@@ -272,11 +272,12 @@ jobs:
         timeout-minutes: 15
         env:
           PROFILE_HEAD: ${{ github.event.pull_request.head.sha }}
+          THREADNOTE_NATIVE_CPU_PROFILE: '1'
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
           $out = Join-Path $env:GITHUB_WORKSPACE '.context/windows-h100-profile'
-          New-Item -ItemType Directory -Force "$out/cpu" | Out-Null
+          New-Item -ItemType Directory -Force $out | Out-Null
           $records = @{}
           $files = @()
           $copies = @()
@@ -294,7 +295,6 @@ jobs:
           $maxGapMs = 0
           $processTruncated = $false
           $samplingMs = 0
-          $profiles = @()
           $clock = [Diagnostics.Stopwatch]::new()
           $sampler = [Diagnostics.Process]::GetCurrentProcess()
           $samplerCpuStart = $sampler.TotalProcessorTime.TotalMilliseconds
@@ -310,10 +310,8 @@ jobs:
             if ([IO.Path]::GetFileName($bun) -ine 'bun.exe') { throw 'Unexpected Bun executable' }
             $version = (& $bun --version).Trim()
             if ($LASTEXITCODE -ne 0 -or $version -ne $env:BUN_VERSION) { throw 'Unexpected Bun version' }
-            $help = & $bun --help | Out-String
-            foreach ($flag in @('--cpu-prof', '--cpu-prof-dir', '--cpu-prof-interval')) {
-              if (-not $help.Contains($flag)) { throw 'Missing profiler capability' }
-            }
+            & $bun -e 'const {profile}=await import("bun:jsc"); const p=await profile(()=>Promise.resolve(),10000); if(!Array.isArray(p.stackTraces.traces))process.exit(1); console.log("bun:jsc.profile Promise completion available");'
+            if ($LASTEXITCODE -ne 0) { throw 'Missing worker profiler capability' }
             $stage = 'counter-capabilities'
             $probe = Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -Property ProcessId, ParentProcessId, CreationDate
             if (-not $probe.CreationDate -or $sampler.TotalProcessorTime.TotalMilliseconds -lt 0) { throw 'Missing counters' }
@@ -339,7 +337,7 @@ jobs:
             $start.WorkingDirectory = $env:GITHUB_WORKSPACE
             $start.RedirectStandardOutput = $true
             $start.RedirectStandardError = $true
-            foreach ($argument in @('--cpu-prof', "--cpu-prof-dir=$out/cpu", '--cpu-prof-interval=10000', './node_modules/vitest/vitest.mjs', 'run', '--no-file-parallelism', $fixture, '-t', 'retains and navigates 100 same-length revisions of a large native plan$')) {
+            foreach ($argument in @('./node_modules/vitest/vitest.mjs', 'run', '--no-file-parallelism', $fixture, '-t', 'retains and navigates 100 same-length revisions of a large native plan$')) {
               $start.ArgumentList.Add($argument)
             }
             $files = @([IO.File]::Create("$out/stdout.log"), [IO.File]::Create("$out/stderr.log"))
@@ -445,30 +443,16 @@ jobs:
             foreach ($file in $files) { $file.Dispose() }
             if ($rows) { $rows.Dispose() }
             $clock.Stop()
-            $profileFiles = @(Get-ChildItem "$out/cpu" -Filter '*.cpuprofile')
-            foreach ($file in @($profileFiles | Select-Object -First 8)) {
-              $valid = $false
-              try {
-                if ($file.Length -le 64MB) {
-                  $cpuProfile = Get-Content $file.FullName -Raw | ConvertFrom-Json -AsHashtable
-                  $valid = $cpuProfile.nodes -is [Array] -and $cpuProfile.samples -is [Array]
-                }
-              } catch { Record-CaptureFailure 'profile-read' $_ }
-              $match = [regex]::Match($file.Name, '^CPU\.\d{8}\.\d{6}\.(\d+)\.')
-              $profiles += @{name = $file.Name; bytes = $file.Length; valid = $valid; pid = $(if ($match.Success) { [int]$match.Groups[1].Value } else { $null })}
-            }
             $workers = @($records.Values | Where-Object { $main -and $_.parent -eq $main.Id -and $_.first -and $_.last })
-            $workerProfile = $workers.Count -eq 1 -and @($profiles | Where-Object { $_.valid -and $_.pid -in $workers.pid }).Count -gt 0
             if ($main -and $workers.Count -eq 0) { Record-CaptureFailure 'missing-worker-counters' $null }
             @{
               testExit = $testExit; processExit = $processExit; ownedTreeTerminated = $terminated
-              workerCandidatePids = @($workers | ForEach-Object { $_.pid }); workerJSProfilePresent = $workerProfile; workerIdentityAmbiguous = $workers.Count -ne 1
+              workerCandidatePids = @($workers | ForEach-Object { $_.pid }); workerLocalProfileRequested = $true; workerIdentityAmbiguous = $workers.Count -ne 1
               failures = $failures.ToArray(); captureErrors = $captureErrors; discoveryErrors = $discoveryErrors
               elapsedMs = $clock.ElapsedMilliseconds; samples = $samples; gaps = $gaps; maxGapMs = $maxGapMs
               samplingElapsedMs = $samplingMs; samplerCpuMs = $sampler.TotalProcessorTime.TotalMilliseconds - $samplerCpuStart
               processesTruncated = $processTruncated; processes = @($records.Values | ForEach-Object { @{pid = $_.pid; parent = $_.parent; created = $_.created; first = $_.first; last = $_.last; terminal = $_.terminal; readErrors = $_.readErrors} })
-              profiles = $profiles; profileFilesTruncated = $profileFiles.Count -gt 8
-              limits = 'CPU counters cover first/last observed intervals only. Thread states are snapshots, not wait durations. Short Git children may be missed. Parent-only profiles are not worker JS attribution. Missing worker profiles leave production-vs-diagnostic CPU unknown. Profiled pass is not timing acceptance.'
+              limits = 'CPU counters cover first/last observed intervals only. Thread states are snapshots, not wait durations. Short Git children may be missed. Worker-local CPU packet is in stderr.log; missing or failed packets leave production-vs-diagnostic CPU unknown. Profiled pass is not timing acceptance.'
             } | ConvertTo-Json -Depth 8 | Set-Content "$out/summary.json"
             foreach ($record in $records.Values) { $record.process.Dispose() }
             if ($main) { $main.Dispose() }

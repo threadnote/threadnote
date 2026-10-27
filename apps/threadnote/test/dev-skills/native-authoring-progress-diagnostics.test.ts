@@ -1,8 +1,10 @@
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Context, Deferred, Effect, Exit, Fiber, Option, Schema, Tracer} from 'effect';
+import {Cause, ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Option, Schema, Tracer} from 'effect';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {expect} from 'vitest';
+import {TestClock} from 'effect/testing';
+import type {SamplingProfile, SamplingProfileStackFrame} from 'bun:jsc';
 import {
   classifyNativeProgress,
   CurrentNativeProgress,
@@ -1131,4 +1133,295 @@ effectIt.effect('conserves the whole original lifecycle file and the existing la
     expect(fixture).toContain('fs: returned.fs');
     expect(fixture).toContain('store: returned.store');
   }),
+);
+
+const cpuFrameFixture = (name = 'encodeBoundedWorkflowJson'): SamplingProfileStackFrame => ({
+  sourceID: 1,
+  name,
+  location: 'PRIVATE',
+  sourceURL: new URL('../../src/workflow_memory/journal_codec.ts', import.meta.url).href,
+  line: 27,
+  column: 1,
+  category: 'Baseline',
+  flags: 0,
+});
+const cpuProfileFixture = (): SamplingProfile => ({
+  functions: 'PRIVATE',
+  bytecodes: 'PRIVATE',
+  stackTraces: {
+    interval: 0.01,
+    sources: [{sourceID: 1, url: 'PRIVATE'}],
+    traces: [{timestamp: 1, frames: [cpuFrameFixture()]}],
+  },
+});
+const cpuPackets = (lines: string[]) =>
+  lines
+    .filter(line => line.startsWith('NATIVE_AUTHORING_CPU_DIAGNOSTICS '))
+    .map(line => JSON.parse(line.slice('NATIVE_AUTHORING_CPU_DIAGNOSTICS '.length)));
+const cpuLoad = async () => (done: () => Promise<void>, interval: number) => {
+  expect(interval).toBe(10_000);
+  return done().then(cpuProfileFixture);
+};
+
+effectIt.effect('keeps CPU profiling flag-off quiet and does not load the native profiler', () =>
+  Effect.gen(function* () {
+    const lines: string[] = [];
+    const observer = make({sink: line => lines.push(line)});
+    const value = {PRIVATE: true};
+    const exit = yield* reportNativeFailure(Effect.fail(value), observer, {
+      enabled: false,
+      load: () => {
+        throw new Error('must not load');
+      },
+    }).pipe(Effect.exit);
+    expect(Exit.isFailure(exit) && Cause.squash(exit.cause)).toBe(value);
+    expect(cpuPackets(lines)).toEqual([]);
+    expect(lines).toHaveLength(1);
+  }),
+);
+
+effectIt.effect(
+  'flushes the nonrejecting CPU gate before return without changing value, Cause, context or tracer',
+  () =>
+    Effect.gen(function* () {
+      class Marker extends Context.Service<Marker, object>()(
+        '@threadnote/threadnote/test/dev-skills/native-authoring-progress-diagnostics.test/Marker',
+      ) {}
+      for (const outcome of ['success', 'failure', 'defect', 'interruption'] as const) {
+        const lines: string[] = [];
+        const observer = make({sink: line => lines.push(line)});
+        const value = {outcome};
+        let executions = 0;
+        let completed = 0;
+        const program = Effect.gen(function* () {
+          executions++;
+          expect(yield* Marker).toBe(value);
+          expect(yield* Effect.tracer).toBe(observer.tracer);
+          return yield* outcome === 'success'
+            ? Effect.succeed(value)
+            : outcome === 'failure'
+              ? Effect.fail(value)
+              : outcome === 'defect'
+                ? Effect.die(value)
+                : Effect.interrupt;
+        });
+        const exit = yield* reportNativeFailure(program, observer, {
+          enabled: true,
+          load: async () => (done, interval) =>
+            cpuLoad()
+              .then(profile => profile(done, interval))
+              .then(result => {
+                completed++;
+                return result;
+              }),
+        }).pipe(Effect.provideService(Marker, value), Effect.withTracer(observer.tracer), Effect.exit);
+        expect(executions).toBe(1);
+        expect(completed).toBe(1);
+        if (outcome === 'success') expect(Exit.isSuccess(exit) && exit.value).toBe(value);
+        else if (outcome === 'interruption') expect(Exit.hasInterrupts(exit)).toBe(true);
+        else expect(Exit.isFailure(exit) && Cause.squash(exit.cause)).toBe(value);
+        expect(cpuPackets(lines).map(packet => packet.status)).toEqual(outcome === 'success' ? [] : ['captured']);
+      }
+    }),
+);
+
+effectIt.effect('collects actual Bun API samples on async gate fulfillment before the worker exits', () =>
+  Effect.gen(function* () {
+    const lines: string[] = [];
+    const value = {failure: true};
+    const provider = ConfigProvider.fromUnknown({THREADNOTE_NATIVE_CPU_PROFILE: '1'});
+    const program = Effect.gen(function* () {
+      expect(yield* ConfigProvider.ConfigProvider).toBe(provider);
+      yield* Effect.sync(() => {
+        const end = performance.now() + 60;
+        while (performance.now() < end) Math.sqrt(performance.now());
+      });
+      return yield* Effect.fail(value);
+    });
+    const exit = yield* reportNativeFailure(program, make({sink: line => lines.push(line)})).pipe(
+      Effect.provideService(ConfigProvider.ConfigProvider, provider),
+      Effect.exit,
+    );
+    expect(Exit.isFailure(exit) && Cause.squash(exit.cause)).toBe(value);
+    const [packet] = cpuPackets(lines);
+    expect(packet.status).toBe('captured');
+    expect(packet.api).toBe('bun:jsc.profile');
+    expect(packet.pid).toBe(process.pid);
+    expect(packet.totalTraces).toBeGreaterThan(0);
+    expect(
+      packet.callers.some(
+        (row: {file: string}) =>
+          row.file === 'apps/threadnote/test/dev-skills/native-authoring-progress-diagnostics.test.ts',
+      ),
+    ).toBe(true);
+    expect(packet.flushMs).toBeGreaterThanOrEqual(0);
+  }).pipe(TestClock.withLive),
+);
+
+effectIt.effect('completes CPU capture on external cancellation without swallowing the interrupt', () =>
+  Effect.gen(function* () {
+    const lines: string[] = [];
+    const entered = yield* Deferred.make<void>();
+    const fiber = yield* reportNativeFailure(
+      Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+      make({sink: line => lines.push(line)}),
+      {enabled: true, load: cpuLoad},
+    ).pipe(Effect.forkChild);
+    yield* Deferred.await(entered);
+    yield* Fiber.interrupt(fiber);
+    const exit = yield* Fiber.await(fiber);
+    expect(Exit.hasInterrupts(exit)).toBe(true);
+    expect(cpuPackets(lines).map(packet => packet.status)).toEqual(['captured']);
+  }),
+);
+
+effectIt.effect('bounds CPU trace/frame/key/output work and emits only source-relative identifiers', () =>
+  Effect.gen(function* () {
+    const lines: string[] = [];
+    const profile = cpuProfileFixture();
+    const privateFrame = {...cpuFrameFixture('PRIVATE_FUNCTION'), sourceURL: 'https://PRIVATE_HOST/PRIVATE_PATH'};
+    profile.stackTraces.traces = Array.from({length: 65_540}, (_, index) => ({
+      timestamp: index,
+      frames: [cpuFrameFixture('function' + (index % 5000)), ...Array.from({length: 34}, () => privateFrame)],
+    }));
+    const exit = yield* reportNativeFailure(Effect.fail('original'), make({sink: line => lines.push(line)}), {
+      enabled: true,
+      load: async () => done => done().then(() => profile),
+    }).pipe(Effect.exit);
+    expect(Exit.isFailure(exit) && Cause.squash(exit.cause)).toBe('original');
+    const [packet] = cpuPackets(lines);
+    expect(packet.totalTraces).toBe(65_540);
+    expect(packet.analyzedTraces).toBe(65_536);
+    expect(packet.tracesOmitted).toBe(4);
+    expect(packet.framesOmitted).toBeGreaterThan(0);
+    expect(packet.keysOmitted).toBeGreaterThan(0);
+    expect(packet.selfRowsOmitted).toBeGreaterThan(0);
+    expect(packet.self.length).toBeLessThanOrEqual(16);
+    expect(packet.callers.length).toBeLessThanOrEqual(16);
+    expect(
+      packet.callers.some((row: {file: string}) => row.file === 'apps/threadnote/src/workflow_memory/journal_codec.ts'),
+    ).toBe(true);
+    const line = lines.find(line => line.startsWith('NATIVE_AUTHORING_CPU_DIAGNOSTICS '))!;
+    expect(new TextEncoder().encode(line).length).toBeLessThanOrEqual(16_384);
+    expect(line).not.toContain('PRIVATE');
+    expect(line).not.toContain(new URL('../../../../', import.meta.url).pathname);
+    for (const file of ['vitest/dist/worker.js', '@vitest/runner/dist/index.js', 'vite/dist/index.js']) {
+      const framework = cpuProfileFixture();
+      framework.stackTraces.traces[0].frames[0].sourceURL = new URL(
+        '../../../../node_modules/.bun/fixture@1/node_modules/' + file,
+        import.meta.url,
+      ).href;
+      const output: string[] = [];
+      yield* reportNativeFailure(Effect.fail('original'), make({sink: line => output.push(line)}), {
+        enabled: true,
+        load: async () => done => done().then(() => framework),
+      }).pipe(Effect.exit);
+      expect(cpuPackets(output)[0].self[0].file).toBe('node_modules/' + file);
+    }
+  }),
+);
+
+effectIt.effect('retains timed-out sampler ownership through late rejection and never writes a late packet', () =>
+  Effect.gen(function* () {
+    const lines: string[] = [];
+    const late = Promise.withResolvers<SamplingProfile>();
+    yield* Effect.addFinalizer(() => Effect.sync(() => late.reject(new Error('late'))));
+    const observer = () => make({sink: line => lines.push(line)});
+    const exit = yield* reportNativeFailure(Effect.fail('original'), observer(), {
+      enabled: true,
+      flushMs: 1,
+      load: async () => done => {
+        void done();
+        return late.promise;
+      },
+    }).pipe(Effect.exit);
+    expect(Exit.isFailure(exit) && Cause.squash(exit.cause)).toBe('original');
+    yield* reportNativeFailure(Effect.fail('second'), observer(), {enabled: true, load: cpuLoad}).pipe(Effect.exit);
+    expect(cpuPackets(lines).map(packet => packet.status)).toEqual(['flush-timeout', 'overlap']);
+    late.reject(new Error('PRIVATE'));
+    yield* Effect.promise(() => late.promise.catch(() => undefined));
+    yield* reportNativeFailure(Effect.fail('third'), observer(), {enabled: true, load: cpuLoad}).pipe(Effect.exit);
+    expect(cpuPackets(lines).map(packet => packet.status)).toEqual(['flush-timeout', 'overlap', 'captured']);
+  }).pipe(TestClock.withLive),
+);
+
+effectIt.effect(
+  'keeps the original error through profiler load/start/result/export/sink failure and declared conflicts',
+  () =>
+    Effect.gen(function* () {
+      const value = {PRIVATE: true};
+      for (const mode of ['load', 'start', 'result', 'export', 'sink'] as const) {
+        const lines: string[] = [];
+        const observer = make({
+          sink: line => {
+            if (mode === 'sink') throw new Error('PRIVATE');
+            lines.push(line);
+          },
+        });
+        const exit = yield* reportNativeFailure(Effect.fail(value), observer, {
+          enabled: true,
+          load: async () => {
+            if (mode === 'load') throw new Error('PRIVATE');
+            return done => {
+              if (mode === 'start') throw new Error('PRIVATE');
+              return done().then(() => {
+                if (mode === 'result') throw new Error('PRIVATE');
+                const profile = cpuProfileFixture();
+                if (mode === 'export')
+                  Object.defineProperty(profile, 'stackTraces', {
+                    get: () => {
+                      throw new Error('PRIVATE');
+                    },
+                  });
+                return profile;
+              });
+            };
+          },
+        }).pipe(Effect.exit);
+        expect(Exit.isFailure(exit) && Cause.squash(exit.cause)).toBe(value);
+        if (mode !== 'sink')
+          expect(cpuPackets(lines)[0].status).toBe(
+            mode === 'result'
+              ? 'profile-failed'
+              : mode === 'export'
+                ? 'export-failed'
+                : mode === 'load' || mode === 'start'
+                  ? 'unavailable'
+                  : 'captured',
+          );
+      }
+      yield* Effect.gen(function* () {
+        const lines: string[] = [];
+        const exit = yield* reportNativeFailure(Effect.fail(value), make({sink: line => lines.push(line)}), {
+          enabled: true,
+          load: () => {
+            throw new Error('must not load');
+          },
+        }).pipe(Effect.exit);
+        expect(Exit.isFailure(exit) && Cause.squash(exit.cause)).toBe(value);
+        expect(cpuPackets(lines)[0].status).toBe('conflict');
+      }).pipe(Effect.provideService(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown({BUN_CPU_PROFILE: '1'})));
+      const unavailableLines: string[] = [];
+      let unavailableLoads = 0;
+      const unavailable = yield* reportNativeFailure(
+        Effect.fail(value),
+        make({sink: line => unavailableLines.push(line)}),
+        {
+          enabled: true,
+          load: () => {
+            unavailableLoads++;
+            throw new Error('must not load');
+          },
+        },
+      ).pipe(
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.make(() => Effect.fail(new ConfigProvider.SourceError({message: 'PRIVATE'}))),
+        ),
+        Effect.exit,
+      );
+      expect(Exit.isFailure(unavailable) && Cause.squash(unavailable.cause)).toBe(value);
+      expect(cpuPackets(unavailableLines)[0].status).toBe('unavailable');
+      expect(unavailableLoads).toBe(0);
+    }),
 );
