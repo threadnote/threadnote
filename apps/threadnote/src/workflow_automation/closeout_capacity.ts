@@ -5,11 +5,14 @@ import {
   admitNativeAuthoringSave,
   nativeAuthoringPrefixDigest,
   nativeAuthoringSaveByteBudget,
+  type NativeWorkflowState,
 } from '@threadnote/workflow-automations/native';
+import type {NativeCloseoutAdmission} from '@threadnote/workflow-automations/closeout';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {
   inspectWorkflowJournal,
+  loadWorkflowJournal,
   withWorkflowLock,
   workflowJournalLogicalBytes,
   workflowLocation,
@@ -19,7 +22,9 @@ import {
 } from '../workflow_memory/journal.js';
 import {workflowJournalLimits} from '../workflow_memory/journal_codec.js';
 import {readWorkflowSharedRoots} from '../workflow_memory/scopes.js';
-import {stableJson} from '../workflow_memory/protocol.js';
+import {stableJson, workflowError} from '../workflow_memory/protocol.js';
+import {verifyWorkflowBinding} from '../workflow_memory/profile.js';
+import {allocateWorkflowArtifactName, workflowArtifactUri} from '../workflow_memory/naming.js';
 import {prepareWorkflowOperation} from '../workflow_memory/artifacts.js';
 import type {WorkflowJournal} from '../workflow_memory/protocol.js';
 import {projectNativeCloseoutKnowledge} from './closeout_projection.js';
@@ -31,6 +36,7 @@ import {
   writeNativeWorkflowState,
 } from './store.js';
 import type {NativeCloseoutPlannedDocument} from './closeout_documents.js';
+import {planNativeCloseoutDocuments} from './closeout_documents.js';
 
 const fail = (message: string) => WorkflowAutomationError.make({code: 'closeout-capacity', message});
 const utf8 = new TextEncoder();
@@ -53,6 +59,65 @@ export interface NativeCloseoutCapacityOwned {
   readonly memoryId: string;
   readonly destination: string;
 }
+
+/** Speculative names only; the independent projection must admit every final body and destination. */
+export const planFreshNativeCloseoutDocuments = Effect.fn('workflowAutomation.planFreshCloseoutDocuments')(function* (
+  config: RuntimeConfig,
+  state: NativeWorkflowState,
+  transactionId: string,
+  admission: NativeCloseoutAdmission,
+  owned: readonly NativeCloseoutCapacityOwned[],
+) {
+  if (!state.naming || state.closeoutSave || state.authoringSave) return undefined;
+  const prefix = 'closeout-' + transactionId.slice(0, 24) + '-';
+  return yield* withWorkflowLock(
+    config,
+    state.bindingId,
+    Effect.gen(function* () {
+      const stored = yield* readNativeWorkflowState(config, state.runId);
+      if (!stored || stableJson(stored.state) !== stableJson(state)) return undefined;
+      if (state.operations.some(operation => operation.intent.operationId.startsWith(prefix))) return undefined;
+      const journal = yield* loadWorkflowJournal(config, state.bindingId, false);
+      const binding = journal.binding;
+      if (
+        binding.workflowRunId !== 'native-v1-' + state.runId ||
+        binding.generation !== state.generation ||
+        binding.project !== state.project ||
+        binding.featureId !== state.featureId ||
+        binding.profile !== state.profile ||
+        binding.team !== state.team ||
+        stableJson(binding.naming) !== stableJson(state.naming)
+      )
+        return yield* workflowError('binding-drift', 'Closeout naming belongs to another native controller.');
+      if (Object.keys(journal.operations).some(id => id.startsWith(prefix))) return undefined;
+      const store = yield* ResourceStore;
+      const probes = ResourceStore.of({
+        ...store,
+        read: (location, uri, options) => store.read(location, uri, {...options, existingOnly: true}),
+      });
+      const storageKind = state.profile === 'desktop' ? 'durable' : 'handoff';
+      const documents = yield* planNativeCloseoutDocuments(admission, owned, key =>
+        Effect.gen(function* () {
+          const artifactKey = prefix + key;
+          const naming = yield* allocateWorkflowArtifactName(config, journal, {
+            protocolVersion: 1,
+            action: 'create',
+            bindingId: state.bindingId,
+            operationId: artifactKey,
+            artifactKey,
+            sourceRunId: state.runId,
+            role: 'closeout-' + key,
+            nameHint: key,
+            storageKind,
+          }).pipe(Effect.provideService(ResourceStore, probes));
+          return {uri: workflowArtifactUri(binding, {artifactKey, naming, storageKind})};
+        }),
+      );
+      yield* verifyWorkflowBinding(config, binding);
+      return documents;
+    }),
+  ).pipe(Effect.mapError(nativeWorkflowError));
+});
 const archiveCapacity = Effect.fn('workflowAutomation.archiveCapacity')(function* (
   config: RuntimeConfig,
   owned: readonly NativeCloseoutCapacityOwned[],
@@ -201,6 +266,7 @@ export const reserveNativeCloseoutCapacity = Effect.fn('workflowAutomation.reser
   plannedDocuments: readonly NativeCloseoutPlannedDocument[],
   codeRefs: readonly string[],
   owned: readonly NativeCloseoutCapacityOwned[] = [],
+  options: {readonly requireFreshOutputs?: boolean} = {},
 ) {
   const limit = yield* CurrentNativeOperationLimit;
   const storedLimit = Math.min(workflowJournalLimits.diskBytes, yield* CurrentNativeCloseoutStoredByteLimit);
@@ -222,6 +288,10 @@ export const reserveNativeCloseoutCapacity = Effect.fn('workflowAutomation.reser
       });
       const intentDigest = sha256HexSync(stableJson({transactionId, plannedDocuments, codeRefs, owned}));
       const prior = state.closeoutSave;
+      if (options.requireFreshOutputs && prior)
+        return yield* fail(
+          'A closeout reservation appeared during speculative planning. Retry its ordinary admission.',
+        );
       if (prior) {
         if (
           prior.transactionId !== transactionId ||
@@ -238,6 +308,25 @@ export const reserveNativeCloseoutCapacity = Effect.fn('workflowAutomation.reser
       )
         return yield* fail('Closeout requires a complete unique operation plan and no pending child write.');
       const journal = yield* withWorkflowLock(config, state.bindingId, inspectWorkflowJournal(config, state.bindingId));
+      const assertFresh = (current: typeof journal) =>
+        Effect.gen(function* () {
+          if (current.needsRecovery)
+            return yield* workflowError(
+              'binding-recovery-needed',
+              'Recover the workflow manifest before fresh closeout admission.',
+            );
+          if (
+            operationIds.some(
+              id =>
+                state.operations.some(operation => operation.intent.operationId === id) ||
+                current.state.operations[id] !== undefined,
+            )
+          )
+            return yield* fail(
+              'A closeout output intent appeared during speculative planning. Retry its ordinary admission.',
+            );
+        });
+      if (options.requireFreshOutputs) yield* assertFresh(journal);
       const projection = yield* projectNativeCloseoutKnowledge(
         config,
         state,
@@ -332,7 +421,20 @@ export const reserveNativeCloseoutCapacity = Effect.fn('workflowAutomation.reser
         },
         catch: nativeWorkflowError,
       });
-      yield* writeNativeWorkflowState(config, {...state, closeoutSave: reservation}, stored.revision);
+      if (options.requireFreshOutputs)
+        yield* withWorkflowLock(
+          config,
+          state.bindingId,
+          Effect.gen(function* () {
+            const current = yield* inspectWorkflowJournal(config, state.bindingId);
+            yield* assertFresh(current);
+            if (stableJson(current.state) !== stableJson(journal.state))
+              return yield* fail('The lower journal changed during fresh projection. Retry its ordinary admission.');
+            // Keep the final lower admission and native CAS commit in the established native -> journal lock order.
+            yield* writeNativeWorkflowState(config, {...state, closeoutSave: reservation}, stored.revision);
+          }),
+        );
+      else yield* writeNativeWorkflowState(config, {...state, closeoutSave: reservation}, stored.revision);
       return reservation;
     }),
   ).pipe(Effect.mapError(nativeWorkflowError));

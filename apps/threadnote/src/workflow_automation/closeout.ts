@@ -15,7 +15,11 @@ import {stableJson} from '../workflow_memory/protocol.js';
 import {withWorkflowRecallRefreshBatch} from '../workflow_memory/recall_refresh.js';
 import {PublicationWriterReasonSchema} from '../workflow_memory/publication_contract.js';
 import {CurrentNativeCloseoutSave, readNativeWorkflowState} from './store.js';
-import {reserveNativeCloseoutCapacity, clearNativeCloseoutCapacity} from './closeout_capacity.js';
+import {
+  reserveNativeCloseoutCapacity,
+  clearNativeCloseoutCapacity,
+  planFreshNativeCloseoutDocuments,
+} from './closeout_capacity.js';
 import {captureNativeCycleSource} from './cycle_git.js';
 import {encodeAuthoringDocument, type NativeAuthoringCall} from './authoring_artifacts.js';
 import {nativeWorkflowError} from './memory.js';
@@ -317,27 +321,38 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
               return yield* fail('invalid-readback', 'Archive preflight did not admit its exact destination.');
             owned.push({...item, operationId, destination: preview.canonicalUri});
           }
-          const documents = yield* planNativeCloseoutDocuments(admission, owned, (key, body) =>
-            call({
-              ...base('preflight'),
-              operationId: 'closeout-' + transactionId.slice(0, 24) + '-' + key,
-              artifactKey: 'closeout-' + transactionId.slice(0, 24) + '-' + key,
-              role: 'closeout-' + key,
-              nameHint: key,
-              body,
-              expectedRevision: null,
-              storageKind: inputs.state.profile === 'desktop' ? 'durable' : 'handoff',
-              codeRefs: admission.architecture.codeRefs,
-            }).pipe(
-              Effect.flatMap(result =>
-                result && typeof result === 'object' && 'uri' in result && typeof result.uri === 'string'
-                  ? Effect.succeed({uri: result.uri})
-                  : Effect.fail(
-                      fail('invalid-readback', 'Final knowledge preflight did not return its exact destination.'),
-                    ),
-              ),
-            ),
+          const speculative = yield* planFreshNativeCloseoutDocuments(
+            config,
+            inputs.state,
+            transactionId,
+            admission,
+            owned,
           );
+          const documents =
+            speculative ??
+            (yield* planNativeCloseoutDocuments(admission, owned, (key, body) =>
+              call({
+                ...base('preflight'),
+                operationId: 'closeout-' + transactionId.slice(0, 24) + '-' + key,
+                artifactKey: 'closeout-' + transactionId.slice(0, 24) + '-' + key,
+                role: 'closeout-' + key,
+                nameHint: key,
+                body,
+                expectedRevision: null,
+                storageKind: inputs.state.profile === 'desktop' ? 'durable' : 'handoff',
+                codeRefs: admission.architecture.codeRefs,
+              }).pipe(
+                Effect.flatMap(result =>
+                  result && typeof result === 'object' && 'uri' in result && typeof result.uri === 'string'
+                    ? Effect.succeed({uri: result.uri})
+                    : Effect.fail(
+                        fail('invalid-readback', 'Final knowledge preflight did not return its exact destination.'),
+                      ),
+                ),
+              ),
+            ));
+          // The naming journal lock has been released before native receipt admission.
+          if (speculative) yield* call(base('inspect'));
           yield* reserveNativeCloseoutCapacity(
             config,
             request.runId,
@@ -345,6 +360,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             documents,
             admission.architecture.codeRefs,
             owned,
+            {requireFreshOutputs: speculative !== undefined},
           );
           const journal: Journal = {
             format: 'threadnote-native-closeout',

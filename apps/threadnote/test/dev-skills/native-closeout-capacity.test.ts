@@ -1,6 +1,7 @@
 import {it} from '@effect/vitest';
 import {Effect, Result, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {
@@ -20,6 +21,8 @@ import {
   withWorkflowLock,
   workflowJournalLogicalBytes,
   serializeWorkflowJournal,
+  writeJournalFile,
+  workflowTransition,
 } from '../../src/workflow_memory/journal.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {prepareWorkflowOperation} from '../../src/workflow_memory/artifacts.js';
@@ -51,6 +54,89 @@ const fixture = Effect.gen(function* () {
 });
 
 describe('whole closeout capacity reservation', () => {
+  it.effect('fresh admission rejects a raced reservation without changing its ordinary retry', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const reserve = (requireFreshOutputs = false) =>
+        reserveNativeCloseoutCapacity(f.config, 'native-run', transaction, f.documents, [], [], {
+          requireFreshOutputs,
+        }).pipe(Effect.provideService(SystemInfo, f.scopedSystem));
+      const prior = yield* reserve();
+      const before = yield* f.fs.readFileString(f.statePath());
+      const rejected = yield* reserve(true).pipe(Effect.result);
+      expect(rejected).toMatchObject({_tag: 'Failure', failure: {code: 'closeout-capacity'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+      expect(yield* reserve()).toEqual(prior);
+    }).pipe(TestClock.withLive, provideNative),
+  );
+
+  for (const final of [false, true])
+    it.effect('fresh admission rejects raced native output intents: final=' + final, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const id = operationId('one') + (final ? '-final' : '');
+        yield* f.call(
+          f.write({
+            operationId: id,
+            artifactKey: operationId('one'),
+            role: 'closeout-one',
+            nameHint: 'one',
+            body: f.documents[0].body,
+          }),
+        );
+        const before = yield* f.fs.readFileString(f.statePath());
+        const documents = final ? [...f.documents, f.documents[0]] : f.documents;
+        const result = yield* reserveNativeCloseoutCapacity(f.config, 'native-run', transaction, documents, [], [], {
+          requireFreshOutputs: true,
+        }).pipe(Effect.provideService(SystemInfo, f.scopedSystem), Effect.result);
+        expect(result).toMatchObject({_tag: 'Failure', failure: {code: 'closeout-capacity'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+      }).pipe(TestClock.withLive, provideNative),
+    );
+
+  it.effect('fresh admission rejects lower-only intent and pending manifest recovery before reserving', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const native = yield* readNativeWorkflowState(f.config, 'native-run');
+      if (!native) throw new Error('Expected native state');
+      const bindingId = native.state.bindingId;
+      const original = (yield* inspectWorkflowJournal(f.config, bindingId).pipe(
+        Effect.provideService(SystemInfo, f.scopedSystem),
+      )).state;
+      const prepared = yield* prepareWorkflowOperation(f.config, original, {
+        protocolVersion: 1,
+        action: 'create',
+        bindingId,
+        operationId: operationId('one'),
+        artifactKey: operationId('one'),
+        role: 'closeout-one',
+        nameHint: 'one',
+        sourceRunId: 'native-run',
+        body: f.documents[0].body,
+        bodySha256: sha256HexSync(f.documents[0].body),
+        expectedRevision: null,
+        storageKind: 'durable',
+      }).pipe(Effect.provideService(SystemInfo, f.scopedSystem));
+      yield* withWorkflowLock(
+        f.config,
+        bindingId,
+        writeJournalFile(f.config, {...original, operations: {...original.operations, [operationId('one')]: prepared}}),
+      );
+      const before = yield* f.fs.readFileString(f.statePath());
+      const reserve = () =>
+        reserveNativeCloseoutCapacity(f.config, 'native-run', transaction, f.documents, [], [], {
+          requireFreshOutputs: true,
+        }).pipe(Effect.provideService(SystemInfo, f.scopedSystem), Effect.result);
+      expect(yield* reserve()).toMatchObject({_tag: 'Failure', failure: {code: 'closeout-capacity'}});
+      yield* withWorkflowLock(
+        f.config,
+        bindingId,
+        writeJournalFile(f.config, workflowTransition(original, original, '2050-01-01T00:00:00.000Z')),
+      );
+      expect(yield* reserve()).toMatchObject({_tag: 'Failure', failure: {code: 'binding-recovery-needed'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+    }).pipe(TestClock.withLive, provideNative),
+  );
   it.effect('rejects insufficient total slots without any child write or reservation', () =>
     Effect.gen(function* () {
       const f = yield* fixture;

@@ -23,6 +23,7 @@ import {prepareWorkflowOperation, withWorkflowProjectionCitations} from '../../s
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {inspectWorkflowJournal} from '../../src/workflow_memory/journal.js';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {reserveNativeCloseoutCapacity} from '../../src/workflow_automation/closeout_capacity.js';
 import {workflowWriteRequest} from '../../src/workflow_automation/memory.js';
 import {projectNativeCloseoutKnowledge} from '../../src/workflow_automation/closeout_projection.js';
 import type {NativeCloseoutPlannedDocument} from '../../src/workflow_automation/closeout_documents.js';
@@ -48,13 +49,15 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
   const system = yield* SystemInfo;
   const clock = yield* Clock.Clock;
   const fixed = yield* Clock.currentTimeMillis;
+  let leaseElapsed = 0n;
+  let closingFailure: 'expiry' | 'interruption' | undefined;
   const fixedClock: Clock.Clock = {
     currentTimeMillis: Effect.succeed(fixed),
     currentTimeMillisUnsafe: () => fixed,
     currentTimeNanos: Effect.succeed(BigInt(fixed) * 1_000_000n),
     currentTimeNanosUnsafe: () => BigInt(fixed) * 1_000_000n,
-    monotonicTimeNanos: clock.monotonicTimeNanos,
-    monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+    monotonicTimeNanos: clock.monotonicTimeNanos.pipe(Effect.map(time => time + leaseElapsed)),
+    monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe() + leaseElapsed,
     sleep: duration => clock.sleep(duration),
   };
   const scopedSystem = {...system, currentDirectory: () => f.repo, environment: () => ({})};
@@ -137,6 +140,8 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
     status: (...args) =>
       Effect.gen(function* () {
         counts.closing++;
+        if (closingFailure === 'expiry') leaseElapsed = 60_000_000_000n;
+        if (closingFailure === 'interruption') return yield* Effect.interrupt;
         if (drift) yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = false;\n');
         return yield* query.status(...args);
       }),
@@ -181,6 +186,9 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
     journal,
     state: stored.state,
     counts,
+    failClosing: (failure: 'expiry' | 'interruption') => {
+      closingFailure = failure;
+    },
     apply,
     request,
     document,
@@ -276,6 +284,30 @@ fcEffectProp(
       expect(batched.maximumJournalBytes).toBeGreaterThan(batched.initialJournalBytes);
     }).pipe(provideNative, TestClock.withLive),
   {fastCheck: {numRuns: 3}},
+);
+
+it.effect.each(['expiry', 'interruption'] as const)('fresh reservation discards a projection on closing %s', failure =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    const document = yield* f.document('first', 'Complete output.\n');
+    const before = yield* f.fs.readFile(f.statePath());
+    f.reset();
+    f.failClosing(failure);
+    const result = yield* reserveNativeCloseoutCapacity(
+      f.config,
+      'native-run',
+      transaction,
+      [document],
+      ['source.ts'],
+      [],
+      {requireFreshOutputs: true},
+    ).pipe(f.apply, Effect.exit);
+    expect(result._tag).toBe('Failure');
+    expect(f.counts.leases).toBe(1);
+    expect(f.counts.releases).toBe(1);
+    expect(yield* f.fs.readFile(f.statePath())).toEqual(before);
+    expect(yield* f.fs.exists(f.statePath() + '.closeout.json')).toBe(false);
+  }).pipe(provideNative, TestClock.withLive),
 );
 
 it.effect('uses zero admissions for empty refs and D=0 and rejects late drift before returning modeled output', () =>
