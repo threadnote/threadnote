@@ -2322,3 +2322,261 @@ it('adopts one refreshed case when live status already includes its old and new 
     expect(adoptMaintenanceEvidence(adopted, current, historical.caseId)).toEqual(adopted);
   }
 });
+
+it('keeps an initially stale selected observation in flight without aborting it into a competing read', async () => {
+  vi.useFakeTimers();
+  const item = {
+    caseId: 'initial-stale-source',
+    project: 'threadnote',
+    memoryId: 'initial-stale-memory',
+    family: 'citation',
+    slot: 'anchor',
+    evidenceRevision: 'old',
+    disposition: 'needs-decision' as const,
+    reason: 'source-changed',
+    firstSeen: 'now',
+    lastSeen: 'now',
+    lastChecked: 'now',
+    attemptCount: 1,
+    events: [],
+  };
+  const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status});
+  const selected = Promise.withResolvers<Response>();
+  let serverLockHeld = false;
+  const calls: {method: string; signal?: AbortSignal | null}[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.startsWith('/api/memory')) return response({content: 'Retained selected advice.'});
+      if (!input.startsWith('/api/attention/context-maintenance')) throw new Error('Unexpected fixture route');
+      calls.push({method: init?.method ?? 'GET', signal: init?.signal});
+      if (init?.method === 'POST') {
+        expect(JSON.parse(String(init.body))).toMatchObject({
+          action: 'refresh-case',
+          project: 'threadnote',
+          caseId: item.caseId,
+        });
+        if (serverLockHeld)
+          return response({error: 'Fixture selected observation still holds the maintenance lock.'}, 500);
+        serverLockHeld = true;
+        // A client abort does not release this controlled server operation until its barrier is completed.
+        return selected.promise;
+      }
+      return input.includes('view=status')
+        ? response({version: 2, cases: [item]})
+        : response({error: 'Fixture saved observation is stale.'}, 409);
+    }),
+  );
+  try {
+    await render(
+      <MaintenanceCaseDialog
+        project="threadnote"
+        caseId={item.caseId}
+        initialCase={item}
+        stale
+        onClose={() => {}}
+        onTask={() => {}}
+        onOpenLibrary={() => {}}
+      />,
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(1500));
+    const trace = calls.map(call => ({method: call.method, aborted: call.signal?.aborted ?? false}));
+    expect(trace).toEqual([{method: 'POST', aborted: false}]);
+    expect(document.querySelector('dialog[open]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain('Current evidence could not be checked.');
+    expect(
+      [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+        button => button.textContent?.trim() === 'Refresh evidence',
+      )?.disabled,
+    ).toBe(true);
+  } finally {
+    serverLockHeld = false;
+    await act(async () =>
+      selected.resolve(
+        response({
+          outcome: 'ready',
+          item,
+          packet: {
+            version: 2,
+            project: 'threadnote',
+            caseId: item.caseId,
+            evidenceRevision: 'fresh',
+            expectedContentHash: 'same-memory',
+            reason: 'source-changed',
+            choices: [],
+            allowedOperations: [],
+            instructions: 'Compare.',
+          },
+        }),
+      ),
+    );
+  }
+});
+
+it('observes initial freshness and each later stale/manual transition once', async () => {
+  await fc.assert(
+    fc.asyncProperty(
+      fc.boolean(),
+      fc.array(fc.constantFrom('stale', 'fresh', 'manual'), {maxLength: 6}),
+      async (initialStale, actions) => {
+        const item = {
+          caseId: 'transition-source',
+          project: 'threadnote',
+          memoryId: 'transition-memory',
+          family: 'citation',
+          slot: 'anchor',
+          evidenceRevision: 'current',
+          disposition: 'needs-decision' as const,
+          reason: 'source-changed',
+          firstSeen: 'now',
+          lastSeen: 'now',
+          lastChecked: 'now',
+          attemptCount: 1,
+          events: [],
+        };
+        const packet = {
+          version: 2,
+          project: item.project,
+          caseId: item.caseId,
+          evidenceRevision: item.evidenceRevision,
+          expectedContentHash: 'same-memory',
+          reason: item.reason,
+          choices: [],
+          allowedOperations: [],
+          instructions: 'Compare.',
+        };
+        const methods: string[] = [];
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (input: string, init?: RequestInit) => {
+            if (input.startsWith('/api/memory')) return new Response(JSON.stringify({content: 'Selected advice.'}));
+            methods.push(init?.method ?? 'GET');
+            if (init?.method === 'POST') {
+              expect(JSON.parse(String(init.body))).toMatchObject({
+                action: 'refresh-case',
+                project: item.project,
+                caseId: item.caseId,
+              });
+              return new Response(JSON.stringify({outcome: 'ready', item, packet}));
+            }
+            return new Response(JSON.stringify(input.includes('view=status') ? {version: 2, cases: [item]} : packet));
+          }),
+        );
+        const element = (stale: boolean) => (
+          <MaintenanceCaseDialog
+            project={item.project}
+            caseId={item.caseId}
+            initialCase={item}
+            stale={stale}
+            onClose={() => {}}
+            onTask={() => {}}
+            onOpenLibrary={() => {}}
+          />
+        );
+        let stale = initialStale;
+        let observations = initialStale ? 1 : 0;
+        try {
+          await render(element(stale));
+          for (const action of actions) {
+            if (action === 'manual') {
+              observations++;
+              const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+                value => value.textContent?.trim() === 'Refresh evidence',
+              )!;
+              expect(button.disabled).toBe(false);
+              await act(async () => button.click());
+            } else {
+              const next = action === 'stale';
+              if (!stale && next) observations++;
+              stale = next;
+              await act(async () => root?.render(element(stale)));
+            }
+            expect(methods.filter(method => method === 'POST')).toHaveLength(observations);
+            expect(document.body.textContent).not.toContain('Current evidence could not be checked.');
+          }
+          expect(methods.filter(method => method === 'GET')).toHaveLength(initialStale ? 0 : 2);
+          expect(methods.filter(method => method === 'POST')).toHaveLength(observations);
+        } finally {
+          await act(async () => root?.unmount());
+          root = undefined;
+          document.body.replaceChildren();
+        }
+      },
+    ),
+    {numRuns: 16},
+  );
+});
+
+it.each(['project-change', 'unmount'] as const)(
+  'cancels an initial selected observation on %s and ignores its late result',
+  async change => {
+    const item = {
+      caseId: 'cancel-source',
+      project: 'threadnote',
+      memoryId: 'cancel-memory',
+      family: 'citation',
+      slot: 'anchor',
+      evidenceRevision: 'old',
+      disposition: 'needs-decision' as const,
+      reason: 'source-changed',
+      firstSeen: 'now',
+      lastSeen: 'now',
+      lastChecked: 'now',
+      attemptCount: 1,
+      events: [],
+    };
+    const barrier = Promise.withResolvers<Response>();
+    let pendingSignal: AbortSignal | null | undefined;
+    const adopted = vi.fn();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.startsWith('/api/memory')) return new Response(JSON.stringify({content: 'Selected advice.'}));
+        if (init?.method === 'POST') {
+          pendingSignal = init.signal;
+          return barrier.promise;
+        }
+        return new Response(JSON.stringify({error: 'Other project does not authorize this source.'}), {status: 403});
+      }),
+    );
+    const element = (project: string) => (
+      <MaintenanceCaseDialog
+        project={project}
+        caseId={item.caseId}
+        initialCase={item}
+        stale
+        onEvidenceUpdated={adopted}
+        onClose={() => {}}
+        onTask={() => {}}
+        onOpenLibrary={() => {}}
+      />
+    );
+    await render(element('threadnote'));
+    expect(pendingSignal?.aborted).toBe(false);
+    if (change === 'project-change') await act(async () => root?.render(element('other')));
+    else {
+      await act(async () => root?.unmount());
+      root = undefined;
+    }
+    expect(pendingSignal?.aborted).toBe(true);
+    await act(async () =>
+      barrier.resolve(
+        new Response(
+          JSON.stringify({
+            outcome: 'ready',
+            item,
+            packet: {
+              version: 2,
+              project: item.project,
+              caseId: item.caseId,
+              evidenceRevision: 'late',
+              reason: 'LATE_SOURCE_MUST_NOT_ADOPT',
+            },
+          }),
+        ),
+      ),
+    );
+    expect(adopted).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain('LATE_SOURCE_MUST_NOT_ADOPT');
+  },
+);

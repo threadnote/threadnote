@@ -93,12 +93,15 @@ export function MaintenanceCaseDialog(props: {
   const [outcome, setOutcome] = useState('');
   const [redactedScopes, setRedactedScopes] = useState<ReadonlySet<string>>(() => new Set());
   const scopeKey = JSON.stringify([props.project, caseId]);
-  const explicitRefresh = useRef(false);
+  const explicitRefresh = useRef(!!props.stale);
+  const previousStale = useRef(!!props.stale);
   const selectedRefresh = useRef<(() => Promise<ManagerContextMaintenancePacketV2 | undefined>) | undefined>(undefined);
   const onEvidenceUpdated = useRef(props.onEvidenceUpdated);
   onEvidenceUpdated.current = props.onEvidenceUpdated;
   useEffect(() => {
-    if (props.stale) {
+    const becameStale = !!props.stale && !previousStale.current;
+    previousStale.current = !!props.stale;
+    if (becameStale) {
       explicitRefresh.current = true;
       setRefresh(value => value + 1);
     }
