@@ -5324,13 +5324,28 @@ describe('Threadnote MCP toolsets', () => {
   });
 
   it('applies an MCP repair only with the exact normalized preview selector', async () => {
+    const repairFailureMessage = (stage: 'pause' | 'preview' | 'apply', result: Readonly<Record<string, unknown>>) =>
+      JSON.stringify({
+        stage,
+        ...(typeof result.code === 'string' || (typeof result.code === 'number' && Number.isFinite(result.code))
+          ? {code: String(result.code).slice(0, 80)}
+          : {}),
+        ...(typeof result.message === 'string' ? {message: result.message.slice(0, 400)} : {}),
+        text: Array.isArray(result.content)
+          ? result.content
+              .slice(0, 3)
+              .flatMap((item: {readonly type?: unknown; readonly text?: unknown} | null) =>
+                item?.type === 'text' && typeof item.text === 'string' ? [item.text.slice(0, 400)] : [],
+              )
+          : [],
+      });
     await withMcpClient(
       async (client, fixture) => {
         const paused = await client.callTool({
           arguments: {action: 'pause', callerCwd: fixture.root},
           name: 'context_maintain',
         });
-        expect(paused.isError).not.toBe(true);
+        expect(paused.isError, repairFailureMessage('pause', paused)).not.toBe(true);
         await writeCanonicalMemory(
           fixture.home,
           'mcp-selector.md',
@@ -5348,7 +5363,7 @@ describe('Threadnote MCP toolsets', () => {
           arguments: {callerCwd: fixture.root, project: 'threadnote', ...selector},
           name: 'context_health_repair_preview',
         });
-        expect(preview.isError).not.toBe(true);
+        expect(preview.isError, repairFailureMessage('preview', preview)).not.toBe(true);
         const proposal = (
           preview.structuredContent as {
             readonly proposals?: readonly {readonly proposalId: string; readonly revision: string}[];
@@ -5379,7 +5394,7 @@ describe('Threadnote MCP toolsets', () => {
           },
           name: 'context_health_repair_apply',
         });
-        expect(applied.isError).not.toBe(true);
+        expect(applied.isError, repairFailureMessage('apply', applied)).not.toBe(true);
         expect(applied.structuredContent).toMatchObject({status: 'applied', version: 1});
         const repeated = await client.callTool({
           arguments: {
