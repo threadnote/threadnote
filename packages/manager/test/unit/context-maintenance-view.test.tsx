@@ -1456,8 +1456,9 @@ describe('context maintenance view', () => {
     expect(document.querySelector('[role=alert]')?.textContent).toContain('Maintenance access ended');
   });
 
-  it('keeps the review visible when background maintenance advances its generation', async () => {
+  it('keeps distinct panel and review identities when background maintenance advances its generation', async () => {
     vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     let advanced = false;
     const memoryUri = 'threadnote://user/tester/memories/example.md';
     const item = {
@@ -1506,11 +1507,17 @@ describe('context maintenance view', () => {
       button => button.textContent === 'Review memory and evidence',
     );
     await act(async () => review!.click());
-    expect(document.querySelector('dialog')?.open).toBe(true);
+    const dialog = document.querySelector('dialog');
+    const automaticPanel = document.querySelector('.automatic-memory-panel');
+    expect(dialog?.open).toBe(true);
+    expect(automaticPanel).not.toBeNull();
     advanced = true;
     await act(async () => vi.advanceTimersByTimeAsync(30_000));
-    expect(document.querySelector('dialog')?.open).toBe(true);
-    expect(document.querySelector('dialog')?.textContent).toContain('Visible memory');
+    expect(document.querySelector('dialog')).toBe(dialog);
+    expect(document.querySelector('.automatic-memory-panel')).toBe(automaticPanel);
+    expect(dialog?.open).toBe(true);
+    expect(dialog?.textContent).toContain('Visible memory');
+    expect(consoleError.mock.calls.filter(args => args.some(value => String(value).includes('same key')))).toEqual([]);
   });
 
   it('refreshes evidence when background proof advances without a corpus change', async () => {

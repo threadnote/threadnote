@@ -1150,7 +1150,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       ) : null}
       {inspectedCase ? (
         <MaintenanceCaseDialog
-          key={props.project}
+          key={`case:${props.project}`}
           project={props.project}
           caseId={inspectedCase.caseId}
           memoryUri={inspectedCase.memoryUri}
