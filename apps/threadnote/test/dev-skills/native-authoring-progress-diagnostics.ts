@@ -55,6 +55,69 @@ export const nativeProgressSpanLabels = [
   'CommandExecutor.execute',
 ] as const;
 const selectedLabels = new Set<string>(nativeProgressSpanLabels);
+export const nativeCommandPhases = ['prepare', 'finish', 'graph-ready', 'OTHER'] as const;
+export const nativeCommandCohorts = [
+  'projection',
+  'native-preflight',
+  'lower-prepare',
+  'execute',
+  'binding',
+  'capture',
+  'OTHER',
+] as const;
+type CommandPhase = (typeof nativeCommandPhases)[number];
+type CommandCohort = (typeof nativeCommandCohorts)[number];
+type CommandAncestor = {
+  phase?: CommandPhase;
+  kind?: 'projection' | 'prepare' | 'execute' | 'save' | 'binding' | 'capture';
+};
+const commandAncestorLabels = new Map<string, CommandAncestor>([
+  ['closeout.stage.prepare', {phase: 'prepare'}],
+  ['closeout.stage.finish', {phase: 'finish'}],
+  ['closeout.stage.graph-ready', {phase: 'graph-ready'}],
+  ['workflowAutomation.projectCloseoutKnowledge', {kind: 'projection'}],
+  ['workflowMemory.prepareOperation', {kind: 'prepare'}],
+  ['workflowMemory.executeOperation', {kind: 'execute'}],
+  ['workflowAutomation.save', {kind: 'save'}],
+  ['workflowMemory.verifyBinding', {kind: 'binding'}],
+  ['workflowMemory.resolveBinding', {kind: 'binding'}],
+  ['memoryCodeCitation.capture', {kind: 'capture'}],
+  ['memoryCodeCitation.captureRepositoryGroup', {kind: 'capture'}],
+]);
+const commandCohort = (parent: Option.Option<Tracer.AnySpan>, known: WeakMap<Tracer.Span, CommandAncestor>) => {
+  try {
+    let ancestor = parent;
+    let phase: CommandPhase | undefined;
+    const kinds = new Set<CommandAncestor['kind']>();
+    for (let depth = 0; depth < 64 && Option.isSome(ancestor); depth++) {
+      if (ancestor.value._tag !== 'Span') {
+        ancestor = Option.none();
+        break;
+      }
+      const selected = known.get(ancestor.value);
+      phase ??= selected?.phase;
+      if (selected?.kind) kinds.add(selected.kind);
+      ancestor = ancestor.value.parent;
+    }
+    if (Option.isSome(ancestor)) return {phase: 'OTHER', cohort: 'OTHER'} as const;
+    const cohort: CommandCohort = kinds.has('binding')
+      ? 'binding'
+      : kinds.has('projection')
+        ? 'projection'
+        : kinds.has('prepare') && kinds.has('execute')
+          ? 'lower-prepare'
+          : kinds.has('prepare') && kinds.has('save')
+            ? 'native-preflight'
+            : kinds.has('execute')
+              ? 'execute'
+              : kinds.has('capture')
+                ? 'capture'
+                : 'OTHER';
+    return {phase: phase ?? 'OTHER', cohort};
+  } catch {
+    return {phase: 'OTHER', cohort: 'OTHER'} as const;
+  }
+};
 const ceiling = 2_147_483_647;
 const bounded = (n: number) => (Number.isNaN(n) ? 0 : Math.min(ceiling, Math.max(0, Math.round(n))));
 const safely = (observe: () => void) => {
@@ -200,6 +263,18 @@ export const makeNativeProgressDiagnostics = (
     nativeProgressBoundaries.map(label => [label, {started: 0, succeeded: 0, failed: 0}]),
   ) as Record<NativeProgressBoundary, Counts>;
   const totals: Record<string, {started: number; ended: number; failed: number; inclusiveMs: number}> = {};
+  const commandAncestors = new WeakMap<Tracer.Span, CommandAncestor>();
+  const commandCohorts = Object.fromEntries(
+    nativeCommandPhases.map(phase => [
+      phase,
+      Object.fromEntries(
+        nativeCommandCohorts.map(cohort => [cohort, {started: 0, ended: 0, failed: 0, inclusiveMs: 0}]),
+      ),
+    ]),
+  ) as Record<
+    CommandPhase,
+    Record<CommandCohort, {started: number; ended: number; failed: number; inclusiveMs: number}>
+  >;
   const refreshWrites = new WeakSet<Tracer.Span>();
   const refreshTransactions = new WeakMap<Tracer.Span, RefreshTransaction>();
   const transactionBoundaries = {
@@ -246,9 +321,17 @@ export const makeNativeProgressDiagnostics = (
       // Preserve the active backend and any observer already wrapping this exact span.
       const span = delegate.span.call(delegate, spanOptions);
       const selected = selectedLabels.has(spanOptions.name);
+      let command: (typeof commandCohorts)[CommandPhase][CommandCohort] | undefined;
       let transaction: RefreshTransaction | undefined;
       let bodyTransaction: RefreshTransaction | undefined;
       safely(() => {
+        const ancestry = commandAncestorLabels.get(spanOptions.name);
+        if (ancestry) commandAncestors.set(span, ancestry);
+        if (spanOptions.name === 'CommandExecutor.execute') {
+          const classified = commandCohort(spanOptions.parent, commandAncestors);
+          command = commandCohorts[classified.phase][classified.cohort];
+          command.started = bounded(command.started + 1);
+        }
         const parent = Option.getOrUndefined(spanOptions.parent);
         if (spanOptions.name === 'recall.writeRefresh') refreshWrites.add(span);
         if (parent?._tag !== 'Span') return;
@@ -308,6 +391,11 @@ export const makeNativeProgressDiagnostics = (
             if (Exit.isFailure(exit)) total.failed = bounded(total.failed + 1);
             const inclusiveMs = bounded(Number(at - spanOptions.startTime) / 1_000_000);
             total.inclusiveMs = bounded(total.inclusiveMs + inclusiveMs);
+            if (command) {
+              command.ended = bounded(command.ended + 1);
+              command.failed = bounded(command.failed + Number(Exit.isFailure(exit)));
+              command.inclusiveMs = bounded(command.inclusiveMs + inclusiveMs);
+            }
             recent.push({...entry, inclusiveMs, outcome: exit._tag});
             if (recent.length > 32) {
               recent.shift();
@@ -405,6 +493,12 @@ export const makeNativeProgressDiagnostics = (
           incremental: {...refreshDecisions.incremental},
         },
         transactionBoundaries: {...transactionBoundaries},
+        commandCohorts: Object.fromEntries(
+          nativeCommandPhases.map(phase => [
+            phase,
+            Object.fromEntries(nativeCommandCohorts.map(cohort => [cohort, {...commandCohorts[phase][cohort]}])),
+          ]),
+        ),
         activeCount,
         unlistedActiveCount: activeCount - active.size,
         active: [...active.values()].map(entry => ({...entry, ageMs: bounded(at - entry.startedMs)})),

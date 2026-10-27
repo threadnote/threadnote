@@ -11,6 +11,8 @@ import {
   nativeProgressFacades,
   nativeProgressMethod,
   nativeProgressSpanLabels,
+  nativeCommandPhases,
+  nativeCommandCohorts,
   observeNativeBody,
   observeNativeBoundary,
   reportNativeFailure,
@@ -795,6 +797,216 @@ effectIt.effect('requires exact observed immediate parents and one successful bo
     }
     expect(observer.snapshot().transactionBoundaries).toMatchObject({observed: 0, rejected: 5});
     expect(observer.snapshot().activeCount).toBe(0);
+  }),
+);
+
+const commandFrame = (
+  observer: ReturnType<typeof make>,
+  phase: (typeof nativeCommandPhases)[number],
+  cohort: (typeof nativeCommandCohorts)[number],
+) => {
+  const labels = {
+    projection: [
+      'workflowAutomation.projectCloseoutKnowledge',
+      'workflowMemory.prepareOperation',
+      'memoryCodeCitation.captureRepositoryGroup',
+    ],
+    'native-preflight': [
+      'workflowAutomation.save',
+      'workflowMemory.prepareOperation',
+      'memoryCodeCitation.captureRepositoryGroup',
+    ],
+    'lower-prepare': [
+      'workflowAutomation.save',
+      'workflowMemory.executeOperation',
+      'workflowMemory.prepareOperation',
+      'memoryCodeCitation.captureRepositoryGroup',
+    ],
+    execute: ['workflowMemory.executeOperation'],
+    binding: ['workflowAutomation.projectCloseoutKnowledge', 'workflowMemory.verifyBinding', 'utils.gitValue'],
+    capture: ['memoryCodeCitation.captureRepositoryGroup'],
+    OTHER: ['PRIVATE.unrecognized'],
+  };
+  const parents: Tracer.Span[] = [];
+  for (const label of [`closeout.stage.${phase}`, ...labels[cohort], 'PRIVATE.middle', 'runCommandEffect']) {
+    parents.push(observer.tracer.span(spanOptions(label, Option.fromUndefinedOr(parents.at(-1)))));
+  }
+  return {
+    command: () => observer.tracer.span(spanOptions('CommandExecutor.execute', Option.some(parents.at(-1)!))),
+    close: () => {
+      for (const parent of [...parents].reverse()) parent.end(3_000_000n, Exit.void);
+    },
+  };
+};
+
+effectIt.effect.prop(
+  'conserves command counts and inclusive durations across closed phase and ancestry cohorts',
+  {
+    events: Schema.Array(
+      Schema.Struct({
+        phase: Schema.Literals(nativeCommandPhases),
+        cohort: Schema.Literals(nativeCommandCohorts),
+        milliseconds: Schema.Literals([0, 1, 7, 255]),
+        failed: Schema.Boolean,
+      }),
+    ).check(Schema.isMaxLength(40)),
+  },
+  ({events}) =>
+    Effect.sync(() => {
+      const observer = make();
+      for (const event of events) {
+        const frame = commandFrame(observer, event.phase, event.cohort);
+        const command = frame.command();
+        const at = 1_000_000n + BigInt(event.milliseconds) * 1_000_000n;
+        const exit = event.failed ? Exit.fail('PRIVATE') : Exit.void;
+        command.end(at, exit);
+        command.end(at + 1n, exit);
+        frame.close();
+      }
+      const cohorts = observer.snapshot().commandCohorts;
+      for (const phase of nativeCommandPhases)
+        for (const cohort of nativeCommandCohorts) {
+          const matching = events.filter(event => event.phase === phase && event.cohort === cohort);
+          expect(cohorts[phase][cohort]).toEqual({
+            started: matching.length,
+            ended: matching.length,
+            failed: matching.filter(event => event.failed).length,
+            inclusiveMs: matching.reduce((total, event) => total + event.milliseconds, 0),
+          });
+        }
+      expect(observer.snapshot().activeCount).toBe(0);
+      expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
+    }),
+  {arbitrary: {runs: 25}},
+);
+
+effectIt.effect('retains command aggregates after thousands of earlier records leave the bounded history', () =>
+  Effect.sync(() => {
+    const lines: string[] = [];
+    const observer = make({sink: line => lines.push(line)});
+    const early = commandFrame(observer, 'prepare', 'projection');
+    for (let index = 0; index < 100; index++) early.command().end(3_000_000n, Exit.void);
+    early.close();
+    const late = commandFrame(observer, 'finish', 'binding');
+    for (let index = 0; index < 4000; index++) late.command().end(4_000_000n, Exit.void);
+    late.close();
+    const snapshot = observer.snapshot();
+    expect(snapshot.recent).toHaveLength(32);
+    expect(snapshot.recentDropped).toBeGreaterThan(4000);
+    expect(snapshot.commandCohorts.prepare.projection).toEqual({started: 100, ended: 100, failed: 0, inclusiveMs: 200});
+    expect(snapshot.commandCohorts.finish.binding).toEqual({started: 4000, ended: 4000, failed: 0, inclusiveMs: 12000});
+    snapshot.commandCohorts.prepare.projection.ended = -1;
+    expect(observer.snapshot().commandCohorts.prepare.projection.ended).toBe(100);
+    expect(lines).toHaveLength(0);
+    observer.reportFailure();
+    expect(lines).toHaveLength(1);
+    expect(lines[0].length).toBeLessThanOrEqual(16_384);
+    const packet = JSON.parse(lines[0].slice(lines[0].indexOf('{')));
+    expect(packet.commandCohorts.prepare.projection.inclusiveMs).toBe(200);
+    expect(packet.commandCohorts.finish.binding.ended).toBe(4000);
+    expect(lines[0]).not.toContain('PRIVATE');
+  }),
+);
+
+effectIt.effect('uses each concurrent command ancestry rather than a mutable current closeout phase', () =>
+  Effect.gen(function* () {
+    const observer = make();
+    const first = yield* Deferred.make<void>();
+    const second = yield* Deferred.make<void>();
+    yield* Effect.all(
+      [
+        Deferred.succeed(first, undefined).pipe(
+          Effect.andThen(Deferred.await(second)),
+          Effect.andThen(Effect.void.pipe(Effect.withSpan('CommandExecutor.execute'))),
+          Effect.withSpan('workflowAutomation.projectCloseoutKnowledge'),
+          Effect.withSpan('closeout.stage.prepare'),
+        ),
+        Deferred.await(first).pipe(
+          Effect.andThen(Deferred.succeed(second, undefined)),
+          Effect.andThen(
+            Effect.void.pipe(
+              Effect.withSpan('CommandExecutor.execute'),
+              Effect.withSpan('workflowMemory.prepareOperation'),
+            ),
+          ),
+          Effect.withSpan('workflowMemory.executeOperation'),
+          Effect.withSpan('workflowAutomation.save'),
+          Effect.withSpan('closeout.stage.finish'),
+        ),
+      ],
+      {concurrency: 'unbounded'},
+    ).pipe(Effect.withTracer(observer.tracer));
+    const cohorts = observer.snapshot().commandCohorts;
+    expect(cohorts.prepare.projection.ended).toBe(1);
+    expect(cohorts.finish['lower-prepare'].ended).toBe(1);
+    expect(cohorts.finish.projection.ended).toBe(0);
+    expect(cohorts.prepare['lower-prepare'].ended).toBe(0);
+  }),
+);
+
+effectIt.effect('bounds hostile ancestry and preserves the exact delegated parent, timestamps and exits', () =>
+  Effect.sync(() => {
+    const ends: [bigint, Exit.Exit<unknown, unknown>][] = [];
+    const created: Tracer.Span[] = [];
+    const delegate = Tracer.make({
+      span(options) {
+        const span = Tracer.nativeTracer.span(options);
+        created.push(span);
+        const end = span.end.bind(span);
+        span.end = (at, exit) => {
+          ends.push([at, exit]);
+          end(at, exit);
+        };
+        return span;
+      },
+    });
+    const observer = makeNativeProgressDiagnostics(delegate, {now: () => 0, sink: () => {}});
+    let nameReads = 0;
+    let parentReads = 0;
+    const hostile = new Proxy(Tracer.nativeTracer.span(spanOptions('PRIVATE.parent')), {
+      get(target, key, receiver) {
+        if (key === 'name') {
+          nameReads++;
+          throw new Error('PRIVATE');
+        }
+        if (key === 'parent') {
+          parentReads++;
+          throw new Error('PRIVATE');
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const options = spanOptions('CommandExecutor.execute', Option.some(hostile));
+    const command = observer.tracer.span(options);
+    const failure = Exit.fail({PRIVATE: 'original error'});
+    command.attribute('PRIVATE', {PRIVATE: 'arguments and paths'});
+    command.event('PRIVATE', 1n, {PRIVATE: 'query'});
+    command.end(3_000_000n, failure);
+    command.end(4_000_000n, failure);
+    expect(command).toBe(created[0]);
+    expect(command.parent).toBe(options.parent);
+    expect(ends).toEqual([
+      [3_000_000n, failure],
+      [4_000_000n, failure],
+    ]);
+    expect(nameReads).toBe(0);
+    expect(parentReads).toBe(1);
+    const external = Tracer.nativeTracer.span(spanOptions('closeout.stage.finish'));
+    observer.tracer.span(spanOptions('CommandExecutor.execute', Option.some(external))).end(3_000_000n, Exit.void);
+    let traversals = 0;
+    const cycle = {
+      _tag: 'Span',
+      get parent(): Option.Option<Tracer.AnySpan> {
+        traversals++;
+        return Option.some(cycle as unknown as Tracer.Span);
+      },
+    };
+    observer.tracer
+      .span(spanOptions('CommandExecutor.execute', Option.some(cycle as unknown as Tracer.Span)))
+      .end(3_000_000n, Exit.void);
+    expect(traversals).toBe(64);
+    expect(observer.snapshot().commandCohorts.OTHER.OTHER).toEqual({started: 3, ended: 3, failed: 1, inclusiveMs: 6});
+    expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
   }),
 );
 
