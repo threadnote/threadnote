@@ -4,6 +4,7 @@ import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workfl
 import {renderNativeDocument, type NativeDocumentEnvelope} from '@threadnote/workflow-automations/documents';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {nativeWorkflowError} from './memory.js';
+import type {NativeWorkflowState} from '@threadnote/workflow-automations/native';
 
 const utf8 = new TextEncoder();
 const failure = (message: string) => WorkflowAutomationError.make({code: 'invalid-authoring-artifact', message});
@@ -15,12 +16,21 @@ export const AuthoringReferenceSchema = Schema.Struct({
   revision: digest,
 });
 export type AuthoringReference = typeof AuthoringReferenceSchema.Type;
-const dataPage = Schema.Struct({
-  format: Schema.Literal('threadnote-native-authoring-data'),
-  version: Schema.Literal(1),
-  contentHash: digest,
-  content: Schema.String.check(Schema.isMaxLength(32_000)),
-});
+export const AuthoringDataPageSchema = Schema.Union([
+  Schema.Struct({
+    format: Schema.Literal('threadnote-native-authoring-data'),
+    version: Schema.Literal(1),
+    contentHash: digest,
+    content: Schema.String.check(Schema.isMaxLength(32_000)),
+  }),
+  Schema.Struct({
+    format: Schema.Literal('threadnote-native-authoring-data'),
+    version: Schema.Literal(2),
+    encoding: Schema.Literal('utf8'),
+    contentHash: digest,
+    content: Schema.String,
+  }),
+]);
 const indexPage = Schema.Struct({
   format: Schema.Literal('threadnote-native-authoring-index'),
   version: Schema.Literal(1),
@@ -67,8 +77,18 @@ export type AuthoringRoot = typeof AuthoringRootSchema.Type;
 export type NativeAuthoringCall<R> = (request: unknown) => Effect.Effect<unknown, WorkflowAutomationError, R>;
 
 const marker = '<!-- threadnote-authoring:v1 ';
+const authoringPayload = (markdown: string, value: unknown, escapeHtml = false): string => {
+  const json = stableJson(value);
+  return (
+    markdown +
+    '\n' +
+    marker +
+    (escapeHtml ? json.replace(/[<>]/gu, character => (character === '<' ? '\\u003c' : '\\u003e')) : json) +
+    ' -->\n'
+  );
+};
 const appendAuthoringPayload = (markdown: string, value: unknown): string => {
-  const body = markdown + '\n' + marker + stableJson(value) + ' -->\n';
+  const body = authoringPayload(markdown, value);
   if (utf8.encode(body).byteLength > 60_000)
     throw WorkflowAutomationError.make({
       code: 'authoring-size',
@@ -121,6 +141,65 @@ const fromBase64 = (content: string): string => {
   return new TextDecoder('utf-8', {fatal: true}).decode(Uint8Array.from(binary, char => char.charCodeAt(0)));
 };
 
+export function decodeAuthoringDataContent(page: typeof AuthoringDataPageSchema.Type): string {
+  if (page.version === 1) return fromBase64(page.content);
+  // Scalar validation preserves U+FEFF, unlike a default TextDecoder roundtrip.
+  if (/[\uD800-\uDFFF]/u.test(page.content) || utf8.encode(page.content).byteLength > 20_000)
+    throw failure('The authoring data encoding is invalid.');
+  return page.content;
+}
+
+export function encodeAuthoringDataPage(index: number, content: string, version: 1 | 2 = 2): string {
+  const markdown =
+    '# Authoring data ' +
+    (index + 1) +
+    '\n\n## Summary\n\nComplete structured data; use the linked root or bounded detail commands.\n';
+  const contentHash = sha256HexSync(content);
+  const legacy = appendAuthoringPayload(markdown, {
+    format: 'threadnote-native-authoring-data',
+    version: 1,
+    contentHash,
+    content: base64(content),
+  });
+  if (version === 1) return legacy;
+  const candidate = authoringPayload(
+    markdown,
+    {
+      format: 'threadnote-native-authoring-data',
+      version: 2,
+      encoding: 'utf8',
+      contentHash,
+      content,
+    },
+    true,
+  );
+  return utf8.encode(candidate).byteLength <= Math.min(60_000, utf8.encode(legacy).byteLength) ? candidate : legacy;
+}
+
+export function authoringDataPageVersion(
+  state: Pick<NativeWorkflowState, 'operations' | 'authoringSave'>,
+  text: string,
+): 1 | 2 {
+  if (!state.authoringSave) return 2;
+  const pages = state.operations
+    .slice(state.authoringSave.operationStart)
+    .filter(operation => operation.intent.role === 'authoring-child' && operation.intent.nameHint === 'source')
+    .map(operation => {
+      const page = decodeAuthoringArtifact(operation.intent.body, AuthoringDataPageSchema);
+      const content = decodeAuthoringDataContent(page);
+      if (sha256HexSync(content) !== page.contentHash) throw failure('An admitted authoring data page changed.');
+      return {body: operation.intent.body, page};
+    });
+  const version = pages.length > 0 && pages.every(({page}) => page.version === 1) ? 1 : 2;
+  // Unchanged content-addressed pages may replay without appending a suffix intent.
+  const expected = new Set(
+    splitAuthoringText(text).map((content, index) => encodeAuthoringDataPage(index, content, version)),
+  );
+  for (const {body} of pages)
+    if (!expected.has(body)) throw failure('An admitted authoring data page differs from its deterministic encoding.');
+  return version;
+}
+
 export const authoringRelations = (context: readonly AuthoringReference[], children: readonly AuthoringReference[]) =>
   [...new Map([...context, ...children].map(reference => [reference.uri, reference])).values()].map(reference => ({
     type: 'references' as const,
@@ -136,6 +215,7 @@ export function makeAuthoringArtifacts<R>(options: {
   readonly evidenceRefs: readonly AuthoringReference[];
   readonly contextRelations?: readonly AuthoringReference[];
   readonly ownedUris?: readonly string[];
+  readonly dataPageVersion?: 1 | 2;
 }) {
   const ownedUris = new Set(options.ownedUris);
   const request = (action: string) => ({
@@ -206,16 +286,7 @@ export function makeAuthoringArtifacts<R>(options: {
       const parts = splitAuthoringText(text);
       for (let index = 0; index < parts.length; index++) {
         const content = parts[index];
-        const body = encodeAuthoringArtifact(
-          'Authoring data ' + (index + 1),
-          'Complete structured data; use the linked root or bounded detail commands.',
-          {
-            format: 'threadnote-native-authoring-data',
-            version: 1,
-            contentHash: sha256HexSync(content),
-            content: base64(content),
-          },
-        );
+        const body = encodeAuthoringDataPage(index, content, options.dataPageVersion);
         references.push(artifactReference(yield* write({body, nameHint: 'source'})));
       }
       let depth = 1;
@@ -258,10 +329,10 @@ export function makeAuthoringArtifacts<R>(options: {
           const artifact = yield* read(current);
           if (expectedDepth === 0) {
             const page = yield* Effect.try({
-              try: () => decodeAuthoringArtifact(artifact.body, dataPage),
+              try: () => decodeAuthoringArtifact(artifact.body, AuthoringDataPageSchema),
               catch: nativeWorkflowError,
             });
-            const text = yield* Effect.try({try: () => fromBase64(page.content), catch: nativeWorkflowError});
+            const text = yield* Effect.try({try: () => decodeAuthoringDataContent(page), catch: nativeWorkflowError});
             if (sha256HexSync(text) !== page.contentHash) return yield* failure('An authoring data page changed.');
             bytes += utf8.encode(text).byteLength;
             if (bytes > 1_000_000) return yield* failure('Authoring data exceeds its bounded read size.');

@@ -46,8 +46,11 @@ import {
 import {
   AuthoringReferenceSchema,
   AuthoringRootSchema,
+  AuthoringDataPageSchema,
+  authoringDataPageVersion,
   artifactReference,
   decodeAuthoringArtifact,
+  decodeAuthoringDataContent,
   encodeAuthoringArtifact,
   encodeAuthoringDocument,
   makeAuthoringArtifacts,
@@ -70,12 +73,6 @@ const review = Schema.Struct({
   documentHash: digest,
   outcome: Schema.Literals(['accepted', 'changes-requested']),
   blockingIssueCount: Schema.Finite.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
-});
-const authoringDataPage = Schema.Struct({
-  format: Schema.Literal('threadnote-native-authoring-data'),
-  version: Schema.Literal(1),
-  contentHash: digest,
-  content: Schema.String.check(Schema.isMaxLength(32_000)),
 });
 const authoringIndexPage = Schema.Struct({
   format: Schema.Literal('threadnote-native-authoring-index'),
@@ -507,19 +504,13 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
               for (const descendant of page.children) yield* visit(descendant, page.depth - 1);
             } else {
               const page = yield* Effect.try({
-                try: () => decodeAuthoringArtifact(child.body, authoringDataPage),
+                try: () => decodeAuthoringArtifact(child.body, AuthoringDataPageSchema),
                 catch: nativeWorkflowError,
               });
               if (expectedDepth !== undefined && expectedDepth !== 0)
                 return yield* fail('invalid-readback', 'The linked specification data page is at the wrong depth.');
               const text = yield* Effect.try({
-                try: () => {
-                  const binary = atob(page.content);
-                  if (btoa(binary) !== page.content) throw new Error('Noncanonical base64');
-                  return new TextDecoder('utf-8', {fatal: true}).decode(
-                    Uint8Array.from(binary, character => character.charCodeAt(0)),
-                  );
-                },
+                try: () => decodeAuthoringDataContent(page),
                 catch: () => fail('invalid-readback', 'The linked specification data page encoding is invalid.'),
               });
               if (sha256HexSync(text) !== page.contentHash)
@@ -946,6 +937,11 @@ const saveAuthoring = <R>(
         return yield* fail('pending-operation', 'Resume the exact authoring save admitted by this run.');
       const authoringCall: NativeAuthoringCall<R> = input =>
         call(input).pipe(Effect.provideService(CurrentNativeAuthoringSave, saveDigest));
+      const pendingText = state.authoringSave ? canonicalAuthoringJson(document) : undefined;
+      const dataPageVersion = yield* Effect.try({
+        try: () => authoringDataPageVersion(state, pendingText ?? ''),
+        catch: nativeWorkflowError,
+      });
 
       let artifacts = makeAuthoringArtifacts({
         call: authoringCall,
@@ -955,6 +951,7 @@ const saveAuthoring = <R>(
         codeRefs: document.context.codeRefs,
         evidenceRefs: document.context.evidenceRefs,
         ownedUris: ownedAuthoringUris(state),
+        dataPageVersion,
       });
       const pending = state.operations.find(operation => operation.status === 'prepared');
       const key = 'author-root-' + document.kind;
@@ -988,7 +985,7 @@ const saveAuthoring = <R>(
           profile: state.profile,
           ...(state.team ? {team: state.team} : {}),
         };
-        const text = canonicalAuthoringJson(document);
+        const text = pendingText ?? canonicalAuthoringJson(document);
         if (
           root.kind !== document.kind ||
           root.featureId !== state.featureId ||
@@ -1140,7 +1137,7 @@ const saveAuthoring = <R>(
           'invalid-document',
           'Resolve the document’s structural/coverage/source issues before saving; readiness-only questions remain draftable.',
         );
-      const text = canonicalAuthoringJson(document);
+      const text = pendingText ?? canonicalAuthoringJson(document);
       const views = documentViews(document).map(item => ({...item, document: boundedView(item.document)}));
       const encodedViews = yield* Effect.try({
         try: () =>
@@ -1268,6 +1265,7 @@ const saveAuthoring = <R>(
           evidenceRefs: document.context.evidenceRefs,
           contextRelations: [artifactReference(contextArtifact)],
           ownedUris: ownedAuthoringUris(state),
+          dataPageVersion,
         });
       }
       const data = yield* artifacts.writeData(text);
