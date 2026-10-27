@@ -1,5 +1,5 @@
 import {describe, expect, it} from '@effect/vitest';
-import {Context, Effect, FileSystem, Layer, Option, Path} from 'effect';
+import {Clock, Context, Deferred, Effect, Fiber, FileSystem, Layer, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
@@ -17,7 +17,11 @@ import {
 } from '@threadnote/graph/admission_freshness';
 import type {CodeGraphSnapshot} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
-import {captureMemoryCodeCitations, MemoryCodeCitationCaptureError} from '../../src/citation/capture.js';
+import {
+  captureMemoryCodeCitations,
+  MemoryCodeCitationCaptureError,
+  withLocalMemoryCodeCitations,
+} from '../../src/citation/capture.js';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
 
 const unexpected = () => Effect.die('Citation capture must not index or request maintenance');
@@ -47,8 +51,26 @@ const base = Layer.mergeAll(
 );
 const dependencies = CodeGraphStore.layer.pipe(Layer.provideMerge(base));
 const source = 'export const value = 1;\n';
+const moduleId = 'cgs_' + 'b'.repeat(40);
+const offsetClock = (clock: Clock.Clock, offset: () => bigint): Clock.Clock => ({
+  currentTimeMillis: clock.currentTimeMillis,
+  currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
+  currentTimeNanos: clock.currentTimeNanos,
+  currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+  monotonicTimeNanos: Effect.sync(() => clock.monotonicTimeNanosUnsafe() + offset()),
+  monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe() + offset(),
+  sleep: duration => clock.sleep(duration),
+});
 
-const fixture = (options: {legacy?: boolean; drift?: boolean; interrupt?: boolean} = {}) =>
+const fixture = (
+  options: {
+    legacy?: boolean;
+    drift?: boolean;
+    interrupt?: boolean;
+    beforeEvidence?: () => Effect.Effect<void>;
+    beforeClosing?: () => Effect.Effect<void>;
+  } = {},
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const paths = yield* Path.Path;
@@ -85,7 +107,7 @@ const fixture = (options: {legacy?: boolean; drift?: boolean; interrupt?: boolea
       dirty: false,
       edgeCount: 0,
       fileCount: 1,
-      symbolCount: 0,
+      symbolCount: 1,
       state: 'ready',
       completedAt: '2026-10-26T00:00:00.000Z',
     };
@@ -104,7 +126,19 @@ const fixture = (options: {legacy?: boolean; drift?: boolean; interrupt?: boolea
           source: 'commit',
         },
       ],
-      [],
+      [
+        {
+          id: moduleId,
+          contentHash: codeGraphCommittedFileContentHash('sha1', bytes),
+          exported: false,
+          kind: 'module',
+          language: 'typescript',
+          name: 'source.ts',
+          path: 'source.ts',
+          qualifiedName: 'source.ts',
+          span: {line: 1, column: 1, endLine: 1, endColumn: 1},
+        },
+      ],
       [],
       [],
     );
@@ -160,6 +194,7 @@ const fixture = (options: {legacy?: boolean; drift?: boolean; interrupt?: boolea
         Effect.gen(function* () {
           expect(leased).toBe(true);
           events.push('evidence');
+          yield* options.beforeEvidence?.() ?? Effect.void;
           if (options.interrupt) return yield* Effect.interrupt;
           return yield* store.effectiveSnapshotCitationEvidence(...args);
         }),
@@ -196,6 +231,7 @@ const fixture = (options: {legacy?: boolean; drift?: boolean; interrupt?: boolea
         Effect.gen(function* () {
           events.push(leased ? 'closing' : 'opening');
           expect(active).toBe(!options.legacy);
+          if (leased) yield* options.beforeClosing?.() ?? Effect.void;
           if (leased && options.drift)
             yield* fs.writeFileString(paths.join(repo, 'source.ts'), 'export const value = 2;\n');
           return yield* query.status(home, cwd, routing);
@@ -204,6 +240,14 @@ const fixture = (options: {legacy?: boolean; drift?: boolean; interrupt?: boolea
     return {
       clients,
       events,
+      withCitations: <A, E, R>(
+        use: Parameters<typeof withLocalMemoryCodeCitations<A, E, R>>[2],
+        refs = ['source.ts'],
+      ) =>
+        withLocalMemoryCodeCitations(config, {callerCwd: repo, refs}, use).pipe(
+          Effect.provideService(CodeGraphQueryService, observedQuery),
+          Effect.provideService(CodeGraphStore, observedStore),
+        ),
       capture: captureMemoryCodeCitations(config, {
         callerCwd: repo,
         refs: ['source.ts'],
@@ -246,6 +290,123 @@ describe('repository citation capture session', () => {
           expect(f.clients[0]).toBe(f.clients[1]);
           expect(f.clients[2]).toBe(f.clients[3]);
           expect(f.clients[0]).not.toBe(f.clients[2]);
+        }).pipe(TestClock.withLive),
+    );
+
+    test.effect('runs normalized citations and all projection work before the real closing observation', () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const output = yield* f.withCitations(
+          citations =>
+            Effect.sync(() => {
+              expect(citations).toHaveLength(1);
+              f.events.push('callback');
+              return citations.map(citation => citation.id);
+            }),
+          [moduleId, ' source.ts ', 'source.ts'],
+        );
+        expect(output).toHaveLength(1);
+        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'callback', 'closing', 'release', 'session-end']);
+        yield* f.capture;
+        expect(f.events.filter(event => event === 'lease')).toHaveLength(2);
+      }).pipe(TestClock.withLive),
+    );
+
+    test.effect('preserves callback error identity and releases without publishing a projection', () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const failure = {code: 'original-body-or-cas-error'};
+        expect(yield* f.withCitations(() => Effect.fail(failure)).pipe(Effect.flip)).toBe(failure);
+        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
+      }).pipe(TestClock.withLive),
+    );
+
+    test.effect('rejects late projection drift and cleans up an interrupted continuation', () =>
+      Effect.gen(function* () {
+        const drift = yield* fixture({drift: true});
+        expect(yield* drift.withCitations(() => Effect.succeed('discarded')).pipe(Effect.flip)).toBeInstanceOf(
+          MemoryCodeCitationCaptureError,
+        );
+        expect(drift.events).toEqual(['opening', 'lease', 'evidence', 'closing', 'release', 'session-end']);
+        const f = yield* fixture();
+        const entered = yield* Deferred.make<void>();
+        const fiber = yield* f
+          .withCitations(() => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)))
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        yield* Fiber.interrupt(fiber);
+        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
+      }).pipe(TestClock.withLive),
+    );
+
+    test.effect('counts evidence time against the same 60-second lease budget as the callback', () =>
+      Effect.gen(function* () {
+        const clock = yield* Clock.Clock;
+        let offset = 0n;
+        const f = yield* fixture({
+          beforeEvidence: () =>
+            Effect.sync(() => {
+              offset += 59_000_000_000n;
+            }),
+        });
+        const failure = yield* f
+          .withCitations(() =>
+            Effect.sync(() => {
+              offset += 2_000_000_000n;
+              return 'discarded';
+            }),
+          )
+          .pipe(
+            Effect.provideService(
+              Clock.Clock,
+              offsetClock(clock, () => offset),
+            ),
+            Effect.flip,
+          );
+        expect(failure).toBeInstanceOf(MemoryCodeCitationCaptureError);
+        expect(String(failure)).toContain('lease expired');
+        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
+      }).pipe(TestClock.withLive),
+    );
+
+    test.effect(
+      'enforces the local eight-reference limit before admission and includes closing in the lease budget',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture();
+          let called = false;
+          expect(
+            yield* f
+              .withCitations(
+                () =>
+                  Effect.sync(() => {
+                    called = true;
+                  }),
+                Array.from({length: 9}, (_, index) => 'file-' + index + '.ts'),
+              )
+              .pipe(Effect.flip),
+          ).toBeInstanceOf(MemoryCodeCitationCaptureError);
+          expect(called).toBe(false);
+          expect(f.events).toEqual([]);
+          const clock = yield* Clock.Clock;
+          let offset = 0n;
+          const closing = yield* fixture({
+            beforeClosing: () =>
+              Effect.sync(() => {
+                offset += 61_000_000_000n;
+              }),
+          });
+          const failure = yield* closing
+            .withCitations(() => Effect.succeed('discarded'))
+            .pipe(
+              Effect.provideService(
+                Clock.Clock,
+                offsetClock(clock, () => offset),
+              ),
+              Effect.flip,
+            );
+          expect(String(failure)).toContain('lease expired');
+          expect(closing.events).toEqual(['opening', 'lease', 'evidence', 'closing', 'release', 'session-end']);
         }).pipe(TestClock.withLive),
     );
 
