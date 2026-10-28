@@ -254,6 +254,7 @@ describe('native closeout lifecycle', () => {
     }).pipe(runCloseout),
   );
 
+  // prettier-ignore
   effectIt.effect('preserves every remaining draft when an owned artifact is edited after admission', () =>
     Effect.gen(function* () {
       const f = yield* nativeCloseoutFixture(false);
@@ -284,6 +285,7 @@ describe('native closeout lifecycle', () => {
       expect(proposal.phaseEvidence).toHaveLength(1);
       expect((yield* readArtifact(f, f.unrelated.uri, 'plan-run')).state).toBe('active');
     }).pipe(runCloseout),
+    windowsCloseoutTimeout,
   );
 
   // prettier-ignore

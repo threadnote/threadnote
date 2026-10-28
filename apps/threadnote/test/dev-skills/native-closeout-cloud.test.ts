@@ -11,6 +11,9 @@ import {nativeCloseoutFixture} from './native-closeout-fixture.js';
 import {provideNative} from './native-automation-fixture.js';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
 
+// P0 Windows allowance for real private Git publication and recovery beyond 60s; revisit with performance data.
+const cloudCloseoutTimeout = process.platform === 'win32' ? 120_000 : 60_000;
+
 type Fixture = Effect.Success<ReturnType<typeof nativeCloseoutFixture>>;
 const decode = Schema.decodeUnknownEffect;
 const validation = Schema.Struct({
@@ -196,7 +199,7 @@ describe('verified personal cloud closeout', () => {
           expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(head);
           expect(yield* f.fs.readFileString(f.statePath('controller') + '.closeout.json')).toBe(bytes);
         }).pipe(TestClock.withLive, provideNative),
-      {timeout: 60_000},
+      {timeout: cloudCloseoutTimeout},
     );
   }
   it.effect(
@@ -274,7 +277,7 @@ describe('verified personal cloud closeout', () => {
         yield* f.closeout('finish');
         expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(head);
       }).pipe(TestClock.withLive, provideNative),
-    {timeout: 60_000},
+    {timeout: cloudCloseoutTimeout},
   );
   it.effect(
     'retains drafts after private push rejection and retries the same approved graph without duplicates',
@@ -311,6 +314,6 @@ describe('verified personal cloud closeout', () => {
         yield* f.closeout('finish');
         expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(head);
       }).pipe(TestClock.withLive, provideNative),
-    {timeout: 60_000},
+    {timeout: cloudCloseoutTimeout},
   );
 });
