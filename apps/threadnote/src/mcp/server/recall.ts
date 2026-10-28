@@ -86,9 +86,7 @@ import {
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {memoryReadRecoveryForRequestedUri, memoryReadRecoveryText} from '@threadnote/memory/read/recovery';
 import {RECALL_RANKER_VERSION} from '@threadnote/recall/rank';
-import {
-  parseRecallMemoryConnectionInput,
-} from '@threadnote/recall/memory/connections';
+import {parseRecallMemoryConnectionInput} from '@threadnote/recall/memory/connections';
 import type {MemoryRelationType} from '@threadnote/memory/document';
 import {
   projectRecallMcpResponse,
