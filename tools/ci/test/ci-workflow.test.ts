@@ -83,6 +83,7 @@ it('uses one authoritative Bazel plan and parallel execution matrix', async () =
 it('routes platform and quality lanes from Bazel outputs', () => {
   expect(jobs['bazel-plan']?.outputs).toEqual({
     bazel_validation: '${{ steps.selection.outputs.bazel_validation }}',
+    compile_targets: '${{ steps.selection.outputs.compile_targets }}',
     execute_bazel: '${{ steps.shards.outputs.execute_bazel }}',
     recall_quality: '${{ steps.selection.outputs.recall_quality }}',
     release_matrix: '${{ steps.selection.outputs.release_matrix }}',
@@ -92,7 +93,7 @@ it('routes platform and quality lanes from Bazel outputs', () => {
   });
   expect(jobs['recall-quality']?.if).toBe("needs.bazel-plan.outputs.recall_quality == 'true'");
   expect(jobs['windows-smoke']?.if).toBe("needs.bazel-plan.outputs.windows_smoke == 'true'");
-  expect(jobs['standalone-targets']?.if).toBe("needs.bazel-plan.outputs.release_matrix == 'true'");
+  expect(jobs['standalone-targets']?.if).toBe("needs.bazel-plan.outputs.compile_targets == 'true'");
   expect(jobs['self-contained-distribution']?.if).toBe("needs.bazel-plan.outputs.release_matrix == 'true'");
 });
 
@@ -112,6 +113,41 @@ it('keeps the stable aggregate check and requires the planner plus every selecte
     'test "$BAZEL_PLAN_VALIDATION_RESULT" = success',
   );
   expect(step(jobs.test, 'Require every selected lane')?.run).toContain('test "$BAZEL_SHARDS_RESULT" = success');
+});
+
+it('requires compile and release results independently for every lane-selection combination', () => {
+  const aggregate = step(jobs.test, 'Require every selected lane')?.run;
+  expect(aggregate).toBeDefined();
+  for (const compile of ['true', 'false']) {
+    for (const release of ['true', 'false']) {
+      for (const compiled of ['success', 'failure', 'cancelled', 'skipped']) {
+        for (const released of ['success', 'failure', 'cancelled', 'skipped']) {
+          const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-c', aggregate!], {
+            encoding: 'utf8',
+            env: {
+              BASH_ENV: '',
+              PATH: '',
+              BAZEL_PLAN_RESULT: 'success',
+              BAZEL_PLAN_VALIDATION_RESULT: 'success',
+              BAZEL_EXECUTE: 'false',
+              BAZEL_SHARDS_RESULT: 'skipped',
+              RECALL_SELECTED: 'false',
+              WINDOWS_SELECTED: 'false',
+              COMPILE_SELECTED: compile,
+              RELEASE_SELECTED: release,
+              STANDALONE_RESULT: compiled,
+              SELF_CONTAINED_RESULT: released,
+            },
+            timeout: 2_000,
+          });
+          const accepted =
+            (compile === 'false' || compiled === 'success') && (release === 'false' || released === 'success');
+          expect(result.error).toBeUndefined();
+          expect(result.status).toBe(accepted ? 0 : 1);
+        }
+      }
+    }
+  }
 });
 
 it('partitions the complete serialized Windows inventory with two native shards and its job limit', () => {

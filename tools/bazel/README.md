@@ -184,6 +184,19 @@ checks generated declarations alongside the execution jobs. Selection and shard
 artifacts include head, source, and inventory generation fingerprints; each
 worker prepares its own checkout and rejects a mismatched generation.
 
+Formatting, lint, test typechecking, and workspace checks share one scheduling
+group to avoid four independent runner setups for a small test-only diff.
+Other selected tests and actions retain duration-weighted balancing.
+
+Bytecode compilation and self-contained release validation have independent
+lane flags. Compilation follows its entrypoint and production source closure.
+Release validation follows the build plus the scripts, tests, fixtures, and
+Vitest configuration actually consumed by the release jobs. Ordinary native
+workflow test edits retain their owning tests and Windows smoke without
+selecting either release matrix. The benchmark classifiers share an exact
+audited test-policy path set; mixed and unknown changes retain conservative
+benchmark coverage.
+
 ```sh
 bun tools/ci/bazel-select.mjs --base origin/main
 bun tools/ci/bazel-plan-shards.mjs

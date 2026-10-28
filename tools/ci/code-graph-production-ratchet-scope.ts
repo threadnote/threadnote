@@ -60,7 +60,7 @@ function isUnrelatedEvaluationPath(path: string): boolean {
 
 const CI_WORKFLOW_PATH = '.github/workflows/ci.yml';
 
-const CI_TEST_POLICY_PATHS = new Set([
+export const CI_TEST_POLICY_PATHS = new Set([
   'apps/threadnote/test/dev-skills/native-authoring-lifecycle.test.ts',
   'apps/threadnote/test/dev-skills/native-authoring-progress-diagnostics.test.ts',
   'apps/threadnote/test/dev-skills/native-closeout-cloud.test.ts',
