@@ -72,7 +72,7 @@ const inspect = Effect.fn('external.inspectCredentialPath')(function* (
     system.userId === undefined ||
     owner !== system.userId ||
     (info.mode & (privateMode ? 0o077 : 0o022)) !== 0 ||
-    (kind === 'file' && Option.getOrUndefined(info.nlink) !== 1)
+    (kind === 'file' && Option.getOrUndefined(info.nlink) !== 1n)
   )
     return yield* unavailable();
   const after = yield* statOptional(target);

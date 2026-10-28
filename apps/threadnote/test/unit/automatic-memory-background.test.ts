@@ -1192,7 +1192,7 @@ describe('automatic ordinary-memory background controls', () => {
               expectedContentHash: hash(f.content),
             });
             expect(packetResult.isError).not.toBe(true);
-            const packet = packetResult.structuredContent as unknown as ReturnType<typeof automaticReviewPacket>;
+            const packet = packetResult.structuredContent as ReturnType<typeof automaticReviewPacket>;
             const authored = yield* f.generate(
               f.config,
               'local-ai',
@@ -1529,7 +1529,7 @@ describe('automatic ordinary-memory background controls', () => {
             expectedContentHash: hash(f.content),
           });
           expect(manual.isError).not.toBe(true);
-          const packet = manual.structuredContent as unknown as ReturnType<typeof automaticReviewPacket>;
+          const packet = manual.structuredContent as ReturnType<typeof automaticReviewPacket>;
           const proposal = yield* f.generate(
             f.config,
             'local-ai',
@@ -1732,7 +1732,7 @@ describe('automatic ordinary-memory background controls', () => {
             expectedContentHash: hash(f.content),
           });
           expect(inspected.isError).not.toBe(true);
-          const packet = inspected.structuredContent as unknown as ReturnType<typeof automaticReviewPacket>;
+          const packet = inspected.structuredContent as ReturnType<typeof automaticReviewPacket>;
           expect(packet.draftRequest.available).toBe(true);
           expect(packet.reviewEvidence).toHaveLength(1);
           expect(yield* readPreparedMemory(f.config, f.uri)).toBeDefined();
@@ -1990,7 +1990,7 @@ try {
             expectedContentHash: hash(f.source),
           });
           expect(read.isError).not.toBe(true);
-          const packet = read.structuredContent as unknown as ReturnType<typeof automaticReviewPacket>;
+          const packet = read.structuredContent as ReturnType<typeof automaticReviewPacket>;
           expect(packet.reviewEvidence).toEqual([]);
           expect(packet.draftRequest.available).toBe(false);
           expect((yield* readDraftQueueStatus(f.config)).backgroundReservations).toHaveLength(1);

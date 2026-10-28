@@ -535,7 +535,7 @@ function privateRegularFileWithinBound(fs: FileSystem.FileSystem, file: string) 
     return (
       Option.isSome(info) &&
       info.value.type === 'File' &&
-      links === 1 &&
+      links === 1n &&
       Number(info.value.size) <= CODE_GRAPH_GIT_STATUS_CACHE_INDEX_BYTES_MAXIMUM
     );
   });

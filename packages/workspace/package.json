@@ -13,11 +13,11 @@
   "dependencies": {
     "@threadnote/platform": "workspace:*",
     "@threadnote/store": "workspace:*",
-    "effect": "4.0.3",
-    "js-yaml": "^5.4.3"
+    "effect": "4.0.7",
+    "js-yaml": "^5.5.0"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.3",
+    "@effect/vitest": "4.0.7",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.2",
     "vitest": "5.0.5"

@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
-FROM oven/bun:1.4.2-alpine AS dependencies
+FROM oven/bun:1.4.4-alpine AS dependencies
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production --ignore-scripts
 
-FROM oven/bun:1.4.2-alpine AS runtime
+FROM oven/bun:1.4.4-alpine AS runtime
 WORKDIR /app
 USER root
 RUN apk add --no-cache ca-certificates git openssh-client su-exec

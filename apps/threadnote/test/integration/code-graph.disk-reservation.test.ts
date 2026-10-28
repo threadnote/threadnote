@@ -129,7 +129,7 @@ describe('code graph disk reservation ledger', () => {
           fs.stat(target).pipe(
             Effect.map(info => ({
               ...info,
-              dev: target === layout.repositoryRoot ? 101 : target === sqliteTemporaryDirectory ? 202 : info.dev,
+              dev: target === layout.repositoryRoot ? 101n : target === sqliteTemporaryDirectory ? 202n : info.dev,
             })),
           ),
       };

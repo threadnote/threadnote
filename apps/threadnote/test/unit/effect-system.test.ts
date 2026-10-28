@@ -122,6 +122,20 @@ describe('SystemInfo structural path adapter', () => {
     {fastCheck: {numRuns: 100}},
   );
 
+  fcEffectProp(
+    effectIt,
+    'preserves full-width filesystem identities without rounding',
+    {
+      dev: FC.bigInt({min: 1n << 53n, max: (1n << 96n) - 1n}),
+      ino: FC.bigInt({min: 1n << 53n, max: (1n << 96n) - 1n}),
+    },
+    ({dev, ino}) =>
+      Effect.sync(() => {
+        expect(Option.getOrUndefined(resolveFileSystemIdentity(dev, Option.some(ino)))).toEqual({dev, ino});
+      }),
+    {fastCheck: {numRuns: 100}},
+  );
+
   effectIt.effect('uses native identities only for matching types and usable descriptors', () =>
     Effect.scoped(
       Effect.acquireUseRelease(
@@ -132,7 +146,7 @@ describe('SystemInfo structural path adapter', () => {
             const target = join(root, 'target');
             yield* fs.writeFileString(target, 'threadnote');
             const info = yield* fs.stat(target);
-            const withoutInode = {...info, ino: Option.none<number>()};
+            const withoutInode = {...info, ino: Option.none<bigint>()};
             const exact = yield* Effect.sync(() => lstatSync(target, {bigint: true}));
             const expected = {dev: exact.dev, ino: exact.ino};
 

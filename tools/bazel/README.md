@@ -44,7 +44,7 @@ bun tools/bazel/run.ts test //tools/bazel/spike:all
 ```
 
 The bootstrap verifies Bazel 9.2.0 against release SHA-256 digests. Bzlmod fetches
-Bun 1.4.2 with platform-specific SHA-256 pins. The initial supported hosts are macOS
+Bun 1.4.4 with platform-specific SHA-256 pins. The initial supported hosts are macOS
 and glibc Linux on arm64/x64; this gate does not replace release cross-compilation
 or the existing Windows checks.
 
@@ -126,7 +126,7 @@ exposes the complete installed tree, accepts only one package manifest, and uses
 `bun test`; its `bun_run` deliberately uses the live checkout. Its audited
 [version table](https://github.com/tomato-bazel/rules_bun/blob/main/bun/private/known_versions.bzl)
 pins 1.3.14 and the extension permits unverified other versions. Those contracts
-do not satisfy Threadnote's per-target Vitest/Bun 1.4.2 requirements without an
+do not satisfy Threadnote's per-target Vitest/Bun 1.4.4 requirements without an
 adaptation. The small local rules keep this compatibility surface reviewable.
 
 No paid Aspect service, remote cache, or managed workflow is required. The local

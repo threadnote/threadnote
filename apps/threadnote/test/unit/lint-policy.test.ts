@@ -16,7 +16,7 @@ const EFFECT_PRESET_PATHS = [
   './node_modules/@effect/tsgo/oxlint-presets/style.json',
 ] as const;
 
-/** Official Effect rules that stay off because they rewrite non-Effect surfaces or default-off mega-channels. */
+/** Broad style migrations stay explicit; a tooling upgrade must not rewrite unrelated native APIs or schema brands. */
 const EFFECT_APPLICATION_BOUNDARY_RULES = [
   'effecttsgo/any-unknown-in-error-context',
   'effecttsgo/async-function',
@@ -25,6 +25,12 @@ const EFFECT_APPLICATION_BOUNDARY_RULES = [
   'effecttsgo/global-timers',
   'effecttsgo/missing-pipeable-signature',
   'effecttsgo/prefer-schema-over-json',
+  'effecttsgo/map-map-error-to-map-both',
+  'effecttsgo/prefer-effect-array',
+  'effecttsgo/prefer-effect-record',
+  'effecttsgo/prefer-effect-string',
+  'effecttsgo/prefer-schema-tagged-error',
+  'effecttsgo/schema-class-missing-brand',
   'effecttsgo/process-env',
   'effecttsgo/schema-sync',
   'effecttsgo/strict-boolean-expressions',

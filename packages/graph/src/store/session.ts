@@ -1,5 +1,5 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Cause, Context, Effect, Exit, Layer, Option, Path, Scope} from 'effect';
+import {Cause, Context, Effect, Layer, Option, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as SqlError from 'effect/sql/SqlError';
 import type {
@@ -86,14 +86,7 @@ function makeDeferredTransaction(sql: SqlClient.SqlClient) {
   return SqlClient.makeWithTransaction({
     transactionService: sql.transactionService,
     spanAttributes: [],
-    acquireConnection: Scope.make().pipe(
-      Effect.flatMap(scope =>
-        Scope.provide(sql.reserve, scope).pipe(
-          Effect.onError(cause => Scope.close(scope, Exit.failCause(cause))),
-          Effect.map(connection => [scope, connection] as const),
-        ),
-      ),
-    ),
+    acquireConnection: restore => restore(sql.reserve),
     begin: connection => connection.executeUnprepared('BEGIN', [], undefined).pipe(Effect.asVoid),
     savepoint: (connection, id) =>
       connection.executeUnprepared(`SAVEPOINT threadnote_deferred_${id}`, [], undefined).pipe(Effect.asVoid),

@@ -28,12 +28,12 @@
     "./runtime-entrypoint": "./src/runtime-entrypoint.ts"
   },
   "dependencies": {
-    "effect": "4.0.3",
-    "@effect/platform-bun": "4.0.3"
+    "effect": "4.0.7",
+    "@effect/platform-bun": "4.0.7"
   },
   "devDependencies": {
     "@threadnote/testing": "workspace:*",
-    "@effect/vitest": "4.0.3",
+    "@effect/vitest": "4.0.7",
     "vitest": "5.0.5",
     "fast-check": "4.10.2"
   },

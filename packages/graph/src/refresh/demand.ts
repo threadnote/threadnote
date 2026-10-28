@@ -58,8 +58,8 @@ type Mutation<A, E = never, R = never> = (
 
 interface DirectoryAuthority {
   readonly birthtimeMilliseconds: number;
-  readonly dev: number;
-  readonly ino: number;
+  readonly dev: bigint;
+  readonly ino: bigint;
   readonly mode: number;
   readonly path: string;
   readonly realPath: string;

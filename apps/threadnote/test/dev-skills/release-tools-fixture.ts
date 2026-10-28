@@ -113,7 +113,8 @@ if (name === 'git' || name === 'rg') {
       exit: child.exitCode,
       signal: !child.signalCode
         ? 'none'
-        : ['SIGTERM', 'SIGKILL', 'SIGPIPE', 'SIGABRT', 'SIGSEGV', 'SIGINT'].includes(child.signalCode)
+        : typeof child.signalCode === 'string' &&
+            ['SIGTERM', 'SIGKILL', 'SIGPIPE', 'SIGABRT', 'SIGSEGV', 'SIGINT'].includes(child.signalCode)
           ? child.signalCode
           : 'other',
       success: child.success,

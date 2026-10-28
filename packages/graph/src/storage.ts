@@ -213,8 +213,8 @@ export interface CodeGraphCompactionSummary {
 
 interface CodeGraphFileIdentity {
   readonly birthtimeMilliseconds: number;
-  readonly dev: number;
-  readonly ino: number;
+  readonly dev: bigint;
+  readonly ino: bigint;
   readonly modifiedAtMilliseconds: number;
   readonly size: bigint;
 }

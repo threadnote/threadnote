@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BUN_VERSION: 1.4.2
+  BUN_VERSION: 1.4.4
 
 jobs:
   verify:
@@ -394,7 +394,7 @@ jobs:
         if: matrix.architecture == 'x64'
         shell: pwsh
         env:
-          BUN_BASELINE_TARBALL_SHA512: 96af362ea563497031f603547226c275f41db6b7a587ce85c50aa586939d895e1265000ff071d4c568677db8f1d9fab3fa3ce097006f8e6944b3bc45c8e34167
+          BUN_BASELINE_TARBALL_SHA512: 73ed7af55fa895edbdb24e46a45ba1e90e2e370443aaef6d5d901551822c75f1997a225e76e434df4064c478b73e63698fbc3f79cdbea0eda8911155142f62d6
         run: |
           # Preserve Threadnote's baseline CPU contract by placing the exact official
           # package payload in the cache path Bun checks before attempting a download.
