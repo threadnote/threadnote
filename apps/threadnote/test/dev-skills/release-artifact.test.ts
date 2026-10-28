@@ -244,6 +244,7 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
 
 it('captures bounded closed producer diagnostics only when the compiled Git fixture opts in', async () => {
   const temporary = await mkdtemp(resolve(tmpdir(), 'threadnote-release-trace-'));
+  let primaryFailure: {error: unknown} | undefined;
   try {
     const nativeGit = Bun.which('git');
     if (!nativeGit) throw new Error('Git is required for the compiled fixture boundary.');
@@ -482,7 +483,19 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     expect(unavailable.status).toBe(0);
     expect(unavailable.stdout.equals(content)).toBe(true);
     expect(unavailable.stderr.length).toBe(0);
-  } finally {
-    await rm(temporary, {recursive: true, force: true});
+  } catch (error) {
+    primaryFailure = {error};
   }
+  try {
+    // All producer calls have returned and concurrent peers have closed before OS cleanup retries.
+    await rm(temporary, {recursive: true, force: true, maxRetries: 3, retryDelay: 50});
+  } catch (cleanupError) {
+    if (primaryFailure) {
+      throw new AggregateError([primaryFailure.error, cleanupError], 'Release trace fixture and cleanup both failed.', {
+        cause: cleanupError,
+      });
+    }
+    throw cleanupError;
+  }
+  if (primaryFailure) throw primaryFailure.error;
 }, 60_000);

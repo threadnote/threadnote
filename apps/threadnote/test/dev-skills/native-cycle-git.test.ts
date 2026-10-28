@@ -2,7 +2,7 @@ import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Option, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {
   captureNativeCycleSource,
   pinNativeCycleTree,
@@ -48,6 +48,13 @@ describe('native cycle Git snapshots', () => {
   effectIt.effect('rejects subdirectory and sibling Git roots', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
+      // Root authority is classified only after the opening query returns valid objects.
+      yield* git(f.repo, 'add', 'source.ts');
+      yield* commit(f.repo);
+      const index = f.path.join(f.repo, '.git', 'index');
+      const beforeIndex = yield* f.fs.readFile(index);
+      const source = f.path.join(f.repo, 'source.ts');
+      const beforeSource = yield* f.fs.readFile(source);
       const subdirectory = f.path.join(f.repo, 'nested');
       yield* f.fs.makeDirectory(subdirectory);
       const sibling = f.path.join(f.root, 'sibling');
@@ -58,6 +65,35 @@ describe('native cycle Git snapshots', () => {
       expect(siblingResult._tag).toBe('Failure');
       if (subdirectoryResult._tag === 'Failure')
         expect(subdirectoryResult.failure).toMatchObject({code: 'binding-drift'});
+      const commands = yield* CommandExecutor;
+      const binary = commands.executeBytes;
+      if (!binary) throw new Error('Expected binary command support.');
+      for (const repo of [subdirectory, sibling]) {
+        let gitCalls = 0;
+        const invalidBase = yield* captureNativeCycleSource(repo, 'HEAD\nHEAD').pipe(
+          Effect.provideService(CommandExecutor, {
+            ...commands,
+            execute: (...args) => {
+              gitCalls++;
+              return commands.execute(...args);
+            },
+            executeBytes: (...args) => {
+              gitCalls++;
+              return binary(...args);
+            },
+          }),
+          Effect.result,
+        );
+        expect(invalidBase._tag).toBe('Failure');
+        if (invalidBase._tag === 'Failure')
+          expect(invalidBase.failure).toMatchObject({
+            code: 'invalid-snapshot',
+            message: 'Use one bounded Git revision.',
+          });
+        expect(gitCalls).toBe(0);
+      }
+      expect(yield* f.fs.readFile(index)).toEqual(beforeIndex);
+      expect(yield* f.fs.readFile(source)).toEqual(beforeSource);
     }).pipe(run),
   );
 
