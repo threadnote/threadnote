@@ -342,7 +342,8 @@ export const withWorkflowJournalSession = <A, E, R>(
             () =>
               Effect.gen(function* () {
                 const state = yield* readJournalFile(config, bindingId);
-                if (!state || stableJson(state.binding) !== stableJson(admission.state.binding))
+                const stringify = (yield* CurrentWorkflowReadCache)?.stringify ?? stableJson;
+                if (!state || stringify(state.binding) !== stringify(admission.state.binding))
                   return yield* workflowError('binding-drift', 'The native memory session binding changed.');
                 const evidenceRefs =
                   request.action === 'recover'

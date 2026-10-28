@@ -10,6 +10,7 @@ import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutati
 import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {withNativeWorkflowMemorySession, runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {withWorkflowReadCache} from '../../src/workflow_memory/read_cache.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 
 type Call = (
@@ -324,6 +325,38 @@ describe('native child lower-memory sessions', () => {
           expect(reentered).toBe(true);
         }),
       ).pipe(Effect.provideService(SystemInfo, f.scopedSystem), Effect.provideService(ResourceStore, store));
+    }).pipe(run),
+  );
+
+  it.effect('compares the current mutable admission binding on every child with and without a read cache', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      let reads = 0;
+      const store = {
+        ...f.store,
+        read: (...args: Parameters<typeof f.store.read>) =>
+          Effect.gen(function* () {
+            reads++;
+            return yield* f.store.read(...args);
+          }),
+      };
+      for (const cached of [false, true]) {
+        const session = withNativeWorkflowMemorySession(f.config, f.bindingId, (admission, call) =>
+          Effect.gen(function* () {
+            const mutableBinding = {...admission.state.binding};
+            // A mutable internal admission must not become a captured canonical baseline.
+            Object.defineProperty(admission, 'state', {value: {...admission.state, binding: mutableBinding}});
+            expect(yield* call(f.read)).toMatchObject({revision: f.artifact.revision});
+            Object.assign(mutableBinding, {featureId: 'changed-after-first-child'});
+            const before = reads;
+            const drifted = yield* call(f.read).pipe(Effect.result);
+            expect(Result.isFailure(drifted)).toBe(true);
+            if (Result.isFailure(drifted)) expect(drifted.failure).toMatchObject({code: 'binding-drift'});
+            expect(reads).toBe(before);
+          }),
+        ).pipe(Effect.provideService(SystemInfo, f.scopedSystem), Effect.provideService(ResourceStore, store));
+        yield* cached ? withWorkflowReadCache(session) : session;
+      }
     }).pipe(run),
   );
 

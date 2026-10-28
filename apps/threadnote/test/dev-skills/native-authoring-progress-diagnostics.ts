@@ -1,12 +1,5 @@
 import {Context, Effect, Exit, type FileSystem, Option, Tracer} from 'effect';
 import type {ResourceStoreShape} from '@threadnote/store/resource-store';
-import {
-  captureNativeCpu,
-  nativeCpuPacketPrefix,
-  nativeCpuLimits,
-  type NativeCpuOptions,
-  type NativeCpuPacket,
-} from './native-cpu-profile-diagnostics.js';
 
 // Test-only vocabulary: fixed primitive refresh counters and a fixed commit-event timestamp only.
 // Input, output, arbitrary attributes, IDs, paths and errors never enter this recorder.
@@ -584,12 +577,6 @@ export const makeNativeProgressDiagnostics = (
         recentDropped,
       };
     },
-    reportCpu(packet: NativeCpuPacket) {
-      safely(() => {
-        const json = serialize(packet);
-        if (Buffer.byteLength(json) <= nativeCpuLimits.bytes) sink(nativeCpuPacketPrefix + json);
-      });
-    },
     reportFailure() {
       if (reported) return;
       reported = true;
@@ -656,21 +643,13 @@ export const observeNativeBody = <A, E, R>(program: Effect.Effect<A, E, R>, obse
     safely(() => observer.enterBody());
     return program.pipe(Effect.onExit(() => Effect.sync(() => safely(() => observer.exitBody()))));
   });
-export const reportNativeFailure = <A, E, R>(
-  program: Effect.Effect<A, E, R>,
-  observer: NativeProgressDiagnostics,
-  cpu: NativeCpuOptions = {},
-) =>
-  captureNativeCpu(
-    program.pipe(
-      Effect.onExit(exit =>
-        Effect.sync(() => {
-          if (Exit.isFailure(exit)) safely(() => observer.reportFailure());
-        }),
-      ),
+export const reportNativeFailure = <A, E, R>(program: Effect.Effect<A, E, R>, observer: NativeProgressDiagnostics) =>
+  program.pipe(
+    Effect.onExit(exit =>
+      Effect.sync(() => {
+        if (Exit.isFailure(exit)) safely(() => observer.reportFailure());
+      }),
     ),
-    packet => observer.reportCpu(packet),
-    cpu,
   );
 
 // These returned facades are never provided back into the application service graph.
