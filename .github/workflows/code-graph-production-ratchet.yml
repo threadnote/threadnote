@@ -186,4 +186,4 @@ jobs:
           name: production-ratchet-candidate-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
