@@ -8,6 +8,8 @@ import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {readRetainedCodeGraphCitationEvidence} from '@threadnote/graph/citation/capsule';
+import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -16,6 +18,8 @@ import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/au
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {stableJson} from '../../src/workflow_memory/protocol.js';
+import {decodeWorkflowJournal} from '../../src/workflow_memory/journal_codec.js';
+import {decodeWorkflowJournalStorageImage} from '../../src/workflow_memory/journal_storage.js';
 import {
   CurrentNativeJobAutoLaunch,
   nativeJobId,
@@ -214,6 +218,126 @@ describe('native private job lifecycle', () => {
       expect(originalCitations.every(citation => citation.evidenceRetention === 'capsule-retained')).toBe(true);
       const status = object(yield* f.call({...f.base('job'), command: 'status', jobId}));
       expect(JSON.stringify(status).length).toBeLessThan(1024);
+    }).pipe(run),
+  );
+
+  effectIt.effect('keeps admitted code evidence when its source file changes before draft work', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const originalBytes = 'export const fixture = true;\n';
+      const head = yield* commit(f.repo, 'source');
+      yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
+      const checkout = yield* resolveRepositoryIdentity(f.repo);
+      yield* f.init();
+      const work = {
+        ...f.base('authoring'),
+        command: 'save',
+        document: document({head, files: [{path: 'source.ts', sha256: sha256HexSync(originalBytes)}]}, ['source.ts']),
+        ready: false,
+        expectedRevision: null,
+      };
+      const jobId = object(yield* submit(f, work)).jobId as string;
+      const inputFile = f.path.join(
+        f.home,
+        'workflow-automations',
+        'native-v1',
+        'jobs',
+        'native-run',
+        jobId + '.json.input.json',
+      );
+      const retained = JSON.parse(yield* f.fs.readFileString(inputFile)) as {
+        witness: {files: {object: {bytes: string}}[]};
+      };
+      expect(Buffer.from(retained.witness.files[0].object.bytes, 'base64').toString('utf8')).toBe(originalBytes);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = false;\n');
+      const changedHead = yield* commit(f.repo, 'changed cited source');
+      expect(changedHead).not.toBe(head);
+      const blocked = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
+      expect(blocked.status).toBe('blocked-with-progress');
+      const state = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
+      const root = state.operations.find(item => object(object(item).intent).role === 'authoring-root');
+      expect(root).toBeDefined();
+      expect(object(root).status).toBe('verified');
+      expect(object(object(root).intent).body).toContain('"readiness":"draft"');
+      const citations = [];
+      for (const item of state.operations) {
+        const artifact = object(object(item).artifact);
+        const content = yield* f.store.read(f.location, artifact.uri as string);
+        citations.push(...(parseMemoryDocument(artifact.uri as string, content)?.metadata.codeCitations ?? []));
+      }
+      expect(citations.length).toBeGreaterThan(0);
+      expect(citations.every(citation => citation.sourceCommit === head)).toBe(true);
+      expect(citations.every(citation => citation.evidenceRetention === 'capsule-retained')).toBe(true);
+      const citation = citations[0];
+      if (!citation) throw new Error('Expected one saved code citation.');
+      const capsule = yield* readRetainedCodeGraphCitationEvidence(f.home, checkout.checkoutId, {
+        extractorSet: citation.extractorSet,
+        fileContentHash: citation.fileContentHash.value,
+        path: citation.path,
+        repositoryId: citation.repositoryId,
+        sourceCommit: citation.sourceCommit,
+        sourceDirty: citation.sourceDirty,
+        sourceSnapshotId: citation.sourceSnapshotId,
+      });
+      expect(capsule).toBeDefined();
+      expect(new TextDecoder().decode(capsule?.bytes)).toBe(originalBytes);
+      expect(capsule?.capsule.source).toMatchObject({
+        path: 'source.ts',
+        repositoryId: citation.repositoryId,
+        sourceCommit: head,
+        sourceDirty: false,
+        fileContentHash: citation.fileContentHash.value,
+      });
+      expect(yield* f.fs.readFileString(inputFile)).toContain(retained.witness.files[0].object.bytes);
+    }).pipe(run),
+  );
+
+  effectIt.effect('reads prior native state and journal through a new job without changing older receipts', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* commit(f.repo, 'source');
+      const initialized = yield* f.init();
+      const prior = object(yield* f.call(f.write({operationId: 'historical-root', artifactKey: 'historical-root'})));
+      const priorArtifact = object(prior.artifact);
+      const originalContent = yield* f.store.read(f.location, priorArtifact.uri as string);
+      const originalState = JSON.parse(yield* f.fs.readFileString(f.statePath())) as Record<string, unknown>;
+      const originalOperation = object((originalState.operations as unknown[])[0]);
+      const originalJournalBytes = yield* f.fs.readFileString(f.journalPath(initialized.bindingId));
+      const originalLogical = yield* Effect.promise(() => decodeWorkflowJournal(originalJournalBytes));
+      const originalJournal = decodeWorkflowJournalStorageImage(JSON.parse(originalLogical)) as {
+        artifacts: Record<string, unknown>;
+        operations: Record<string, {artifact: {canonicalUri: string}}>;
+      };
+      const priorJournalOperation = Object.entries(originalJournal.operations).find(
+        ([, operation]) => operation.artifact.canonicalUri === priorArtifact.uri,
+      );
+      expect(originalJournal.artifacts[priorArtifact.uri as string]).toBeDefined();
+      expect(priorJournalOperation).toBeDefined();
+      if (!priorJournalOperation) throw new Error('Expected the original keyed journal operation.');
+      const work = {
+        ...f.base('authoring'),
+        command: 'save',
+        document: document(),
+        ready: false,
+        expectedRevision: null,
+      };
+      const jobId = object(yield* submit(f, work)).jobId as string;
+      expect(object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call)).status).toBe('completed');
+      const currentState = JSON.parse(yield* f.fs.readFileString(f.statePath())) as Record<string, unknown>;
+      expect(currentState.bindingId).toBe(originalState.bindingId);
+      expect(currentState.generation).toBe(originalState.generation);
+      expect(object((currentState.operations as unknown[])[0])).toEqual(originalOperation);
+      expect(yield* f.store.read(f.location, priorArtifact.uri as string)).toBe(originalContent);
+      const currentJournalBytes = yield* f.fs.readFileString(f.journalPath(initialized.bindingId));
+      const currentLogical = yield* Effect.promise(() => decodeWorkflowJournal(currentJournalBytes));
+      const currentJournal = decodeWorkflowJournalStorageImage(JSON.parse(currentLogical)) as typeof originalJournal;
+      expect(currentJournal.artifacts[priorArtifact.uri as string]).toEqual(
+        originalJournal.artifacts[priorArtifact.uri as string],
+      );
+      expect(currentJournal.operations[priorJournalOperation[0]]).toEqual(priorJournalOperation[1]);
+      expect(
+        new Set((currentState.operations as unknown[]).map(item => object(object(item).intent).operationId)).size,
+      ).toBe((currentState.operations as unknown[]).length);
     }).pipe(run),
   );
 
