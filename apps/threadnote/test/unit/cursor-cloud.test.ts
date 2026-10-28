@@ -211,8 +211,8 @@ describe('Cursor Cloud profile', () => {
       team: 'engineering',
       user: 'cloud-user',
     });
-    const mcpConfig = buildCursorCloudMcpConfig(profile);
-    expect(mcpConfig).toEqual(buildCursorCloudMcpConfig(profile));
+    const mcpConfig = buildCursorCloudMcpConfig(profile, ['engineering']);
+    expect(mcpConfig).toEqual(buildCursorCloudMcpConfig(profile, ['engineering']));
     expect(mcpConfig).toEqual({
       args: ['-lc', 'exec "$HOME/.local/bin/threadnote-mcp-server"'],
       command: '/bin/sh',
@@ -225,6 +225,15 @@ describe('Cursor Cloud profile', () => {
       },
       type: 'stdio',
     });
+  });
+
+  it('omits share selectors for a reusable discovery configuration', () => {
+    const profile = buildCursorCloudProfile(runtime, {team: 'engineering', user: 'cloud-user'});
+    const config = buildCursorCloudMcpConfig(profile);
+    expect(config.env.THREADNOTE_CURSOR_CLOUD_TEAM).toBeUndefined();
+    expect(config.env.THREADNOTE_CURSOR_CLOUD_TEAMS).toBeUndefined();
+    expect(config.env.THREADNOTE_MCP_TOOLSET).toBe('cursor-cloud-personal');
+    expect(buildCursorCloudMcpConfig(profile, [])).toEqual(config);
   });
 
   it('renders one MCP configuration for a deterministic bounded share set', () => {

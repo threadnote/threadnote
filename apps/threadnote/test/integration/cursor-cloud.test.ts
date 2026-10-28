@@ -86,6 +86,24 @@ describe('Cursor Cloud integration', () => {
         type: 'stdio',
       });
 
+      const discoveryConfig = JSON.parse(
+        (
+          await runCli([
+            'cloud',
+            'cursor',
+            'config',
+            '--home',
+            fixture.home,
+            '--user',
+            'cloud-user',
+            '--agent-id',
+            'cloud-agent',
+          ])
+        ).stdout,
+      );
+      expect(discoveryConfig.env.THREADNOTE_CURSOR_CLOUD_TEAM).toBeUndefined();
+      expect(discoveryConfig.env.THREADNOTE_CURSOR_CLOUD_TEAMS).toBeUndefined();
+      expect(discoveryConfig.env.THREADNOTE_MCP_TOOLSET).toBe('cursor-cloud-personal');
       const first = await bootstrap(fixture);
       const before = await readFile(join(fixture.home, 'share', 'teams.json'), 'utf8');
       const second = await bootstrap(fixture);
@@ -211,6 +229,49 @@ describe('Cursor Cloud integration', () => {
         expect(recallError).toContain('is not configured yet');
         expect(recallError).toContain('MCP discovery remains available');
       });
+    } finally {
+      await rm(fixture.root, {force: true, recursive: true});
+    }
+  });
+
+  it('starts and verifies the discovered set with CLI restrictions taking precedence over environment selectors', async () => {
+    const fixture = await cloudFixture();
+    const docsRemote = await seedRemote(fixture.root, 'command-docs-share');
+    const environment = {HOME: fixture.userHome, THREADNOTE_CURSOR_CLOUD_TEAM: '', THREADNOTE_CURSOR_CLOUD_TEAMS: ''};
+    const command = async (name: 'start' | 'verify', extra: readonly string[] = [], env: Record<string, string> = {}) =>
+      JSON.parse(
+        (
+          await runCli(['cloud', 'cursor', name, '--home', fixture.home, '--cwd', process.cwd(), '--json', ...extra], {
+            ...environment,
+            ...env,
+          })
+        ).stdout,
+      );
+    try {
+      await expect(command('verify')).rejects.toMatchObject({
+        stderr: expect.stringContaining('No writable Cursor Cloud memory shares'),
+      });
+      await bootstrap(fixture);
+      await bootstrap(fixture, 'docs', docsRemote);
+      expect((await command('verify')).teams).toEqual(['docs', 'engineering']);
+      const registryPath = join(fixture.home, 'share', 'teams.json');
+      const registry = JSON.parse(await readFile(registryPath, 'utf8'));
+      registry.defaultTeam = 'engineering';
+      await writeFile(registryPath, JSON.stringify(registry));
+      expect((await command('start')).teams).toEqual(['docs', 'engineering']);
+      expect((await command('verify', [], {THREADNOTE_CURSOR_CLOUD_TEAM: 'docs'})).teams).toEqual(['docs']);
+      expect(
+        (await command('start', ['--team', 'engineering'], {THREADNOTE_CURSOR_CLOUD_TEAMS: 'invalid'})).teams,
+      ).toEqual(['engineering']);
+      expect(
+        (await command('verify', ['--team', 'docs'], {THREADNOTE_CURSOR_CLOUD_TEAM: 'engineering'})).teams,
+      ).toEqual(['docs']);
+      await writeFile(registryPath, JSON.stringify({version: 1, teams: {}}));
+      for (const name of ['start', 'verify'] as const) {
+        await expect(command(name)).rejects.toMatchObject({
+          stderr: expect.stringContaining('No writable Cursor Cloud memory shares'),
+        });
+      }
     } finally {
       await rm(fixture.root, {force: true, recursive: true});
     }
