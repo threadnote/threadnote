@@ -56,6 +56,7 @@ const ciTestPolicyPaths = [
   'apps/threadnote/test/dev-skills/native-closeout-recall-batch.test.ts',
   'apps/threadnote/test/dev-skills/native-cycle-lifecycle.test.ts',
   'apps/threadnote/test/dev-skills/native-release-workflows.ts',
+  'apps/threadnote/test/dev-skills/release-artifact.test.ts',
   'apps/threadnote/test/dev-skills/release-artifact-preview-fence.test.ts',
   'apps/threadnote/test/e2e/local-bins.e2e.ts',
   'tools/bazel/target-specs.mjs',
