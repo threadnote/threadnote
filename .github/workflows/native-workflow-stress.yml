@@ -1,0 +1,51 @@
+name: Native workflow manual stress
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  authoring-history:
+    name: H100 full history (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30 # Qualification budget, not a completion SLA.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - name: Run 100 real saves and 100-root history traversal
+        shell: bash
+        env:
+          THREADNOTE_NATIVE_WORKFLOW_LOAD: manual-v1
+        run: |
+          echo "Source: $GITHUB_SHA; platform: $RUNNER_OS; start: $(date -u +%FT%TZ)"
+          bun --bun vitest run apps/threadnote/test/dev-skills/native-authoring-lifecycle.test.ts --testNamePattern 'retains and navigates 100 same-length revisions'
+          echo "Source: $GITHUB_SHA; platform: $RUNNER_OS; completed: $(date -u +%FT%TZ); saves: 100; history roots: 100"
+
+  windows-cloud-closeout:
+    name: Windows cloud publication and recovery
+    runs-on: windows-latest
+    timeout-minutes: 50 # Four cases, 10 minutes each; qualification budget only.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - name: Run four real private Git cloud cases
+        shell: bash
+        env:
+          THREADNOTE_NATIVE_WORKFLOW_CLOUD: manual-v1
+        run: |
+          echo "Source: $GITHUB_SHA; platform: $RUNNER_OS; start: $(date -u +%FT%TZ)"
+          bun --bun vitest run apps/threadnote/test/dev-skills/native-closeout-cloud.test.ts
+          echo "Source: $GITHUB_SHA; platform: $RUNNER_OS; completed: $(date -u +%FT%TZ); cloud cases: 4"

@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main, codex/4.0.0, release/5.0.0, release/5.1.0]
+  workflow_dispatch:
+    inputs:
+      native_workflow_stress:
+        description: Run the manual native workflow qualification tier
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -13,8 +20,14 @@ env:
   BUN_VERSION: 1.4.2
 
 jobs:
+  # Registered CI can dispatch a branch's same-commit manual tier before the new workflow reaches default.
+  native-workflow-stress:
+    if: github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true
+    uses: ./.github/workflows/native-workflow-stress.yml
+
   bazel-plan:
     name: Plan affected Bazel checks
+    if: github.event_name != 'workflow_dispatch' || inputs.native_workflow_stress != true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -364,10 +377,11 @@ jobs:
           if-no-files-found: ignore
 
   test:
-    name: Unit and integration tests
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true && 'Native workflow stress qualification' || 'Unit and integration tests' }}
     if: always()
     needs:
       [
+        native-workflow-stress,
         bazel-plan,
         bazel-plan-validation,
         bazel-shards,
@@ -381,6 +395,8 @@ jobs:
     steps:
       - name: Require every selected lane
         env:
+          MANUAL_STRESS: ${{ github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true }}
+          NATIVE_WORKFLOW_STRESS_RESULT: ${{ needs.native-workflow-stress.result }}
           BAZEL_EXECUTE: ${{ needs.bazel-plan.outputs.execute_bazel }}
           BAZEL_PLAN_RESULT: ${{ needs.bazel-plan.result }}
           BAZEL_PLAN_VALIDATION_RESULT: ${{ needs.bazel-plan-validation.result }}
@@ -394,6 +410,10 @@ jobs:
           STANDALONE_RESULT: ${{ needs.standalone-targets.result }}
           SELF_CONTAINED_RESULT: ${{ needs.self-contained-distribution.result }}
         run: |
+          if [ "$MANUAL_STRESS" = true ]; then
+            test "$NATIVE_WORKFLOW_STRESS_RESULT" = success
+            exit 0
+          fi
           test "$BAZEL_PLAN_RESULT" = success
           test "$BAZEL_PLAN_VALIDATION_RESULT" = success
           if [ "$BAZEL_EXECUTE" = true ]; then

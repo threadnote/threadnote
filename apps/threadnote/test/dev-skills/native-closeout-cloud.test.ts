@@ -134,8 +134,10 @@ const verifyRetirement = (f: Fixture, owned: readonly {runId: string; uri: strin
     ).toBe('active');
   });
 
-// P0 Windows quarantine: real cloud publication/recovery exceeded 120s; retain all four cases elsewhere.
-describe.skipIf(process.platform === 'win32')('verified personal cloud closeout', () => {
+// Windows exercises these real private Git cases only in the explicit manual qualification tier.
+const manualCloud = process.env.THREADNOTE_NATIVE_WORKFLOW_CLOUD === 'manual-v1';
+const cloudTimeout = manualCloud && process.platform === 'win32' ? 600_000 : 60_000;
+describe.skipIf(process.platform === 'win32' && !manualCloud)('verified personal cloud closeout', () => {
   for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const) {
     it.effect(
       'publishes and independently reads the complete approved graph for ' + profile,
@@ -197,7 +199,7 @@ describe.skipIf(process.platform === 'win32')('verified personal cloud closeout'
           expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(head);
           expect(yield* f.fs.readFileString(f.statePath('controller') + '.closeout.json')).toBe(bytes);
         }).pipe(TestClock.withLive, provideNative),
-      {timeout: 60_000},
+      {timeout: cloudTimeout},
     );
   }
   it.effect(
@@ -275,7 +277,7 @@ describe.skipIf(process.platform === 'win32')('verified personal cloud closeout'
         yield* f.closeout('finish');
         expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(head);
       }).pipe(TestClock.withLive, provideNative),
-    {timeout: 60_000},
+    {timeout: cloudTimeout},
   );
   it.effect(
     'retains drafts after private push rejection and retries the same approved graph without duplicates',
@@ -312,6 +314,6 @@ describe.skipIf(process.platform === 'win32')('verified personal cloud closeout'
         yield* f.closeout('finish');
         expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(head);
       }).pipe(TestClock.withLive, provideNative),
-    {timeout: 60_000},
+    {timeout: cloudTimeout},
   );
 });

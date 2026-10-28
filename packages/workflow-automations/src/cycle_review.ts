@@ -83,6 +83,18 @@ export function validateNativeCycleReview(
   input: unknown,
   previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
 ) {
+  const result = validateNativeCycleReviewHistory(snapshot, input, previous);
+  if (!result.review.selected.includes('simplicity'))
+    fail('Select the required simplicity review lane and include its complete report.');
+  return result;
+}
+
+/** Revalidate stored evidence without applying later submission requirements to its immutable history. */
+export function validateNativeCycleReviewHistory(
+  snapshot: NativeCycleSnapshot,
+  input: unknown,
+  previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
+) {
   let review: NativeCycleReview;
   try {
     review = Schema.decodeUnknownSync(NativeCycleReviewSchema, {onExcessProperty: 'error'})(input);

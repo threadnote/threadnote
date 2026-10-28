@@ -5,6 +5,7 @@ import {expect, it} from 'vitest';
 import {parse} from 'yaml';
 
 interface Step {
+  readonly env?: Readonly<Record<string, string>>;
   readonly id?: string;
   readonly if?: string;
   readonly name?: string;
@@ -26,6 +27,7 @@ interface Job {
     readonly 'fail-fast'?: boolean;
     readonly matrix?: {readonly shard?: readonly string[]};
   };
+  readonly uses?: string;
 }
 
 interface Workflow {
@@ -100,6 +102,7 @@ it('routes platform and quality lanes from Bazel outputs', () => {
 it('keeps the stable aggregate check and requires the planner plus every selected shard', () => {
   expect(jobs.test?.if).toBe('always()');
   expect(jobs.test?.needs).toEqual([
+    'native-workflow-stress',
     'bazel-plan',
     'bazel-plan-validation',
     'bazel-shards',
@@ -114,6 +117,36 @@ it('keeps the stable aggregate check and requires the planner plus every selecte
   );
   expect(step(jobs.test, 'Require every selected lane')?.run).toContain('test "$BAZEL_SHARDS_RESULT" = success');
 });
+
+it.each(['success', 'failure', 'cancelled', 'skipped'])(
+  'uses a distinct manual qualification context and requires stress result %s to be success',
+  stressResult => {
+    expect(jobs.test?.name).toContain("'Native workflow stress qualification'");
+    expect(jobs.test?.name).toContain("'Unit and integration tests'");
+    expect(jobs.test?.name).toContain(
+      "github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true",
+    );
+    expect(jobs['native-workflow-stress']?.if).toBe(
+      "github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true",
+    );
+    expect(jobs['native-workflow-stress']?.uses).toBe('./.github/workflows/native-workflow-stress.yml');
+    const aggregate = step(jobs.test, 'Require every selected lane');
+    expect(aggregate?.env?.NATIVE_WORKFLOW_STRESS_RESULT).toBe('${{ needs.native-workflow-stress.result }}');
+    const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-c', aggregate?.run ?? 'exit 98'], {
+      encoding: 'utf8',
+      env: {
+        BASH_ENV: '',
+        PATH: '',
+        MANUAL_STRESS: 'true',
+        NATIVE_WORKFLOW_STRESS_RESULT: stressResult,
+        BAZEL_PLAN_RESULT: 'skipped',
+      },
+      timeout: 2_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(stressResult === 'success' ? 0 : 1);
+  },
+);
 
 it('requires compile and release results independently for every lane-selection combination', () => {
   const aggregate = step(jobs.test, 'Require every selected lane')?.run;
