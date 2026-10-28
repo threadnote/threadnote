@@ -3,38 +3,37 @@ import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {SystemInfo, runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
+import {SystemInfo} from '@threadnote/platform/system';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {Counter, Digest, FileUri, Identifier, Observation, Position} from '@threadnote/semantic/contracts';
+import {
+  Counter,
+  Digest,
+  FileUri,
+  Identifier,
+  Observation,
+  Position,
+  type QueryOutcome,
+} from '@threadnote/semantic/contracts';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {CommandExecutor, runDetachedCommandEffect} from '@threadnote/platform/command';
 import {LspFault, makeLspClient, spawnLspWire, type LspWire} from './lsp_transport.js';
-import {makeTypeScriptSession, SemanticSessionFault} from './providers/typescript.js';
-import {fromPromiseInterruptible, fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
-import {parse as parseJsonc, type ParseError} from 'jsonc-parser';
+import {makeTypeScriptSession} from './providers/typescript.js';
+import {
+  SemanticSessionFault,
+  SemanticLanguage,
+  SemanticQuery,
+  isCoreSemanticQuery,
+  type SemanticSession,
+} from './provider.js';
+import {makePythonSession, makePythonNotifications} from './providers/python.js';
+import {makePythonProject, PythonEnvironment} from './providers/python_project.js';
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
+import {boundedFileDigest, readBoundedText, semanticTreeDigest} from './fingerprint.js';
+export {semanticTreeDigest} from './fingerprint.js';
 
 const Instance = Schema.Struct({pid: Counter, identity: Identifier});
 
-const readBounded = (file: string, maximumBytes: number) =>
-  fromPromiseInterruptibleAwaiting(
-    () => runtimeReadBoundedStableRegularFile(file, maximumBytes),
-    () => LspFault.make({code: 'rejected'}),
-  );
-const readBoundedText = (file: string, maximumBytes: number) =>
-  readBounded(file, maximumBytes).pipe(
-    Effect.flatMap(bytes =>
-      Effect.try({
-        try: () => new TextDecoder('utf-8', {fatal: true}).decode(bytes),
-        catch: () => LspFault.make({code: 'protocol'}),
-      }),
-    ),
-  );
-const boundedFileDigest = Effect.fn('semantic.boundedFileDigest')(function* (file: string, maximumBytes: number) {
-  const crypto = yield* Crypto.Crypto;
-  const hash = yield* crypto.digest('SHA-256', yield* readBounded(file, maximumBytes));
-  return Array.from(hash, byte => byte.toString(16).padStart(2, '0')).join('');
-});
 type Instance = typeof Instance.Type;
 const Reservation = Schema.Struct({
   token: Digest,
@@ -44,123 +43,6 @@ const Reservation = Schema.Struct({
   generation: Counter,
   importing: Schema.Boolean,
   quarantined: Schema.Boolean,
-});
-
-/** Bounded conservative pilot invalidation. No build/config code is evaluated to compute this basis. */
-export const semanticTreeDigest = Effect.fn('semantic.treeDigest')(function* (
-  root: string,
-  projectConfiguration = false,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const canonical = yield* fs.realPath(root);
-  if (canonical !== path.resolve(root)) return yield* LspFault.make({code: 'prerequisite'});
-  const pending = [canonical];
-  const entries: [string, string][] = [];
-  let files = 0;
-  let totalBytes = 0;
-  const configurations = new Set<string>();
-  const validateConfiguration = (file: string): Effect.Effect<void, unknown> =>
-    Effect.gen(function* () {
-      if (configurations.has(file)) return;
-      if (configurations.size >= 256 || !file.startsWith(canonical + path.sep) || (yield* fs.realPath(file)) !== file)
-        return yield* LspFault.make({code: 'prerequisite'});
-      configurations.add(file);
-      if (Number((yield* fs.stat(file)).size) > 1024 * 1024) return yield* LspFault.make({code: 'capacity'});
-      const errors: ParseError[] = [];
-      const raw: unknown = parseJsonc(yield* readBoundedText(file, 1024 * 1024), errors, {allowTrailingComma: true});
-      if (errors.length) return yield* LspFault.make({code: 'prerequisite'});
-      const configuration = yield* Schema.decodeUnknownEffect(
-        Schema.Struct({
-          extends: Schema.optional(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
-          references: Schema.optional(Schema.Array(Schema.Struct({path: Schema.String}))),
-        }),
-      )(raw);
-      const extensions =
-        typeof configuration.extends === 'string' ? [configuration.extends] : (configuration.extends ?? []);
-      for (const base of extensions) {
-        let resolved: string;
-        if (base.startsWith('.'))
-          resolved = path.resolve(path.dirname(file), base.endsWith('.json') ? base : base + '.json');
-        else
-          resolved = yield* Effect.try({
-            try: () => Bun.resolveSync(base, path.dirname(file)),
-            catch: () => LspFault.make({code: 'prerequisite'}),
-          });
-        if (!resolved.endsWith('.json')) return yield* LspFault.make({code: 'prerequisite'});
-        yield* validateConfiguration(resolved);
-      }
-      for (const reference of configuration.references ?? []) {
-        const resolved = path.resolve(path.dirname(file), reference.path);
-        if (!resolved.startsWith(canonical + path.sep) || (yield* fs.realPath(resolved)) !== resolved)
-          return yield* LspFault.make({code: 'prerequisite'});
-      }
-    });
-  while (pending.length) {
-    const directory = pending.pop()!;
-    const names = (yield* fs.readDirectory(directory)).sort();
-    if (names.length + files > 20_000) return yield* LspFault.make({code: 'capacity'});
-    for (const name of names) {
-      const file = path.join(directory, name);
-      const relative = path.relative(canonical, file);
-      if (relative === '.git' || relative.startsWith('.git/')) continue;
-      if (++files > 20_000) return yield* LspFault.make({code: 'capacity'});
-      // Symlinked or external project roots need explicit provider qualification; never silently omit them.
-      if (Option.isSome(yield* fs.readLink(file).pipe(Effect.option)))
-        return yield* LspFault.make({code: 'prerequisite'});
-      const before = yield* fs.stat(file);
-      if (before.type === 'Directory') {
-        pending.push(file);
-        entries.push([relative, 'directory']);
-        continue;
-      }
-      if (before.type !== 'File' || Number(before.size) > 32 * 1024 * 1024)
-        return yield* LspFault.make({code: 'capacity'});
-      totalBytes += Number(before.size);
-      if (totalBytes > 256 * 1024 * 1024) return yield* LspFault.make({code: 'capacity'});
-      const hash = yield* boundedFileDigest(file, Number(before.size));
-      if (projectConfiguration && /^(?:tsconfig|jsconfig)(?:\..+)?\.json$/u.test(name))
-        yield* validateConfiguration(file);
-      const after = yield* fs.stat(file);
-      if (
-        after.size !== before.size ||
-        Option.getOrUndefined(after.mtime)?.getTime() !== Option.getOrUndefined(before.mtime)?.getTime()
-      )
-        return yield* LspFault.make({code: 'rejected'});
-      entries.push([relative, hash]);
-    }
-  }
-  // Include worktree and common branch metadata without traversing Git object storage.
-  const git = path.join(canonical, '.git');
-  if (yield* fs.exists(git)) {
-    const info = yield* fs.stat(git);
-    let directory = git;
-    if (info.type === 'File') {
-      if (Number(info.size) > 8192) return yield* LspFault.make({code: 'prerequisite'});
-      const text = (yield* readBoundedText(git, 8192)).trim();
-      if (!text.startsWith('gitdir: ')) return yield* LspFault.make({code: 'prerequisite'});
-      directory = yield* fs.realPath(path.resolve(canonical, text.slice(8)));
-    }
-    const head = yield* readBoundedText(path.join(directory, 'HEAD'), 8192);
-    entries.push(['git:HEAD', head]);
-    const commonFile = path.join(directory, 'commondir');
-    const common = (yield* fs.exists(commonFile))
-      ? path.resolve(directory, (yield* readBoundedText(commonFile, 8192)).trim())
-      : directory;
-    if (head.startsWith('ref: ')) {
-      const ref = head.slice(5).trim();
-      if (!ref.startsWith('refs/') || ref.includes('..') || ref.includes('\\'))
-        return yield* LspFault.make({code: 'prerequisite'});
-      const file = path.join(common, ref);
-      if (yield* fs.exists(file)) entries.push(['git:ref', yield* readBoundedText(file, 8192)]);
-      const packed = path.join(common, 'packed-refs');
-      if (yield* fs.exists(packed)) {
-        if (Number((yield* fs.stat(packed)).size) > 4 * 1024 * 1024) return yield* LspFault.make({code: 'capacity'});
-        entries.push(['git:packed', yield* boundedFileDigest(packed, 4 * 1024 * 1024)]);
-      }
-    }
-  }
-  return sha256HexSync(JSON.stringify(entries.sort(([a], [b]) => a.localeCompare(b))));
 });
 
 export interface TypeScriptHostCandidate {
@@ -182,15 +64,40 @@ export const semanticCandidateKey = (candidate: TypeScriptHostCandidate) =>
     candidate.sdkDirectory,
     candidate.sdkTreeDigest,
   ]);
+export interface PythonHostCandidate {
+  readonly runtime: string;
+  readonly runtimeDigest: string;
+  readonly runtimeVersion: '24.19.0';
+  readonly serverDirectory: string;
+  readonly serverTreeDigest: string;
+  readonly environments: readonly PythonEnvironment[];
+}
+export const semanticCatalogKey = (options: {candidate?: TypeScriptHostCandidate; python?: PythonHostCandidate}) =>
+  JSON.stringify([
+    options.candidate ? semanticCandidateKey(options.candidate) : null,
+    options.python
+      ? [
+          options.python.runtime,
+          options.python.runtimeDigest,
+          options.python.runtimeVersion,
+          options.python.serverDirectory,
+          options.python.serverTreeDigest,
+          [...options.python.environments]
+            .sort((a, b) => a.id.localeCompare(b.id))
+            .map(e => [e.id, e.metadataFile, e.metadataDigest]),
+        ]
+      : null,
+  ]);
 export interface SemanticCoordinatorOptions {
   readonly enabled: boolean;
   readonly dataHome: string;
-  readonly candidate: TypeScriptHostCandidate;
+  readonly candidate?: TypeScriptHostCandidate;
+  readonly python?: PythonHostCandidate;
 }
-type TypeScriptSession = Effect.Success<ReturnType<typeof makeTypeScriptSession>>;
 interface AnalysisSession {
   readonly scope: Scope.Closeable;
-  readonly api: TypeScriptSession;
+  readonly api: SemanticSession;
+  readonly verify: Effect.Effect<void, unknown>;
   readonly basis: Observation;
   readonly diskBasis: string;
   readonly reservation: SemanticReservation;
@@ -202,7 +109,16 @@ interface AnalysisSession {
   closed: Deferred.Deferred<void, unknown>;
 }
 const sessionIdentity = (o: Observation) =>
-  JSON.stringify([o.repository, o.worktree, o.project, o.view.kind, o.view.id, o.view.owner, o.view.epoch]);
+  JSON.stringify([
+    o.repository,
+    o.worktree,
+    o.project,
+    o.provider.id,
+    o.view.kind,
+    o.view.id,
+    o.view.owner,
+    o.view.epoch,
+  ]);
 
 /** Host-only construction. Repository requests can select a source view, never an executable, plugin or build policy. */
 export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(function* (
@@ -213,6 +129,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
   const path = yield* Path.Path;
   const scope = yield* Effect.scope;
   const command = yield* CommandExecutor;
+  const crypto = yield* Crypto.Crypto;
   const home = yield* fs.realPath(options.dataHome);
   if (home !== path.resolve(options.dataHome)) return yield* LspFault.make({code: 'prerequisite'});
   const admission = yield* makeSemanticAdmission({directory: path.join(home, 'semantic', 'admission-v1')});
@@ -225,47 +142,67 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
     if (session) session.faulted = true;
     causes.set(id, reason);
   };
-  const candidate = structuredClone(options.candidate);
-  const toolchain = sha256HexSync(
-    JSON.stringify([candidate.runtimeDigest, candidate.serverTreeDigest, candidate.sdkTreeDigest]),
-  );
-  // P00 selected the 6.0.2 fallback with SDK6.0.3/Node24.19.0; this pilot never selects by executable presence.
-  // config/semantic-providers/qualification-lock.json retains feasibility evidence and unresolved production gates.
-  if (
-    candidate.runtimeVersion !== '24.19.0' ||
-    ![candidate.runtimeDigest, candidate.sdkTreeDigest, candidate.serverTreeDigest].every(value =>
-      Schema.is(Digest)(value),
-    )
-  )
-    return yield* LspFault.make({code: 'prerequisite'});
-  const verifyCandidate = Effect.gen(function* () {
-    for (const file of [candidate.runtime, candidate.sdkDirectory, candidate.serverDirectory])
-      if ((yield* fs.realPath(file)) !== path.resolve(file)) return yield* LspFault.make({code: 'prerequisite'});
-    if (
-      (yield* sha256FileHex(candidate.runtime)) !== candidate.runtimeDigest ||
-      (yield* semanticTreeDigest(candidate.sdkDirectory)) !== candidate.sdkTreeDigest ||
-      (yield* semanticTreeDigest(candidate.serverDirectory)) !== candidate.serverTreeDigest
-    )
-      return yield* LspFault.make({code: 'prerequisite'});
-    for (const [directory, version] of [
-      [candidate.sdkDirectory, '6.0.3'],
-      [candidate.serverDirectory, '6.0.2'],
-    ]) {
-      const text = yield* readBoundedText(path.join(directory, 'package.json'), 1024 * 1024);
-      const value = yield* Effect.try({
-        try: () => JSON.parse(text),
-        catch: () => LspFault.make({code: 'prerequisite'}),
-      });
-      if (value?.version !== version) return yield* LspFault.make({code: 'prerequisite'});
-    }
-  });
-  yield* verifyCandidate;
-  const version = yield* command.execute(candidate.runtime, ['--version'], {
-    env: {},
-    timeoutMs: 2000,
-    maxOutputBytes: 128,
-  });
-  if (version.stdout.trim() !== 'v24.19.0') return yield* LspFault.make({code: 'prerequisite'});
+  const catalog = structuredClone(options);
+  const verifyCandidate = (candidate: TypeScriptHostCandidate | PythonHostCandidate) =>
+    Effect.gen(function* () {
+      if (
+        candidate.runtimeVersion !== '24.19.0' ||
+        !Schema.is(Digest)(candidate.runtimeDigest) ||
+        !Schema.is(Digest)(candidate.serverTreeDigest)
+      )
+        return yield* LspFault.make({code: 'prerequisite'});
+      for (const file of [candidate.runtime, candidate.serverDirectory])
+        if (!path.isAbsolute(file) || (yield* fs.realPath(file)) !== file)
+          return yield* LspFault.make({code: 'prerequisite'});
+      if (
+        (yield* sha256FileHex(candidate.runtime)) !== candidate.runtimeDigest ||
+        (yield* semanticTreeDigest(candidate.serverDirectory)) !== candidate.serverTreeDigest
+      )
+        return yield* LspFault.make({code: 'prerequisite'});
+      if ('sdkDirectory' in candidate) {
+        if (
+          !path.isAbsolute(candidate.sdkDirectory) ||
+          (yield* fs.realPath(candidate.sdkDirectory)) !== candidate.sdkDirectory ||
+          (yield* semanticTreeDigest(candidate.sdkDirectory)) !== candidate.sdkTreeDigest
+        )
+          return yield* LspFault.make({code: 'prerequisite'});
+        for (const [directory, version] of [
+          [candidate.sdkDirectory, '6.0.3'],
+          [candidate.serverDirectory, '6.0.2'],
+        ]) {
+          const text = yield* readBoundedText(path.join(directory, 'package.json'), 1024 * 1024);
+          const value = yield* Effect.try({
+            try: () => JSON.parse(text),
+            catch: () => LspFault.make({code: 'prerequisite'}),
+          });
+          if (value?.version !== version) return yield* LspFault.make({code: 'prerequisite'});
+        }
+      } else {
+        // The wheel's package.json carries upstream Pyright's version; pin the distributed basedpyright server itself.
+        if (
+          (yield* boundedFileDigest(
+            path.join(candidate.serverDirectory, 'dist/pyright-langserver.js'),
+            16 * 1024 * 1024,
+          )) !== '3ff64ca89ba46d04a7e8410955f20fb5e02d6b76d9a76f92e57bf43c95635c33' ||
+          candidate.environments.length < 1 ||
+          candidate.environments.length > 16 ||
+          new Set(candidate.environments.map(e => e.id)).size !== candidate.environments.length
+        )
+          return yield* LspFault.make({code: 'prerequisite'});
+        for (const environment of candidate.environments) yield* Schema.decodeEffect(PythonEnvironment)(environment);
+      }
+    });
+  const configured = [catalog.candidate, catalog.python].filter(c => c !== undefined);
+  if (!configured.length) return yield* LspFault.make({code: 'prerequisite'});
+  for (const candidate of configured) {
+    yield* verifyCandidate(candidate);
+    const version = yield* command.execute(candidate.runtime, ['--version'], {
+      env: {},
+      timeoutMs: 2000,
+      maxOutputBytes: 128,
+    });
+    if (version.stdout.trim() !== 'v24.19.0') return yield* LspFault.make({code: 'prerequisite'});
+  }
   const retire = (id: string, session: AnalysisSession) =>
     Effect.uninterruptible(
       Effect.suspend(() => {
@@ -281,11 +218,28 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         }).pipe(Effect.onExit(exit => Deferred.done(session.closed, exit)));
       }),
     );
-  const attach = (observation: Observation, text: string, language: Parameters<TypeScriptSession['upsert']>[2]) =>
+  const attach = (observation: Observation, text: string, language: SemanticLanguage, environment?: string) =>
     startup.withPermit(
       Effect.gen(function* () {
         const input = structuredClone(yield* Schema.decodeEffect(Observation)(observation));
         if (sha256HexSync(text) !== input.content) return yield* LspFault.make({code: 'protocol'});
+        const candidate = language === 'python' ? catalog.python : catalog.candidate;
+        const providerId = language === 'python' ? 'basedpyright' : 'typescript-language-server';
+        const selected =
+          language === 'python' ? catalog.python?.environments.find(e => e.id === environment) : undefined;
+        if (
+          !candidate ||
+          input.provider.id !== providerId ||
+          (language === 'python' ? !selected : environment !== undefined)
+        )
+          return yield* LspFault.make({code: 'prerequisite'});
+        const toolchain = sha256HexSync(
+          JSON.stringify([
+            candidate.runtimeDigest,
+            candidate.serverTreeDigest,
+            'sdkTreeDigest' in candidate ? candidate.sdkTreeDigest : selected,
+          ]),
+        );
         let fixed = {...input, toolchain};
         const project = yield* path.fromFileUrl(new URL(fixed.project));
         const worktree = yield* path.fromFileUrl(new URL(fixed.worktree));
@@ -293,6 +247,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         if (
           !(project === worktree || project.startsWith(worktree + path.sep)) ||
           !file.startsWith(project + path.sep) ||
+          file.split(path.sep).includes('.git') ||
           (yield* fs.realPath(project)) !== project ||
           (yield* fs.realPath(worktree)) !== worktree
         )
@@ -301,24 +256,37 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           return yield* LspFault.make({code: 'rejected'});
         const id = sessionIdentity(fixed);
         let session = sessions.get(id);
-        const diskBasis = yield* semanticTreeDigest(worktree, true);
+        const diskBasis = yield* semanticTreeDigest(worktree, providerId !== 'basedpyright');
         fixed = {...fixed, configuration: diskBasis};
-        if (session && session.diskBasis !== diskBasis) {
+        if (session && (session.diskBasis !== diskBasis || session.basis.toolchain !== toolchain)) {
           yield* retire(id, session);
           return yield* LspFault.make({code: 'rejected'});
         }
         if (!session) {
           if ((failures.get(id) ?? 0) >= 2 || failures.size >= 256) return yield* LspFault.make({code: 'prerequisite'});
-          yield* verifyCandidate;
           const owned = yield* Scope.fork(scope);
           const create = Effect.gen(function* () {
+            const projectOptions = selected
+              ? yield* makePythonProject({
+                  project,
+                  worktree,
+                  privateDirectory: path.join(home, 'semantic', 'environments'),
+                  runtime: candidate.runtime,
+                  environment: selected,
+                })
+              : undefined;
+            yield* verifyCandidate(candidate);
             const reservation = yield* admission.acquire(
               sha256HexSync(fixed.repository + '\0' + fixed.worktree),
               10_000,
             );
             fixed = {
               ...fixed,
-              provider: {id: 'typescript-language-server', version: '6.0.2', generation: reservation.generation},
+              provider: {
+                id: providerId,
+                version: language === 'python' ? '1.40.2' : '6.0.2',
+                generation: reservation.generation,
+              },
               projectEpoch: reservation.generation,
             };
             const wireState: {current?: LspWire} = {};
@@ -330,27 +298,65 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                   )
                 : Effect.void,
             );
+            const verify = verifyCandidate(candidate).pipe(
+              Effect.andThen(projectOptions?.verify ?? Effect.void),
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+              Effect.provideService(Crypto.Crypto, crypto),
+            );
             const wire = yield* spawnLspWire({
               command: candidate.runtime,
-              args: [path.join(candidate.serverDirectory, 'lib/cli.mjs'), '--stdio'],
+              args: [
+                path.join(candidate.serverDirectory, language === 'python' ? 'langserver.index.js' : 'lib/cli.mjs'),
+                '--stdio',
+              ],
               cwd: project,
-              // No NODE_OPTIONS, NODE_PATH, TS plugin/log variables, repository PATH or inherited execution settings.
+              // No repository PATH, NODE_OPTIONS, Python startup hooks, plugins or inherited execution settings.
               environment: {},
             });
             wireState.current = wire;
             yield* reservation.bindProvider(wire.pid);
-            const client = yield* makeLspClient(wire);
-            const api = yield* makeTypeScriptSession(client, {
-              basis: fixed,
-              tsserver: path.join(candidate.sdkDirectory, 'lib/tsserver.js'),
-              maxMemoryMb: 512,
-              startupMilliseconds: 10_000,
-            });
+            const notifications = makePythonNotifications();
+            const client = yield* makeLspClient(wire, notifications.receive, projectOptions?.settings);
+            let api: SemanticSession;
+            if (projectOptions) {
+              api = yield* makePythonSession(client, {
+                basis: fixed,
+                notifications,
+                roots: [...projectOptions.roots, candidate.serverDirectory],
+                profile: projectOptions.profile,
+                environmentReady: projectOptions.ready,
+                startupMilliseconds: 10000,
+              });
+            } else {
+              if (!('sdkDirectory' in candidate)) return yield* LspFault.make({code: 'prerequisite'});
+              const ts = yield* makeTypeScriptSession(client, {
+                basis: fixed,
+                tsserver: path.join(candidate.sdkDirectory, 'lib/tsserver.js'),
+                maxMemoryMb: 512,
+                startupMilliseconds: 10000,
+              });
+              api = {
+                ...ts,
+                query: (operation, observation, position, milliseconds) =>
+                  isCoreSemanticQuery(operation)
+                    ? ts.query(operation, observation, position, milliseconds)
+                    : Effect.succeed<QueryOutcome>({
+                        version: 1,
+                        status: 'unsupported',
+                        reason: 'Optional operation is not qualified for the TypeScript profile',
+                        evidence: null,
+                      }),
+                upsert: (o, t, l, ms) =>
+                  l === 'python' ? Effect.fail(LspFault.make({code: 'rejected'})) : ts.upsert(o, t, l, ms),
+              };
+            }
             fixed = yield* api.upsert(fixed, text, language, 10_000);
             yield* reservation.finishImport;
             return {
               scope: owned,
               api,
+              verify,
               basis: fixed,
               diskBasis,
               reservation,
@@ -391,7 +397,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           const info = yield* active.api.project(fixed.uri);
           if (
             (fixed.view.kind === 'disk' && (yield* boundedFileDigest(file, 32 * 1024 * 1024)) !== fixed.content) ||
-            (yield* semanticTreeDigest(worktree, true)) !== diskBasis
+            (yield* semanticTreeDigest(worktree, providerId !== 'basedpyright')) !== diskBasis
           )
             return yield* LspFault.make({code: 'rejected'});
           return info;
@@ -401,7 +407,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           observation: structuredClone(fixed),
           status: 'experimental' as const,
           completeness: 'partial' as const,
-          edits: 'disabled' as const,
+          edits: language === 'python' ? ('preparation-only' as const) : ('disabled' as const),
           project: projectInfo,
         };
       }),
@@ -409,7 +415,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
   const use = <A, E, R>(
     observation: Observation,
     milliseconds: number,
-    f: (api: TypeScriptSession) => Effect.Effect<A, E, R>,
+    f: (api: SemanticSession) => Effect.Effect<A, E, R>,
   ) =>
     Effect.gen(function* () {
       if (!Number.isSafeInteger(milliseconds) || milliseconds < 1 || milliseconds > 45_000)
@@ -425,16 +431,19 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           Effect.gen(function* () {
             if (session.closing) return yield* LspFault.make({code: 'closing'});
             const worktree = yield* path.fromFileUrl(new URL(fixed.worktree));
-            const before = yield* semanticTreeDigest(worktree, true);
+            const before = yield* semanticTreeDigest(worktree, fixed.provider.id !== 'basedpyright');
             if (before !== session.diskBasis) {
               yield* retire(id, session);
               return yield* LspFault.make({code: 'rejected'});
             }
-            yield* verifyCandidate;
+            yield* session.verify.pipe(Effect.onError(() => retire(id, session).pipe(Effect.ignore)));
             session.lastUsed = yield* Clock.currentTimeMillis;
             const result = yield* f(session.api);
-            yield* verifyCandidate;
-            if (session.closing || (yield* semanticTreeDigest(worktree, true)) !== before) {
+            yield* session.verify.pipe(Effect.onError(() => retire(id, session).pipe(Effect.ignore)));
+            if (
+              session.closing ||
+              (yield* semanticTreeDigest(worktree, fixed.provider.id !== 'basedpyright')) !== before
+            ) {
               yield* retire(id, session);
               return yield* LspFault.make({code: 'rejected'});
             }
@@ -479,6 +488,22 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         experimental: true,
         readOnly: true,
         sessions: sessions.size,
+        providerProfiles: configured.map(candidate => ({
+          id: 'sdkDirectory' in candidate ? 'typescript-language-server' : 'basedpyright',
+          version: 'sdkDirectory' in candidate ? '6.0.2' : '1.40.2',
+          status: 'experimental',
+          prerequisites: 'host-qualified-candidate',
+          environments: 'environments' in candidate ? candidate.environments.map(environment => environment.id) : [],
+          capabilities: {
+            reads: 'experimental',
+            diagnostics: 'experimental',
+            rename: 'sdkDirectory' in candidate ? 'unsupported' : 'preparation-only',
+            codeActions: 'sdkDirectory' in candidate ? 'unsupported' : 'inline-preparation-only',
+            optional: 'sdkDirectory' in candidate ? 'unsupported-unqualified' : 'provider-advertised-reads',
+            apply: 'unsupported',
+            commands: 'unsupported',
+          },
+        })),
         effectiveLimits: {
           queryMilliseconds: 10000,
           maximumQueryMilliseconds: 45000,
@@ -519,13 +544,22 @@ const Request = Schema.Union([
     operation: Schema.Literal('attach'),
     observation: Observation,
     text: Schema.String.check(Schema.isMaxLength(4 * 1024 * 1024)),
-    language: Schema.Literals(['typescript', 'typescriptreact', 'javascript', 'javascriptreact']),
+    language: SemanticLanguage,
+    environment: Schema.optional(Identifier),
   }),
   Schema.Struct({
     operation: Schema.Literal('query'),
     observation: Observation,
-    query: Schema.Literals(['definition', 'references', 'hover', 'symbols']),
+    query: SemanticQuery,
     position: Schema.optional(Position),
+    milliseconds: Counter,
+  }),
+  Schema.Struct({
+    operation: Schema.Literal('prepare'),
+    observation: Observation,
+    edit: Schema.Literals(['rename', 'code-action']),
+    position: Position,
+    newName: Schema.optional(Identifier),
     milliseconds: Counter,
   }),
   Schema.Struct({operation: Schema.Literal('diagnostics'), observation: Observation, milliseconds: Counter}),
@@ -608,7 +642,7 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
                 grants.delete(id);
                 return {status: 'closed'};
               }
-              const result = yield* coordinator.attach(body.observation, body.text, body.language);
+              const result = yield* coordinator.attach(body.observation, body.text, body.language, body.environment);
               return {...result, capability: claim.token};
             }),
           )
@@ -627,6 +661,17 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
             ),
           );
       }
+      if (body.operation === 'prepare')
+        return yield* coordinator.use(body.observation, body.milliseconds, api =>
+          api.prepare
+            ? api.prepare(body.edit, body.observation, body.position, body.newName, body.milliseconds)
+            : Effect.succeed<QueryOutcome>({
+                version: 1,
+                status: 'unsupported',
+                reason: 'Provider edit preparation is unavailable',
+                evidence: null,
+              }),
+        );
       if (body.operation === 'diagnostics')
         return yield* coordinator.use(body.observation, body.milliseconds, api =>
           api.diagnostics(body.observation, body.milliseconds),
@@ -768,7 +813,17 @@ const Bootstrap = Schema.Struct({
   token: Digest,
   worktree: FileUri,
   dataHome: Schema.String,
-  candidate: HostCandidate,
+  candidate: Schema.optional(HostCandidate),
+  python: Schema.optional(
+    Schema.Struct({
+      runtime: Schema.String,
+      runtimeDigest: Digest,
+      runtimeVersion: Schema.Literal('24.19.0'),
+      serverDirectory: Schema.String,
+      serverTreeDigest: Digest,
+      environments: Schema.Array(PythonEnvironment).check(Schema.isMaxLength(16)),
+    }),
+  ),
 });
 export interface SemanticEndpointLaunch extends SemanticCoordinatorOptions {
   readonly worktree: string;
@@ -811,7 +866,7 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
           bootstrap.worktree !== options.worktree ||
           bootstrap.runtimeIdentity !== options.runtimeIdentity ||
           bootstrap.dataHome !== home ||
-          semanticCandidateKey(bootstrap.candidate) !== semanticCandidateKey(options.candidate)
+          semanticCatalogKey(bootstrap) !== semanticCatalogKey(options)
         )
           return yield* LspFault.make({code: 'prerequisite'});
       } else {
@@ -821,7 +876,8 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
           worktree: options.worktree,
           token: sha256HexSync(yield* crypto.randomBytes(32)),
           dataHome: home,
-          candidate: options.candidate,
+          ...(options.candidate ? {candidate: options.candidate} : {}),
+          ...(options.python ? {python: options.python} : {}),
         };
         yield* fs.writeFileString(bootstrapFile, JSON.stringify(bootstrap), {flag: 'wx', mode: 0o600});
       }
@@ -903,6 +959,7 @@ export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(functio
           enabled: true,
           dataHome: bootstrap.dataHome,
           candidate: bootstrap.candidate,
+          python: bootstrap.python,
         });
         const endpoint = yield* serveSemanticEndpoint(coordinator, {
           directory,
