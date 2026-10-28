@@ -18,6 +18,11 @@ import {refreshWorkflowRecall, trackPotentialWorkflowMutation} from './recall_re
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {preparePersonalMemoryWrite} from '../mcp/server/memory.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
+import {
+  assertNativeJobLiveSource,
+  CurrentNativeJobReadyPromotion,
+  CurrentNativeJobSourceView,
+} from '../workflow_automation/native_jobs.js';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
 import {readWorkflowSharedRoots} from './scopes.js';
 import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence, verifyWorkflowEvidenceBytes} from './evidence.js';
@@ -335,11 +340,24 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
         return yield* workflowError('out-of-scope', 'Private relation targets must belong to the same workflow.');
     }
     relations = resolvedRelations.targets;
-    const captured = yield* captureMemoryCodeCitationsForMcp(
-      config,
-      {callerCwd: state.binding.repo, project: state.binding.project, refs: request.codeRefs ?? []},
-      'workflow-memory',
-    );
+    const admitted = yield* CurrentNativeJobSourceView;
+    const promotion =
+      (role === 'authoring-root' && (yield* CurrentNativeJobReadyPromotion)) || role.startsWith('closeout-');
+    if (admitted && admitted.repo !== state.binding.repo)
+      return yield* workflowError(
+        'binding-drift',
+        'Admitted source view does not belong to the original logical repository.',
+      );
+    if (admitted && !promotion && stableJson(request.codeRefs ?? []) !== stableJson(admitted.citationRefs))
+      return yield* workflowError('citation-drift', 'Child code references differ from the admitted citation witness.');
+    const captured =
+      admitted && !promotion
+        ? {ok: true as const, citations: admitted.citations}
+        : yield* captureMemoryCodeCitationsForMcp(
+            config,
+            {callerCwd: state.binding.repo, project: state.binding.project, refs: request.codeRefs ?? []},
+            'workflow-memory',
+          );
     if (!captured.ok) {
       if (Schema.is(MemoryCodeCitationCaptureError)(captured.failure) && captured.failure.retryable)
         return yield* workflowError(
@@ -518,6 +536,10 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
               request: operation.deferredCodeAnchor,
             })
           : undefined;
+        const admitted = yield* CurrentNativeJobSourceView;
+        const promotion =
+          (operation.request.role === 'authoring-root' && (yield* CurrentNativeJobReadyPromotion)) ||
+          operation.request.role?.startsWith('closeout-');
         yield* store.writeChecked(
           workflowLocation(config),
           artifact.canonicalUri,
@@ -528,7 +550,8 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
               ? {}
               : {expectedFingerprint: yield* store.fingerprint(operation.before)}),
           },
-          verifyAuthoredMemoryRelationTargetIdentities(config, operation.relations).pipe(
+          (admitted && promotion ? assertNativeJobLiveSource(admitted) : Effect.void).pipe(
+            Effect.andThen(verifyAuthoredMemoryRelationTargetIdentities(config, operation.relations)),
             Effect.andThen(verifyWorkflowEvidenceBytes(config, initial.binding, operation.request.evidenceRefs)),
           ),
         );

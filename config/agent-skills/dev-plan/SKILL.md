@@ -5,6 +5,8 @@ description: Turn approved feature intent into a code-grounded architecture and 
 
 # Dev Plan
 
+The orchestrator owns handoff memories. Background agents report results and artifact links directly; they do not store handoff memories. Include this boundary in delegated prompts.
+
 Resources: `{{THREADNOTE_SKILL_ROOT}}`; bundle: `{{THREADNOTE_BUNDLE_ROOT}}`. Use these pinned roots for linked files and generation identity. In an unrendered checkout, use this skill directory and its parent. Start with the [native bootstrap]({{THREADNOTE_BUNDLE_ROOT}}/dev-cycle/references/native-bootstrap.md).
 
 Use the installed Threadnote workflow-automation JSON interface as the authority for schemas and actions. Retrieve only the capability and command schema needed now. Do not reproduce full schemas, use legacy local scripts, or invent request fields. Runtime receipts, compare-and-swap, approval, and readback govern persistence.

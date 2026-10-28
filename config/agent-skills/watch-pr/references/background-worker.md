@@ -8,6 +8,8 @@ Before ACK, persist the receipt and intended disposition. ACK is not resolution.
 
 The consumer is read-only: it does not edit source, rerun checks, post comments, dismiss feedback, or merge. The parent investigates linked evidence and applies justified fixes under the active-repair default, unless the user explicitly chose monitor-only.
 
+Report bounded results to the parent without writing handoff memories. Keep native delivery receipts and dispositions; the parent owns the task handoff memory.
+
 Use bounded nonblocking checks across owned watches, then yield through the host event mechanism. Unchanged timeouts are quiet. Before ending, transfer ownership to the parent or a verified current-chat wakeup; otherwise preserve pending work and report monitoring as interrupted. Stop on terminal completion or cancellation.
 
 For an authorized runtime handoff, request stop, confirm the collector has exited, and durably dispose and acknowledge pending deliveries. Resume the same watch and consumer on a compatible runtime.

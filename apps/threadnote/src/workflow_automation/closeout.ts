@@ -1,8 +1,6 @@
 import {Effect, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workflow-automations/contracts';
-import {NativeAuthoringDocumentSchema} from '@threadnote/workflow-automations/authoring';
-import {NativeCycleStateSchema} from '@threadnote/workflow-automations/cycle';
 import {prepareNativeCloseout, NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import {renderNativeDocument} from '@threadnote/workflow-automations/documents';
 import {planNativeCloseoutDocuments} from './closeout_documents.js';
@@ -17,83 +15,14 @@ import {PublicationWriterReasonSchema} from '../workflow_memory/publication_cont
 import {CurrentNativeCloseoutSave, readNativeWorkflowState} from './store.js';
 import {reserveNativeCloseoutCapacity, clearNativeCloseoutCapacity} from './closeout_capacity.js';
 import {captureNativeCycleSource} from './cycle_git.js';
+import {decodeJournal, nativeCloseoutRequestSchema, type Journal} from './closeout_request_schema.js';
+export {nativeCloseoutRequestSchema} from './closeout_request_schema.js';
+import {assertNativeJobLiveSource, CurrentNativeJobBoundary, CurrentNativeJobSourceView} from './native_jobs.js';
 import {encodeAuthoringDocument, type NativeAuthoringCall} from './authoring_artifacts.js';
 import {nativeWorkflowError} from './memory.js';
 import {loadNativeCloseoutInputs} from './closeout_inputs.js';
 import {readNativeCloseoutJournal, writeNativeCloseoutJournal, withNativeCloseoutLock} from './closeout_store.js';
 
-const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
-const text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096));
-const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
-const gitObject = Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u));
-const reference = Schema.Struct({uri: text, memoryId: text, revision: digest});
-export const nativeCloseoutRequestSchema = Schema.Struct({
-  protocolVersion: Schema.Literal(1),
-  executorVersion: Schema.Literal(1),
-  action: Schema.Literal('closeout'),
-  command: Schema.Literals([
-    'schema',
-    'validation-input',
-    'prepare',
-    'inspect',
-    'finish',
-    'publication-preview',
-    'publication-approve',
-  ]),
-  runId: id,
-  generation: text,
-  proposal: Schema.optionalKey(NativeCloseoutProposalSchema),
-  expectedRevision: Schema.optionalKey(Schema.NullOr(digest)),
-  approvalDigest: Schema.optionalKey(digest),
-  decision: Schema.optionalKey(Schema.Literals(['approve', 'defer', 'reject'])),
-  approvalEvidence: Schema.optionalKey(text),
-});
-const ownedSchema = Schema.Struct({
-  runId: id,
-  generation: text,
-  bindingId: digest,
-  artifactKey: id,
-  role: id,
-  sourceRunId: id,
-  uri: text,
-  memoryId: text,
-  revision: digest,
-  operationId: id,
-  destination: text,
-});
-const journalSchema = Schema.Struct({
-  format: Schema.Literal('threadnote-native-closeout'),
-  version: Schema.Literal(1),
-  runId: id,
-  generation: text,
-  bindingId: digest,
-  profile: Schema.Literals(['desktop', 'codex-cloud-personal', 'cursor-cloud-personal']),
-  transactionId: digest,
-  source: Schema.Struct({repo: text, head: gitObject, tree: gitObject}),
-  cycle: NativeCycleStateSchema,
-  plan: NativeAuthoringDocumentSchema,
-  spec: Schema.optionalKey(NativeAuthoringDocumentSchema),
-  proposal: NativeCloseoutProposalSchema,
-  owned: Schema.Array(ownedSchema).check(Schema.isMaxLength(4096)),
-  documents: Schema.Array(
-    Schema.Struct({
-      key: id,
-      body: Schema.String.check(Schema.isMaxLength(60000)),
-      uri: text,
-      relations: Schema.Array(Schema.Struct({type: Schema.Literal('references'), uri: text})).check(
-        Schema.isMaxLength(16),
-      ),
-    }),
-  ).check(Schema.isBetweenLength(1, 8192)),
-  documentDigest: digest,
-  outputs: Schema.Record(id, reference),
-  archives: Schema.Record(text, reference),
-  approvalDigest: Schema.optionalKey(digest),
-  decision: Schema.optionalKey(Schema.Literals(['approve', 'defer', 'reject'])),
-  publication: Schema.optionalKey(Schema.Unknown),
-  status: Schema.Literals(['prepared', 'archiving', 'complete']),
-});
-type Journal = typeof journalSchema.Type;
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const attempt = <A>(f: () => A) => Effect.try({try: f, catch: nativeWorkflowError});
 const hash = (value: unknown) => sha256HexSync(stableJson(value));
@@ -102,30 +31,6 @@ const ref = (artifact: WorkflowArtifact) => ({
   memoryId: artifact.memoryId,
   revision: artifact.revision,
 });
-const decodeJournal = (input: unknown): Journal => {
-  const value = Schema.decodeUnknownSync(journalSchema, {onExcessProperty: 'error'})(input);
-  prepareNativeCloseout(value.cycle, value.plan, value.proposal, value.spec);
-  if (value.documentDigest !== hash(value.documents))
-    throw fail('invalid-closeout-state', 'Admitted final document bytes changed.');
-  if (
-    value.transactionId !==
-      hash({
-        runId: value.runId,
-        generation: value.generation,
-        source: value.source,
-        cycle: value.cycle,
-        proposal: value.proposal,
-      }) ||
-    value.owned.some(item => !item.role.startsWith('authoring-') || item.sourceRunId !== item.runId)
-  )
-    throw fail('invalid-closeout-state', 'Closeout intent or authoring ownership changed.');
-  if (
-    new Set(value.owned.map(item => item.uri)).size !== value.owned.length ||
-    Object.keys(value.archives).some(uri => !value.owned.some(item => item.uri === uri))
-  )
-    throw fail('invalid-closeout-state', 'Closeout history contains duplicate or unowned archives.');
-  return value;
-};
 const artifact = (input: unknown): WorkflowArtifact => {
   if (!input || typeof input !== 'object') throw fail('invalid-readback', 'Expected verified native memory readback.');
   const value = input as Record<string, unknown>;
@@ -502,6 +407,8 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
               'publication-incomplete',
               'Keep task-local drafts until their exact durable graph is approved.',
             );
+          const admitted = yield* CurrentNativeJobSourceView;
+          if (admitted) yield* assertNativeJobLiveSource(admitted);
           const publication = yield* runWorkflowMemory(config, {
             protocolVersion: 1,
             action: 'publication-publish',
@@ -555,6 +462,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             journal.bindingId,
             assertWorkflowPublicationVerified(config, journal.bindingId),
           );
+          if (admitted) yield* assertNativeJobLiveSource(admitted);
           yield* save({...journal, publication});
         }
         const read = (bindingId: string, uri: string) =>
@@ -640,6 +548,8 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
               observed.state !== 'active'
             )
               return yield* fail('invalid-readback', 'Closeout knowledge failed independent current readback.');
+            const admitted = yield* CurrentNativeJobSourceView;
+            if (admitted) yield* assertNativeJobLiveSource(admitted);
             const reference = ref(observed);
             yield* save({...journal, outputs: {...journal.outputs, [key]: reference}});
             return reference;
@@ -647,6 +557,8 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
         const finalDocuments = new Map(journal.documents.map(document => [document.key, document]));
         const seen = new Set<string>();
         for (const document of journal.documents) {
+          const boundary = yield* CurrentNativeJobBoundary;
+          if (boundary) yield* boundary;
           if (!seen.has(document.key)) {
             const final = finalDocuments.get(document.key);
             if (final && final !== document) {
@@ -680,6 +592,8 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
         }
         // Recover an archive whose response or parent receipt was lost, using its original native intent.
         for (const item of journal.owned) {
+          const boundary = yield* CurrentNativeJobBoundary;
+          if (boundary) yield* boundary;
           if (journal.archives[item.uri]) continue;
           const observed = yield* withWorkflowLock(
             config,
