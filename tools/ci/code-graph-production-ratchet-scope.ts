@@ -59,6 +59,9 @@ function isUnrelatedEvaluationPath(path: string): boolean {
 }
 
 const CI_WORKFLOW_PATH = '.github/workflows/ci.yml';
+const WINDOWS_VITEST_SHARD_COMMAND = '          bun --bun vitest run --no-file-parallelism --shard=${{ matrix.shard }}';
+const WINDOWS_VITEST_DEFAULT_COMMAND =
+  '          bun --bun vitest run --no-file-parallelism --testTimeout=120000 --shard=${{ matrix.shard }}';
 
 const CI_TEST_POLICY_PATHS = new Set([
   'apps/threadnote/test/dev-skills/native-authoring-lifecycle.test.ts',
@@ -99,20 +102,38 @@ function validTimeoutMinutes(line: string): number | undefined {
   return Number.isSafeInteger(minutes) && minutes <= 360 ? minutes : undefined;
 }
 
-function changesOnlyWindowsSmokeTimeout(before: string | undefined, after: string | undefined): boolean {
+function windowsSmokeShardCommandLine(lines: readonly string[], command: string): number | undefined {
+  const starts = lines.flatMap((line, index) => (line === '  windows-smoke:' ? [index] : []));
+  if (starts.length !== 1) return undefined;
+  const start = starts[0];
+  const end = lines.findIndex((line, index) => index > start && /^ {2}[^\s:#][^:]*:$/u.test(line));
+  const matches = lines.flatMap((line, index) =>
+    index > start && (end === -1 || index < end) && line === command ? [index] : [],
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function changesOnlyWindowsSmokeBudget(before: string | undefined, after: string | undefined): boolean {
   if (before === undefined || after === undefined) return false;
   const beforeLines = before.split('\n');
   const afterLines = after.split('\n');
   const beforeTimeout = windowsSmokeTimeoutLine(beforeLines);
   const afterTimeout = windowsSmokeTimeoutLine(afterLines);
+  const beforeCommand = windowsSmokeShardCommandLine(beforeLines, WINDOWS_VITEST_SHARD_COMMAND);
+  const addedDefault =
+    beforeCommand !== undefined &&
+    beforeCommand === windowsSmokeShardCommandLine(afterLines, WINDOWS_VITEST_DEFAULT_COMMAND);
   return (
     beforeTimeout !== undefined &&
     beforeTimeout === afterTimeout &&
     validTimeoutMinutes(beforeLines[beforeTimeout]) !== undefined &&
     validTimeoutMinutes(afterLines[afterTimeout]) !== undefined &&
-    beforeLines[beforeTimeout] !== afterLines[afterTimeout] &&
+    (beforeLines[beforeTimeout] !== afterLines[afterTimeout] || addedDefault) &&
     beforeLines.length === afterLines.length &&
-    beforeLines.every((line, index) => index === beforeTimeout || line === afterLines[index])
+    beforeLines.every(
+      (line, index) =>
+        index === beforeTimeout || (index === beforeCommand && addedDefault) || line === afterLines[index],
+    )
   );
 }
 
@@ -198,7 +219,7 @@ export function classifyCodeGraphProductionRatchetScope(
     !invalidPath &&
     sortedPaths.length > 0 &&
     sortedPaths.every(isCiTestPolicyPath) &&
-    (!paths.has(CI_WORKFLOW_PATH) || changesOnlyWindowsSmokeTimeout(diff.beforeCiWorkflow, diff.afterCiWorkflow));
+    (!paths.has(CI_WORKFLOW_PATH) || changesOnlyWindowsSmokeBudget(diff.beforeCiWorkflow, diff.afterCiWorkflow));
   const skipReason =
     !invalidPath && isPurePrivateReleaseEvidenceDiff(sortedPaths)
       ? 'private-release-evidence-only'

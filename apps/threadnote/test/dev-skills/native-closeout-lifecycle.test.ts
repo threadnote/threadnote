@@ -119,10 +119,9 @@ const journalImage = (f: Fixture) =>
       status: string;
     };
   });
-// P0 Windows allowance for full native closeout fixtures beyond 30s; revisit with performance data.
+// P0 Windows allowance for seven full native closeout fixtures beyond 30s; revisit with performance data.
 const windowsCloseoutTimeout = process.platform === 'win32' ? {timeout: 120_000} : undefined;
 describe('native closeout lifecycle', () => {
-  // prettier-ignore
   effectIt.effect('rejects an entire closeout before writes when only one operation slot remains', () =>
     Effect.gen(function* () {
       const f = yield* nativeCloseoutFixture(false);
@@ -139,7 +138,6 @@ describe('native closeout lifecycle', () => {
       expect(yield* f.fs.exists(f.statePath(f.controllerRunId) + '.closeout.json')).toBe(false);
       yield* assertOwnedState(f, loaded.owned, 'active');
     }).pipe(runCloseout),
-    windowsCloseoutTimeout,
   );
   effectIt.effect(
     'completes desktop architecture-only closeout and preserves linked decisions and unrelated artifacts',
