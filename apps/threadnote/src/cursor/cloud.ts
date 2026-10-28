@@ -461,23 +461,47 @@ export function planCursorCloudBootstrap(
   return {action: 'reuse', remote, team};
 }
 
-export const resolveCursorCloudMemoryScope = Effect.fn('cursorCloud.resolveMemoryScope')(function (
+export const resolveCursorCloudMemoryScope = Effect.fn('cursorCloud.resolveMemoryScope')(function* (
   config: RuntimeConfig,
   environment: Readonly<Record<string, string | undefined>>,
 ) {
-  return Effect.sync(() => {
-    const teams = cursorCloudTeamsFromEnvironment(environment);
-    return {
-      mode: 'shared-read-write',
-      shares: teams.map(team => ({root: cursorCloudMemoryRoot(config.user, team), team})),
-    } satisfies CursorCloudMemoryScope;
+  const requested = yield* Effect.try({
+    try: () => cursorCloudTeamsFromEnvironment(environment),
+    catch: cause =>
+      Schema.is(CursorCloudOperationError)(cause)
+        ? cause
+        : CursorCloudOperationError.make({message: cause instanceof Error ? cause.message : String(cause)}),
   });
+  const teams = requested ?? registeredCursorCloudTeams(yield* readTeamsFile(config));
+  if (teams.length > MAX_CURSOR_CLOUD_TEAMS) {
+    return yield* CursorCloudOperationError.make({
+      message: `Personal Cursor Cloud supports at most ${MAX_CURSOR_CLOUD_TEAMS} shares in one MCP server. Restrict the selected shares with ${CURSOR_CLOUD_TEAMS_ENV}.`,
+    });
+  }
+  return {
+    mode: 'shared-read-write',
+    shares: teams.map(team => ({root: cursorCloudMemoryRoot(config.user, team), team})),
+  } satisfies CursorCloudMemoryScope;
 });
+
+export function registeredCursorCloudTeams(teamsFile: ShareTeamsFile): readonly string[] {
+  return [
+    ...new Set(
+      Object.entries(teamsFile.teams)
+        .filter(([, team]) => shareTeamAccess(team) === 'read-write')
+        .map(([name]) => normalizeTeamName(name)),
+    ),
+  ].sort();
+}
+
+export const CURSOR_CLOUD_NO_SHARES_MESSAGE =
+  'No writable Cursor Cloud memory shares are registered yet. Wait for the environment Build to finish, or run threadnote cloud cursor bootstrap --team <share> --remote <remote>.';
 
 export const assertCursorCloudMemoryTeamsReady = Effect.fn('cursorCloud.assertMemoryTeamsReady')(function* (
   config: RuntimeConfig,
   teams: readonly string[],
 ) {
+  if (teams.length === 0) return yield* CursorCloudOperationError.make({message: CURSOR_CLOUD_NO_SHARES_MESSAGE});
   const teamsFile = yield* readTeamsFile(config);
   for (const team of teams) {
     const configured = teamsFile.teams[team];
@@ -999,13 +1023,13 @@ export const configuredTeamChecks = Effect.fn('cursorCloud.configuredTeamChecks'
   ] satisfies readonly CursorCloudVerifyCheck[];
 });
 
-function cursorCloudTeamsFromEnvironment(environment: Readonly<Record<string, string | undefined>>): readonly string[] {
+function cursorCloudTeamsFromEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+): readonly string[] | undefined {
   const rawTeams = environment[CURSOR_CLOUD_TEAMS_ENV]?.trim();
   const rawTeam = environment[CURSOR_CLOUD_TEAM_ENV]?.trim();
   if (!rawTeams && !rawTeam) {
-    throw CursorCloudOperationError.make({
-      message: `${CURSOR_CLOUD_TEAM_ENV} or ${CURSOR_CLOUD_TEAMS_ENV} is required by the Personal Cursor Cloud toolset.`,
-    });
+    return undefined;
   }
   let decoded: unknown;
   if (rawTeams) {
@@ -1014,8 +1038,14 @@ function cursorCloudTeamsFromEnvironment(environment: Readonly<Record<string, st
     } catch {
       throw CursorCloudOperationError.make({message: `${CURSOR_CLOUD_TEAMS_ENV} must be a JSON array of share names.`});
     }
-    if (!Array.isArray(decoded) || decoded.some(team => typeof team !== 'string')) {
-      throw CursorCloudOperationError.make({message: `${CURSOR_CLOUD_TEAMS_ENV} must be a JSON array of share names.`});
+    if (
+      !Array.isArray(decoded) ||
+      decoded.length === 0 ||
+      decoded.some(team => typeof team !== 'string' || !team.trim())
+    ) {
+      throw CursorCloudOperationError.make({
+        message: `${CURSOR_CLOUD_TEAMS_ENV} must be a non-empty JSON array of share names.`,
+      });
     }
   } else {
     return normalizeCursorCloudTeams(rawTeam);

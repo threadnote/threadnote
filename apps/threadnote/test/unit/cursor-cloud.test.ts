@@ -1,6 +1,15 @@
 import fc from 'fast-check';
+import {BunFileSystem, BunPath} from '@effect/platform-bun';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {it as effectIt} from '@effect/vitest';
 import {describe, expect, it} from 'vitest';
-import {Schema} from 'effect';
+import {Cause, Effect, FileSystem, Layer, Schema} from 'effect';
+import {provideTestLayer} from '../helpers/effect-layer.js';
+import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {TestClock} from 'effect/testing';
+import {SystemInfo} from '@threadnote/platform/system';
+import {runCommandEffect} from '@threadnote/platform/command';
+import {resolveWorkflowBinding, verifyWorkflowBinding} from '../../src/workflow_memory/profile.js';
 import {
   buildCursorCloudMcpConfig,
   buildCursorCloudProfile,
@@ -12,6 +21,9 @@ import {
   cursorCloudRuntimeConfig,
   normalizeCursorCloudTeams,
   planCursorCloudBootstrap,
+  resolveCursorCloudMemoryScope,
+  registeredCursorCloudTeams,
+  assertCursorCloudMemoryTeamsReady,
 } from '@threadnote/threadnote/cursor/cloud';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {ShareTeamConfig, ShareTeamsFile} from '@threadnote/threadnote/types';
@@ -24,6 +36,165 @@ const runtime: RuntimeConfig = {
   manifestPath: '/tmp/threadnote-cloud-test/seed-manifest.yaml',
   user: 'local-user',
 };
+
+const scopeTestLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
+const scopeFixture = Effect.fn('test.cursorCloud.scopeFixture')(function* (
+  names: readonly string[],
+  defaultTeam = names[0],
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-cursor-scope-'});
+  yield* fs.makeDirectory(`${home}/share`);
+  const teams = Object.fromEntries(names.map(name => [name, {remote: `https://example.invalid/${name}.git`}]));
+  const file = `${home}/share/teams.json`;
+  yield* fs.writeFileString(file, JSON.stringify({version: 1, defaultTeam, teams}));
+  return {config: {...runtime, agentContextHome: home}, fs, file};
+});
+
+describe('Cursor Cloud discovered scope', () => {
+  effectIt.effect('preserves workflow binding drift and can restore its original explicit restriction', () =>
+    Effect.gen(function* () {
+      const f = yield* scopeFixture(['personal']);
+      const home = f.config.agentContextHome;
+      const system = yield* SystemInfo;
+      const environment: Record<string, string> = {};
+      const repo = `${home}/repo`;
+      const worktree = `${home}/share/worktrees/personal`;
+      yield* f.fs.makeDirectory(repo);
+      yield* f.fs.makeDirectory(worktree, {recursive: true});
+      yield* runCommandEffect('git', ['init', '--initial-branch=main', repo]);
+      yield* runCommandEffect('git', ['init', '--initial-branch=main', worktree]);
+      yield* f.fs.makeDirectory(`${home}/cursor-cloud`);
+      yield* f.fs.writeFileString(
+        `${home}/cursor-cloud/profile.json`,
+        JSON.stringify({
+          version: 1,
+          provider: 'cursor-cloud',
+          account: f.config.account,
+          user: f.config.user,
+          agentId: f.config.agentId,
+        }),
+      );
+      const info = {...system, currentDirectory: () => repo, environment: () => environment};
+      const binding = yield* resolveWorkflowBinding(f.config, {
+        protocolVersion: 1,
+        action: 'bind',
+        workflowRunId: 'cursor-scope-binding',
+        project: 'threadnote',
+        featureId: 'scope-test',
+        generation: 'test',
+      }).pipe(Effect.provideService(SystemInfo, info));
+      const registry = JSON.parse(yield* f.fs.readFileString(f.file));
+      registry.teams.docs = {...registry.teams.personal};
+      yield* f.fs.writeFileString(f.file, JSON.stringify(registry));
+      expect(
+        yield* verifyWorkflowBinding(f.config, binding).pipe(Effect.provideService(SystemInfo, info), Effect.result),
+      ).toMatchObject({_tag: 'Failure', failure: {code: 'binding-drift'}});
+      environment.THREADNOTE_CURSOR_CLOUD_TEAM = 'personal';
+      yield* verifyWorkflowBinding(f.config, binding).pipe(Effect.provideService(SystemInfo, info));
+    }).pipe(
+      TestClock.withLive,
+      provideTestLayer(
+        TestCommandExecutorLayer.pipe(Layer.provideMerge(TestSystemInfoLayer), Layer.provideMerge(BunServices.layer)),
+      ),
+    ),
+  );
+
+  it('discovers exactly the writable set independent of order and default without mutating the registry', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.stringMatching(/^[a-z][a-z0-9]{0,12}$/u), {maxLength: 16}),
+        fc.array(fc.boolean(), {minLength: 1, maxLength: 16}),
+        (names, readOnly) => {
+          const entries = names.map(
+            (name, index) =>
+              [
+                name,
+                {
+                  ...teamConfig(
+                    'https://example.invalid/memory.git',
+                    readOnly[index % readOnly.length] ? 'read-only' : undefined,
+                  ),
+                  name,
+                },
+              ] as const,
+          );
+          const registry: ShareTeamsFile = {version: 1, defaultTeam: names[0], teams: Object.fromEntries(entries)};
+          const original = structuredClone(registry);
+          const selected = registeredCursorCloudTeams(registry);
+          expect(selected).toEqual([...new Set(selected)].sort());
+          for (const [name, team] of entries) expect(selected.includes(name)).toBe(team.access !== 'read-only');
+          expect(selected.every(name => names.includes(name))).toBe(true);
+          expect(
+            registeredCursorCloudTeams({
+              ...registry,
+              defaultTeam: names.at(-1),
+              teams: Object.fromEntries([...entries].reverse()),
+            }),
+          ).toEqual(selected);
+          expect(registry).toEqual(original);
+        },
+      ),
+      {numRuns: 100},
+    );
+  });
+  effectIt.effect('discovers all writable shares without a default and observes registry changes', () =>
+    Effect.gen(function* () {
+      const f = yield* scopeFixture(['engineering', 'docs'], 'engineering');
+      const before = yield* f.fs.readFileString(f.file);
+      expect((yield* resolveCursorCloudMemoryScope(f.config, {})).shares.map(s => s.team)).toEqual([
+        'docs',
+        'engineering',
+      ]);
+      expect(yield* f.fs.readFileString(f.file)).toBe(before);
+      yield* f.fs.writeFileString(
+        f.file,
+        JSON.stringify({
+          version: 1,
+          defaultTeam: 'docs',
+          teams: {
+            engineering: {remote: 'https://example.invalid/engineering.git'},
+            docs: {remote: 'https://example.invalid/docs.git', access: 'read-only'},
+          },
+        }),
+      );
+      expect((yield* resolveCursorCloudMemoryScope(f.config, {})).shares.map(s => s.team)).toEqual(['engineering']);
+      expect(
+        (yield* resolveCursorCloudMemoryScope(f.config, {THREADNOTE_CURSOR_CLOUD_TEAM: 'docs'})).shares.map(
+          s => s.team,
+        ),
+      ).toEqual(['docs']);
+      const readiness = yield* assertCursorCloudMemoryTeamsReady(f.config, ['docs']).pipe(Effect.exit);
+      expect(readiness._tag).toBe('Failure');
+      if (readiness._tag === 'Failure') expect(Cause.pretty(readiness.cause)).toContain('not read-write yet');
+    }).pipe(provideTestLayer(scopeTestLayer)),
+  );
+
+  effectIt.effect('keeps empty discovery empty and applies restrictions before the share cap', () =>
+    Effect.gen(function* () {
+      const f = yield* scopeFixture([]);
+      expect((yield* resolveCursorCloudMemoryScope(f.config, {})).shares).toEqual([]);
+      const large = yield* scopeFixture(Array.from({length: 17}, (_, i) => `team-${i}`));
+      expect(
+        (yield* resolveCursorCloudMemoryScope(large.config, {THREADNOTE_CURSOR_CLOUD_TEAM: 'team-0'})).shares,
+      ).toHaveLength(1);
+      const oversized = yield* resolveCursorCloudMemoryScope(large.config, {}).pipe(Effect.result);
+      expect(oversized._tag).toBe('Failure');
+      for (const selection of ['[]', '{}', '["docs", ""]', 'invalid']) {
+        const result = yield* resolveCursorCloudMemoryScope(f.config, {THREADNOTE_CURSOR_CLOUD_TEAMS: selection}).pipe(
+          Effect.result,
+        );
+        expect(result._tag).toBe('Failure');
+      }
+      expect(
+        yield* resolveCursorCloudMemoryScope(f.config, {
+          THREADNOTE_CURSOR_CLOUD_TEAM: 'other',
+          THREADNOTE_CURSOR_CLOUD_TEAMS: '["docs"]',
+        }).pipe(Effect.result),
+      ).toMatchObject({_tag: 'Failure'});
+    }).pipe(provideTestLayer(scopeTestLayer)),
+  );
+});
 
 describe('Cursor Cloud profile', () => {
   it('renders a deterministic writable shared-memory MCP configuration', () => {

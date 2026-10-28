@@ -88,7 +88,6 @@ import {memoryReadRecoveryForRequestedUri, memoryReadRecoveryText} from '@thread
 import {RECALL_RANKER_VERSION} from '@threadnote/recall/rank';
 import {
   parseRecallMemoryConnectionInput,
-  type ParsedRecallMemoryConnectionInput,
 } from '@threadnote/recall/memory/connections';
 import type {MemoryRelationType} from '@threadnote/memory/document';
 import {
@@ -142,7 +141,7 @@ import {
   textFromCallToolResult,
   writeDurableMemory,
 } from './memory.js';
-import {syncCursorCloudMemoryShares} from './cursor_cloud_memory.js';
+import {resolveMemoryScope, syncCursorCloudMemoryShares, type MemoryScopeSource} from './cursor_cloud_memory.js';
 import {resolveRecallWorkspaceContext} from './recall_workspace_context.js';
 import {resourceIdIsWithin} from '@threadnote/store/resource-id';
 
@@ -829,9 +828,9 @@ export function registerSearchTool(
   name: string,
   description: string,
   progressTiming: RecallProgressTiming,
-  memoryScope?: CursorCloudMemoryScope,
+  scopeSource?: MemoryScopeSource,
 ): void {
-  const profileLabel = memoryScope?.label ?? 'Personal Cursor Cloud';
+  const profileLabel = scopeSource?.label ?? 'Personal Cursor Cloud';
   server.registerTool(
     name,
     {
@@ -863,11 +862,11 @@ export function registerSearchTool(
           minimum: 0,
           maximum: 1,
         }),
-        ...(memoryScope ? {team: McpInput.string(`Configured ${profileLabel} share`)} : {}),
+        ...(scopeSource ? {team: McpInput.string(`Configured ${profileLabel} share`)} : {}),
         workset: McpInput.string('Named workset'),
       },
     },
-    (
+    Effect.fn('mcp_server.recall')(function* (
       {
         budgetTokens,
         callerCwd,
@@ -886,7 +885,8 @@ export function registerSearchTool(
         workset,
       },
       {progress},
-    ) => {
+    ) {
+      const memoryScope = yield* resolveMemoryScope(scopeSource);
       const checkedUri = optionalResourceUri(uri, name);
       if (!checkedUri.ok) {
         return checkedUri.error;
@@ -894,23 +894,24 @@ export function registerSearchTool(
       if (workset?.trim() && memoryScope) {
         return argumentError(`${name} does not allow worksets in the ${memoryScope?.label ?? 'Cursor Cloud'} profile.`);
       }
-      let memoryConnections: ParsedRecallMemoryConnectionInput | undefined;
-      try {
-        const normalizedMemoryRefs = normalizeStringOrStrings(memoryRefs);
-        const normalizedRelationTypes = normalizeStringOrStrings(relationTypes);
-        if (normalizedRelationTypes.length > 0 && normalizedMemoryRefs.length === 0) {
-          return argumentError(`${name} relationTypes requires memoryRefs.`);
-        }
-        memoryConnections =
-          normalizedMemoryRefs.length > 0
+      const connections = yield* Effect.try({
+        try: () => {
+          const normalizedMemoryRefs = normalizeStringOrStrings(memoryRefs);
+          const normalizedRelationTypes = normalizeStringOrStrings(relationTypes);
+          if (normalizedRelationTypes.length > 0 && normalizedMemoryRefs.length === 0) {
+            throw new Error(`${name} relationTypes requires memoryRefs.`);
+          }
+          return normalizedMemoryRefs.length > 0
             ? parseRecallMemoryConnectionInput({
                 memoryRefs: normalizedMemoryRefs,
                 relationTypes: normalizedRelationTypes,
               })
             : undefined;
-      } catch (error) {
-        return argumentError(errorMessage(error));
-      }
+        },
+        catch: errorMessage,
+      }).pipe(Effect.result);
+      if (connections._tag === 'Failure') return argumentError(connections.failure);
+      const memoryConnections = connections.success;
       const normalizedQuery = query?.trim() ?? '';
       if (!normalizedQuery && memoryConnections === undefined) {
         return argumentError(
@@ -922,13 +923,13 @@ export function registerSearchTool(
         );
       }
       const requestedTeam = typeof team === 'string' ? team : undefined;
-      let selectedShare;
-      try {
-        selectedShare =
-          memoryScope && requestedTeam?.trim() ? cursorCloudShareForTeam(memoryScope, requestedTeam) : undefined;
-      } catch (error) {
-        return argumentError(errorMessage(error));
-      }
+      const selected = yield* Effect.try({
+        try: () =>
+          memoryScope && requestedTeam?.trim() ? cursorCloudShareForTeam(memoryScope, requestedTeam) : undefined,
+        catch: errorMessage,
+      }).pipe(Effect.result);
+      if (selected._tag === 'Failure') return argumentError(selected.failure);
+      const selectedShare = selected.success;
       if (memoryScope && requestedTeam?.trim() && !selectedShare) {
         return argumentError(`${name} team must be one of: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`);
       }
@@ -947,7 +948,7 @@ export function registerSearchTool(
       if (scopedUri && memoryScope && !cursorCloudUriWithinScope(memoryScope, scopedUri)) {
         return argumentError(`${name} uri must stay within a configured ${profileLabel} share.`);
       }
-      return runRecallTool(
+      return yield* runRecallTool(
         config,
         {
           budgetTokens,
@@ -978,7 +979,7 @@ export function registerSearchTool(
           ),
         ),
       );
-    },
+    }),
   );
 }
 
@@ -1357,9 +1358,9 @@ export function registerReadTool(
   config: RuntimeConfig,
   name: string,
   description: string,
-  memoryScope?: CursorCloudMemoryScope,
+  scopeSource?: MemoryScopeSource,
 ): void {
-  const profileLabel = memoryScope?.label ?? 'Personal Cursor Cloud';
+  const profileLabel = scopeSource?.label ?? 'Personal Cursor Cloud';
   server.registerTool(
     name,
     {
@@ -1388,6 +1389,7 @@ export function registerReadTool(
         return argumentError(`${name} section and offsetBytes require exactly one uri.`);
       }
       return Effect.gen(function* () {
+        const memoryScope = yield* resolveMemoryScope(scopeSource);
         const outsideScope = memoryScope
           ? requestedUris.find(
               requestedUri =>
