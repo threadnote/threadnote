@@ -14,6 +14,8 @@ it.skipIf(!archive)(
   async () => {
     if (!archive) throw new Error('Missing release archive.');
     const temporary = await mkdtemp(resolve(tmpdir(), 'threadnote-release-tools-'));
+    let bodyFailure: {readonly error: unknown} | undefined;
+    let cleanupFailure: {readonly error: unknown} | undefined;
     try {
       const tools = resolve(temporary, process.platform === 'win32' ? 'fixture-tools.exe' : 'fixture-tools');
       const harness = resolve(temporary, process.platform === 'win32' ? 'release-artifact.exe' : 'release-artifact');
@@ -44,9 +46,26 @@ it.skipIf(!archive)(
       );
       expect(result.error, result.error?.message).toBeUndefined();
       expect(result.status, `${result.stdout}\n${result.stderr}\nFixtures: ${nativeFixtures.join(', ')}`).toBe(0);
+    } catch (error) {
+      bodyFailure = {error};
     } finally {
-      await rm(temporary, {recursive: true, force: true});
+      try {
+        await rm(temporary, {recursive: true, force: true, maxRetries: 10, retryDelay: 50});
+      } catch (error) {
+        cleanupFailure = {error};
+      }
     }
+    if (bodyFailure && cleanupFailure) {
+      throw new AggregateError(
+        [bodyFailure.error, cleanupFailure.error],
+        'Release workflow and fixture cleanup both failed.',
+        {
+          cause: bodyFailure.error,
+        },
+      );
+    }
+    if (bodyFailure) throw bodyFailure.error;
+    if (cleanupFailure) throw cleanupFailure.error;
   },
   1_860_000,
 );
@@ -158,7 +177,7 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
     expect(failure.stdout.equals(expected.stdout)).toBe(true);
     expect(failure.stderr.equals(expected.stderr)).toBe(true);
   } finally {
-    await rm(temporary, {recursive: true, force: true});
+    await rm(temporary, {recursive: true, force: true, maxRetries: 10, retryDelay: 50});
   }
 }, 60_000);
 
@@ -374,6 +393,6 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     expect(unavailable.stdout.equals(content)).toBe(true);
     expect(unavailable.stderr.length).toBe(0);
   } finally {
-    await rm(temporary, {recursive: true, force: true});
+    await rm(temporary, {recursive: true, force: true, maxRetries: 10, retryDelay: 50});
   }
 }, 60_000);

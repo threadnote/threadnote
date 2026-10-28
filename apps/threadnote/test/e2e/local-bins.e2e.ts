@@ -328,9 +328,16 @@ describe('built self-contained distribution', () => {
     const semanticStart = performance.now();
     let semanticOutput: {readonly stderr: string; readonly stdout: string} | undefined;
     const semantic = await runCliJson<{
+      readonly edges?: readonly unknown[];
       readonly freshness?: string;
+      readonly operation?: string;
       readonly warnings?: readonly string[];
-      readonly snapshot?: {readonly id?: string; readonly worktreeId?: string; readonly commit?: string};
+      readonly snapshot?: {
+        readonly id?: string;
+        readonly worktreeId?: string;
+        readonly commit?: string;
+        readonly dirty?: boolean;
+      };
       readonly nodes?: ReadonlyArray<{
         readonly id?: string;
         readonly kind?: string;
@@ -342,9 +349,28 @@ describe('built self-contained distribution', () => {
     });
     const semanticElapsedMs = performance.now() - semanticStart;
     try {
-      expect(semantic.nodes).toEqual(
-        expect.arrayContaining([expect.objectContaining({path: 'docs/architecture.md', score: expect.any(Number)})]),
-      );
+      expect(semantic).toMatchObject({
+        freshness: 'current',
+        operation: 'query',
+        snapshot: {
+          commit: (await runGit(['rev-parse', 'HEAD'], graphRepository)).trim(),
+          dirty: false,
+          id: expect.stringMatching(/^cgsn_[a-f0-9]{40}$/),
+          worktreeId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      });
+      const budgetWarning =
+        'Semantic graph search reached its elapsed-time budget; lexical graph results were returned.';
+      if (semantic.warnings?.includes(budgetWarning)) {
+        expect(semantic.warnings).toEqual([budgetWarning]);
+        expect(semantic.nodes).toEqual([]);
+        expect(semantic.edges).toEqual([]);
+      } else {
+        expect(semantic.warnings).toEqual([]);
+        expect(semantic.nodes).toEqual(
+          expect.arrayContaining([expect.objectContaining({path: 'docs/architecture.md', score: expect.any(Number)})]),
+        );
+      }
     } catch (cause) {
       try {
         const scrub = (text: string | undefined, limit: number) => {

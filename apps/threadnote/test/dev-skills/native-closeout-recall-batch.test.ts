@@ -5,6 +5,9 @@ import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store'
 import {nativeCloseoutFixture} from './native-closeout-fixture.js';
 import {runCloseout} from './native-closeout-diagnostics.js';
 
+// P0 Windows allowance for three real archive/recovery paths beyond 30s; revisit with performance data.
+const windowsArchiveTimeout = process.platform === 'win32' ? {timeout: 120_000} : undefined;
+
 const samples = vi.hoisted(() => ({
   refreshes: [] as {uris: readonly string[]; receipt: boolean}[],
   acknowledgements: [] as {uris: readonly string[]; inactive: boolean; succeeded: boolean}[],
@@ -93,6 +96,7 @@ const proposalFor = (value: unknown, includeCodeRefs = true) => {
 };
 
 for (const outcome of ['success', 'lost-response', 'interrupted'] as const) {
+  // prettier-ignore
   it.effect(`batches real owned archives and resumes ${outcome}`, () =>
     Effect.gen(function* () {
       const f = yield* nativeCloseoutFixture(false);
@@ -195,5 +199,6 @@ for (const outcome of ['success', 'lost-response', 'interrupted'] as const) {
       const unrelated = object(yield* f.call({...f.base('read', 'plan-run'), uri: f.unrelated.uri}));
       expect(object(unrelated.artifact).state).toBe('active');
     }).pipe(runCloseout),
+    windowsArchiveTimeout,
   );
 }

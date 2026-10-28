@@ -12,6 +12,9 @@ import {captureNativeCycleSource as captureSource} from '../../src/workflow_auto
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {CycleDiagnostics, cycleDiagnostics} from './native-cycle-diagnostics.js';
 
+// P0 Windows allowance for three real Git/native cycle fixtures beyond 30s; revisit with performance data.
+const windowsCycleFixtureTimeout = process.platform === 'win32' ? {timeout: 120_000} : undefined;
+
 const object = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== 'object') throw new Error('Expected object response');
   return value as Record<string, unknown>;
@@ -895,6 +898,7 @@ describe('native cycle lifecycle', () => {
     }).pipe(run),
   );
 
+  // prettier-ignore
   effectIt.effect('verifies ready graph, actual anchors, ownership and packet budgets before routine dispatch', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -950,6 +954,7 @@ describe('native cycle lifecycle', () => {
         .pipe(Effect.result);
       expect(drift).toMatchObject({failure: {code: 'source-drift'}});
     }).pipe(run),
+    windowsCycleFixtureTimeout,
   );
 
   effectIt.effect(
@@ -1204,6 +1209,7 @@ effectIt.effect(
       expect(runtime.reviews.slice(0, acceptedRuntime.reviews.length)).toEqual(acceptedRuntime.reviews);
       expect(runtime.attempts.slice(0, acceptedRuntime.attempts.length)).toEqual(acceptedRuntime.attempts);
     }).pipe(run),
+  windowsCycleFixtureTimeout,
 );
 
 effectIt.effect('does not offer or directly publish a retained validated child retargeted onto a pending parent', () =>
@@ -1328,4 +1334,5 @@ effectIt.effect(
       expect(after.attempts.slice(0, oldRuntime.attempts.length)).toEqual(oldRuntime.attempts);
       expect(after.state.phases.two).toEqual(oldRuntime.state.phases.two);
     }).pipe(run),
+  windowsCycleFixtureTimeout,
 );

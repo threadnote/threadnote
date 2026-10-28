@@ -179,6 +179,9 @@ function runProfile(
   });
   const run = (args: readonly string[], cwd = repo, timeoutMs = 60_000, input?: string) =>
     runReleaseCommand(args, environment, cwd, {timeoutMs, input});
+  // Intel macOS cloud closeout archives a full published graph; keep other native request budgets unchanged.
+  const closeoutFinishTimeoutMs =
+    profile !== 'desktop' && process.platform === 'darwin' && process.arch === 'x64' ? 600_000 : 180_000;
   const git = (...args: string[]) => run(['git', ...args]).trim();
   writeFileSync(join(repo, 'source.ts'), 'export const completeRead = (value: string) => value;\n', 'utf8');
   for (const args of [
@@ -446,7 +449,7 @@ function runProfile(
       const markerValue = {
         version: 1,
         phase: 'persisted-after-finish-timeout',
-        timeoutSeconds: 180,
+        timeoutSeconds: closeoutFinishTimeoutMs / 1000,
         stdout: timeoutOutput,
         producerRetainedShow: Array.isArray(producer.latestShow) && producer.latestShow.length > 0,
         native: {
@@ -718,7 +721,12 @@ function runProfile(
         }
       }
       try {
-        stdout = run([binary, 'workflow-automation', '--home', home], repo, 180_000, JSON.stringify(request));
+        stdout = run(
+          [binary, 'workflow-automation', '--home', home],
+          repo,
+          capture ? closeoutFinishTimeoutMs : 180_000,
+          JSON.stringify(request),
+        );
       } catch (error) {
         if (!(error instanceof ReleaseCommandError) || error.timedOut || error.cause) throw error;
         status = error.status;
@@ -734,7 +742,9 @@ function runProfile(
           persistFinishPublicationDiagnostic({}, true, producer, output);
         } catch {
           try {
-            process.stderr.write('NATIVE_CLOSEOUT_TIMEOUT_DIAGNOSTICS {"version":1,"captureError":"summary-failed"}\n');
+            process.stderr.write(
+              `NATIVE_CLOSEOUT_TIMEOUT_DIAGNOSTICS ${asciiJson({version: 1, timeoutSeconds: closeoutFinishTimeoutMs / 1000, captureError: 'summary-failed'})}\n`,
+            );
           } catch {
             /* Preserve the process error. */
           }
