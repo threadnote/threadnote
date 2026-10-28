@@ -229,7 +229,7 @@
       },
       "productionQualified": false,
       "blockers": [
-        "Representative edit-based code action, interpreter switching, dynamic analysis limits, other platforms and final product conformance remain unqualified."
+        "Dynamic interpreter/import-hook environments, dynamic analysis limits, other platforms, installed runtime integration and final product conformance require their own current evidence. P03 source fixtures cover static environment switching and a representative inline action; productionQualified remains false."
       ],
       "pilotEvidence": [
         {
@@ -245,7 +245,45 @@
           },
           "outcome": "passed"
         }
-      ]
+      ],
+      "implementationProfile": {
+        "phase": "P03",
+        "status": "experimental-static-environment",
+        "serverEntry": "langserver.index.js",
+        "serverBundleSha256": "3ff64ca89ba46d04a7e8410955f20fb5e02d6b76d9a76f92e57bf43c95635c33",
+        "metadataFormat": "threadnote-static-python-environment-v1",
+        "pythonVersion": [3, 12, 13],
+        "interpreterExecution": false,
+        "intrinsicMetadataProbeSha256": {
+          "paths": "d8a7c87965c4ad49200fda06dd4fb09f6229e65c4a188553889562c01c615510",
+          "version": "5811c668ec7eb72ffad07fa10823ada5a40e9392137033a876850ac30ebd1230"
+        },
+        "operations": [
+          "symbols",
+          "definition",
+          "references",
+          "hover",
+          "versioned-diagnostics",
+          "source-versioned-rename-preparation",
+          "inline-quickfix-preparation",
+          "read-only-completion",
+          "call-hierarchy"
+        ],
+        "denied": [
+          "workspace/executeCommand",
+          "workspace/applyEdit",
+          "resource-operations",
+          "import-hooks",
+          "environment-activation",
+          "automatic-downloads"
+        ],
+        "limitations": [
+          "Explicit host-qualified static environment manifests only; runtime version and dependency provenance are host supplied, not observed by interpreter execution.",
+          "Unsupported or external configuration, competing execution environments, executable or escaping .pth files, symlinks and provider-unavailable optional operations fail explicitly. Completion suggestions omit commands and unversioned insert/import edits.",
+          "Experimental POSIX profile; packaged public proposal/application surfaces and complete platform/performance/GA qualification belong to later phases."
+        ],
+        "sourceEvidence": ["apps/threadnote/test/unit/semantic-python.test.ts"]
+      }
     },
     {
       "id": "python-lsp-server+pylsp-rope",

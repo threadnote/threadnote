@@ -311,6 +311,31 @@ const coordinatorFixture = Effect.gen(function* () {
   return {fs, path, root, coordinator, candidate};
 });
 describe.skipIf(process.platform === 'win32')('semantic coordinator with injected runtime version probe', () => {
+  effectIt.effect('rejects relative host paths and excluded Git sources before provider execution', () =>
+    Effect.gen(function* () {
+      const {path, root, candidate, coordinator} = yield* coordinatorFixture;
+      for (const field of ['runtime', 'serverDirectory', 'sdkDirectory'] as const) {
+        const relative = path.relative(process.cwd(), candidate[field]);
+        expect(path.isAbsolute(relative)).toBe(false);
+        expect(
+          (yield* Effect.exit(
+            makeSemanticCoordinator({enabled: true, dataHome: root, candidate: {...candidate, [field]: relative}}),
+          ))._tag,
+        ).toBe('Failure');
+      }
+      const uri = (yield* path.toFileUrl(root)).href;
+      const metadataSource = observation('x', {worktree: uri, project: uri, uri: uri + '/.git/hidden.ts'});
+      expect((yield* Effect.exit(coordinator.attach(metadataSource, 'x', 'typescript')))._tag).toBe('Failure');
+      expect((yield* coordinator.status).providers).toBe(0);
+    }).pipe(
+      // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow OS test entrypoint.
+      Effect.provide(coordinatorIo),
+      Effect.provideService(CommandExecutor, versionProbe),
+      Effect.provideService(ChildEnvironmentPolicy, {sanitizeExternal: env => env, preserveIntendedChild: env => env}),
+      TestClock.withLive,
+    ),
+  );
+
   effectIt.effect.prop(
     'gives concurrent first attachments exactly one durable view capability',
     [Schema.Int.check(Schema.isBetween({minimum: 2, maximum: 6}))],

@@ -10,11 +10,18 @@ import {
   type QueryOutcome,
 } from '@threadnote/semantic/contracts';
 import {LspFault, type LspClient} from '../lsp_transport.js';
+import {
+  SemanticSessionFault,
+  SemanticRange as Range,
+  validTextPosition,
+  wellFormed,
+  type SemanticDiagnostic,
+  type DiagnosticSnapshot,
+  type DiagnosticDelta,
+} from '../provider.js';
+export {SemanticSessionFault, validTextPosition} from '../provider.js';
+export type {SemanticDiagnostic, DiagnosticSnapshot, DiagnosticDelta} from '../provider.js';
 
-export class SemanticSessionFault extends Schema.TaggedError<SemanticSessionFault>()('SemanticSessionFault', {
-  reason: Schema.Literals(['invalid', 'conflict', 'stale', 'not-ready', 'provider']),
-}) {}
-const Range = Schema.Struct({start: Position, end: Position});
 const Location = Schema.Struct({uri: FileUri, range: Range});
 const LocationLink = Schema.Struct({
   targetUri: FileUri,
@@ -32,26 +39,6 @@ const Diagnostic = Schema.Struct({
   category: Schema.String,
   code: Counter,
 });
-export interface SemanticDiagnostic {
-  readonly id: string;
-  readonly range: typeof Range.Type;
-  readonly message: string;
-  readonly category: string;
-  readonly code: number;
-}
-export interface DiagnosticSnapshot {
-  readonly observation: Observation;
-  readonly items: readonly SemanticDiagnostic[];
-}
-export interface DiagnosticDelta extends DiagnosticSnapshot {
-  readonly added: readonly SemanticDiagnostic[];
-  readonly remaining: readonly SemanticDiagnostic[];
-  readonly resolved: readonly {
-    readonly item: SemanticDiagnostic;
-    readonly observation: Observation;
-    readonly resolvedIn: Observation;
-  }[];
-}
 interface OpenDocument {
   observation: Observation;
   readonly text: string;
@@ -73,26 +60,6 @@ const invalid = () => SemanticSessionFault.make({reason: 'invalid'});
 const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown) =>
   Schema.decodeUnknownEffect(schema)(input).pipe(Effect.mapError(invalid));
 
-/** UTF-16 LSP positions must be within a line and cannot split a surrogate pair. */
-export function validTextPosition(text: string, position: Position): boolean {
-  if (!Schema.is(Position)(position)) return false;
-  const lines = text.split(/\r\n|\r|\n/u);
-  const line = lines[position.line];
-  if (line === undefined || position.character > line.length) return false;
-  const before = line.charCodeAt(position.character - 1);
-  const after = line.charCodeAt(position.character);
-  return !(before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff);
-}
-function wellFormed(text: string): boolean {
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = text.charCodeAt(++i);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
-    } else if (code >= 0xdc00 && code <= 0xdfff) return false;
-  }
-  return true;
-}
 const sameBasis = (a: Observation, b: Observation) =>
   observationKey({
     ...a,
