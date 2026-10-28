@@ -20,6 +20,7 @@ import {
   TopicSourceEvidence,
 } from './topic_review_presentation.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
+import {evidenceReadError, maintenanceEvidenceBusy} from './evidence_refresh.js';
 import {memoryDocumentParts} from '../library_model.js';
 import type {ManagerContextMaintenancePacketV2, ManagerMaintenanceRefreshResultV1} from './contracts.js';
 import type {
@@ -115,6 +116,7 @@ export function TopicReviewContent(
     previousPacketRevision.current = packetRevision;
     const selectedRefreshRequested = refreshRequested.current;
     refreshRequested.current = false;
+    const retained = activeSelection.current === selectionKey ? {packet, review, draft} : undefined;
     if (
       activeSelection.current === selectionKey &&
       review &&
@@ -164,6 +166,7 @@ export function TopicReviewContent(
       return () => controller.abort();
     }
     async function load() {
+      let selectedObservationPending = false;
       let privateLoad =
         sourceKind === 'obsidian' ||
         review?.sourceKind === 'obsidian' ||
@@ -198,6 +201,7 @@ export function TopicReviewContent(
       try {
         let currentPacket = freshProvidedPacket ? props.initialPacket : undefined;
         if (selectedRefreshRequested) {
+          selectedObservationPending = !!props.onRefreshEvidence || !!caseId;
           if (props.onRefreshEvidence) currentPacket = await props.onRefreshEvidence();
           else if (caseId) {
             const refreshed = await api<ManagerMaintenanceRefreshResultV1>(
@@ -209,6 +213,7 @@ export function TopicReviewContent(
               throw new Error('reason' in refreshed ? refreshed.reason : 'Current selected evidence is unavailable.');
             currentPacket = refreshed.packet;
           }
+          selectedObservationPending = false;
           if (controller.signal.aborted || operationEpoch.current !== epoch) return;
           if (caseId && (!currentPacket || currentPacket.project !== props.project || currentPacket.caseId !== caseId))
             throw new Error('The selected evidence could not be refreshed. Check source access and try again.');
@@ -297,6 +302,16 @@ export function TopicReviewContent(
         }
       } catch (cause) {
         if (!controller.signal.aborted && operationEpoch.current === epoch) {
+          // Restore only when this selected observation never entered; later source/read failures still redact.
+          if (selectedObservationPending && maintenanceEvidenceBusy(cause)) {
+            if (retained) {
+              setPacket(retained.packet);
+              setReview(retained.review);
+              setDraft(retained.draft);
+            }
+            setError(evidenceReadError(cause));
+            return;
+          }
           if (privateLoad) {
             heldDraft.current = undefined;
             setReview(undefined);
@@ -720,6 +735,7 @@ export function TopicReviewContent(
             onClick={() => {
               setError('');
               setNotice('');
+              setLoading(true);
               refreshRequested.current = true;
               setGeneration(value => value + 1);
             }}
@@ -782,6 +798,7 @@ export function TopicReviewContent(
           onClick={() => {
             setError('');
             setNotice('');
+            setLoading(true);
             refreshRequested.current = true;
             setGeneration(value => value + 1);
           }}

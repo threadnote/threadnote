@@ -2,9 +2,16 @@
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
+import fc from 'fast-check';
 import {MaintenanceCaseDialog, MaintenanceTaskDialog} from '../../src/attention/maintenance_dialogs.js';
 import {HealthDetail} from '../../src/attention_details.js';
-import type {ManagerContextMaintenanceCaseV2} from '../../src/attention/contracts.js';
+import type {
+  ManagerContextMaintenanceCaseV2,
+  ManagerContextMaintenancePacketV2,
+} from '../../src/attention/contracts.js';
+import type {ManagerTopicReviewV1} from '../../src/attention/topic_contracts.js';
+import {ManagerApiError} from '../../src/ui/support.js';
+import {evidenceReadError, maintenanceEvidenceBusy} from '../../src/attention/evidence_refresh.js';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import type {MemoryRecord} from '@threadnote/memory/document';
 
@@ -444,3 +451,425 @@ it('redacts the previous stored memory synchronously when selecting another sour
   await act(async () => pending.resolve(response({content: '# Current selected source'})));
   expect(memory.textContent).toContain('Current selected source');
 });
+
+async function privateTopicBusyFixture() {
+  const hash = 'a'.repeat(64);
+  const selected = {...item, family: 'topic-maintenance', slot: 'declared-support'};
+  const selectedPacket: ManagerContextMaintenancePacketV2 = {
+    ...packet,
+    version: 2,
+    evidence: undefined,
+    family: selected.family,
+    slot: selected.slot,
+    reviewId: 'private-topic-review',
+    topicEvidence: {
+      version: 2,
+      sourceKind: 'obsidian',
+      outcome: 'ready',
+      targetUri: memoryUri,
+      targetHash: hash,
+      observationRevision: hash,
+      coverage: 'declared-only',
+      canDraft: true,
+      body: 'PRIVATE ACCEPTED CLAIM',
+      paragraphs: [],
+      additionalDependencies: [],
+      obsidian: {
+        current: {
+          sourceId: 'source',
+          sourceInstanceId: 'instance',
+          noteId: 'note',
+          relativePath: 'private.md',
+          revisionHash: hash,
+          sanitizerVersion: 'v1',
+          accessHash: hash,
+          vaultHash: hash,
+          inspectionDigest: hash,
+          content: 'PRIVATE SUPPORT EXCERPT',
+          startOffset: 0,
+          endOffset: 23,
+          truncated: false,
+        },
+      },
+    },
+  };
+  const review: ManagerTopicReviewV1 = {
+    version: 1,
+    kind: 'topic-maintenance',
+    project: 'threadnote',
+    reviewId: selectedPacket.reviewId!,
+    revision: 3,
+    state: 'pending',
+    topic: 'Private topic',
+    caseId: selected.caseId,
+    sourceKind: 'obsidian',
+    caseObservationMatches: true,
+    targetUri: memoryUri,
+    targetHash: hash,
+    acceptedBody: 'PRIVATE ACCEPTED CLAIM',
+    observationRevision: hash,
+    coverage: 'declared-only',
+    generation: {origin: 'manual', agent: 'user', model: 'manual', attempts: 0, usage: {status: 'unavailable'}},
+    draft: {
+      version: 1,
+      targetHash: hash,
+      observationRevision: hash,
+      packetDigest: hash,
+      outcome: 'propose-revalidation',
+      operations: [],
+      reviewedHandles: ['current:source'],
+      rationale: 'Review existing claim.',
+      unresolvedQuestions: [],
+      removedClaims: [],
+    },
+    proposal: {body: 'PRIVATE PREPARED COMPARISON', finalBodyHash: hash, changedOrdinals: []},
+    paragraphs: [],
+    additionalDependencies: [],
+    support: [],
+    warnings: [],
+    canApply: true,
+    approval: {
+      stage: 'preview',
+      reviewRevision: 3,
+      approvalDigest: hash,
+      content: 'PRIVATE PREPARED COMPARISON',
+      contentHash: hash,
+      metadataDiff: [],
+    },
+  };
+  let failure: {status: number; code?: string} | undefined;
+  let reviewFailure: {status: number; code?: string} | undefined;
+  let held: Promise<Response> | undefined;
+  let heldSignal: AbortSignal | null | undefined;
+  const fetch = vi.fn(async (path: string, init?: RequestInit) => {
+    const project =
+      init?.method === 'POST'
+        ? JSON.parse(String(init.body)).project
+        : new URL(path, 'http://manager.test').searchParams.get('project');
+    if (project && project !== 'threadnote')
+      return response({error: 'This scope no longer authorizes the review.'}, 403);
+    if (path.startsWith('/api/consolidation-models')) return response({models: []});
+    if (path.startsWith('/api/attention/topic-review')) {
+      if (init?.method === 'POST') throw new Error('This observation test must not mutate a topic review.');
+      return reviewFailure
+        ? response({error: 'Later source review refused.', code: reviewFailure.code}, reviewFailure.status)
+        : response(review);
+    }
+    if (path.startsWith('/api/memory?')) return response({content: 'PRIVATE ACCEPTED CLAIM'});
+    if (init?.method === 'POST' && held) {
+      const pending = held;
+      held = undefined;
+      heldSignal = init.signal;
+      return pending;
+    }
+    if (init?.method === 'POST')
+      return failure
+        ? response(
+            {error: 'Untrusted backend detail must not appear as busy guidance.', code: failure.code},
+            failure.status,
+          )
+        : response({outcome: 'ready', item: selected, packet: selectedPacket});
+    return response(path.includes('view=status') ? {version: 2, cases: [selected]} : selectedPacket);
+  });
+  vi.stubGlobal('fetch', fetch);
+  const element = (stale = false, project = 'threadnote') => (
+    <MaintenanceCaseDialog {...base} project={project} initialCase={selected} stale={stale} />
+  );
+  await render(element());
+  return {
+    fetch,
+    element,
+    fail: (status: number, code?: string) => {
+      failure = {status, code};
+    },
+    recover: () => {
+      failure = undefined;
+    },
+    failReview: (status: number, code?: string) => {
+      reviewFailure = {status, code};
+    },
+    hold: (promise: Promise<Response>) => {
+      held = promise;
+    },
+    signal: () => heldSignal,
+    ready: () => response({outcome: 'ready', item: selected, packet: selectedPacket}),
+  };
+}
+
+it('keeps a private prepared comparison through exact maintenance busy and resumes only after a fresh observation', async () => {
+  vi.useFakeTimers();
+  const fixture = await privateTopicBusyFixture();
+  const content = document.querySelector('.topic-review-content');
+  const apply = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+    button => button.textContent?.trim() === 'Confirm unchanged',
+  );
+  expect(apply?.disabled).toBe(false);
+  expect(content?.textContent).toContain('PRIVATE PREPARED COMPARISON');
+  fixture.fail(503, 'context-maintenance-busy');
+  await render(fixture.element(true));
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(document.querySelector('.topic-review-content')).toBe(content);
+  expect(content?.textContent).toContain('PRIVATE PREPARED COMPARISON');
+  expect(apply?.disabled).toBe(true);
+  expect(document.body.textContent).toContain('Maintenance is busy. Check current evidence to try again.');
+  expect(document.body.textContent).not.toContain('Untrusted backend detail');
+  const posts = () => fixture.fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
+  expect(posts()).toHaveLength(3);
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(posts()).toHaveLength(3);
+  fixture.recover();
+  await click('Check current evidence');
+  expect(document.querySelector('.topic-review-content')).toBe(content);
+  expect(apply?.disabled).toBe(false);
+  expect(posts()).toHaveLength(4);
+  expect(posts().every(([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case')).toBe(true);
+});
+
+it.each([
+  [503, undefined],
+  [503, 'different-code'],
+  [500, 'context-maintenance-busy'],
+  [401, 'context-maintenance-busy'],
+  [403, 'context-maintenance-busy'],
+  [404, 'context-maintenance-busy'],
+] as const)('does not treat status %s and code %s as proven maintenance busy', async (status, code) => {
+  vi.useFakeTimers();
+  const fixture = await privateTopicBusyFixture();
+  expect(document.body.textContent).toContain('PRIVATE PREPARED COMPARISON');
+  fixture.fail(status, code);
+  await render(fixture.element(true));
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(document.body.textContent).not.toContain('PRIVATE PREPARED COMPARISON');
+  expect(document.body.textContent).not.toContain('Maintenance is busy.');
+  expect(maintenanceEvidenceBusy(ManagerApiError.of('Synthetic refusal.', status, code))).toBe(false);
+  const posts = fixture.fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
+  expect(posts).toHaveLength([401, 403, 404].includes(status) ? 1 : 3);
+});
+
+it('classifies network failures as generic evidence errors rather than maintenance acquisition busy', () => {
+  const network = new TypeError('Network request failed.');
+  expect(maintenanceEvidenceBusy(network)).toBe(false);
+  expect(evidenceReadError(network)).toBe(
+    'Current evidence could not be checked. Check current evidence to try again.',
+  );
+});
+
+it('keeps a private prepared comparison when the topic review’s own refresh reports exact maintenance busy', async () => {
+  vi.useFakeTimers();
+  const fixture = await privateTopicBusyFixture();
+  expect(document.body.textContent).toContain('PRIVATE PREPARED COMPARISON');
+  fixture.fail(503, 'context-maintenance-busy');
+  await click('Refresh evidence');
+  expect(document.body.textContent).not.toContain('PRIVATE PREPARED COMPARISON');
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(document.body.textContent).toContain('PRIVATE PREPARED COMPARISON');
+  expect(document.body.textContent).toContain('Maintenance is busy. Check current evidence to try again.');
+  expect(
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+      button => button.textContent?.trim() === 'Confirm unchanged',
+    )?.disabled,
+  ).toBe(true);
+});
+
+it.each([503, 401, 403, 404])(
+  'does not restore a private comparison when a later review read returns %s after busy recovery',
+  async status => {
+    vi.useFakeTimers();
+    const fixture = await privateTopicBusyFixture();
+    fixture.fail(503, 'context-maintenance-busy');
+    await click('Refresh evidence');
+    await act(async () => vi.advanceTimersByTimeAsync(1500));
+    expect(document.body.textContent).toContain('PRIVATE PREPARED COMPARISON');
+    fixture.recover();
+    fixture.failReview(status, 'context-maintenance-busy');
+    await click('Refresh evidence');
+    expect(document.body.textContent).not.toContain('PRIVATE PREPARED COMPARISON');
+    expect(document.body.textContent).not.toContain('PRIVATE SUPPORT EXCERPT');
+    expect(document.body.textContent).not.toContain('Maintenance is busy. Check current evidence');
+    expect(document.body.textContent).toContain('Later source review refused.');
+    expect(
+      [...document.querySelectorAll<HTMLButtonElement>('.topic-review-content button')].filter(button =>
+        ['Apply update', 'Confirm unchanged'].includes(button.textContent?.trim() ?? ''),
+      ),
+    ).toHaveLength(0);
+  },
+);
+
+it('preserves the chosen semantic outcome and prepared preview through busy while confirmation stays blocked', async () => {
+  vi.useFakeTimers();
+  const memory = (name: string, body: string): MemoryRecord => ({
+    uri: `threadnote://memory/${name}`,
+    body,
+    content: body,
+    headerTitle: 'MEMORY',
+    metadata: {
+      kind: 'durable',
+      project: 'threadnote',
+      status: 'active',
+      sourceAgentClient: 'test',
+      timestamp: '2026-01-01',
+    },
+  });
+  const semantic = buildContextHealthReport({
+    project: 'threadnote',
+    records: [memory('left', 'Timeout is 60 seconds.'), memory('right', 'Timeout must be 30 seconds.')],
+    now: new Date('2026-06-01'),
+  }).findings[0].semanticEvidence!;
+  const selected = {...item, family: 'semantic-contradiction'};
+  const selectedPacket = {...packet, family: selected.family, semanticEvidence: semantic, evidence: undefined};
+  let busy = false;
+  const fetch = vi.fn(async (path: string, init?: RequestInit) => {
+    if (path.endsWith('/preview'))
+      return response({
+        preview: {
+          previewId: 'selected-preview',
+          revision: 'exact-revision',
+          choice: 'both',
+          mode: 'keep-both',
+          summary: 'Both memories remain current.',
+        },
+      });
+    if (path.endsWith('/apply')) throw new Error('Busy/recovery must not apply a saved choice.');
+    if (init?.method === 'POST')
+      return busy
+        ? response({code: 'context-maintenance-busy', error: 'Do not display a lock path /private/lock.'}, 503)
+        : response({outcome: 'ready', item: selected, packet: selectedPacket});
+    return response(path.includes('view=status') ? {version: 2, cases: [selected]} : selectedPacket);
+  });
+  vi.stubGlobal('fetch', fetch);
+  await render(<MaintenanceCaseDialog {...base} initialCase={selected} />);
+  await act(async () => document.querySelector<HTMLInputElement>('input[value="both"]')!.click());
+  await click('Preview my choice');
+  const comparison = document.querySelector('[aria-label="Review your choice"]');
+  const confirm = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+    button => button.textContent?.trim() === 'Confirm both apply',
+  )!;
+  expect(confirm.disabled).toBe(false);
+  busy = true;
+  await click('Refresh evidence');
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(document.querySelector<HTMLInputElement>('input[value="both"]')?.checked).toBe(true);
+  expect(document.querySelector('[aria-label="Review your choice"]')).toBe(comparison);
+  expect(confirm.disabled).toBe(true);
+  expect(document.body.textContent).not.toContain('/private/lock');
+  busy = false;
+  await click('Check current evidence');
+  expect(document.querySelector<HTMLInputElement>('input[value="both"]')?.checked).toBe(true);
+  expect(confirm.disabled).toBe(false);
+  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/preview'))).toHaveLength(1);
+  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/apply'))).toHaveLength(0);
+});
+
+it('never restores an old private review across bounded observation-completion and scope-change orders', async () => {
+  vi.useFakeTimers();
+  await fc.assert(
+    fc.asyncProperty(
+      fc.constantFrom('busy', 'ready', 'denial'),
+      fc.constantFrom('project-change', 'unmount'),
+      fc.boolean(),
+      async (completion, scope, finishFirst) => {
+        const fixture = await privateTopicBusyFixture();
+        const pending = Promise.withResolvers<Response>();
+        fixture.fail(503, 'context-maintenance-busy');
+        fixture.hold(pending.promise);
+        let finished = false;
+        const finish = async () => {
+          if (finished) return;
+          finished = true;
+          await act(async () =>
+            pending.resolve(
+              completion === 'ready'
+                ? fixture.ready()
+                : response(
+                    {code: 'context-maintenance-busy', error: 'Selected observation did not complete.'},
+                    completion === 'busy' ? 503 : 403,
+                  ),
+            ),
+          );
+          await act(async () => vi.advanceTimersByTimeAsync(1500));
+        };
+        try {
+          await click('Refresh evidence');
+          expect(fixture.signal()?.aborted).toBe(false);
+          if (finishFirst) {
+            await finish();
+            if (completion === 'denial') expect(document.body.textContent).not.toContain('PRIVATE PREPARED COMPARISON');
+            else expect(document.body.textContent).toContain('PRIVATE PREPARED COMPARISON');
+          }
+          if (scope === 'project-change') await render(fixture.element(false, 'other'));
+          else await render(<MaintenanceTaskDialog task="Current unrelated view" onClose={() => {}} />);
+          if (!finishFirst) expect(fixture.signal()?.aborted).toBe(true);
+          expect(document.body.textContent).not.toContain('PRIVATE PREPARED COMPARISON');
+          await finish();
+          expect(document.body.textContent).not.toContain('PRIVATE PREPARED COMPARISON');
+          expect(document.body.textContent).not.toContain('PRIVATE SUPPORT EXCERPT');
+        } finally {
+          await finish();
+          await render(<></>);
+        }
+      },
+    ),
+    {numRuns: 12},
+  );
+});
+
+it.each(['relation', 'shared-owner-proposal'])(
+  'recovers an initially busy %s case into a selected inspection-only packet',
+  async family => {
+    vi.useFakeTimers();
+    const selected = {...item, family, slot: family === 'relation' ? 'threadnote://memory/tn_target' : 'relations'};
+    const instructions = 'Selected target evidence is current; absence and repair authority remain unverified.';
+    const fresh = {
+      ...packet,
+      family,
+      evidenceRevision: 'current-selected-revision',
+      reason: 'selected-relation-evidence-incomplete',
+      evidence: undefined,
+      instructions,
+      allowedOperations: ['read_context', 'context_maintenance_packet'],
+      ownerProposal:
+        family === 'shared-owner-proposal'
+          ? {
+              proposalRevision: 'owner-revision',
+              expectedContentHash: 'hash',
+              selectedEdits: [],
+              omittedEdits: 0,
+              publication: {
+                instructions: 'The shared owner must verify team authority before proposing any canonical change.',
+              },
+            }
+          : undefined,
+    };
+    let busy = true;
+    const fetch = vi.fn(async (path: string, init?: RequestInit) => {
+      if (path.startsWith('/api/memory?')) return response({content: 'Selected canonical relation subject.'});
+      if (init?.method === 'POST')
+        return busy
+          ? response({code: 'context-maintenance-busy', error: 'Controlled acquisition busy.'}, 503)
+          : response({
+              outcome: 'ready',
+              item: {...selected, evidenceRevision: 'current-selected-revision'},
+              packet: fresh,
+            });
+      return response(path.includes('view=status') ? {version: 2, cases: [selected]} : fresh);
+    });
+    vi.stubGlobal('fetch', fetch);
+    await render(<MaintenanceCaseDialog {...base} initialCase={selected} stale />);
+    await act(async () => vi.advanceTimersByTimeAsync(1500));
+    expect(document.body.textContent).toContain('Maintenance is busy. Check current evidence to try again.');
+    expect(document.body.textContent).not.toContain('Your review is kept');
+    busy = false;
+    await click('Check current evidence');
+    expect(document.body.textContent).toContain(instructions);
+    if (family === 'shared-owner-proposal')
+      expect(document.body.textContent).toContain('The shared owner must verify team authority');
+    const posts = fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
+    expect(posts).toHaveLength(4);
+    expect(posts.every(([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case')).toBe(true);
+    expect(
+      [...document.querySelectorAll<HTMLButtonElement>('button')].some(
+        button => button.textContent?.trim() === 'Apply update',
+      ),
+    ).toBe(false);
+  },
+);

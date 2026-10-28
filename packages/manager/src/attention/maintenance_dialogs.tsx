@@ -10,7 +10,7 @@ import {MemoryExcerpt} from '../review_presentation.js';
 import {SourceExcerpt} from '../source_code.js';
 import {memoryDocumentParts} from '../library_model.js';
 import {api, ManagerApiError} from '../ui/support.js';
-import {evidenceReadError, retryEvidenceRead} from './evidence_refresh.js';
+import {evidenceReadError, maintenanceEvidenceBusy, retryEvidenceRead} from './evidence_refresh.js';
 import type {
   ManagerContextMaintenanceCaseV2,
   ManagerContextMaintenancePacketV2,
@@ -217,7 +217,7 @@ export function MaintenanceCaseDialog(props: {
         }
         if (!current()) return;
         if (
-          packet?.topicEvidence?.version === 2 ||
+          (packet?.topicEvidence?.version === 2 && !maintenanceEvidenceBusy(cause)) ||
           (Schema.is(ManagerApiError)(cause) && [401, 403, 404].includes(cause.status))
         ) {
           setPacket(undefined);
