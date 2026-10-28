@@ -45,6 +45,22 @@ export interface ContextMaintenanceReadOptions {
   readonly receiptId?: string;
 }
 
+/** A bounded readable-resource observation is never proof that an unobserved target is absent. */
+export interface ContextMaintenanceRelationResourceObservation {
+  readonly uri: string;
+  readonly sourceHash?: string;
+  readonly memoryId?: string;
+  readonly status?: string;
+}
+
+export interface ContextMaintenanceRelationEvidence {
+  readonly completeness: 'selected-only';
+  readonly provenance: 'bounded-selected-resource-read';
+  readonly subject: ContextMaintenanceRelationResourceObservation;
+  /** Target observations exclude the subject, which the packet's existing subject fences re-read. */
+  readonly observations: readonly ContextMaintenanceRelationResourceObservation[];
+}
+
 export interface ContextMaintenanceCaseV2 {
   readonly caseId: string;
   readonly project: string;
@@ -80,6 +96,7 @@ export interface ContextMaintenanceCaseV2 {
   readonly causeKey?: string;
   readonly repositoryId?: string;
   readonly subjectContentHashes?: readonly {readonly uri: string; readonly hash: string}[];
+  readonly relationEvidence?: ContextMaintenanceRelationEvidence;
   readonly candidateReview?: {readonly reviewId: string; readonly revision: number; readonly candidateRevision: string};
   readonly sourceSnapshot?: {readonly cwd: string; readonly generation: string; readonly revision: string};
   readonly sourceSnapshots?: readonly {

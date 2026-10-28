@@ -98,6 +98,7 @@ import {
   selectMaintenanceWorkAndRequestCursor,
 } from './maintenance_decisions.js';
 import {readMemoryRecordsByUri, resourceExists} from '../../mcp/server/memory.js';
+import * as selectedMaintenance from './maintenance_refresh.js';
 export {runContextMaintainCommand} from './maintenance_commands.js';
 import {collectContextHealthEvidence} from './health_commands.js';
 import {contextHealthFindingCaseIdentityV2} from '@threadnote/context/health_maintenance';
@@ -252,7 +253,9 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         if (selectedCase === undefined || (options.project !== undefined && selectedCase.project !== options.project))
           return yield* fail('The exact maintenance case is unavailable in this project.');
         if (selectedCase.family !== 'citation' && selectedCase.family !== 'citation-coverage')
-          return yield* fail('Exact maintenance refresh supports citation cases only.');
+          return yield* fail(
+            'Exact run supports citation cases only. Use context maintain --action refresh --project <project> --case-id <case-id> --json to inspect current evidence without changing canonical memories.',
+          );
         options = {...options, project: selectedCase.project};
       }
       if (state.paused) return publicStatus(state);
@@ -1865,7 +1868,7 @@ export const readContextMaintenancePacket = Effect.fn('contextMaintenance.packet
         'Preview this exact review revision before choosing approve, defer, or reject. Approval and destructive replacement require explicit user authorization. Candidate decisions use the review inbox, not context-health memory repair.',
     };
   }
-  const corpus = selectedRecords ?? (yield* readMaintenanceMemoryRecords(config, {requireReadable: true}));
+  const corpus = yield* selectedMaintenance.readPacketRecords(config, item, selectedRecords);
   const relatedMemories = ['semantic-contradiction', 'repository-recovery'].includes(item.family)
     ? corpus.filter(record => item.subjectContentHashes?.some(subject => subject.uri === record.uri) === true)
     : [];
@@ -1879,7 +1882,7 @@ export const readContextMaintenancePacket = Effect.fn('contextMaintenance.packet
     );
   if (stale)
     return yield* fail(
-      'The selected maintenance case is stale. Run maintenance to refresh its evidence before requesting a decision packet.',
+      'The selected maintenance case is stale. Use context maintain --action refresh --project <project> --case-id <case-id> --json to refresh this exact decision.',
     );
   if (item.family === TOPIC_MAINTENANCE_FAMILY) {
     const assertTopicCaseCurrent = Effect.gen(function* () {
@@ -1906,16 +1909,13 @@ export const readContextMaintenancePacket = Effect.fn('contextMaintenance.packet
       (yield* recordSourceRevision(config, record, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.revision)
   )
     return yield* fail(
-      'The selected maintenance case is stale. Source evidence changed; run maintenance before requesting a decision packet.',
+      'The selected maintenance case is stale. Source evidence changed; use context maintain --action refresh --project <project> --case-id <case-id> --json to check this exact decision.',
     );
   const assertCurrent = Effect.gen(function* () {
     const latest = (yield* readState(config)).cases.find(current => current.caseId === item.caseId);
     if (latest?.evidenceRevision !== item.evidenceRevision || latest.disposition !== item.disposition)
       return yield* fail('The selected maintenance case changed. Refresh its packet.');
-    const subjects = yield* readMemoryRecordsByUri(
-      config,
-      (item.subjectContentHashes ?? []).map(subject => subject.uri),
-    );
+    const subjects = yield* selectedMaintenance.readPacketSubjects(config, item, latest);
     if (
       item.subjectContentHashes?.some(
         subject => contentHash(subjects.find(record => record.uri === subject.uri)?.content ?? '') !== subject.hash,

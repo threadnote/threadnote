@@ -12,6 +12,7 @@ import {
   retireContextMaintenanceAnchor,
 } from '../../../memory/context/maintenance.js';
 import {argumentError, mcpErrorResult} from '../common.js';
+import {refreshContextMaintenanceCase} from '../../../memory/context/maintenance_refresh.js';
 import {captureTopicObsidianEvidence} from '../../../memory/context/maintenance_obsidian.js';
 import {
   readTopicMaintenanceDraft,
@@ -379,11 +380,12 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
     {
       annotations: {readOnlyHint: false, destructiveHint: true, idempotentHint: false},
       description:
-        'Run one bounded local maintenance tick, pause/resume default automatic work, or CAS-undo an exact retained repair receipt. Shared canonical knowledge remains review controlled; no network or scheduler installation occurs.',
+        'Run one bounded local maintenance tick, refresh one exact decision without changing canonical memories, pause/resume default automatic work, or CAS-undo an exact retained repair receipt. Shared canonical knowledge remains review controlled; no network or scheduler installation occurs.',
       inputSchema: {
         action: McpInput.literals(
           [
             'run',
+            'refresh',
             'pause',
             'resume',
             'undo',
@@ -406,7 +408,9 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
         project: McpInput.string('Optional project; omitted work uses fair home-wide scheduling'),
         maxRecords: McpInput.integer('Bounded work tasks', {minimum: 1, maximum: 100}),
         receiptId: McpInput.string('Exact retained receipt for undo'),
-        caseId: McpInput.string('Exact citation case to refresh, or reviewed deleted-anchor case to retire'),
+        caseId: McpInput.string(
+          'Exact case to refresh with action refresh, citation case for run, or reviewed anchor to retire',
+        ),
         evidenceRevision: McpInput.string('Exact reviewed anchor evidence revision'),
         expectedContentHash: McpInput.string('Exact reviewed subject hash for anchor retirement'),
       },
@@ -424,23 +428,27 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
         }
         const cwd = input.callerCwd ?? (yield* SystemInfo).currentDirectory();
         if (!(yield* Path.Path).isAbsolute(cwd)) return argumentError('context_maintain callerCwd must be absolute.');
+        if (input.action === 'refresh' && (!input.project || !input.caseId))
+          return argumentError('context_maintain refresh requires project and caseId.');
         const result =
-          input.action === 'retire-anchor'
-            ? yield* retireContextMaintenanceAnchor(config, {
-                caseId: input.caseId ?? '',
-                evidenceRevision: input.evidenceRevision ?? '',
-                expectedContentHash: input.expectedContentHash ?? '',
-              })
-            : input.action === 'pause' || input.action === 'resume'
-              ? yield* setContextMaintenancePaused(config, input.action === 'pause')
-              : input.action === 'undo'
-                ? yield* undoContextMaintenance(config, input.receiptId ?? '')
-                : yield* runContextMaintenance(config, {
-                    cwd,
-                    project: input.project,
-                    maxRecords: input.maxRecords,
-                    caseId: input.caseId,
-                  });
+          input.action === 'refresh'
+            ? yield* refreshContextMaintenanceCase(config, {project: input.project!, caseId: input.caseId!, cwd})
+            : input.action === 'retire-anchor'
+              ? yield* retireContextMaintenanceAnchor(config, {
+                  caseId: input.caseId ?? '',
+                  evidenceRevision: input.evidenceRevision ?? '',
+                  expectedContentHash: input.expectedContentHash ?? '',
+                })
+              : input.action === 'pause' || input.action === 'resume'
+                ? yield* setContextMaintenancePaused(config, input.action === 'pause')
+                : input.action === 'undo'
+                  ? yield* undoContextMaintenance(config, input.receiptId ?? '')
+                  : yield* runContextMaintenance(config, {
+                      cwd,
+                      project: input.project,
+                      maxRecords: input.maxRecords,
+                      caseId: input.caseId,
+                    });
         return {
           content: [
             {

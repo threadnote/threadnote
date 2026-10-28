@@ -1,8 +1,18 @@
-import {readState, writeState, withStateLock, readContextMaintenancePacket} from './maintenance.js';
-import {DateTime, Effect, Result} from 'effect';
+import {
+  readState,
+  writeState,
+  withStateLock,
+  readContextMaintenancePacket,
+  ContextMaintenanceError,
+} from './maintenance.js';
+import {DateTime, Effect, FileSystem, Path, Result} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
-import type {MemoryRecord} from '@threadnote/memory/document';
+import {isAgentArtifactUri, parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
+import {localMemoryPathForUri, localUserMemoriesRoot} from '@threadnote/memory/local-path';
+import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
+import {readBoundedContainedStableRegularFile} from '@threadnote/graph/inventory/contained_file';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {buildContextHealthReport, type ContextHealthReportV1} from '@threadnote/context/health';
 import {findContextHealthSemanticContradiction} from '@threadnote/context/health_semantic';
 import {
@@ -11,13 +21,19 @@ import {
   contextHealthFindingCaseIdentityV2,
 } from '@threadnote/context/health_maintenance';
 import {validateContextHealthMemoryCitations} from '@threadnote/context/citation_validation';
-import {readMemoryRecordsByUriWithSourceHash} from '../../mcp/server/memory.js';
+import {readMemoryRecordsByUri, readMemoryRecordsByUriWithSourceHash} from '../../mcp/server/memory.js';
+import {readMaintenanceMemoryRecords} from '../maintenance/records.js';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import type {ContextBriefMemoryCitationValidationV2} from '@threadnote/context/types';
-import type {ContextMaintenanceCaseV2, MaintenanceState} from './maintenance_contracts.js';
-import {maintenanceContentHash} from './maintenance_policy.js';
+import type {
+  ContextMaintenanceCaseV2,
+  ContextMaintenanceRelationEvidence,
+  ContextMaintenanceRelationResourceObservation,
+  MaintenanceState,
+} from './maintenance_contracts.js';
+import {maintenanceContentHash, resolveRelationTarget, resolveMaintenanceRelationPolicy} from './maintenance_policy.js';
 import {readContextMaintenanceSourceEpoch} from './maintenance_evidence.js';
-import {recordSourceRevision} from './maintenance_source.js';
+import {maintenanceRecordRevision, recordSourceRevision} from './maintenance_source.js';
 import {observeTopicMaintenanceCase} from './maintenance_topic.js';
 
 /** Observe only the selected subjects. Refreshing never repairs canonical documents. */
@@ -27,6 +43,8 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
   item: ContextMaintenanceCaseV2,
   fallbackCwd: string,
 ) {
+  if (item.family === 'relation' || item.family === 'shared-owner-proposal')
+    return yield* observeSelectedRelationMaintenanceCase(config, state, item, fallbackCwd);
   const uris = [
     ...new Set([
       ...(item.subjectContentHashes ?? []).map(source => source.uri),
@@ -212,6 +230,7 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
     next.reason === item.reason &&
     JSON.stringify(next.subjectContentHashes) === JSON.stringify(item.subjectContentHashes) &&
     JSON.stringify(next.sourceSnapshot) === JSON.stringify(item.sourceSnapshot) &&
+    JSON.stringify(next.relationEvidence) === JSON.stringify(item.relationEvidence) &&
     JSON.stringify(next.anchorEvidence) === JSON.stringify(item.anchorEvidence)
   ) {
     next = item;
@@ -241,6 +260,255 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
             ],
     },
   });
+});
+
+/** One logical observation; failures and aliases remain unknown, without scanning a corpus or inferring absence. */
+export const readSelectedMaintenanceRelationResource = Effect.fn('contextMaintenance.readRelationResource')(function* (
+  config: RuntimeConfig,
+  uri: string,
+) {
+  const read = yield* Effect.gen(function* () {
+    const file = yield* localMemoryPathForUri(config, uri);
+    if (!file) return undefined;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const resourceRoot = yield* localUserMemoriesRoot(config);
+    const root = yield* fs.realPath(resourceRoot);
+    const bytes = yield* readBoundedContainedStableRegularFile(
+      fs,
+      path,
+      root,
+      path.relative(resourceRoot, file).split(path.sep).join('/'),
+      8 * 1_024 * 1_024,
+    );
+    const content = yield* Effect.try(() => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes));
+    const record = parseMemoryDocument(uri, content) ?? undefined;
+    const observation: ContextMaintenanceRelationResourceObservation = {
+      uri,
+      sourceHash: sha256HexSync(bytes),
+      ...(record?.metadata.memoryId === undefined ? {} : {memoryId: record.metadata.memoryId}),
+      ...(record === undefined ? {} : {status: record.metadata.status}),
+    };
+    return {record, observation};
+  }).pipe(Effect.result);
+  return Result.isSuccess(read) && read.success !== undefined ? read.success : {record: undefined, observation: {uri}};
+});
+
+/** Packet callers separately check the subject using their existing subject read, avoiding duplicate observations. */
+export const relationMaintenanceEvidenceCurrent = Effect.fn('contextMaintenance.relationEvidenceCurrent')(function* (
+  config: RuntimeConfig,
+  evidence: ContextMaintenanceRelationEvidence,
+) {
+  if (!validRelationMaintenanceEvidence(evidence)) return false;
+  for (const expected of evidence.observations) {
+    const current = yield* readSelectedMaintenanceRelationResource(config, expected.uri);
+    if (JSON.stringify(current.observation) !== JSON.stringify(expected)) return false;
+  }
+  return true;
+});
+
+export function validRelationMaintenanceEvidence(input: unknown): input is ContextMaintenanceRelationEvidence {
+  if (typeof input !== 'object' || input === null) return false;
+  const evidence = input as Partial<ContextMaintenanceRelationEvidence>;
+  const stamp = (value: unknown): value is ContextMaintenanceRelationResourceObservation => {
+    if (typeof value !== 'object' || value === null) return false;
+    const item = value as Partial<ContextMaintenanceRelationResourceObservation>;
+    return (
+      typeof item.uri === 'string' &&
+      item.uri.length > 0 &&
+      item.uri.length <= 4_096 &&
+      (item.sourceHash === undefined ||
+        (typeof item.sourceHash === 'string' && /^[a-f0-9]{64}$/u.test(item.sourceHash))) &&
+      (item.memoryId === undefined || (typeof item.memoryId === 'string' && item.memoryId.length <= 256)) &&
+      (item.status === undefined || (typeof item.status === 'string' && item.status.length <= 64))
+    );
+  };
+  return (
+    evidence.completeness === 'selected-only' &&
+    evidence.provenance === 'bounded-selected-resource-read' &&
+    stamp(evidence.subject) &&
+    Array.isArray(evidence.observations) &&
+    evidence.observations.length < 32 &&
+    evidence.observations.every(stamp) &&
+    new Set([evidence.subject.uri, ...evidence.observations.map(item => item.uri)]).size ===
+      evidence.observations.length + 1
+  );
+}
+
+/** Reuse one bounded read per identity for packet construction and each closing fence. */
+export const readCurrentRelationMaintenanceRecords = Effect.fn('contextMaintenance.currentRelationRecords')(function* (
+  config: RuntimeConfig,
+  item: ContextMaintenanceCaseV2,
+  latest?: ContextMaintenanceCaseV2,
+) {
+  const evidence = item.relationEvidence;
+  if (
+    !['relation', 'shared-owner-proposal'].includes(item.family) ||
+    !validRelationMaintenanceEvidence(evidence) ||
+    (latest && JSON.stringify(latest.relationEvidence) !== JSON.stringify(evidence))
+  )
+    return undefined;
+  const expected = [evidence.subject, ...evidence.observations];
+  const observed = yield* Effect.forEach(
+    expected,
+    observation => readSelectedMaintenanceRelationResource(config, observation.uri),
+    {concurrency: 16},
+  );
+  return observed.every((value, index) => JSON.stringify(value.observation) === JSON.stringify(expected[index]))
+    ? observed.flatMap(value => (value.record ? [value.record] : []))
+    : undefined;
+});
+
+export const readPacketRecords = Effect.fn('contextMaintenance.packetRecords')(function* (
+  config: RuntimeConfig,
+  item: ContextMaintenanceCaseV2,
+  selected?: readonly MemoryRecord[],
+) {
+  if (selected) return selected;
+  if (item.relationEvidence) {
+    const current = yield* readCurrentRelationMaintenanceRecords(config, item);
+    if (!current)
+      return yield* ContextMaintenanceError.make({
+        message: 'The selected relation changed. Refresh this exact decision.',
+      });
+    return current;
+  }
+  return yield* readMaintenanceMemoryRecords(config, {requireReadable: true});
+});
+
+export const readPacketSubjects = Effect.fn('contextMaintenance.packetSubjects')(function* (
+  config: RuntimeConfig,
+  item: ContextMaintenanceCaseV2,
+  latest: ContextMaintenanceCaseV2,
+) {
+  if (item.relationEvidence) {
+    const current = yield* readCurrentRelationMaintenanceRecords(config, item, latest);
+    if (!current)
+      return yield* ContextMaintenanceError.make({
+        message: 'The selected relation changed. Refresh this exact decision.',
+      });
+    return current;
+  }
+  return yield* readMemoryRecordsByUri(
+    config,
+    (item.subjectContentHashes ?? []).map(subject => subject.uri),
+  );
+});
+
+const observeSelectedRelationMaintenanceCase = Effect.fn('contextMaintenance.observeSelectedRelation')(function* (
+  config: RuntimeConfig,
+  state: MaintenanceState,
+  item: ContextMaintenanceCaseV2,
+  fallbackCwd: string,
+) {
+  const subjectUri = item.subjectUri ?? item.subjectContentHashes?.[0]?.uri;
+  if (!subjectUri || (item.subjectContentHashes?.length ?? 0) > 1)
+    return {outcome: 'unavailable' as const, reason: 'Select the exact canonical relation subject before refreshing.'};
+  const subject = yield* readSelectedMaintenanceRelationResource(config, subjectUri);
+  const record = subject.record;
+  if (
+    !record ||
+    record.metadata.status !== 'active' ||
+    record.metadata.project !== item.project ||
+    (record.metadata.memoryId ?? record.uri) !== item.memoryId
+  )
+    return {
+      outcome: 'unavailable' as const,
+      reason: 'The selected relation subject is unreadable or its identity changed. Review the current memory first.',
+    };
+  const relations = (record.metadata.relations ?? []).filter(relation => !isAgentArtifactUri(relation.uri));
+  const exact = relations.filter(
+    relation => relation.uri === item.slot || memoryIdFromIdentityAlias(relation.uri) === item.slot,
+  );
+  const selected = item.family === 'relation' && exact.length > 0 ? exact : relations;
+  const identities = [...new Set(selected.map(relation => relation.uri).filter(uri => uri !== subjectUri))].sort();
+  if (identities.length + 1 > 32)
+    return {
+      outcome: 'incomplete' as const,
+      reason:
+        'This selection exceeds 32 subject/target lookup identities. Review its exact references before retrying; no evidence or memory was changed.',
+    };
+  const targets = yield* Effect.forEach(identities, uri => readSelectedMaintenanceRelationResource(config, uri), {
+    concurrency: 16,
+  });
+  const records = [record, ...targets.flatMap(target => (target.record ? [target.record] : []))];
+  const matching = selected.filter(
+    relation =>
+      relation.uri === item.slot ||
+      memoryIdFromIdentityAlias(relation.uri) === item.slot ||
+      resolveRelationTarget(records, relation.uri).record?.metadata.memoryId === item.slot,
+  );
+  if (item.family === 'relation' && matching.length === 0)
+    return {
+      outcome: 'incomplete' as const,
+      reason:
+        'The saved relation target no longer resolves to this exact identity. Review the memory’s current references before retrying.',
+    };
+  const evidence: ContextMaintenanceRelationEvidence = {
+    completeness: 'selected-only',
+    provenance: 'bounded-selected-resource-read',
+    subject: subject.observation,
+    observations: targets.map(target => target.observation),
+  };
+  const root = item.sourceSnapshot?.cwd ?? fallbackCwd;
+  const epoch = item.sourceSnapshot ? yield* readContextMaintenanceSourceEpoch(config, root) : undefined;
+  const sourceRevision = item.sourceSnapshot ? yield* recordSourceRevision(config, record, root) : undefined;
+  const policies = (item.family === 'relation' ? matching : selected).map(relation =>
+    resolveMaintenanceRelationPolicy(record, relation, records, false),
+  );
+  const unknown = policies.some(policy => policy.state === 'unknown' || policy.state === 'ambiguous');
+  const now = DateTime.formatIso(yield* DateTime.now);
+  let next: ContextMaintenanceCaseV2 = {
+    ...item,
+    evidenceRevision: maintenanceRecordRevision(record, records, false, epoch, sourceRevision),
+    disposition:
+      item.family === 'shared-owner-proposal' || unknown
+        ? 'waiting-evidence'
+        : policies.every(policy => policy.state === 'active')
+          ? 'resolved'
+          : 'needs-decision',
+    reason:
+      item.family === 'shared-owner-proposal'
+        ? 'shared-owner-authority-unverified'
+        : unknown
+          ? 'selected-relation-evidence-incomplete'
+          : 'selected-relation-evidence-observed',
+    subjectContentHashes: [{uri: record.uri, hash: maintenanceContentHash(record.content)}],
+    relationEvidence: evidence,
+    ...(epoch !== undefined && sourceRevision !== undefined
+      ? {sourceSnapshot: {cwd: root, generation: epoch, revision: sourceRevision}}
+      : {}),
+    lastChecked: now,
+  };
+  const closed = yield* readSelectedMaintenanceRelationResource(config, subjectUri);
+  if (
+    JSON.stringify(closed.observation) !== JSON.stringify(subject.observation) ||
+    !(yield* relationMaintenanceEvidenceCurrent(config, evidence)) ||
+    (epoch !== undefined &&
+      ((yield* readContextMaintenanceSourceEpoch(config, root)) !== epoch ||
+        (yield* recordSourceRevision(config, record, root)) !== sourceRevision))
+  )
+    return {
+      outcome: 'changing' as const,
+      reason: 'The selected subject, target or source changed during the check. Retry after the edit is saved.',
+    };
+  if (
+    next.evidenceRevision === item.evidenceRevision &&
+    next.disposition === item.disposition &&
+    next.reason === item.reason &&
+    JSON.stringify(next.subjectContentHashes) === JSON.stringify(item.subjectContentHashes) &&
+    JSON.stringify(next.relationEvidence) === JSON.stringify(item.relationEvidence) &&
+    JSON.stringify(next.sourceSnapshot) === JSON.stringify(item.sourceSnapshot)
+  )
+    next = item;
+  return {
+    outcome: 'observed' as const,
+    records,
+    item: next,
+    reference: undefined,
+    repairFinding: undefined,
+    state: {...state, cases: state.cases.map(value => (value.caseId === item.caseId ? next : value))},
+  };
 });
 
 export function selectedMaintenanceCitations(
