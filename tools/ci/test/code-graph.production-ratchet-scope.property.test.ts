@@ -31,6 +31,8 @@ function shouldSkipBenchmark(
   );
 }
 
+const serializedShard = '          bun --bun vitest run --no-file-parallelism --shard=${{ matrix.shard }}';
+const windowsDefaultShard = serializedShard.replace(' --shard=', ' --testTimeout=120000 --shard=');
 const beforeCiWorkflow = `name: CI
 env:
   BUN_VERSION: 1.4.2
@@ -42,10 +44,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - run: bun run typecheck
+      - run: >-
+${serializedShard}
+          apps/threadnote/test/dev-skills/
   release:
     timeout-minutes: 45
 `;
 const afterCiWorkflow = beforeCiWorkflow.replace('    timeout-minutes: 30', '    timeout-minutes: 60');
+const afterWindowsDefault = beforeCiWorkflow.replace(serializedShard, windowsDefaultShard);
 
 const ciTestPolicyPaths = [
   '.github/workflows/ci.yml',
@@ -90,6 +96,54 @@ describe('code graph production ratchet diff scope', () => {
     const before359 = beforeCiWorkflow.replace('    timeout-minutes: 30', '    timeout-minutes: 359');
     const after360 = before359.replace('    timeout-minutes: 359', '    timeout-minutes: 360');
     expect(ciTestPolicyScope(['.github/workflows/ci.yml'], after360, before359).runBenchmark).toBe(false);
+  });
+
+  it('skips only the exact Windows serialized Vitest 120-second default, alone or with a valid job timeout change', () => {
+    expect(ciTestPolicyScope(ciTestPolicyPaths, afterWindowsDefault, beforeCiWorkflow).runBenchmark).toBe(false);
+    expect(ciTestPolicyScope(['.github/workflows/ci.yml'], afterWindowsDefault, beforeCiWorkflow).runBenchmark).toBe(
+      false,
+    );
+    expect(
+      ciTestPolicyScope(
+        ciTestPolicyPaths,
+        afterCiWorkflow.replace(serializedShard, windowsDefaultShard),
+        beforeCiWorkflow,
+      ).runBenchmark,
+    ).toBe(false);
+  });
+
+  it('runs for other Windows Vitest options, duplicate or invalid timers, and changes to workload or shard', () => {
+    for (const after of [
+      beforeCiWorkflow.replace(serializedShard, serializedShard.replace(' --shard=', ' --testTimeout=30000 --shard=')),
+      beforeCiWorkflow.replace(
+        serializedShard,
+        windowsDefaultShard.replace(' --shard=', ' --testTimeout=120000 --shard='),
+      ),
+      beforeCiWorkflow.replace(
+        serializedShard,
+        windowsDefaultShard.replace('--testTimeout=120000', '--testTimeout 120000'),
+      ),
+      beforeCiWorkflow.replace(serializedShard, windowsDefaultShard.replace(' --shard=', ' --maxWorkers=2 --shard=')),
+      afterWindowsDefault.replace('--shard=${{ matrix.shard }}', '--shard=1/2'),
+      afterWindowsDefault.replace('apps/threadnote/test/dev-skills/', 'apps/threadnote/test/unit/'),
+      afterWindowsDefault.replace('bun run typecheck', 'bun run test'),
+      afterWindowsDefault.replace('BUN_VERSION: 1.4.2', 'BUN_VERSION: 1.4.3'),
+    ]) {
+      expect(ciTestPolicyScope(ciTestPolicyPaths, after, beforeCiWorkflow).runBenchmark).toBe(true);
+    }
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.integer({min: 1, max: 119_999}), fc.integer({min: 120_001, max: 240_000})),
+        milliseconds => {
+          const after = beforeCiWorkflow.replace(
+            serializedShard,
+            windowsDefaultShard.replace('120000', String(milliseconds)),
+          );
+          expect(ciTestPolicyScope(ciTestPolicyPaths, after, beforeCiWorkflow).runBenchmark).toBe(true);
+        },
+      ),
+      {numRuns: 50},
+    );
   });
 
   it('runs when the CI workflow changes anything beyond the Windows job timeout', () => {
