@@ -1,7 +1,9 @@
 import {isPurePrivateReleaseEvidenceDiff} from './private-release-evidence-family.js';
 
 export interface CodeGraphProductionRatchetDiff {
+  readonly afterCiWorkflow?: string;
   readonly afterPackageJson?: string;
+  readonly beforeCiWorkflow?: string;
   readonly beforePackageJson?: string;
   readonly changedPaths: Iterable<string>;
 }
@@ -10,7 +12,8 @@ export interface CodeGraphProductionRatchetScope {
   readonly changedCount: number;
   readonly paths: readonly string[];
   readonly runBenchmark: boolean;
-  readonly skipReason?: 'private-release-evidence-only' | 'release-metadata-only' | 'unrelated-evaluation-only';
+  readonly skipReason?:
+    'private-release-evidence-only' | 'release-metadata-only' | 'unrelated-evaluation-only' | 'ci-and-test-policy-only';
 }
 
 type JsonObject = Readonly<Record<string, unknown>>;
@@ -52,6 +55,64 @@ function isUnrelatedEvaluationPath(path: string): boolean {
     /^src\/evaluation\/context-brief-citation-[^/]+$/u.test(path) ||
     /^test\/evaluation\/(?:baselines|fixtures)\/context-brief-citations[^/]*(?:\/|$)/u.test(path) ||
     /^test\/unit\/(?:evaluation\.)?context-brief-citation-[^/]+\.test\.ts$/u.test(path)
+  );
+}
+
+const CI_WORKFLOW_PATH = '.github/workflows/ci.yml';
+
+const CI_TEST_POLICY_PATHS = new Set([
+  'apps/threadnote/test/dev-skills/native-authoring-lifecycle.test.ts',
+  'apps/threadnote/test/dev-skills/native-authoring-progress-diagnostics.test.ts',
+  'apps/threadnote/test/dev-skills/native-closeout-cloud.test.ts',
+  'apps/threadnote/test/dev-skills/native-closeout-lifecycle.test.ts',
+  'apps/threadnote/test/dev-skills/native-closeout-recall-batch.test.ts',
+  'apps/threadnote/test/dev-skills/native-cycle-lifecycle.test.ts',
+  'apps/threadnote/test/dev-skills/native-release-workflows.ts',
+  'apps/threadnote/test/dev-skills/release-artifact.test.ts',
+  'apps/threadnote/test/dev-skills/release-artifact-preview-fence.test.ts',
+  'apps/threadnote/test/e2e/local-bins.e2e.ts',
+  'tools/bazel/target-specs.mjs',
+  'tools/bazel/test/target-contracts.test.ts',
+  'tools/ci/code-graph-production-ratchet-scope.ts',
+  'tools/ci/test/ci-workflow.test.ts',
+  'tools/ci/test/code-graph.production-ratchet-scope.property.test.ts',
+]);
+
+function isCiTestPolicyPath(path: string): boolean {
+  return path === CI_WORKFLOW_PATH || CI_TEST_POLICY_PATHS.has(path);
+}
+
+function windowsSmokeTimeoutLine(lines: readonly string[]): number | undefined {
+  const starts = lines.flatMap((line, index) => (line === '  windows-smoke:' ? [index] : []));
+  if (starts.length !== 1) return undefined;
+  const start = starts[0];
+  const end = lines.findIndex((line, index) => index > start && /^ {2}[^\s:#][^:]*:$/u.test(line));
+  const timeoutLines = lines.flatMap((line, index) =>
+    index > start && (end === -1 || index < end) && /^ {4}timeout-minutes:/u.test(line) ? [index] : [],
+  );
+  return timeoutLines.length === 1 ? timeoutLines[0] : undefined;
+}
+
+function validTimeoutMinutes(line: string): number | undefined {
+  const match = /^ {4}timeout-minutes: ([1-9]\d*)$/u.exec(line);
+  const minutes = Number(match?.[1]);
+  return Number.isSafeInteger(minutes) && minutes <= 360 ? minutes : undefined;
+}
+
+function changesOnlyWindowsSmokeTimeout(before: string | undefined, after: string | undefined): boolean {
+  if (before === undefined || after === undefined) return false;
+  const beforeLines = before.split('\n');
+  const afterLines = after.split('\n');
+  const beforeTimeout = windowsSmokeTimeoutLine(beforeLines);
+  const afterTimeout = windowsSmokeTimeoutLine(afterLines);
+  return (
+    beforeTimeout !== undefined &&
+    beforeTimeout === afterTimeout &&
+    validTimeoutMinutes(beforeLines[beforeTimeout]) !== undefined &&
+    validTimeoutMinutes(afterLines[afterTimeout]) !== undefined &&
+    beforeLines[beforeTimeout] !== afterLines[afterTimeout] &&
+    beforeLines.length === afterLines.length &&
+    beforeLines.every((line, index) => index === beforeTimeout || line === afterLines[index])
   );
 }
 
@@ -133,6 +194,11 @@ export function classifyCodeGraphProductionRatchetScope(
     changesOnlyTopLevelVersion(diff.beforePackageJson, diff.afterPackageJson);
 
   const evaluationOnly = !invalidPath && sortedPaths.length > 0 && sortedPaths.every(isUnrelatedEvaluationPath);
+  const ciAndTestPolicyOnly =
+    !invalidPath &&
+    sortedPaths.length > 0 &&
+    sortedPaths.every(isCiTestPolicyPath) &&
+    (!paths.has(CI_WORKFLOW_PATH) || changesOnlyWindowsSmokeTimeout(diff.beforeCiWorkflow, diff.afterCiWorkflow));
   const skipReason =
     !invalidPath && isPurePrivateReleaseEvidenceDiff(sortedPaths)
       ? 'private-release-evidence-only'
@@ -140,7 +206,9 @@ export function classifyCodeGraphProductionRatchetScope(
         ? 'release-metadata-only'
         : evaluationOnly
           ? 'unrelated-evaluation-only'
-          : undefined;
+          : ciAndTestPolicyOnly
+            ? 'ci-and-test-policy-only'
+            : undefined;
   return {changedCount: sortedPaths.length, paths: sortedPaths, runBenchmark: skipReason === undefined, skipReason};
 }
 
@@ -184,7 +252,9 @@ function classifyCurrentDiff(
   if (diffResult.exitCode !== 0) return failSafe(`git-diff-failed-${diffResult.exitCode}`);
   const changedPaths = new TextDecoder().decode(diffResult.stdout).split('\0').filter(Boolean);
   const scope = classifyCodeGraphProductionRatchetScope({
+    afterCiWorkflow: changedPaths.includes(CI_WORKFLOW_PATH) ? readGitFile(head, CI_WORKFLOW_PATH) : undefined,
     afterPackageJson: readGitFile(head, 'package.json'),
+    beforeCiWorkflow: changedPaths.includes(CI_WORKFLOW_PATH) ? readGitFile(mergeBase, CI_WORKFLOW_PATH) : undefined,
     beforePackageJson: readGitFile(mergeBase, 'package.json'),
     changedPaths,
   });

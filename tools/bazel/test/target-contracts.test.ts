@@ -64,6 +64,20 @@ describe('generated Bazel test contracts', () => {
     expect(selectForChangedInput('.github/workflows/ci.yml').targets).toContain('//:windows_smoke');
   });
 
+  it.each([
+    'apps/threadnote/test/dev-skills/native-authoring-lifecycle.test.ts',
+    'apps/threadnote/test/dev-skills/native-closeout-lifecycle.test.ts',
+    'apps/threadnote/test/dev-skills/native-closeout-recall-batch.test.ts',
+    'apps/threadnote/test/dev-skills/native-cycle-lifecycle.test.ts',
+    'apps/threadnote/test/integration/cli.dev-skills.test.ts',
+    'packages/integrations/test/dev-skills-catalog.test.ts',
+  ])('selects Windows smoke when executed test %s changes', changedFile => {
+    expect(target('//:windows_smoke').inputs).toContain(changedFile);
+    const selection = selectForChangedInput(changedFile);
+    expect(selection.mode).toBe('selective');
+    expect(selection.targets).toContain('//:windows_smoke');
+  });
+
   it('keeps the inventory byte-stable across filesystem enumeration orders', () => {
     const labels = inventory.targets.map(candidate => candidate.label);
     expect(labels).toEqual([...labels].sort());

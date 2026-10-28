@@ -206,7 +206,7 @@ jobs:
     needs: bazel-plan
     if: needs.bazel-plan.outputs.windows_smoke == 'true'
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

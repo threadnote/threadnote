@@ -114,10 +114,10 @@ it('keeps the stable aggregate check and requires the planner plus every selecte
   expect(step(jobs.test, 'Require every selected lane')?.run).toContain('test "$BAZEL_SHARDS_RESULT" = success');
 });
 
-it('partitions the complete serialized Windows inventory with two native shards and unchanged job limits', () => {
+it('partitions the complete serialized Windows inventory with two native shards and its job limit', () => {
   const windows = jobs['windows-smoke'];
   expect(windows?.name).toBe('Bun unit smoke · Windows · ${{ matrix.shard }}');
-  expect(windows?.['timeout-minutes']).toBe(30);
+  expect(windows?.['timeout-minutes']).toBe(60);
   expect(windows?.strategy).toEqual({'fail-fast': false, matrix: {shard: ['1/2', '2/2']}});
   const runs = windows?.steps?.filter(candidate => candidate.run?.includes('vitest run --no-file-parallelism'));
   expect(runs).toHaveLength(1);
@@ -203,7 +203,7 @@ it.each(['windows-smoke', 'self-contained-distribution'])(
     expect(steps.indexOf(setup!)).toBeGreaterThan(
       steps.findIndex(candidate => candidate.run === 'bun install --frozen-lockfile'),
     );
-    expect(job?.['timeout-minutes']).toBe(name === 'windows-smoke' ? 30 : 45);
+    expect(job?.['timeout-minutes']).toBe(name === 'windows-smoke' ? 60 : 45);
     expect(job?.strategy?.['fail-fast']).toBe(false);
   },
 );

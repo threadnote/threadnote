@@ -31,7 +31,150 @@ function shouldSkipBenchmark(
   );
 }
 
+const beforeCiWorkflow = `name: CI
+env:
+  BUN_VERSION: 1.4.2
+jobs:
+  linux:
+    timeout-minutes: 20
+  windows-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - run: bun run typecheck
+  release:
+    timeout-minutes: 45
+`;
+const afterCiWorkflow = beforeCiWorkflow.replace('    timeout-minutes: 30', '    timeout-minutes: 60');
+
+const ciTestPolicyPaths = [
+  '.github/workflows/ci.yml',
+  'apps/threadnote/test/dev-skills/native-authoring-lifecycle.test.ts',
+  'apps/threadnote/test/dev-skills/native-authoring-progress-diagnostics.test.ts',
+  'apps/threadnote/test/dev-skills/native-closeout-cloud.test.ts',
+  'apps/threadnote/test/dev-skills/native-closeout-lifecycle.test.ts',
+  'apps/threadnote/test/dev-skills/native-closeout-recall-batch.test.ts',
+  'apps/threadnote/test/dev-skills/native-cycle-lifecycle.test.ts',
+  'apps/threadnote/test/dev-skills/native-release-workflows.ts',
+  'apps/threadnote/test/dev-skills/release-artifact.test.ts',
+  'apps/threadnote/test/dev-skills/release-artifact-preview-fence.test.ts',
+  'apps/threadnote/test/e2e/local-bins.e2e.ts',
+  'tools/bazel/target-specs.mjs',
+  'tools/bazel/test/target-contracts.test.ts',
+  'tools/ci/code-graph-production-ratchet-scope.ts',
+  'tools/ci/test/ci-workflow.test.ts',
+  'tools/ci/test/code-graph.production-ratchet-scope.property.test.ts',
+];
+
+function ciTestPolicyScope(changedPaths: readonly string[], after = afterCiWorkflow, before = beforeCiWorkflow) {
+  return classifyCodeGraphProductionRatchetScope({afterCiWorkflow: after, beforeCiWorkflow: before, changedPaths});
+}
+
 describe('code graph production ratchet diff scope', () => {
+  it('records a scoped skip for test and CI selection policy with only a valid Windows timeout change', () => {
+    expect(ciTestPolicyScope(ciTestPolicyPaths)).toMatchObject({
+      runBenchmark: false,
+      skipReason: 'ci-and-test-policy-only',
+    });
+    expect(ciTestPolicyScope(ciTestPolicyPaths.slice(1)).runBenchmark).toBe(false);
+    expect(ciTestPolicyScope(['.github/workflows/ci.yml']).runBenchmark).toBe(false);
+    const before20 = beforeCiWorkflow.replace(
+      'runs-on: windows-latest\n    timeout-minutes: 30',
+      'runs-on: windows-latest\n    timeout-minutes: 20',
+    );
+    const after45 = before20.replace(
+      'runs-on: windows-latest\n    timeout-minutes: 20',
+      'runs-on: windows-latest\n    timeout-minutes: 45',
+    );
+    expect(ciTestPolicyScope(['.github/workflows/ci.yml'], after45, before20).runBenchmark).toBe(false);
+    const before359 = beforeCiWorkflow.replace('    timeout-minutes: 30', '    timeout-minutes: 359');
+    const after360 = before359.replace('    timeout-minutes: 359', '    timeout-minutes: 360');
+    expect(ciTestPolicyScope(['.github/workflows/ci.yml'], after360, before359).runBenchmark).toBe(false);
+  });
+
+  it('runs when the CI workflow changes anything beyond the Windows job timeout', () => {
+    for (const after of [
+      afterCiWorkflow.replace('BUN_VERSION: 1.4.2', 'BUN_VERSION: 1.4.3'),
+      afterCiWorkflow.replace('bun run typecheck', 'bun run test'),
+      afterCiWorkflow.replace('    timeout-minutes: 45', '    timeout-minutes: 60'),
+      afterCiWorkflow.replace('    timeout-minutes: 60', '    timeout-minutes: 361'),
+      afterCiWorkflow.replace('    timeout-minutes: 60', '    timeout-minutes: 0'),
+      afterCiWorkflow.replace('    timeout-minutes: 60', '    timeout-minutes: 060'),
+      afterCiWorkflow.replace('    timeout-minutes: 60', ''),
+      beforeCiWorkflow,
+    ]) {
+      expect(ciTestPolicyScope(ciTestPolicyPaths, after).runBenchmark).toBe(true);
+    }
+    expect(
+      classifyCodeGraphProductionRatchetScope({afterCiWorkflow, changedPaths: ciTestPolicyPaths}).runBenchmark,
+    ).toBe(true);
+    const duplicateBudget = beforeCiWorkflow.replace(
+      '    timeout-minutes: 30',
+      '    timeout-minutes: 30\n    timeout-minutes: 30',
+    );
+    expect(
+      ciTestPolicyScope(
+        ['.github/workflows/ci.yml'],
+        duplicateBudget.replace('timeout-minutes: 30', 'timeout-minutes: 60'),
+        duplicateBudget,
+      ).runBenchmark,
+    ).toBe(true);
+    expect(
+      ciTestPolicyScope(
+        ['.github/workflows/ci.yml'],
+        afterCiWorkflow,
+        beforeCiWorkflow.replace('    timeout-minutes: 30', ''),
+      ).runBenchmark,
+    ).toBe(true);
+    expect(
+      ciTestPolicyScope(
+        ['.github/workflows/ci.yml'],
+        afterCiWorkflow,
+        beforeCiWorkflow.replace('    timeout-minutes: 30', '    timeout-minutes: 0'),
+      ).runBenchmark,
+    ).toBe(true);
+  });
+
+  it('runs for protected runtime, parser, dependency, benchmark, gate, baseline, model, and ambiguous mixed diffs', () => {
+    for (const path of [
+      'packages/graph/src/code-graph.ts',
+      'packages/graph/src/parser.ts',
+      'apps/threadnote/src/standalone.ts',
+      'config/code-graph-model.json',
+      'bun.lock',
+      'package.json',
+      'scripts/benchmark-code-graph.ts',
+      'tools/ci/code-graph-production-ratchet-gate.ts',
+      '.github/workflows/code-graph-production-ratchet.yml',
+      'apps/threadnote/test/evaluation/baselines/code-graph-v1/production-ratchet-github-linux-x64.json',
+      'apps/threadnote/test/evaluation/fixtures/code-graph-v1/repository/fixture.ts',
+      'tools/ci/test/benchmark-workflow.test.ts',
+      'apps/threadnote/test/dev-skills/fixture.ts',
+      'apps/threadnote/test/dev-skills/other.test.ts',
+      'unexpected/path.txt',
+    ]) {
+      expect(ciTestPolicyScope([...ciTestPolicyPaths, path]).runBenchmark).toBe(true);
+    }
+  });
+
+  it('keeps the CI and test policy exemption order-invariant and monotonic under protected additions', () => {
+    const protectedPath = fc.constantFrom(
+      'packages/graph/src/code-graph.ts',
+      'scripts/benchmark-code-graph.ts',
+      'tools/ci/code-graph-production-ratchet-gate.ts',
+      'bun.lock',
+      '.github/workflows/code-graph-production-ratchet.yml',
+    );
+    fc.assert(
+      fc.property(fc.shuffledSubarray(ciTestPolicyPaths, {minLength: 1}), protectedPath, (paths, path) => {
+        expect(ciTestPolicyScope(paths).runBenchmark).toBe(false);
+        expect(ciTestPolicyScope([...paths].reverse()).runBenchmark).toBe(false);
+        expect(ciTestPolicyScope([...paths, path]).runBenchmark).toBe(true);
+      }),
+      {numRuns: 100},
+    );
+  });
+
   it('skips a version-only release diff with release notes', () => {
     expect(shouldSkipBenchmark(['package.json', '.github/release-notes/v4.3.7.md'])).toBe(true);
     expect(shouldSkipBenchmark(['package.json'])).toBe(true);
