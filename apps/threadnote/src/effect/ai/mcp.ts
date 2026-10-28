@@ -28,6 +28,7 @@ const MCP_RESOURCE_ERROR_BRAND_KEY = 'threadnote.io/resource-read-error';
 const MCP_RESOURCE_MEMORY_RECOVERY_KEY = 'threadnote.io/memory-read-recovery';
 export const MCP_RESOURCE_ERROR_DATA = Object.freeze({[MCP_RESOURCE_ERROR_BRAND_KEY]: 1});
 export const MCP_RESOURCE_NOT_FOUND_ERROR_DATA = Object.freeze({[MCP_RESOURCE_ERROR_BRAND_KEY]: 2});
+
 export const MCP_PROGRESS_HEARTBEAT_MILLISECONDS = 10_000;
 export const MCP_PROGRESS_MESSAGE_MAX_BYTES = 160;
 export const MCP_PROGRESS_METADATA_KEY = 'threadnote.io/progress';
@@ -47,6 +48,10 @@ const MCP_PROGRESS_GENERATION_METADATA_KEY = 'threadnote.io/private/progress-gen
 const MCP_INVALID_BATCH_METHOD = 'invalid/json-rpc-batch';
 const MCP_HTTP_CANCELLATION_UNSUPPORTED_MESSAGE =
   'Streamable HTTP cancellation is not supported until requests can be interrupted across POSTs.';
+
+export function mcpResourceInvalidParamsError(message: string): McpSchema.InvalidParams {
+  return McpSchema.InvalidParams.make({message, data: MCP_RESOURCE_ERROR_DATA});
+}
 
 export function mcpResourceNotFoundRecoveryErrorData(
   recovery: MemoryReadRecoveryV1,

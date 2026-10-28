@@ -2,7 +2,7 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {execFile} from '@threadnote/testing/node-child-process';
-import {access, mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
+import {access, mkdir, mkdtemp, readFile, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
@@ -86,6 +86,24 @@ describe('Cursor Cloud integration', () => {
         type: 'stdio',
       });
 
+      const discoveryConfig = JSON.parse(
+        (
+          await runCli([
+            'cloud',
+            'cursor',
+            'config',
+            '--home',
+            fixture.home,
+            '--user',
+            'cloud-user',
+            '--agent-id',
+            'cloud-agent',
+          ])
+        ).stdout,
+      );
+      expect(discoveryConfig.env.THREADNOTE_CURSOR_CLOUD_TEAM).toBeUndefined();
+      expect(discoveryConfig.env.THREADNOTE_CURSOR_CLOUD_TEAMS).toBeUndefined();
+      expect(discoveryConfig.env.THREADNOTE_MCP_TOOLSET).toBe('cursor-cloud-personal');
       const first = await bootstrap(fixture);
       const before = await readFile(join(fixture.home, 'share', 'teams.json'), 'utf8');
       const second = await bootstrap(fixture);
@@ -216,163 +234,302 @@ describe('Cursor Cloud integration', () => {
     }
   });
 
-  it('exposes several personal Git shares through one bounded MCP server', async () => {
+  it('starts and verifies the discovered set with CLI restrictions taking precedence over environment selectors', async () => {
     const fixture = await cloudFixture();
-    const docsRemote = await seedRemote(fixture.root, 'docs-share');
+    const docsRemote = await seedRemote(fixture.root, 'command-docs-share');
+    const environment = {HOME: fixture.userHome, THREADNOTE_CURSOR_CLOUD_TEAM: '', THREADNOTE_CURSOR_CLOUD_TEAMS: ''};
+    const command = async (name: 'start' | 'verify', extra: readonly string[] = [], env: Record<string, string> = {}) =>
+      JSON.parse(
+        (
+          await runCli(['cloud', 'cursor', name, '--home', fixture.home, '--cwd', process.cwd(), '--json', ...extra], {
+            ...environment,
+            ...env,
+          })
+        ).stdout,
+      );
     try {
-      await bootstrap(fixture, 'engineering', fixture.remote);
+      await expect(command('verify')).rejects.toMatchObject({
+        stderr: expect.stringContaining('No writable Cursor Cloud memory shares'),
+      });
+      await bootstrap(fixture);
       await bootstrap(fixture, 'docs', docsRemote);
-      const dashboard = await runCli([
-        'cloud',
-        'cursor',
-        'config',
-        '--home',
-        fixture.home,
-        '--team',
-        'engineering',
-        '--team',
-        'docs',
-        '--user',
-        'cloud-user',
-        '--agent-id',
-        'cloud-agent',
-      ]);
-      expect(JSON.parse(dashboard.stdout)).toMatchObject({
-        env: {
-          THREADNOTE_CURSOR_CLOUD_TEAM: 'docs',
-          THREADNOTE_CURSOR_CLOUD_TEAMS: '["docs","engineering"]',
-          THREADNOTE_MCP_TOOLSET: 'cursor-cloud-personal',
-        },
-      });
-
-      await withCloudMcp(fixture, ['engineering', 'docs'], async client => {
-        await callText(client, 'list_context', {recursive: true, team: 'engineering'});
-        const allSharesRemoteUri = 'memories/shared/docs/durable/projects/threadnote/remote-all-shares.md';
-        await pushRemoteMemory(
-          fixture.root,
-          docsRemote,
-          'durable/projects/threadnote/remote-all-shares.md',
-          memoryDocument('remote-all-shares', 'REMOTE_ALL_SHARES_REFRESH_SENTINEL'),
-        );
-        const refreshedAllShares = await client.callTool({
-          arguments: {callerCwd: process.cwd(), query: 'REMOTE_ALL_SHARES_REFRESH_SENTINEL'},
-          name: 'recall_context',
+      expect((await command('verify')).teams).toEqual(['docs', 'engineering']);
+      const registryPath = join(fixture.home, 'share', 'teams.json');
+      const registry = JSON.parse(await readFile(registryPath, 'utf8'));
+      registry.defaultTeam = 'engineering';
+      await writeFile(registryPath, JSON.stringify(registry));
+      expect((await command('start')).teams).toEqual(['docs', 'engineering']);
+      expect((await command('verify', [], {THREADNOTE_CURSOR_CLOUD_TEAM: 'docs'})).teams).toEqual(['docs']);
+      expect(
+        (await command('start', ['--team', 'engineering'], {THREADNOTE_CURSOR_CLOUD_TEAMS: 'invalid'})).teams,
+      ).toEqual(['engineering']);
+      expect(
+        (await command('verify', ['--team', 'docs'], {THREADNOTE_CURSOR_CLOUD_TEAM: 'engineering'})).teams,
+      ).toEqual(['docs']);
+      await writeFile(registryPath, JSON.stringify({version: 1, teams: {}}));
+      for (const name of ['start', 'verify'] as const) {
+        await expect(command(name)).rejects.toMatchObject({
+          stderr: expect.stringContaining('No writable Cursor Cloud memory shares'),
         });
-        expect(JSON.stringify(refreshedAllShares)).toContain(allSharesRemoteUri);
-
-        await expect(
-          callError(client, 'remember_context', {
-            kind: 'durable',
-            project: 'threadnote',
-            text: 'An ambiguous write must be rejected.',
-            topic: 'ambiguous-write',
-          }),
-        ).resolves.toContain('requires team');
-
-        for (const [team, topic] of [
-          ['engineering', 'engineering-contract'],
-          ['docs', 'docs-contract'],
-        ] as const) {
-          const stored = await client.callTool({
-            arguments: {
-              kind: 'durable',
-              project: 'threadnote',
-              team,
-              text: `Durable contract for ${team}.`,
-              topic,
-            },
-            name: 'remember_context',
-          });
-          expect(stored.isError, JSON.stringify(stored)).not.toBe(true);
-          expect(stored.structuredContent).toMatchObject({
-            memoryUri: `threadnote://user/cloud-user/memories/shared/${team}/durable/projects/threadnote/${topic}.md`,
-            persistence: 'shared-git-pushed',
-          });
-          await expect(
-            callText(client, 'read_context', {
-              uri: `threadnote://user/cloud-user/memories/shared/${team}/durable/projects/threadnote/${topic}.md`,
-            }),
-          ).resolves.toContain(`Durable contract for ${team}.`);
-        }
-
-        await expect(callError(client, 'list_context', {})).resolves.toContain('requires team or uri');
-        await expect(callText(client, 'list_context', {recursive: true, team: 'docs'})).resolves.toContain(
-          'docs-contract.md',
-        );
-        await expect(
-          callError(client, 'list_context', {
-            team: 'docs',
-            uri: 'threadnote://user/cloud-user/memories/shared/engineering',
-          }),
-        ).resolves.toContain('team must match the share containing uri');
-        const allSharesRecall = await client.callTool({
-          arguments: {callerCwd: process.cwd(), query: 'Durable contract', responseFormat: 'dual'},
-          name: 'recall_context',
-        });
-        expect(JSON.stringify(allSharesRecall.structuredContent)).toContain('/shared/docs/');
-        expect(JSON.stringify(allSharesRecall.structuredContent)).toContain('/shared/engineering/');
-        const docsRecall = await client.callTool({
-          arguments: {
-            callerCwd: process.cwd(),
-            query: 'Durable contract',
-            responseFormat: 'dual',
-            team: 'docs',
-          },
-          name: 'recall_context',
-        });
-        expect(JSON.stringify(docsRecall.structuredContent)).toContain('/shared/docs/');
-        expect(JSON.stringify(docsRecall.structuredContent)).not.toContain('/shared/engineering/');
-        await expect(
-          callError(client, 'recall_context', {
-            callerCwd: process.cwd(),
-            query: 'Durable contract',
-            team: 'docs',
-            uri: 'threadnote://user/cloud-user/memories/shared/engineering',
-          }),
-        ).resolves.toContain('team must match the share containing uri');
-        await expect(
-          callError(client, 'remember_context', {
-            kind: 'durable',
-            project: 'threadnote',
-            relations: [
-              {
-                type: 'references',
-                uri: 'threadnote://user/cloud-user/memories/shared/engineering/durable/projects/threadnote/engineering-contract.md',
-              },
-            ],
-            team: 'docs',
-            text: 'Cross-share relations remain forbidden.',
-            topic: 'cross-share-relation',
-          }),
-        ).resolves.toContain('authorized memory scope');
-      });
-
-      await rm(join(fixture.home, 'share', 'fetch-receipts', 'docs.json'), {force: true});
-      await withCloudMcp(fixture, ['engineering', 'docs'], async client => {
-        await callText(client, 'list_context', {recursive: true, team: 'engineering'});
-        const teamScopedRemoteUri =
-          'threadnote://user/cloud-user/memories/shared/docs/durable/projects/threadnote/remote-team-scoped.md';
-        await pushRemoteMemory(
-          fixture.root,
-          docsRemote,
-          'durable/projects/threadnote/remote-team-scoped.md',
-          memoryDocument('remote-team-scoped', 'REMOTE_TEAM_SCOPED_REFRESH_SENTINEL'),
-        );
-        await expect(callText(client, 'read_context', {uri: teamScopedRemoteUri})).resolves.toContain(
-          'REMOTE_TEAM_SCOPED_REFRESH_SENTINEL',
-        );
-      });
-
-      const engineeringTree = await gitTree(fixture.remote);
-      const docsTree = await gitTree(docsRemote);
-      expect(engineeringTree).toContain('engineering-contract.md');
-      expect(engineeringTree).not.toContain('docs-contract.md');
-      expect(docsTree).toContain('docs-contract.md');
-      expect(docsTree).not.toContain('engineering-contract.md');
+      }
     } finally {
       await rm(fixture.root, {force: true, recursive: true});
     }
   });
+
+  it('discovers shares registered after startup without exposing local memory or choosing a default', async () => {
+    const fixture = await cloudFixture();
+    const docsRemote = await seedRemote(fixture.root, 'late-docs-share');
+    const uri =
+      'threadnote://user/cloud-user/memories/shared/engineering/durable/projects/threadnote/late-bootstrap.md';
+    try {
+      await withCloudMcp(fixture, [], async client => {
+        expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(CLOUD_TOOL_NAMES);
+        await expect(client.readResource({uri})).rejects.toThrow('No writable Cursor Cloud memory shares');
+        const handoff = await client.callTool({
+          name: 'remember_context',
+          arguments: {
+            kind: 'handoff',
+            project: 'threadnote',
+            topic: 'local-only',
+            text: 'LOCAL_ONLY_SENTINEL',
+          },
+        });
+        expect(handoff.isError, JSON.stringify(handoff)).not.toBe(true);
+        expect(
+          await callError(client, 'recall_context', {callerCwd: process.cwd(), query: 'LOCAL_ONLY_SENTINEL'}),
+        ).toContain('No writable Cursor Cloud memory shares');
+        await bootstrap(fixture);
+        const stored = await client.callTool({
+          name: 'remember_context',
+          arguments: {
+            kind: 'durable',
+            project: 'threadnote',
+            topic: 'late-bootstrap',
+            text: 'LATE_BOOTSTRAP_SENTINEL',
+          },
+        });
+        expect(stored.isError, JSON.stringify(stored)).not.toBe(true);
+        expect(JSON.stringify(await client.readResource({uri}))).toContain('LATE_BOOTSTRAP_SENTINEL');
+        await bootstrap(fixture, 'docs', docsRemote);
+        expect(
+          await callError(client, 'remember_context', {kind: 'durable', text: 'Ambiguous', topic: 'no-default'}),
+        ).toContain('requires team');
+        const recalled = await client.callTool({
+          name: 'recall_context',
+          arguments: {
+            callerCwd: process.cwd(),
+            query: 'LATE_BOOTSTRAP_SENTINEL',
+            responseFormat: 'dual',
+          },
+        });
+        expect(JSON.stringify(recalled)).toContain('late-bootstrap.md');
+        const registryPath = join(fixture.home, 'share', 'teams.json');
+        const registry = JSON.parse(await readFile(registryPath, 'utf8'));
+        delete registry.teams.engineering;
+        await writeFile(registryPath, JSON.stringify(registry));
+        expect(await callError(client, 'read_context', {uri})).toContain('must stay within');
+        await expect(client.readResource({uri})).rejects.toThrow('outside the active Cursor Cloud memory scope');
+      });
+    } finally {
+      await rm(fixture.root, {force: true, recursive: true});
+    }
+  });
+
+  it('preserves actionable resource errors for invalid selectors and oversized discovery', async () => {
+    const fixture = await cloudFixture();
+    const uri = 'threadnote://user/cloud-user/memories/shared/engineering';
+    try {
+      await mkdir(join(fixture.home, 'share'), {recursive: true});
+      await writeFile(
+        join(fixture.home, 'share', 'teams.json'),
+        JSON.stringify({
+          version: 1,
+          teams: Object.fromEntries(
+            Array.from({length: 17}, (_, index) => [`team-${index}`, {remote: fixture.remote}]),
+          ),
+        }),
+      );
+      await withCloudMcp(fixture, [], async client => {
+        await expect(client.readResource({uri})).rejects.toThrow('at most 16 shares');
+      });
+      for (const raw of ['[]', 'invalid']) {
+        await withCloudMcp(
+          fixture,
+          [],
+          async client => {
+            expect((await client.listTools()).tools).toHaveLength(CLOUD_TOOL_NAMES.length);
+            await expect(client.readResource({uri})).rejects.toThrow('THREADNOTE_CURSOR_CLOUD_TEAMS');
+          },
+          'cursor-cloud-personal',
+          {THREADNOTE_CURSOR_CLOUD_TEAMS: raw},
+        );
+      }
+    } finally {
+      await rm(fixture.root, {force: true, recursive: true});
+    }
+  });
+
+  it.each([true, false])(
+    'exposes several personal Git shares through one bounded MCP server (selectors: %s)',
+    async explicit => {
+      const fixture = await cloudFixture();
+      const docsRemote = await seedRemote(fixture.root, 'docs-share');
+      try {
+        await bootstrap(fixture, 'engineering', fixture.remote);
+        await bootstrap(fixture, 'docs', docsRemote);
+        const dashboard = await runCli([
+          'cloud',
+          'cursor',
+          'config',
+          '--home',
+          fixture.home,
+          '--team',
+          'engineering',
+          '--team',
+          'docs',
+          '--user',
+          'cloud-user',
+          '--agent-id',
+          'cloud-agent',
+        ]);
+        expect(JSON.parse(dashboard.stdout)).toMatchObject({
+          env: {
+            THREADNOTE_CURSOR_CLOUD_TEAM: 'docs',
+            THREADNOTE_CURSOR_CLOUD_TEAMS: '["docs","engineering"]',
+            THREADNOTE_MCP_TOOLSET: 'cursor-cloud-personal',
+          },
+        });
+
+        await withCloudMcp(fixture, explicit ? ['engineering', 'docs'] : [], async client => {
+          await callText(client, 'list_context', {recursive: true, team: 'engineering'});
+          const allSharesRemoteUri = 'memories/shared/docs/durable/projects/threadnote/remote-all-shares.md';
+          await pushRemoteMemory(
+            fixture.root,
+            docsRemote,
+            'durable/projects/threadnote/remote-all-shares.md',
+            memoryDocument('remote-all-shares', 'REMOTE_ALL_SHARES_REFRESH_SENTINEL'),
+          );
+          const refreshedAllShares = await client.callTool({
+            arguments: {callerCwd: process.cwd(), query: 'REMOTE_ALL_SHARES_REFRESH_SENTINEL'},
+            name: 'recall_context',
+          });
+          expect(JSON.stringify(refreshedAllShares)).toContain(allSharesRemoteUri);
+
+          await expect(
+            callError(client, 'remember_context', {
+              kind: 'durable',
+              project: 'threadnote',
+              text: 'An ambiguous write must be rejected.',
+              topic: 'ambiguous-write',
+            }),
+          ).resolves.toContain('requires team');
+
+          for (const [team, topic] of [
+            ['engineering', 'engineering-contract'],
+            ['docs', 'docs-contract'],
+          ] as const) {
+            const stored = await client.callTool({
+              arguments: {
+                kind: 'durable',
+                project: 'threadnote',
+                team,
+                text: `Durable contract for ${team}.`,
+                topic,
+              },
+              name: 'remember_context',
+            });
+            expect(stored.isError, JSON.stringify(stored)).not.toBe(true);
+            expect(stored.structuredContent).toMatchObject({
+              memoryUri: `threadnote://user/cloud-user/memories/shared/${team}/durable/projects/threadnote/${topic}.md`,
+              persistence: 'shared-git-pushed',
+            });
+            await expect(
+              callText(client, 'read_context', {
+                uri: `threadnote://user/cloud-user/memories/shared/${team}/durable/projects/threadnote/${topic}.md`,
+              }),
+            ).resolves.toContain(`Durable contract for ${team}.`);
+          }
+
+          await expect(callError(client, 'list_context', {})).resolves.toContain('requires team or uri');
+          await expect(callText(client, 'list_context', {recursive: true, team: 'docs'})).resolves.toContain(
+            'docs-contract.md',
+          );
+          await expect(
+            callError(client, 'list_context', {
+              team: 'docs',
+              uri: 'threadnote://user/cloud-user/memories/shared/engineering',
+            }),
+          ).resolves.toContain('team must match the share containing uri');
+          const allSharesRecall = await client.callTool({
+            arguments: {callerCwd: process.cwd(), query: 'Durable contract', responseFormat: 'dual'},
+            name: 'recall_context',
+          });
+          expect(JSON.stringify(allSharesRecall.structuredContent)).toContain('/shared/docs/');
+          expect(JSON.stringify(allSharesRecall.structuredContent)).toContain('/shared/engineering/');
+          const docsRecall = await client.callTool({
+            arguments: {
+              callerCwd: process.cwd(),
+              query: 'Durable contract',
+              responseFormat: 'dual',
+              team: 'docs',
+            },
+            name: 'recall_context',
+          });
+          expect(JSON.stringify(docsRecall.structuredContent)).toContain('/shared/docs/');
+          expect(JSON.stringify(docsRecall.structuredContent)).not.toContain('/shared/engineering/');
+          await expect(
+            callError(client, 'recall_context', {
+              callerCwd: process.cwd(),
+              query: 'Durable contract',
+              team: 'docs',
+              uri: 'threadnote://user/cloud-user/memories/shared/engineering',
+            }),
+          ).resolves.toContain('team must match the share containing uri');
+          await expect(
+            callError(client, 'remember_context', {
+              kind: 'durable',
+              project: 'threadnote',
+              relations: [
+                {
+                  type: 'references',
+                  uri: 'threadnote://user/cloud-user/memories/shared/engineering/durable/projects/threadnote/engineering-contract.md',
+                },
+              ],
+              team: 'docs',
+              text: 'Cross-share relations remain forbidden.',
+              topic: 'cross-share-relation',
+            }),
+          ).resolves.toContain('authorized memory scope');
+        });
+
+        await rm(join(fixture.home, 'share', 'fetch-receipts', 'docs.json'), {force: true});
+        await withCloudMcp(fixture, ['engineering', 'docs'], async client => {
+          await callText(client, 'list_context', {recursive: true, team: 'engineering'});
+          const teamScopedRemoteUri =
+            'threadnote://user/cloud-user/memories/shared/docs/durable/projects/threadnote/remote-team-scoped.md';
+          await pushRemoteMemory(
+            fixture.root,
+            docsRemote,
+            'durable/projects/threadnote/remote-team-scoped.md',
+            memoryDocument('remote-team-scoped', 'REMOTE_TEAM_SCOPED_REFRESH_SENTINEL'),
+          );
+          await expect(callText(client, 'read_context', {uri: teamScopedRemoteUri})).resolves.toContain(
+            'REMOTE_TEAM_SCOPED_REFRESH_SENTINEL',
+          );
+        });
+
+        const engineeringTree = await gitTree(fixture.remote);
+        const docsTree = await gitTree(docsRemote);
+        expect(engineeringTree).toContain('engineering-contract.md');
+        expect(engineeringTree).not.toContain('docs-contract.md');
+        expect(docsTree).toContain('docs-contract.md');
+        expect(docsTree).not.toContain('engineering-contract.md');
+      } finally {
+        await rm(fixture.root, {force: true, recursive: true});
+      }
+    },
+  );
 
   it('renders and idempotently prepares remote-hybrid mode without a memory checkout', async () => {
     const root = await mkdtemp(join(tmpdir(), 'threadnote-cursor-cloud-hybrid-'));
@@ -834,7 +991,7 @@ interface CloudFixture {
 }
 
 async function cloudFixture(): Promise<CloudFixture> {
-  const root = await mkdtemp(join(tmpdir(), 'threadnote-cursor-cloud-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'threadnote-cursor-cloud-')));
   const remote = await seedRemote(root, 'memory-share');
   const home = join(root, 'home');
   const userHome = join(root, 'user-home');
@@ -946,6 +1103,7 @@ async function withCloudMcp<T>(
   teamsOrUse: readonly string[] | ((client: Client) => Promise<T>),
   maybeUse?: (client: Client) => Promise<T>,
   toolset: 'cursor-cloud' | 'cursor-cloud-git-beta' | 'cursor-cloud-personal' = 'cursor-cloud-personal',
+  environment: Readonly<Record<string, string>> = {},
 ): Promise<T> {
   const teams = typeof teamsOrUse === 'function' ? ['engineering'] : teamsOrUse;
   const use = typeof teamsOrUse === 'function' ? teamsOrUse : maybeUse!;
@@ -958,12 +1116,13 @@ async function withCloudMcp<T>(
       ...gitIdentityEnvironment,
       THREADNOTE_ACCOUNT: 'local',
       THREADNOTE_AGENT_ID: 'cloud-agent',
-      THREADNOTE_CURSOR_CLOUD_TEAM: 'engineering',
-      ...(teams.length === 1 ? {} : {THREADNOTE_CURSOR_CLOUD_TEAMS: JSON.stringify([...teams].sort())}),
+      THREADNOTE_CURSOR_CLOUD_TEAM: teams[0] ?? '',
+      THREADNOTE_CURSOR_CLOUD_TEAMS: teams.length > 1 ? JSON.stringify([...teams].sort()) : '',
       THREADNOTE_HOME: fixture.home,
       THREADNOTE_MANIFEST: join(fixture.home, 'seed-manifest.yaml'),
       THREADNOTE_MCP_TOOLSET: toolset,
       THREADNOTE_USER: 'cloud-user',
+      ...environment,
     },
     stderr: 'pipe',
   });

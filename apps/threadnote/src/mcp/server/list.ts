@@ -5,12 +5,11 @@ import {
   cursorCloudShareForTeam,
   cursorCloudShareForUri,
   cursorCloudUriWithinScope,
-  type CursorCloudMemoryScope,
 } from '../../cursor/cloud.js';
 import {EffectMcpServerRegistry, McpInput} from '../../effect/ai/mcp.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {argumentError, optionalResourceUri, type RuntimeConfig} from './common.js';
-import {syncCursorCloudMemoryShares} from './cursor_cloud_memory.js';
+import {resolveMemoryScope, syncCursorCloudMemoryShares, type MemoryScopeSource} from './cursor_cloud_memory.js';
 import {runNativeListTool} from './memory.js';
 
 export function registerListTool(
@@ -18,9 +17,9 @@ export function registerListTool(
   config: RuntimeConfig,
   name: string,
   description: string,
-  memoryScope?: CursorCloudMemoryScope,
+  scopeSource?: MemoryScopeSource,
 ): void {
-  const profileLabel = memoryScope?.label ?? 'Personal Cursor Cloud';
+  const profileLabel = scopeSource?.label ?? 'Personal Cursor Cloud';
   server.registerTool(
     name,
     {
@@ -33,10 +32,11 @@ export function registerListTool(
         simple: McpInput.boolean('Only return paths'),
         nodeLimit: McpInput.integer('Maximum node count', {minimum: 1, maximum: 1000}),
         node_limit: McpInput.integer('Maximum node count', {minimum: 1, maximum: 1000}),
-        ...(memoryScope ? {team: McpInput.string(`Configured ${profileLabel} share`)} : {}),
+        ...(scopeSource ? {team: McpInput.string(`Configured ${profileLabel} share`)} : {}),
       },
     },
     Effect.fn('mcp_server.callback')(function* ({all, nodeLimit, node_limit, recursive, simple, team, uri}) {
+      const memoryScope = yield* resolveMemoryScope(scopeSource);
       const checkedUri = optionalResourceUri(uri, name);
       if (!checkedUri.ok) {
         return checkedUri.error;
