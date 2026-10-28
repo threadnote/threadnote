@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Result} from 'effect';
+import {Arbitrary, Effect, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CommandExecutor, CommandTimedOut, runCommandEffect} from '@threadnote/platform/command';
@@ -27,45 +27,83 @@ describe('native Git observations', () => {
       const binary = commands.executeBytes;
       if (!binary) throw new Error('Expected binary command support.');
       for (const format of ['sha1', 'sha256']) {
-        const repo = f.path.join(f.root, format);
-        yield* f.fs.makeDirectory(repo);
-        yield* git(repo, 'init', '--initial-branch=main', `--object-format=${format}`);
-        yield* f.fs.writeFileString(f.path.join(repo, 'source.ts'), 'source\n');
-        yield* git(repo, 'add', '.');
-        yield* commit(repo);
-        yield* git(repo, 'checkout', '--detach');
-        const head = (yield* git(repo, 'rev-parse', 'HEAD')).trim();
-        const tree = (yield* git(repo, 'rev-parse', 'HEAD^{tree}')).trim();
-        const before = yield* f.fs.readFile(f.path.join(repo, '.git', 'index'));
-        const observed: (readonly string[])[] = [];
-        const snapshot = yield* captureNativeCycleSource(repo, 'HEAD').pipe(
-          Effect.provideService(CommandExecutor, {
-            ...commands,
-            executeBytes: (executable, args, options) => {
-              observed.push(args);
-              return binary(executable, args, options).pipe(
-                Effect.map(result =>
-                  initialObjects(args)
-                    ? {
-                        ...result,
-                        stdout: new TextEncoder().encode(
-                          new TextDecoder().decode(result.stdout).replace(/\n/gu, '\r\n'),
-                        ),
-                      }
-                    : result,
-                ),
-              );
-            },
-          }),
-        );
-        expect(snapshot).toMatchObject({head, tree, baseTree: tree, files: {}});
-        expect(head).toHaveLength(format === 'sha1' ? 40 : 64);
-        expect(observed.filter(initialObjects)).toHaveLength(1);
-        expect(observed.filter(args => args.includes('rev-parse'))).toHaveLength(4);
-        expect(observed.at(-1)).toContain('HEAD^{commit}');
-        expect(observed.at(-1)).toContain('--verify');
-        expect(yield* f.fs.readFile(f.path.join(repo, '.git', 'index'))).toEqual(before);
-        yield* verifyNativeCloseoutSource(repo, head);
+        const ordinary = f.path.join(f.root, format + ' ordinary space');
+        const linked = f.path.join(f.root, format + ' linked space');
+        yield* f.fs.makeDirectory(ordinary);
+        yield* git(ordinary, 'init', '--initial-branch=main', `--object-format=${format}`);
+        yield* f.fs.writeFileString(f.path.join(ordinary, 'source.ts'), 'source\n');
+        yield* git(ordinary, 'add', '.');
+        yield* commit(ordinary);
+        yield* git(ordinary, 'checkout', '--detach');
+        yield* git(ordinary, 'worktree', 'add', '--detach', linked, 'HEAD');
+        for (const repo of [ordinary, linked]) {
+          const root = yield* f.fs.realPath(repo);
+          const head = (yield* git(repo, 'rev-parse', 'HEAD')).trim();
+          const tree = (yield* git(repo, 'rev-parse', 'HEAD^{tree}')).trim();
+          const index = (yield* git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'index')).trim();
+          const before = yield* f.fs.readFile(index);
+          expect(yield* captureNativeCycleSource(repo, 'HEAD')).toMatchObject({head, tree, baseTree: tree, files: {}});
+          const observed: (readonly string[])[] = [];
+          const snapshot = yield* captureNativeCycleSource(repo, 'HEAD').pipe(
+            Effect.provideService(CommandExecutor, {
+              ...commands,
+              executeBytes: (executable, args, options) => {
+                observed.push(args);
+                return binary(executable, args, options).pipe(
+                  Effect.map(result =>
+                    initialObjects(args)
+                      ? {
+                          ...result,
+                          // Alter only the framing EOLs; never normalize bytes inside a root path.
+                          stdout: new TextEncoder().encode(`${root}\r\n${head}\r\n${tree}\r\n`),
+                        }
+                      : result,
+                  ),
+                );
+              },
+            }),
+          );
+          expect(snapshot).toMatchObject({head, tree, baseTree: tree, files: {}});
+          expect(head).toHaveLength(format === 'sha1' ? 40 : 64);
+          expect(observed.filter(initialObjects)).toHaveLength(1);
+          expect(observed.filter(args => args.includes('rev-parse'))).toHaveLength(3);
+          expect(observed[0]).toContain('--show-toplevel');
+          expect(observed.findIndex(args => args.includes('--git-path'))).toBeGreaterThan(
+            observed.findIndex(args => args.includes('status')),
+          );
+          expect(observed.filter(args => args.includes('add'))).toHaveLength(2);
+          expect(observed.some(args => args.includes('--renormalize'))).toBe(true);
+          expect(observed.at(-1)).toContain('HEAD^{commit}');
+          expect(observed.at(-1)).toContain('--verify');
+          expect(yield* f.fs.readFile(index)).toEqual(before);
+          yield* verifyNativeCloseoutSource(repo, head);
+        }
+      }
+    }).pipe(run),
+  );
+
+  effectIt.effect('retains internal LF, CRLF and object-looking root lines in real ordinary and linked captures', () =>
+    Effect.gen(function* () {
+      // Win32 filenames cannot contain CR/LF; the same ordinary/linked matrix above runs there.
+      if (process.platform === 'win32') return;
+      const f = yield* nativeFixture();
+      for (const format of ['sha1', 'sha256']) {
+        const width = format === 'sha1' ? 40 : 64;
+        const ordinary = f.path.join(f.root, `${format} ordinary\n${'a'.repeat(width)}\r\nspace end`);
+        const linked = f.path.join(f.root, `${format} linked\r\n${'b'.repeat(width)}\nspace end`);
+        yield* f.fs.makeDirectory(ordinary);
+        yield* git(ordinary, 'init', '--initial-branch=main', `--object-format=${format}`);
+        yield* f.fs.writeFileString(f.path.join(ordinary, 'source.ts'), 'source\n');
+        yield* git(ordinary, 'add', '.');
+        yield* commit(ordinary);
+        yield* git(ordinary, 'worktree', 'add', '--detach', linked, 'HEAD');
+        for (const repo of [ordinary, linked]) {
+          const root = yield* f.fs.realPath(repo);
+          const head = (yield* git(repo, 'rev-parse', 'HEAD')).trim();
+          const tree = (yield* git(repo, 'rev-parse', 'HEAD^{tree}')).trim();
+          const snapshot = yield* captureNativeCycleSource(repo, 'HEAD');
+          expect(snapshot).toMatchObject({repo: root, head, tree, baseTree: tree, files: {}});
+        }
       }
     }).pipe(run),
   );
@@ -83,14 +121,17 @@ describe('native Git observations', () => {
       const before = yield* f.fs.readFile(index);
       for (const stdout of [
         '',
-        `${hash}\n`,
-        `${hash}\n${hash}`,
-        `${hash}\n${hash}\nextra\n`,
-        `${hash.toUpperCase()}\n${hash}\n`,
-        `${hash}\n${'a'.repeat(64)}\n`,
-        ` ${hash}\n${hash}\n`,
-        `${hash}\r\r\n${hash}\n`,
-        `${hash}\nHEAD^{tree}\n`,
+        `${f.repo}\n${hash}\n`,
+        `${f.repo}\n${hash}\n${hash}`,
+        `${f.repo}\n${hash}\n${hash}\nextra\n`,
+        `${f.repo}\n${hash.toUpperCase()}\n${hash}\n`,
+        `${f.repo}\n${hash}\n${'a'.repeat(64)}\n`,
+        `${f.repo}\n ${hash}\n${hash}\n`,
+        `${f.repo}\n${hash}\r\r\n${hash}\n`,
+        `${f.repo}\n${hash}\nHEAD^{tree}\n`,
+        `${f.repo}\n${hash}\n${hash}\n\n`,
+        `\n${hash}\n${hash}\n`,
+        new Uint8Array([0xff]),
       ]) {
         let indexWrites = 0;
         const result = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
@@ -99,7 +140,11 @@ describe('native Git observations', () => {
             executeBytes: (executable, args, options) => {
               if (args.includes('add')) indexWrites++;
               return initialObjects(args)
-                ? Effect.succeed({exitCode: 0, stderr: '', stdout: new TextEncoder().encode(stdout)})
+                ? Effect.succeed({
+                    exitCode: 0,
+                    stderr: '',
+                    stdout: typeof stdout === 'string' ? new TextEncoder().encode(stdout) : stdout,
+                  })
                 : binary(executable, args, options);
             },
           }),
@@ -108,6 +153,104 @@ describe('native Git observations', () => {
         refused(result, 'invalid-snapshot');
         expect(indexWrites).toBe(0);
         expect(yield* f.fs.readFile(index)).toEqual(before);
+      }
+    }).pipe(run),
+  );
+
+  effectIt.effect('requires complete equal-format lowercase object tails without trimming their fields', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const root = yield* f.fs.realPath(f.repo);
+      const commands = yield* CommandExecutor;
+      const result = yield* Arbitrary.checkEffect(
+        Arbitrary.schema(
+          Schema.Struct({
+            headWidth: Schema.Literals([40, 64]),
+            treeWidth: Schema.Literals([40, 64]),
+            uppercase: Schema.Boolean,
+            separator: Schema.Literals(['\n', '\r\n']),
+            ending: Schema.Literals(['\n', '\r\n', '', '\n\n']),
+          }),
+        ),
+        ({headWidth, treeWidth, uppercase, separator, ending}) =>
+          Effect.gen(function* () {
+            const observed: (readonly string[])[] = [];
+            const head = (uppercase ? 'A' : 'a').repeat(headWidth);
+            const result = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+              Effect.provideService(CommandExecutor, {
+                ...commands,
+                executeBytes: (_executable, args) => {
+                  observed.push(args);
+                  return Effect.succeed({
+                    exitCode: 0,
+                    stderr: '',
+                    stdout: new TextEncoder().encode(
+                      initialObjects(args)
+                        ? `${root}${separator}${head}${separator}${'b'.repeat(treeWidth)}${ending}`
+                        : 'u conflict\0',
+                    ),
+                  });
+                },
+              }),
+              Effect.result,
+            );
+            const valid = !uppercase && headWidth === treeWidth && (ending === '\n' || ending === '\r\n');
+            refused(result, valid ? 'unmerged-index' : 'invalid-snapshot');
+            expect(observed.some(args => args.includes('status'))).toBe(valid);
+            expect(observed.some(args => args.includes('add') || args.includes('--git-path'))).toBe(false);
+            return true;
+          }),
+        {runs: 24},
+      );
+      expect(result).toMatchObject({_tag: 'Passed', runs: 24});
+    }).pipe(run),
+  );
+
+  effectIt.effect('checks root authority and documents early base refusal before index or status work', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* git(f.repo, 'add', '.');
+      yield* commit(f.repo);
+      const other = f.path.join(f.root, 'other directory');
+      yield* f.fs.makeDirectory(other);
+      const root = yield* f.fs.realPath(f.repo);
+      const hash = 'a'.repeat(40);
+      const commands = yield* CommandExecutor;
+      const binary = commands.executeBytes;
+      if (!binary) throw new Error('Expected binary command support.');
+      const before = yield* f.fs.readFile(f.path.join(f.repo, '.git', 'index'));
+      for (const sample of [
+        {base: 'HEAD', prefix: other, code: 'binding-drift', status: false},
+        // The extra OID is a path prefix, not an excuse to accept a three-line projection.
+        {base: 'HEAD', prefix: `${root}\n${hash}`, code: undefined, status: false},
+        {base: 'HEAD', prefix: ` \t${root} \t`, code: 'unmerged-index', status: true},
+        {base: 'HEAD\nHEAD', prefix: other, code: 'invalid-snapshot', status: false},
+      ]) {
+        const observed: (readonly string[])[] = [];
+        const result = yield* captureNativeCycleSource(f.repo, sample.base).pipe(
+          Effect.provideService(CommandExecutor, {
+            ...commands,
+            executeBytes: (executable, args, options) => {
+              observed.push(args);
+              if (initialObjects(args))
+                return Effect.succeed({
+                  exitCode: 0,
+                  stderr: '',
+                  stdout: new TextEncoder().encode(`${sample.prefix}\r\n${hash}\r\n${hash}\r\n`),
+                });
+              if (args.includes('status'))
+                return Effect.succeed({exitCode: 0, stderr: '', stdout: new TextEncoder().encode('u conflict\0')});
+              return binary(executable, args, options);
+            },
+          }),
+          Effect.result,
+        );
+        if (sample.code) refused(result, sample.code);
+        else expect(Result.isFailure(result)).toBe(true);
+        expect(observed.some(args => args.includes('status'))).toBe(sample.status);
+        expect(observed.some(args => args.includes('add') || args.includes('--git-path'))).toBe(false);
+        if (sample.base !== 'HEAD') expect(observed).toHaveLength(0);
+        expect(yield* f.fs.readFile(f.path.join(f.repo, '.git', 'index'))).toEqual(before);
       }
     }).pipe(run),
   );
@@ -317,7 +460,9 @@ describe('native Git observations', () => {
       );
       refused(result, 'unmerged-index');
       expect(observed.filter(args => args.includes('status'))).toHaveLength(1);
-      expect(observed.some(args => args.includes('ls-files') || args.includes('add'))).toBe(false);
+      expect(
+        observed.some(args => args.includes('ls-files') || args.includes('add') || args.includes('--git-path')),
+      ).toBe(false);
       expect(yield* f.fs.readFile(index)).toEqual(before);
       expect(yield* f.fs.readFileString(f.path.join(f.repo, 'source.ts'))).toBe(source);
     }).pipe(run),

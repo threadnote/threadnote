@@ -56,24 +56,31 @@ const resolveObject = Effect.fn('workflowAutomation.cycle.resolveObject')(functi
   return value;
 });
 
-/** One initial observation only; the closing HEAD check remains independent. */
+/** One fresh opening root/object observation; the closing HEAD check remains independent. */
 const resolveSourceObjects = Effect.fn('workflowAutomation.cycle.resolveSourceObjects')(function* (
   repo: string,
   base: string,
 ) {
+  const fs = yield* FileSystem.FileSystem;
+  const root = yield* fs.realPath(repo);
+  // Invalid base syntax now refuses before the read-only Git root observation.
   if (!base.trim() || base.length > 512 || nativeCycleHasControl(base))
     return yield* fail('invalid-snapshot', 'Use one bounded Git revision.');
-  const output = yield* git(repo, ['rev-parse', '--revs-only', '--end-of-options', 'HEAD^{commit}', `${base}^{tree}`]);
-  const records = output.split(/\r?\n/u);
-  if (
-    records.length !== 3 ||
-    records[2] !== '' ||
-    !objectId.test(records[0]) ||
-    !objectId.test(records[1]) ||
-    records[0].length !== records[1].length
-  )
+  const output = yield* git(root, [
+    'rev-parse',
+    '--show-toplevel',
+    '--revs-only',
+    '--end-of-options',
+    'HEAD^{commit}',
+    `${base}^{tree}`,
+  ]);
+  // Paths may themselves contain newlines or OID-looking lines. Only the final two records are objects.
+  const records = /\r?\n([a-f0-9]{40}|[a-f0-9]{64})\r?\n([a-f0-9]{40}|[a-f0-9]{64})\r?\n$/u.exec(output);
+  if (!records || records.index + records[0].length !== output.length || records[1].length !== records[2].length)
     return yield* fail('invalid-snapshot', 'Git did not return two complete object identities.');
-  return {head: records[0], baseTree: records[1]};
+  const reported = output.slice(0, records.index).trim();
+  if (!reported) return yield* fail('invalid-snapshot', 'Git did not return a repository root.');
+  return {repo: yield* canonicalReportedRepo(root, reported), head: records[1], baseTree: records[2]};
 });
 
 /** Read one exact Git tree entry, including its executable/symlink/submodule mode. */
@@ -109,22 +116,28 @@ export const readNativeCycleTreeEntry = Effect.fn('workflowAutomation.cycle.read
   return entry ?? {mode: absentTreeMode, blob: '0'.repeat(tree.length)};
 });
 
+const canonicalReportedRepo = (root: string, reported: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const canonicalReported = yield* fs.realPath(reported);
+    if (canonicalReported !== root) {
+      const requestedAuthority = yield* readPathFileSystemAuthority(root, 'Directory');
+      const reportedAuthority = yield* readPathFileSystemAuthority(canonicalReported, 'Directory');
+      if (
+        Option.isNone(requestedAuthority) ||
+        Option.isNone(reportedAuthority) ||
+        !sameFileSystemIdentity(requestedAuthority.value, reportedAuthority.value)
+      )
+        return yield* fail('binding-drift', 'Cycle Git operations must use the bound repository root.');
+    }
+    return canonicalReported;
+  });
+
 const canonicalRepo = Effect.fn('workflowAutomation.cycle.canonicalRepo')(function* (repo: string) {
   const fs = yield* FileSystem.FileSystem;
   const root = yield* fs.realPath(repo);
   const reported = (yield* git(root, ['rev-parse', '--show-toplevel'])).trim();
-  const canonicalReported = yield* fs.realPath(reported);
-  if (canonicalReported !== root) {
-    const requestedAuthority = yield* readPathFileSystemAuthority(root, 'Directory');
-    const reportedAuthority = yield* readPathFileSystemAuthority(canonicalReported, 'Directory');
-    if (
-      Option.isNone(requestedAuthority) ||
-      Option.isNone(reportedAuthority) ||
-      !sameFileSystemIdentity(requestedAuthority.value, reportedAuthority.value)
-    )
-      return yield* fail('binding-drift', 'Cycle Git operations must use the bound repository root.');
-  }
-  return canonicalReported;
+  return yield* canonicalReportedRepo(root, reported);
 });
 
 /** A private index captures worktree bytes; the contributor's index is never written. */
@@ -134,8 +147,7 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const root = yield* canonicalRepo(repo);
-  const {head, baseTree} = yield* resolveSourceObjects(root, base);
+  const {repo: root, head, baseTree} = yield* resolveSourceObjects(repo, base);
   const status = yield* git(root, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none']);
   const statusRecords = status.split('\0');
   let unmerged = false;
