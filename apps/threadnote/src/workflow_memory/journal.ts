@@ -22,7 +22,7 @@ import {readWorkflowSharedRoots} from './scopes.js';
 import {verifyWorkflowEvidence} from './evidence.js';
 import {decodeWorkflowJournal, encodeWorkflowJournal, workflowJournalLimits} from './journal_codec.js';
 import {workflowStateTopic} from './naming.js';
-import {CurrentWorkflowReadCache, immutableWorkflowImage, type WorkflowReadCache} from './read_cache.js';
+import {CurrentWorkflowReadCache, immutableWorkflowImage} from './read_cache.js';
 import {
   decodeWorkflowJournalStorageImage,
   hasPackedWorkflowScopes,
@@ -192,10 +192,10 @@ export function assertWorkflowJournalCapacity(state: WorkflowJournal, compact = 
   );
 }
 
-function transitionImages(prepared: WorkflowJournal, stringify: WorkflowReadCache['stringify']) {
+function transitionImages(prepared: WorkflowJournal) {
   const frozen = immutableWorkflowImage(prepared);
   const committed = immutableWorkflowImage({...frozen, manifestCommitted: true});
-  const content = workflowJournalStorageImagePair(frozen, stringify.textValues);
+  const content = workflowJournalStorageImagePair(frozen);
   return Object.freeze({
     prepared: Object.freeze({state: frozen, compact: true, content: content.prepared}),
     committed: Object.freeze({state: committed, compact: true, content: content.committed}),
@@ -431,7 +431,7 @@ export const assertWorkflowTransition = Effect.fn('workflowMemory.transition')(f
   const prepared = workflowTransition(previous, updated, DateTime.formatIso(yield* DateTime.now));
   const cache = yield* CurrentWorkflowReadCache;
   if (cache?.compactJournal) {
-    const images = yield* validateWorkflowInput(() => transitionImages(prepared, cache.stringify));
+    const images = yield* validateWorkflowInput(() => transitionImages(prepared));
     yield* validateWorkflowInput(() => assertJournalContentCapacity(images.prepared.content()));
     yield* validateWorkflowInput(() => assertJournalContentCapacity(images.committed.content()));
   } else {
@@ -452,10 +452,7 @@ export const persistWorkflowState = Effect.fn('workflowMemory.persistState')(fun
   yield* validateTransition(config, previous, prepared);
   const cache = yield* CurrentWorkflowReadCache;
   if (cache?.compactJournal) {
-    const images = yield* Effect.try({
-      try: () => transitionImages(prepared, cache.stringify),
-      catch: writeCapacityError,
-    });
+    const images = yield* Effect.try({try: () => transitionImages(prepared), catch: writeCapacityError});
     yield* writeJournalImage(config, images.prepared);
     yield* reconcileManifest(config, images.prepared.state, true);
     // Encode the committed bytes only after the live manifest fence has succeeded.

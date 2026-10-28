@@ -13,12 +13,7 @@ import {
   workflowJournalStorageImagePair,
 } from '../../src/workflow_memory/journal_storage.js';
 import {stableJson, type WorkflowJournal} from '../../src/workflow_memory/protocol.js';
-import {
-  CurrentWorkflowReadCache,
-  immutableWorkflowImage,
-  withWorkflowReadCache,
-} from '../../src/workflow_memory/read_cache.js';
-import {makeRequestCanonicalJson} from '../../src/workflow_memory/canonical_json.js';
+import {immutableWorkflowImage, withWorkflowReadCache} from '../../src/workflow_memory/read_cache.js';
 import {
   assertWorkflowTransition,
   persistWorkflowState,
@@ -82,60 +77,50 @@ describe('workflow journal scope-set storage', () => {
           fc.array(fc.integer({min: 0, max: 0xffff}), {maxLength: 60}).map(units => String.fromCharCode(...units)),
           fc.constant('"manifestCommitted":false\n雪🙂\ud800x\udfff'),
         ),
-        async (scopes, generatedText) => {
-          const encoders = [
-            undefined,
-            makeRequestCanonicalJson({maximumCachedBytes: 0}),
-            makeRequestCanonicalJson({maximumCachedBytes: 4228}),
-            makeRequestCanonicalJson(),
-          ];
-          for (const text of [generatedText, generatedText.padEnd(1024, '雪')]) {
-            const initial = image(scopes, {
-              manifestContent: text,
-              previousManifestContent: text,
-              requestBody: text,
-              desired: text,
-              before: text,
-              relationContent: text,
+        async (scopes, text) => {
+          const initial = image(scopes, {
+            manifestContent: text,
+            previousManifestContent: text,
+            requestBody: text,
+            desired: text,
+            before: text,
+            relationContent: text,
+          });
+          const child = image([[...scopes[0], 'new-scope']]).operations['operation-0'];
+          const appended = {...initial, operations: {...initial.operations, '0-child': child}};
+          const replaced = {
+            ...appended,
+            operations: {
+              ...appended.operations,
+              'operation-0': {...child, desired: text + '\nreplacement'},
+            },
+          };
+          const reordered = {
+            ...replaced,
+            operations: Object.fromEntries(Object.entries(replaced.operations).reverse()),
+          };
+          for (const current of [initial, appended, replaced, reordered]) {
+            const prepared = immutableWorkflowImage({
+              ...current,
+              manifestCommitted: false,
+              '4294967295': [undefined, text],
+              '10': {manifestCommitted: false, nested: [text]},
+              '2': text,
+              '01': undefined,
+              '4294967294': {optional: undefined},
             });
-            const child = image([[...scopes[0], 'new-scope']]).operations['operation-0'];
-            const appended = {...initial, operations: {...initial.operations, '0-child': child}};
-            const replaced = {
-              ...appended,
-              operations: {
-                ...appended.operations,
-                'operation-0': {...child, desired: text + '\nreplacement'},
-              },
-            };
-            const reordered = {
-              ...replaced,
-              operations: Object.fromEntries(Object.entries(replaced.operations).reverse()),
-            };
-            for (const current of [initial, appended, replaced, reordered]) {
-              const prepared = immutableWorkflowImage({
-                ...current,
-                manifestCommitted: false,
-                '4294967295': [undefined, text],
-                '10': {manifestCommitted: false, nested: [text]},
-                '2': text,
-                '01': undefined,
-                '4294967294': {optional: undefined},
-              });
-              const before = stableJson(prepared);
-              for (const encoder of encoders) {
-                const pair = workflowJournalStorageImagePair(prepared, encoder?.textValues);
-                for (const committed of [false, true]) {
-                  const state = {...prepared, manifestCommitted: committed};
-                  const content = committed ? pair.committed() : pair.prepared();
-                  expect(content).toBe(stableJson(workflowJournalStorageImage(state, true)) + '\n');
-                  const stored = encodeWorkflowJournal(content);
-                  expect(stored).toBe(serializeWorkflowJournal(state, true));
-                  const decoded = decodeWorkflowJournalStorageImage(JSON.parse(await decodeWorkflowJournal(stored)));
-                  expect(stableJson(decoded)).toBe(stableJson(state));
-                }
-              }
-              expect(stableJson(prepared)).toBe(before);
+            const before = stableJson(prepared);
+            const pair = workflowJournalStorageImagePair(prepared);
+            for (const committed of [false, true]) {
+              const state = {...prepared, manifestCommitted: committed};
+              const content = committed ? pair.committed() : pair.prepared();
+              expect(content).toBe(stableJson(workflowJournalStorageImage(state, true)) + '\n');
+              const stored = encodeWorkflowJournal(content);
+              expect(stored).toBe(serializeWorkflowJournal(state, true));
+              const decoded = decodeWorkflowJournalStorageImage(JSON.parse(await decodeWorkflowJournal(stored)));
+              expect(stableJson(decoded)).toBe(stableJson(state));
             }
+            expect(stableJson(prepared)).toBe(before);
           }
         },
       ),
@@ -525,134 +510,6 @@ describe('workflow journal scope-set storage', () => {
     );
     expect(stableJson(decoded)).toBe(stableJson(postimage));
   });
-
-  it('uses only the private text table across mutable pair constructions and late hook failures', () => {
-    const text = 'quote"\\\n雪🙂\ud800'.repeat(128);
-    const encoder = makeRequestCanonicalJson();
-    const initial = {
-      ...image([['scope']], {manifestContent: text, desired: text, relationContent: text}),
-      manifestCommitted: false,
-    };
-    const tables: unknown[] = [];
-    const format = (value: unknown) => {
-      tables.push(value);
-      return encoder.textValues(value);
-    };
-    workflowJournalStorageImagePair(initial, format);
-    const changed = {...initial, manifestContent: 'X' + text.slice(1), textValues: {unrelated: text}};
-    const pair = workflowJournalStorageImagePair(changed, format);
-    expect(pair.prepared()).toBe(stableJson(workflowJournalStorageImage(changed, true)) + '\n');
-    expect(pair.committed()).toBe(
-      stableJson(workflowJournalStorageImage({...changed, manifestCommitted: true}, true)) + '\n',
-    );
-    expect(tables).toHaveLength(2);
-    expect(tables.every(value => Array.isArray(value) && value.every(item => typeof item === 'string'))).toBe(true);
-    expect(tables[0]).not.toBe(tables[1]);
-
-    for (const prototype of [Object.prototype, Array.prototype]) {
-      for (const accessor of [false, true]) {
-        for (const throwing of [false, true]) {
-          const previous = Object.getOwnPropertyDescriptor(prototype, 'toJSON');
-          const run = (formatter?: (value: unknown) => string) => {
-            const events: string[] = [];
-            let nested = false;
-            const hook = (key: string) => {
-              events.push('hook:' + key);
-              if (throwing) throw new SyntaxError('first storage hook');
-              if (!nested) {
-                nested = true;
-                events.push(encoder.textValues([text]));
-                nested = false;
-              }
-              return 'hooked';
-            };
-            try {
-              Object.defineProperty(prototype, 'toJSON', {
-                configurable: true,
-                ...(accessor
-                  ? {
-                      get: () => {
-                        events.push('get');
-                        if (throwing) throw new SyntaxError('first storage getter');
-                        return hook;
-                      },
-                    }
-                  : {value: hook}),
-              });
-              try {
-                const content = workflowJournalStorageImagePair(initial, formatter);
-                return {prepared: content.prepared(), committed: content.committed(), events};
-              } catch (error) {
-                return {error: error instanceof Error ? [error.name, error.message] : error, events};
-              }
-            } finally {
-              if (previous) Object.defineProperty(prototype, 'toJSON', previous);
-              else Reflect.deleteProperty(prototype, 'toJSON');
-            }
-          };
-          expect(run(encoder.textValues)).toEqual(run());
-        }
-      }
-    }
-  });
-
-  effectIt.effect(
-    'reuses request text across preview and persistence with independent timestamps and exact readback',
-    () =>
-      Effect.gen(function* () {
-        const f = yield* nativeFixture();
-        const initialized = yield* f.init();
-        const body = 'Retained body "\\\n雪🙂'.repeat(128);
-        yield* f.call(f.write({body}));
-        const file = f.journalPath(initialized.bindingId);
-        const original = yield* f.fs.readFileString(file);
-        const previous = decodeWorkflowJournalStorageImage(
-          JSON.parse(yield* Effect.promise(() => decodeWorkflowJournal(original))),
-        ) as WorkflowJournal;
-        yield* withWorkflowReadCache(
-          Effect.gen(function* () {
-            const cache = yield* CurrentWorkflowReadCache;
-            if (!cache) throw new Error('Expected request encoder');
-            const tables: unknown[] = [];
-            const format = cache.stringify.textValues;
-            const scoped = {
-              ...cache,
-              stringify: Object.assign(cache.stringify, {
-                textValues: (value: unknown) => {
-                  tables.push(value);
-                  return format(value);
-                },
-              }),
-            };
-            yield* withWorkflowLock(
-              f.config,
-              initialized.bindingId,
-              Effect.gen(function* () {
-                yield* assertWorkflowTransition(f.config, previous, previous);
-                yield* Effect.sleep('3 millis');
-                const persisted = yield* persistWorkflowState(f.config, previous, previous);
-                expect(tables[0]).not.toContain(persisted.manifestContent);
-                expect(tables[1]).toContain(persisted.manifestContent);
-                expect(persisted.previousManifestContent).toBe(previous.manifestContent);
-                expect(persisted.operations).toEqual(previous.operations);
-                expect(tables).toHaveLength(2);
-                const bytes = yield* f.fs.readFileString(file);
-                expect(bytes).toBe(serializeWorkflowJournal(persisted, true));
-                expect(
-                  stableJson(
-                    decodeWorkflowJournalStorageImage(
-                      JSON.parse(yield* Effect.promise(() => decodeWorkflowJournal(bytes))),
-                    ),
-                  ),
-                ).toBe(stableJson(persisted));
-                expect(yield* f.store.read(f.location, persisted.manifestUri)).toBe(persisted.manifestContent);
-              }).pipe(Effect.provideService(CurrentWorkflowReadCache, scoped)),
-            );
-          }),
-          {compactJournal: true},
-        );
-      }).pipe(TestClock.withLive, provideNative),
-  );
 
   effectIt.effect('checks both native sibling capacities before mutation', () =>
     Effect.gen(function* () {

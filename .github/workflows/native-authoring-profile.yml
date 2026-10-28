@@ -1,0 +1,40 @@
+name: Native authoring H100 CPU profile (temporary)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/native-authoring-profile.yml
+
+permissions:
+  contents: read
+
+jobs:
+  profile-h100:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - name: Install Windows workflow prerequisites
+        shell: pwsh
+        run: bun tools/ci/windows-workflow-prerequisites.ts
+      - name: Profile original H100 test
+        shell: pwsh
+        run: |
+          $profileDir = Join-Path $env:RUNNER_TEMP 'native-authoring-cpu-profiles'
+          New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+          bun --cpu-prof "--cpu-prof-dir=$profileDir" --cpu-prof-interval=10000 --bun node_modules/vitest/vitest.mjs run --no-file-parallelism apps/threadnote/test/dev-skills/native-authoring-lifecycle.test.ts -t 'retains and navigates 100 same-length revisions of a large native plan'
+      - name: Upload raw CPU profiles
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-authoring-h100-cpu-profiles-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-authoring-cpu-profiles/*.cpuprofile
+          if-no-files-found: error
+          retention-days: 3
