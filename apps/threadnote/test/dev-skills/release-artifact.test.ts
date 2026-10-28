@@ -9,6 +9,96 @@ import fc from 'fast-check';
 // The literal directory declares the copied fixture/helper closure to Bazel.
 const nativeFixtures = ['native-release-workflows.ts', 'release-tools-fixture.ts', 'release-artifact.ts'];
 const archive = process.env.THREADNOTE_RELEASE_ARCHIVE;
+
+const collectDelayedChild = async (child: ReturnType<typeof spawn>) => {
+  const output: Buffer[] = [];
+  const errors: Buffer[] = [];
+  let failure: Error | undefined;
+  // close covers process exit and closure of both stdio streams, including after error.
+  const completed = new Promise<{code: number | null; signal: string | null}>(resolve => {
+    child.once('error', error => {
+      failure ??= error;
+    });
+    child.once('close', (code, signal) => resolve({code, signal}));
+  });
+  const timer = setTimeout(() => child.kill(), 15_000);
+  try {
+    if (!child.stdout || !child.stderr) throw new Error('Expected both compiled fixture output pipes.');
+    const streamFailure = (error: Error) => {
+      failure ??= error;
+    };
+    child.stdout.once('error', streamFailure);
+    child.stderr.once('error', streamFailure);
+    // Hold both OS pipes unread long enough to force backpressure above their capacity.
+    child.stdout.on('data', chunk => output.push(Buffer.from(chunk)));
+    child.stderr.on('data', chunk => errors.push(Buffer.from(chunk)));
+    child.stdout.pause();
+    child.stderr.pause();
+    await new Promise(resolve => setTimeout(resolve, 150));
+    child.stdout.resume();
+    child.stderr.resume();
+    const exit = await completed;
+    if (failure) throw failure;
+    expect(exit.signal).toBeNull();
+    return {...exit, stdout: Buffer.concat(output), stderr: Buffer.concat(errors)};
+  } finally {
+    clearTimeout(timer);
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) child.kill();
+    await completed;
+  }
+};
+
+it.each(['process', 'stdout', 'stderr'] as const)(
+  'retains delayed child %s errors and holds cleanup until close',
+  async boundary => {
+    const child = spawn(
+      process.execPath,
+      ['-e', "process.stdout.write('ready'); process.stdin.resume(); process.stdin.on('end', () => process.exit(0));"],
+      {stdio: ['pipe', 'pipe', 'pipe']},
+    );
+    const ready = new Promise<void>(resolve => child.stdout.once('data', () => resolve()));
+    const closed = new Promise<void>(resolve => child.once('close', () => resolve()));
+    const primary = new Error(`${boundary} error before close`);
+    let cleanupStarted = false;
+    let pipesClosedAtSettlement = false;
+    let result: unknown;
+    const outcome = collectDelayedChild(child)
+      .finally(() => {
+        cleanupStarted = true;
+        pipesClosedAtSettlement = child.stdout.destroyed && child.stderr.destroyed;
+      })
+      .then(
+        () => undefined,
+        error => error,
+      );
+    try {
+      await Promise.race([
+        ready,
+        outcome.then(error => {
+          throw error ?? new Error('Child closed before ready.');
+        }),
+      ]);
+      (boundary === 'process' ? child : child[boundary]).emit('error', primary);
+      await new Promise<void>(resolve => globalThis.setImmediate(resolve));
+      expect(cleanupStarted).toBe(false);
+      expect(child.exitCode).toBeNull();
+      expect(child.stdout.destroyed).toBe(false);
+      expect(child.stderr.destroyed).toBe(false);
+    } finally {
+      child.stdin.end();
+      try {
+        result = await outcome;
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+        await closed;
+      }
+    }
+    expect(result).toBe(primary);
+    expect(cleanupStarted).toBe(true);
+    expect(pipesClosedAtSettlement).toBe(true);
+  },
+);
+
 it.skipIf(!archive)(
   'runs extracted native workflows without external interpreters or source access',
   async () => {
@@ -53,6 +143,7 @@ it.skipIf(!archive)(
 
 it('forwards complete real Git bytes through the compiled fixture to a delayed consumer', async () => {
   const temporary = await mkdtemp(resolve(tmpdir(), 'threadnote-release-pipe-'));
+  let primaryFailure: {error: unknown} | undefined;
   try {
     const nativeGit = Bun.which('git');
     if (!nativeGit) throw new Error('Git is required for the compiled fixture boundary.');
@@ -65,35 +156,13 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
     expect(build.success, JSON.stringify(build.logs)).toBe(true);
     await writeFile(resolve(temporary, 'tool-paths.json'), JSON.stringify({git: nativeGit}));
     expect(spawnSync(nativeGit, ['init', '--bare', repo], {timeout: 15_000}).status).toBe(0);
-    const delayed = async (args: readonly string[]) => {
-      const child = spawn(proxy, [...args], {
-        env: {...process.env, THREADNOTE_RELEASE_FIXTURE_ROOT: temporary},
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      const output: Buffer[] = [];
-      const errors: Buffer[] = [];
-      const timer = setTimeout(() => child.kill(), 15_000);
-      const completed = new Promise<{code: number | null; signal: string | null}>((resolve, reject) => {
-        child.once('error', reject);
-        child.once('close', (code, signal) => resolve({code, signal}));
-      });
-      // Hold both OS pipes unread long enough to force backpressure above their capacity.
-      child.stdout.on('data', chunk => output.push(Buffer.from(chunk)));
-      child.stderr.on('data', chunk => errors.push(Buffer.from(chunk)));
-      child.stdout.pause();
-      child.stderr.pause();
-      try {
-        await new Promise(resolve => setTimeout(resolve, 150));
-        child.stdout.resume();
-        child.stderr.resume();
-        const exit = await completed;
-        expect(exit.signal).toBeNull();
-        return {...exit, stdout: Buffer.concat(output), stderr: Buffer.concat(errors)};
-      } finally {
-        clearTimeout(timer);
-        child.kill();
-      }
-    };
+    const delayed = (args: readonly string[]) =>
+      collectDelayedChild(
+        spawn(proxy, [...args], {
+          env: {...process.env, THREADNOTE_RELEASE_FIXTURE_ROOT: temporary},
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }),
+      );
     const diagnostic = (result: Awaited<ReturnType<typeof delayed>>) =>
       JSON.stringify({
         code: result.code,
@@ -157,9 +226,20 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
     expect(failure.code, diagnostic(failure)).toBe(expected.status);
     expect(failure.stdout.equals(expected.stdout)).toBe(true);
     expect(failure.stderr.equals(expected.stderr)).toBe(true);
-  } finally {
-    await rm(temporary, {recursive: true, force: true});
+  } catch (error) {
+    primaryFailure = {error};
   }
+  try {
+    await rm(temporary, {recursive: true, force: true});
+  } catch (cleanupError) {
+    if (primaryFailure) {
+      throw new AggregateError([primaryFailure.error, cleanupError], 'Release pipe fixture and cleanup both failed.', {
+        cause: cleanupError,
+      });
+    }
+    throw cleanupError;
+  }
+  if (primaryFailure) throw primaryFailure.error;
 }, 60_000);
 
 it('captures bounded closed producer diagnostics only when the compiled Git fixture opts in', async () => {

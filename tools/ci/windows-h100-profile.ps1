@@ -1,4 +1,4 @@
-# Temporary D17 controller. Synthetic checks run before the sole original H100 launch.
+# Temporary D18 hosted-Windows capture. Packet/root-pipe checks precede the sole original H100 launch.
 [CmdletBinding()]
 param([switch]$QualifyOnly)
 $ErrorActionPreference = 'Stop'
@@ -48,7 +48,8 @@ public sealed class H100CopyFault : Stream {
 }
 '@
 
-function Invoke-OwnedH100([string[]]$Arguments, [int]$LimitMs, [string]$Fault = 'None', [bool]$Profile = $false) {
+# Observe the root invocation only. Hosted step/job limits own ultimate containment.
+function Invoke-H100Root([string[]]$Arguments, [string]$Fault = 'None', [bool]$Profile = $false) {
   $info = [Diagnostics.ProcessStartInfo]::new((Get-Command bun -CommandType Application).Source)
   $info.WorkingDirectory = $reviewedCheckout
   $info.UseShellExecute = $false
@@ -60,159 +61,74 @@ function Invoke-OwnedH100([string[]]$Arguments, [int]$LimitMs, [string]$Fault = 
   else { [void]$info.Environment.Remove('THREADNOTE_NATIVE_CPU_PROFILE') }
   $runner = [Diagnostics.Process]::new()
   $runner.StartInfo = $info
-  $owned = [Collections.Generic.List[object]]::new()
   $stdout = [H100Output]::new($(if ($Fault -eq 'Cap') {2048} else {8MB}), $Fault)
   $stderr = [H100Output]::new(8MB, 'None')
   $copies = @()
+  $started = $false
+  $start = $null
+  $pidObserved = $null
   $originalExit = $null
+  $rootExit = $null
+  $rootReturned = $false
   $forced = $false
   $outputFault = $false
-  $identityFault = $Fault -eq 'Ambiguous'
-  $discoveryTruncated = $false
-  $controllerFault = $false
-  $cleanupMs = 0
-  $returnVerified = $false
-  $clock = [Diagnostics.Stopwatch]::StartNew()
-  $cleanup = $null
-  $rootBunImage = $null
-  $discovery = @{nonBunObserved=0}
-  # Only the runner and verified same-image Bun descendants consume retained slots.
-  # Other images are snapshot-only exclusions; rooted Kill(true) contains their trees.
-  function Discover-Owned {
-    $discoveryClock = [Diagnostics.Stopwatch]::StartNew()
-    try {
-      if (-not $rootBunImage -or ($cleanup -and $cleanup.ElapsedMilliseconds -ge 15000)) { $script:discoveryInvalid = $true; return }
-      $rows = @(Get-CimInstance Win32_Process -OperationTimeoutSec 1)
-      $nonBun = @{}
-      for ($depth = 0; $depth -lt 8; $depth++) {
-        $added = $false
-        foreach ($row in $rows) {
-          if ($discoveryClock.ElapsedMilliseconds -ge 1000 -or ($cleanup -and $cleanup.ElapsedMilliseconds -ge 15000)) { $script:discoveryInvalid = $true; return }
-          if (@($owned | Where-Object Id -eq $row.ProcessId).Count -or $nonBun.ContainsKey([int]$row.ProcessId)) { continue }
-          $parents = @($owned | Where-Object Id -eq $row.ParentProcessId)
-          $parentIsBun = $parents.Count -eq 1
-          if (-not $parentIsBun -and -not $nonBun.ContainsKey([int]$row.ParentProcessId)) { continue }
-          $parent = if ($parentIsBun) {$parents[0]} else {$nonBun[[int]$row.ParentProcessId]}
-          $born = $row.CreationDate.ToUniversalTime().Ticks
-          if ($born -lt $parent.Start) { continue }
-          if ($parentIsBun -and $parent.Process.HasExited -and $born -gt $parent.Process.ExitTime.ToUniversalTime().Ticks) { continue }
-          if ([string]::IsNullOrEmpty($row.ExecutablePath)) { $script:discoveryInvalid = $true; continue }
-          $image = [IO.Path]::GetFullPath($row.ExecutablePath)
-          if (-not [string]::Equals($image, $rootBunImage, [StringComparison]::OrdinalIgnoreCase)) {
-            # Rebuilt per snapshot; thousands of sequential Git children never accumulate handles.
-            if ($nonBun.Count -ge 128) { $script:discoveryOverflow = $true; return }
-            $nonBun[[int]$row.ProcessId] = [pscustomobject]@{Start=$born}
-            $discovery.nonBunObserved++
-            $added = $true
-            continue
-          }
-          # A same-image child reached through an unretained intermediary is unresolved, not inferred owned.
-          if (-not $parentIsBun) { $script:discoveryInvalid = $true; continue }
-          $child = $null
-          try {
-            $child = [Diagnostics.Process]::GetProcessById([int]$row.ProcessId)
-            [void]$child.Handle
-            $start = $child.StartTime.ToUniversalTime().Ticks
-            $actualImage = [IO.Path]::GetFullPath($child.MainModule.FileName)
-            if ([Math]::Abs($start - $born) -gt 10000 -or -not [string]::Equals($actualImage, $rootBunImage, [StringComparison]::OrdinalIgnoreCase)) {
-              $child.Dispose(); $script:discoveryInvalid = $true; continue
-            }
-            if ($owned.Count -ge 8) { $child.Dispose(); $script:discoveryOverflow = $true; return }
-            $owned.Add([pscustomobject]@{Id=$child.Id; Start=$start; Process=$child; Return=$null})
-            $added = $true
-          } catch { if ($child) { $child.Dispose() }; $script:discoveryInvalid = $true }
-        }
-        if (-not $added) { return }
-      }
-      # Depth/image/ancestry gaps remain unresolved; this is not a complete child census.
-      foreach ($row in $rows) {
-        if ((@($owned | Where-Object Id -eq $row.ParentProcessId).Count -or $nonBun.ContainsKey([int]$row.ParentProcessId)) -and
-          -not @($owned | Where-Object Id -eq $row.ProcessId).Count -and -not $nonBun.ContainsKey([int]$row.ProcessId)) {
-          $script:discoveryOverflow = $true
-        }
-      }
-    } catch { $script:discoveryInvalid = $true }
-  }
-  $script:discoveryInvalid = $false
-  $script:discoveryOverflow = $false
+  $rootFault = $false
+  $pipesDrained = $true
   try {
     if (-not $runner.Start()) { throw 'runner failed to start' }
+    $started = $true
     [void]$runner.Handle
-    $owned.Add([pscustomobject]@{Id=$runner.Id; Start=$runner.StartTime.ToUniversalTime().Ticks; Process=$runner; Return=$null})
-    $rootBunImage = [IO.Path]::GetFullPath($runner.MainModule.FileName)
-    $inputStream = if ($Fault -eq 'Copy') { [H100CopyFault]::new() } else { $runner.StandardOutput.BaseStream }
+    $start = $runner.StartTime.ToUniversalTime().Ticks
+    $pidObserved = $runner.Id
+    $inputStream = if ($Fault -eq 'Copy') {[H100CopyFault]::new()} else {$runner.StandardOutput.BaseStream}
     $copies = @($inputStream.CopyToAsync($stdout), $runner.StandardError.BaseStream.CopyToAsync($stderr))
-    $nextDiscovery = 0
     while ($true) {
-      if ($clock.ElapsedMilliseconds -ge $nextDiscovery) { Discover-Owned; $nextDiscovery = $clock.ElapsedMilliseconds + 1000 }
-      if ($runner.HasExited) { $originalExit = $runner.ExitCode }
+      if ($runner.HasExited) { $originalExit = $runner.ExitCode; break }
       if (@($copies | Where-Object IsFaulted).Count) { $outputFault = $true; break }
-      if ($identityFault -or $script:discoveryInvalid -or $script:discoveryOverflow) { break }
-      if ($null -ne $originalExit) { break }
-      if ($clock.ElapsedMilliseconds -ge $LimitMs) { break }
       Start-Sleep -Milliseconds 50
     }
-  } catch { $controllerFault = $true }
+  } catch { $rootFault = $true }
   finally {
-    # ONE cumulative 15s budget, including discovery, retained-handle waits and BOTH drains.
-    $cleanup = [Diagnostics.Stopwatch]::StartNew()
-    if ($owned.Count -and $null -eq $originalExit -and $runner.HasExited) { $originalExit = $runner.ExitCode }
-    if ($owned.Count) { Discover-Owned }
-    foreach ($entry in @($owned.ToArray()) | Sort-Object Start -Descending) {
+    # Only root-fault cleanup and pipe drain share this best-effort 15s budget.
+    # This is neither a child census nor a whole-export/VM-teardown deadline.
+    $drain = [Diagnostics.Stopwatch]::StartNew()
+    if ($started) {
       try {
-        if (-not $entry.Process.HasExited) {
-          if ($cleanup.ElapsedMilliseconds -ge 15000) { break }
-          if ($entry.Process.StartTime.ToUniversalTime().Ticks -ne $entry.Start) { $identityFault = $true; continue }
-          # Rooted tree containment catches children created after the latest bounded CIM snapshot.
-          # Retained returns below remain separate: CIM is not a complete all-child census.
-          $entry.Process.Kill($true)
+        if ($runner.HasExited) { $originalExit = $runner.ExitCode }
+        elseif ($null -ne $start -and $runner.StartTime.ToUniversalTime().Ticks -eq $start) {
+          $runner.Kill($true)
           $forced = $true
-        }
-      } catch { $identityFault = $true }
+        } else { $rootFault = $true }
+        $remaining = [Math]::Max(0, 15000 - [int]$drain.ElapsedMilliseconds)
+        if ($runner.WaitForExit($remaining)) { $rootExit = $runner.ExitCode; $rootReturned = $true }
+      } catch { $rootFault = $true }
     }
-    foreach ($entry in $owned) {
-      try {
-        $remaining = [Math]::Max(0, 15000 - [int]$cleanup.ElapsedMilliseconds)
-        if ($entry.Process.WaitForExit($remaining)) { $entry.Return = $entry.Process.ExitCode }
-      } catch { $identityFault = $true }
-    }
-    $drainsComplete = $true
     for ($index = 0; $index -lt $copies.Count; $index++) {
       $copy = $copies[$index]
       try {
-        $remaining = [Math]::Max(0, 15000 - [int]$cleanup.ElapsedMilliseconds)
-        if (-not $copy.Wait($remaining)) { $outputFault = $true; $drainsComplete = $false }
+        $remaining = [Math]::Max(0, 15000 - [int]$drain.ElapsedMilliseconds)
+        if (-not $copy.Wait($remaining)) { $outputFault = $true; $pipesDrained = $false }
       } catch { $outputFault = $true }
       if ($copy.IsFaulted) {
-        # Observe the failed copy, then drain/discard its remaining real pipe AFTER termination.
+        # Observe the failed copy, then best-effort discard the real pipe after root cleanup.
         try {
           $stream = if ($index -eq 0) {$runner.StandardOutput.BaseStream} else {$runner.StandardError.BaseStream}
-          $drain = $stream.CopyToAsync([IO.Stream]::Null)
-          $remaining = [Math]::Max(0, 15000 - [int]$cleanup.ElapsedMilliseconds)
-          if (-not $drain.Wait($remaining)) { $drainsComplete = $false }
-        } catch { $drainsComplete = $false }
+          $discard = $stream.CopyToAsync([IO.Stream]::Null)
+          $remaining = [Math]::Max(0, 15000 - [int]$drain.ElapsedMilliseconds)
+          if (-not $discard.Wait($remaining)) { $pipesDrained = $false }
+        } catch { $pipesDrained = $false }
       }
     }
-    $identityFault = $identityFault -or $script:discoveryInvalid
-    $discoveryTruncated = $script:discoveryOverflow
-    $cleanupMs = [int]$cleanup.ElapsedMilliseconds
-    $returnVerified = $owned.Count -gt 0 -and -not $identityFault -and -not $discoveryTruncated -and
-      $cleanupMs -lt 15000 -and $drainsComplete -and @($owned | Where-Object { $null -eq $_.Return }).Count -eq 0 -and
-      @($copies | Where-Object { -not $_.IsCompleted }).Count -eq 0
+    $pipesDrained = $pipesDrained -and $copies.Count -eq 2 -and @($copies | Where-Object {-not $_.IsCompleted}).Count -eq 0
   }
   $text = ''
-  if ($returnVerified -and -not $outputFault) {
+  if ($pipesDrained -and -not $outputFault) {
     $text = [Text.Encoding]::UTF8.GetString($stdout.ToArray()) + "`n" + [Text.Encoding]::UTF8.GetString($stderr.ToArray())
   }
-  $returns = @($owned | ForEach-Object { [ordered]@{pid=$_.Id; startTicks=$_.Start; exit=$_.Return} })
-  foreach ($entry in $owned) { $entry.Process.Dispose() }
-  if (-not $owned.Count) { $runner.Dispose() }
-  $stdout.Dispose(); $stderr.Dispose()
-  $cleanupMs = [int]$cleanup.ElapsedMilliseconds
-  $returnVerified = $returnVerified -and $cleanupMs -lt 15000
-  return [pscustomobject]@{OriginalExit=$originalExit; Forced=$forced; OutputFault=$outputFault; IdentityFault=$identityFault;
-    DiscoveryTruncated=$discoveryTruncated; ControllerFault=$controllerFault; CleanupMs=$cleanupMs; CleanupClock=$cleanup; NonBunObserved=$discovery.nonBunObserved;
-    ReturnStatus=$(if ($returnVerified) {'RETURN_VERIFIED'} else {'RETURN_UNVERIFIED'}); Returns=$returns; Text=$text}
+  try { $runner.Dispose(); $stdout.Dispose(); $stderr.Dispose() } catch { $rootFault = $true }
+  return [pscustomobject]@{OriginalExit=$originalExit; RootExit=$rootExit; RootReturned=$rootReturned;
+    RootPid=$pidObserved; RootStartTicks=$start; Forced=$forced; OutputFault=$outputFault; RootFault=$rootFault;
+    PipesDrained=($pipesDrained -and $drain.ElapsedMilliseconds -lt 15000); RootDrainMs=[int]$drain.ElapsedMilliseconds; Text=$text}
 }
 
 function Count-Value($Value) {
@@ -331,7 +247,7 @@ function Convert-H100Packets([string]$Text) {
   return [pscustomobject]@{Cpu=$cpu; Progress=$progress}
 }
 
-# Qualification uses only synthetic Bun children; no profile, fixture or production store.
+# Qualification uses only unprofiled synthetic root processes; no fixture or production store.
 $qualification = [Diagnostics.Stopwatch]::StartNew()
 $checks = [Collections.Generic.List[object]]::new()
 $runtime = $null
@@ -365,36 +281,28 @@ try {
     $checks.Add([ordered]@{fault=$fault; passed=$rejected})
     if (-not $rejected) { throw 'packet fault not rejected' }
   }
-  foreach ($fault in @('None', 'NonBunChurn', 'Write', 'ShortWrite', 'Copy', 'Cap', 'Ambiguous', 'Timeout')) {
+  foreach ($fault in @('None', 'Write', 'ShortWrite', 'Copy', 'Cap')) {
     if ($qualification.ElapsedMilliseconds -ge 30000) { throw 'synthetic qualification deadline' }
-    $code = 'console.log("H100_RUNTIME "+JSON.stringify({bun:Bun.version,revision:Bun.revision,cwd:process.cwd()}));const c=Bun.spawn([process.execPath,"-e","setTimeout(()=>process.exit(0),2000)"],{stdout:"ignore",stderr:"ignore"});setTimeout(()=>process.stdout.write("x".repeat(8192)),1200);setTimeout(()=>process.exit(7),2300);'
-    if ($fault -eq 'NonBunChurn') {
-      $code = 'const children=Array.from({length:12},()=>Bun.spawn([process.env.ComSpec,"/d","/s","/c","ping -n 3 127.0.0.1 >nul"],{stdout:"ignore",stderr:"ignore"}));const c=Bun.spawn([process.execPath,"-e","setTimeout(()=>process.exit(0),2000)"],{stdout:"ignore",stderr:"ignore"});Promise.all([...children.map(child=>child.exited),c.exited]).then(()=>process.exit(7));'
-    }
-    if ($fault -eq 'Timeout') { $code = 'setTimeout(()=>{},10000)' }
-    $limit = if ($fault -eq 'Timeout') {1000} else {4000}
-    $result = Invoke-OwnedH100 @('-e', $code) ([Math]::Min($limit, 30000 - [int]$qualification.ElapsedMilliseconds)) $fault
-    $okay = if ($fault -eq 'None') {
-      $result.OriginalExit -eq 7 -and -not $result.Forced -and $result.ReturnStatus -eq 'RETURN_VERIFIED' -and $result.Returns.Count -ge 2
-    } elseif ($fault -eq 'NonBunChurn') {
-      $result.OriginalExit -eq 7 -and -not $result.Forced -and $result.ReturnStatus -eq 'RETURN_VERIFIED' -and
-        $result.Returns.Count -eq 2 -and $result.NonBunObserved -ge 9
-    } elseif ($fault -eq 'Ambiguous') {
-      $result.ReturnStatus -eq 'RETURN_UNVERIFIED' -and $result.IdentityFault
-    } elseif ($fault -eq 'Timeout') {
-      $null -eq $result.OriginalExit -and $result.Forced -and $result.ReturnStatus -eq 'RETURN_VERIFIED'
-    } else { $result.OutputFault -and $result.ReturnStatus -eq 'RETURN_VERIFIED' }
-    if ($fault -eq 'None' -and $okay) {
-      $runtimeLines = @($result.Text -split "`r?`n" | Where-Object { $_.StartsWith('H100_RUNTIME ') })
-      if ($runtimeLines.Count -ne 1) { throw 'runtime identity missing' }
-      $actual = $runtimeLines[0].Substring('H100_RUNTIME '.Length) | ConvertFrom-Json
-      if ($actual.bun -cne '1.4.2' -or $actual.revision -cnotmatch '^[a-f0-9]{7,64}$') { throw 'unexpected actual Bun identity' }
-      if (-not [string]::Equals($actual.cwd, $reviewedCheckout, [StringComparison]::OrdinalIgnoreCase)) { throw 'synthetic child working directory mismatch' }
-      $runtime = [ordered]@{bun=$actual.bun; revision=$actual.revision; workingDirectoryVerified=$true}
-    }
-    $checks.Add([ordered]@{fault=$fault; passed=[bool]$okay; originalExit=$result.OriginalExit; returnStatus=$result.ReturnStatus; cleanupMs=$result.CleanupMs; nonBunObserved=$result.NonBunObserved})
-    if (-not $okay -or $qualification.ElapsedMilliseconds -ge 30000) { throw "synthetic qualification failed: $fault" }
+    $code = 'console.log("H100_RUNTIME "+JSON.stringify({bun:Bun.version,revision:Bun.revision,cwd:process.cwd()}));process.stdout.write("x".repeat(8192));setTimeout(()=>process.exit(7),1000);'
+    $result = Invoke-H100Root @('-e', $code) $fault
+    $okay = $result.RootReturned -and $result.PipesDrained -and -not $result.RootFault
+    if ($fault -eq 'None') {
+      $okay = $okay -and $result.OriginalExit -eq 7 -and -not $result.Forced -and -not $result.OutputFault
+      if ($okay) {
+        $runtimeLines = @($result.Text -split "`r?`n" | Where-Object { $_.StartsWith('H100_RUNTIME ') })
+        if ($runtimeLines.Count -ne 1) { throw 'runtime identity missing' }
+        $actual = $runtimeLines[0].Substring('H100_RUNTIME '.Length) | ConvertFrom-Json
+        if ($actual.bun -cne '1.4.2' -or $actual.revision -cnotmatch '^[a-f0-9]{7,64}$') { throw 'unexpected actual Bun identity' }
+        if (-not [string]::Equals($actual.cwd, $reviewedCheckout, [StringComparison]::OrdinalIgnoreCase)) { throw 'synthetic root working directory mismatch' }
+        $runtime = [ordered]@{bun=$actual.bun; revision=$actual.revision; workingDirectoryVerified=$true}
+      }
+    } else { $okay = $okay -and $result.OutputFault }
+    $checks.Add([ordered]@{fault=$fault; passed=[bool]$okay; originalExit=$result.OriginalExit; rootExit=$result.RootExit;
+      rootReturned=$result.RootReturned; pipesDrained=$result.PipesDrained; forced=$result.Forced;
+      outputFault=$result.OutputFault; rootFault=$result.RootFault; rootDrainMs=$result.RootDrainMs})
+    if (-not $okay -or $qualification.ElapsedMilliseconds -ge 30000) { throw 'root pipe qualification failed' }
   }
+
 } catch {
   $preflightExport = if ($env:RUNNER_TEMP) {Join-Path $env:RUNNER_TEMP 'h100-export'} else {''}
   if ($preflightExport -and (Test-Path -LiteralPath (Join-Path $preflightExport 'claim.json'))) {
@@ -427,61 +335,56 @@ if ($qualification.ElapsedMilliseconds -ge 30000) { throw 'preflight receipt dea
 $raw = Join-Path $env:RUNNER_TEMP ('h100-private-' + [Guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($raw)
 $report = Join-Path $raw 'vitest.json'
-$result = Invoke-OwnedH100 @('node_modules/vitest/vitest.mjs', 'run', '--no-file-parallelism', '--maxWorkers=1',
+$result = Invoke-H100Root @('node_modules/vitest/vitest.mjs', 'run', '--no-file-parallelism', '--maxWorkers=1',
   $fixture, '-t', '^native authoring lifecycle > retains and navigates 100 same-length revisions of a large native plan$',
-  '--reporter=default', '--reporter=json', "--outputFile=$report") 675000 'None' $true
+  '--reporter=default', '--reporter=json', "--outputFile=$report") 'None' $true
 
-# The SAME cleanup stopwatch remains authoritative through projection, disposal and receipt attempts.
-function Assert-CleanupBudget {
-  if ($result.CleanupClock.ElapsedMilliseconds -ge 15000) { $result.ReturnStatus = 'RETURN_UNVERIFIED'; throw 'cumulative cleanup/receipt deadline' }
-}
 $qualified = $false
 $exportFault = $false
 $cpu = $null
 $progress = $null
+$caseOutcome = $null
 try {
-  Assert-CleanupBudget
   $packets = Convert-H100Packets $result.Text
   $cpu = $packets.Cpu; $progress = $packets.Progress
   if ((Get-Item -LiteralPath $report).Length -gt 8MB) { throw 'private JSON report read cap' }
   $vitest = [IO.File]::ReadAllText($report) | ConvertFrom-Json
   $executed = @($vitest.testResults | ForEach-Object { $_.assertionResults } | Where-Object { $_.status -in @('passed','failed') })
   if ($executed.Count -ne 1 -or $executed[0].fullName -cne 'native authoring lifecycle retains and navigates 100 same-length revisions of a large native plan') { throw 'original single-case result missing' }
-  Assert-CleanupBudget
-  $workers = @($result.Returns | Where-Object { $_.pid -eq $cpu.pid -and $null -ne $_.exit })
-  $qualified = $cpu.status -eq 'captured' -and $cpu.Contains('summary') -and $cpu.summary.analyzedTraces -gt 0 -and $workers.Count -eq 1 -and $result.ReturnStatus -eq 'RETURN_VERIFIED' -and
-    -not $result.Forced -and -not $result.OutputFault -and -not $result.ControllerFault -and $null -ne $result.OriginalExit
+  $caseOutcome = $executed[0].status
+  # The packet came from this invocation's private pipes. Worker identity is self-reported metadata.
+  $qualified = $cpu.status -eq 'captured' -and $cpu.Contains('summary') -and $cpu.summary.analyzedTraces -gt 0 -and
+    $cpu.pid -gt 0 -and $cpu.session -gt 0 -and $cpu.bun -ceq $runtime.bun -and $cpu.revision -ceq $runtime.revision -and
+    $cpu.outcome -ceq $(if ($executed[0].status -eq 'passed') {'Success'} else {'Failure'}) -and
+    $result.RootReturned -and $result.PipesDrained -and -not $result.Forced -and -not $result.OutputFault -and
+    -not $result.RootFault -and $null -ne $result.OriginalExit
 } catch { $exportFault = $true }
 $rawRemoved = $false
-try { Assert-CleanupBudget; Remove-Item -LiteralPath $raw -Recurse -Force; $rawRemoved = -not (Test-Path -LiteralPath $raw); Assert-CleanupBudget } catch { $exportFault = $true }
+try { Remove-Item -LiteralPath $raw -Recurse -Force; $rawRemoved = -not (Test-Path -LiteralPath $raw) } catch { $exportFault = $true }
 $qualified = $qualified -and $rawRemoved -and -not $exportFault
 $control = [ordered]@{version=1; runID=$claim.runID; attempt=1; head=$claim.head; runtime=$runtime; qualified=$qualified;
-  originalExit=$result.OriginalExit; parentAndWorkerReturns=$result.Returns; returnStatus=$result.ReturnStatus;
-  forcedContainment=$result.Forced; outputFault=$result.OutputFault; identityFault=$result.IdentityFault;
-  discoveryTruncated=$result.DiscoveryTruncated; nonBunObserved=$result.NonBunObserved; controllerFault=$result.ControllerFault; cleanupMs=[int]$result.CleanupClock.ElapsedMilliseconds;
-  ownershipEvidence='verified-retained-handle-returns-plus-rooted-tree-termination;CIM-is-not-a-complete-child-census';
+  originalExit=$result.OriginalExit; originalCaseOutcome=$caseOutcome; rootExit=$result.RootExit; rootReturned=$result.RootReturned;
+  rootPid=$result.RootPid; rootStartTicks=$result.RootStartTicks; bestEffortTreeKill=$result.Forced;
+  outputFault=$result.OutputFault; rootFault=$result.RootFault; pipesDrained=$result.PipesDrained; rootDrainMs=$result.RootDrainMs;
+  containment='existing-hosted-Windows-15minute-step-20minute-job-lifecycle';
+  workerMetadata='self-reported-profile-pid-session-runtime;not-OS-child-return-proof';
   exportFault=$exportFault; rawRemoved=$rawRemoved; qualification=$checks.ToArray(); interpretation='attribution-only-no-timing-acceptance';
-  limits='internal-native-profile-allocation-and-overhead-unbounded;logical-deadlines-do-not-preempt-kernel-calls'}
+  limits='descendant-quiescence-and-exact-platform-teardown-time-unknown;native-profile-allocation-and-overhead-unbounded;logical-drain-deadline-does-not-preempt-kernel-IO'}
+
 try {
-  Assert-CleanupBudget
   if ($cpu) { [IO.File]::WriteAllText((Join-Path $export 'cpu.json'), ($cpu | ConvertTo-Json -Depth 20 -Compress)) }
-  Assert-CleanupBudget
   if ($progress) { [IO.File]::WriteAllText((Join-Path $export 'progress.json'), ($progress | ConvertTo-Json -Depth 20 -Compress)) }
-  Assert-CleanupBudget
-  $control.cleanupMs = [int]$result.CleanupClock.ElapsedMilliseconds
   [IO.File]::WriteAllText((Join-Path $export 'control.json'), ($control | ConvertTo-Json -Depth 20 -Compress))
   $files = @(Get-ChildItem -LiteralPath $export -File)
   if (@($files | Where-Object { $_.Name -cnotin @('claim.json','cpu.json','progress.json','control.json') }).Count -or
     ($files | Measure-Object Length -Sum).Sum -gt 1MB) { throw 'export allowlist/cap' }
-  Assert-CleanupBudget
 } catch {
   # Best effort failure receipt follows termination/drain; it never grants qualification.
-  $control.qualified = $false; $control.exportFault = $true; $control.returnStatus = 'RETURN_UNVERIFIED'
-  $control.cleanupMs = [int]$result.CleanupClock.ElapsedMilliseconds
+  $control.qualified = $false; $control.exportFault = $true
   try { [IO.File]::WriteAllText((Join-Path $export 'control.json'), ($control | ConvertTo-Json -Depth 20 -Compress)) } catch {}
   if ($null -ne $result.OriginalExit -and $result.OriginalExit -ne 0) { exit $result.OriginalExit }
-  throw 'sanitized export/deadline failed; capture unqualified'
+  throw 'sanitized export failed; capture unqualified'
 }
 if ($null -ne $result.OriginalExit -and $result.OriginalExit -ne 0) { exit $result.OriginalExit }
-if (-not $qualified) { exit 1 }
+if ($caseOutcome -eq 'failed' -or -not $qualified) { exit 1 }
 exit 0
