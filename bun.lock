@@ -68,7 +68,6 @@
         "mitata": "1.0.34",
         "oxlint": "1.90.0",
         "oxlint-tsgolint": "7.0.2005",
-        "prettier": "^3.9.10",
         "react": "^19.3.1",
         "react-dom": "^19.3.1",
         "tree-sitter-elixir": "0.3.5",
@@ -558,6 +557,7 @@
       },
     },
   },
+  "trustedDependencies": [],
   "overrides": {
     "@effect/platform-node-shared": "4.0.7",
     "@hono/node-server": "^2.1.5",
@@ -1959,8 +1959,6 @@
     "postcss": ["postcss@8.5.32", "", { "dependencies": { "nanoid": "^3.3.20", "picocolors": "^1.1.1", "source-map-js": "^1.2.2" } }, "sha512-LJlKCCAUFKOuZxipUdYw1NzIITEsPcgyOG9LkvRJvuKj/bRzbuRY0ARXvL0pWGpsZvn8jku+LMep2eU0seHp8g=="],
 
     "postgres": ["postgres@3.4.9", "", {}, "sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw=="],
-
-    "prettier": ["prettier@3.9.10", "", { "bin": { "prettier": "bin/prettier.cjs" } }, "sha512-skGHTH1Yb9QvaTC4hWnRTzEYtCpApF0UMBPz+t/0ZPzP8ihefo/btKd+QA7pUE0fEwA1SbS/NmhyEcstdXOIdA=="],
 
     "pretty-bytes": ["pretty-bytes@6.1.1", "", {}, "sha512-mQUvGU6aUFQ+rNvTIAcZuWGRT9a6f6Yrg9bHs4ImKF+HZCEK+plBvnAZYSIQztknZF2qnzNtr6F8s0+IuptdlQ=="],
 

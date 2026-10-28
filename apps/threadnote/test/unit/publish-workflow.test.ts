@@ -46,7 +46,7 @@ describe('standalone release workflows', () => {
       expect(workflow).toContain('name: Run release contract smokes');
       expect(workflow).toContain('run: bun run test:smoke:release');
       expect(workflow).not.toContain('- run: bun run lint');
-      expect(workflow).not.toContain('- run: bun run prettier:check');
+      expect(workflow).not.toContain('- run: bun run format:check');
       expect(workflow).not.toContain('- run: bun run typecheck');
       expect(workflow).not.toContain('- run: bun run test\n');
     }),

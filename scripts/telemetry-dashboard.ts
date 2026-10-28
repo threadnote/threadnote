@@ -1017,8 +1017,13 @@ export async function renderTelemetryDashboard(repositoryRoot = process.cwd()): 
 }
 
 export async function formatDashboardArtifact(rendered: string): Promise<string> {
-  const {format} = await import('prettier');
-  return format(rendered, {parser: 'json', printWidth: 120});
+  const child = Bun.spawnSync([process.execPath, 'fmt', '--no-script', '--parser', 'json', '--print-width', '120'], {
+    stdin: new TextEncoder().encode(rendered),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  if (child.exitCode !== 0) throw ScriptError.make({message: 'Bun could not format the dashboard artifact.'});
+  return new TextDecoder().decode(child.stdout);
 }
 
 export function validateDashboardArtifactBytes(actual: string, expected: string): void {

@@ -106,7 +106,7 @@ of patched Oxlint/tsgolint native artifacts with their pinned Effect distributio
 | -------------------------------- | ----------------------------------------------------------------------------------------- |
 | `effect_sqlite_test`             | Bun-hosted Effect Vitest, scoped SQLite, workspace exports, unrelated graph inputs absent |
 | `parser_native_test`             | Parser WASM loaded in a Bun worker; native resvg resolution and rendering                 |
-| `typecheck_patch_test`           | TypeScript, Effect diagnostics, patched native Oxlint/tsgolint                            |
+| `typecheck_patch_test`           | Bun check, Effect diagnostics, patched native Oxlint/tsgolint                             |
 | `standalone` / `standalone_test` | Declared standalone compile output executes without npm inputs                            |
 | `dependency_closure_test`        | Cycle regression and bounded property tests against independent reachability model        |
 

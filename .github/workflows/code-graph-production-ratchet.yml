@@ -2,6 +2,7 @@ name: Code graph production ratchet
 
 on:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,6 +16,7 @@ env:
 
 jobs:
   classify:
+    if: github.event_name == 'pull_request'
     name: Classify production ratchet scope
     runs-on: ubuntu-latest
     outputs:
@@ -39,7 +41,7 @@ jobs:
   ratchet:
     name: Governed reduced production profile · Linux
     needs: classify
-    if: always()
+    if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
 
@@ -147,6 +149,41 @@ jobs:
           (needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false')
         with:
           name: code-graph-production-ratchet-Linux-${{ runner.arch }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+  capture-baseline:
+    name: Capture a governed baseline candidate
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Capture three exact-source observations and generate a candidate
+        env:
+          THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-ubuntu-24.04-${{ runner.arch }}
+          THREADNOTE_BENCHMARK_RUNNER_ID: ${{ runner.name }}
+          THREADNOTE_CODE_GRAPH_PARSER_WORKERS: '4'
+        run: |
+          set -euo pipefail
+          for sample in 1 2 3; do
+            bun run bench:code-graph -- \
+              --profile production-large --profile-files 3000 --profile-symbols 110000 \
+              --minimum-free-gib 20 --samples 1 --warmups 0 --quiet \
+              --output "artifacts/production-ratchet-observation-$sample.json"
+          done
+          bun scripts/generate-code-graph-production-ratchet.ts \
+            artifacts/production-ratchet-observation-{1,2,3}.json \
+            --output artifacts/production-ratchet-candidate.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: production-ratchet-candidate-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 14

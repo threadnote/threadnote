@@ -254,6 +254,7 @@ describe('ordinary memory exact public review', () => {
           expectedContentHash: sha256HexSync(f.content),
         });
         expect(inspected.isError).not.toBe(true);
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
         const packet = inspected.structuredContent as ReturnType<typeof automaticReviewPacket>;
         expect(packet.omissions).not.toContain('related-source-unreadable');
         expect(packet.reviewEvidence).toHaveLength(1);
@@ -270,6 +271,7 @@ describe('ordinary memory exact public review', () => {
           draftJson: draft(packet, 'The timeout is 60 seconds.'),
         });
         expect(proposed.isError).not.toBe(true);
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
         const preview = proposed.structuredContent as NonNullable<ReturnType<typeof projectAutomaticMemoryReview>>;
         expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
         const applied = yield* f.review({
@@ -295,6 +297,7 @@ describe('ordinary memory exact public review', () => {
           expectedContentHash: sha256HexSync(accepted),
         });
         expect(rebuiltResult.isError).not.toBe(true);
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
         const rebuilt = rebuiltResult.structuredContent as ReturnType<typeof automaticReviewPacket>;
         expect(rebuilt.omissions).not.toContain('related-source-unreadable');
         expect(rebuilt.basis.assessment.coverage.omittedSources).toBe(0);
@@ -308,6 +311,7 @@ describe('ordinary memory exact public review', () => {
           desiredBody: current.body,
         });
         expect(manualResult.isError).not.toBe(true);
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
         const manual = manualResult.structuredContent as NonNullable<ReturnType<typeof projectAutomaticMemoryReview>>;
         expect(manual.approval!.reviewedSupport.active.paragraphs).toEqual(
           current.metadata.reviewedSupport!.active.paragraphs,
@@ -339,6 +343,7 @@ describe('ordinary memory exact public review', () => {
           expectedContentHash: sha256HexSync(f.content),
         });
         expect(inspected.isError).not.toBe(true);
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
         const packet = inspected.structuredContent as ReturnType<typeof automaticReviewPacket>;
         expect(packet.omissions).toContain('related-source-unreadable');
         expect(packet.reviewEvidence).toHaveLength(0);
@@ -389,6 +394,7 @@ describe('ordinary memory exact public review', () => {
             });
             expect(yield* Ref.get(changed)).toBe(true);
             expect(inspected.isError).not.toBe(true);
+            // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
             const packet = inspected.structuredContent as ReturnType<typeof automaticReviewPacket>;
             expect(packet.omissions).toContain('related-source-unreadable');
             expect(packet.reviewEvidence).toHaveLength(0);
@@ -411,6 +417,7 @@ describe('ordinary memory exact public review', () => {
         expectedContentHash: sha256HexSync(f.content),
       });
       expect(inspected.isError).not.toBe(true);
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
       const packet = inspected.structuredContent as ReturnType<typeof automaticReviewPacket>;
       expect(packet.reviewEvidence).toHaveLength(1);
       const proposed = yield* f.review({
@@ -420,6 +427,7 @@ describe('ordinary memory exact public review', () => {
         draftJson: draft(packet, 'The timeout is 60 seconds.'),
       });
       expect(proposed.isError).not.toBe(true);
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
       const preview = proposed.structuredContent as NonNullable<ReturnType<typeof projectAutomaticMemoryReview>>;
       const duplicateUri = f.sourceUri.replace('/source.md', '/duplicate.md');
       yield* f.store.write(

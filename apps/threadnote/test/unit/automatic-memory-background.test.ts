@@ -1192,6 +1192,7 @@ describe('automatic ordinary-memory background controls', () => {
               expectedContentHash: hash(f.content),
             });
             expect(packetResult.isError).not.toBe(true);
+            // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
             const packet = packetResult.structuredContent as ReturnType<typeof automaticReviewPacket>;
             const authored = yield* f.generate(
               f.config,
@@ -1529,6 +1530,7 @@ describe('automatic ordinary-memory background controls', () => {
             expectedContentHash: hash(f.content),
           });
           expect(manual.isError).not.toBe(true);
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
           const packet = manual.structuredContent as ReturnType<typeof automaticReviewPacket>;
           const proposal = yield* f.generate(
             f.config,
@@ -1732,6 +1734,7 @@ describe('automatic ordinary-memory background controls', () => {
             expectedContentHash: hash(f.content),
           });
           expect(inspected.isError).not.toBe(true);
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
           const packet = inspected.structuredContent as ReturnType<typeof automaticReviewPacket>;
           expect(packet.draftRequest.available).toBe(true);
           expect(packet.reviewEvidence).toHaveLength(1);
@@ -1990,6 +1993,7 @@ try {
             expectedContentHash: hash(f.source),
           });
           expect(read.isError).not.toBe(true);
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
           const packet = read.structuredContent as ReturnType<typeof automaticReviewPacket>;
           expect(packet.reviewEvidence).toEqual([]);
           expect(packet.draftRequest.available).toBe(false);

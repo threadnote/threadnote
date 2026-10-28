@@ -10,6 +10,7 @@ interface PackageManifest {
   readonly overrides?: Readonly<Record<string, string>>;
   readonly packageManager?: string;
   readonly scripts?: Readonly<Record<string, string>>;
+  readonly trustedDependencies?: readonly string[];
 }
 
 describe('Bun distribution contract', () => {
@@ -19,6 +20,7 @@ describe('Bun distribution contract', () => {
     const effectVersion = '4.0.7';
 
     expect(manifest.packageManager).toMatch(/^bun@/);
+    expect(manifest.trustedDependencies).toEqual([]);
     for (const packageName of [
       '@effect/ai-openai-compat',
       '@effect/platform-bun',
