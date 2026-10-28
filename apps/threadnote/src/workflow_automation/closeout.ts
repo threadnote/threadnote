@@ -1,4 +1,5 @@
-import {Effect, Schema} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
+import {checkNativeCycleScope} from '@threadnote/workflow-automations/cycle';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workflow-automations/contracts';
 import {prepareNativeCloseout, NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
@@ -6,14 +7,20 @@ import {renderNativeDocument} from '@threadnote/workflow-automations/documents';
 import {planNativeCloseoutDocuments} from './closeout_documents.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runWorkflowMemory} from '../workflow_memory/index.js';
-import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
+import {inspectWorkflowJournal, readOptionalResource, withWorkflowLock} from '../workflow_memory/journal.js';
 import {assertWorkflowPublicationVerified, CurrentWorkflowArchivePublication} from '../workflow_memory/publication.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {withWorkflowRecallRefreshBatch} from '../workflow_memory/recall_refresh.js';
 import {PublicationWriterReasonSchema} from '../workflow_memory/publication_contract.js';
 import {CurrentNativeCloseoutSave, readNativeWorkflowState} from './store.js';
-import {reserveNativeCloseoutCapacity, clearNativeCloseoutCapacity} from './closeout_capacity.js';
+import {
+  reserveNativeCloseoutCapacity,
+  clearNativeCloseoutCapacity,
+  inspectPristineNativeCloseoutCapacity,
+  releasePristineNativeCloseoutCapacity,
+  nativeCloseoutPlannedOperationIds,
+} from './closeout_capacity.js';
 import {captureNativeCycleSource} from './cycle_git.js';
 import {decodeJournal, nativeCloseoutRequestSchema, type Journal} from './closeout_request_schema.js';
 export {nativeCloseoutRequestSchema} from './closeout_request_schema.js';
@@ -21,7 +28,12 @@ import {assertNativeJobLiveSource, CurrentNativeJobBoundary, CurrentNativeJobSou
 import {encodeAuthoringDocument, type NativeAuthoringCall} from './authoring_artifacts.js';
 import {nativeWorkflowError} from './memory.js';
 import {loadNativeCloseoutInputs} from './closeout_inputs.js';
-import {readNativeCloseoutJournal, writeNativeCloseoutJournal, withNativeCloseoutLock} from './closeout_store.js';
+import {
+  assertNativeCloseoutJournalCapacity,
+  readNativeCloseoutJournal,
+  writeNativeCloseoutJournal,
+  withNativeCloseoutLock,
+} from './closeout_store.js';
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const attempt = <A>(f: () => A) => Effect.try({try: f, catch: nativeWorkflowError});
@@ -61,6 +73,8 @@ const summary = (journal: Journal, revision: string) => ({
     state: journal.status,
     revision,
     sourceCommit: journal.source.head,
+    ...(journal.admissionEpoch ? {admissionEpoch: journal.admissionEpoch} : {}),
+    retainedAdmissions: journal.history?.length ?? 0,
     owned: journal.owned.length,
     archived: Object.keys(journal.archives).length,
     outputs: Object.entries(journal.outputs)
@@ -70,6 +84,99 @@ const summary = (journal: Journal, revision: string) => ({
       ? {approvalDigest: journal.approvalDigest, decision: journal.decision ?? 'pending'}
       : {}),
   },
+});
+
+/** Every changed path needs a newly accepted current phase; historical merged owners may overlap it. */
+export const freshCloseoutChangedPathCoverage = (
+  changed: readonly string[],
+  phases: Journal['cycle']['plan']['phases'],
+  qualified: ReadonlySet<string>,
+): string[] | undefined => {
+  const covered = new Set<string>();
+  for (const path of changed) {
+    const owners = phases.filter(phase => qualified.has(phase.id) && checkNativeCycleScope(phase, [path]));
+    if (!owners.length) return undefined;
+    for (const owner of owners) covered.add(owner.id);
+  }
+  return [...covered];
+};
+
+const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission')(function* (
+  previous: Journal,
+  current: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  source: Journal['source'],
+) {
+  const runtime = current.state.cycle;
+  if (!runtime || !previous.recovery)
+    return yield* fail('closeout-recovery', 'The fenced admission or current cycle is unavailable.');
+  const carried = previous.recovery.carriedQualification;
+  const baseline =
+    carried && hash(carried.source) === hash(source) && carried.cycleRuntimeDigest === hash(runtime)
+      ? carried
+      : previous.recovery;
+  const oldAttempts = new Set(baseline.acceptedAttemptIds);
+  const oldSnapshots = new Set(baseline.snapshotIds);
+  const snapshots = new Map(runtime.snapshots.map(entry => [entry.snapshot.snapshotId, entry.snapshot]));
+  const fresh = new Set(
+    runtime.attempts
+      .filter(
+        item =>
+          item.status === 'accepted' &&
+          !oldAttempts.has(item.id) &&
+          !oldSnapshots.has(item.snapshotId) &&
+          runtime.reviews.some(review => review.snapshotId === item.snapshotId),
+      )
+      .map(item => snapshots.get(item.snapshotId))
+      .filter((item): item is NonNullable<typeof item> => !!item && item.tree === source.tree)
+      .map(item => item.phaseId),
+  );
+  const qualified = new Set(
+    [...fresh].filter(
+      id =>
+        runtime.state.phases[id]?.validation?.snapshotTree === source.tree &&
+        runtime.state.phases[id]?.head === source.head,
+    ),
+  );
+  const affected = new Set<string>(baseline === carried ? carried.affectedPhaseIds : []);
+  if (!affected.size) {
+    const changed =
+      source.head === previous.source.head
+        ? []
+        : (yield* runCommandEffect(
+            'git',
+            [
+              '--no-optional-locks',
+              '-C',
+              source.repo,
+              'diff',
+              '--no-renames',
+              '--name-only',
+              '-z',
+              previous.source.head,
+              source.head,
+            ],
+            {timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024},
+          )).stdout
+            .split('\0')
+            .filter(Boolean);
+    if (changed.length) {
+      const coverage = freshCloseoutChangedPathCoverage(changed, runtime.state.plan.phases, qualified);
+      if (!coverage)
+        return yield* fail(
+          'closeout-acceptance-stale',
+          'Fresh accepted phase coverage is required for every changed source path.',
+        );
+      for (const id of coverage) affected.add(id);
+    } else
+      for (const phase of runtime.state.plan.phases)
+        if (hash(runtime.state.phases[phase.id]) !== hash(previous.cycle.phases[phase.id])) affected.add(phase.id);
+  }
+  if (!affected.size || [...affected].some(id => !qualified.has(id)))
+    return yield* fail(
+      'closeout-acceptance-stale',
+      'Fresh affected-phase source review and cycle acceptance are required after the superseded admission.',
+    );
+  return [...affected];
 });
 
 export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nativeCall: NativeAuthoringCall<R>) =>
@@ -101,7 +208,51 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
       Effect.gen(function* () {
         let saved = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);
         activeTransactionId = saved?.state.transactionId;
-        if (request.expectedRevision !== undefined && request.expectedRevision !== (saved?.revision ?? null))
+        const admittedJob = yield* CurrentNativeJobSourceView;
+        const assertJobPrepareBasis = (source: Journal['source'], bindingId: string) =>
+          Effect.gen(function* () {
+            if (
+              admittedJob &&
+              (bindingId !== admittedJob.bindingId ||
+                source.repo !== admittedJob.repo ||
+                source.head !== admittedJob.head ||
+                source.tree !== admittedJob.tree)
+            )
+              return yield* fail('job-source-drift', 'The closeout preparation source changed after job admission.');
+          });
+        const assertJobPrepareLive = admittedJob ? assertNativeJobLiveSource(admittedJob) : Effect.void;
+        if (admittedJob && (request.command === 'prepare' || request.command === 'finish')) {
+          const controller = yield* readNativeWorkflowState(config, request.runId);
+          const observedEpoch =
+            saved?.state.status === 'superseded'
+              ? hash({supersededRevision: saved.revision})
+              : saved?.state.admissionEpoch;
+          if (
+            !controller ||
+            controller.state.bindingId !== admittedJob.bindingId ||
+            controller.state.generation !== request.generation ||
+            !controller.state.cycle ||
+            hash(controller.state.cycle.state) !== admittedJob.cycleDigest ||
+            observedEpoch !== admittedJob.closeoutAdmissionEpoch ||
+            (request.command === 'finish' &&
+              (!saved ||
+                saved.state.status === 'admitting' ||
+                saved.state.status === 'superseded' ||
+                saved.state.transactionId !== admittedJob.closeoutTransactionId ||
+                saved.state.bindingId !== admittedJob.bindingId ||
+                saved.state.source.repo !== admittedJob.repo ||
+                saved.state.source.head !== admittedJob.head ||
+                saved.state.source.tree !== admittedJob.tree ||
+                hash(saved.state.cycle) !== admittedJob.cycleDigest ||
+                stableJson(saved.state.proposal.architecture.codeRefs) !== stableJson(admittedJob.citationRefs)))
+          )
+            return yield* fail('job-closeout-drift', 'The admitted closeout job belongs to another admission.');
+        }
+        if (
+          request.expectedRevision !== undefined &&
+          request.expectedRevision !== (saved?.revision ?? null) &&
+          !(request.command === 'recover' && saved?.state.status === 'superseded')
+        )
           return yield* fail(
             'closeout-conflict',
             'Closeout receipts changed. Read their current revision before retrying.',
@@ -128,14 +279,59 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
           if (!request.proposal)
             return yield* fail('invalid-request', 'Provide actual implementation and combined verification evidence.');
           if (saved) {
-            if (hash(saved.state.proposal) !== hash(request.proposal))
-              return yield* fail(
-                'closeout-intent-conflict',
-                'Resume this admitted closeout; its evidence cannot be replaced.',
+            if (saved.state.status === 'admitting') {
+              if (hash(saved.state.proposal) !== hash(request.proposal))
+                return yield* fail(
+                  'closeout-intent-conflict',
+                  'Resume or recover the original admitted proposal first.',
+                );
+              const inputs = yield* loadNativeCloseoutInputs(config, request.runId, request.generation, call);
+              if (hash(inputs.source) !== hash(saved.state.source) || hash(inputs.cycle) !== hash(saved.state.cycle))
+                return yield* fail('closeout-drift', 'The uncommitted readmission source or acceptance changed.');
+              yield* assertJobPrepareBasis(inputs.source, inputs.binding.bindingId);
+              yield* assertJobPrepareLive;
+              yield* reserveNativeCloseoutCapacity(
+                config,
+                request.runId,
+                saved.state.transactionId,
+                saved.state.documents,
+                saved.state.proposal.architecture.codeRefs,
+                saved.state.owned,
               );
-            return summary(saved.state, saved.revision);
+              const prepared: Journal = {...saved.state, status: 'prepared'};
+              const resumed = yield* writeNativeCloseoutJournal(
+                config,
+                request.runId,
+                prepared,
+                saved.revision,
+                decodeJournal,
+              );
+              return summary(resumed.state, resumed.revision);
+            }
+            if (saved.state.status !== 'superseded') {
+              if (hash(saved.state.proposal) !== hash(request.proposal))
+                return yield* fail(
+                  'closeout-intent-conflict',
+                  'Resume this admitted closeout; its evidence cannot be replaced.',
+                );
+              return summary(saved.state, saved.revision);
+            }
+            const controller = yield* readNativeWorkflowState(config, request.runId);
+            if (!controller)
+              return yield* fail('closeout-recovery', 'The original controller is unavailable for readmission.');
+            if (controller.state.closeoutSave)
+              return yield* fail('closeout-recovery', 'Release the fenced exact reservation before readmission.');
+            if ((saved.state.history?.length ?? 0) >= 4)
+              return yield* fail('closeout-capacity', 'Retained closeout admission history is full.');
           }
           const inputs = yield* loadNativeCloseoutInputs(config, request.runId, request.generation, call);
+          yield* assertJobPrepareBasis(inputs.source, inputs.binding.bindingId);
+          if (saved?.state.status === 'superseded')
+            yield* freshReadmission(
+              saved.state,
+              (yield* readNativeWorkflowState(config, request.runId))!,
+              inputs.source,
+            );
           const admission = yield* attempt(() =>
             prepareNativeCloseout(inputs.cycle, inputs.plan, request.proposal, inputs.spec),
           );
@@ -148,12 +344,15 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
               ...(admission.documents.behavior ? [admission.documents.behavior] : []),
             ].forEach(encodeAuthoringDocument),
           );
+          const admissionEpoch =
+            saved?.state.status === 'superseded' ? hash({supersededRevision: saved.revision}) : undefined;
           const transactionId = hash({
             runId: request.runId,
             generation: request.generation,
             source: inputs.source,
             cycle: inputs.cycle,
             proposal: request.proposal,
+            ...(admissionEpoch ? {admissionEpoch} : {}),
           });
           activeTransactionId = transactionId;
           const owned: Journal['owned'][number][] = [];
@@ -198,14 +397,6 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
               ),
             ),
           );
-          yield* reserveNativeCloseoutCapacity(
-            config,
-            request.runId,
-            transactionId,
-            documents,
-            admission.architecture.codeRefs,
-            owned,
-          );
           const journal: Journal = {
             format: 'threadnote-native-closeout',
             version: 1,
@@ -214,6 +405,8 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             bindingId: inputs.binding.bindingId,
             profile: inputs.state.profile,
             transactionId,
+            ...(admissionEpoch ? {admissionEpoch} : {}),
+            ...(admissionEpoch ? {cycleRuntimeDigest: hash(inputs.state.cycle)} : {}),
             source: inputs.source,
             cycle: inputs.cycle,
             plan: inputs.plan,
@@ -225,13 +418,193 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             outputs: {},
             archives: {},
             status: 'prepared',
+            ...(saved?.state.status === 'superseded'
+              ? {
+                  history: [
+                    ...(saved.state.history ?? []),
+                    (({history: _history, ...retired}) => ({
+                      ...retired,
+                      status: 'superseded' as const,
+                      recovery: saved.state.recovery!,
+                    }))(saved.state),
+                  ],
+                }
+              : {}),
           };
-          saved = yield* writeNativeCloseoutJournal(config, request.runId, journal, null, decodeJournal);
+          if (saved?.state.status === 'superseded') {
+            yield* assertJobPrepareLive;
+            const admitting: Journal = {...journal, status: 'admitting'};
+            yield* assertNativeCloseoutJournalCapacity(journal, decodeJournal);
+            yield* assertNativeCloseoutJournalCapacity(admitting, decodeJournal);
+            saved = yield* writeNativeCloseoutJournal(config, request.runId, admitting, saved.revision, decodeJournal);
+            yield* reserveNativeCloseoutCapacity(
+              config,
+              request.runId,
+              transactionId,
+              documents,
+              admission.architecture.codeRefs,
+              owned,
+            );
+            saved = yield* writeNativeCloseoutJournal(config, request.runId, journal, saved.revision, decodeJournal);
+          } else {
+            yield* assertJobPrepareLive;
+            yield* reserveNativeCloseoutCapacity(
+              config,
+              request.runId,
+              transactionId,
+              documents,
+              admission.architecture.codeRefs,
+              owned,
+            );
+            saved = yield* writeNativeCloseoutJournal(config, request.runId, journal, null, decodeJournal);
+          }
           return summary(saved.state, saved.revision);
         }
         if (!saved)
           return yield* fail('closeout-not-prepared', 'Prepare and verify this native closeout before finishing.');
         let journal = saved.state;
+        if (request.command === 'recover') {
+          if (!['prepared', 'admitting', 'superseded'].includes(journal.status))
+            return yield* fail('closeout-recovery', 'Only a pristine admission can be superseded.');
+          if (journal.status === 'prepared' || journal.status === 'admitting') {
+            if (
+              Object.keys(journal.outputs).length ||
+              Object.keys(journal.archives).length ||
+              journal.approvalDigest ||
+              journal.decision ||
+              journal.publication
+            )
+              return yield* fail('closeout-recovery', 'Final output, archive or publication receipts already exist.');
+            const controller = yield* readNativeWorkflowState(config, request.runId);
+            if (
+              !controller ||
+              controller.state.bindingId !== journal.bindingId ||
+              controller.state.generation !== journal.generation
+            )
+              return yield* fail('closeout-recovery', 'Controller binding changed; preserve the original admission.');
+            const reservation = controller.state.closeoutSave
+              ? yield* inspectPristineNativeCloseoutCapacity(config, request.runId, journal.transactionId)
+              : undefined;
+            if (!reservation && journal.status === 'prepared')
+              return yield* fail('closeout-recovery', 'The prepared admission lost its exact reservation.');
+            const operationIds =
+              reservation?.operationIds ?? nativeCloseoutPlannedOperationIds(journal.transactionId, journal.documents);
+            if (
+              !reservation &&
+              controller.state.operations.some(item => operationIds.includes(item.intent.operationId))
+            )
+              return yield* fail('closeout-recovery', 'A lower closeout operation started without its reservation.');
+            const fs = yield* FileSystem.FileSystem;
+            const publicationFile = (yield* Path.Path).join(
+              config.agentContextHome,
+              'workflow-memory',
+              journal.bindingId + '.publication.json',
+            );
+            if (yield* fs.exists(publicationFile))
+              return yield* fail('closeout-recovery', 'A publication journal exists; preserve the original admission.');
+            const bindings = new Set([journal.bindingId, ...journal.owned.map(item => item.bindingId)]);
+            for (const bindingId of bindings) {
+              const lower = yield* withWorkflowLock(config, bindingId, inspectWorkflowJournal(config, bindingId));
+              if (journal.owned.some(item => item.bindingId === bindingId && lower.state.operations[item.operationId]))
+                return yield* fail(
+                  'closeout-recovery',
+                  'An archive lower operation started; preserve the original admission.',
+                );
+              if (bindingId === journal.bindingId && operationIds.some(id => lower.state.operations[id]))
+                return yield* fail(
+                  'closeout-recovery',
+                  'A final output lower operation started; preserve the original admission.',
+                );
+            }
+            for (const document of journal.documents)
+              if ((yield* readOptionalResource(config, document.uri)) !== undefined)
+                return yield* fail('closeout-recovery', 'A final output already exists at its admitted destination.');
+            for (const item of journal.owned) {
+              if ((yield* readOptionalResource(config, item.destination)) !== undefined)
+                return yield* fail('closeout-recovery', 'An archive already exists at its admitted destination.');
+              const observed = yield* runWorkflowMemory(config, {
+                protocolVersion: 1,
+                action: 'read',
+                bindingId: item.bindingId,
+                uri: item.uri,
+              }).pipe(Effect.flatMap(value => attempt(() => artifact(value))));
+              if (
+                observed.memoryId !== item.memoryId ||
+                observed.revision !== item.revision ||
+                observed.state !== 'active'
+              )
+                return yield* fail('closeout-recovery', 'An owned draft changed; preserve the original admission.');
+            }
+            const currentSource = yield* Effect.result(captureNativeCycleSource(journal.source.repo, 'HEAD'));
+            const prior = journal.status === 'admitting' ? journal.history?.at(-1) : undefined;
+            const preserveQualification =
+              prior?.recovery &&
+              currentSource._tag === 'Success' &&
+              currentSource.success.repo === journal.source.repo &&
+              currentSource.success.head === journal.source.head &&
+              currentSource.success.tree === journal.source.tree &&
+              journal.cycleRuntimeDigest === hash(controller.state.cycle);
+            const qualifiedPhases = preserveQualification
+              ? yield* freshReadmission(prior, controller, journal.source)
+              : undefined;
+            const previousCarry = prior?.recovery?.carriedQualification;
+            const validPreviousCarry =
+              previousCarry &&
+              hash(previousCarry.source) === hash(journal.source) &&
+              previousCarry.cycleRuntimeDigest === journal.cycleRuntimeDigest;
+            const carried = preserveQualification
+              ? validPreviousCarry
+                ? previousCarry
+                : {
+                    source: journal.source,
+                    cycleRuntimeDigest: journal.cycleRuntimeDigest!,
+                    affectedPhaseIds: qualifiedPhases!,
+                    acceptedAttemptIds: prior.recovery.acceptedAttemptIds,
+                    snapshotIds: prior.recovery.snapshotIds,
+                  }
+              : undefined;
+            const fenced: Journal = {
+              ...journal,
+              status: 'superseded',
+              recovery: {
+                reservation,
+                acceptedAttemptIds:
+                  controller.state.cycle?.attempts.filter(item => item.status === 'accepted').map(item => item.id) ??
+                  [],
+                snapshotIds: controller.state.cycle?.snapshots.map(item => item.snapshot.snapshotId) ?? [],
+                ...(carried ? {carriedQualification: carried} : {}),
+              },
+            };
+            saved = yield* writeNativeCloseoutJournal(config, request.runId, fenced, saved.revision, decodeJournal);
+            journal = saved.state;
+          }
+          if (journal.recovery?.reservation)
+            yield* releasePristineNativeCloseoutCapacity(config, request.runId, journal.recovery.reservation);
+          return summary(journal, saved.revision);
+        }
+        if (request.command === 'inspect') {
+          const current = yield* readNativeWorkflowState(config, request.runId);
+          const source = yield* Effect.result(captureNativeCycleSource(journal.source.repo, 'HEAD'));
+          return {
+            ...summary(journal, saved.revision),
+            drift: {
+              binding:
+                !current ||
+                current.state.bindingId !== journal.bindingId ||
+                current.state.generation !== journal.generation,
+              cycle: !current?.state.cycle || hash(current.state.cycle.state) !== hash(journal.cycle),
+              source:
+                source._tag === 'Failure' ||
+                source.success.head !== journal.source.head ||
+                source.success.tree !== journal.source.tree,
+            },
+          };
+        }
+        if (journal.status === 'superseded' || journal.status === 'admitting')
+          return yield* fail(
+            'closeout-superseded',
+            'This admission is fenced; reaccept the affected phase before preparing a new closeout.',
+          );
         const save = (next: Journal) =>
           writeNativeCloseoutJournal(config, request.runId, next, saved!.revision, decodeJournal).pipe(
             Effect.tap(value =>
@@ -253,7 +626,6 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             'closeout-drift',
             'Cycle acceptance, delivery, or native binding changed after closeout admission.',
           );
-        if (request.command === 'inspect') return summary(journal, saved.revision);
         if (journal.status === 'complete') {
           yield* clearNativeCloseoutCapacity(config, request.runId, journal.transactionId);
           return summary(journal, saved.revision);
