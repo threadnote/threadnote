@@ -12,6 +12,9 @@ import {captureNativeCycleSource as captureSource} from '../../src/workflow_auto
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {CycleDiagnostics, cycleDiagnostics} from './native-cycle-diagnostics.js';
 
+// P0 Windows allowance for real Git/native reconciliation beyond 30s; revisit with performance data.
+const windowsReconciliationTimeout = process.platform === 'win32' ? {timeout: 120_000} : undefined;
+
 const object = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== 'object') throw new Error('Expected object response');
   return value as Record<string, unknown>;
@@ -1328,4 +1331,5 @@ effectIt.effect(
       expect(after.attempts.slice(0, oldRuntime.attempts.length)).toEqual(oldRuntime.attempts);
       expect(after.state.phases.two).toEqual(oldRuntime.state.phases.two);
     }).pipe(run),
+  windowsReconciliationTimeout,
 );
