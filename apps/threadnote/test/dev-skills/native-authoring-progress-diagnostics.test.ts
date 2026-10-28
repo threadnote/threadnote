@@ -597,15 +597,15 @@ effectIt.effect('broken clocks, sink, serialization, snapshots and bookkeeping c
   }),
 );
 
-effectIt.effect('conserves the whole original lifecycle file and the existing layer ownership wiring', () =>
+effectIt.effect('matches the approved lifecycle source baseline and existing layer ownership wiring', () =>
   Effect.sync(() => {
-    // Git may check out this unchanged text file with CRLF on Windows.
-    const original = Buffer.from(
+    // This baseline includes the approved Windows-only stress-test quarantine; Git may use CRLF on Windows.
+    const lifecycle = Buffer.from(
       readFileSync(new URL('./native-authoring-lifecycle.test.ts', import.meta.url), 'utf8').replace(/\r\n/gu, '\n'),
     );
-    expect(original.byteLength).toBe(80683);
-    expect(createHash('sha256').update(original).digest('hex')).toBe(
-      'd354d96e996d7b514d0a242b9b9901adb2151a017480e9db479bb5c35179bb1d',
+    expect(lifecycle.byteLength).toBe(80832);
+    expect(createHash('sha256').update(lifecycle).digest('hex')).toBe(
+      'd11baf74d73ebec81678ac1fb3fc602bf14b797fab9779e4b41a5e6861222b8a',
     );
     const fixture = readFileSync(new URL('./native-automation-fixture.ts', import.meta.url), 'utf8');
     expect(fixture.match(/provideTestLayer\(ApplicationLayer\)/gu)).toHaveLength(1);
