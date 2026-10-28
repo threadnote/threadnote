@@ -31,6 +31,7 @@ import {runNativeAuthoring} from './authoring.js';
 import {runNativeCycle} from './cycle.js';
 import {runNativeWatch} from './watch.js';
 import {runNativeCloseout} from './closeout.js';
+import {CurrentNativeJobBoundary, runNativeJob} from './native_jobs.js';
 import {boundNativeCycleOutput} from '@threadnote/workflow-automations/cycle-output';
 import {
   CurrentWorkflowReadCache,
@@ -433,6 +434,8 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
 
 const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: RuntimeConfig, input: unknown) {
   const request = yield* Effect.try({try: () => decodeNativeWorkflowRequest(input), catch: nativeWorkflowError});
+  const boundary = yield* CurrentNativeJobBoundary;
+  if (boundary && (request.action === 'write' || request.action === 'recover')) yield* boundary;
   if (request.action === 'capabilities')
     return {
       ...version,
@@ -453,6 +456,7 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
         'cycle',
         'watch',
         'closeout',
+        'job',
       ],
       profiles: ['desktop', 'codex-cloud-personal', 'cursor-cloud-personal'],
     };
@@ -471,6 +475,10 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
 const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (config: RuntimeConfig, input: unknown) {
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'request-schema')
     return yield* Effect.try({try: () => nativeRequestSchema(input), catch: nativeWorkflowError});
+  if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'job')
+    return yield* runNativeJob(config, input, request =>
+      runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),
+    );
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'closeout')
     return yield* withWorkflowReadCache(
       runNativeCloseout(config, input, request =>

@@ -35,6 +35,9 @@ import {readWorkflowSharedRoots} from '../workflow_memory/scopes.js';
 import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence} from '../workflow_memory/evidence.js';
 import {workflowArtifactUri} from '../workflow_memory/naming.js';
 import {nativeWorkflowError} from './memory.js';
+import {assertNativeJobLiveSource, CurrentNativeJobReadyPromotion, CurrentNativeJobSourceView} from './native_jobs.js';
+import {nativeAuthoringRequestSchema} from './authoring_request_schema.js';
+export {nativeAuthoringRequestSchema} from './authoring_request_schema.js';
 import {
   CurrentNativeAuthoringSave,
   CurrentNativeOperationLimit,
@@ -61,16 +64,6 @@ import {
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
-const confirmation = Schema.Struct({
-  intentHash: digest,
-  decision: Schema.Literal('approved'),
-  response: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-});
-const review = Schema.Struct({
-  documentHash: digest,
-  outcome: Schema.Literals(['accepted', 'changes-requested']),
-  blockingIssueCount: Schema.Finite.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
-});
 const authoringDataPage = Schema.Struct({
   format: Schema.Literal('threadnote-native-authoring-data'),
   version: Schema.Literal(1),
@@ -82,57 +75,6 @@ const authoringIndexPage = Schema.Struct({
   version: Schema.Literal(1),
   depth: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 3})),
   children: Schema.Array(AuthoringReferenceSchema).check(Schema.isBetweenLength(1, 8)),
-});
-export const nativeAuthoringRequestSchema = Schema.Struct({
-  protocolVersion: Schema.Literal(1),
-  executorVersion: Schema.Literal(1),
-  action: Schema.Literal('authoring'),
-  command: Schema.Literals([
-    'schema',
-    'scope-inspect',
-    'pin',
-    'validate',
-    'render',
-    'review-packet',
-    'challenge-packet',
-    'acceptance-packet',
-    'confirm',
-    'save',
-    'load',
-    'recover',
-    'diff',
-    'export-plan',
-    'from-spec',
-    'export-dev-cycle',
-    'closeout-input',
-    'read',
-  ]),
-  runId: id,
-  generation: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-  document: Schema.optionalKey(Schema.Unknown),
-  before: Schema.optionalKey(Schema.Unknown),
-  after: Schema.optionalKey(Schema.Unknown),
-  ready: Schema.optionalKey(Schema.Boolean),
-  confirmation: Schema.optionalKey(confirmation),
-  review: Schema.optionalKey(review),
-  uri: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^threadnote:\/\/[^\s]+$/u), Schema.isMaxLength(4096))),
-  expectedRevision: Schema.optionalKey(Schema.NullOr(digest)),
-  paths: Schema.optionalKey(Schema.Array(Schema.String).check(Schema.isMinLength(1), Schema.isMaxLength(128))),
-  literalOnly: Schema.optionalKey(Schema.Boolean),
-  evidenceRefs: Schema.optionalKey(Schema.Array(AuthoringReferenceSchema).check(Schema.isMaxLength(16))),
-  delivery: Schema.optionalKey(Schema.Literals(['local', 'commit', 'pr'])),
-  bindings: Schema.optionalKey(Schema.Record(id, Schema.Struct({branch: Schema.String, baseBranch: Schema.String}))),
-  sectionId: Schema.optionalKey(id),
-  artifactId: Schema.optionalKey(id),
-  decisionId: Schema.optionalKey(id),
-  designRisk: Schema.optionalKey(Schema.Literals(['routine', 'alternatives', 'uncertain'])),
-  offsetBytes: Schema.optionalKey(Schema.Finite),
-  maxBytes: Schema.optionalKey(Schema.Finite),
-  sourceDigest: Schema.optionalKey(digest),
-  detail: Schema.optionalKey(Schema.Literals(['summary', 'document', 'outline', 'section'])),
-  userResponse: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
-  userDecision: Schema.optionalKey(Schema.Literals(['approve', 'reject', 'defer'])),
-  packet: Schema.optionalKey(Schema.Unknown),
 });
 type Request = typeof nativeAuthoringRequestSchema.Type;
 const utf8 = new TextEncoder();
@@ -149,7 +91,20 @@ const bullets = (items: readonly string[]) => items.map(item => '- ' + item).joi
 const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(function* (
   repo: string,
   paths: readonly string[],
+  live = false,
 ) {
+  const admitted = live ? undefined : yield* CurrentNativeJobSourceView;
+  if (admitted) {
+    if (admitted.repo !== repo || paths.length < 1 || paths.length > 128 || new Set(paths).size !== paths.length)
+      return yield* fail('invalid-scope', 'Admitted source view differs from the original bound source scope.');
+    const files = [] as {path: string; sha256: string}[];
+    for (const relative of paths) {
+      const file = admitted.files.find(item => item.path === relative);
+      if (!file) return yield* fail('invalid-scope', 'Admitted source view lacks a required file.');
+      files.push({path: relative, sha256: file.object.sha256});
+    }
+    return {head: admitted.head, files};
+  }
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   if (paths.length < 1 || paths.length > 128 || new Set(paths).size !== paths.length)
@@ -186,11 +141,13 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
 const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(function* (
   repo: string,
   document: NativeAuthoringDocument,
+  live = false,
 ) {
   if (!document.source) return;
   const source = yield* inspectSource(
     repo,
     document.source.files.map(file => file.path),
+    live,
   );
   if (stableJson(source) !== stableJson(document.source))
     return yield* fail(
@@ -1336,8 +1293,8 @@ const saveAuthoring = <R>(
         catch: nativeWorkflowError,
       });
       // A changed source cannot publish a root referring to stale child acceptance.
-      yield* verifySource(repo, document);
-      const artifact = yield* artifacts.write({
+      yield* verifySource(repo, document, readiness === 'ready');
+      const rootWrite = artifacts.write({
         body,
         nameHint: document.kind,
         role: 'authoring-root',
@@ -1346,6 +1303,11 @@ const saveAuthoring = <R>(
         ...(prior ? {uri: prior.uri} : {}),
         relations: links,
       });
+      const artifact = yield* rootWrite.pipe(
+        Effect.provideService(CurrentNativeJobReadyPromotion, readiness === 'ready'),
+      );
+      const admitted = yield* CurrentNativeJobSourceView;
+      if (admitted && readiness === 'ready') yield* assertNativeJobLiveSource(admitted);
       yield* clearAuthoringSave(config, request.runId, saveDigest);
       return {...rootSummary(root, artifact), changed: true};
     }).pipe(

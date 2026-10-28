@@ -6,6 +6,7 @@ import {nativeWorkflowError} from '../workflow_automation/memory.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {SystemInfo} from '@threadnote/platform/system';
 import {runNativeWatchCollector} from '../workflow_automation/watch.js';
+import {runNativeJobWorker} from '../workflow_automation/native_jobs.js';
 
 export const nativeWorkflowInputByteLimit = 2_000_000;
 
@@ -89,6 +90,13 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
       Command.make('watch-collector', {watchId: Flag.String('watch-id'), token: Flag.String('token')}, options =>
         withRuntime(config => runNativeWatchCollector(config, options.watchId, options.token)),
       ).pipe(Command.withDescription('Internal same-executable native watcher process')),
+      Command.make('job-worker', {runId: Flag.String('run-id'), jobId: Flag.String('job-id')}, options =>
+        withRuntime(config =>
+          runNativeJobWorker(config, options.runId, options.jobId, request =>
+            runWorkflowAutomation(config, request).pipe(Effect.mapError(nativeWorkflowError)),
+          ).pipe(Effect.asVoid),
+        ),
+      ).pipe(Command.withDescription('Internal same-executable native job process')),
     ]),
   );
 }

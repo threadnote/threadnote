@@ -14,10 +14,11 @@ import {NativeCycleReviewSchema, nativeCycleOrchestratorLane} from '@threadnote/
 import {NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
-import {nativeAuthoringRequestSchema} from './authoring.js';
+import {nativeAuthoringRequestSchema} from './authoring_request_schema.js';
 import {nativeCycleRequestSchema, nativeCycleSemanticPrerequisites} from './cycle.js';
 import {nativeWatchRequestSchema} from './watch.js';
-import {nativeCloseoutRequestSchema} from './closeout.js';
+import {nativeCloseoutRequestSchema} from './closeout_request_schema.js';
+import {nativeJobRequestSchema} from './native_jobs.js';
 
 export const NativeRequestSchemaDiscoverySchema = Schema.Struct({
   protocolVersion: Schema.Literal(1),
@@ -31,6 +32,7 @@ export const NativeRequestSchemaDiscoverySchema = Schema.Struct({
     'cycle',
     'watch',
     'closeout',
+    'job',
     'authoring-document',
     'cycle-plan',
     'cycle-validation',
@@ -101,6 +103,8 @@ export function nativeRequestSchema(input: unknown) {
         return commandSchema(nativeWatchRequestSchema, request.command);
       case 'closeout':
         return commandSchema(nativeCloseoutRequestSchema, request.command);
+      case 'job':
+        return commandSchema(nativeJobRequestSchema, request.command);
       default: {
         if (request.command !== undefined) return invalid('Command selection is only available for command topics.');
         const schema =
