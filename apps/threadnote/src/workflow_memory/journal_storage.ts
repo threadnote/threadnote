@@ -126,7 +126,11 @@ function compactJournalImage(state: WorkflowJournal) {
 }
 
 // Partition only a container frame; large child values keep the native canonical encoder.
-function partitionFrame(value: Record<string, unknown>, slot: string) {
+function partitionFrame(
+  value: Record<string, unknown>,
+  slot: string,
+  textValues: (value: unknown) => string = stableJson,
+) {
   const ordered = Object.fromEntries(
     Object.entries(value)
       .filter(([, item]) => item !== undefined)
@@ -135,7 +139,8 @@ function partitionFrame(value: Record<string, unknown>, slot: string) {
   const keys = Object.keys(ordered);
   const index = keys.indexOf(slot);
   if (index < 0) throw invalid();
-  const entry = (key: string) => `${JSON.stringify(key)}:${stableJson(ordered[key])}`;
+  const entry = (key: string) =>
+    `${JSON.stringify(key)}:${key === 'textValues' ? textValues(ordered[key]) : stableJson(ordered[key])}`;
   const before = keys.slice(0, index).map(entry);
   const after = keys.slice(index + 1).map(entry);
   return {
@@ -153,10 +158,13 @@ function siblingContents(prefix: string, suffix: string) {
 }
 
 /** Pure formatting for one private, immutable native transition; no persistence or scope authority. */
-export function workflowJournalStorageImagePair(prepared: WorkflowJournal) {
+export function workflowJournalStorageImagePair(
+  prepared: WorkflowJournal,
+  textValues: (value: unknown) => string = stableJson,
+) {
   const image = compactJournalImage(prepared);
   const journal = partitionFrame(image.journal, 'manifestCommitted');
-  const envelope = partitionFrame(image, 'journal');
+  const envelope = partitionFrame(image, 'journal', textValues);
   return siblingContents(envelope.prefix + journal.prefix, journal.suffix + envelope.suffix + '\n');
 }
 

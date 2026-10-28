@@ -1,23 +1,25 @@
 import {stableJson} from './protocol.js';
 
 const defaultCacheBytes = 64 * 1024 * 1024;
+const minimumCachedTextLength = 1024;
+const maximumCachedTexts = 4096;
 const utf8 = new TextEncoder();
 
 type ObjectLike = object;
 
 /**
  * Creates a request-local canonical JSON encoder that reuses serialized
- * fragments only for deeply immutable, plain JSON subtrees.
+ * fragments for deeply immutable, plain JSON subtrees. The private storage text
+ * table can also reuse exact primitive quotes against the same retained budget.
  */
-export function makeRequestCanonicalJson(
-  options: {readonly maximumCachedBytes?: number} = {},
-): (value: unknown) => string {
+export function makeRequestCanonicalJson(options: {readonly maximumCachedBytes?: number} = {}) {
   const requestedBudget = options.maximumCachedBytes ?? defaultCacheBytes;
   const maximumCachedBytes =
     Number.isFinite(requestedBudget) && requestedBudget >= 0
       ? Math.min(defaultCacheBytes, Math.floor(requestedBudget))
       : 0;
   const cachedJson = new WeakMap<ObjectLike, string>();
+  const cachedTexts = new Map<string, string>();
   const provenImmutable = new WeakSet<ObjectLike>();
 
   const inspect = (value: unknown, active: WeakSet<ObjectLike>): boolean => {
@@ -103,7 +105,21 @@ export function makeRequestCanonicalJson(
   };
   let retainedBytes = 0;
 
-  const encode = (value: unknown): string => {
+  const quoteText = (value: string): string => {
+    if (value.length < minimumCachedTextLength) return JSON.stringify(value);
+    const cached = cachedTexts.get(value);
+    if (cached !== undefined) return cached;
+    const quoted = JSON.stringify(value);
+    // Account for both UTF-16 strings and an entry allowance, not engine heap/RSS.
+    const bytes = 2 * (value.length + quoted.length) + 128;
+    if (cachedTexts.size < maximumCachedTexts && bytes <= maximumCachedBytes - retainedBytes) {
+      cachedTexts.set(value, quoted);
+      retainedBytes += bytes;
+    }
+    return quoted;
+  };
+
+  const encode = (value: unknown, textValues = false): string => {
     const inheritedToJson = [Object.prototype, Array.prototype].some(prototype => {
       const descriptor = Object.getOwnPropertyDescriptor(prototype, 'toJSON');
       return descriptor !== undefined && (!('value' in descriptor) || typeof descriptor.value === 'function');
@@ -114,7 +130,8 @@ export function makeRequestCanonicalJson(
 
     const serialize = (current: unknown, active: WeakSet<ObjectLike>): string => {
       if (current === null) return 'null';
-      if (typeof current === 'string' || typeof current === 'boolean') return JSON.stringify(current);
+      if (typeof current === 'string') return textValues ? quoteText(current) : JSON.stringify(current);
+      if (typeof current === 'boolean') return JSON.stringify(current);
       if (typeof current === 'number') return JSON.stringify(current);
       if (current === undefined) return 'null';
       if (typeof current !== 'object') return stableJson(current);
@@ -150,5 +167,8 @@ export function makeRequestCanonicalJson(
     return serialize(value, new WeakSet());
   };
 
-  return encode;
+  return Object.assign((value: unknown) => encode(value), {
+    // Disabled storage formatting stays a single native bulk call.
+    textValues: maximumCachedBytes === 0 ? stableJson : (value: unknown) => encode(value, true),
+  });
 }
