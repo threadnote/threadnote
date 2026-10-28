@@ -24,7 +24,7 @@ export const cursorCloudPersonalDocsSection: DocsSection = {
       body: [
         {
           type: 'note',
-          text: 'This setup is for one Cursor user who does not operate Threadnote’s organization remote-memory service. It registers one personal stdio MCP. That single server can expose up to 16 explicitly configured private Git memory shares; it never exposes other local or shared Threadnote namespaces.',
+          text: 'This setup uses Git memory repositories without Threadnote’s organization remote-memory service. It registers one personal stdio MCP that can be reused in a saved environment shared by engineers from several teams. That single server discovers up to 16 registered writable Git memory shares, with optional environment selectors to restrict the set; it never exposes other Threadnote namespaces.',
         },
         {type: 'heading', text: 'How the personal setup fits together'},
         {
@@ -37,7 +37,7 @@ export const cursorCloudPersonalDocsSection: DocsSection = {
             ],
             [
               'One personal MCP',
-              'Starts `threadnote-mcp-server` over stdio and bounds every memory operation to the configured share set.',
+              'Starts `threadnote-mcp-server` over stdio and discovers registered writable shares before each operation. Optional environment selectors restrict that set.',
             ],
             [
               'One or more private Git repositories',
@@ -115,14 +115,12 @@ test -f "$HOME/.cursor/skills/threadnote-memory/SKILL.md"`,
         {type: 'heading', text: '3. Generate one personal MCP configuration'},
         {
           type: 'paragraph',
-          text: 'Run the configuration command from any trusted Threadnote installation. Repeat `--team` in exactly the set the environment bootstrapped. Ordering and duplicates are normalized, so the same set produces the same configuration.',
+          text: 'Run the configuration command from any trusted Threadnote installation. Omit `--team` to generate a reusable MCP configuration: the Cloud VM discovers its registered writable shares before each operation. No default share is chosen, and adding shares during bootstrap does not require restarting the MCP. The installation generating this JSON does not need those share repositories locally.',
         },
         {
           type: 'code',
           language: 'sh',
           code: `threadnote cloud cursor config \\
-  --team personal \\
-  --team docs \\
   --user cursor-cloud \\
   --agent-id cursor-cloud`,
         },
@@ -136,12 +134,21 @@ test -f "$HOME/.cursor/skills/threadnote-memory/SKILL.md"`,
   "env": {
     "THREADNOTE_ACCOUNT": "local",
     "THREADNOTE_AGENT_ID": "cursor-cloud",
-    "THREADNOTE_CURSOR_CLOUD_TEAM": "docs",
-    "THREADNOTE_CURSOR_CLOUD_TEAMS": "[\\"docs\\",\\"personal\\"]",
     "THREADNOTE_MCP_TOOLSET": "cursor-cloud-personal",
     "THREADNOTE_USER": "cursor-cloud"
   }
 }`,
+        },
+        {
+          type: 'paragraph',
+          text: 'Both `THREADNOTE_CURSOR_CLOUD_TEAM` and `THREADNOTE_CURSOR_CLOUD_TEAMS` are optional. When neither is set, the MCP uses all registered writable shares and ignores `defaultTeam`. To restrict one MCP, pass `--team` to the configuration command; repeat it for several shares. The generated selector values are sorted and deduplicated. A singular selector names one share; the plural selector is a non-empty JSON array, and any singular value must belong to that array. An explicit empty array is rejected. Read-only shares are excluded from discovery, and selecting one explicitly reports a readiness error. If discovery finds more than 16 writable shares, restrict the set instead of relying on truncation.',
+        },
+        {
+          type: 'code',
+          language: 'sh',
+          code: `# Optional: restrict this MCP to two registered shares.
+threadnote cloud cursor config --team personal --team docs \\
+  --user cursor-cloud --agent-id cursor-cloud`,
         },
         {
           type: 'paragraph',
@@ -152,14 +159,16 @@ test -f "$HOME/.cursor/skills/threadnote-memory/SKILL.md"`,
           type: 'code',
           language: 'sh',
           code: `threadnote cloud cursor verify \\
-  --team personal \\
-  --team docs \\
   --user cursor-cloud \\
   --agent-id cursor-cloud \\
   --cwd "$PWD" \\
   --json
 
 threadnote doctor --dry-run`,
+        },
+        {
+          type: 'paragraph',
+          text: '`start` and `verify` follow the same share selection rules: explicit CLI `--team` values take precedence, then environment selectors, then discovery of registered writable shares. An environment-wide default is unnecessary. If no writable shares are registered yet, the MCP still advertises its tools and shared operations report setup guidance; retry after the Build finishes. VM-local handoffs remain available.',
         },
         {
           type: 'list',
@@ -201,7 +210,7 @@ threadnote doctor --dry-run`,
           rows: [
             [
               '`team … is not configured` or MCP discovery fails',
-              'On current releases MCP discovery remains available while bootstrap is still cloning shares, and recall reports a temporary readiness warning. Wait for the Build to finish and retry. If the warning remains, rerun bootstrap for that exact `--team`, rebuild the environment, then regenerate the one MCP configuration with the same repeated team set.',
+              'MCP discovery remains available while bootstrap is still cloning shares. Wait for the Build to finish and retry. If readiness still fails, rerun bootstrap for the missing share and rebuild the environment. Keep the selector-free MCP configuration: it discovers newly registered writable shares automatically. Change team selectors only when you intentionally restricted the MCP and need to adjust that restriction.',
             ],
             [
               '`0 canonical documents` or `Resource user scope does not match`',

@@ -11,7 +11,12 @@ import {
 } from '../toolset.js';
 import {currentPackageVersion} from '../../utils.js';
 import {getRuntimeConfig as getApplicationRuntimeConfig} from '../../runtime.js';
-import {EffectMcpServerAdapter, McpInput, mcpProgressHeartbeatMilliseconds} from '../../effect/ai/mcp.js';
+import {
+  EffectMcpServerAdapter,
+  mcpResourceInvalidParamsError,
+  McpInput,
+  mcpProgressHeartbeatMilliseconds,
+} from '../../effect/ai/mcp.js';
 import {
   MCP_RESOURCE_MIME_TYPE,
   MCP_RESOURCE_READ_MAX_BYTES,
@@ -37,7 +42,6 @@ import {
   cursorCloudRemoteHybridStatus,
   cursorCloudScopeRoots,
   resolveCursorCloudMemoryScope,
-  type CursorCloudMemoryScope,
 } from '../../cursor/cloud.js';
 import {runCursorAttestationChallenge} from '../../cursor/cloud_attestation.js';
 import {
@@ -81,6 +85,7 @@ import {registerMaintenanceMetadataTools} from './maintenance_metadata.js';
 import {registerKnowledgeDeltaGitProposalTool, registerTopicMaintenanceGitProposalTool} from './git_proposal.js';
 import {registerProcedurePublicationTools} from './procedure.js';
 import {registerActivationProofTool} from './activation.js';
+import {resolveMemoryScope, type MemoryScopeSource} from './cursor_cloud_memory.js';
 import {
   runInstallSharedSkillTool,
   runListSharedSkillsTool,
@@ -124,11 +129,11 @@ export const mcpServerEffect = withAnonymousTelemetry(
           sharedSyncDelayMilliseconds: mcpProgressTestSharedSyncDelayMilliseconds(system.environment()),
         };
         const memoryScope = isCursorCloudPersonalToolset(toolset)
-          ? yield* resolveCursorCloudMemoryScope(config, system.environment())
+          ? {resolve: () => resolveCursorCloudMemoryScope(config, system.environment())}
           : undefined;
         setMcpStartupVersion(yield* currentPackageVersion().pipe(Effect.orElseSucceed(() => undefined)));
         const instructions = memoryScope
-          ? `Personal Cursor Cloud uses one MCP bounded to these Git memory shares: ${memoryScope.shares.map(share => `${share.team} (${share.root})`).join(', ')}. Call recall_context with an absolute callerCwd; optionally pass team to narrow recall. Results are unread pointers, not evidence, so read relevant threadnote:// URIs with read_context. With multiple shares, durable remember_context writes require team; writes are committed and pushed only to that share. Memory tools reject URIs outside the configured share set.`
+          ? 'Personal Cursor Cloud discovers registered writable Git memory shares for each operation. Optional team environment selectors restrict that set; no default share is chosen. Call recall_context with an absolute callerCwd; optionally pass team to narrow recall. Results are unread pointers, so read relevant threadnote:// URIs with read_context. With multiple shares, new durable remember_context writes require team; writes are committed and pushed only to that share. Memory tools reject URIs outside the effective share set.'
           : toolset === CURSOR_CLOUD_LOCAL_MCP_TOOLSET
             ? 'Cursor Cloud remote-hybrid mode uses this local server only for checkout-specific code graph evidence, diagnostics, and workload attestation. All historical memory reads and writes belong to the managed threadnote-memory HTTP server. Never fall back to local personal memory or a Git memory share.'
             : 'Threadnote offers bounded context, graph, and memory tools. Choose the tool whose description matches the evidence gap; verify returned evidence in source. Writes stay private unless sharing is confirmed. Never auto-apply/share or store secrets, credentials, customer data, or raw logs.';
@@ -179,7 +184,7 @@ export const mcpServerEffect = withAnonymousTelemetry(
 function registerResources(
   server: EffectMcpServerAdapter,
   config: RuntimeConfig,
-  memoryScope?: CursorCloudMemoryScope,
+  memoryScope?: MemoryScopeSource,
 ): void {
   server.registerResourceTemplate(
     {
@@ -193,7 +198,13 @@ function registerResources(
       routerPath: '*',
       uriTemplate: 'threadnote://{+resourcePath}',
     },
-    uri => readThreadnoteMcpResource(config, uri, memoryScope ? cursorCloudScopeRoots(memoryScope) : undefined),
+    uri =>
+      Effect.gen(function* () {
+        const scope = yield* resolveMemoryScope(memoryScope).pipe(
+          Effect.mapError(error => mcpResourceInvalidParamsError(error.message)),
+        );
+        return yield* readThreadnoteMcpResource(config, uri, scope ? cursorCloudScopeRoots(scope) : undefined);
+      }),
   );
 }
 
@@ -279,7 +290,7 @@ function registerTools(
   config: RuntimeConfig,
   toolset: McpToolset,
   recallProgressTiming: RecallProgressTiming,
-  memoryScope?: CursorCloudMemoryScope,
+  memoryScope?: MemoryScopeSource,
 ): void {
   const capabilities = mcpToolCapabilities(toolset);
   if (capabilities.memoryRead) {

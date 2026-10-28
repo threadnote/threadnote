@@ -29,6 +29,8 @@ const DURATION_HINTS = new Map([
   ['//packages/memory:test_runtime', 60],
 ]);
 
+const REPOSITORY_CHECKS = new Set(['//:format', '//:lint', '//:test_typecheck', '//:workspace_check']);
+
 /**
  * @param {BazelTarget} target
  */
@@ -73,7 +75,14 @@ export function planBazelShards({inventory, selected, maxShards = 8}) {
     .map(target => ({...target, weight: targetWeight(target)}));
   const network = executable.filter(target => target.requiresNetwork);
   const ordinary = executable.filter(target => !target.requiresNetwork);
-  const ordinaryShardCount = Math.min(ordinary.length, Math.max(maxShards - (network.length > 0 ? 1 : 0), 0));
+  const checks = ordinary
+    .filter(target => REPOSITORY_CHECKS.has(target.label))
+    .sort((left, right) => left.label.localeCompare(right.label));
+  const groups = ordinary
+    .filter(target => !REPOSITORY_CHECKS.has(target.label))
+    .map(target => ({targets: [target], weight: target.weight}));
+  if (checks.length > 0) groups.push({targets: checks, weight: checks.reduce((sum, target) => sum + target.weight, 0)});
+  const ordinaryShardCount = Math.min(groups.length, Math.max(maxShards - (network.length > 0 ? 1 : 0), 0));
   const bins = Array.from({length: ordinaryShardCount}, () => ({postgres: false, targets: [], weight: 0}));
   if (network.length > 0) {
     bins.push({
@@ -83,12 +92,12 @@ export function planBazelShards({inventory, selected, maxShards = 8}) {
     });
   }
   if (ordinary.length > 0 && bins.length === 0) bins.push({postgres: false, targets: [], weight: 0});
-  for (const target of [...ordinary].sort(
-    (left, right) => right.weight - left.weight || left.label.localeCompare(right.label),
+  for (const group of groups.sort(
+    (left, right) => right.weight - left.weight || left.targets[0].label.localeCompare(right.targets[0].label),
   )) {
     const bin = bins.reduce((best, candidate) => (candidate.weight < best.weight ? candidate : best));
-    bin.targets.push(target);
-    bin.weight += target.weight;
+    bin.targets.push(...group.targets);
+    bin.weight += group.weight;
   }
 
   return bins

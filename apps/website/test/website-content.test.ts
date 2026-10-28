@@ -2667,8 +2667,7 @@ Measure the system before changing its implementation language.
       .find(candidate => candidate.id === 'personal-cursor-cloud');
     const content = JSON.stringify(article);
     const mcpConfiguration = article?.body.find(
-      block =>
-        block.type === 'code' && block.language === 'json' && block.code.includes('THREADNOTE_CURSOR_CLOUD_TEAMS'),
+      block => block.type === 'code' && block.language === 'json' && block.code.includes('THREADNOTE_MCP_TOOLSET'),
     );
     const install = article?.body.find(
       block => block.type === 'code' && block.language === 'sh' && block.code.includes('cloud cursor bootstrap'),
@@ -2698,12 +2697,16 @@ Measure the system before changing its implementation language.
       env: {
         THREADNOTE_ACCOUNT: 'local',
         THREADNOTE_AGENT_ID: 'cursor-cloud',
-        THREADNOTE_CURSOR_CLOUD_TEAM: 'docs',
-        THREADNOTE_CURSOR_CLOUD_TEAMS: '["docs","personal"]',
         THREADNOTE_MCP_TOOLSET: 'cursor-cloud-personal',
         THREADNOTE_USER: 'cursor-cloud',
       },
     });
+    expect(content).toContain('Both `THREADNOTE_CURSOR_CLOUD_TEAM` and `THREADNOTE_CURSOR_CLOUD_TEAMS` are optional');
+    expect(content).toContain('No default share is chosen');
+    expect(content).toContain('before each operation');
+    expect(content).toContain('explicit CLI `--team` values take precedence');
+    expect(content).toContain('Keep the selector-free MCP configuration');
+    expect(content).not.toContain('same repeated team set');
     if (!install || install.type !== 'code')
       throw TestError.make({message: 'Missing Personal Cursor Cloud install command.'});
     expect(install.code.match(/cloud cursor bootstrap/gu)).toHaveLength(2);

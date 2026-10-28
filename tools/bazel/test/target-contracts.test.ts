@@ -353,9 +353,69 @@ describe('generated Bazel test contracts', () => {
   });
 
   it('propagates modeled build and package impacts into platform CI lanes', () => {
-    expect(target('//:release_matrix').dependsOn).toEqual(['//:release_check', '//:threadnote_build']);
+    expect(target('//:release_matrix').dependsOn).toEqual([
+      '//:release_check',
+      '//:threadnote_build',
+      '//:release_smoke_inputs',
+    ]);
+    expect(target('//:compile_targets').dependsOn).toEqual(['//:compile_inputs']);
     expect(target('//:recall_quality').dependsOn).toEqual(['//:recall_quality_inputs']);
     expect(target('//:windows_smoke').dependsOn).toEqual(['//:windows_smoke_inputs']);
+  });
+
+  it('keeps the PR #918 timeout-only edit in its owning tests and Windows lane', () => {
+    const file = 'apps/threadnote/test/dev-skills/native-closeout-lifecycle.test.ts';
+    const selection = selectForChangedInput(file);
+
+    expect(selection.mode).toBe('selective');
+    expect(selection.targets).toContain(applicationTargetForEntry(file).label);
+    expect(selection.targets).toContain('//:windows_smoke');
+    expect(selection.targets).not.toContain('//:release_matrix');
+    expect(selection.targets).not.toContain('//:compile_targets');
+  });
+
+  it.each([
+    'apps/threadnote/test/dev-skills/release-artifact.test.ts',
+    'apps/threadnote/test/dev-skills/native-release-workflows.ts',
+    'apps/threadnote/test/dev-skills/native-release-process.ts',
+    'apps/threadnote/test/dev-skills/native-release-network-probe.ts',
+    'apps/threadnote/test/dev-skills/release-tools-fixture.ts',
+    'apps/threadnote/test/fixtures/cli-output-consumer.ts',
+    'apps/threadnote/test/e2e/model-setup-upgrade.e2e.ts',
+    'scripts/smoke-self-contained.ts',
+    'scripts/archive-release.ts',
+    'vitest.config.ts',
+    'vitest.e2e.config.ts',
+    'tools/ci/vitest-plan.ts',
+  ])('selects release smoke independently of compilation for consumer input %s', file => {
+    expect(target('//:release_smoke_inputs').inputs).toContain(file);
+    const selection = selectForChangedInput(file);
+
+    expect(selection.mode).toBe('selective');
+    expect(selection.targets).toContain('//:release_matrix');
+    expect(selection.targets).not.toContain('//:compile_targets');
+  });
+
+  it('selects only the compile lane for its cross-compilation entrypoint', () => {
+    const selection = selectForChangedInput('scripts/compile-targets.ts');
+
+    expect(selection.mode).toBe('selective');
+    expect(selection.targets).toContain('//:compile_targets');
+    expect(selection.targets).not.toContain('//:release_matrix');
+  });
+
+  it.each([
+    'apps/threadnote/src/standalone.ts',
+    'bun.lock',
+    'package.json',
+    'packages/graph/package.json',
+    'assets/models/licenses/bge-small-en-v1.5.LICENSE',
+    '.github/workflows/ci.yml',
+  ])('retains compile and release coverage for shared input %s', file => {
+    const selection = selectForChangedInput(file);
+
+    expect(selection.mode).toBe('selective');
+    expect(selection.targets).toEqual(expect.arrayContaining(['//:compile_targets', '//:release_matrix']));
   });
 
   it.each([

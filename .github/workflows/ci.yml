@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 20
     outputs:
       bazel_validation: ${{ steps.selection.outputs.bazel_validation }}
+      compile_targets: ${{ steps.selection.outputs.compile_targets }}
       execute_bazel: ${{ steps.shards.outputs.execute_bazel }}
       recall_quality: ${{ steps.selection.outputs.recall_quality }}
       release_matrix: ${{ steps.selection.outputs.release_matrix }}
@@ -247,7 +248,7 @@ jobs:
   standalone-targets:
     name: Bytecode compile · ${{ matrix.target }}
     needs: bazel-plan
-    if: needs.bazel-plan.outputs.release_matrix == 'true'
+    if: needs.bazel-plan.outputs.compile_targets == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -384,6 +385,7 @@ jobs:
           BAZEL_PLAN_RESULT: ${{ needs.bazel-plan.result }}
           BAZEL_PLAN_VALIDATION_RESULT: ${{ needs.bazel-plan-validation.result }}
           BAZEL_SHARDS_RESULT: ${{ needs.bazel-shards.result }}
+          COMPILE_SELECTED: ${{ needs.bazel-plan.outputs.compile_targets }}
           RECALL_SELECTED: ${{ needs.bazel-plan.outputs.recall_quality }}
           RELEASE_SELECTED: ${{ needs.bazel-plan.outputs.release_matrix }}
           WINDOWS_SELECTED: ${{ needs.bazel-plan.outputs.windows_smoke }}
@@ -401,7 +403,7 @@ jobs:
           fi
           if [ "$RECALL_SELECTED" = true ]; then test "$RECALL_RESULT" = success; fi
           if [ "$WINDOWS_SELECTED" = true ]; then test "$WINDOWS_RESULT" = success; fi
+          if [ "$COMPILE_SELECTED" = true ]; then test "$STANDALONE_RESULT" = success; fi
           if [ "$RELEASE_SELECTED" = true ]; then
-            test "$STANDALONE_RESULT" = success
             test "$SELF_CONTAINED_RESULT" = success
           fi
