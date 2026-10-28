@@ -11,6 +11,11 @@ Call `recall_context` with the absolute `callerCwd` before non-trivial work. One
 memory shares: omit `team` to recall across all of them, or pass a configured `team` to narrow the search. A `uri`
 selector must stay inside that configured share set. Named Worksets and `context_brief` are unavailable in this profile.
 
+Without `THREADNOTE_CURSOR_CLOUD_TEAM` or `THREADNOTE_CURSOR_CLOUD_TEAMS`, the MCP discovers all registered writable
+shares before each operation. These variables optionally restrict that set; no environment-wide default share applies.
+If bootstrap has not registered any writable shares yet, shared operations report setup guidance. Retry after the Build
+finishes; do not fall back to local memory.
+
 Recall results are unread pointers, not evidence. Read every relevant `threadnote://` result with `read_context` before
 using it. `read_context` may read pointers from any configured share. It returns the full memory up to 64 KiB;
 larger memories refuse with an outline. Explicitly page one URI with `offsetBytes=0`, then pass each

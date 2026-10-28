@@ -1,5 +1,5 @@
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
-import {Console, Effect, Schema} from 'effect';
+import {Console, DateTime, Effect, Schema} from 'effect';
 import {EffectMcpServerRegistry, EffectMcpServerAdapter, McpInput} from '../../effect/ai/mcp.js';
 import {enrichMemoryMetadataWithConfiguredLocalAi} from '../../effect/ai/enrichment.js';
 import {isInSharedNamespace, sharedTeamNameForUri} from '../../share/index.js';
@@ -28,7 +28,6 @@ import {
   cursorCloudShareForTeam,
   cursorCloudShareForUri,
   cursorCloudUriWithinScope,
-  type CursorCloudMemoryScope,
   type CursorCloudShareScope,
 } from '../../cursor/cloud.js';
 import {resourceIdIsWithin} from '@threadnote/store/resource-id';
@@ -47,15 +46,16 @@ import {
   withStaleVersionNotice,
 } from './common.js';
 import {readMemoryRecordsByUri, writeCursorCloudSharedMemory, writeDurableMemory} from './memory.js';
+import {resolveMemoryScope, type MemoryScopeSource} from './cursor_cloud_memory.js';
 
 export function registerStoreTool(
   server: EffectMcpServerRegistry,
   config: RuntimeConfig,
   name: string,
   description: string,
-  memoryScope?: CursorCloudMemoryScope,
+  scopeSource?: MemoryScopeSource,
 ): void {
-  const profileLabel = memoryScope?.label ?? 'Personal Cursor Cloud';
+  const profileLabel = scopeSource?.label ?? 'Personal Cursor Cloud';
   const handoffDescription =
     name === 'remember_context'
       ? ' Handoff: task; decisions/invariants; verification; blockers/risks; next_step. CodeRefs enable compact resume. Skip Knowledge Delta review.'
@@ -99,11 +99,11 @@ export function registerStoreTool(
         text: McpInput.string(),
         sourceAgentClient: McpInput.string(),
         status: McpInput.literals(['active', 'archived', 'expired', 'superseded']),
-        ...(memoryScope ? {team: McpInput.string(`Target ${profileLabel} share for durable memory`)} : {}),
+        ...(scopeSource ? {team: McpInput.string(`Target ${profileLabel} share for durable memory`)} : {}),
         topic: McpInput.string(),
       },
     },
-    ({
+    Effect.fn('mcp_server.store')(function* ({
       callerCwd,
       citationPolicy,
       clearKeywords,
@@ -120,7 +120,8 @@ export function registerStoreTool(
       team,
       text,
       topic,
-    }) => {
+    }) {
+      const memoryScope = yield* resolveMemoryScope(scopeSource, kind === 'handoff');
       const checkedText = requiredText(text, name, 'text', {text: 'Durable engineering note...'});
       if (!checkedText.ok) {
         return checkedText.error;
@@ -137,24 +138,27 @@ export function registerStoreTool(
       let selectedShare: CursorCloudShareScope | undefined;
       const requestedTeam = typeof team === 'string' ? team : undefined;
       if (memoryScope) {
-        try {
-          const teamShare = requestedTeam?.trim() ? cursorCloudShareForTeam(memoryScope, requestedTeam) : undefined;
-          const replaceShare = checkedReplaceUri.value
-            ? cursorCloudShareForUri(memoryScope, checkedReplaceUri.value)
-            : undefined;
-          if (requestedTeam?.trim() && !teamShare) {
-            return argumentError(`${name} team must be one of: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`);
-          }
-          if (memoryKind === 'durable' && checkedReplaceUri.value && !replaceShare) {
-            return argumentError(`${name} replaceUri must stay within a configured ${profileLabel} share.`);
-          }
-          if (teamShare && replaceShare && teamShare.team !== replaceShare.team) {
-            return argumentError(`${name} team must match the share containing replaceUri.`);
-          }
-          selectedShare = teamShare ?? replaceShare ?? cursorCloudShareForTeam(memoryScope, undefined);
-        } catch (error) {
-          return argumentError(error instanceof Error ? error.message : String(error));
+        const selection = yield* Effect.try({
+          try: () => ({
+            teamShare: requestedTeam?.trim() ? cursorCloudShareForTeam(memoryScope, requestedTeam) : undefined,
+            replaceShare: checkedReplaceUri.value
+              ? cursorCloudShareForUri(memoryScope, checkedReplaceUri.value)
+              : undefined,
+          }),
+          catch: error => (error instanceof Error ? error.message : String(error)),
+        }).pipe(Effect.result);
+        if (selection._tag === 'Failure') return argumentError(selection.failure);
+        const {teamShare, replaceShare} = selection.success;
+        if (requestedTeam?.trim() && !teamShare) {
+          return argumentError(`${name} team must be one of: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`);
         }
+        if (memoryKind === 'durable' && checkedReplaceUri.value && !replaceShare) {
+          return argumentError(`${name} replaceUri must stay within a configured ${profileLabel} share.`);
+        }
+        if (teamShare && replaceShare && teamShare.team !== replaceShare.team) {
+          return argumentError(`${name} team must match the share containing replaceUri.`);
+        }
+        selectedShare = teamShare ?? replaceShare ?? cursorCloudShareForTeam(memoryScope, undefined);
         if (memoryKind === 'durable' && !selectedShare) {
           return argumentError(
             `${name} requires team when several ${profileLabel} shares are configured: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`,
@@ -193,10 +197,10 @@ export function registerStoreTool(
         schemaVersion: MEMORY_SCHEMA_VERSION,
         sourceAgentClient: sourceAgentClient ?? 'mcp',
         status: status ?? 'active',
-        timestamp: new Date().toISOString(),
+        timestamp: DateTime.formatIso(yield* DateTime.now),
         topic: normalizeOptionalMetadata(topic),
       };
-      return Effect.gen(function* () {
+      return yield* Effect.gen(function* () {
         const requestedCodeRefs = stringList(codeRefs);
         if (citationPolicy === 'defer' && requestedCodeRefs.length === 0) {
           return argumentError(`${name} citationPolicy=defer requires at least one codeRef.`);
@@ -379,7 +383,7 @@ export function registerStoreTool(
           status: metadata.status,
         });
       }).pipe(Effect.flatMap(withStaleVersionNotice));
-    },
+    }),
   );
 }
 

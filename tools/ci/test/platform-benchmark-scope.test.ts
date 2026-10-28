@@ -25,6 +25,48 @@ function scope(
 }
 
 describe('Platform benchmark PR scope', () => {
+  it('skips the audited native workflow test-policy edits including PR #918', () => {
+    for (const path of [
+      'apps/threadnote/test/dev-skills/native-closeout-lifecycle.test.ts',
+      'apps/threadnote/test/dev-skills/native-authoring-lifecycle.test.ts',
+      'apps/threadnote/test/dev-skills/native-release-workflows.ts',
+      'apps/threadnote/test/dev-skills/release-artifact.test.ts',
+    ])
+      expect(scope([path])).toMatchObject({runRecallPr: false, runCodeGraphPr: false});
+    for (const path of [
+      'apps/threadnote/test/dev-skills/native-closeout-lifecycle-next.test.ts',
+      'apps/threadnote/test/dev-skills/native-closeout-lifecycle.test.ts.backup',
+      '.github/workflows/ci.yml',
+      'tools/ci/test/benchmark-workflow.test.ts',
+    ])
+      expect(scope([path])).toMatchObject({runRecallPr: true, runCodeGraphPr: true});
+  });
+
+  it('keeps audited test-policy exemptions deterministic without hiding mixed changes', () => {
+    const paths = [
+      'apps/threadnote/test/dev-skills/native-closeout-lifecycle.test.ts',
+      'apps/threadnote/test/dev-skills/release-artifact.test.ts',
+      'tools/bazel/test/target-contracts.test.ts',
+    ];
+    fc.assert(
+      fc.property(fc.shuffledSubarray(paths, {minLength: 1}), selected => {
+        expect(scope([...selected, ...selected].reverse())).toMatchObject({runRecallPr: false, runCodeGraphPr: false});
+        expect(scope([...selected, 'packages/graph/src/index.ts'])).toMatchObject({
+          runRecallPr: false,
+          runCodeGraphPr: true,
+        });
+        expect(scope([...selected, 'packages/recall/src/index.ts'])).toMatchObject({
+          runRecallPr: true,
+          runCodeGraphPr: false,
+        });
+        for (const path of ['bun.lock', 'unknown/input.ts', '', '../escape.ts']) {
+          expect(scope([...selected, path])).toMatchObject({runRecallPr: true, runCodeGraphPr: true});
+        }
+      }),
+      {numRuns: 50},
+    );
+  });
+
   it('skips the PR #601 release-readiness-only diff for both expensive lanes', () => {
     const after = JSON.stringify({
       dependencies: {effect: '4.0.0-rc.112'},

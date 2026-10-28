@@ -23,6 +23,41 @@ const targetArbitrary = fc
   );
 
 describe('Bazel CI sharding', () => {
+  it('groups the four repository checks from PR #918 without serializing product targets', () => {
+    const checks = ['//:format', '//:lint', '//:test_typecheck', '//:workspace_check'];
+    const product = '//apps/threadnote:test_standard_native';
+    const inventory = [...checks.map(label => target(label, 1)), target(product, 20)];
+    const shards = planBazelShards({inventory, selected: inventory.map(candidate => candidate.label)});
+
+    expect(shards).toHaveLength(2);
+    expect(shards.find(shard => shard.targets.includes('//:format'))?.targets).toEqual(checks);
+    expect(shards.find(shard => shard.targets.includes(product))?.targets).toEqual([product]);
+    expect(shards.flatMap(shard => shard.targets).sort()).toEqual([...checks, product].sort());
+  });
+
+  it('groups only selected repository checks deterministically under every shard cap', () => {
+    const checks = ['//:format', '//:lint', '//:test_typecheck', '//:workspace_check'];
+    fc.assert(
+      fc.property(fc.subarray(checks), fc.integer({min: 1, max: 8}), (selectedChecks, maxShards) => {
+        const product = '//packages/store:test';
+        const inventory = [...checks.map(label => target(label, 1)), target(product, 3)];
+        const selected = [...selectedChecks, product];
+        const first = planBazelShards({inventory, selected, maxShards});
+        expect(first).toEqual(
+          planBazelShards({inventory: [...inventory].reverse(), selected: [...selected].reverse(), maxShards}),
+        );
+        expect(first.flatMap(shard => shard.targets).sort()).toEqual([...selected].sort());
+        expect(first.length).toBeLessThanOrEqual(maxShards);
+        if (selectedChecks.length) {
+          expect(first.find(shard => shard.targets.includes(selectedChecks[0]))?.targets).toEqual(
+            expect.arrayContaining(selectedChecks),
+          );
+        }
+      }),
+      {numRuns: 100},
+    );
+  });
+
   it('isolates PostgreSQL targets and greedily balances the remaining work', () => {
     const inventory = [
       target('//apps/threadnote:test_standard_graph_01_of_04', 16),
