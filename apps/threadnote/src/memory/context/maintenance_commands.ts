@@ -35,6 +35,7 @@ import {
   undoContextMaintenance,
 } from './maintenance.js';
 import {refreshContextMaintenanceCase} from './maintenance_refresh.js';
+import {ContextMaintenanceBusy, contextMaintenanceBusyResult} from './maintenance_contracts.js';
 
 export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')(function* (
   config: RuntimeConfig,
@@ -107,8 +108,8 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
     if (selected.project !== options.project)
       return yield* TopicReviewError.make({message: 'The selected review belongs to another project.'});
   }
-  const result =
-    options.action === 'refresh'
+  const result = yield* Effect.gen(function* () {
+    return options.action === 'refresh'
       ? yield* refreshContextMaintenanceCase(
           config,
           {project: options.project!, caseId: options.caseId!, cwd},
@@ -201,6 +202,14 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
                                 maxRecords: options.maxRecords,
                                 caseId: options.caseId,
                               });
+  }).pipe(
+    Effect.catchIf(Schema.is(ContextMaintenanceBusy), () =>
+      Effect.gen(function* () {
+        (yield* SystemInfo).setExitCode(1);
+        return contextMaintenanceBusyResult();
+      }),
+    ),
+  );
   // Detached ordinary-use wakes run generation only after the assessment's state lock is released.
   const background =
     (options.action === undefined || options.action === 'run') &&

@@ -4,8 +4,11 @@ import {
   withStateLock,
   readContextMaintenancePacket,
   ContextMaintenanceError,
+  contextMaintenanceStatePath,
 } from './maintenance.js';
 import {DateTime, Effect, FileSystem, Path, Result} from 'effect';
+import {isFileLockTimeout} from '@threadnote/platform/file/lock';
+import {ContextMaintenanceBusy} from './maintenance_contracts.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {isAgentArtifactUri, parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
@@ -35,6 +38,28 @@ import {maintenanceContentHash, resolveRelationTarget, resolveMaintenanceRelatio
 import {readContextMaintenanceSourceEpoch} from './maintenance_evidence.js';
 import {maintenanceRecordRevision, recordSourceRevision} from './maintenance_source.js';
 import {observeTopicMaintenanceCase} from './maintenance_topic.js';
+
+/** Only this invocation's state-lock acquisition is retryable; nested failures retain their original semantics. */
+export function withMaintenanceOperationLock<A, E, R>(config: RuntimeConfig, effect: Effect.Effect<A, E, R>) {
+  return Effect.suspend(() =>
+    Effect.gen(function* () {
+      const lockPath = `${yield* contextMaintenanceStatePath(config)}.lock`;
+      let entered = false;
+      return yield* withStateLock(
+        config,
+        Effect.gen(function* () {
+          entered = true;
+          return yield* effect;
+        }),
+      ).pipe(
+        Effect.catchIf(
+          error => !entered && isFileLockTimeout(error) && error.lockPath === lockPath,
+          () => Effect.fail(ContextMaintenanceBusy.make({})),
+        ),
+      );
+    }),
+  );
+}
 
 /** Observe only the selected subjects. Refreshing never repairs canonical documents. */
 export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.observeSelected')(function* (
@@ -566,7 +591,7 @@ export const refreshContextMaintenanceCase = Effect.fn('contextMaintenance.refre
   selection: Parameters<typeof readContextMaintenancePacket>[2] = {},
 ) {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const observed = yield* withStateLock(
+    const observed = yield* withMaintenanceOperationLock(
       config,
       Effect.gen(function* () {
         const state = yield* readState(config);

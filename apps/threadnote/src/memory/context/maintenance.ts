@@ -206,7 +206,7 @@ export const setContextMaintenancePaused = Effect.fn('contextMaintenance.pause')
   config: RuntimeConfig,
   paused: boolean,
 ) {
-  return yield* withStateLock(
+  return yield* selectedMaintenance.withMaintenanceOperationLock(
     config,
     Effect.gen(function* () {
       const state = {...(yield* readState(config)), paused};
@@ -243,7 +243,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
   const path = yield* Path.Path;
   if (!path.isAbsolute(options.cwd)) return yield* fail('Maintenance cwd must be absolute.');
   const maxRecords = Math.max(1, Math.min(100, options.maxRecords ?? 16));
-  return yield* withStateLock(
+  return yield* selectedMaintenance.withMaintenanceOperationLock(
     config,
     Effect.gen(function* () {
       let state = yield* readState(config);
@@ -1163,16 +1163,6 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         ? publicStatus(state)
         : publicStatus(state, options.project, {caseId: options.caseId});
     }),
-  ).pipe(
-    Effect.catchIf(
-      error =>
-        options.caseId === undefined &&
-        typeof error === 'object' &&
-        error !== null &&
-        '_tag' in error &&
-        error._tag === 'FileLockTimeout',
-      () => readContextMaintenanceStatus(config),
-    ),
   );
 });
 
@@ -1289,7 +1279,7 @@ export const undoContextMaintenance = Effect.fn('contextMaintenance.undo')(funct
   receiptId: string,
 ) {
   if (!/^maintenance-[0-9a-f]{40}$/u.test(receiptId)) return yield* fail('Select an exact maintenance receipt.');
-  return yield* withStateLock(
+  return yield* selectedMaintenance.withMaintenanceOperationLock(
     config,
     Effect.gen(function* () {
       const state = yield* readState(config);
@@ -1409,7 +1399,7 @@ export const retireContextMaintenanceAnchor = Effect.fn('contextMaintenance.reti
   config: RuntimeConfig,
   input: {readonly caseId: string; readonly evidenceRevision: string; readonly expectedContentHash: string},
 ) {
-  return yield* withStateLock(
+  return yield* selectedMaintenance.withMaintenanceOperationLock(
     config,
     Effect.gen(function* () {
       const state = yield* readState(config);

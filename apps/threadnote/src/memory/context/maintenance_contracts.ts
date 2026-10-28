@@ -15,6 +15,21 @@ export class MaintenancePauseFenceBusy extends Schema.TaggedError<MaintenancePau
   {},
 ) {}
 
+export class ContextMaintenanceBusy extends Schema.TaggedError<ContextMaintenanceBusy>()('ContextMaintenanceBusy', {}) {
+  override readonly message =
+    'Context maintenance is busy. No protected operation started. Retry shortly; if busy persists, let current Threadnote work finish before retrying.';
+}
+
+export function contextMaintenanceBusyResult() {
+  return {
+    outcome: 'busy' as const,
+    code: 'context-maintenance-busy' as const,
+    retryable: true as const,
+    progress: 'not-started' as const,
+    error: ContextMaintenanceBusy.make({}).message,
+  };
+}
+
 export interface MaintenanceState extends ContextMaintenanceStatusV2 {
   readonly checkpoints: Readonly<Record<string, WorkCheckpoint>>;
   readonly lastProject?: string;

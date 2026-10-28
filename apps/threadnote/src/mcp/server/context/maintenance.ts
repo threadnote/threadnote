@@ -13,6 +13,7 @@ import {
 } from '../../../memory/context/maintenance.js';
 import {argumentError, mcpErrorResult} from '../common.js';
 import {refreshContextMaintenanceCase} from '../../../memory/context/maintenance_refresh.js';
+import {ContextMaintenanceBusy, contextMaintenanceBusyResult} from '../../../memory/context/maintenance_contracts.js';
 import {captureTopicObsidianEvidence} from '../../../memory/context/maintenance_obsidian.js';
 import {
   readTopicMaintenanceDraft,
@@ -458,7 +459,17 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
           ],
           structuredContent: result,
         };
-      }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error)))),
+      }).pipe(
+        Effect.catch(error => {
+          if (!Schema.is(ContextMaintenanceBusy)(error)) return Effect.succeed(mcpErrorResult(error));
+          const busy = contextMaintenanceBusyResult();
+          return Effect.succeed({
+            content: [{type: 'text' as const, text: JSON.stringify(busy)}],
+            structuredContent: busy,
+            isError: true,
+          });
+        }),
+      ),
   );
   server.registerTool(
     'context_maintenance_packet',
