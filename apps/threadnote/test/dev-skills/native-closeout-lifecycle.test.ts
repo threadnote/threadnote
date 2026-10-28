@@ -231,6 +231,7 @@ describe('native closeout lifecycle', () => {
     windowsCloseoutTimeout,
   );
 
+  // prettier-ignore
   effectIt.effect('rejects missing acceptance and changed source without retiring any owned draft', () =>
     Effect.gen(function* () {
       const f = yield* nativeCloseoutFixture(false);
@@ -252,6 +253,7 @@ describe('native closeout lifecycle', () => {
       yield* assertOwnedState(f, loaded.owned, 'active');
       expect((yield* readArtifact(f, f.unrelated.uri, 'plan-run')).state).toBe('active');
     }).pipe(runCloseout),
+    windowsCloseoutTimeout,
   );
 
   // prettier-ignore
