@@ -412,3 +412,83 @@ jobs:
             test "$STANDALONE_RESULT" = success
             test "$SELF_CONTAINED_RESULT" = success
           fi
+
+  # Temporary D17 attribution lane; remove after its single spent claim. Ordinary lanes are unchanged.
+  windows-h100-profile:
+    name: Temporary Windows H100 attribution
+    if: >-
+      github.event_name == 'pull_request' && github.event.number == 913 &&
+      github.repository == 'threadnote/threadnote' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.run_attempt == 1 &&
+      contains(github.event.pull_request.labels.*.name, format('h100-once-{0}', github.event.pull_request.head.sha))
+    runs-on: windows-latest
+    timeout-minutes: 20
+    concurrency:
+      group: native-h100-attribution-913
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # This reviewed inline claim MUST precede checkout/setup/install/self-tests/PR-controlled code.
+      # Root stages h100-once-<reviewed local commit40sha> before its normal FFpush; no labeled trigger.
+      - name: Consume exact reviewed-head claim once
+        shell: pwsh
+        env:
+          H100_CLAIM_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          if ($env:GITHUB_EVENT_NAME -ne 'pull_request' -or $env:GITHUB_RUN_ATTEMPT -ne '1' -or
+            $env:GITHUB_REPOSITORY -cne 'threadnote/threadnote' -or $event.number -ne 913 -or
+            $event.pull_request.base.repo.full_name -cne 'threadnote/threadnote' -or
+            $event.pull_request.head.repo.full_name -cne 'threadnote/threadnote' -or
+            $event.pull_request.head.sha -cnotmatch '^[a-f0-9]{40}$' -or $env:GITHUB_RUN_ID -cnotmatch '^\d+$') {
+            throw 'unsupported event/run/repository'
+          }
+          $head = $event.pull_request.head.sha
+          $label = 'h100-once-' + $head
+          $headers = @{Authorization=('Bearer ' + $env:H100_CLAIM_TOKEN); Accept='application/vnd.github+json'; 'X-GitHub-Api-Version'='2022-11-28'}
+          $live = Invoke-WebRequest -Uri 'https://api.github.com/repos/threadnote/threadnote/pulls/913' -Headers $headers -TimeoutSec 15 -MaximumRetryCount 0 -SkipHttpErrorCheck
+          if ($live.StatusCode -ne 200) { throw 'live PR read failed' }
+          $pr = $live.Content | ConvertFrom-Json
+          if ($pr.head.sha -cne $head -or $pr.head.repo.full_name -cne 'threadnote/threadnote' -or $pr.base.repo.full_name -cne 'threadnote/threadnote') { throw 'live head drift' }
+          $claim = Invoke-WebRequest -Method Delete -Uri ('https://api.github.com/repos/threadnote/threadnote/issues/913/labels/' + [Uri]::EscapeDataString($label)) -Headers $headers -TimeoutSec 15 -MaximumRetryCount 0 -SkipHttpErrorCheck
+          if ($claim.StatusCode -ne 200) { throw 'claim absent/failed/ambiguous; no retry or replacement' }
+          # DELETE200 spends authority even if any following operation/setup/run is cancelled or fails.
+          $export = Join-Path $env:RUNNER_TEMP 'h100-export'
+          [void][IO.Directory]::CreateDirectory($export)
+          $receipt = [ordered]@{version=1; claim='DELETE200'; head=$head; label=$label; runID=$env:GITHUB_RUN_ID; attempt=1; runnerOS=$env:RUNNER_OS; claimedAt=[DateTime]::UtcNow.ToString('o')}
+          [IO.File]::WriteAllText((Join-Path $export 'claim.json'), ($receipt | ConvertTo-Json -Compress))
+          Remove-Item Env:H100_CLAIM_TOKEN
+      - name: Preserve actual run claim before setup and launch
+        uses: actions/upload-artifact@v7
+        with:
+          name: h100-d17-claim-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/h100-export/claim.json
+          if-no-files-found: error
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install frozen workspace dependencies
+        run: bun install --frozen-lockfile
+      - name: Qualify owned Windows controller, then capture original H100 once
+        shell: pwsh
+        timeout-minutes: 15
+        run: ./tools/ci/windows-h100-profile.ps1
+      - name: Preserve only sanitized bounded attribution export
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: h100-d17-sanitized-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/h100-export/claim.json
+            ${{ runner.temp }}/h100-export/cpu.json
+            ${{ runner.temp }}/h100-export/progress.json
+            ${{ runner.temp }}/h100-export/control.json
+          if-no-files-found: ignore
