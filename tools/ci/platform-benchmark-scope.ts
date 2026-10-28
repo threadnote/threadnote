@@ -1,4 +1,5 @@
 import {isPurePrivateReleaseEvidenceDiff} from './private-release-evidence-family.js';
+import {CI_TEST_POLICY_PATHS} from './code-graph-production-ratchet-scope.js';
 
 export interface PlatformBenchmarkDiff {
   readonly afterPackageJson?: string;
@@ -206,6 +207,7 @@ function isLockfileOrManifest(path: string): boolean {
 
 function isIgnoredPath(path: string): boolean {
   return (
+    CI_TEST_POLICY_PATHS.has(path) ||
     RELEASE_READINESS_PATHS.has(path) ||
     path === 'README.md' ||
     path === 'LICENSE' ||
