@@ -1,6 +1,5 @@
 import {startAutomaticModelSetupScheduler} from '../../models/setup_lifecycle.js';
 import {Console, Effect, Logger, Schema} from 'effect';
-import {McpSchema} from 'effect/ai';
 import {MCP_PROCESS_LIFECYCLE_PROBE_ENV} from '../../constants.js';
 import {
   DEFAULT_MCP_TOOLSET,
@@ -14,7 +13,7 @@ import {currentPackageVersion} from '../../utils.js';
 import {getRuntimeConfig as getApplicationRuntimeConfig} from '../../runtime.js';
 import {
   EffectMcpServerAdapter,
-  MCP_RESOURCE_ERROR_DATA,
+  mcpResourceInvalidParamsError,
   McpInput,
   mcpProgressHeartbeatMilliseconds,
 } from '../../effect/ai/mcp.js';
@@ -202,9 +201,7 @@ function registerResources(
     uri =>
       Effect.gen(function* () {
         const scope = yield* resolveMemoryScope(memoryScope).pipe(
-          Effect.mapError(error =>
-            McpSchema.InvalidParams.make({message: error.message, data: MCP_RESOURCE_ERROR_DATA}),
-          ),
+          Effect.mapError(error => mcpResourceInvalidParamsError(error.message)),
         );
         return yield* readThreadnoteMcpResource(config, uri, scope ? cursorCloudScopeRoots(scope) : undefined);
       }),
