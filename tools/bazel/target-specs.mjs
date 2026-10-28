@@ -806,6 +806,10 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       dependsOn: ['//:windows_smoke_inputs'],
       inputs: [
         '.github/workflows/ci.yml',
+        // The workflow runs this entire test directory, including tests outside windows_smoke_inputs.
+        ...testFilesBelow('apps/threadnote/test/dev-skills'),
+        'apps/threadnote/test/integration/cli.dev-skills.test.ts',
+        'packages/integrations/test/dev-skills-catalog.test.ts',
         ...filesBelow('packages/platform/src'),
         ...filesBelow('apps/threadnote/src/effect'),
         ...filesBelow('apps/threadnote/src/process'),

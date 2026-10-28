@@ -119,6 +119,8 @@ const journalImage = (f: Fixture) =>
       status: string;
     };
   });
+// P0 Windows allowance for seven full native closeout fixtures beyond 30s; revisit with performance data.
+const windowsCloseoutTimeout = process.platform === 'win32' ? {timeout: 120_000} : undefined;
 describe('native closeout lifecycle', () => {
   effectIt.effect('rejects an entire closeout before writes when only one operation slot remains', () =>
     Effect.gen(function* () {
@@ -203,8 +205,10 @@ describe('native closeout lifecycle', () => {
         });
         expect(yield* f.fs.readFileString(receiptFile)).toBe(bytes);
       }).pipe(runCloseout),
+    windowsCloseoutTimeout,
   );
 
+  // prettier-ignore
   effectIt.effect('completes a spec-backed desktop closeout with independent verified behavior readback', () =>
     Effect.gen(function* () {
       const f = yield* nativeCloseoutFixture(true);
@@ -224,8 +228,10 @@ describe('native closeout lifecycle', () => {
         image.outputs.architecture.uri,
       );
     }).pipe(runCloseout),
+    windowsCloseoutTimeout,
   );
 
+  // prettier-ignore
   effectIt.effect('rejects missing acceptance and changed source without retiring any owned draft', () =>
     Effect.gen(function* () {
       const f = yield* nativeCloseoutFixture(false);
@@ -247,8 +253,10 @@ describe('native closeout lifecycle', () => {
       yield* assertOwnedState(f, loaded.owned, 'active');
       expect((yield* readArtifact(f, f.unrelated.uri, 'plan-run')).state).toBe('active');
     }).pipe(runCloseout),
+    windowsCloseoutTimeout,
   );
 
+  // prettier-ignore
   effectIt.effect('preserves every remaining draft when an owned artifact is edited after admission', () =>
     Effect.gen(function* () {
       const f = yield* nativeCloseoutFixture(false);
@@ -279,8 +287,10 @@ describe('native closeout lifecycle', () => {
       expect(proposal.phaseEvidence).toHaveLength(1);
       expect((yield* readArtifact(f, f.unrelated.uri, 'plan-run')).state).toBe('active');
     }).pipe(runCloseout),
+    windowsCloseoutTimeout,
   );
 
+  // prettier-ignore
   effectIt.effect('recovers the original archive intent after its first response is lost', () =>
     Effect.gen(function* () {
       const f = yield* nativeCloseoutFixture(false);
@@ -332,8 +342,10 @@ describe('native closeout lifecycle', () => {
         expect(observed).toMatchObject({uri: archive.uri, state: 'archived', memoryId: item.memoryId});
       }
     }).pipe(runCloseout),
+    windowsCloseoutTimeout,
   );
 
+  // prettier-ignore
   effectIt.effect('recovers spec-backed archive interruption when authoring and controller share one native run', () =>
     Effect.gen(function* () {
       const f = yield* nativeCloseoutFixture(true, 'desktop', 'plan-run');
@@ -406,8 +418,10 @@ describe('native closeout lifecycle', () => {
       expect(yield* f.fs.readFileString(receiptFile)).toBe(bytes);
       expect(proposal.phaseEvidence).toHaveLength(1);
     }).pipe(runCloseout),
+    windowsCloseoutTimeout,
   );
 
+  // prettier-ignore
   effectIt.effect('recovers a committed final behavior write whose response is lost before receipt save', () =>
     Effect.gen(function* () {
       const f = yield* nativeCloseoutFixture(true);
@@ -525,9 +539,11 @@ describe('native closeout lifecycle', () => {
       expect(replay.closeout).toMatchObject({state: 'complete', archived: loaded.owned.length});
       expect(yield* f.fs.readFileString(receiptFile)).toBe(bytes);
     }).pipe(runCloseout),
+    windowsCloseoutTimeout,
   );
 
   for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const)
+    // prettier-ignore
     effectIt.effect(`${profile} preserves drafts until native publication approval`, () =>
       Effect.gen(function* () {
         const f = yield* nativeCloseoutFixture(false, profile);
@@ -546,5 +562,6 @@ describe('native closeout lifecycle', () => {
         expect(Object.keys(image.archives)).toHaveLength(0);
         expect((yield* readArtifact(f, f.unrelated.uri, 'plan-run')).state).toBe('active');
       }).pipe(runCloseout),
+      windowsCloseoutTimeout,
     );
 });

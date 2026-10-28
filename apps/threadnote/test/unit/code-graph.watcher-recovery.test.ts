@@ -25,6 +25,7 @@ import {
 } from '@threadnote/graph/watcher';
 import {SystemInfo} from '@threadnote/platform/system';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixture-temp-directory';
 import {completeCodeGraphReadyReadRefresh} from '@threadnote/threadnote/mcp/server/code_graph/ready_read';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -214,7 +215,7 @@ describe('watcher admitted-attempt recovery', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped();
+        const root = yield* makeIdempotentFixtureTempDirectoryScoped(fs, 'threadnote-watcher-recovery-');
         const cwd = path.join(root, 'repository');
         const home = path.join(root, 'home');
         yield* fs.makeDirectory(path.join(cwd, 'apps', 'docs'), {recursive: true});
