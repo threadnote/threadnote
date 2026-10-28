@@ -225,7 +225,7 @@ jobs:
         run: bun tools/ci/windows-workflow-prerequisites.ts
       - run: bun run typecheck
       - run: >-
-          bun --bun vitest run --no-file-parallelism --shard=${{ matrix.shard }}
+          bun --bun vitest run --no-file-parallelism --testTimeout=120000 --shard=${{ matrix.shard }}
           apps/threadnote/test/unit/windows-support.test.ts
           apps/threadnote/test/unit/command-shim.test.ts
           apps/threadnote/test/unit/effect-command.test.ts

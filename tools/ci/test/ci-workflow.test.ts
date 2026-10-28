@@ -163,6 +163,7 @@ it('partitions the complete serialized Windows inventory with two native shards 
     'vitest',
     'run',
     '--no-file-parallelism',
+    '--testTimeout=120000',
     '--shard=${{',
     'matrix.shard',
     '}}',
