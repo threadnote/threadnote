@@ -26,7 +26,7 @@ export const BUILTIN_MODEL_MANIFESTS = [
     repository: 'ggml-org/bge-small-en-v1.5-Q8_0-GGUF',
     revision: 'f2068edd9b54f2a369549ccc71f70ed273a2a801',
     role: 'embedding',
-    runtime: {darwinArm64EmbeddingGpuLayers: 0, nodeLlamaCpp: '3.22.1'},
+    runtime: {darwinArm64EmbeddingGpuLayers: 0, nodeLlamaCpp: '3.22.2'},
     sha256: 'f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804',
     size: 36_685_152,
     task: 'english-retrieval-candidate',

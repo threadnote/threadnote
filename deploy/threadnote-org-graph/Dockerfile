@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM --platform=linux/amd64 oven/bun:1.4.2-debian@sha256:4f6e31d1a54d6a3dd312daef655fc998101b5043d52e12592ac293ef04b9bc73 AS build
+FROM --platform=linux/amd64 oven/bun:1.4.4-debian@sha256:b740c3f5600e6360684f240d31c67ffb759def968bfa98ed98c4cce970707735 AS build
 WORKDIR /src
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --ignore-scripts
@@ -11,7 +11,7 @@ RUN test "${#SOURCE_COMMIT}" = 40 && \
     THREADNOTE_BUILD_TARGET=bun-linux-x64-baseline bun run build && \
     bun build deploy/threadnote-org-graph/preflight.ts --target=bun --outfile=/tmp/graph-publisher-preflight.js
 
-FROM --platform=linux/amd64 oven/bun:1.4.2-debian@sha256:4f6e31d1a54d6a3dd312daef655fc998101b5043d52e12592ac293ef04b9bc73
+FROM --platform=linux/amd64 oven/bun:1.4.4-debian@sha256:b740c3f5600e6360684f240d31c67ffb759def968bfa98ed98c4cce970707735
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git openssh-client nginx-light tini && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/dist /opt/threadnote

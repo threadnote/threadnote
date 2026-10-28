@@ -51,15 +51,15 @@ describe('remote memory reference deployment', () => {
       Bun.file('package.json').json() as Promise<{readonly dependencies?: Readonly<Record<string, string>>}>,
     ]);
 
-    expect(dockerfile).toContain('FROM oven/bun:1.4.2-alpine AS dependencies');
+    expect(dockerfile).toContain('FROM oven/bun:1.4.4-alpine AS dependencies');
     expect(dockerfile).not.toContain('COPY patches ./patches');
     expect(dockerfile).toContain('bun install --frozen-lockfile --production --ignore-scripts');
     expect(dockerfile).toContain('apk add --no-cache git');
     expect(dockerfile).toContain('CMD ["bun", "apps/threadnote/src/standalone.ts", "remote-memory-service"]');
     expect(packageJson.dependencies).toMatchObject({
-      '@effect/platform-bun': '4.0.3',
-      effect: '4.0.3',
-      'js-yaml': '^5.4.3',
+      '@effect/platform-bun': '4.0.7',
+      effect: '4.0.7',
+      'js-yaml': '^5.5.0',
     });
   });
 

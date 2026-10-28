@@ -2,6 +2,8 @@
 
 Threadnote is one product with one release version and one Bun lockfile. Internal packages are private source packages with explicit exports. Run `bun install --frozen-lockfile` at the repository root; Bun resolves `workspace:*` dependencies without publishing packages.
 
+The root `trustedDependencies: []` blocks dependency lifecycle scripts, including the unused native Node Tree-sitter addon pulled in by grammar peers. Builds consume packaged WASM grammars and prebuilt platform packages. The root `prepare` script still installs Husky and patches the Effect lint tools. Add an explicit trusted package only when its install hook is required by the build.
+
 ## Start here
 
 Place a change with the code that owns it, colocate its tests, regenerate the

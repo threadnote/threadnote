@@ -66,12 +66,12 @@
     "@threadnote/protocol": "workspace:*",
     "@threadnote/recall": "workspace:*",
     "@threadnote/store": "workspace:*",
-    "effect": "4.0.3",
+    "effect": "4.0.7",
     "postgres": "3.4.9",
-    "jose": "6.2.12"
+    "jose": "6.2.13"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.3",
+    "@effect/vitest": "4.0.7",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.2",
     "vitest": "5.0.5"

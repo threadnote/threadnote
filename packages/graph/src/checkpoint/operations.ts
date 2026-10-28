@@ -112,8 +112,8 @@ interface OpenCheckpointInput {
 
 interface OwnedFileIdentity {
   readonly birthtimeMilliseconds: number;
-  readonly dev: number;
-  readonly ino: number;
+  readonly dev: bigint;
+  readonly ino: bigint;
   readonly mode: number;
   readonly modifiedAtMilliseconds: number;
   readonly size: bigint;

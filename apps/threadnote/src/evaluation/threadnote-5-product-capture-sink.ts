@@ -32,19 +32,19 @@ interface DirectoryAuthorityInput {
 
 interface DirectoryAuthority {
   readonly birthtimeMilliseconds: number;
-  readonly dev: number;
+  readonly dev: bigint;
   readonly directory: string;
-  readonly ino: number;
+  readonly ino: bigint;
   readonly mode: number;
   readonly realPath: string;
   readonly uid: number;
 }
 
 interface FileAuthority {
-  readonly dev: number;
-  readonly ino: number;
+  readonly dev: bigint;
+  readonly ino: bigint;
   readonly mode: number;
-  readonly nlink: number;
+  readonly nlink: bigint;
   readonly size: bigint;
   readonly uid: number;
 }
@@ -282,7 +282,7 @@ const inspectFileHandle = Effect.fn('productCapture.inspectFileHandle')(function
   expectedLinks: number,
 ) {
   const authority = yield* fileAuthority(yield* file.stat, effectiveUid);
-  if (authority.size !== expectedSize || authority.nlink !== expectedLinks) {
+  if (authority.size !== expectedSize || authority.nlink !== BigInt(expectedLinks)) {
     return yield* ProductCaptureError.make({message: 'Private product capture reservation state is invalid.'});
   }
   return authority;
