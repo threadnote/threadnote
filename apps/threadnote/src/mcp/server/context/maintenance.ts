@@ -451,7 +451,12 @@ export function registerContextMaintenanceTools(server: ContextMaintenanceToolRe
           return argumentError('context_maintain refresh requires project and caseId.');
         const result =
           input.action === 'refresh'
-            ? yield* refreshContextMaintenanceCase(config, {project: input.project!, caseId: input.caseId!, cwd})
+            ? yield* refreshContextMaintenanceCase(config, {
+                project: input.project!,
+                caseId: input.caseId!,
+                cwd,
+                sourceCwd: input.callerCwd,
+              })
             : input.action === 'retire-anchor'
               ? yield* retireContextMaintenanceAnchor(config, {
                   caseId: input.caseId ?? '',

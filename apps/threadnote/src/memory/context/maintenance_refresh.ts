@@ -630,7 +630,13 @@ function superseded(state: MaintenanceState, item: ContextMaintenanceCaseV2, rea
 /** Refresh one selected observation, retrying a read race once. Canonical sources remain untouched. */
 export const refreshContextMaintenanceCase = Effect.fn('contextMaintenance.refreshCase')(function* (
   config: RuntimeConfig,
-  input: {readonly project: string; readonly caseId: string; readonly cwd: string},
+  input: {
+    readonly project: string;
+    readonly caseId: string;
+    readonly cwd: string;
+    /** Explicit evidence selector; cwd alone remains the fallback for retained cases. */
+    readonly sourceCwd?: string;
+  },
   selection: Parameters<typeof readContextMaintenancePacket>[2] = {},
 ) {
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -643,6 +649,30 @@ export const refreshContextMaintenanceCase = Effect.fn('contextMaintenance.refre
         );
         if (!item)
           return {outcome: 'unavailable' as const, reason: 'This decision is no longer available in this project.'};
+        if (input.sourceCwd !== undefined && item.sourceSnapshot) {
+          const fs = yield* FileSystem.FileSystem;
+          const paths = yield* Effect.all([
+            fs.realPath(input.sourceCwd).pipe(Effect.result),
+            fs.realPath(item.sourceSnapshot.cwd).pipe(Effect.result),
+          ]);
+          const sourceSelection = {requestedCwd: input.sourceCwd, retainedCwd: item.sourceSnapshot.cwd};
+          if (Result.isFailure(paths[0]) || Result.isFailure(paths[1]))
+            return {
+              outcome: 'incomplete' as const,
+              code: 'source-selection-unavailable' as const,
+              sourceSelection,
+              reason:
+                'The requested or retained source checkout is unavailable. Verify both existing checkout paths before retrying; no source association or evidence was changed.',
+            };
+          if (paths[0].success !== paths[1].success)
+            return {
+              outcome: 'incomplete' as const,
+              code: 'source-selection-mismatch' as const,
+              sourceSelection,
+              reason:
+                'This decision retains another source checkout. Retry with --source-cwd (MCP callerCwd) set to sourceSelection.retainedCwd to use that checkout, or review the source association separately before selecting another checkout. No evidence or source association was changed.',
+            };
+        }
         if (
           item.family === 'topic-maintenance' &&
           (selection.citationId !== undefined ||
@@ -654,7 +684,7 @@ export const refreshContextMaintenanceCase = Effect.fn('contextMaintenance.refre
                   (item.subjectContentHashes?.length === 1 ? item.subjectContentHashes[0].uri : undefined))))
         )
           return {outcome: 'unavailable' as const, reason: 'Select evidence from this exact topic memory.'};
-        const result = yield* observeSelectedMaintenanceCase(config, state, item, input.cwd);
+        const result = yield* observeSelectedMaintenanceCase(config, state, item, input.sourceCwd ?? input.cwd);
         if ('state' in result && result.state && JSON.stringify(result.state) !== JSON.stringify(state))
           yield* writeState(config, result.state);
         return result;
