@@ -1689,7 +1689,7 @@ function App({
                         placeholder={navTreeTab === 'memories' ? 'Search memories or URI' : 'Filter resources'}
                         maxLength={4096}
                         value={filter}
-                        disabled={controlsBlocked}
+                        disabled={historyBlocked}
                         onChange={event => setFilter(librarySearchInputValue(event.target.value))}
                         onKeyDown={event => {
                           if (event.nativeEvent.isComposing || event.key !== 'Enter' || !librarySearchIsUri) return;

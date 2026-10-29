@@ -496,9 +496,11 @@ it('clears unavailable URI content and fences a late URI response after a newer 
   await enterSearch();
   expect(host.textContent).toContain('Record unavailable until it loads.');
   expect(host.querySelector('.library-article')).toBeNull();
+  expect(searchInput().disabled).toBe(false);
   await setSearch(slow.uri);
   await enterSearch();
   expect(finishSlow).toBeDefined();
+  expect(searchInput().disabled).toBe(false);
   await setSearch(latest.uri);
   await enterSearch();
   expect(host.querySelector('.library-article')?.textContent).toContain('Latest body');
