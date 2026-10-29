@@ -3,7 +3,11 @@ import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
-import {contextHealthCaseIdV2} from '@threadnote/context/health_maintenance';
+import {
+  contextHealthCaseIdV2,
+  contextHealthCitationCaseSlotV2,
+  resolveContextHealthRelationTargetV2,
+} from '@threadnote/context/health_maintenance';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
@@ -25,6 +29,7 @@ import {
   validRelationMaintenanceEvidence,
 } from '../../src/memory/context/maintenance_refresh.js';
 import {readContextMaintenancePacket, readState, writeState} from '../../src/memory/context/maintenance.js';
+import {readMemoryRecordsByUri} from '../../src/mcp/server/memory.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
@@ -155,6 +160,71 @@ describe('bounded selected relation maintenance refresh', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  effectIt.effect('keeps readable alias and canonical relations out of a selected shared citation refresh', () =>
+    Effect.gen(function* () {
+      const alias = 'threadnote://memory/tn_alias_target';
+      const canonical = `${PREFIX}shared/default/durable/projects/fixture/canonical-target.md`;
+      const data = yield* fixture(true, [
+        {type: 'references', uri: alias},
+        {type: 'depends_on', uri: canonical},
+      ]);
+      const repo = yield* repository(data);
+      yield* data.fs.writeFileString(
+        data.config.manifestPath,
+        `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repo.root)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n`,
+      );
+      yield* (yield* CodeGraphIndexer).index({cwd: repo.root, threadnoteHome: data.home, ensureVectors: false});
+      const citations = yield* captureMemoryCodeCitations(data.config, {
+        callerCwd: repo.root,
+        project: 'fixture',
+        refs: ['source.ts'],
+      });
+      const subject = memory(data.uri, data.record.metadata.relations, {schemaVersion: 5, codeCitations: citations});
+      const aliasTarget = memory(`${PREFIX}shared/default/durable/projects/fixture/alias-target.md`, [], {
+        memoryId: 'tn_alias_target',
+      });
+      const canonicalTarget = memory(canonical, [], {memoryId: 'tn_canonical_target'});
+      for (const record of [subject, aliasTarget, canonicalTarget]) yield* data.write(record);
+      const readable = yield* readMemoryRecordsByUri(data.config, [aliasTarget.uri, canonicalTarget.uri]);
+      expect(readable).toHaveLength(2);
+      expect(resolveContextHealthRelationTargetV2(readable, alias).record?.metadata.memoryId).toBe('tn_alias_target');
+      expect(resolveContextHealthRelationTargetV2(readable, canonical).record?.uri).toBe(canonical);
+      const item: ContextMaintenanceCaseV2 = {
+        ...data.item,
+        caseId: contextHealthCaseIdV2({
+          project: 'fixture',
+          memoryId: 'tn_subject',
+          family: 'citation',
+          slot: contextHealthCitationCaseSlotV2(citations[0]),
+        }),
+        family: 'citation',
+        slot: contextHealthCitationCaseSlotV2(citations[0]),
+        citationId: citations[0].id,
+        subjectContentHashes: [{uri: subject.uri, hash: maintenanceContentHash(subject.content)}],
+      };
+      yield* writeState(data.config, {...data.state, cases: [item]});
+      yield* data.fs.writeFileString(repo.source, 'export const supported = false;\n');
+      const refreshed = yield* refreshContextMaintenanceCase(data.config, {
+        project: 'fixture',
+        caseId: item.caseId,
+        cwd: repo.root,
+      });
+      expect(['ready', 'resolved']).toContain(refreshed.outcome);
+      if (refreshed.outcome !== 'ready' && refreshed.outcome !== 'resolved')
+        throw new Error('Expected citation packet.');
+      expect(refreshed.item.subjectContentHashes).toHaveLength(1);
+      expect(refreshed.item.relationEvidence).toBeUndefined();
+      expect('ownerProposal' in refreshed.packet && refreshed.packet.ownerProposal).toMatchObject({
+        readOnly: true,
+        selectedEdits: [],
+        evidence: {completeness: 'unknown', supportsAbsence: false},
+      });
+      for (const record of [subject, aliasTarget, canonicalTarget]) {
+        expect(yield* data.fs.readFileString(data.fileFor(record.uri))).toBe(record.content);
+      }
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('reads the actual shared canonical namespace and withholds partial-corpus removal suggestions', () =>
     Effect.gen(function* () {
       const data = yield* fixture(true);
@@ -163,12 +233,7 @@ describe('bounded selected relation maintenance refresh', () => {
       if (result.outcome !== 'observed') return;
       expect(result.item.disposition).toBe('waiting-evidence');
       expect(result.item.relationEvidence?.subject.uri).toBe(data.uri);
-      const proposal = sharedMaintenanceOwnerProposal(
-        data.record,
-        result.records,
-        undefined,
-        result.item.relationEvidence,
-      );
+      const proposal = sharedMaintenanceOwnerProposal(data.record, undefined, result.item.relationEvidence);
       expect(proposal.selectedEdits).toEqual([]);
       expect(proposal.evidence).toMatchObject({completeness: 'selected-only', supportsAbsence: false});
       expect(yield* data.fs.readFileString(data.fileFor(data.uri))).toBe(data.record.content);
@@ -407,8 +472,7 @@ describe('bounded selected relation maintenance refresh', () => {
         if (result.outcome === 'observed') {
           expect(result.item.relationEvidence?.observations).toHaveLength(count);
           expect(
-            sharedMaintenanceOwnerProposal(data.record, result.records, undefined, result.item.relationEvidence)
-              .selectedEdits,
+            sharedMaintenanceOwnerProposal(data.record, undefined, result.item.relationEvidence).selectedEdits,
           ).toEqual([]);
         }
         expect(yield* data.fs.readFileString(data.fileFor(data.uri))).toBe(data.record.content);

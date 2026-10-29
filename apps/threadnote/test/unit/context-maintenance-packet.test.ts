@@ -1,6 +1,7 @@
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Result} from 'effect';
 import {describe, expect, it} from 'vitest';
+import fc from 'fast-check';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {
   sharedMaintenanceOwnerProposal,
@@ -58,28 +59,55 @@ describe('revision-bound maintenance packets', () => {
       expect(reads).toBe(0);
     }),
   );
-  it('binds exact shared canonical edits and base without mutating or exporting personal bodies', () => {
+  it('binds the exact shared subject and base without mutating or exporting personal bodies', () => {
     const original = record.content;
     const base = {
       commit: Effect2.pipe('a', EffectString.repeat(40)),
       repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
     };
-    const proposal = sharedMaintenanceOwnerProposal(record, [record], base);
+    const proposal = sharedMaintenanceOwnerProposal(record, base);
     expect(proposal.readOnly).toBe(true);
-    expect(proposal.selectedEdits).toEqual([
-      {
-        operation: 'remove-relation',
-        relation: {type: 'depends_on', uri: target},
-        reason: 'target-unresolved-in-readable-corpus',
-      },
-    ]);
+    expect(proposal.selectedEdits).toEqual([]);
+    expect(proposal.evidence).toEqual({
+      completeness: 'unknown',
+      provenance: 'unobserved-relation-targets',
+      supportsAbsence: false,
+    });
     expect(proposal.sharedBase).toEqual({state: 'available', ...base});
     expect(proposal.proposalRevision).not.toBe(
-      sharedMaintenanceOwnerProposal(record, [record], {...base, commit: Effect2.pipe('c', EffectString.repeat(40))})
+      sharedMaintenanceOwnerProposal(record, {...base, commit: Effect2.pipe('c', EffectString.repeat(40))})
         .proposalRevision,
     );
     expect(JSON.stringify(proposal)).not.toContain('Preserve the original claim.');
     expect(record.content).toBe(original);
     expect(proposal.publication.operations).toContain('share_propose');
+  });
+  it('never infers removal from unobserved relations and conserves arbitrary canonical content', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            type: fc.constantFrom('references' as const, 'depends_on' as const),
+            uri: fc.constantFrom(target, 'threadnote://memory/tn_target'),
+          }),
+          {maxLength: 40},
+        ),
+        fc.string({maxLength: 100}),
+        (relations, body) => {
+          const subject = parseMemoryDocument(
+            uri,
+            formatMemoryDocument('MEMORY', {...record.metadata, relations}, body),
+          )!;
+          const before = structuredClone(subject);
+          const proposal = sharedMaintenanceOwnerProposal(subject);
+          expect(proposal.selectedEdits).toEqual([]);
+          expect(proposal.omittedEdits).toBe(0);
+          expect(proposal.evidence.supportsAbsence).toBe(false);
+          expect(sharedMaintenanceOwnerProposal(subject)).toEqual(proposal);
+          expect(subject).toEqual(before);
+        },
+      ),
+      {numRuns: 32},
+    );
   });
 });
