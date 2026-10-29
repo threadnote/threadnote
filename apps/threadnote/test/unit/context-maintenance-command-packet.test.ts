@@ -60,7 +60,7 @@ effectIt.effect('explicit refresh CLI preserves the selected scope and never fal
     expect(JSON.parse(result.output)).toEqual(observed);
     expect(refreshSpy).toHaveBeenCalledExactlyOnceWith(
       refreshConfig,
-      {project: 'fixture', caseId: 'selected-case', cwd: '/selected'},
+      {project: 'fixture', caseId: 'selected-case', cwd: '/selected', sourceCwd: '/selected'},
       {...selection, citationId: undefined},
     );
     expect(runSpy).not.toHaveBeenCalled();
@@ -100,6 +100,7 @@ effectIt.effect('registered MCP refresh validates its exact scope and preserves 
       project: 'fixture',
       caseId: 'selected-case',
       cwd: '/selected',
+      sourceCwd: '/selected',
     });
     for (const invalid of [{project: undefined}, {caseId: undefined}, {callerCwd: 'relative'}]) {
       const refused = yield* server.invokeTool(

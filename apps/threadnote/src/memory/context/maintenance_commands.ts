@@ -113,7 +113,7 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
     return options.action === 'refresh'
       ? yield* refreshContextMaintenanceCase(
           config,
-          {project: options.project!, caseId: options.caseId!, cwd},
+          {project: options.project!, caseId: options.caseId!, cwd, sourceCwd: options.sourceCwd},
           {
             citationId: options.citationId,
             memoryUri: options.memoryUri,
