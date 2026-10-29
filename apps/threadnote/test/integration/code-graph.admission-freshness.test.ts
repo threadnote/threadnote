@@ -1,11 +1,14 @@
 import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Console, Effect, Exit, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
+import {currentCodeGraphBuildStatus} from '@threadnote/graph/build_status';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {runIsolatedCodeGraphIndexSnapshot} from '@threadnote/graph/isolated/index';
+import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import type {CodeGraphProgress} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -21,6 +24,42 @@ describe('current graph admission freshness', () => {
         const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-isolated-admission-'});
         const repo = path.join(root, 'repository');
         const home = path.join(root, 'home');
+        let stage: 'setup' | 'first-index' | 'second-index' | 'query' = 'setup';
+        let firstProgress: CodeGraphProgress['phase'] | undefined;
+        let secondProgress: CodeGraphProgress['phase'] | undefined;
+        // Registered after the temporary directory, so failure evidence precedes its scoped deletion.
+        yield* Effect.addFinalizer(exit =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.gen(function* () {
+                const status = yield* Effect.gen(function* () {
+                  const identity = yield* resolveRepositoryIdentity(repo);
+                  const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
+                  const latest = yield* currentCodeGraphBuildStatus(layout, identity.worktreeId);
+                  return latest === undefined
+                    ? {unavailable: true}
+                    : {
+                        buildId: latest.buildId,
+                        state: latest.state,
+                        phase: latest.phase,
+                        owner: latest.owner,
+                        request: latest.request,
+                        result: latest.result,
+                        observation: latest.observation,
+                        timestamps: latest.timestamps,
+                      };
+                }).pipe(Effect.interruptible, Effect.timeout('1 second'), Effect.exit);
+                yield* Console.error(
+                  'isolated-admission-failure',
+                  JSON.stringify({
+                    stage,
+                    firstProgress,
+                    secondProgress,
+                    buildStatus: Exit.isSuccess(status) ? status.value : {unavailable: true},
+                  }),
+                );
+              }).pipe(Effect.ignoreCause),
+        );
         yield* fs.makeDirectory(repo);
         yield* fs.writeFileString(path.join(repo, 'included.ts'), 'export const includedSymbol = 1;\n');
         yield* fs.writeFileString(path.join(repo, 'excluded.ts'), 'export const excludedSymbol = 2;\n');
@@ -28,15 +67,30 @@ describe('current graph admission freshness', () => {
         yield* git(['init', '-q', '--initial-branch=main']);
         yield* git(['add', '.']);
         yield* git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
-        const first = yield* runIsolatedCodeGraphIndexSnapshot({cwd: repo, threadnoteHome: home, ensureVectors: false});
+        stage = 'first-index';
+        const first = yield* runIsolatedCodeGraphIndexSnapshot({
+          cwd: repo,
+          threadnoteHome: home,
+          ensureVectors: false,
+          onProgress: progress =>
+            Effect.sync(() => {
+              firstProgress = progress.phase;
+            }),
+        });
         expect(first.snapshot.fileCount).toBe(2);
         yield* fs.writeFileString(path.join(repo, '.git/info/exclude'), 'excluded.ts\n');
+        stage = 'second-index';
         const second = yield* runIsolatedCodeGraphIndexSnapshot({
           cwd: repo,
           threadnoteHome: home,
           ensureVectors: false,
+          onProgress: progress =>
+            Effect.sync(() => {
+              secondProgress = progress.phase;
+            }),
         });
         expect(second.snapshot.fileCount).toBe(1);
+        stage = 'query';
         const inspected = yield* query.inspect({
           cwd: repo,
           threadnoteHome: home,

@@ -56,6 +56,6 @@ Repeat `protocolVersion`, `executorVersion`, `runId` and `generation`; use the d
 
 Use bounded packets and exact snapshot review/validation. Get CAS `expectedRevision` from `cycle inspect`, including before `cycle init`. Discover the next cycle command's prerequisites for snapshot/attempt IDs and detail budgets; retrieve `cycle-plan`, `cycle-validation` or `cycle-review` payload schemas only as needed. Preserve rejected attempts. Record accepted delivery and owned watch before continuing the next eligible phase; pending CI or merge alone does not stop implementation.
 
-Watch uses `watchId` and leased `consumerId`, not a run envelope. Own one collector and supported current-chat wakeup; relay and inspect evidence. Persist dispositions before ACK. Keep unresolved `work`, update via `work-disposition`, and stop/record terminal collectors.
+Watch uses `watchId` and leased `consumerId`, not a run envelope. Own one collector and a verified event-driven host wakeup; relay and inspect evidence. Idle polling and subscription maintenance run natively, without recurring model tasks. Persist dispositions before ACK. Keep unresolved `work`, update via `work-disposition`, and stop/record terminal collectors.
 
 After all phases and current combined-source acceptance, discover `closeout-proposal` as needed and use `validation-input`, `prepare`, `finish`. Independently read every durable output before retiring owned drafts. Personal cloud requires exact `publication-preview` approval and verified Git readback; task-local drafts are not cloud durability.
