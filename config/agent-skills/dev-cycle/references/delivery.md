@@ -8,4 +8,6 @@ For multiphase features in GitHub repositories, prefer stacked phase PRs: target
 
 When authorized, commit and open/update the phase PR, record the verified delivery receipt, and start or transfer the sole native watch collector and leased consumer. Continue the next eligible phase immediately; do not wait for CI, draft feedback, or merge. Reconcile actual failed checks and head changes when received.
 
+Verify event-driven delivery to the exact host session. Native idle watching must not schedule model turns; an unsupported wake mechanism is a coverage gap. Keep existing watch identity and pending work when transferring from a periodic fallback.
+
 Do not claim a check passed unless it ran. A watch signal is evidence to investigate, not merge authority. Follow the native watch flow and preserve unresolved work across acknowledgements.
