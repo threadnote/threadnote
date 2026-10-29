@@ -323,9 +323,9 @@ const reviewed = Effect.fn('test.nativeCycle.reviewed')(function* () {
     snapshotTree: snapshot.tree,
     status: 'complete',
     mode: 'full',
-    selected: ['orchestrator', 'simplicity'],
+    selected: ['correctness', 'simplicity'],
     lanes: [
-      {name: 'orchestrator', status: 'complete'},
+      {name: 'correctness', status: 'complete'},
       {name: 'simplicity', status: 'complete'},
     ],
     findings: [],
@@ -362,9 +362,9 @@ const completeLocalPhase = Effect.fn('test.nativeCycle.completeLocalPhase')(func
       snapshotTree: snapshot.tree,
       status: 'complete',
       mode: snapshot.previous ? 'incremental' : 'full',
-      selected: ['orchestrator', 'simplicity'],
+      selected: ['correctness', 'simplicity'],
       lanes: [
-        {name: 'orchestrator', status: 'complete'},
+        {name: 'correctness', status: 'complete'},
         {name: 'simplicity', status: 'complete'},
       ],
       findings: [],
@@ -399,7 +399,7 @@ const completeLocalPhase = Effect.fn('test.nativeCycle.completeLocalPhase')(func
 });
 
 describe('native cycle lifecycle', () => {
-  effectIt.effect('decodes an immutable legacy review while refusing its current submission', () =>
+  effectIt.effect('preserves immutable legacy evidence and readiness while refusing current self-review', () =>
     Effect.gen(function* () {
       const f = yield* reviewed();
       const legacy = {
@@ -428,6 +428,42 @@ describe('native cycle lifecycle', () => {
       expect(
         yield* f.mutate('ready', {phaseId: 'one', snapshotId: f.snapshot.snapshotId}).pipe(Effect.result),
       ).toMatchObject({failure: {code: 'review-pending'}});
+      yield* f.mutate('validate-review', {
+        snapshotId: f.snapshot.snapshotId,
+        attemptId: 'independent-current-review',
+        report: f.report,
+      });
+      yield* f.mutate('ready', {
+        phaseId: 'one',
+        snapshotId: f.snapshot.snapshotId,
+        validation: {
+          snapshotTree: f.snapshot.tree,
+          reviewTree: f.snapshot.tree,
+          status: 'passed',
+          productState: 'working',
+          checks: [{command: 'private flow', result: 'passed', evidence: 'Real source fixture.'}],
+          acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Private source readback.'}],
+        },
+      });
+      const envelope = JSON.parse(yield* f.fs.readFileString(f.statePath()));
+      const accepted = decodeNativeCycleRuntime(envelope.cycle);
+      const legacyReady = {
+        ...accepted,
+        reviews: [{snapshotId: f.snapshot.snapshotId, report: legacy}],
+        attempts: EffectArray.map(accepted.attempts, attempt =>
+          attempt.status === 'accepted' ? {...attempt, report: bytes, digest: sha256HexSync(bytes)} : attempt,
+        ),
+      };
+      expect(decodeNativeCycleRuntime(JSON.parse(JSON.stringify(legacyReady)))).toEqual(legacyReady);
+      expect(legacyReady.state.phases.one.status).toBe('validated');
+      expect(legacyReady.state).toEqual(accepted.state);
+      yield* f.fs.writeFileString(f.statePath(), JSON.stringify({...envelope, cycle: legacyReady}));
+      const unchanged = yield* f.fs.readFileString(f.statePath());
+      yield* f.inspect();
+      expect(
+        yield* f.mutate('ready', {phaseId: 'one', snapshotId: f.snapshot.snapshotId}).pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'invalid-cycle-review'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(unchanged);
     }).pipe(run),
   );
   effectIt.effect('keeps stable-base incremental patch detail limited to the new source delta', () =>
@@ -478,9 +514,9 @@ describe('native cycle lifecycle', () => {
           snapshotTree: first.tree,
           status: 'complete',
           mode: 'full',
-          selected: ['orchestrator', 'simplicity'],
+          selected: ['correctness', 'simplicity'],
           lanes: [
-            {name: 'orchestrator', status: 'complete'},
+            {name: 'correctness', status: 'complete'},
             {name: 'simplicity', status: 'complete'},
           ],
           findings: [],
@@ -601,9 +637,9 @@ describe('native cycle lifecycle', () => {
           snapshotTree: snapshot.tree,
           status: 'complete',
           mode: 'full',
-          selected: ['orchestrator', 'simplicity'],
+          selected: ['correctness', 'simplicity'],
           lanes: [
-            {name: 'orchestrator', status: 'complete'},
+            {name: 'correctness', status: 'complete'},
             {name: 'simplicity', status: 'complete'},
           ],
           findings: [],
@@ -927,8 +963,8 @@ describe('native cycle lifecycle', () => {
             attemptId: 'recovery-missing-simplicity',
             report: {
               ...report,
-              selected: ['orchestrator'],
-              lanes: [{name: 'orchestrator', status: 'complete'}],
+              selected: ['correctness'],
+              lanes: [{name: 'correctness', status: 'complete'}],
               findings: [{...finding, state: 'carried'}],
             },
           }),
@@ -1195,9 +1231,9 @@ describe('native cycle lifecycle', () => {
             snapshotTree: snapshot.tree,
             status: 'complete',
             mode: previous ? 'incremental' : 'full',
-            selected: ['orchestrator', 'simplicity'],
+            selected: ['correctness', 'simplicity'],
             lanes: [
-              {name: 'orchestrator', status: 'complete'},
+              {name: 'correctness', status: 'complete'},
               {name: 'simplicity', status: 'complete'},
             ],
             findings: [],
@@ -1614,9 +1650,9 @@ effectIt.effect(
             snapshotTree: snapshot.tree,
             status: 'complete',
             mode: 'full',
-            selected: ['orchestrator', 'simplicity'],
+            selected: ['correctness', 'simplicity'],
             lanes: [
-              {name: 'orchestrator', status: 'complete'},
+              {name: 'correctness', status: 'complete'},
               {name: 'simplicity', status: 'complete'},
             ],
             findings: [],

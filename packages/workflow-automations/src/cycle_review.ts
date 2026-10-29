@@ -83,6 +83,7 @@ const safePath = (value: string) =>
   EffectArray.every(Effect.pipe(value, EffectString.split('/')), part => part !== '' && part !== '.' && part !== '..');
 
 export const nativeCycleOrchestratorLane = 'orchestrator';
+export const nativeCycleCorrectnessLane = 'correctness';
 
 export function validateNativeCycleReview(
   snapshot: NativeCycleSnapshot,
@@ -90,6 +91,13 @@ export function validateNativeCycleReview(
   previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
 ) {
   const result = validateNativeCycleReviewHistory(snapshot, input, previous);
+  if (
+    result.review.selected.includes(nativeCycleOrchestratorLane) ||
+    EffectArray.some(result.review.lanes, lane => lane.name === nativeCycleOrchestratorLane)
+  )
+    fail('The orchestrator must not review source. Use independent correctness and simplicity review lanes.');
+  if (!result.review.selected.includes(nativeCycleCorrectnessLane))
+    fail('Select the required correctness review lane and include its complete report.');
   if (!result.review.selected.includes('simplicity'))
     fail('Select the required simplicity review lane and include its complete report.');
   return result;
@@ -116,8 +124,8 @@ export function validateNativeCycleReviewHistory(
     fail('Review source or mode does not match its immutable snapshot.');
   const selected = new Set(review.selected),
     lanes = new Set(EffectArray.map(review.lanes, lane => lane.name));
-  if (!selected.has(nativeCycleOrchestratorLane))
-    fail('Select the required orchestrator review lane and include its complete report.');
+  if (!selected.has(nativeCycleOrchestratorLane) && !selected.has(nativeCycleCorrectnessLane))
+    fail('Select the required correctness review lane and include its complete report.');
   if (
     selected.size !== review.selected.length ||
     lanes.size !== review.lanes.length ||

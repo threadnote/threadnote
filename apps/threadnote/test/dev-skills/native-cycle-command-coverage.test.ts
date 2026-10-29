@@ -137,8 +137,8 @@ it.effect('dispatches bounded cycle discovery and exact read checks through a re
       schemaKind: 'decoding-envelope',
       runtimeValidationRequired: true,
       semanticPrerequisites: {
-        requiredSelectedLanes: ['orchestrator', 'simplicity'],
-        requiredCompletedLanes: ['orchestrator', 'simplicity'],
+        requiredSelectedLanes: ['correctness', 'simplicity'],
+        requiredCompletedLanes: ['correctness', 'simplicity'],
         specialistLanes: expect.stringContaining('optional'),
       },
     });
@@ -221,9 +221,9 @@ it.effect('dispatches bounded cycle discovery and exact read checks through a re
           snapshotTree: snapshot.tree,
           status: 'complete',
           mode: 'full',
-          selected: ['orchestrator', 'simplicity'],
+          selected: ['correctness', 'simplicity'],
           lanes: [
-            {name: 'orchestrator', status: 'complete'},
+            {name: 'correctness', status: 'complete'},
             {name: 'simplicity', status: 'complete'},
           ],
           findings: [],

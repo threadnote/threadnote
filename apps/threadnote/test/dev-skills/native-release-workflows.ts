@@ -1135,9 +1135,9 @@ function runProfile(
     snapshotTree: snapshot.tree,
     status: 'complete',
     mode: 'full',
-    selected: ['orchestrator', 'simplicity'],
+    selected: ['correctness', 'simplicity'],
     lanes: [
-      {name: 'orchestrator', status: 'complete'},
+      {name: 'correctness', status: 'complete'},
       {name: 'simplicity', status: 'complete'},
     ],
     findings: [],

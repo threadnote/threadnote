@@ -53,9 +53,9 @@ const review = (
   snapshotTree: current.tree,
   status: 'complete',
   mode: 'incremental',
-  selected: ['orchestrator', 'simplicity', 'security'],
+  selected: ['correctness', 'simplicity', 'security'],
   lanes: [
-    {name: 'orchestrator', status: 'complete'},
+    {name: 'correctness', status: 'complete'},
     {name: 'simplicity', status: 'complete'},
     {name: 'security', status: 'complete'},
   ],
@@ -134,18 +134,18 @@ describe('native cycle review validation', () => {
     for (const input of [
       {...valid, unexpected: true},
       {...valid, status: 'running'},
-      {...valid, selected: ['orchestrator', 'security'], lanes: [{name: 'orchestrator', status: 'complete'}]},
-      {...valid, selected: ['orchestrator', 'security', 'security']},
+      {...valid, selected: ['correctness', 'security'], lanes: [{name: 'correctness', status: 'complete'}]},
+      {...valid, selected: ['correctness', 'security', 'security']},
       {...valid, lanes: [...valid.lanes, valid.lanes[1]]},
       {...valid, selected: ['security'], lanes: [{name: 'security', status: 'complete'}]},
-      {...valid, lanes: [{name: 'orchestrator', status: 'running'}, valid.lanes[1]]},
+      {...valid, lanes: [{name: 'correctness', status: 'running'}, valid.lanes[1]]},
     ])
       expect(caught(() => validateNativeCycleReview(snapshot(), input, previous))).toMatchObject({
         code: 'invalid-cycle-review',
       });
   });
 
-  it('identifies the missing orchestrator even when selected and completed names match', () => {
+  it('rejects self-review even alongside both independent mandatory lanes', () => {
     const current = snapshot({previous: undefined, previousTree: undefined});
     const rootOnly = review(
       {mode: 'full', selected: ['root'], lanes: [{name: 'root', status: 'complete'}], findings: []},
@@ -153,49 +153,70 @@ describe('native cycle review validation', () => {
     );
     expect(caught(() => validateNativeCycleReview(current, rootOnly))).toMatchObject({
       code: 'invalid-cycle-review',
-      message: 'Select the required orchestrator review lane and include its complete report.',
+      message: 'Select the required correctness review lane and include its complete report.',
     });
     const orchestratorOnly = {
       ...rootOnly,
       selected: ['orchestrator'],
       lanes: [{name: 'orchestrator', status: 'complete'}],
     };
-    expect(caught(() => validateNativeCycleReview(current, orchestratorOnly))).toMatchObject({
-      code: 'invalid-cycle-review',
-      message: 'Select the required simplicity review lane and include its complete report.',
-    });
-    expect(
-      caught(() => validateNativeCycleReview(current, {...orchestratorOnly, selected: ['orchestrator', 'simplicity']})),
-    ).toMatchObject({code: 'invalid-cycle-review', message: 'Selected and completed review lanes differ.'});
+    for (const selected of [
+      orchestratorOnly.selected,
+      ['orchestrator', 'simplicity'],
+      ['correctness', 'simplicity', 'orchestrator'],
+    ])
+      expect(
+        caught(() =>
+          validateNativeCycleReview(current, {
+            ...rootOnly,
+            selected,
+            lanes: EffectArray.map(selected, name => ({name, status: 'complete'})),
+          }),
+        ),
+      ).toMatchObject({
+        code: 'invalid-cycle-review',
+        message: 'The orchestrator must not review source. Use independent correctness and simplicity review lanes.',
+      });
+    const valid = review({mode: 'full', findings: []}, current);
+    for (const input of [
+      {...valid, selected: [...valid.selected, 'orchestrator']},
+      {...valid, lanes: [...valid.lanes, {name: 'orchestrator', status: 'complete'}]},
+    ])
+      expect(caught(() => validateNativeCycleReview(current, input))).toMatchObject({
+        code: 'invalid-cycle-review',
+      });
   });
 
   it.each(['full', 'incremental'] as const)(
-    'requires selected and completed simplicity in every new %s report',
+    'requires separate selected and completed correctness and simplicity in every new %s report',
     mode => {
       const current = mode === 'full' ? snapshot({previous: undefined, previousTree: undefined}) : snapshot();
       const valid = review({mode, findings: [finding({state: mode === 'full' ? 'new' : 'carried'})]}, current);
       const history = mode === 'incremental' ? previous : undefined;
-      expect(validateNativeCycleReview(current, valid, history).review.selected).toContain('simplicity');
-      for (const input of [
-        {
-          ...valid,
-          selected: EffectArray.filter(valid.selected, name => name !== 'simplicity'),
-          lanes: EffectArray.filter(valid.lanes, lane => lane.name !== 'simplicity'),
-        },
-        {...valid, lanes: EffectArray.filter(valid.lanes, lane => lane.name !== 'simplicity')},
-        {...valid, selected: EffectArray.filter(valid.selected, name => name !== 'simplicity')},
-        {
-          ...valid,
-          lanes: EffectArray.map(valid.lanes, lane =>
-            lane.name === 'simplicity' ? {...lane, status: 'running'} : lane,
-          ),
-        },
-        {...valid, selected: [...valid.selected, 'simplicity']},
-        {...valid, lanes: [...valid.lanes, {name: 'simplicity', status: 'complete'}]},
-      ])
-        expect(caught(() => validateNativeCycleReview(current, input, history))).toMatchObject({
-          code: 'invalid-cycle-review',
-        });
+      expect(validateNativeCycleReview(current, valid, history).review.selected).toEqual([
+        'correctness',
+        'simplicity',
+        'security',
+      ]);
+      for (const required of ['correctness', 'simplicity'])
+        for (const input of [
+          {
+            ...valid,
+            selected: EffectArray.filter(valid.selected, name => name !== required),
+            lanes: EffectArray.filter(valid.lanes, lane => lane.name !== required),
+          },
+          {...valid, lanes: EffectArray.filter(valid.lanes, lane => lane.name !== required)},
+          {...valid, selected: EffectArray.filter(valid.selected, name => name !== required)},
+          {
+            ...valid,
+            lanes: EffectArray.map(valid.lanes, lane => (lane.name === required ? {...lane, status: 'running'} : lane)),
+          },
+          {...valid, selected: [...valid.selected, required]},
+          {...valid, lanes: [...valid.lanes, {name: required, status: 'complete'}]},
+        ])
+          expect(caught(() => validateNativeCycleReview(current, input, history))).toMatchObject({
+            code: 'invalid-cycle-review',
+          });
     },
   );
 
@@ -207,9 +228,18 @@ describe('native cycle review validation', () => {
     expect(JSON.stringify(priorReview)).toBe(original);
     expect(caught(() => validateNativeCycleReview(priorSnapshot, stored.review))).toMatchObject({
       code: 'invalid-cycle-review',
-      message: 'Select the required simplicity review lane and include its complete report.',
+      message: 'The orchestrator must not review source. Use independent correctness and simplicity review lanes.',
     });
     expect(caught(() => validateNativeCycleReviewHistory(priorSnapshot, {...priorReview, lanes: []}))).toMatchObject({
+      code: 'invalid-cycle-review',
+    });
+    const legacyWithSimplicity = {
+      ...priorReview,
+      selected: [...priorReview.selected, 'simplicity'],
+      lanes: [...priorReview.lanes, {name: 'simplicity', status: 'complete'}],
+    };
+    expect(validateNativeCycleReviewHistory(priorSnapshot, legacyWithSimplicity).review).toEqual(legacyWithSimplicity);
+    expect(caught(() => validateNativeCycleReview(priorSnapshot, legacyWithSimplicity))).toMatchObject({
       code: 'invalid-cycle-review',
     });
   });
@@ -221,15 +251,27 @@ describe('native cycle review validation', () => {
         fc.boolean(),
         fc.boolean(),
         fc.boolean(),
-        fc.uniqueArray(fc.constantFrom('security', 'performance', 'correctness'), {maxLength: 3}),
-        (incremental, orchestratorSelected, simplicitySelected, simplicityComplete, specialists) => {
+        fc.boolean(),
+        fc.boolean(),
+        fc.uniqueArray(fc.constantFrom('security', 'performance', 'architecture'), {maxLength: 3}),
+        (
+          incremental,
+          correctnessSelected,
+          simplicitySelected,
+          correctnessComplete,
+          simplicityComplete,
+          orchestratorSelected,
+          specialists,
+        ) => {
           const current = incremental ? snapshot() : snapshot({previous: undefined, previousTree: undefined});
           const selected = [
             ...specialists,
-            ...(orchestratorSelected ? ['orchestrator'] : []),
+            ...(correctnessSelected ? ['correctness'] : []),
             ...(simplicitySelected ? ['simplicity'] : []),
+            ...(orchestratorSelected ? ['orchestrator'] : []),
           ];
-          const completed = EffectArray.filter(selected, name => name !== 'simplicity');
+          const completed = [...specialists, ...(orchestratorSelected ? ['orchestrator'] : [])];
+          if (correctnessComplete) completed.push('correctness');
           if (simplicityComplete) completed.push('simplicity');
           const input = review(
             {
@@ -243,11 +285,42 @@ describe('native cycle review validation', () => {
           // Keep the existing predecessor ledger valid so this property isolates lane admission.
           const history = incremental ? {...previous, review: {...priorReview, findings: []}} : undefined;
           const error = caught(() => validateNativeCycleReview(current, input, history));
-          if (orchestratorSelected && simplicitySelected && simplicityComplete) expect(error).toBeUndefined();
+          if (
+            correctnessSelected &&
+            correctnessComplete &&
+            simplicitySelected &&
+            simplicityComplete &&
+            !orchestratorSelected
+          )
+            expect(error).toBeUndefined();
           else expect(error).toMatchObject({code: 'invalid-cycle-review'});
         },
       ),
       {numRuns: 60},
+    );
+  });
+
+  it('round-trips immutable legacy lane reports without rewriting their source or finding identities', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.constantFrom('simplicity', 'correctness', 'performance'), {maxLength: 3}),
+        additional => {
+          const selected = ['orchestrator', 'security', ...additional];
+          const legacy = {
+            ...priorReview,
+            selected,
+            lanes: EffectArray.map(selected, name => ({name, status: 'complete'})),
+          };
+          const bytes = JSON.stringify({snapshot: priorSnapshot, review: legacy});
+          const decoded = JSON.parse(bytes);
+          expect(validateNativeCycleReviewHistory(decoded.snapshot, decoded.review).review).toEqual(legacy);
+          expect(JSON.stringify(decoded)).toBe(bytes);
+          expect(caught(() => validateNativeCycleReview(decoded.snapshot, decoded.review))).toMatchObject({
+            code: 'invalid-cycle-review',
+          });
+        },
+      ),
+      {numRuns: 40},
     );
   });
 

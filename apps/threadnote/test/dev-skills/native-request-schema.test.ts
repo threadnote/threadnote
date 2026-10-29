@@ -136,8 +136,8 @@ describe('native request schema discovery', () => {
     const response = nativeRequestSchema({...base, topic: 'cycle-review'});
     expect(response).toMatchObject({
       semanticPrerequisites: {
-        requiredSelectedLanes: ['orchestrator', 'simplicity'],
-        requiredCompletedLanes: ['orchestrator', 'simplicity'],
+        requiredSelectedLanes: ['correctness', 'simplicity'],
+        requiredCompletedLanes: ['correctness', 'simplicity'],
         specialistLanes: expect.stringContaining('Additional specialist lanes are optional'),
       },
     });

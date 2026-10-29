@@ -145,6 +145,142 @@ function repository(data: Effect.Success<ReturnType<typeof fixture>>) {
   });
 }
 
+function repositoryGroup() {
+  return Effect.gen(function* () {
+    const data = yield* fixture();
+    const records = [
+      data.record,
+      memory(`${PREFIX}durable/projects/fixture/second.md`, [], {memoryId: 'tn_second'}),
+      memory(`${PREFIX}durable/projects/fixture/third.md`, [], {memoryId: 'tn_third'}),
+    ];
+    yield* Effect.forEach(records, data.write);
+    const identity = {project: 'fixture', memoryId: 'repo_fixture', family: 'repository-recovery', slot: 'repository'};
+    const item: ContextMaintenanceCaseV2 = {
+      ...data.item,
+      ...identity,
+      caseId: contextHealthCaseIdV2(identity),
+      repositoryId: identity.memoryId,
+      reason: 'repository-ambiguous',
+      subjectContentHashes: EffectArray.map(records, record => ({
+        uri: record.uri,
+        hash: maintenanceContentHash(record.content),
+      })),
+      sourceSnapshots: EffectArray.map(records, record => ({
+        uri: record.uri,
+        cwd: data.home,
+        generation: 'retained-source-generation',
+        revision: 'retained-source-revision',
+      })),
+    };
+    const state = {...data.state, cases: [item]};
+    yield* writeState(data.config, state);
+    return {...data, records, item, state};
+  });
+}
+
+describe('bounded selected repository recovery refresh', () => {
+  effectIt.effect('reports the unsupported group prerequisite without rewriting subjects or retained evidence', () =>
+    Effect.gen(function* () {
+      const data = yield* repositoryGroup();
+      const before = yield* readState(data.config);
+      const result = yield* refreshContextMaintenanceCase(data.config, {
+        project: data.item.project,
+        caseId: data.item.caseId,
+        cwd: data.home,
+      });
+      expect(result).toEqual({
+        outcome: 'unavailable',
+        reason:
+          'Repository recovery does not support a grouped source refresh. Verify the repository association with authoritative repository evidence, then refresh the affected citation cases individually. Current source and route evidence have not been checked.',
+      });
+      expect(yield* readState(data.config)).toEqual(before);
+      for (const record of data.records)
+        expect(yield* data.fs.readFileString(data.fileFor(record.uri))).toBe(record.content);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('refuses changed, replaced, unavailable and incompletely retained subjects', () =>
+    Effect.gen(function* () {
+      const data = yield* repositoryGroup();
+      const selected = data.records[1];
+      for (const changed of [
+        {...selected, content: `${selected.content}\nChanged claim.`},
+        memory(selected.uri, [], {memoryId: 'tn_replacement'}),
+        memory(selected.uri, [], {status: 'archived'}),
+        memory(selected.uri, [], {project: 'other'}),
+      ]) {
+        yield* data.write(changed);
+        const result = yield* observeSelectedMaintenanceCase(data.config, data.state, data.item, data.home);
+        expect(result.outcome).toBe('unavailable');
+        expect('reason' in result && result.reason).not.toContain('does not support a grouped source refresh');
+        expect('state' in result).toBe(false);
+        expect(yield* data.fs.readFileString(data.fileFor(selected.uri))).toBe(changed.content);
+      }
+      yield* data.fs.remove(data.fileFor(selected.uri));
+      const missing = yield* observeSelectedMaintenanceCase(data.config, data.state, data.item, data.home);
+      expect(missing).toMatchObject({
+        outcome: 'unavailable',
+        reason: 'A selected memory is no longer available in this project.',
+      });
+      yield* data.write(selected);
+      for (const item of [
+        {...data.item, memoryId: 'repo_replaced'},
+        {...data.item, repositoryId: undefined},
+        {...data.item, slot: 'other'},
+        {...data.item, subjectUri: selected.uri, subjectContentHashes: data.item.subjectContentHashes!.slice(0, 1)},
+      ]) {
+        const result = yield* observeSelectedMaintenanceCase(data.config, data.state, item, data.home);
+        expect(result.outcome).toBe('unavailable');
+        expect('reason' in result && result.reason).not.toContain('does not support a grouped source refresh');
+      }
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('detects a subject replacement during the closing read', () =>
+    Effect.gen(function* () {
+      const data = yield* repositoryGroup();
+      const selected = data.records[1];
+      const selectedFile = data.fileFor(selected.uri);
+      let reads = 0;
+      const racing = FileSystem.FileSystem.of({
+        ...data.fs,
+        readFileString: (file, ...options) =>
+          Effect.gen(function* () {
+            if (file === selectedFile && ++reads === 2)
+              yield* data.write(memory(selected.uri, [], {memoryId: 'tn_replacement'}));
+            return yield* data.fs.readFileString(file, ...options);
+          }),
+      });
+      const result = yield* observeSelectedMaintenanceCase(data.config, data.state, data.item, data.home).pipe(
+        Effect.provideService(FileSystem.FileSystem, racing),
+      );
+      expect(reads).toBeGreaterThanOrEqual(2);
+      expect(result.outcome).toBe('changing');
+      expect(yield* readState(data.config)).toEqual(data.state);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.prop(
+    'is deterministic and read-only under bounded subject ordering permutations',
+    {rotation: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 2})), reverse: Schema.Boolean},
+    ({rotation, reverse}) =>
+      Effect.gen(function* () {
+        const data = yield* repositoryGroup();
+        const hashes = [...data.item.subjectContentHashes!];
+        const ordered = [...hashes.slice(rotation), ...hashes.slice(0, rotation)];
+        const item = {...data.item, subjectContentHashes: reverse ? ordered.reverse() : ordered};
+        const first = yield* observeSelectedMaintenanceCase(data.config, data.state, item, data.home);
+        const repeat = yield* observeSelectedMaintenanceCase(data.config, data.state, item, data.home);
+        expect(first.outcome).toBe('unavailable');
+        expect('reason' in first && first.reason).toContain('does not support a grouped source refresh');
+        expect(repeat).toEqual(first);
+        expect('state' in first).toBe(false);
+        expect(yield* readState(data.config)).toEqual(data.state);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    {arbitrary: {runs: 8, seed: 944}},
+  );
+});
+
 describe('bounded selected relation maintenance refresh', () => {
   effectIt.effect.each([false, true])(
     'publishes exact refreshed citation evidence while paused (reviewed support: %s)',
