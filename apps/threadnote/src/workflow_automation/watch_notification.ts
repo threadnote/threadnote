@@ -23,6 +23,33 @@ import {
 } from './watch_host_session.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 
+/** Read-only capability admission for an explicitly selected executable; never queue a probe message. */
+export const preflightNativeWatchCodexQueue = Effect.fn('nativeWatch.preflightCodexQueue')(function* (
+  executable: string,
+) {
+  const incompatible = () =>
+    WorkflowAutomationError.make({
+      code: 'host-queue-incompatible',
+      message:
+        'The selected Codex executable could not verify queue --help with --thread and --message support: ' +
+        executable +
+        '. Select a compatible absolute Codex executable explicitly and retry this binding; no watch target was changed.',
+    });
+  const result = yield* runCommandEffect(executable, ['queue', '--help'], {
+    allowFailure: true,
+    timeoutMs: 5_000,
+    maxOutputBytes: 16_384,
+  }).pipe(Effect.mapError(incompatible));
+  const help = result.stdout + '\n' + result.stderr;
+  if (
+    result.exitCode !== 0 ||
+    !/^Usage:\s+codex(?:\.exe)?\s+queue(?:\s|$)/imu.test(help) ||
+    !/^\s+(?:-\w,\s+)?--thread\s+<[^>\r\n]+>/mu.test(help) ||
+    !/^\s+(?:-\w,\s+)?--message\s+<[^>\r\n]+>/mu.test(help)
+  )
+    return yield* incompatible();
+});
+
 function cursorCompletionReceipt(stdout: string, sessionId: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(stdout);

@@ -150,6 +150,10 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
     await writeFile(
       host,
       `import {appendFileSync} from 'node:fs';
+if (process.argv.slice(2).join(' ') === 'queue --help') {
+  process.stdout.write('Usage: codex queue [OPTIONS] --thread <THREAD> --message <TEXT>\\nOptions:\\n      --thread <THREAD>\\n      --message <TEXT>\\n');
+  process.exit(0);
+}
 appendFileSync(${JSON.stringify(hostCounter)},JSON.stringify(process.argv.slice(2))+'\\n');
 process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for thread cccccccc-cccc-4ccc-cccc-cccccccccccc.\\n');`,
     );
