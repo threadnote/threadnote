@@ -56,6 +56,29 @@ future signed release. Enabling it still requires an approved provider and a rev
 upstream `.dll` and `.node` files. Linux and Windows artifacts are protected by the immutable GitHub release and
 checksums but are not OS code-signed.
 
+## Updater protocol compatibility
+
+The released 5.3.0-beta.7 updater requires development-workflow manifest schema 1. Beta.8 requires schema 2,
+including native workflow requirements. Both request the same manifest without negotiating its version, so one immutable
+package cannot satisfy both readers. Keep the unversioned schema-2 capability and manifest contracts compatible with
+beta.8. New updaters delegate refresh preparation, execution and status reading to the verified candidate through the
+explicit version-1 update protocol; the parent checks the stable intent and release identity without parsing the
+candidate's internal manifest or persisted refresh schema.
+
+Users on beta.7 need the official bootstrap installer once to cross this boundary:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/threadnote/threadnote/main/scripts/install.sh | sh -s -- --beta
+threadnote update --beta
+```
+
+The bootstrap installer verifies the downloaded release and invokes its installer directly. The second command uses
+the new updater to refresh enrolled workflows, preserving ownership and personal-edit checks. Stable 5.2.1 has no
+development-workflow refresh handshake and can use `threadnote update --beta`; beta.8 can also use that command.
+For a custom data home, pass the same `--home` to both recovery commands. Qualify those paths with actual released binaries in
+isolated installation and data homes. Synthetic version labels in current-code tests do not establish compatibility
+with a released updater.
+
 ## Publishing
 
 For the 5.0 release branch, keep `package.json` at `5.0.0` while reviewed slices accumulate. Every pull request targeting

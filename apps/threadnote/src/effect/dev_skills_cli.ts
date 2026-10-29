@@ -15,7 +15,12 @@ import {
   type DevSkillsResult,
 } from '../dev_skills/contract.js';
 import type {CliRuntimeRunner} from './cli.js';
-import {boolean, optionalChoice, optionalString, requiredString} from './cli/flags.js';
+import {boolean, optionalChoice, optionalString, requiredChoice, requiredString} from './cli/flags.js';
+import {
+  prepareCandidateDevSkillsUpdate,
+  readCandidateDevSkillsUpdate,
+  refreshCandidateDevSkillsUpdate,
+} from '../dev_skills/update_protocol.js';
 
 export const devSkillsCommandMetadata = {productionLog: {mode: 'never'}} as const;
 
@@ -30,6 +35,33 @@ const selectionFlags = () => ({
 });
 
 export function makeDevSkillsCommand(withRuntime: CliRuntimeRunner) {
+  const updateProtocol = () => requiredChoice('protocol-version', ['1'], 'Updater wire protocol version');
+  const prepareUpdate = Command.make(
+    'prepare-update',
+    {
+      protocolVersion: updateProtocol(),
+      releaseRoot: requiredString('release-root', 'Exact final installation release root'),
+      releaseVersion: requiredString('release-version', 'Exact candidate release version'),
+    },
+    ({releaseRoot, releaseVersion}) =>
+      withRuntime(config =>
+        prepareCandidateDevSkillsUpdate(config, releaseRoot, releaseVersion).pipe(
+          Effect.flatMap(result => Console.log(JSON.stringify(result))),
+        ),
+      ),
+  ).pipe(Command.withDescription('Prepare a verified candidate’s workflow update for the updater'));
+  const updateState = (command: 'refresh-update' | 'update-status') =>
+    Command.make(
+      command,
+      {protocolVersion: updateProtocol(), intent: requiredString('intent', 'Prepared update intent')},
+      ({intent}) =>
+        withRuntime(config =>
+          (command === 'refresh-update'
+            ? refreshCandidateDevSkillsUpdate(config, intent)
+            : readCandidateDevSkillsUpdate(config, intent)
+          ).pipe(Effect.flatMap(result => Console.log(JSON.stringify(result)))),
+        ),
+    );
   const refresh = Command.make(
     'refresh-enrolled',
     {intent: requiredString('intent', 'Prepared update intent'), json: boolean('json', 'Print the refresh result')},
@@ -92,7 +124,16 @@ export function makeDevSkillsCommand(withRuntime: CliRuntimeRunner) {
   );
   return Command.make('dev-skills').pipe(
     Command.withDescription('Install and manage Threadnote development workflows for your agent host'),
-    Command.withSubcommands([list, status, ...actions, capabilities, refresh]),
+    Command.withSubcommands([
+      list,
+      status,
+      ...actions,
+      capabilities,
+      refresh,
+      prepareUpdate,
+      updateState('refresh-update'),
+      updateState('update-status'),
+    ]),
   );
 }
 
