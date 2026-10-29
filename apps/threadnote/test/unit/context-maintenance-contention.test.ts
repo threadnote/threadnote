@@ -106,6 +106,65 @@ function successor(value: number): ContextMaintenanceCaseV2 {
 }
 
 describe('maintenance-state contention boundary', () => {
+  effectIt.effect('confirms one global pause while the work lock is held and preserves the worker journal', () =>
+    Effect.gen(function* () {
+      const data = yield* fixture();
+      const before = yield* data.fs.readFileString(data.statePath);
+      yield* withHolder(
+        data.config,
+        Effect.gen(function* () {
+          const token = yield* data.fs.readFileString(data.lockPath);
+          const response = yield* handleManagerAttentionAction({
+            config: data.config,
+            method: 'POST',
+            url: new URL('http://localhost/api/attention/context-maintenance?view=controls'),
+            body: Effect.succeed({action: 'pause'}),
+          });
+          expect(response).toEqual({status: 200, body: {paused: true}});
+          expect(yield* data.fs.readFileString(data.statePath)).toBe(before);
+          expect(yield* data.fs.readFileString(data.lockPath)).toBe(token);
+          yield* maintenance.writeState(data.config, {...data.state, state: 'waiting-evidence'});
+          expect((yield* maintenance.readState(data.config)).paused).toBe(true);
+        }),
+      );
+      expect((yield* maintenance.readContextMaintenanceControl(data.config)).paused).toBe(true);
+      const fence = yield* maintenance
+        .withMaintenancePauseFence(data.config, Effect.die('must not publish'))
+        .pipe(Effect.result);
+      expect(Result.isFailure(fence)).toBe(true);
+      expect((yield* maintenance.runContextMaintenance(data.config, {cwd: data.home})).paused).toBe(true);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.prop(
+    'worker writes cannot change a saved global control choice',
+    {
+      operations: Schema.Array(Schema.Struct({control: Schema.Boolean, paused: Schema.Boolean})).check(
+        Schema.isMinLength(1),
+        Schema.isMaxLength(12),
+      ),
+    },
+    ({operations}) =>
+      Effect.gen(function* () {
+        const data = yield* fixture();
+        let expected = false;
+        let explicitControl = false;
+        for (const operation of operations) {
+          if (operation.control) {
+            yield* maintenance.setContextMaintenanceControl(data.config, operation.paused);
+            expected = operation.paused;
+            explicitControl = true;
+          } else {
+            yield* maintenance.writeState(data.config, {...data.state, paused: operation.paused});
+            if (!explicitControl) expected = operation.paused;
+          }
+          expect((yield* maintenance.readState(data.config)).paused).toBe(expected);
+          expect((yield* maintenance.readState(data.config)).generation).toBe(data.state.generation);
+        }
+      }).pipe(provideTestLayer(TEST_LAYER)),
+    {arbitrary: {runs: 12}},
+  );
+
   effectIt.effect(
     'reports actual live-holder contention after the unchanged50ms wait without entering or changing its token',
     () =>

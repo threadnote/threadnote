@@ -13,6 +13,7 @@ import {
 } from '@threadnote/memory/code/citation';
 import {ContextHealthPanel} from '@threadnote/manager/attention-view';
 import {ManagerNavigation, useContextHealthDecisionCount} from '../../src/navigation.js';
+import {MaintenanceControls} from '../../src/attention/maintenance_controls.js';
 import {ContextMaintenanceView, adoptMaintenanceEvidence} from '@threadnote/manager/attention/maintenance-view';
 import {MaintenanceCaseDialog} from '../../src/attention/maintenance_dialogs.js';
 import {HealthDetail} from '../../src/attention_details.js';
@@ -464,6 +465,7 @@ describe('context maintenance view', () => {
       vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input), 'http://manager.test');
         if (url.pathname === '/api/shares/conflicts') return response({conflicts: []});
+        if (url.searchParams.get('view') === 'controls') return response({paused: true});
         if (url.pathname === '/api/context-health') {
           reportReads += 1;
           return reportReads > 1 ? lateReport.promise : response(staleReport);
@@ -2256,23 +2258,90 @@ describe('context maintenance view', () => {
     );
     expect(document.querySelector('[aria-label="Preparing background maintenance"]') === null).toBe(complete);
   });
-  it('keeps run and pause actions on the canonical maintenance endpoint', async () => {
-    const actions: string[] = [];
+  it('keeps global pause usable while a project run is pending and ignores its late on response', async () => {
+    const actions: Array<{url: string; action: string}> = [];
+    const pending = Promise.withResolvers<Response>();
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (_url: string, init?: RequestInit) => {
-        if (init?.body) actions.push(JSON.parse(String(init.body)).action);
-        return new Response(JSON.stringify(status()), {headers: {'content-type': 'application/json'}});
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.body) {
+          const action = JSON.parse(String(init.body)).action;
+          actions.push({url, action});
+          if (action === 'run-now') return pending.promise;
+          return new Response(JSON.stringify({paused: true}));
+        }
+        return new Response(JSON.stringify(EffectString.includes('view=controls')(url) ? {paused: false} : status()));
       }),
     );
-    await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
-    for (const label of ['Run maintenance now', 'Pause automatic maintenance']) {
-      const button = EffectOption.getOrUndefined(
-        EffectArray.findFirst(Array.from(document.querySelectorAll('button')), item => item.textContent === label),
+    function CombinedControls() {
+      const [controlGeneration, setControlGeneration] = React.useState(0);
+      return (
+        <>
+          <MaintenanceControls project="threadnote" onChanged={() => setControlGeneration(value => value + 1)} />
+          <ContextMaintenanceView
+            {...props}
+            controlGeneration={controlGeneration}
+            project="threadnote"
+            report={report()}
+          />
+        </>
       );
-      await act(async () => button?.click());
     }
-    expect(actions).toEqual(['run-now', 'pause']);
+    await render(<CombinedControls />);
+    const button = (label: string) =>
+      EffectOption.getOrThrow(
+        EffectArray.findFirst(
+          Array.from(document.querySelectorAll('button')),
+          item => EffectString.trim(item.textContent ?? '') === label,
+        ),
+      );
+    await act(async () => button('Automatic recovery').click());
+    await act(async () => button('Run maintenance now').click());
+    expect(button('Pause automatic maintenance').disabled).toBe(false);
+    await act(async () => button('Pause automatic maintenance').click());
+    expect(
+      document.querySelector('[aria-label="Automatic maintenance controls"] .health-status-badge')?.textContent,
+    ).toBe('Off');
+    const projectRun = document.querySelector<HTMLButtonElement>('[aria-label="Project maintenance actions"] button')!;
+    expect(projectRun.disabled).toBe(true);
+    await act(async () => projectRun.click());
+    expect(actions).toHaveLength(2);
+    await act(async () => pending.resolve(new Response(JSON.stringify(status()))));
+    expect(
+      document.querySelector('[aria-label="Automatic maintenance controls"] .health-status-badge')?.textContent,
+    ).toBe('Off');
+    expect(actions).toEqual([
+      {url: '/api/attention/context-maintenance', action: 'run-now'},
+      {url: '/api/attention/context-maintenance?view=controls', action: 'pause'},
+    ]);
+  });
+  it('refreshes a paused project after enabling the global setting without live support', async () => {
+    let paused = true;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (EffectString.includes('view=controls')(url)) {
+          if (init?.body) paused = false;
+          return new Response(JSON.stringify({paused}));
+        }
+        if (EffectString.startsWith('/api/context-health')(url)) return new Response(JSON.stringify(report()));
+        if (EffectString.startsWith('/api/attention/context-maintenance')(url))
+          return new Response(JSON.stringify({...status(), paused}));
+        return new Response(JSON.stringify({version: 1, project: 'threadnote', items: [], omitted: 0}));
+      }),
+    );
+    await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={0} />);
+    const button = (label: string) =>
+      EffectOption.getOrThrow(
+        EffectArray.findFirst(
+          Array.from(document.querySelectorAll('button')),
+          item => EffectString.trim(item.textContent ?? '') === label,
+        ),
+      );
+    await act(async () => button('Automatic recovery').click());
+    expect(button('Run maintenance now').disabled).toBe(true);
+    await act(async () => button('Enable automatic maintenance').click());
+    expect(button('Run maintenance now').disabled).toBe(false);
   });
   it('rejects a late status response after changing projects', async () => {
     const pending = Promise.withResolvers<Response>();
@@ -3053,7 +3122,7 @@ it.each([401, 403, 404])(
   },
 );
 
-async function pendingParentDenial(kind: 'cases' | 'receipts' | 'pause' | 'undo', holdEvidence = false) {
+async function pendingParentDenial(kind: 'cases' | 'receipts' | 'run-now' | 'undo', holdEvidence = false) {
   const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/private-pagination.md';
   const item: ManagerContextMaintenanceCaseV2 = {
     caseId: 'pending-parent-case',
@@ -3109,7 +3178,7 @@ async function pendingParentDenial(kind: 'cases' | 'receipts' | 'pause' | 'undo'
     vi.fn(async (input: string, init?: RequestInit) => {
       const url = new URL(input, 'http://manager.test');
       if (
-        (init?.method === 'POST' && ['pause', 'undo'].includes(JSON.parse(String(init.body)).action)) ||
+        (init?.method === 'POST' && ['run-now', 'undo'].includes(JSON.parse(String(init.body)).action)) ||
         url.searchParams.has('caseCursor') ||
         url.searchParams.has('receiptCursor')
       ) {
@@ -3161,7 +3230,7 @@ async function pendingParentDenial(kind: 'cases' | 'receipts' | 'pause' | 'undo'
           ? 'Load more retained changes and undo'
           : kind === 'undo'
             ? 'Undo this change'
-            : 'Pause automatic maintenance',
+            : 'Run maintenance now',
     ).click(),
   );
   expect(requests).toEqual([kind]);
@@ -3186,8 +3255,8 @@ it.each([401, 403, 404])('redacts an open review when gated history pagination r
   expect(document.body.textContent).not.toContain('PRIVATE SELECTED EVIDENCE');
 });
 
-it.each([401, 403, 404])('redacts an open review when a gated same-parent pause action returns %s', async code => {
-  const pending = await pendingParentDenial('pause');
+it.each([401, 403, 404])('redacts an open review when a gated same-parent run action returns %s', async code => {
+  const pending = await pendingParentDenial('run-now');
   expect(document.querySelector('dialog')?.textContent).toContain('PRIVATE STORED MEMORY');
   expect(document.querySelector('dialog')?.textContent).toContain('PRIVATE SELECTED EVIDENCE');
   await pending.finish(code);
@@ -3207,7 +3276,7 @@ it('redacts protected review state independently of delayed history/action and e
   ] as const;
   await fc.assert(
     fc.asyncProperty(
-      fc.constantFrom('cases' as const, 'receipts' as const, 'pause' as const),
+      fc.constantFrom('cases' as const, 'receipts' as const, 'run-now' as const),
       fc.constantFrom(401, 403, 404),
       fc.constantFrom(...orders),
       async (kind, code, order) => {
@@ -3238,7 +3307,7 @@ it('redacts protected review state independently of delayed history/action and e
   );
 });
 
-it.each(['cases', 'receipts', 'pause'] as const)(
+it.each(['cases', 'receipts', 'run-now'] as const)(
   'preserves an authorized open review after transient %s request failure',
   async kind => {
     const pending = await pendingParentDenial(kind);

@@ -1,5 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
+import {setContextMaintenancePaused} from '../../src/memory/context/maintenance.js';
 import {expect} from 'vitest';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
@@ -29,6 +30,7 @@ export const managerImportedTopicFixture = Effect.fn('test.managerImportedTopicF
     manifestPath: path.join(home, 'manifest.yaml'),
     user: 'tester',
   };
+  yield* setContextMaintenancePaused(config, false);
   yield* fs.makeDirectory(vault, {recursive: true});
   yield* fs.writeFileString(notePath, 'Original note fact.');
   yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');

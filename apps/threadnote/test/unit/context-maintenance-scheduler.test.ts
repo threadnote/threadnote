@@ -9,6 +9,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   runContextMaintenanceScheduler,
   setContextMaintenancePaused,
+  readContextMaintenanceControl,
   wakeContextMaintenance,
 } from '@threadnote/threadnote/memory/context/maintenance';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -33,9 +34,23 @@ function fixture() {
 const unavailableCommand = () => Effect.die(new Error('Only detached maintenance is allowed in this test.'));
 
 describe('context maintenance scheduler containment', () => {
+  effectIt.effect('defaults a fresh installation to off and does not start detached maintenance', () =>
+    Effect.gen(function* () {
+      const config = yield* fixture();
+      expect((yield* readContextMaintenanceControl(config)).paused).toBe(true);
+      const command = CommandExecutor.of({
+        execute: unavailableCommand,
+        executeStreaming: unavailableCommand,
+        spawnDetached: () => Effect.die('Automatic maintenance must remain off until enabled.'),
+      });
+      expect(yield* wakeContextMaintenance(config).pipe(Effect.provideService(CommandExecutor, command))).toBe(false);
+    }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
+  );
+
   effectIt.effect('starts a detached tick immediately and repeats after thirty seconds', () =>
     Effect.gen(function* () {
       const config = yield* fixture();
+      yield* setContextMaintenancePaused(config, false);
       const system = yield* SystemInfo;
       const first = yield* Deferred.make<void>();
       const second = yield* Deferred.make<void>();

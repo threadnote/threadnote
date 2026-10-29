@@ -59,6 +59,7 @@ function fixture() {
       manifestPath: path.join(home, 'manifest.yaml'),
       user: 'tester',
     };
+    yield* setContextMaintenancePaused(config, false);
     const write = (item: ReturnType<typeof record>) =>
       fs.writeFileString(path.join(directory, `${item.metadata.topic}.md`), item.content);
     const state = () =>
@@ -200,6 +201,7 @@ describe('whole-engine convergence', () => {
         for (const item of reverse ? [...documents].reverse() : documents)
           yield* f.fs.writeFileString(f.path.join(f.directory, item.name), item.content);
         yield* f.fs.remove(f.path.join(f.home, 'context-maintenance'), {recursive: true});
+        yield* setContextMaintenancePaused(f.config, false);
         yield* settle(f, repository, reverse ? 1 : 4);
         expect(activeCases(yield* f.state())).toEqual(activeCases(maintained));
       }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
@@ -277,6 +279,7 @@ describe('whole-engine convergence', () => {
         yield* settle(f, f.home, batch);
         const final = activeCases(yield* f.state());
         yield* f.fs.remove(f.path.join(f.home, 'context-maintenance'), {recursive: true});
+        yield* setContextMaintenancePaused(f.config, false);
         yield* settle(f, f.home, 4);
         expect(activeCases(yield* f.state())).toEqual(final);
       }).pipe(provideTestLayer(ApplicationLayer)),

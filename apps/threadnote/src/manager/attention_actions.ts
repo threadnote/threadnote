@@ -26,6 +26,8 @@ import {
   readContextMaintenancePacket,
   runContextMaintenance,
   setContextMaintenancePaused,
+  readContextMaintenanceControl,
+  setContextMaintenanceControl,
   undoContextMaintenance,
 } from '../memory/context/maintenance.js';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -91,6 +93,13 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   const topicReview = yield* handleManagerTopicReview(request);
   if (topicReview !== undefined) return topicReview;
   if (route === '/api/attention/context-maintenance') {
+    if (request.url.searchParams.get('view') === 'controls') {
+      if (request.method === 'GET') return {status: 200, body: yield* readContextMaintenanceControl(request.config)};
+      if (request.method !== 'POST') return undefined;
+      const body = yield* request.body;
+      if (body.action !== 'pause' && body.action !== 'resume') return invalid('Choose pause or resume.');
+      return yield* maintenanceActionResponse(setContextMaintenanceControl(request.config, body.action === 'pause'));
+    }
     if (request.method === 'GET') {
       const project = request.url.searchParams.get('project') ?? undefined;
       if (project !== undefined && !isManagerProjectName(project)) return invalid('Select a valid project.');

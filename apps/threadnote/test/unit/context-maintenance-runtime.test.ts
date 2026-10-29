@@ -1359,7 +1359,7 @@ describe('persistent context maintenance', () => {
         checkpoints: {},
       };
       const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
-      yield* fixture.fs.makeDirectory(fixture.path.dirname(stateFile));
+      yield* fixture.fs.makeDirectory(fixture.path.dirname(stateFile), {recursive: true});
       yield* fixture.fs.writeFileString(stateFile, JSON.stringify(state));
       const initial = yield* readContextMaintenanceStatus(fixture.config, 'threadnote');
       expect(initial.cases).toHaveLength(30);
@@ -2927,7 +2927,7 @@ describe('persistent context maintenance', () => {
       }));
       const legacy = {...removed[0], caseId: 'legacy-case', slot: 'anchor:1', citationId: undefined, attemptCount: 3};
       const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
-      yield* fixture.fs.makeDirectory(fixture.path.dirname(stateFile));
+      yield* fixture.fs.makeDirectory(fixture.path.dirname(stateFile), {recursive: true});
       yield* fixture.fs.writeFileString(
         stateFile,
         JSON.stringify({
@@ -4834,6 +4834,11 @@ function makeFixture() {
       manifestPath: path.join(home, 'threadnote.json'),
       user: 'tester',
     };
+    yield* fs.makeDirectory(path.join(home, 'context-maintenance'), {recursive: true});
+    yield* fs.writeFileString(
+      path.join(home, 'context-maintenance/control-v1.json'),
+      JSON.stringify({version: 1, paused: false}),
+    );
     return {fs, path, home, directory, source: path.join(directory, 'source.md'), config};
   });
 }

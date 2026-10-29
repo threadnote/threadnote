@@ -1,4 +1,16 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {
+  withMaintenanceControlPauseFence,
+  readMaintenanceControl,
+  readContextMaintenanceControl,
+} from './maintenance_control.js';
+export {
+  withMaintenanceControlPauseFence,
+  contextMaintenanceControlPath,
+  readContextMaintenanceControl,
+  setContextMaintenanceControl,
+  setContextMaintenancePaused,
+} from './maintenance_control.js';
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {ManagerLiveChangeHints} from '../../manager/live_sources.js';
 import {prepareAutomaticMaintenance} from './maintenance_preparation.js';
@@ -204,28 +216,15 @@ export function reconcileAcceptedTopicMaintenanceCase<A, E, R>(
   );
 }
 
-export const setContextMaintenancePaused = Effect.fn('contextMaintenance.pause')(function* (
-  config: RuntimeConfig,
-  paused: boolean,
-) {
-  return yield* selectedMaintenance.withMaintenanceOperationLock(
-    config,
-    Effect.gen(function* () {
-      const state = {...(yield* readState(config)), paused};
-      yield* writeState(config, state);
-      return publicStatus(state);
-    }),
-  );
-});
-
-export function withMaintenancePauseFence<A, E, R>(config: RuntimeConfig, publish: Effect.Effect<A, E, R>) {
+/** Retain worker-state ownership while the publisher acquires its queue claim. */
+export function withMaintenancePublicationLock<A, E, R>(config: RuntimeConfig, publish: Effect.Effect<A, E, R>) {
   return Effect.suspend(() => {
     let entered = false;
     return withStateLock(
       config,
       Effect.gen(function* () {
         entered = true;
-        if ((yield* readState(config)).paused)
+        if ((yield* readContextMaintenanceControl(config)).paused)
           return yield* fail('Automatic generation is paused with all context maintenance.');
         return yield* publish;
       }),
@@ -236,6 +235,10 @@ export function withMaintenancePauseFence<A, E, R>(config: RuntimeConfig, publis
       ),
     );
   });
+}
+
+export function withMaintenancePauseFence<A, E, R>(config: RuntimeConfig, publish: Effect.Effect<A, E, R>) {
+  return withMaintenancePublicationLock(config, withMaintenanceControlPauseFence(config, publish));
 }
 
 export const runContextMaintenance = Effect.fn('contextMaintenance.run')(function* (
@@ -1240,6 +1243,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       };
       yield* writeState(config, state);
       if (selectedCase === undefined) yield* pruneReceiptJournals(config, state.receipts);
+      state = {...state, ...(yield* readContextMaintenanceControl(config))};
       return selectedCase === undefined
         ? publicStatus(state)
         : publicStatus(state, options.project, {caseId: options.caseId});
@@ -1726,7 +1730,7 @@ function fail(message: string) {
 function emptyState(): MaintenanceState {
   return {
     version: 2,
-    paused: false,
+    paused: true,
     state: 'idle',
     generation: '',
     projects: [],
@@ -1768,14 +1772,19 @@ export function withStateLock<A, E, R>(config: RuntimeConfig, effect: Effect.Eff
     return yield* withExclusiveFileLock(yield* FileSystem.FileSystem, `${yield* statePath(config)}.lock`, LOCK, effect);
   });
 }
-export const readState = Effect.fn('contextMaintenance.readState')(function* (config: RuntimeConfig) {
+export const readRawState = Effect.fn('contextMaintenance.readRawState')(function* (config: RuntimeConfig) {
   const value = yield* readJson(yield* statePath(config));
   if (value === undefined) return emptyState();
   if (!isMaintenanceState(value)) return yield* fail('Maintenance state is malformed; preserve it for recovery.');
   const state = value;
   return {...state, cases: migrateMaintenanceCases(state.cases)};
 });
-function readJson(file: string) {
+export const readState = Effect.fn('contextMaintenance.readState')(function* (config: RuntimeConfig) {
+  const state = yield* readRawState(config);
+  const control = yield* readMaintenanceControl(config);
+  return {...state, paused: control?.paused ?? state.paused};
+});
+export function readJson(file: string) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const stat = yield* fs.stat(file).pipe(Effect.result);
@@ -1795,7 +1804,7 @@ function readJson(file: string) {
     });
   });
 }
-const atomicJson = Effect.fn('contextMaintenance.atomicJson')(function* (file: string, value: unknown) {
+export const atomicJson = Effect.fn('contextMaintenance.atomicJson')(function* (file: string, value: unknown) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   yield* fs.makeDirectory(path.dirname(file), {recursive: true});

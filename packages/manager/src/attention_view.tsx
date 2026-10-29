@@ -27,6 +27,7 @@ import {api, errorMessage, ManagerApiError} from '@threadnote/manager/ui/support
 import {useManagerLiveQuery, useManagerLiveResource} from './live/provider.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
+import {MaintenanceControls} from './attention/maintenance_controls.js';
 
 interface AttentionPanelProps {
   readonly onOpenLibrary: (uri?: string) => void;
@@ -430,6 +431,18 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
 }
 
 export function ContextHealthPanel(props: AttentionPanelProps): React.ReactElement {
+  const [controlGeneration, setControlGeneration] = useState(0);
+  return (
+    <>
+      <MaintenanceControls project={props.project} onChanged={() => setControlGeneration(value => value + 1)} />
+      <ProjectContextHealthPanel {...props} controlGeneration={controlGeneration} />
+    </>
+  );
+}
+
+function ProjectContextHealthPanel(
+  props: AttentionPanelProps & {readonly controlGeneration: number},
+): React.ReactElement {
   const readHealth = useCallback(
     (signal: AbortSignal) =>
       api<ManagerContextHealthResponseV1>(
@@ -819,6 +832,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
     return (
       <ContextMaintenanceView
         key={props.project}
+        controlGeneration={props.controlGeneration}
         project={props.project}
         projects={props.projects}
         report={report}

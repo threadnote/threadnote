@@ -111,7 +111,12 @@ import {
 } from './maintenance_preparation_state.js';
 import {maintenanceContentHash} from './maintenance_policy.js';
 import {prepareContextMaintenanceInventory, readContextMaintenanceCanonicalRecord} from './maintenance_inventory.js';
-import {readContextMaintenancePacket, readContextMaintenanceStatus, withMaintenancePauseFence} from './maintenance.js';
+import {
+  readContextMaintenancePacket,
+  readContextMaintenanceStatus,
+  withMaintenanceControlPauseFence,
+  withMaintenancePublicationLock,
+} from './maintenance.js';
 import {withTopicGenerationObservation, TopicGenerationRequestError} from './maintenance_generation.js';
 import {MaintenancePauseFenceBusy} from './maintenance_contracts.js';
 import * as EffectRecord from 'effect/Record';
@@ -261,10 +266,14 @@ const verifyAdmittedDraft = Effect.fn('automaticMaintenance.verifyDraftAdmission
 function saveAdmittedDraft(config: RuntimeConfig, review: CandidateReview, claim?: DraftQueueClaim) {
   const publish = saveCandidateReview(config.agentContextHome, review);
   if (!claim) return publish;
-  const fenced = publishDraftWorkReview(config, claim, publish);
+  const fenced = publishDraftWorkReview(
+    config,
+    claim,
+    claim.work.foreground ? publish : withMaintenanceControlPauseFence(config, publish),
+  );
   // Both callers hold the review lock. Pause and queue publication order is
-  // review → maintenance state → queue; expensive source checks precede this fence.
-  return claim.work.foreground ? fenced : withMaintenancePauseFence(config, fenced);
+  // review → maintenance state → queue → control; queue waits never hold the control lock.
+  return claim.work.foreground ? fenced : withMaintenancePublicationLock(config, fenced);
 }
 
 /** Retry only a known unopened publication fence, never inference or a possibly-started writer. */

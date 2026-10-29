@@ -7,7 +7,7 @@ import {modelSetupObservationPaths} from '../models/setup.js';
 import {autoUpdateObservationPath} from '../release/auto_update.js';
 import {installedActiveReleaseObservationPath} from '../installations.js';
 import {readManageableThreadnoteProcessDiagnostics} from '../process/diagnostics.js';
-import {contextMaintenanceStatePath} from '../memory/context/maintenance.js';
+import {contextMaintenanceControlPath, contextMaintenanceStatePath} from '../memory/context/maintenance.js';
 import {readManagerLiveProjects, type ManagerLive} from './live.js';
 import {makeManagerLiveSources} from './live_sources.js';
 import {makeHealthEnabledManagerLive} from './live_health_sources.js';
@@ -74,6 +74,7 @@ export const makeManagerLiveObservationRuntime = Effect.fn('manager.liveObservat
     home: config.agentContextHome,
     account: config.account,
     maintenanceStatePath: yield* contextMaintenanceStatePath(config),
+    maintenanceControlPath: yield* contextMaintenanceControlPath(config),
     manifestPath: config.manifestPath,
     onScopeChange: live.invalidateScope,
     onInvalidate: (topics, revision) =>

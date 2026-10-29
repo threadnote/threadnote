@@ -84,6 +84,8 @@ describe('Manager canonical live observation', () => {
       const seen: string[] = [];
       let scopeChanges = 0;
       const maintenanceStatePath = path.join(home, 'context-maintenance', 'state-v2.json');
+      const maintenanceControlPath = path.join(home, 'context-maintenance', 'control-v1.json');
+      yield* fs.makeDirectory(path.dirname(maintenanceControlPath), {recursive: true});
       // Dropped watcher delivery is intentional: every replacement must be
       // recovered by the bounded reconciliation timer alone.
       const unwatchedFs: FileSystem.FileSystem = {...fs, watch: () => Stream.never};
@@ -91,6 +93,7 @@ describe('Manager canonical live observation', () => {
         home,
         account: 'local',
         maintenanceStatePath,
+        maintenanceControlPath,
         manifestPath,
         onScopeChange: Effect.sync(() => {
           scopeChanges++;
@@ -117,6 +120,8 @@ describe('Manager canonical live observation', () => {
       yield* replace(semanticFile, '{"semantic":1}');
       expect(scopeChanges).toBe(0);
       yield* replace(manifestPath, '{"manifest":1}');
+      expect(scopeChanges).toBe(1);
+      yield* replace(maintenanceControlPath, '{"version":1,"paused":true}');
       expect(scopeChanges).toBe(1);
     }).pipe(Effect.timeout('18 seconds'), TestClock.withLive, provideLayer),
   );

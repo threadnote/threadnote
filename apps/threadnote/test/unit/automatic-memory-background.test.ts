@@ -232,6 +232,7 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* (body =
     user: 'tester',
     manifestPath: path.join(home, 'manifest.yaml'),
   };
+  yield* setContextMaintenancePaused(config, false);
   yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
   const server = new EffectMcpServerAdapter('automatic-background-test', '1.0.0', '');
   registerStoreTool(server, config, 'remember_context', 'Store memory.');
@@ -1280,7 +1281,7 @@ describe('automatic ordinary-memory background controls', () => {
                     Effect2.pipe(
                       file,
                       EffectString.endsWith(
-                        invalidation === 'all-maintenance-pause' ? 'state-v2.json.lock' : 'queue.lock',
+                        invalidation === 'all-maintenance-pause' ? 'control-v1.json.lock' : 'queue.lock',
                       ),
                     )
                       ? Deferred.succeed(policyBoundary, 'contended').pipe(Effect.asVoid)
