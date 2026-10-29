@@ -101,8 +101,8 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
   const missingStoreAttempt =
     action === 'install' &&
     !receipt &&
-    (context.homeIndex.targets[id] !== undefined ||
-      context.runtimeIndex.enrollments[id] !== undefined ||
+    (context.homeIndex.targets[id]?.state === 'enrolled' ||
+      context.runtimeIndex.enrollments[id]?.state === 'enrolled' ||
       sharing.length > 0) &&
     physicalJournal === null;
   const missingStoreReinstall =

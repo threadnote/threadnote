@@ -64,6 +64,59 @@ const enablement = Effect.fn(function* (f: Effect.Success<ReturnType<typeof miss
     runtimeAfter: json(runtime),
   });
 });
+const survivingKinds = [
+  'unknown-file',
+  'unknown-directory',
+  'generation',
+  'staging',
+  'lock',
+  'discovery-file',
+  'discovery-directory',
+  'physical-journal',
+  'restore-journal',
+] as const;
+const refusesSurvivingContent = (
+  kind: (typeof survivingKinds)[number],
+  member = 'dev-plan',
+  suffix = 'known',
+  payload = 'unowned',
+) =>
+  Effect.gen(function* () {
+    const f = yield* missing();
+    const destination =
+      kind === 'discovery-file'
+        ? f.path.join(f.installed.target.skillRoot, member, 'SKILL.md')
+        : kind === 'discovery-directory'
+          ? f.path.join(f.installed.target.skillRoot, member, `unknown-${suffix}`)
+          : f.path.join(
+              f.store,
+              (
+                {
+                  'unknown-file': `unknown-${suffix}`,
+                  'unknown-directory': `unknown-${suffix}`,
+                  generation: 'generations/orphan',
+                  staging: 'orphan.staging',
+                  lock: '.mutation.lock',
+                  'physical-journal': 'journal.json',
+                  'restore-journal': 'restore-journal.json',
+                } as Record<string, string>
+              )[kind],
+            );
+    if (['unknown-directory', 'generation', 'staging', 'discovery-directory'].includes(kind))
+      yield* f.fs.makeDirectory(destination, {recursive: true});
+    else {
+      yield* f.fs.makeDirectory(f.path.dirname(destination), {recursive: true});
+      yield* f.fs.writeFileString(destination, payload);
+    }
+    const before = yield* snapshot(f.root);
+    const preview = yield* f.run(previewDevSkills(f.config, 'install', selector, manual));
+    expect(preview.canApply).toBe(false);
+    // Original physical journals retain their separate recovery path; malformed ones fail closed.
+    expect(yield* f.run(applyDevSkills(f.config, 'install', selector, manual)).pipe(Effect.result)).toMatchObject({
+      _tag: 'Failure',
+    });
+    expect(yield* snapshot(f.root)).toEqual(before);
+  }).pipe(provide);
 
 describe('explicit manual missing-store reinstall', () => {
   for (const flat of [false, true])
@@ -259,65 +312,49 @@ describe('explicit manual missing-store reinstall', () => {
     }).pipe(provide),
   );
 
+  for (const kind of survivingKinds)
+    effectIt.effect(`refuses surviving ${kind} without changing any bytes`, () => refusesSurvivingContent(kind));
+
   effectIt.effect.prop(
-    'refuses every surviving managed store or workflow entry without changing any bytes',
+    'preserves arbitrary surviving store and discovery content without acquiring ownership',
     {
-      kind: Schema.Literals([
-        'unknown-file',
-        'unknown-directory',
-        'generation',
-        'staging',
-        'lock',
-        'discovery-file',
-        'discovery-directory',
-        'physical-journal',
-        'restore-journal',
-      ]),
+      kind: Schema.Literals(['unknown-file', 'unknown-directory', 'discovery-file', 'discovery-directory']),
       member: Schema.Literals(['dev-spec', 'dev-plan', 'dev-cycle', 'watch-pr']),
       suffix: Schema.String.check(Schema.isPattern(/^[a-d]{1,8}$/u)),
       payload: Schema.String.check(Schema.isMaxLength(80)),
     },
-    ({kind, member, suffix, payload}) =>
-      Effect.gen(function* () {
-        const f = yield* missing();
-        const destination =
-          kind === 'discovery-file'
-            ? f.path.join(f.installed.target.skillRoot, member, 'SKILL.md')
-            : kind === 'discovery-directory'
-              ? f.path.join(f.installed.target.skillRoot, member, `unknown-${suffix}`)
-              : f.path.join(
-                  f.store,
-                  (
-                    {
-                      'unknown-file': `unknown-${suffix}`,
-                      'unknown-directory': `unknown-${suffix}`,
-                      generation: 'generations/orphan',
-                      staging: 'orphan.staging',
-                      lock: '.mutation.lock',
-                      'physical-journal': 'journal.json',
-                      'restore-journal': 'restore-journal.json',
-                    } as Record<string, string>
-                  )[kind],
-                );
-        if (['unknown-directory', 'generation', 'staging', 'discovery-directory'].includes(kind))
-          yield* f.fs.makeDirectory(destination, {recursive: true});
-        else {
-          yield* f.fs.makeDirectory(f.path.dirname(destination), {recursive: true});
-          yield* f.fs.writeFileString(destination, payload);
-        }
-        const before = yield* snapshot(f.root);
-        const preview = yield* f.run(previewDevSkills(f.config, 'install', selector, manual));
-        expect(preview.canApply).toBe(false);
-        // Original physical journals retain their separate recovery path; malformed ones fail closed.
-        expect(yield* f.run(applyDevSkills(f.config, 'install', selector, manual)).pipe(Effect.result)).toMatchObject({
-          _tag: 'Failure',
-        });
-        expect(yield* snapshot(f.root)).toEqual(before);
-      }).pipe(provide),
-    {arbitrary: {runs: 18}},
+    ({kind, member, suffix, payload}) => refusesSurvivingContent(kind, member, suffix, payload),
+    {arbitrary: {runs: 8}},
   );
 
-  for (const mismatch of ['missing-runtime', 'different-target', 'removed', 'foreign-disabled'] as const)
+  for (const explicitManual of [false, true])
+    effectIt.effect(`allows an ordinary explicit install after a matched opt-out (manual=${explicitManual})`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        expect(
+          yield* f.run(
+            ensureDevSkills(f.config, selector, {mode: 'setup', choice: 'disabled', operationId: 'opt-out'}),
+          ),
+        ).toMatchObject({state: 'disabled'});
+        const before = yield* snapshot(f.root);
+        const options = explicitManual ? manual : {};
+        const preview = yield* f.run(previewDevSkills(f.config, 'install', selector, options));
+        expect(preview.canApply).toBe(true);
+        expect(yield* snapshot(f.root)).toEqual(before);
+        expect(
+          yield* f.run(
+            applyDevSkills(f.config, 'install', selector, {...options, expectedDigest: preview.previewDigest}),
+          ),
+        ).toMatchObject({applied: true, recovered: false});
+        expect((yield* f.run(statusDevSkills(f.config, selector))).targets[0]).toMatchObject({
+          installationState: 'current',
+          enrollmentState: 'enrolled',
+          enabled: true,
+        });
+      }).pipe(provide),
+    );
+
+  for (const mismatch of ['missing-runtime', 'different-target', 'removed-vs-active', 'foreign-disabled'] as const)
     effectIt.effect(`refuses ${mismatch} enrollment`, () =>
       Effect.gen(function* () {
         const f = yield* missing();
@@ -327,9 +364,9 @@ describe('explicit manual missing-store reinstall', () => {
           runtime = JSON.parse(yield* f.fs.readFileString(runtimeFile));
         if (mismatch === 'missing-runtime') delete runtime.enrollments[f.installed.consumerId];
         if (mismatch === 'different-target') runtime.enrollments[f.installed.consumerId].target.discoveryRoots = [];
-        if (mismatch === 'removed') {
-          home.targets[f.installed.consumerId].state = runtime.enrollments[f.installed.consumerId].state = 'removed';
-          home.targets[f.installed.consumerId].enabled = runtime.enrollments[f.installed.consumerId].enabled = false;
+        if (mismatch === 'removed-vs-active') {
+          home.targets[f.installed.consumerId].state = 'removed';
+          home.targets[f.installed.consumerId].enabled = false;
         }
         if (mismatch === 'foreign-disabled') {
           const foreign = {
