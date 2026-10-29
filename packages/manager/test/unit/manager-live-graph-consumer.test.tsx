@@ -173,3 +173,33 @@ it('coalesces dependent catalog reads and aborts a pending read when Graph is le
   await flush();
   expect(document.querySelector('output')?.textContent).toBe('r1');
 });
+
+it('applies pushed graph status and refreshes dependent catalog data without status GETs', async () => {
+  const host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () =>
+    root?.render(
+      <ManagerLiveProvider account="one">
+        <Probe />
+      </ManagerLiveProvider>,
+    ),
+  );
+  await flush();
+  const socket = FakeManagerSocket.instances[0];
+  const status = () => ({builds: [], catalogRevision: revision, lifecyclePending: false, waiterCount: 0, waiters: []});
+  await act(async () => {
+    socket.open(['graph-status'], ['graph-status']);
+    socket.ack();
+    socket.snapshot(1, {topic: 'graph-status', scope: 'account'}, status());
+  });
+  await flush();
+  expect([statusReads, catalogReads, diagnosticReads]).toEqual([0, 1, 1]);
+  revision = 'r2';
+  await act(async () => socket.snapshot(2, {topic: 'graph-status', scope: 'account'}, status()));
+  await flush();
+  expect(document.querySelector('output')?.textContent).toBe('r2');
+  expect([statusReads, catalogReads, diagnosticReads]).toEqual([0, 2, 2]);
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  expect(statusReads).toBe(0);
+});
