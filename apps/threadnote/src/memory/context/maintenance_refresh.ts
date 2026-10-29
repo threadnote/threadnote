@@ -105,6 +105,32 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
     EffectArray.some(records, record => record.metadata.status !== 'active' || record.metadata.project !== item.project)
   )
     return {outcome: 'unavailable' as const, reason: 'A selected memory is no longer available in this project.'};
+  if (item.family === 'repository-recovery') {
+    if (!item.repositoryId || item.memoryId !== item.repositoryId || item.slot !== 'repository')
+      return yield* close({
+        outcome: 'unavailable' as const,
+        reason: 'The selected repository group identity is unavailable. Review the retained repository recovery case.',
+      });
+    if (
+      EffectArray.some(
+        records,
+        record =>
+          !EffectArray.some(
+            item.subjectContentHashes ?? [],
+            subject => subject.uri === record.uri && subject.hash === maintenanceContentHash(record.content),
+          ),
+      )
+    )
+      return yield* close({
+        outcome: 'unavailable' as const,
+        reason: 'A selected repository recovery subject changed. Review the current subjects before proceeding.',
+      });
+    return yield* close({
+      outcome: 'unavailable' as const,
+      reason:
+        'Repository recovery does not support a grouped source refresh. Verify the repository association with authoritative repository evidence, then refresh the affected citation cases individually. Current source and route evidence have not been checked.',
+    });
+  }
   const record =
     EffectOption.getOrUndefined(
       EffectArray.findFirst(records, record => (record.metadata.memoryId ?? record.uri) === item.memoryId),
