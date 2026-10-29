@@ -130,13 +130,13 @@ describe('native request schema discovery', () => {
     expect(JSON.parse(response.schemaPage.text).schema.required).not.toContain('expectedRevision');
   });
 
-  it('discovers the mandatory root lane without requiring a specialist', () => {
+  it('discovers both mandatory review lanes with additional specialists optional', () => {
     const response = nativeRequestSchema({...base, topic: 'cycle-review'});
     expect(response).toMatchObject({
       semanticPrerequisites: {
-        requiredSelectedLane: 'orchestrator',
-        requiredCompletedLane: 'orchestrator',
-        specialistLanes: expect.stringContaining('Optional'),
+        requiredSelectedLanes: ['orchestrator', 'simplicity'],
+        requiredCompletedLanes: ['orchestrator', 'simplicity'],
+        specialistLanes: expect.stringContaining('Additional specialist lanes are optional'),
       },
     });
   });
