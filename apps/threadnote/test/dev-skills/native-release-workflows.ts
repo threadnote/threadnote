@@ -3,6 +3,7 @@
  * Cloud acceptance uses actual bootstrap/publication against private bare Git.
  */
 import assert from 'node:assert/strict';
+import {String as EffectString} from 'effect';
 // Bun 1.4.2 compile cannot bundle the testing builtin export-star wrappers.
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- Independent checksum boundary in the compiled release controller.
 import {createHash} from 'node:crypto';
@@ -1366,7 +1367,13 @@ function runProfile(
       const artifact = call({...jobCommon, action: 'read', uri: root.uri}, undefined, ['ok'], 1_048_576).artifact;
       assert.equal(artifact.uri, root.uri);
       assert.equal(artifact.revision, root.revision);
-      assert(structuredDocument(artifact).title === jobDocument.title);
+      const rootPayload = structuredDocument(artifact);
+      assert.equal(rootPayload.format, 'threadnote-native-authoring-root');
+      assert.equal(rootPayload.kind, jobDocument.kind);
+      assert.equal(rootPayload.featureId, jobDocument.id);
+      assert.equal(rootPayload.documentHash, result.result.authoring.documentHash);
+      assert.equal(rootPayload.readiness, 'draft');
+      assert(EffectString.startsWith(`# ${jobDocument.title}\n`)(artifact.body));
       const retry = call({...jobCommon, action: 'job', command: 'submit', work}, undefined, ['completed'], 65_536);
       assert.equal(retry.jobId, jobId);
       assert.equal(retry.status, 'completed');
