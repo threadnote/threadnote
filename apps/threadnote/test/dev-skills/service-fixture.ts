@@ -99,6 +99,7 @@ export const devSkillsReleaseFixture = Effect.fn('test.devSkills.release')(funct
   const bundle = yield* loadDevSkillsBundleAt(f.source, version, false);
   const releaseRoot = f.path.join(f.runtime, 'versions', version);
   const bundleRoot = staged ? f.path.join(f.runtime, 'versions', '.threadnote-update-fixture', 'release') : releaseRoot;
+  const executableName = f.system.platform === 'win32' ? 'threadnote.exe' : 'threadnote';
   for (const [relative, content] of Object.entries(bundle.files)) {
     const file = f.path.join(bundleRoot, 'config', 'agent-skills', relative);
     yield* f.fs.makeDirectory(f.path.dirname(file), {recursive: true});
@@ -106,7 +107,7 @@ export const devSkillsReleaseFixture = Effect.fn('test.devSkills.release')(funct
   }
   yield* f.fs.writeFileString(f.path.join(bundleRoot, 'config/dev-skills.json'), JSON.stringify(bundle.manifest));
   yield* f.fs.writeFileString(f.path.join(bundleRoot, 'release.json'), JSON.stringify({version}));
-  yield* f.fs.writeFileString(f.path.join(bundleRoot, 'threadnote'), 'fixture executable metadata only');
+  yield* f.fs.writeFileString(f.path.join(bundleRoot, executableName), 'fixture executable metadata only');
   const capabilities = {
     schemaVersion: 2 as const,
     manifestSchemas: [1, 2],
@@ -118,7 +119,7 @@ export const devSkillsReleaseFixture = Effect.fn('test.devSkills.release')(funct
   };
   const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     effect.pipe(
-      Effect.provideService(SystemInfo, {...f.system, executablePath: f.path.join(releaseRoot, 'threadnote')}),
+      Effect.provideService(SystemInfo, {...f.system, executablePath: f.path.join(releaseRoot, executableName)}),
       Effect.provideService(DevSkillsSource, {root: releaseRoot, runtimeVersion: version}),
     );
   const activate = f.fs.writeFileString(

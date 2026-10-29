@@ -166,7 +166,10 @@ effectIt.effect(
       yield* old.activate;
       delete f.environment.THREADNOTE_INSTALL_ROOT;
       const environmentBefore = {...f.environment};
-      const parent = {...f.system, executablePath: f.path.join(old.releaseRoot, 'threadnote')};
+      const parent = {
+        ...f.system,
+        executablePath: f.path.join(old.releaseRoot, f.system.platform === 'win32' ? 'threadnote.exe' : 'threadnote'),
+      };
       const boundary = yield* commands(f);
       expect(yield* f.fs.exists(f.path.join(f.home, 'dev-skills', 'index.json'))).toBe(false);
       const {prepared, next} = yield* f

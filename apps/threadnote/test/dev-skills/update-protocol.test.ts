@@ -188,16 +188,27 @@ effectIt.effect('keeps a refresh pending when its readonly durable status disagr
   }).pipe(provideTestLayer(devSkillsTestLayer)),
 );
 
-effectIt.effect('candidate preparation refuses a different executing version before writing intent', () =>
-  Effect.gen(function* () {
-    const f = yield* fixture();
-    const candidate = yield* devSkillsReleaseFixture(f, '5.3.0-beta.9', true);
-    const result = yield* prepareCandidateDevSkillsUpdate(f.config, candidate.releaseRoot, '5.3.0-beta.10').pipe(
-      Effect.provideService(SystemInfo, {...f.system, executablePath: f.path.join(candidate.bundleRoot, 'threadnote')}),
-      Effect.provideService(DevSkillsSource, {root: candidate.bundleRoot, runtimeVersion: candidate.releaseVersion}),
-      Effect.result,
-    );
-    expect(result._tag).toBe('Failure');
-    expect(yield* f.fs.exists(f.path.join(f.runtime, 'dev-skills-refresh.json'))).toBe(false);
-  }).pipe(provideTestLayer(devSkillsTestLayer)),
+effectIt.effect(
+  'candidate preparation finds either platform executable and refuses a different version before writing intent',
+  () =>
+    Effect.gen(function* () {
+      for (const platform of ['darwin', 'win32'] as const) {
+        const base = yield* fixture();
+        const f = {...base, system: {...base.system, platform}};
+        const candidate = yield* devSkillsReleaseFixture(f, '5.3.0-beta.9', true);
+        const result = yield* prepareCandidateDevSkillsUpdate(f.config, candidate.releaseRoot, '5.3.0-beta.10').pipe(
+          Effect.provideService(SystemInfo, {
+            ...f.system,
+            executablePath: f.path.join(candidate.bundleRoot, platform === 'win32' ? 'threadnote.exe' : 'threadnote'),
+          }),
+          Effect.provideService(DevSkillsSource, {
+            root: candidate.bundleRoot,
+            runtimeVersion: candidate.releaseVersion,
+          }),
+          Effect.result,
+        );
+        expect(result).toMatchObject({_tag: 'Failure', failure: {_tag: 'DevSkillsError', code: 'invalid-candidate'}});
+        expect(yield* f.fs.exists(f.path.join(f.runtime, 'dev-skills-refresh.json'))).toBe(false);
+      }
+    }).pipe(provideTestLayer(devSkillsTestLayer)),
 );
