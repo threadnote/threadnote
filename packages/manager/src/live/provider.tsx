@@ -1,7 +1,7 @@
 import React, {createContext, useContext, useEffect, useMemo, useSyncExternalStore} from 'react';
 import {createManagerLiveClient} from './client.js';
 import type {ManagerLiveResource} from './contracts.js';
-import {MANAGER_LIVE_SUPPORTED_TOPICS} from './contracts.js';
+import {MANAGER_LIVE_SNAPSHOT_HEADER, MANAGER_LIVE_SUPPORTED_TOPICS} from './contracts.js';
 import type {ManagerLiveSnapshot} from './store.js';
 import {api} from '../ui/support.js';
 
@@ -21,7 +21,14 @@ export function ManagerLiveProvider(props: {
             origin: window.location.origin,
             scopeKey: props.account,
             requestTicket: signal =>
-              api<{ticket: string}>('/api/live-session', {topics: [...MANAGER_LIVE_SUPPORTED_TOPICS]}, {signal}),
+              api<{ticket: string}>(
+                '/api/live-session',
+                {topics: [...MANAGER_LIVE_SUPPORTED_TOPICS]},
+                {
+                  signal,
+                  headers: {[MANAGER_LIVE_SNAPSHOT_HEADER]: 'processes,graph-status'},
+                },
+              ),
           })
         : undefined,
     [props.account],

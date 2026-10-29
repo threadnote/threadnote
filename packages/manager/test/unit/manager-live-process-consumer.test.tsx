@@ -100,3 +100,39 @@ it('retains scoped rows and footer during a held read/error and advances age wit
   expect(reads).toBe(before);
   expect(document.querySelector('.process-row')?.textContent).not.toBe(ageBefore);
 });
+
+it('updates the panel and shared footer from pushed inventories without process GETs', async () => {
+  const host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () =>
+    root?.render(
+      <ManagerLiveProvider account="one">
+        <ManagerProcessesProvider>
+          <ManagerDialogProvider>
+            <ProcessesPanel />
+            <ManagerOperationsFooter onOpen={() => undefined} />
+          </ManagerDialogProvider>
+        </ManagerProcessesProvider>
+      </ManagerLiveProvider>,
+    ),
+  );
+  await flush();
+  const socket = FakeManagerSocket.instances[0];
+  const data = await response().json();
+  await act(async () => {
+    socket.open(['processes'], ['processes']);
+    socket.ack();
+    socket.snapshot(1, {topic: 'processes', scope: 'account'}, data);
+  });
+  await flush();
+  expect(reads).toBe(0);
+  expect(document.querySelector('.process-workspace')?.textContent).toContain('Graph');
+  expect(document.querySelector('.footer-operations.is-visible')).not.toBeNull();
+  await act(async () => socket.snapshot(2, {topic: 'processes', scope: 'account'}, {...data, processes: []}));
+  await flush();
+  expect(document.querySelectorAll('.process-row')).toHaveLength(0);
+  expect(document.querySelector('.footer-operations.is-visible')).toBeNull();
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  expect(reads).toBe(0);
+});

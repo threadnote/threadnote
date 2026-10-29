@@ -379,7 +379,7 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
             live,
             healthHints,
             sources,
-          } = yield* makeManagerLiveObservationRuntime(config, actualPort, token);
+          } = yield* makeManagerLiveObservationRuntime(config, actualPort, token, automaticCompactionStatus);
           yield* Effect.addFinalizer(() => releaseManagerGraphSnapshotLeases());
           yield* server.serve(
             createManagerServer({automaticCompactionStatus, config, jobs: new Map(), token, worksetScope, live}).pipe(

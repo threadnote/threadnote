@@ -100,7 +100,11 @@ export class ManagerApiError extends Schema.TaggedError<ManagerApiError>()('Mana
 async function api<T>(
   path: string,
   body?: Record<string, unknown>,
-  options: {readonly signal?: AbortSignal; readonly timeoutMilliseconds?: number} = {},
+  options: {
+    readonly signal?: AbortSignal;
+    readonly timeoutMilliseconds?: number;
+    readonly headers?: Readonly<Record<string, string>>;
+  } = {},
 ): Promise<T> {
   const controller = options.timeoutMilliseconds === undefined ? undefined : new AbortController();
   let timedOut = false;
@@ -120,6 +124,7 @@ async function api<T>(
     const response = await fetch(path, {
       body: body ? JSON.stringify(body) : undefined,
       headers: {
+        ...options.headers,
         authorization: `Bearer ${token}`,
         'content-type': 'application/json',
       },
