@@ -54,6 +54,8 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => {
+      if (url === '/api/attention/context-maintenance?view=controls')
+        return new Response(JSON.stringify({paused: true}));
       if (url === '/api/live-session') return new Response(JSON.stringify({ticket: 'fixture'}));
       if (Effect.pipe(url, EffectString.startsWith('/api/context-health/citations/jobs'))) {
         jobReads++;

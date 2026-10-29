@@ -37,6 +37,7 @@ beforeEach(() => {
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), 'http://manager.test');
+      if (url.pathname === '/api/attention/context-maintenance') return response({paused: true});
       if (url.pathname === '/api/reviews') {
         return response({
           items: [

@@ -6,6 +6,7 @@ import {formatMemoryDocument} from '@threadnote/memory/document';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {setContextMaintenancePaused} from '@threadnote/threadnote/memory/context/maintenance';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -29,6 +30,16 @@ describe('headless context maintenance lifecycle', () => {
       const system = yield* SystemInfo;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-maintenance-process-'});
       const user = 'maintenance-process';
+      yield* setContextMaintenancePaused(
+        {
+          account: 'local',
+          agentContextHome: home,
+          agentId: 'maintenance-test',
+          manifestPath: path.join(home, 'manifest.yaml'),
+          user,
+        },
+        false,
+      );
       const directory = path.join(home, 'data', 'local', 'user', user, 'memories', 'durable', 'projects', 'threadnote');
       yield* fs.makeDirectory(directory, {recursive: true});
       const source = path.join(directory, 'source.md');

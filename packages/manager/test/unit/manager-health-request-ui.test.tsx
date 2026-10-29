@@ -20,6 +20,8 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/attention/context-maintenance?view=controls')
+        return Promise.resolve(new Response('{"paused":true}'));
       if (Effect.pipe(String(input), EffectString.includes('/citations/jobs')))
         return Promise.resolve(new Response('{"job":null}'));
       const {promise, resolve, reject} = Promise.withResolvers<Response>();

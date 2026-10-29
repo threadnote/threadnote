@@ -77,7 +77,7 @@ it.each([{memories: 3, pending: 0}, {memories: 0, pending: 2}, {pending: 0}])(
 );
 
 it('shows project inspection destinations in All Health without issuing scans or mutations', async () => {
-  const fetch = vi.fn();
+  const fetch = vi.fn(async () => json({paused: true}));
   vi.stubGlobal('fetch', fetch);
   const onProjectChange = vi.fn();
   await render(
@@ -101,7 +101,11 @@ it('shows project inspection destinations in All Health without issuing scans or
   const inspect = tiles[1];
   await act(async () => inspect.click());
   expect(onProjectChange).toHaveBeenCalledWith('beta');
-  expect(fetch).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch).toHaveBeenCalledWith(
+    '/api/attention/context-maintenance?view=controls',
+    expect.objectContaining({method: 'GET'}),
+  );
   expect(document.body.textContent).not.toContain('Repair all');
 });
 
