@@ -714,7 +714,7 @@ describe('native closeout lifecycle', () => {
         expect(completed?.state.history?.[0].transactionId).toBe(old.state.transactionId);
         expect(completed?.state.status).toBe('complete');
       }).pipe(runCloseout),
-    {timeout: 120_000},
+    {timeout: process.platform === 'win32' ? 180_000 : 120_000},
   );
   effectIt.effect('rejects an entire closeout before writes when only one operation slot remains', () =>
     Effect.gen(function* () {
