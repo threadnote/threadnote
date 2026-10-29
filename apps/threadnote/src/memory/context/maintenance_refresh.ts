@@ -36,7 +36,7 @@ import type {
   MaintenanceState,
 } from './maintenance_contracts.js';
 import {maintenanceContentHash, resolveRelationTarget, resolveMaintenanceRelationPolicy} from './maintenance_policy.js';
-import {readContextMaintenanceSourceEpoch} from './maintenance_evidence.js';
+import {collectContextMaintenanceCitationEvidence, readContextMaintenanceSourceEpoch} from './maintenance_evidence.js';
 import {maintenanceRecordRevision, recordSourceRevision} from './maintenance_source.js';
 import {observeTopicMaintenanceCase} from './maintenance_topic.js';
 import * as EffectString from 'effect/String';
@@ -198,11 +198,22 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
       );
     const epoch = yield* readContextMaintenanceSourceEpoch(config, root);
     const revision = yield* recordSourceRevision(config, record, root);
-    const validations = yield* validateContextHealthMemoryCitations(
+    const validations = yield* collectContextMaintenanceCitationEvidence(
       config,
-      {kind: 'repository', callerCwd: root, project: item.project},
+      item.project,
+      [record],
       [{uri: record.uri, codeCitations: citations}],
-      {fullScan: false},
+      root,
+      {
+        mode: 'diagnostic',
+        validate: selected =>
+          validateContextHealthMemoryCitations(
+            config,
+            {kind: 'repository', callerCwd: root, project: item.project},
+            selected,
+            {fullScan: false},
+          ),
+      },
     );
     const selectedCitation =
       item.family === 'citation-coverage'
