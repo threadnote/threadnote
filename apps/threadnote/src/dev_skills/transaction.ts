@@ -14,7 +14,7 @@ import {
   stableJson,
 } from './files.js';
 import {generationRoot, renderEntrypoints, verifyGeneration, verifyHistoricalProjection} from './inspection.js';
-import {DEV_SKILLS_MAX_HISTORICAL_SUPPORT_MEMBERS, parseDevSkillsManifest} from './manifest.js';
+import {DEV_SKILLS_MAX_HISTORICAL_SUPPORT_MEMBERS, parseHistoricalDevSkillsManifest} from './manifest.js';
 import {
   consumerId,
   homeIndexPath,
@@ -40,7 +40,7 @@ interface Journal {
 function parseBundle(value: unknown): DevSkillsBundle | null {
   if (value === null) return null;
   requireValue(isRecord(value) && isRecord(value.files), 'Invalid transaction generation.');
-  const manifest = parseDevSkillsManifest(value.manifest);
+  const manifest = parseHistoricalDevSkillsManifest(value.manifest);
   const files: Record<string, string> = {};
   requireValue(
     Object.keys(value.files).length === Object.keys(manifest.hashes).length,

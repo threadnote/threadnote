@@ -24,9 +24,10 @@ export const previewDevSkills = Effect.fn('devSkills.preview')(function* (
   config: RuntimeConfig,
   action: DevSkillsAction,
   selector: DevSkillsSelector,
+  options: {readonly reinstallMissingStore?: boolean} = {},
 ) {
   const bundle = yield* loadDevSkillsBundle();
-  const mutation = yield* planMutation(config, bundle, action, selector);
+  const mutation = yield* planMutation(config, bundle, action, selector, options);
   const receipt = (yield* readReceipt(mutation.plan.target)).receipt;
   return {
     ...mutation.plan,
@@ -99,7 +100,11 @@ export const applyDevSkills = Effect.fn('devSkills.apply')(function* (
   config: RuntimeConfig,
   action: DevSkillsAction,
   selector: DevSkillsSelector,
-  options: {readonly expectedDigest?: string; readonly lease?: DevSkillsMutationLease} = {},
+  options: {
+    readonly expectedDigest?: string;
+    readonly lease?: DevSkillsMutationLease;
+    readonly reinstallMissingStore?: boolean;
+  } = {},
 ) {
   const bundle = yield* loadDevSkillsBundle();
   return yield* applyCapturedDevSkills(config, bundle, action, selector, {...options, readiness: true});

@@ -104,7 +104,9 @@ describe('authenticated Manager development workflows HTTP', () => {
         });
         const preview = yield* server.preview('install', selector);
         expect(preview.status).toBe(200);
-        expect(preview.body).toEqual(yield* f.run(previewDevSkills(f.config, 'install', selector)));
+        expect(preview.body).toEqual(
+          yield* f.run(previewDevSkills(f.config, 'install', selector, {reinstallMissingStore: true})),
+        );
         expect(preview.body.canApply).toBe(true);
         expect(preview.body.readiness?.planning.state).toBe('blocked');
         expect((yield* server.request(statusPath(selector))).status).toBe(200);
