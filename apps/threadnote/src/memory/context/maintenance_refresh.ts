@@ -201,7 +201,7 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
     const validations = yield* collectContextMaintenanceCitationEvidence(
       config,
       item.project,
-      [record],
+      [{...record, metadata: {...record.metadata, codeCitations: currentMemoryCodeCitations(record)}}],
       [{uri: record.uri, codeCitations: citations}],
       root,
       {

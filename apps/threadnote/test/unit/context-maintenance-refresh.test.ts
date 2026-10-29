@@ -7,6 +7,9 @@ import {contextHealthCaseIdV2, contextHealthCitationCaseSlotV2} from '@threadnot
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
+import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
+import {createReviewedSupportSnapshot, type ReviewedMemorySupportV1} from '@threadnote/memory/reviewed-support';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {
   formatMemoryDocument,
@@ -138,9 +141,9 @@ function repository(data: Effect.Success<ReturnType<typeof fixture>>) {
 }
 
 describe('bounded selected relation maintenance refresh', () => {
-  effectIt.effect(
-    'publishes exact refreshed citation evidence for a review-only preview while maintenance is paused',
-    () =>
+  effectIt.effect.each([false, true])(
+    'publishes exact refreshed citation evidence while paused (reviewed support: %s)',
+    reviewed =>
       Effect.gen(function* () {
         const data = yield* fixture();
         const repo = yield* repository(data);
@@ -150,15 +153,66 @@ describe('bounded selected relation maintenance refresh', () => {
         );
         const indexer = yield* CodeGraphIndexer;
         yield* indexer.index({cwd: repo.root, threadnoteHome: data.home, ensureVectors: false});
-        const citations = yield* captureMemoryCodeCitations(data.config, {
+        const roots = yield* captureMemoryCodeCitations(data.config, {
           callerCwd: repo.root,
           project: 'fixture',
           refs: ['source.ts'],
         });
-        expect(citations).toHaveLength(1);
-        const subject = memory(data.uri, data.record.metadata.relations, {schemaVersion: 5, codeCitations: citations});
+        expect(roots).toHaveLength(1);
+        let citations = roots;
+        if (reviewed) {
+          yield* data.fs.writeFileString(repo.source, 'export const supported = true; // reviewed support\n');
+          yield* repo.git(['add', '.']);
+          yield* repo.git([
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.invalid',
+            'commit',
+            '--quiet',
+            '-m',
+            'reviewed',
+          ]);
+          yield* indexer.index({cwd: repo.root, threadnoteHome: data.home, ensureVectors: false});
+          citations = yield* captureMemoryCodeCitations(data.config, {
+            callerCwd: repo.root,
+            project: 'fixture',
+            refs: ['source.ts'],
+          });
+        }
+        const source = {kind: 'code' as const, citation: citations[0]};
+        const evidenceId = automaticMaintenanceEvidenceId(source);
+        const bodyHash = sha256HexSync(data.record.body);
+        const reviewedSupport: ReviewedMemorySupportV1 | undefined = reviewed
+          ? {
+              type: 'reviewed-memory-support',
+              version: 1,
+              active: createReviewedSupportSnapshot({
+                bodyHash,
+                paragraphs: [
+                  {ordinal: 0, hash: bodyHash, role: 'descriptive', support: 'direct', evidenceIds: [evidenceId]},
+                ],
+                sources: [{id: evidenceId, source, scope: 'repository'}],
+                acceptance: {
+                  reviewId: 'review-citation-refresh',
+                  approvedAt: NOW,
+                  targetBeforeHash: bodyHash,
+                  preparationDigest: bodyHash,
+                  sourceVectorDigest: bodyHash,
+                },
+              }),
+            }
+          : undefined;
+        const subject = memory(data.uri, data.record.metadata.relations, {
+          schemaVersion: reviewed ? 11 : 5,
+          codeCitations: roots,
+          ...(reviewedSupport === undefined ? {} : {reviewedSupport}),
+        });
         yield* data.write(subject);
-        yield* data.write(memory(data.record.metadata.relations![0].uri, [], {memoryId: 'tn_target'}));
+        const target = memory(data.record.metadata.relations![0].uri, [], {memoryId: 'tn_target'});
+        yield* data.write(
+          parseMemoryDocument(target.uri, formatMemoryDocument('MEMORY', target.metadata, 'Independent target.'))!,
+        );
         yield* data.fs.writeFileString(repo.source, 'export const supported = false;\n');
         yield* repo.git(['add', '.']);
         yield* repo.git([
@@ -199,7 +253,9 @@ describe('bounded selected relation maintenance refresh', () => {
         expect(refreshed.outcome).toBe('ready');
         if (refreshed.outcome !== 'ready') throw new Error('Expected exact retained citation packet.');
         expect(refreshed.item).toMatchObject({disposition: 'needs-decision', reason: 'source-changed'});
-        expect(refreshed.packet.allowedOperations).toContain('context_health_repair_preview');
+        expect(refreshed.packet.allowedOperations).toContain(
+          reviewed ? 'context_maintenance_review' : 'context_health_repair_preview',
+        );
         const state = yield* readState(data.config);
         const plan = yield* previewContextHealthRepairs(data.config, 'fixture', repo.root, selector);
         expect(plan.proposals).toHaveLength(1);
