@@ -997,6 +997,12 @@ export function renderContextHealthRepairPlan(
     }),
     `Knowledge Delta: ${plan.knowledgeDelta.reviewId} revision ${plan.knowledgeDelta.revision}; ${plan.knowledgeDelta.items.length} item(s).`,
   ];
+  if (plan.citationCoverage !== undefined && plan.citationCoverage.state !== 'complete') {
+    lines.push(
+      `Citation evidence is ${plan.citationCoverage.state}: ${plan.citationCoverage.checked}/${plan.citationCoverage.eligible} checked, ${plan.citationCoverage.deferred} deferred. Zero proposals does not establish that citations are healthy.`,
+      'Foreground previews consume published citation receipts. For a retained decision, refresh that exact case with threadnote context maintain --action refresh --project <project> --case-id <case-id> --source-cwd <checkout> --json, then repeat this preview in that checkout. Explicit refresh works while automatic maintenance is paused.',
+    );
+  }
   if (plan.omittedProposals > 0) lines.push(`- ${plan.omittedProposals} additional proposal(s) omitted.`);
   if (plan.nextCursor !== undefined) {
     const nextSelector = {...selector, after: plan.nextCursor};

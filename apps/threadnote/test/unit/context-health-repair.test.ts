@@ -37,6 +37,32 @@ const PROJECT = 'threadnote';
 const NOW = '2026-09-17T12:00:00.000Z';
 
 describe('context health repair proposals', () => {
+  it('binds citation review revisions to canonical subjects without granting mutation authority', () => {
+    fc.assert(
+      fc.property(fc.string({maxLength: 200}), text => {
+        const source = record('citation-review', `Claim ${JSON.stringify(text)}.`);
+        const changed = record('citation-review', `${source.body} Revised.`);
+        const report = healthReport([
+          finding('citation-changed', 'repair-citation', source.uri, `${source.uri}#citation`),
+        ]);
+        const proposal = onlyProposal(report, [source]);
+        const revised = onlyProposal(report, [changed]);
+        expect(proposal.mutation.kind).toBe('review-only');
+        expect(proposal.proposalId).toBe(revised.proposalId);
+        expect(proposal.revision).not.toBe(revised.revision);
+        expect(onlyProposal(report, [source])).toEqual(proposal);
+        expect(
+          applyContextHealthRepairProposalV1({
+            expectedRevision: proposal.revision,
+            proposal,
+            records: [source],
+          }),
+        ).toEqual({records: [source], status: 'review-required'});
+      }),
+      {numRuns: 40},
+    );
+  });
+
   it('requires consolidation review for single and batch citation replacement without rewriting history', () => {
     const source = consolidatedMemory();
     const previous = source.metadata.codeCitations![0];
