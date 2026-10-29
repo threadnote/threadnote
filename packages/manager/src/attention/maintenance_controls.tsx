@@ -100,7 +100,7 @@ export function MaintenanceControls(props: {
   }
 
   return (
-    <section className="attention-bulk-repair" aria-label="Automatic maintenance controls">
+    <section className="attention-bulk-repair health-global-maintenance" aria-label="Automatic maintenance controls">
       <div>
         <div className="health-maintenance-heading">
           <strong>Automatic maintenance</strong>
