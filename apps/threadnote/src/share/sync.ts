@@ -6,6 +6,7 @@ import {parseMemoryDocument} from '@threadnote/memory/document';
 import {memoryIdentityLockKey} from '@threadnote/memory/identity-alias';
 import {SystemInfo} from '@threadnote/platform/system';
 import {loadRecallMemoryIdentities} from '@threadnote/recall/index';
+import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
 import {uriSegment} from '@threadnote/workspace/manifest';
 
 import type {ShareRuntime, ShareSyncOptions, ShareTeamConfig} from '../types.js';
@@ -528,6 +529,7 @@ const runShareSyncForTeam = Effect.fn('share.runShareSyncForTeam')(function* (
       const result = yield* applyAndPersistChanges(config, team.config, state, combined);
       const succeeded = combined.length - result.failed.length;
       yield* Console.log(`Reindexed ${succeeded} file change(s) into native canonical store.`);
+      for (const warning of result.warnings) yield* Console.warn(warning);
       if (result.failed.length > 0) {
         yield* Console.warn(
           `share sync: ${result.failed.length} file(s) could not be ingested on this run; they are persisted and will be retried on the next sync or agent recall/read.`,
@@ -633,12 +635,10 @@ const runShareSyncQuiet = Effect.fn('share.runShareSyncQuiet')(function* (
     pulledChanges = yield* listChangedFiles(worktree, beforeRev, afterRev);
   }
   const combined = mergeChanges(pendingChanges, pulledChanges);
-  if (combined.length > 0) {
-    yield* applyAndPersistChanges(config, team.config, state, combined, {quiet: true});
-  }
+  const result = yield* applyAndPersistChanges(config, team.config, state, combined, {quiet: true});
   return {
     synced: true,
-    warnings: [...restoreWarnings, ...pendingMemoryIngestWarnings(state, team.name, true)],
+    warnings: [...restoreWarnings, ...result.warnings, ...pendingMemoryIngestWarnings(state, team.name, true)],
   };
 });
 
@@ -677,6 +677,7 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
 ) {
   const ov = NATIVE_RESOURCE_BACKEND;
   const failed: ChangedFile[] = [];
+  const invalidatedUris = new Set<string>();
   for (const change of changes) {
     if (!isShareableMemoryChange(change)) {
       continue;
@@ -700,6 +701,7 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
               if (currentContent === undefined) {
                 return;
               }
+              invalidatedUris.add(uri);
               yield* removeMemoryUri(config, ov, uri, false, options);
               return;
             }
@@ -758,7 +760,12 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
               restoredIdentity && currentContent !== undefined
                 ? verifySharedMemoryContentUnchanged(config, uri, currentContent)
                 : verifySharedMemoryIdentityContinuity(config, uri, content);
-            yield* writeMemoryFileChecked(config, ov, uri, content, writeMode, false, writeCheck, options);
+            yield* writeMemoryFileChecked(config, ov, uri, content, writeMode, false, writeCheck, {
+              ...options,
+              onWriteStarted: () => {
+                invalidatedUris.add(uri);
+              },
+            });
           }),
         );
       }),
@@ -772,7 +779,7 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
       failed.push(normalizedChange);
     }
   }
-  return {failed};
+  return {failed, invalidatedUris: [...invalidatedUris]};
 });
 
 const sharedIdentityLockPlan = Effect.fn('share.identityLockPlan')(function* (
@@ -946,7 +953,7 @@ const applyAndPersistChanges = Effect.fn('share.applyAndPersistChanges')(functio
   options: {readonly quiet?: boolean} = {},
 ) {
   if (changes.length === 0) {
-    return {failed: []};
+    return {failed: [], warnings: []};
   }
   // Persist intent BEFORE applying so a crash mid-apply doesn't lose state.
   state.pendingReindexes.set(team.name, changes);
@@ -961,7 +968,19 @@ const applyAndPersistChanges = Effect.fn('share.applyAndPersistChanges')(functio
     state.pendingReindexes.delete(team.name);
   }
   yield* writePendingReindexes(config, state);
-  return result;
+  const refresh =
+    result.invalidatedUris.length > 0
+      ? yield* refreshRecallDerivedIndexesAfterCanonicalMutation(config, result.invalidatedUris).pipe(
+          Effect.interruptible,
+        )
+      : undefined;
+  const warnings =
+    refresh?.state === 'deferred'
+      ? [
+          `Shared team "${team.name}" canonical changes are preserved, but recall refresh is deferred. ${refresh.repair}`,
+        ]
+      : [];
+  return {failed: result.failed, warnings};
 });
 
 const materializePreviousContentForPendingConflict = Effect.fn('share.materializePreviousContentForPendingConflict')(

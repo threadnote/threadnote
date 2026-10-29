@@ -1,11 +1,12 @@
 import {Array as EffectArray, Record as EffectRecord} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
+import {ResourceStore} from '@threadnote/store/resource-store';
 import {chmod, mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Schema} from 'effect';
+import {Effect, FileSystem, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
@@ -275,9 +276,13 @@ async function makeSeededRemote(root: string): Promise<string> {
   return remote;
 }
 
-async function makeIdentityRestorationFixture(topic: string) {
-  const repo = await makeShareRepo();
-  const {store} = await nativeStoreFixture(repo.root);
+const makeIdentityRestorationFixtureEffect = Effect.fn('test.makeIdentityRestorationFixture')(function* (
+  topic: string,
+) {
+  const repo = yield* Effect.promise(makeShareRepo);
+  const fs = yield* FileSystem.FileSystem;
+  const resources = yield* ResourceStore;
+  const store = repo.home;
   const relativePath = `durable/projects/threadnote/${topic}.md`;
   const uri = `threadnote://user/denys/memories/shared/default/${relativePath}`;
   const established = `MEMORY\nkind: durable\nstatus: active\nvisibility: shared\nproject: threadnote\ntopic: ${topic}\nmemory_id: tn_established_identity\n\nOriginal reviewed body.\n`;
@@ -286,21 +291,25 @@ async function makeIdentityRestorationFixture(topic: string) {
     established,
     EffectString.replace('Original reviewed body.', 'Corrected replacement body.'),
   );
-  await mkdir(dirname(join(repo.seed, relativePath)), {recursive: true});
-  await writeFile(join(repo.seed, relativePath), established, 'utf8');
-  await git(['add', relativePath], repo.seed);
-  await git(['commit', '-m', 'publish established identity'], repo.seed);
-  await git(['push', 'origin', 'main'], repo.seed);
-  await runShareSync(repo.config, {push: false});
-  await writeFile(join(repo.seed, relativePath), transient, 'utf8');
-  await git(['add', relativePath], repo.seed);
-  await git(['commit', '-m', 'republish with transient identity'], repo.seed);
-  await git(['push', 'origin', 'main'], repo.seed);
-  await git(['fetch', 'origin'], repo.worktree);
-  await git(['rebase', 'origin/main'], repo.worktree);
-  await writeCanonicalResource(store, uri, transient);
+  yield* fs.makeDirectory(dirname(join(repo.seed, relativePath)), {recursive: true});
+  yield* fs.writeFileString(join(repo.seed, relativePath), established);
+  yield* runCommand('git', ['add', relativePath], {cwd: repo.seed});
+  yield* runCommand('git', ['commit', '-m', 'publish established identity'], {cwd: repo.seed});
+  yield* runCommand('git', ['push', 'origin', 'main'], {cwd: repo.seed});
+  yield* runShareSyncEffect(repo.config, {push: false});
+  yield* fs.writeFileString(join(repo.seed, relativePath), transient);
+  yield* runCommand('git', ['add', relativePath], {cwd: repo.seed});
+  yield* runCommand('git', ['commit', '-m', 'republish with transient identity'], {cwd: repo.seed});
+  yield* runCommand('git', ['push', 'origin', 'main'], {cwd: repo.seed});
+  yield* runCommand('git', ['fetch', 'origin'], {cwd: repo.worktree});
+  yield* runCommand('git', ['rebase', 'origin/main'], {cwd: repo.worktree});
+  yield* resources.write({home: store, account: repo.config.account, user: repo.config.user}, uri, transient, {
+    mode: 'replace',
+  });
   return {...repo, established, relativePath, restored, store, transient, uri};
-}
+});
+
+const makeIdentityRestorationFixture = (topic: string) => runEffect(makeIdentityRestorationFixtureEffect(topic));
 
 describe('share sync git handling', () => {
   beforeEach(() => {
@@ -1650,26 +1659,33 @@ describe('share sync git handling', () => {
     await expect(runEffect(listShareConflicts(config, {team: 'default'}))).resolves.toEqual([]);
   }, 20000);
 
-  it('keeps a historical identity restoration pending when another native memory owns the restored id', async () => {
-    const {config, home, relativePath, restored, seed, store, transient, uri} =
-      await makeIdentityRestorationFixture('native-duplicate-restoration');
-    const duplicateUri =
-      'threadnote://user/denys/memories/shared/default/durable/projects/threadnote/native-duplicate-owner.md';
-    const duplicate =
-      'MEMORY\nkind: durable\nstatus: active\nvisibility: shared\nproject: threadnote\ntopic: native-duplicate-owner\nmemory_id: tn_established_identity\n\nOther active owner.\n';
-    await writeCanonicalResource(store, duplicateUri, duplicate);
-    await writeFile(join(seed, relativePath), restored, 'utf8');
-    await git(['add', relativePath], seed);
-    await git(['commit', '-m', 'restore duplicated established identity'], seed);
-    await git(['push', 'origin', 'main'], seed);
+  effectIt.effect(
+    'keeps a historical identity restoration pending when another native memory owns the restored id',
+    () =>
+      Effect.gen(function* () {
+        const {config, home, relativePath, restored, seed, store, transient, uri} =
+          yield* makeIdentityRestorationFixtureEffect('native-duplicate-restoration');
+        const duplicateUri =
+          'threadnote://user/denys/memories/shared/default/durable/projects/threadnote/native-duplicate-owner.md';
+        const duplicate =
+          'MEMORY\nkind: durable\nstatus: active\nvisibility: shared\nproject: threadnote\ntopic: native-duplicate-owner\nmemory_id: tn_established_identity\n\nOther active owner.\n';
+        const resources = yield* ResourceStore;
+        yield* resources.write({home, account: config.account, user: config.user}, duplicateUri, duplicate, {
+          mode: 'create',
+        });
+        yield* Effect.promise(() => writeFile(join(seed, relativePath), restored, 'utf8'));
+        yield* runCommand('git', ['add', relativePath], {cwd: seed});
+        yield* runCommand('git', ['commit', '-m', 'restore duplicated established identity'], {cwd: seed});
+        yield* runCommand('git', ['push', 'origin', 'main'], {cwd: seed});
 
-    await runShareSync(config, {push: false});
+        yield* runShareSyncEffect(config, {push: false});
 
-    await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toBe(transient);
-    await expect(readFile(join(home, 'share', 'auto-sync-pending-reindexes.json'), 'utf8')).resolves.toContain(
-      relativePath,
-    );
-  }, 20000);
+        expect(yield* Effect.promise(() => readFile(canonicalResourceFile(store, uri), 'utf8'))).toBe(transient);
+        expect(
+          yield* Effect.promise(() => readFile(join(home, 'share', 'auto-sync-pending-reindexes.json'), 'utf8')),
+        ).toContain(relativePath);
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
 
   it('keeps a historical identity restoration pending when another Git file owns the restored id', async () => {
     const {config, home, relativePath, restored, seed, store, transient, uri} =
