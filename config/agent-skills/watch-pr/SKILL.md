@@ -13,6 +13,10 @@ Watch defaults to active repair. Honor explicit monitor-only or local-only limit
 
 Use the native workflow-automation JSON interface. Retrieve bounded schemas for the needed watch action; do not start an additional collector or copy large schemas. The runtime is the sole collector and durable event/work authority. A live watch has one collector and one leased consumer; verify the supported wakeup targets this chat before ending the turn.
 
+Keep idle work in the native runtime. Do not create recurring model tasks to poll the inbox, renew ownership, or recheck unchanged PRs. Wake the agent only for new meaningful events; coalesce notifications and retain durable delivery identity. Silence does not make a scheduled model turn free.
+
+Verify the exact host surface and target: Codex chat, Cursor CLI session, or Cursor Cloud agent. Check that the selected Codex executable supports `queue`; PATH may name an older CLI. Cursor CLI requires a dedicated, idle session per watch with its task scope and approvals already loaded; do not target an interactive session still in use. A terminal continuation does not prove delivery into an IDE chat. If event delivery is unavailable, report the coverage gap; a recurring fallback needs explicit user authorization.
+
 1. Resolve exact PR, current head, scope, stop condition, and any owning development phase. Preserve existing work and budgets. Start or resume the native watch with its original identity; do not create a competing collector.
 2. Relay pending events and inspect linked evidence. Persist each event disposition before acknowledging its delivery. Ack only queues delivery; it does not mean the issue is resolved. Keep unresolved work visible after ack, and explicitly update its disposition when resolved or ignored.
 3. For actionable feedback, confirm current head and source evidence, make a justified in-scope fix, run focused checks, and deliver when authorized. Reconcile unexpected head changes and invalidate prior green results. Rerun a failed job only with evidence of a transient cause; investigate deterministic failures.

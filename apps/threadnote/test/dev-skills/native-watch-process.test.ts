@@ -1,4 +1,5 @@
-import {Array as EffectArray, Option as EffectOption} from 'effect';
+import * as EffectArray from 'effect/Array';
+import * as EffectOption from 'effect/Option';
 import {describe, it, expect} from 'vitest';
 import {nativeWatchInvocation} from '../../src/workflow_automation/watch_process.js';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
@@ -47,11 +48,15 @@ const controlFields = {
   collector: Schema.Struct({alive: Schema.Boolean, pid: Schema.NullOr(Schema.Int), status: Schema.String}),
   pending: Schema.Int,
   stopRequested: Schema.Boolean,
-  delivery: Schema.optionalKey(Schema.NullOr(deliveryBoundary)),
+  delivery: deliveryBoundary.pipe(Schema.NullOr, Schema.optionalKey),
   work: Schema.Struct({open: Schema.Int, blocked: Schema.Int, terminal: Schema.Int}),
 };
 const controlBoundary = Schema.Struct(controlFields);
-const healthBoundary = Schema.Struct({...controlFields, metrics: Schema.Struct({sweeps: Schema.Int})});
+const healthBoundary = Schema.Struct({
+  ...controlFields,
+  metrics: Schema.Struct({sweeps: Schema.Int}),
+  notification: Schema.Struct({notifiedThrough: Schema.Int}).pipe(Schema.NullOr, Schema.optionalKey),
+});
 const workRecordBoundary = Schema.Struct({
   eventId: Schema.String,
   status: Schema.String,
@@ -108,7 +113,7 @@ const required = <A>(value: A | null | undefined): A => {
   if (value === null || value === undefined) throw new Error('Required CLI response field missing.');
   return value;
 };
-async function realCollectorScenario(terminal: boolean) {
+async function realCollectorScenario(terminal: boolean, eventDriven = false) {
   const root = await mkdtemp(join(tmpdir(), 'native-watch-child-'));
   const home = join(root, 'home');
   const bin = join(root, 'bin');
@@ -116,8 +121,10 @@ async function realCollectorScenario(terminal: boolean) {
   await mkdir(bin);
   const counter = join(root, 'gh-requests');
   await writeFile(counter, '');
+  const hostCounter = join(root, 'host-requests');
+  await writeFile(hostCounter, '');
   const fake = join(root, 'fake-gh.ts');
-  const head = Effect2.pipe('a', EffectString.repeat(40));
+  const head = Fn.pipe('a', EffectString.repeat(40));
   await writeFile(
     fake,
     `import {appendFileSync} from 'node:fs';
@@ -138,6 +145,20 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
     compile: {outfile: join(bin, process.platform === 'win32' ? 'gh.exe' : 'gh')},
   });
   if (!compiled.success) throw new Error('Could not compile private fake gh: ' + JSON.stringify(compiled.logs));
+  if (eventDriven) {
+    const host = join(root, 'fake-codex.ts');
+    await writeFile(
+      host,
+      `import {appendFileSync} from 'node:fs';
+appendFileSync(${JSON.stringify(hostCounter)},JSON.stringify(process.argv.slice(2))+'\\n');
+process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for thread cccccccc-cccc-4ccc-cccc-cccccccccccc.\\n');`,
+    );
+    const built = await Bun.build({
+      entrypoints: [host],
+      compile: {outfile: join(bin, process.platform === 'win32' ? 'codex.exe' : 'codex')},
+    });
+    if (!built.success) throw new Error('Could not compile private fake codex: ' + JSON.stringify(built.logs));
+  }
   const entrypoint = resolve('apps/threadnote/src/standalone.ts');
   const env = {
     ...process.env,
@@ -203,7 +224,31 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
     while (alive(pid) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
     expect(alive(pid)).toBe(false);
   };
-  const start = {pr: 'https://github.com/fixture/repo/pull/1', consumerId: 'test-consumer', wakeupId: 'live-test'};
+  const start = {
+    pr: 'https://github.com/fixture/repo/pull/1',
+    consumerId: 'test-consumer',
+    wakeupId: 'live-test',
+    ...(eventDriven
+      ? {
+          wakeup: {
+            host: 'codex',
+            executable: join(bin, process.platform === 'win32' ? 'codex.exe' : 'codex'),
+            threadId: 'cccccccc-cccc-4ccc-cccc-cccccccccccc',
+          },
+        }
+      : {}),
+  };
+  const hostCalls = async () =>
+    EffectArray.map(
+      EffectArray.filter(EffectString.split(await readFile(hostCounter, 'utf8'), '\n'), line => !!line),
+      line => Schema.String.pipe(Schema.Array, Schema.fromJsonString, Schema.decodeSync)(line),
+    );
+  const notified = async (count: number) => {
+    const deadline = Date.now() + 10_000;
+    while ((await hostCalls()).length < count && Date.now() < deadline)
+      await new Promise(resolve => setTimeout(resolve, 20));
+    expect(await hostCalls()).toHaveLength(count);
+  };
   const consumer = {consumerId: 'test-consumer'};
   try {
     const initial = (await cli('start', start)).result;
@@ -219,6 +264,11 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
       expect(terminalHealth.collector.status).toBe('terminal');
       await dead(pid);
       owned.delete(pid);
+      if (eventDriven) {
+        await notified(1);
+        expect((await hostCalls())[0][4]).toContain(JSON.stringify(home));
+        expect((await hostCalls())[0][4]).toContain('fixture-watch:1:4');
+      }
       const delivery = required((await cli('relay', consumer)).result.delivery);
       expect(EffectArray.map(delivery.events, event => event.kind).sort()).toEqual([
         'ci_error',
@@ -271,6 +321,14 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
     expect(premature.exitCode).not.toBe(0);
     expect((await cli('relay', consumer)).result.delivery).toEqual(delivery);
     expect(await readFile(counter, 'utf8')).toBe(requests);
+    if (eventDriven) {
+      await notified(1);
+      const receiptDeadline = Date.now() + 10_000;
+      let notifiedThrough = (await cli('inspect')).result.notification?.notifiedThrough ?? 0;
+      while (notifiedThrough < 3 && Date.now() < receiptDeadline)
+        notifiedThrough = (await cli('inspect')).result.notification?.notifiedThrough ?? 0;
+      expect(notifiedThrough).toBe(3);
+    }
     process.kill(firstPid, 'SIGKILL');
     await dead(firstPid);
     owned.delete(firstPid);
@@ -286,10 +344,13 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
     const restartRequests = await readFile(counter, 'utf8');
     expect((await cli('relay', consumer)).result.delivery).toEqual(delivery);
     const largeEvent = required(
-      EffectOption.getOrUndefined(EffectArray.findFirst(delivery.events, event => event.kind === 'ci_error')),
+      Fn.pipe(
+        EffectArray.findFirst(delivery.events, event => event.kind === 'ci_error'),
+        EffectOption.getOrUndefined,
+      ),
     );
-    const largeReason = Effect2.pipe('界', EffectString.repeat(1024));
-    const largeEvidence = Effect2.pipe('語', EffectString.repeat(2048));
+    const largeReason = Fn.pipe('界', EffectString.repeat(1024));
+    const largeEvidence = Fn.pipe('語', EffectString.repeat(2048));
     const dispositions = EffectArray.map(delivery.events, event => ({
       eventId: event.id,
       status: 'open',
@@ -306,12 +367,17 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
       EffectArray.map(dispositions, item => item.eventId).sort(),
     );
     const locator = required(
-      required(EffectOption.getOrUndefined(EffectArray.findFirst(work, item => item.eventId === largeEvent.id))).detail,
+      required(
+        Fn.pipe(
+          EffectArray.findFirst(work, item => item.eventId === largeEvent.id),
+          EffectOption.getOrUndefined,
+        ),
+      ).detail,
     );
     const beforeDetail = (await cli('inspect')).result.revision;
     const wrong = await cli(
       'work-detail',
-      {eventId: locator.eventId, sourceDigest: Effect2.pipe('f', EffectString.repeat(64))},
+      {eventId: locator.eventId, sourceDigest: Fn.pipe('f', EffectString.repeat(64))},
       false,
     );
     expect(wrong.exitCode).not.toBe(0);
@@ -352,12 +418,17 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
       true,
     );
     expect(await readFile(counter, 'utf8')).toBe(restartRequests);
+    if (eventDriven) {
+      await notified(1);
+      expect((await hostCalls())[0][4]).toContain(JSON.stringify(home));
+    }
     await cli('stop');
     await dead(nextPid);
     owned.delete(nextPid);
     const stopped = (await cli('inspect')).result;
     expect(stopped.collector.alive).toBe(false);
     expect(stopped.stopRequested).toBe(true);
+    if (eventDriven) await notified(2);
   } finally {
     // The private fixture state is also authoritative if startup failed after spawning.
     try {
@@ -393,10 +464,24 @@ it(
   60_000,
 );
 
+it(
+  'keeps event delivery gated across real collector crash/restart and sends stop before exit',
+  () => realCollectorScenario(false, true),
+  60_000,
+);
+it(
+  'sends terminal event notification before the real collector exits',
+  () => realCollectorScenario(true, true),
+  60_000,
+);
+
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Schema} from 'effect';
+import * as Effect from 'effect/Effect';
+import * as FileSystem from 'effect/FileSystem';
+import * as Schema from 'effect/Schema';
+import * as EffectString from 'effect/String';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {TestClock} from 'effect/testing';
+import * as TestClock from 'effect/testing/TestClock';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -408,8 +493,7 @@ import {
   writeNativeWatch,
 } from '../../src/workflow_automation/watch_store.js';
 import {launchNativeWatchProcess} from '../../src/workflow_automation/watch_process.js';
-import * as EffectString from 'effect/String';
-import * as Effect2 from 'effect';
+import * as Fn from 'effect/Function';
 
 effectIt.effect('startup failure sets stop only for its current nonce and preserves queued state', () =>
   Effect.gen(function* () {

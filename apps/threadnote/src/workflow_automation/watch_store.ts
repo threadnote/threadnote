@@ -1,5 +1,10 @@
-import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import * as EffectArray from 'effect/Array';
+import * as Crypto from 'effect/Crypto';
+import * as Effect from 'effect/Effect';
+import * as FileSystem from 'effect/FileSystem';
+import * as Option from 'effect/Option';
+import * as Path from 'effect/Path';
+import * as Schema from 'effect/Schema';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
@@ -13,8 +18,13 @@ import type {NativeWatchProviderCache} from './watch_provider.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeBoundedWorkflowJson, encodeBoundedWorkflowJson} from '../workflow_memory/journal_codec.js';
 import {stableJson} from '../workflow_memory/protocol.js';
+import {
+  nativeWatchNotificationSchema,
+  validateNativeWatchNotification,
+  type NativeWatchNotification,
+} from './watch_notification_state.js';
 import * as EffectString from 'effect/String';
-import * as Effect2 from 'effect';
+import * as Fn from 'effect/Function';
 
 export interface NativeWatchEnvelope {
   format: 'threadnote-native-watch-runtime';
@@ -33,6 +43,7 @@ export interface NativeWatchEnvelope {
     consecutiveErrors: number;
   };
   stopRequested: boolean;
+  notification?: NativeWatchNotification;
   metrics: {
     requests: number;
     notModified: number;
@@ -50,10 +61,10 @@ const text = (max: number) =>
     Schema.isMaxLength(max),
     Schema.makeFilter(value =>
       EffectArray.some([...value], character => {
-        const code = Effect2.pipe(
+        const code = Fn.pipe(
           character,
           EffectString.charCodeAt(0),
-          Effect2.Option.getOrElse(() => NaN),
+          Option.getOrElse(() => NaN),
         );
         return code < 32 || (code >= 127 && code <= 159);
       })
@@ -80,7 +91,7 @@ const envelopeSchema = Schema.Struct({
             Schema.Struct({
               head: Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u)),
               base: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u))),
-              mergeable: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+              mergeable: Schema.Boolean.pipe(Schema.NullOr, Schema.optionalKey),
               state: Schema.Literals(['open', 'closed', 'merged']),
             }),
           ),
@@ -102,6 +113,7 @@ const envelopeSchema = Schema.Struct({
     }),
   ),
   stopRequested: Schema.Boolean,
+  notification: Schema.optionalKey(nativeWatchNotificationSchema),
   metrics: Schema.Struct({
     requests: integer,
     notModified: integer,
@@ -117,9 +129,10 @@ export function decodeNativeWatchEnvelope(value: unknown): NativeWatchEnvelope {
     const envelope = Schema.decodeUnknownSync(envelopeSchema, {onExcessProperty: 'error'})(value);
     const state = decodeNativeWatchState(envelope.state);
     checkRunId(state.watchId);
+    if (envelope.notification) validateNativeWatchNotification(envelope.notification, state);
     if (new Set(EffectArray.map(envelope.provider.pages, page => page.key)).size !== envelope.provider.pages.length)
       throw new Error('Duplicate page');
-    const head = Effect2.pipe('a', EffectString.repeat(40));
+    const head = Fn.pipe('a', EffectString.repeat(40));
     const pages = EffectArray.map(envelope.provider.pages, page => {
       const projection = page.projection;
       if (projection.size > 1_000_000 || projection.pending + projection.failed > projection.size)
@@ -136,7 +149,7 @@ export function decodeNativeWatchEnvelope(value: unknown): NativeWatchEnvelope {
           count: 0,
           pending: 0,
           failed: 0,
-          version: Effect2.pipe('a', EffectString.repeat(64)),
+          version: Fn.pipe('a', EffectString.repeat(64)),
         },
       });
       const source = sweep.sources[0];
@@ -153,7 +166,7 @@ const STATE_CODEC = 'threadnote-native-watch-runtime-gzip-v1';
 function checkRunId(runId: string): void {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId) ||
-    Effect2.pipe(runId, EffectString.includes('..')) ||
+    Fn.pipe(runId, EffectString.includes('..')) ||
     /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(runId) ||
     ['constructor', 'prototype'].includes(runId)
   )
