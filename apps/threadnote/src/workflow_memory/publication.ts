@@ -124,7 +124,17 @@ function isPreparedWrite(value: unknown): value is PreparedSharedMemoryWrite {
   )
     return false;
   const record = parseMemoryDocument(value.memoryUri, value.memory);
-  return record !== undefined && stableJson(record.metadata) === stableJson(value.finalMetadata);
+  // Markdown omits empty lists that remain explicit in the prepared intent.
+  const expectedMetadata = {
+    ...value.finalMetadata,
+    ...(EffectArray.isArray(value.finalMetadata.codeCitations) && value.finalMetadata.codeCitations.length === 0
+      ? {codeCitations: undefined}
+      : {}),
+    ...(EffectArray.isArray(value.finalMetadata.relations) && value.finalMetadata.relations.length === 0
+      ? {relations: undefined}
+      : {}),
+  };
+  return record !== undefined && stableJson(record.metadata) === stableJson(expectedMetadata);
 }
 
 function isExternalTarget(value: unknown): boolean {

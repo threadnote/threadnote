@@ -1199,6 +1199,8 @@ function contextBriefStructuredContent(): Record<string, unknown> {
         excerpt: 'Memory says the hidden constraint.',
         freshness: 'fresh',
         freshnessBasis: 'code-citations',
+        kind: 'durable',
+        rank: 0,
         preciseStatus: 'exact',
         selectionBasis: 'code-citation',
         trust: 'approved',
@@ -1230,6 +1232,7 @@ function contextBriefStructuredContent(): Record<string, unknown> {
       },
       contracts: [],
     },
+    evidenceState: 'sufficient',
     mode: 'brief',
     output: {omittedItems: 0, projectorVersion: 3, returnedItems: 2, truncated: false},
     recommendedFollowUps: [

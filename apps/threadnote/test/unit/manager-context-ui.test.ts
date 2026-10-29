@@ -40,47 +40,7 @@ beforeEach(() => {
       const path =
         typeof input === 'string' ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
       const body = init?.body ? parseJsonObject(String(init.body)) : {};
-      if (path === '/api/worksets') {
-        return Promise.resolve(
-          jsonResponse({
-            definitions: [{memberCount: 1, name: 'platform'}],
-            definitionSource: 'seed-manifest',
-            editability: {state: 'editable'},
-            projectEditability: {state: 'editable'},
-            projects: [
-              {
-                branchState: 'current',
-                folder: 'threadnote',
-                name: 'threadnote',
-                path: '/private/threadnote',
-                worksetCount: 1,
-                worksets: ['platform'],
-              },
-              {
-                branchState: 'current',
-                folder: 'other',
-                name: 'other-project',
-                path: '/private/other-repository',
-                worksetCount: 0,
-                worksets: [],
-              },
-              {
-                branchState: 'current',
-                folder: 'changed',
-                name: 'changed-project',
-                path: '/private/changed',
-                worksetCount: 0,
-                worksets: [],
-              },
-            ],
-            projectsReadOnly: false,
-            readOnly: false,
-            revision: Effect.pipe('a', EffectString.repeat(64)),
-            type: 'manager-workset-catalog',
-            version: 1,
-          }),
-        );
-      }
+      if (path === '/api/worksets') return Promise.resolve(jsonResponse(managerWorksetCatalog()));
       requests.push({body, path});
       if (path === '/api/context/brief') {
         return Promise.resolve(
@@ -103,7 +63,24 @@ beforeEach(() => {
               createdAt: '2026-08-31T00:00:00.000Z',
               id: 'cgwj_context_recovery',
               progress: {message: 'Ready.', phase: 'completed', total: 1},
-              result: {state: 'ready'},
+              result: {
+                coverage: {complete: true, excluded: 0, failed: 0, missing: 0, ready: 1, requested: 1},
+                manifestDigest: Effect.pipe('b', EffectString.repeat(64)),
+                members: [
+                  {
+                    project: 'threadnote',
+                    projectionDigest: Effect.pipe('c', EffectString.repeat(64)),
+                    repositoryId: Effect.pipe('d', EffectString.repeat(64)),
+                    snapshotId: `cgsn_${Effect.pipe('e', EffectString.repeat(40))}-direct`,
+                    state: 'ready',
+                    symbolCount: 12,
+                  },
+                ],
+                state: 'ready',
+                type: 'code-graph-workset-prepare',
+                version: 1,
+                workset: String(body.workset),
+              },
               status: 'completed',
               workset: body.workset,
             },
@@ -307,23 +284,7 @@ describe('Manager Context workspace', () => {
       (input: string | URL | Request, init?: RequestInit) => {
         const path =
           typeof input === 'string' ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
-        if (path === '/api/worksets') {
-          return Promise.resolve(
-            jsonResponse({
-              definitions: [{memberCount: 1, name: 'platform'}],
-              projects: [
-                {
-                  branchState: 'current',
-                  folder: 'threadnote',
-                  name: 'threadnote',
-                  path: '/private/threadnote',
-                  worksetCount: 1,
-                  worksets: ['platform'],
-                },
-              ],
-            }),
-          );
-        }
+        if (path === '/api/worksets') return Promise.resolve(jsonResponse(managerWorksetCatalog(false)));
         return new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), {
             once: true,
@@ -767,6 +728,52 @@ async function flush(): Promise<void> {
     await Promise.resolve();
     await new Promise(resolve => window.setTimeout(resolve, 0));
   });
+}
+
+const THREADNOTE_MANAGER_PROJECT = {
+  branchState: 'current',
+  folder: 'threadnote',
+  name: 'threadnote',
+  path: '/private/threadnote',
+  worksetCount: 1,
+  worksets: ['platform'],
+} as const;
+
+function managerWorksetCatalog(includeOtherProjects = true) {
+  return {
+    definitions: [{memberCount: 1, name: 'platform'}],
+    definitionSource: 'seed-manifest',
+    editability: {state: 'editable'},
+    projectEditability: {state: 'editable'},
+    projects: [
+      THREADNOTE_MANAGER_PROJECT,
+      ...(includeOtherProjects
+        ? [
+            {
+              branchState: 'current',
+              folder: 'other',
+              name: 'other-project',
+              path: '/private/other-repository',
+              worksetCount: 0,
+              worksets: [],
+            },
+            {
+              branchState: 'current',
+              folder: 'changed',
+              name: 'changed-project',
+              path: '/private/changed',
+              worksetCount: 0,
+              worksets: [],
+            },
+          ]
+        : []),
+    ],
+    projectsReadOnly: false,
+    readOnly: false,
+    revision: Effect.pipe('a', EffectString.repeat(64)),
+    type: 'manager-workset-catalog',
+    version: 1,
+  };
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

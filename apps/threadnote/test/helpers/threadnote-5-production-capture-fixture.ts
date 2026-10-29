@@ -438,7 +438,7 @@ function recordSuccessfulOperation(
 }
 
 function contextBriefRecord(items: readonly ReturnType<typeof journey>[]) {
-  const structuredContent = contextBriefContent();
+  const structuredContent = emptyContextBriefContent();
   return record('solo', 'context-brief', {
     attempts: EffectArray.map(items, item => ({
       event: {
@@ -453,12 +453,26 @@ function contextBriefRecord(items: readonly ReturnType<typeof journey>[]) {
   });
 }
 
-function contextBriefContent() {
+export function emptyContextBriefContent() {
   return parseContextBriefV1({
     activeHandoffs: [],
     coverage: {
       gaps: [],
-      memory: {},
+      graph: {
+        complete: true,
+        consideredRepositories: 1,
+        readyRepositories: 1,
+        requestedRepositories: 1,
+        states: {current: 1},
+      },
+      memory: {
+        consideredCandidates: 0,
+        durableCandidates: 0,
+        fresh: 0,
+        handoffCandidates: 0,
+        stale: 0,
+        unknown: 0,
+      },
       omissions: {
         activeHandoffs: 0,
         coverageGaps: 0,
@@ -470,14 +484,19 @@ function contextBriefContent() {
       },
     },
     durableDecisions: [],
+    evidenceState: 'no-match',
     graph: {cards: [], contracts: []},
     mode: 'brief',
     output: {omittedItems: 0, projectorVersion: 2, returnedItems: 0, truncated: false},
     recommendedFollowUps: [],
-    scope: {},
+    scope: {freshness: 'fresh', kind: 'repository', name: '/repo', readyRepositories: 1, requestedRepositories: 1},
     stalenessAndConflicts: [],
     task: {summary: 'x', truncated: false},
-    trust: {},
+    trust: {
+      compiler: {modelsRequired: false, queryPlanExposed: false},
+      graph: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
+      memory: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+    },
     type: 'context-brief',
     version: 2,
   });
@@ -802,7 +821,7 @@ function source(text: string, topic: string) {
 }
 
 function outputBudgetRecord() {
-  const structuredContent = contextBriefContent();
+  const structuredContent = emptyContextBriefContent();
   return record('output-budgets', 'context-brief', {
     attempts: [
       {

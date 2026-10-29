@@ -67,10 +67,11 @@ import {
 import {secondSurfaceChallengeIdV1} from '@threadnote/threadnote/activation/second/surface_store';
 import {summarizeLocalValueEvents} from '@threadnote/threadnote/value_report/events';
 import {renderManagedGuidanceBlock} from '@threadnote/threadnote/guidance/index';
-import {parseContextBriefV1, renderContextBriefText} from '@threadnote/context/projector';
+import {renderContextBriefText} from '@threadnote/context/projector';
 import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
 import * as fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import {emptyContextBriefContent} from '../helpers/threadnote-5-production-capture-fixture.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -1377,33 +1378,7 @@ describe('Threadnote 5 source-native receipt verification', () => {
   });
 
   it('replays ten measured Context Brief attempts with authority-gated solo claims and local output budgets', () => {
-    const structuredContent = parseContextBriefV1({
-      activeHandoffs: [],
-      coverage: {
-        gaps: [],
-        memory: {},
-        omissions: {
-          activeHandoffs: 0,
-          coverageGaps: 0,
-          durableDecisions: 0,
-          graphCards: 0,
-          graphContracts: 0,
-          recommendedFollowUps: 0,
-          stalenessAndConflicts: 0,
-        },
-      },
-      durableDecisions: [],
-      graph: {cards: [], contracts: []},
-      mode: 'brief',
-      output: {omittedItems: 0, projectorVersion: 2, returnedItems: 0, truncated: false},
-      recommendedFollowUps: [],
-      scope: {},
-      stalenessAndConflicts: [],
-      task: {summary: 'x', truncated: false},
-      trust: {},
-      type: 'context-brief',
-      version: 2,
-    });
+    const structuredContent = emptyContextBriefContent();
     const attempt = {
       event: {candidate: CANDIDATE},
       request: {budgetTokens: 1_500, mode: 'brief', scope: {callerCwd: '/repo', kind: 'repository'}, task: 'x'},

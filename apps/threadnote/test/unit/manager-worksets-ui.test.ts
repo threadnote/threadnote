@@ -7,6 +7,11 @@ import {renderToStaticMarkup} from 'react-dom/server';
 import fc from 'fast-check';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {ManagerDialogProvider} from '@threadnote/manager/dialog';
+import {
+  renderCodeGraphWorksetEvidenceText,
+  type CodeGraphWorksetEvidenceProjectionV2,
+} from '@threadnote/graph/workset/evidence';
+import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
 import type {ManagerWorksetPrepareJob} from '@threadnote/threadnote/manager/worksets';
 import {managerWorksetJobElapsedMilliseconds, PrepareJobPanel, WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {readFile} from '@threadnote/testing/node-fs-promises';
@@ -127,6 +132,9 @@ beforeEach(() => {
         return Promise.resolve(jsonResponse({code: 'revision-conflict', error: 'Manifest changed.'}, 409));
       }
       const operation = body.operation;
+      if (operation !== 'create' && operation !== 'update' && operation !== 'delete') {
+        throw new Error('Unexpected manifest-project mutation operation.');
+      }
       if (operation === 'delete') {
         const name = String(body.project);
         projectInventory = EffectArray.filter(projectInventory, project => project !== name);
@@ -157,12 +165,15 @@ beforeEach(() => {
         String.fromCharCode(106 + projectMutationBodies.length - 1),
         EffectString.repeat(64),
       );
-      return Promise.resolve(jsonResponse({catalog: catalog(), changed: true, warnings: []}));
+      return Promise.resolve(jsonResponse({catalog: catalog(), changed: true, operation, warnings: []}));
     }
     if (url === '/api/worksets/definitions') {
       const body = parseJsonObject(String(init?.body));
       definitionMutationBodies.push(body);
       const operation = body.operation;
+      if (operation !== 'create' && operation !== 'update' && operation !== 'delete') {
+        throw new Error('Unexpected Workset definition mutation operation.');
+      }
       if (operation === 'delete') {
         definitionProjects.delete(String(body.workset));
       } else {
@@ -175,7 +186,7 @@ beforeEach(() => {
         String.fromCharCode(98 + definitionMutationBodies.length - 1),
         EffectString.repeat(64),
       );
-      return Promise.resolve(jsonResponse({catalog: catalog(), changed: true, warnings: []}));
+      return Promise.resolve(jsonResponse({catalog: catalog(), changed: true, operation, warnings: []}));
     }
     if (Effect.pipe(url, EffectString.startsWith('/api/worksets/definition'))) {
       const name = new URL(url, 'http://manager.test').searchParams.get('workset') ?? 'alpha';
@@ -898,47 +909,49 @@ function status(name: string) {
 }
 
 function evidence(repositoryKey: string, qualifiedName: string) {
+  const structuredContent = {
+    cards: [
+      {
+        id: `card-${repositoryKey}`,
+        reason: {score: 1, signals: [], summary: 'Exact graph match'},
+        ref: 'cgr_example',
+        relationships: [],
+        repositoryKey,
+        symbol: {
+          kind: 'function',
+          language: 'typescript',
+          name: qualifiedName,
+          path: 'src/index.ts',
+          qualifiedName,
+          span: {column: 0, endColumn: 1, endLine: 1, line: 1},
+        },
+      },
+    ],
+    coverage: {
+      cataloguedRepositories: 1,
+      complete: true,
+      consideredRepositories: 1,
+      deepQueriedRepositories: 1,
+      requestedRepositories: 1,
+      states: {current: 1, deferred: 0, excluded: 0, failed: 0, missing: 0, stale: 0},
+      stopReason: 'exhaustion',
+    },
+    output: {omittedCards: 0, projectorVersion: 1, returnedCards: 1, totalCards: 1, truncated: false},
+    repositories: {},
+    trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
+    type: 'code-graph-workset-query',
+    version: 2,
+    warnings: [],
+    workset: {
+      generation: {digest: Effect.pipe('c', EffectString.repeat(64)), id: 'cgwg_example'},
+      name: repositoryKey,
+    },
+  } satisfies CodeGraphWorksetEvidenceProjectionV2;
+  const text = renderCodeGraphWorksetEvidenceText(structuredContent);
   return {
     maximumBytes: 4_096,
-    measurement: {},
-    structuredContent: {
-      cards: [
-        {
-          id: `card-${repositoryKey}`,
-          reason: {score: 1, signals: [], summary: 'Exact graph match'},
-          ref: 'cgr_example',
-          relationships: [],
-          repositoryKey,
-          symbol: {
-            kind: 'function',
-            language: 'typescript',
-            name: qualifiedName,
-            path: 'src/index.ts',
-            qualifiedName,
-            span: {column: 0, endColumn: 1, endLine: 1, line: 1},
-          },
-        },
-      ],
-      coverage: {
-        cataloguedRepositories: 1,
-        complete: true,
-        consideredRepositories: 1,
-        deepQueriedRepositories: 1,
-        requestedRepositories: 1,
-        states: {current: 1, deferred: 0, excluded: 0, failed: 0, missing: 0, stale: 0},
-        stopReason: 'exhaustion',
-      },
-      output: {omittedCards: 0, projectorVersion: 1, returnedCards: 1, totalCards: 1, truncated: false},
-      repositories: {},
-      trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
-      type: 'code-graph-workset-query',
-      version: 2,
-      warnings: [],
-      workset: {
-        generation: {digest: Effect.pipe('c', EffectString.repeat(64)), id: 'cgwg_example'},
-        name: repositoryKey,
-      },
-    },
-    text: '',
+    measurement: measureAgentToolResponse({structuredContent, text}),
+    structuredContent,
+    text,
   };
 }

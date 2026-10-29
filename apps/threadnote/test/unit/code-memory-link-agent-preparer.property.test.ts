@@ -276,8 +276,36 @@ describe('Code Memory Link sealed preparation', () => {
     const brief = (version: 2 | 3, durableDecisions: readonly Record<string, unknown>[]) =>
       parseContextBriefV1({
         activeHandoffs: [],
-        coverage: {},
+        coverage: {
+          gaps: [],
+          graph: {
+            complete: true,
+            consideredRepositories: 1,
+            readyRepositories: 1,
+            requestedRepositories: 1,
+            states: {current: 1},
+          },
+          memory: {
+            codeAnchors: {complete: true, matchedMemories: durableDecisions.length, requested: 1, resolved: 1},
+            consideredCandidates: durableDecisions.length,
+            durableCandidates: durableDecisions.length,
+            fresh: durableDecisions.length,
+            handoffCandidates: 0,
+            stale: 0,
+            unknown: 0,
+          },
+          omissions: {
+            activeHandoffs: 0,
+            coverageGaps: 0,
+            durableDecisions: 0,
+            graphCards: 0,
+            graphContracts: 0,
+            recommendedFollowUps: 0,
+            stalenessAndConflicts: 0,
+          },
+        },
         durableDecisions,
+        evidenceState: 'sufficient',
         graph: {cards: [], contracts: []},
         mode: 'brief',
         output: {
@@ -287,10 +315,20 @@ describe('Code Memory Link sealed preparation', () => {
           truncated: false,
         },
         recommendedFollowUps: [],
-        scope: {},
+        scope: {
+          freshness: 'fresh',
+          kind: 'repository',
+          name: 'injection-canary-fixture',
+          readyRepositories: 1,
+          requestedRepositories: 1,
+        },
         stalenessAndConflicts: [],
         task: {summary: definition.prompt, truncated: false},
-        trust: {},
+        trust: {
+          compiler: {modelsRequired: false, queryPlanExposed: false},
+          graph: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
+          memory: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+        },
         type: 'context-brief',
         version,
       });
