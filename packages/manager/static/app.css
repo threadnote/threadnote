@@ -956,6 +956,10 @@ body.is-resizing-sidebar * {
   padding: 16px;
 }
 
+.health-global-maintenance {
+  margin-bottom: 20px;
+}
+
 .attention-bulk-repair strong {
   display: block;
   margin-bottom: 4px;

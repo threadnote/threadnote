@@ -558,6 +558,28 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   }
   return (
     <section aria-busy={busy} className="panel attention-panel context-health is-active">
+      <div className="workspace-tabs" role="tablist" aria-label="Context Health sections">
+        {EffectArray.map(
+          [
+            ['decisions', 'Needs a decision'],
+            ['recovery', 'Automatic recovery'],
+            ['history', 'History'],
+            ['hygiene', 'Hygiene'],
+          ] as const,
+          ([value, label]) => (
+            <button
+              key={value}
+              role="tab"
+              aria-selected={tab === value}
+              className={tab === value ? 'is-active' : undefined}
+              onClick={() => setTab(value)}
+            >
+              {label}
+              {value === 'decisions' && decisionCount > 0 ? <span>{decisionCount}</span> : null}
+            </button>
+          ),
+        )}
+      </div>
       <AutomaticMemoryPanel
         onOpenMemory={props.onOpenLibrary}
         key={props.project}
@@ -587,28 +609,6 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         }}
         onSummaryChange={(project, summary) => setAutomatic(summary ? {project, ...summary} : undefined)}
       />
-      <div className="workspace-tabs" role="tablist" aria-label="Context Health sections">
-        {EffectArray.map(
-          [
-            ['decisions', 'Needs a decision'],
-            ['recovery', 'Automatic recovery'],
-            ['history', 'History'],
-            ['hygiene', 'Hygiene'],
-          ] as const,
-          ([value, label]) => (
-            <button
-              key={value}
-              role="tab"
-              aria-selected={tab === value}
-              className={tab === value ? 'is-active' : undefined}
-              onClick={() => setTab(value)}
-            >
-              {label}
-              {value === 'decisions' && decisionCount > 0 ? <span>{decisionCount}</span> : null}
-            </button>
-          ),
-        )}
-      </div>
       <p role="status" aria-live="polite" className="workspace-note">
         <ShieldCheck />
         {maintenanceStatusLabel({
