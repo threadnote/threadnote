@@ -8,6 +8,7 @@ import {readContextMaintenanceStatus} from '../memory/context/maintenance.js';
 import {buildLocalValueReport} from '../value_report/commands.js';
 import {managerAttentionProjectRoot} from './attention.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {readManagerReviewEligibility} from './review_actionability.js';
 
 export interface ManagerHomeHandoffV1 {
   readonly timestamp: string;
@@ -45,6 +46,7 @@ export interface ManagerHomeApiResponse {
 const homeSources = {
   records: readMaintenanceMemoryRecords,
   reviews: listCandidateReviews,
+  eligibility: readManagerReviewEligibility,
   value: buildLocalValueReport,
   root: managerAttentionProjectRoot,
   health: collectContextHealth,
@@ -102,7 +104,16 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
   const [corpusResult, reviewsResult, valueResult, healthResult, maintenanceResult] = yield* Effect.all(
     [
       Fiber.join(corpusFiber),
-      observe(sources.reviews(request.config.agentContextHome)),
+      observe(
+        sources.reviews(request.config.agentContextHome).pipe(
+          Effect.flatMap(reviews =>
+            sources.eligibility(
+              request.config,
+              reviews.filter(review => review.project === project),
+            ),
+          ),
+        ),
+      ),
       observe(sources.value(request.config, {period: 30, project})),
       healthObservation,
       observe(sources.maintenance(request.config, project)),
@@ -124,15 +135,7 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
           uri: record.uri,
         }))
     : [];
-  const pendingCount = Result.isSuccess(reviewsResult)
-    ? reviewsResult.success
-        .filter(review => review.project === project && !(review.maintenanceCapture && !review.maintenance))
-        .flatMap(review => review.candidates)
-        .filter(
-          candidate =>
-            candidate.state === 'pending' || candidate.state === 'deferred' || candidate.state === 'applying',
-        ).length
-    : undefined;
+  const pendingCount = Result.isSuccess(reviewsResult) ? reviewsResult.success.pendingCount : undefined;
   const healthReport = healthResult && Result.isSuccess(healthResult) ? healthResult.success : undefined;
   const retainedDecisions = Result.isSuccess(maintenanceResult)
     ? maintenanceResult.success.counts?.decisionMemories
@@ -199,22 +202,19 @@ const collectAllProjectsHome = Effect.fn('managerHome.collectAllProjects')(funct
   const [corpus, reviews] = yield* Effect.all(
     [
       observeHomeSource(sources.records(request.config), deadline),
-      observeHomeSource(sources.reviews(request.config.agentContextHome), deadline),
+      observeHomeSource(
+        sources
+          .reviews(request.config.agentContextHome)
+          .pipe(Effect.flatMap(reviews => sources.eligibility(request.config, reviews))),
+        deadline,
+      ),
     ],
     {concurrency: 2},
   );
   const records = Result.isSuccess(corpus)
     ? corpus.success.filter(record => record.metadata.status === 'active')
     : undefined;
-  const pendingCount = Result.isSuccess(reviews)
-    ? reviews.success
-        .filter(review => !(review.maintenanceCapture && !review.maintenance))
-        .flatMap(review => review.candidates)
-        .filter(
-          candidate =>
-            candidate.state === 'pending' || candidate.state === 'deferred' || candidate.state === 'applying',
-        ).length
-    : undefined;
+  const pendingCount = Result.isSuccess(reviews) ? reviews.success.pendingCount : undefined;
   return {
     body: {
       handoffs: (records ?? [])

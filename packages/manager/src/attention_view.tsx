@@ -1,5 +1,6 @@
 import {MarkdownViewer} from './ui/controls.js';
 import {Sparkles} from 'lucide-react';
+import {Schema} from 'effect';
 import {MemoryExcerpt, ReviewBadge} from './review_presentation.js';
 import {ReviewProgress} from './review_progress.js';
 import React, {useCallback, useEffect, useRef, useState} from 'react';
@@ -13,7 +14,7 @@ import {ContextMaintenanceView} from './attention/maintenance_view.js';
 import {TopicReviewDialog} from './attention/topic_review.js';
 import {AutomaticMemoryReviewDialog} from './attention/automatic_review.js';
 import {ReviewDetail, HealthDetail} from './attention_details.js';
-import {api, errorMessage} from '@threadnote/manager/ui/support';
+import {api, errorMessage, ManagerApiError} from '@threadnote/manager/ui/support';
 import {useManagerLiveQuery, useManagerLiveResource} from './live/provider.js';
 
 interface AttentionPanelProps {
@@ -76,14 +77,71 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
     view: 'pending' | 'deferred' | 'history';
   }>();
   const [generation, setGeneration] = useState(0);
-  const [inbox, setInbox] = useState<ManagerReviewInboxResponseV1>();
+  const scope = JSON.stringify([props.project, view]);
+  const [storedInbox, setInbox] = useState<{scope: string; value: ManagerReviewInboxResponseV1}>();
+  const inbox = storedInbox?.scope === scope ? storedInbox.value : undefined;
   const returnFocus = useRef<{reviewId: string; candidateId: string} | undefined>(undefined);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
+  const live = useManagerLiveQuery<ManagerReviewInboxResponseV1>(
+    props.project ? {topic: 'automatic-memory', project: props.project} : {topic: 'home', scope: 'account'},
+    `reviews:${view}`,
+    signal =>
+      api<ManagerReviewInboxResponseV1>(
+        `/api/reviews?project=${encodeURIComponent(props.project)}&view=${view}`,
+        undefined,
+        {signal, timeoutMilliseconds: 8_000},
+      ),
+  );
+  const fallback = !live.active || live.snapshot.status === 'unsupported';
+  useEffect(() => {
+    const next = inbox?.background?.nextRetryAt;
+    if (!fallback || next === undefined || !Number.isFinite(next)) return;
+    let due = false;
+    const retry = () => {
+      due = true;
+      if (!document.hidden) {
+        due = false;
+        setGeneration(value => value + 1);
+      }
+    };
+    const visible = () => {
+      if (due && !document.hidden) retry();
+    };
+    const timer = window.setTimeout(retry, Math.max(25, next - Date.now()));
+    document.addEventListener('visibilitychange', visible);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', visible);
+    };
+  }, [fallback, inbox?.background?.nextRetryAt, scope]);
+  useEffect(() => {
+    if (fallback) return;
+    if (live.snapshot.status === 'ready') {
+      const result = live.snapshot.data;
+      if (result.version === 1 && result.project === props.project && Array.isArray(result.items)) {
+        setInbox({scope, value: result});
+        setError('');
+        setLoading(false);
+      } else {
+        setInbox(undefined);
+        setSelected(undefined);
+        setError('The review inbox does not match this selection. Refresh Manager.');
+      }
+    } else if (live.snapshot.status === 'error') {
+      if (attentionReadRequiresRedaction(live.snapshot.error)) {
+        setInbox(undefined);
+        setSelected(undefined);
+      }
+      setError(errorMessage(live.snapshot.error));
+      setLoading(false);
+    } else setLoading(true);
+  }, [fallback, live.snapshot, scope, props.project]);
   useEffect(() => {
     setSelected(undefined);
     setNotice('');
+    setError('');
   }, [props.project, view]);
   useEffect(() => {
     if (selected || !returnFocus.current) return;
@@ -97,21 +155,34 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
     }
   }, [selected, inbox]);
   useEffect(() => {
+    if (!fallback) {
+      live.invalidate();
+      return;
+    }
     let cancelled = false;
     const controller = new AbortController();
-    setInbox(undefined);
     setLoading(true);
-    setError('');
     void api<ManagerReviewInboxResponseV1>(
       `/api/reviews?project=${encodeURIComponent(props.project)}&view=${view}`,
       undefined,
       {signal: controller.signal, timeoutMilliseconds: 8_000},
     )
       .then(result => {
-        if (!cancelled && result.project === props.project) setInbox(result);
+        if (cancelled) return;
+        if (!result || result.version !== 1 || result.project !== props.project || !Array.isArray(result.items)) {
+          throw ManagerApiError.of('The review inbox does not match this selection. Refresh Manager.', 409);
+        }
+        setInbox({scope, value: result});
+        setError('');
       })
       .catch(cause => {
-        if (!cancelled) setError(errorMessage(cause));
+        if (!cancelled) {
+          if (attentionReadRequiresRedaction(cause)) {
+            setInbox(undefined);
+            setSelected(undefined);
+          }
+          setError(errorMessage(cause));
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -120,7 +191,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
       cancelled = true;
       controller.abort();
     };
-  }, [props.project, props.refreshGeneration, generation, view]);
+  }, [props.project, props.refreshGeneration, generation, view, fallback]);
   const activeSelection =
     selected && selected.view === view && (!props.project || selected.project === props.project) ? selected : undefined;
 
@@ -140,19 +211,41 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
           </button>
         ))}
       </div>
-      {error ? (
-        <div role="alert">
-          <AttentionError error={error} />
-          <button type="button" onClick={() => setGeneration(value => value + 1)}>
-            Retry loading reviews
-          </button>
+      {view === 'pending' &&
+      inbox?.background &&
+      (inbox.background.assessments > 0 || inbox.background.awaitingSources > 0 || inbox.background.obsolete > 0) ? (
+        <div className="review-notice" role="status">
+          <p>
+            {inbox.background.assessments} background assessments · {inbox.background.awaitingSources} updates waiting
+            for source verification.
+          </p>
+          <p>
+            Assessments and unavailable sources are checked automatically as evidence changes. No review or discard is
+            required.
+          </p>
+          {inbox.background.obsolete > 0 ? (
+            <p>{inbox.background.obsolete} obsolete generated reviews are retained in History.</p>
+          ) : null}
         </div>
-      ) : loading ? (
+      ) : null}
+      <div className="attention-refresh-status" style={{blockSize: '3.5rem', overflowY: 'auto'}}>
+        {error ? (
+          <div role="alert">
+            {error}
+            <button type="button" onClick={() => setGeneration(value => value + 1)}>
+              Retry loading reviews
+            </button>
+          </div>
+        ) : inbox && loading ? (
+          <p role="status">Checking for review updates…</p>
+        ) : null}
+      </div>
+      {!inbox && loading ? (
         <ReviewProgress
           title="Loading the review inbox…"
           description="Loading saved review summaries. You can switch tabs while this loads."
         />
-      ) : !inbox || inbox.items.length === 0 ? (
+      ) : !inbox && error ? null : !inbox || inbox.items.length === 0 ? (
         <AttentionEmpty
           text={
             view === 'pending'
@@ -173,8 +266,18 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                   <h3>{review.task}</h3>
                 </div>
                 <ReviewBadge tone="proposal">
-                  <Sparkles size={12} aria-hidden="true" /> {review.candidates.length}{' '}
-                  {review.candidates.length === 1 ? 'proposal' : 'proposals'}
+                  {review.queueStatus ? (
+                    review.queueStatus === 'assessment' ? (
+                      'Background assessment'
+                    ) : (
+                      'Obsolete review'
+                    )
+                  ) : (
+                    <>
+                      <Sparkles size={12} aria-hidden="true" /> {review.candidates.length}{' '}
+                      {review.candidates.length === 1 ? 'proposal' : 'proposals'}
+                    </>
+                  )}
                 </ReviewBadge>
               </header>
               <p className="muted">
@@ -195,7 +298,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                                 : 'neutral'
                         }
                       >
-                        {candidate.state}
+                        {review.queueStatus ?? candidate.state}
                       </ReviewBadge>
                       {!review.kind ? (
                         <>
@@ -256,6 +359,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
       ) : null}
       {activeSelection?.kind === 'automatic-memory' ? (
         <AutomaticMemoryReviewDialog
+          onOpenMemory={props.onOpenLibrary}
           key={`${activeSelection.project}:${activeSelection.reviewId}`}
           project={activeSelection.project}
           reviewId={activeSelection.reviewId}
@@ -313,12 +417,18 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
   const requestEpoch = useRef(0);
   const requestController = useRef<AbortController | undefined>(undefined);
   const [storedReport, setReport] = useState<ManagerContextHealthResponseV1>();
-  const report = storedReport?.project === props.project ? storedReport : undefined;
+  const liveReadInvalid =
+    !legacyHealth &&
+    ((live.snapshot.status === 'error' && attentionReadRequiresRedaction(live.snapshot.error)) ||
+      (live.snapshot.status === 'ready' && !validHealthReport(live.snapshot.data, props.project)));
+  const report = storedReport?.project === props.project && !liveReadInvalid ? storedReport : undefined;
   const [nextCursor, setNextCursor] = useState<string>();
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [fallbackFreshProject, setFallbackFreshProject] = useState<string>();
+  const healthUnconfirmed =
+    loading || !!error || (live.active && live.snapshot.status !== 'ready' && fallbackFreshProject !== props.project);
   const [citationRepairOpen, setCitationRepairOpen] = useState(false);
   const [citationRepairJob, setCitationRepairJob] = useState<ManagerCitationRepairJobV1>();
   const [citationRepairJobError, setCitationRepairJobError] = useState('');
@@ -372,6 +482,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
     setReport(undefined);
     setNextCursor(undefined);
     setError('');
+    setLoading(false);
     setLoadingMore(false);
     setFallbackFreshProject(undefined);
   }, [props.project]);
@@ -387,15 +498,18 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
     let cancelled = false;
     const controller = new AbortController();
     requestController.current = controller;
-    setLoading(true);
     setLoadingMore(false);
-    setError('');
     const poll = () => {
       requestEpoch.current += 1;
+      setLoading(true);
+      setFallbackFreshProject(undefined);
       setLoadingMore(false);
       void readHealth(controller.signal)
         .then(result => {
-          if (!cancelled && result.project === props.project) {
+          if (!cancelled) {
+            if (!validHealthReport(result, props.project)) {
+              throw ManagerApiError.of('Context health does not match this project. Refresh Manager.', 409);
+            }
             setReport(result);
             setNextCursor(result.nextCursor);
             setFallbackFreshProject(props.project);
@@ -404,6 +518,12 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         })
         .catch(cause => {
           if (!cancelled) {
+            if (attentionReadRequiresRedaction(cause)) {
+              setReport(undefined);
+              setSelected(undefined);
+              setCitationRepairOpen(false);
+              setNextCursor(undefined);
+            }
             setFallbackFreshProject(undefined);
             setError(errorMessage(cause));
           }
@@ -424,7 +544,16 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
     };
   }, [props.project, props.refreshGeneration, generation, legacyHealth, readHealth]);
   useEffect(() => {
-    if (legacyHealth || live.snapshot.status !== 'ready' || live.snapshot.data.project !== props.project) return;
+    if (legacyHealth || live.snapshot.status !== 'ready') return;
+    if (!validHealthReport(live.snapshot.data, props.project)) {
+      setReport(undefined);
+      setSelected(undefined);
+      setCitationRepairOpen(false);
+      setNextCursor(undefined);
+      setError('Context health does not match this project. Refresh Manager.');
+      setLoading(false);
+      return;
+    }
     requestEpoch.current += 1;
     requestController.current?.abort();
     requestController.current = new AbortController();
@@ -437,9 +566,15 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
   useEffect(() => {
     if (legacyHealth) return;
     if (live.snapshot.status === 'error') {
+      if (attentionReadRequiresRedaction(live.snapshot.error)) {
+        setReport(undefined);
+        setSelected(undefined);
+        setCitationRepairOpen(false);
+        setNextCursor(undefined);
+      }
       setError(errorMessage(live.snapshot.error));
       setLoading(false);
-    } else if (live.snapshot.status === 'loading' && !report) {
+    } else if (live.snapshot.status === 'loading' || live.snapshot.status === 'stale') {
       setLoading(true);
     }
   }, [legacyHealth, live.snapshot, report]);
@@ -523,17 +658,19 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
   ]);
 
   function loadMore(): void {
-    if (!nextCursor || loadingMore) return;
+    if (!nextCursor || loadingMore || loading || error) return;
     const epoch = requestEpoch.current;
     setLoadingMore(true);
-    setError('');
     void api<ManagerContextHealthResponseV1>(
       `/api/context-health?project=${encodeURIComponent(props.project)}&after=${encodeURIComponent(nextCursor)}`,
       undefined,
       {signal: requestController.current?.signal, timeoutMilliseconds: 8_000},
     )
       .then(next => {
-        if (epoch !== requestEpoch.current || next.project !== props.project) return;
+        if (epoch !== requestEpoch.current) return;
+        if (!validHealthReport(next, props.project)) {
+          throw ManagerApiError.of('Context health does not match this project. Refresh Manager.', 409);
+        }
         setReport(current =>
           current === undefined
             ? next
@@ -546,9 +683,18 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
               },
         );
         setNextCursor(next.nextCursor);
+        setError('');
       })
       .catch(cause => {
-        if (epoch === requestEpoch.current) setError(errorMessage(cause));
+        if (epoch === requestEpoch.current) {
+          if (attentionReadRequiresRedaction(cause)) {
+            setReport(undefined);
+            setSelected(undefined);
+            setCitationRepairOpen(false);
+            setNextCursor(undefined);
+          }
+          setError(errorMessage(cause));
+        }
       })
       .finally(() => {
         if (epoch === requestEpoch.current) setLoadingMore(false);
@@ -556,7 +702,8 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
   }
 
   async function startBackgroundCitationRepair(): Promise<void> {
-    if (!props.project || citationRepairJobStarting || citationRepairJob?.status === 'running') return;
+    if (!props.project || healthUnconfirmed || citationRepairJobStarting || citationRepairJob?.status === 'running')
+      return;
     const project = props.project;
     const projectEpoch = citationRepairJobProjectEpoch.current;
     setCitationRepairJobStarting(true);
@@ -643,7 +790,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         onLoadMore={loadMore}
         reportError={error}
         onRefresh={() => setGeneration(value => value + 1)}
-        healthLiveStale={live.active && live.snapshot.status !== 'ready' && fallbackFreshProject !== props.project}
+        healthLiveStale={healthUnconfirmed}
         healthLegacy={legacyHealth}
         healthFallback={live.active && legacyHealth && fallbackFreshProject === props.project}
       />
@@ -660,11 +807,19 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         summary="Inspect stale, conflicting, duplicated, or disconnected context for this project."
         title="Context health"
       />
-      {!props.project ? (
-        <AttentionEmpty text="Select a project to inspect its context health." />
-      ) : error ? (
-        <AttentionError error={error} />
-      ) : loading ? (
+      <div className="attention-refresh-status" style={{blockSize: '3.5rem', overflowY: 'auto'}}>
+        {error ? (
+          <p role="alert">
+            {error}{' '}
+            <button type="button" onClick={() => setGeneration(value => value + 1)}>
+              Retry checking context
+            </button>
+          </p>
+        ) : report && loading ? (
+          <p role="status">Checking for context updates…</p>
+        ) : null}
+      </div>
+      {!report && loading ? (
         <AttentionEmpty text="Checking project context…" />
       ) : report ? (
         <>
@@ -690,7 +845,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
                     Review citation repairs
                   </button>
                   <button
-                    disabled={citationRepairJobStarting || citationRepairJob?.status === 'running'}
+                    disabled={healthUnconfirmed || citationRepairJobStarting || citationRepairJob?.status === 'running'}
                     onClick={() => void startBackgroundCitationRepair()}
                     type="button"
                   >
@@ -785,7 +940,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
           )}
           {nextCursor ? (
             <footer className="attention-footer">
-              <button disabled={loadingMore} onClick={loadMore} type="button">
+              <button disabled={loadingMore || healthUnconfirmed} onClick={loadMore} type="button">
                 {loadingMore ? 'Loading more findings…' : `Load ${report.remainingFindings ?? 'more'} findings`}
               </button>
             </footer>
@@ -800,7 +955,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
           project={props.project}
           repairsAvailable={report?.repositoryEvidence.state === 'available'}
           stale={
-            (live.active && live.snapshot.status !== 'ready' && fallbackFreshProject !== props.project) ||
+            healthUnconfirmed ||
             JSON.stringify(report.findings.find(item => item.id === selected.id)) !== JSON.stringify(selected)
           }
           onClose={() => setSelected(undefined)}
@@ -811,11 +966,26 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       {citationRepairOpen && report ? (
         <CitationRepairDialog
           project={props.project}
+          stale={healthUnconfirmed}
           onChanged={() => setGeneration(value => value + 1)}
           onClose={() => setCitationRepairOpen(false)}
         />
       ) : null}
     </section>
+  );
+}
+
+function attentionReadRequiresRedaction(cause: unknown): boolean {
+  return Schema.is(ManagerApiError)(cause) && [400, 401, 403, 404, 409, 410].includes(cause.status);
+}
+
+function validHealthReport(result: ManagerContextHealthResponseV1, project: string): boolean {
+  return (
+    !!result &&
+    result.version === 1 &&
+    result.project === project &&
+    Array.isArray(result.findings) &&
+    Array.isArray(result.recordPreviews)
   );
 }
 
@@ -942,6 +1112,7 @@ function CitationRepairDialog(props: {
   readonly onChanged: () => void;
   readonly onClose: () => void;
   readonly project: string;
+  readonly stale?: boolean;
 }): React.ReactElement {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [preview, setPreview] = useState<CitationRepairPreview>();
@@ -964,6 +1135,7 @@ function CitationRepairDialog(props: {
   }, [busy]);
 
   async function loadPreview(rebuild: boolean): Promise<void> {
+    if (rebuild && props.stale) return;
     setBusy(true);
     setError('');
     setResult(undefined);
@@ -987,7 +1159,7 @@ function CitationRepairDialog(props: {
   }
 
   async function applyAll(): Promise<void> {
-    if (!preview || preview.items.length === 0) return;
+    if (props.stale || !preview || preview.items.length === 0) return;
     setBusy(true);
     setError('');
     setResult(undefined);
@@ -1103,11 +1275,11 @@ function CitationRepairDialog(props: {
           </p>
         ) : null}
         <footer>
-          <button disabled={busy} onClick={() => void loadPreview(true)} type="button">
+          <button disabled={busy || props.stale} onClick={() => void loadPreview(true)} type="button">
             {busy && progress?.stage !== 'apply' ? 'Working…' : 'Rebuild project graph and retry'}
           </button>
           <button
-            disabled={busy || !preview || preview.items.length === 0}
+            disabled={busy || props.stale || !preview || preview.items.length === 0}
             onClick={() => void applyAll()}
             type="button"
           >
@@ -1273,14 +1445,6 @@ function AttentionHeader(props: {
 
 function AttentionEmpty(props: {readonly text: string}): React.ReactElement {
   return <div className="attention-empty">{props.text}</div>;
-}
-
-function AttentionError(props: {readonly error: string}): React.ReactElement {
-  return (
-    <div className="attention-empty is-error" role="alert">
-      {props.error}
-    </div>
-  );
 }
 
 function Metric(props: {readonly label: string; readonly value: string}): React.ReactElement {

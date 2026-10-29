@@ -38,8 +38,19 @@ import {
 
 export class TopicReviewSourceError extends Schema.TaggedError<TopicReviewSourceError>()('TopicReviewSourceError', {
   message: Schema.String,
+  reason: Schema.optionalKey(
+    Schema.Literals(['target-changed', 'source-changed', 'source-unavailable', 'scope-changed', 'policy-changed']),
+  ),
 }) {}
-const fail = (message: string) => TopicReviewSourceError.make({message});
+const fail = (
+  message: string,
+  reason:
+    | 'target-changed'
+    | 'source-changed'
+    | 'source-unavailable'
+    | 'scope-changed'
+    | 'policy-changed' = 'source-unavailable',
+) => TopicReviewSourceError.make({message, reason});
 
 /** Reconstruct only the previously reviewed vector; it never authorizes a new capture. */
 function reviewedObservation(record: MemoryRecord, review: TopicMaintenanceReviewPayloadV1) {
@@ -129,7 +140,7 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
 ) {
   yield* Effect.try({
     try: () => assertAutomaticMaintenanceTarget(review.basis.assessment, record),
-    catch: () => fail('The automatic review baseline or approved role authority changed.'),
+    catch: () => fail('The automatic review baseline or approved role authority changed.', 'target-changed'),
   });
   const manifest = yield* readSeedManifest(config.manifestPath).pipe(Effect.result);
   let root: string | undefined;
@@ -143,7 +154,7 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
       !(yield* Path.Path).isAbsolute(sourceCwd) ||
       (root && (yield* fs.realPath(root)) !== (yield* fs.realPath(sourceCwd)))
     )
-      return yield* fail('The configured automatic source checkout changed.');
+      return yield* fail('The configured automatic source checkout changed.', 'scope-changed');
     root = sourceCwd;
   }
   const scopeRevision = sha256HexSync(
@@ -155,7 +166,7 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
     }),
   );
   if (scopeRevision !== review.basis.scopeRevision)
-    return yield* fail('The automatic preparation source policy changed.');
+    return yield* fail('The automatic preparation source policy changed.', 'scope-changed');
   const portableReads = new Map<string, Effect.Success<ReturnType<typeof resolveAutomaticSharedMemorySource>>>();
   for (const entry of review.reviewEvidence)
     if (entry.descriptor.source.kind === 'memory' && entry.descriptor.locator) {
@@ -174,15 +185,15 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
     const current = routed
       ? {record: routed.record, hash: sha256HexSync(routed.record.content)}
       : yield* readContextMaintenanceCanonicalRecord(config, read.uri);
+    if (current.hash !== read.hash) return yield* fail('A reviewed canonical source changed.', 'source-changed');
     if (
-      current.hash !== read.hash ||
       current.record.metadata.status !== 'active' ||
       (current.record.metadata.project ?? '') !== (record.metadata.project ?? '') ||
       current.record.metadata.visibility === 'external' ||
       current.record.metadata.trust === 'untrusted' ||
       current.record.metadata.authority === 'external'
     )
-      return yield* fail('A reviewed canonical source or its current access policy changed.');
+      return yield* fail('A reviewed canonical source or its current access policy changed.', 'policy-changed');
     if (!routed)
       ordinarySources.push({
         content: current.record.content,

@@ -1,3 +1,4 @@
+import {retainSemanticChoice, semanticEvidenceIdentity} from './semantic_recovery.js';
 import React, {useEffect, useId, useRef, useState} from 'react';
 import {Schema} from 'effect';
 import {ExternalLink, Info} from 'lucide-react';
@@ -194,7 +195,7 @@ export function SemanticResolutionReview(props: {
   readonly evidence: ContextHealthSemanticContradictionV2;
   readonly onOpenLibrary: (uri: string) => void;
   readonly onResolved: () => void;
-  readonly onRefresh: () => void;
+  readonly onRefresh: () => void | Promise<void>;
   readonly secondaryAction?: React.ReactNode;
   readonly ownerInstructions?: string;
   readonly writesDisabled?: boolean;
@@ -208,21 +209,29 @@ export function SemanticResolutionReview(props: {
   const [stale, setStale] = useState(false);
   const request = useRef<AbortController | undefined>(undefined);
   const review = useRef<HTMLElement>(null);
+  const previewScope = useRef<string | undefined>(undefined);
   const {evidence} = props;
+  const prior = useRef({project: props.project, evidence});
+  const evidenceKey = semanticEvidenceIdentity(evidence);
+  const scopeKey = JSON.stringify([props.project, evidenceKey]);
   useEffect(() => {
-    setChoice(undefined);
+    const previous = prior.current;
+    prior.current = {project: props.project, evidence};
+    request.current?.abort();
+    setChoice(value =>
+      previous.project === props.project ? retainSemanticChoice(value, previous.evidence, evidence) : undefined,
+    );
     setPreview(undefined);
     setReviewedWholeMemory(false);
     setBusy(false);
-    setError('');
+    setError(
+      previous.project === props.project && semanticEvidenceIdentity(previous.evidence) !== evidenceKey
+        ? 'The statements changed. Review the current outcome before confirming your choice.'
+        : '',
+    );
     setStale(false);
-    return () => request.current?.abort();
-  }, [
-    props.project,
-    evidence.contradictionId,
-    evidence.left.recordContentFingerprint,
-    evidence.right.recordContentFingerprint,
-  ]);
+  }, [props.project, evidenceKey]);
+  useEffect(() => () => request.current?.abort(), []);
   useEffect(() => {
     if (preview || error) review.current?.focus();
   }, [preview, error]);
@@ -234,6 +243,7 @@ export function SemanticResolutionReview(props: {
     preview.archivedContent !== undefined;
   const canConfirm =
     preview?.choice === choice &&
+    previewScope.current === scopeKey &&
     !busy &&
     !stale &&
     !props.writesDisabled &&
@@ -248,12 +258,13 @@ export function SemanticResolutionReview(props: {
     const isStale = Schema.is(ManagerApiError)(cause) && cause.status === 409;
     setError(
       isStale
-        ? 'This comparison is out of date. Refresh to review the latest memories, then choose again.'
+        ? 'Checking the current statements. Your choice is retained; review the refreshed outcome before confirming.'
         : errorMessage(cause),
     );
     setPreview(undefined);
     setReviewedWholeMemory(false);
     setStale(isStale);
+    if (isStale) void Promise.resolve(props.onRefresh()).then(() => setStale(false));
   }
   async function prepare() {
     if (!choice || busy || stale || props.writesDisabled) return;
@@ -283,6 +294,7 @@ export function SemanticResolutionReview(props: {
       if (controller.signal.aborted) return;
       if (result.preview.choice !== choice)
         throw new Error('This preview belongs to a different choice. Prepare it again.');
+      previewScope.current = scopeKey;
       setPreview(result.preview);
     } catch (cause) {
       if (!controller.signal.aborted) failed(cause);
@@ -322,7 +334,7 @@ export function SemanticResolutionReview(props: {
       <SemanticComparisonEvidence
         evidence={evidence}
         onOpenLibrary={props.onOpenLibrary}
-        selection={{choice, onChoose: choose, disabled: busy || stale}}
+        selection={{choice, onChoose: choose, disabled: busy || stale || props.writesDisabled}}
       />
       <section
         ref={review}
@@ -407,7 +419,7 @@ export function SemanticResolutionReview(props: {
         </span>
         <div className="semantic-resolution-actions">
           {stale ? (
-            <button type="button" className="primary" onClick={props.onRefresh}>
+            <button type="button" className="primary" onClick={() => void props.onRefresh()}>
               Refresh comparison
             </button>
           ) : (

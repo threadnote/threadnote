@@ -90,6 +90,7 @@ export type ManagerAutomaticReviewResponse = ManagerAutomaticReview | ManagerTop
 
 /** Recovery metadata never carries accepted memory, source, proposal or approval text. */
 export interface ManagerTopicReviewRecoveryV1 {
+  readonly reason?: import('./contracts.js').ManagerReviewReadinessReason;
   readonly version: 1;
   readonly kind: 'topic-maintenance-recovery';
   readonly project: string;

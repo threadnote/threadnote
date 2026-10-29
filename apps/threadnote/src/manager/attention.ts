@@ -20,6 +20,7 @@ import {normalizeContextHealthSelector} from '../memory/context/health_selector.
 import {SystemInfo} from '@threadnote/platform/system';
 import {managerProjectPathIsForeign} from './project/roots.js';
 import {maintenanceContentHash} from '../memory/context/maintenance_policy.js';
+import {readManagerReviewEligibility} from './review_actionability.js';
 
 type ManagerAttentionResponse =
   | {readonly body: ManagerContextHealthResponseV1 | ManagerReviewInboxResponseV1; readonly status: 200}
@@ -51,12 +52,13 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
     const reviews = (yield* listCandidateReviews(request.config.agentContextHome)).filter(
       review => (!project || review.project === project) && !(review.maintenanceCapture && !review.maintenance),
     );
-    const pendingCount = reviews.reduce(
-      (count, review) => count + review.candidates.filter(candidate => isPending(candidate.state)).length,
-      0,
-    );
-    const visibleReviews = reviews.filter(review =>
-      review.candidates.some(candidate =>
+    const eligibility = yield* readManagerReviewEligibility(request.config, reviews);
+    const {pendingCount, background} = eligibility;
+    const visibleReviews = reviews.filter(review => {
+      const queue = eligibility.byReview.get(review.reviewId);
+      if (queue === 'assessment' || queue === 'obsolete') return view === 'history';
+      if (queue === 'waiting') return false;
+      return review.candidates.some(candidate =>
         view === 'history'
           ? !isPending(candidate.state)
           : view === 'deferred'
@@ -64,20 +66,24 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
             : view === 'pending'
               ? candidate.state === 'pending' || candidate.state === 'applying'
               : isPending(candidate.state),
-      ),
-    );
+      );
+    });
     // Typed review cards display metadata only. Opening the exact review owns live authorization and source proof.
     const items = visibleReviews
       .map(review => {
         const metadataOnly = review.maintenance?.version === 2 || review.maintenance?.version === 3;
         return {
+          ...(['assessment', 'obsolete'].includes(eligibility.byReview.get(review.reviewId) ?? '')
+            ? {queueStatus: eligibility.byReview.get(review.reviewId) as 'assessment' | 'obsolete'}
+            : {}),
           ...(review.maintenance
             ? {kind: review.maintenance.version === 3 ? ('automatic-memory' as const) : ('topic-maintenance' as const)}
             : {}),
           candidates: review.candidates
             .filter(candidate =>
               view === 'history'
-                ? !isPending(candidate.state)
+                ? ['assessment', 'obsolete'].includes(eligibility.byReview.get(review.reviewId) ?? '') ||
+                  !isPending(candidate.state)
                 : view === 'deferred'
                   ? candidate.state === 'deferred'
                   : view === 'pending'
@@ -99,7 +105,14 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
           project: review.project,
           reviewId: review.reviewId,
           revision: review.revision,
-          task: metadataOnly ? 'Prepared memory update' : review.task,
+          task:
+            eligibility.byReview.get(review.reviewId) === 'assessment'
+              ? 'Background memory assessment'
+              : eligibility.byReview.get(review.reviewId) === 'obsolete'
+                ? 'Previous generated memory review'
+                : metadataOnly
+                  ? 'Prepared memory update'
+                  : review.task,
           topic: metadataOnly ? 'Private topic update' : review.topic,
         };
       })
@@ -110,6 +123,7 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
     return {
       body: {
         items,
+        ...(background.assessments || background.awaitingSources || background.obsolete ? {background} : {}),
         pendingCount,
         project,
         version: 1,

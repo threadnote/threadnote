@@ -751,6 +751,56 @@ export const loadCandidateReviewOptional = Effect.fn('candidate.loadReviewOption
   return (yield* fs.exists(path)) ? yield* loadCandidateReview(agentContextHome, reviewId) : undefined;
 });
 
+/** Caller holds this review's lock and has rechecked its revision. Preserve exact bytes before model rollover. */
+export const preserveCandidateReviewRevision = Effect.fn('candidate.preserveRevision')(function* (
+  agentContextHome: string,
+  expected: CandidateReview,
+) {
+  if (
+    !/^review-[a-zA-Z0-9_-]{1,128}$/u.test(expected.reviewId) ||
+    !Number.isSafeInteger(expected.revision) ||
+    expected.revision < 1
+  )
+    return yield* CandidateMemoryError.make({message: 'Select an exact safe review revision to preserve.'});
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const raw = yield* fs.readFileString(candidateReviewPath(path, agentContextHome, expected.reviewId));
+  const current = yield* Effect.try({
+    try: () => parseCandidateReview(JSON.parse(raw)),
+    catch: () => CandidateMemoryError.make({message: 'Cannot preserve the exact previous review revision.'}),
+  });
+  if (JSON.stringify(current) !== JSON.stringify(expected))
+    return yield* CandidateMemoryError.make({message: 'The review changed before revision preservation.'});
+  const directory = path.join(
+    agentContextHome,
+    'threadnote',
+    'candidates',
+    'v1',
+    'revision-history',
+    expected.reviewId,
+  );
+  const archive = path.join(directory, `${expected.revision}.json`);
+  for (const entry of [path.dirname(directory), directory, archive])
+    if (Option.isSome(yield* fs.readLink(entry).pipe(Effect.option)))
+      return yield* CandidateMemoryError.make({
+        message: 'Linked review revision history cannot preserve immutable bytes.',
+      });
+  if (yield* fs.exists(archive)) {
+    if ((yield* fs.readFileString(archive)) !== raw)
+      return yield* CandidateMemoryError.make({message: 'The immutable previous review revision differs.'});
+    return archive;
+  }
+  if ((yield* fs.exists(directory)) && (yield* fs.readDirectory(directory)).length >= 32)
+    return yield* CandidateMemoryError.make({
+      message: 'Review revision history is full; preserve it before continuing.',
+    });
+  yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
+  yield* writePrivateFileAtomically(fs, archive, raw);
+  if ((yield* fs.readFileString(archive)) !== raw)
+    return yield* CandidateMemoryError.make({message: 'The previous review revision was not preserved.'});
+  return archive;
+});
+
 /** Read the bounded private review set for maintenance reporting without mutating retention state. */
 export const listCandidateReviews = Effect.fn('candidate.listReviews')(function* (agentContextHome: string) {
   const fs = yield* FileSystem.FileSystem;

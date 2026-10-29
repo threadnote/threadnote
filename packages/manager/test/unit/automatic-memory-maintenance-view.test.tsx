@@ -132,8 +132,93 @@ afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   root = undefined;
   document.body.replaceChildren();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+it('retains the automatic card and model choice while checking, preserves failures until recovery, and pauses generation', async () => {
+  const held = Promise.withResolvers<Response>();
+  const retry = Promise.withResolvers<Response>();
+  let reads = 0;
+  const current = {version: 1, project: 'project', items: [item({canGenerate: true})], omitted: 0};
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      const path = new URL(String(input), 'http://manager.test').pathname;
+      if (path === '/api/attention/automatic-memory') {
+        reads++;
+        return reads === 1 ? Promise.resolve(json(current)) : reads === 2 ? held.promise : retry.promise;
+      }
+      if (path === '/api/consolidation-models')
+        return Promise.resolve(
+          json({
+            models: [
+              {id: 'first', label: 'First'},
+              {id: 'chosen', label: 'Chosen'},
+            ],
+          }),
+        );
+      if (path === '/api/models/setup') return Promise.resolve(json({phase: 'ready', artifactReady: true}));
+      throw new Error(`Unexpected request ${String(input)}`);
+    }),
+  );
+  await render(<AutomaticMemoryPanel project="project" />);
+  const card = document.querySelector<HTMLElement>('.automatic-memory-card')!;
+  const disclosure = card.querySelector<HTMLDetailsElement>('details')!;
+  await act(async () => {
+    disclosure.open = true;
+    disclosure.dispatchEvent(new Event('toggle'));
+  });
+  const model = document.querySelector<HTMLSelectElement>('[aria-label="Consolidation model"]')!;
+  await act(async () => {
+    model.value = 'chosen';
+    model.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  const generate = button('Generate now');
+  expect(generate.disabled).toBe(false);
+  const status = document.querySelector('.automatic-memory-refresh-status');
+  model.focus();
+  card.scrollTop = 160;
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Refresh automatic updates"]')!.click());
+  expect(document.querySelector('.automatic-memory-card')).toBe(card);
+  expect(disclosure.open).toBe(true);
+  expect(model.value).toBe('chosen');
+  expect(document.activeElement).toBe(model);
+  expect(model.disabled).toBe(false);
+  expect(generate.disabled).toBe(true);
+  expect(card.scrollTop).toBe(160);
+  await act(async () => held.reject(new Error('Transient automatic read failure')));
+  const alert = status?.querySelector('[role=alert]');
+  expect(alert?.textContent).toContain('Transient automatic read failure');
+  expect(generate.disabled).toBe(true);
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Refresh automatic updates"]')!.click());
+  expect(status?.querySelector('[role=alert]')).toBe(alert);
+  await act(async () => retry.resolve(json(current)));
+  expect(status?.querySelector('[role=alert]')).toBeNull();
+  expect(document.querySelector('.automatic-memory-refresh-status')).toBe(status);
+  expect(document.querySelector('.automatic-memory-card')).toBe(card);
+  expect(model.value).toBe('chosen');
+  expect(document.activeElement).toBe(model);
+  expect(generate.disabled).toBe(false);
+});
+
+it.each([403, 404, 409])('redacts automatic cards after a denied or invalid refresh (HTTP %s)', async code => {
+  let denied = false;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      denied
+        ? json({error: 'Automatic access ended'}, code)
+        : json({version: 1, project: 'project', items: [item()], omitted: 0}),
+    ),
+  );
+  await render(<AutomaticMemoryPanel project="project" />);
+  expect(document.querySelector('.automatic-memory-card')).not.toBeNull();
+  denied = true;
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Refresh automatic updates"]')!.click());
+  expect(document.querySelector('.automatic-memory-card')).toBeNull();
+  expect(document.querySelector('[role=alert]')?.textContent).toContain('Automatic access ended');
 });
 async function render(element: React.ReactElement) {
   if (!root) {
@@ -179,6 +264,35 @@ it('groups uncited legacy coverage once, sorts ready reviews first, and never mu
     ),
     {numRuns: 40},
   );
+});
+
+it('labels a no-update policy review as an assessment and retains update actions for active proposal routes', async () => {
+  vi.stubGlobal('fetch', async () =>
+    json({
+      version: 1,
+      project: 'project',
+      omitted: 0,
+      items: [
+        item({state: 'policy', reviewId, reason: 'No update proposed. Waiting for sufficient evidence.'}),
+        ...(['ready', 'generating', 'queued'] as const).map(state =>
+          item({
+            uri: `${uri}/${state}`,
+            state,
+            reviewId: `${reviewId}-${state}`,
+          }),
+        ),
+      ],
+    }),
+  );
+  await render(<AutomaticMemoryPanel project="project" />);
+  const assessment = document.querySelector('.automatic-memory-card[data-state=policy]');
+  expect(assessment?.textContent).toContain('No update proposed. Waiting for sufficient evidence.');
+  expect(assessment?.querySelector('button')?.textContent).toContain('View assessment');
+  expect(assessment?.textContent).not.toContain('Review update');
+  for (const state of ['ready', 'generating', 'queued'])
+    expect(document.querySelector(`.automatic-memory-card[data-state=${state}] button`)?.textContent).toContain(
+      'Review update',
+    );
 });
 
 it('shows ordinary new and upgraded unenrolled memories with truthful progress and ready Review', async () => {
@@ -310,7 +424,7 @@ it.each(['durable', 'preference', 'incident'] as const)(
   },
 );
 
-it('requires the exact full preview and explicit confirmation; HTTP200 incomplete is not completion', async () => {
+it('automatically prepares the exact full preview and applies only on explicit click; HTTP200 incomplete is not completion', async () => {
   const applied = vi.fn();
   const close = vi.fn();
   const posts: Record<string, unknown>[] = [];
@@ -336,16 +450,11 @@ it('requires the exact full preview and explicit confirmation; HTTP200 incomplet
     <AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={close} onApplied={applied} />,
   );
   expect(document.body.textContent).toContain('Accepted prose.');
-  await click('Preview exact update');
   expect(document.querySelector('.automatic-review-exact pre')?.textContent).toContain(
     'reviewed_support: exact-provenance',
   );
-  expect(button('Confirm and apply').disabled).toBe(true);
-  await act(async () => {
-    const checkbox = document.querySelector<HTMLInputElement>('input[type=checkbox]')!;
-    checkbox.click();
-  });
-  await click('Confirm and apply');
+  expect(button('Apply update').disabled).toBe(false);
+  await click('Apply update');
   expect(posts.at(-1)).toMatchObject({action: 'apply', revision: 2, approved: true, approvalDigest: hash});
   expect(applied).not.toHaveBeenCalled();
   expect(close).not.toHaveBeenCalled();
@@ -357,6 +466,44 @@ it('requires the exact full preview and explicit confirmation; HTTP200 incomplet
   expect(applied).toHaveBeenCalledOnce();
   expect(close).toHaveBeenCalledOnce();
 });
+
+it.each(['insufficient-evidence', 'policy-conflict'] as const)(
+  'shows %s as an assessment without preparing or presenting an unchanged rewrite',
+  async outcome => {
+    const initial = review();
+    const assessment = review({
+      coverage: {...coverage, outcome: 'partial', scope: 'recorded-only', omittedSources: 6},
+      proposal: {
+        ...initial.proposal,
+        body: initial.acceptedBody,
+        changedOrdinals: [],
+        draft: {
+          ...initial.proposal.draft,
+          outcome,
+          operations: [],
+          paragraphDecisions: [{ordinal: 0, beforeHash: hash, role: 'unknown', support: 'unresolved', evidenceIds: []}],
+          unresolvedQuestions: ['Which current evidence supports this claim?'],
+        },
+      },
+    });
+    const posts: unknown[] = [];
+    vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body) posts.push(JSON.parse(String(init.body)));
+      return json(assessment);
+    });
+    await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+    expect(document.body.textContent).toContain('No update proposed');
+    expect(document.body.textContent).toContain('accepted memory is unchanged');
+    expect(document.body.textContent).toContain('Which current evidence supports this claim?');
+    expect(document.querySelector('.review-proposal-preview')).toBeNull();
+    expect(document.querySelector('.automatic-review-exact')).toBeNull();
+    expect(document.querySelector('[role=alert]')).toBeNull();
+    expect(button('Apply update')).toBeUndefined();
+    expect(posts).toEqual([]);
+    await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+    expect(posts).toEqual([]);
+  },
+);
 
 it('keeps the Library preview open and refreshes canonical content only after verified apply', async () => {
   const changed = vi.fn();
@@ -391,14 +538,12 @@ it('keeps the Library preview open and refreshes canonical content only after ve
     />,
   );
   await click('Review update');
-  await click('Preview exact update');
   expect(document.querySelector('.automatic-review-exact pre')?.textContent).toContain('exact-provenance');
   expect(document.querySelector('dialog')).not.toBeNull();
   expect(changed).not.toHaveBeenCalled();
   expect(legacyChanged).not.toHaveBeenCalled();
-  expect(button('Confirm and apply').disabled).toBe(true);
-  await act(async () => document.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
-  await click('Confirm and apply');
+  expect(button('Apply update').disabled).toBe(false);
+  await click('Apply update');
   expect(changed).toHaveBeenCalledOnce();
   expect(legacyChanged).not.toHaveBeenCalled();
   expect(document.querySelector('dialog')).toBeNull();
@@ -425,12 +570,8 @@ it('freezes preview controls synchronously and ignores a delayed response after 
       onApplied={applied}
     />,
   );
-  await act(async () => {
-    button('Preview exact update').click();
-    button('Preview exact update').click();
-  });
   expect(calls).toHaveLength(1);
-  expect(button('Preview exact update').disabled).toBe(true);
+  expect(document.querySelector('.review-progress')?.textContent).toContain('Preparing the exact full preview');
   await render(
     <AutomaticMemoryReviewDialog
       project="other"
@@ -460,7 +601,7 @@ it('keeps shared read-only proposals on the owner route without an apply control
     />,
   );
   expect(document.body.textContent).toContain('Publication requires separate approval');
-  expect(button('Confirm and apply')).toBeUndefined();
+  expect(button('Apply update')).toBeUndefined();
   expect(button('Preview exact update')).toBeUndefined();
 });
 
@@ -480,8 +621,7 @@ it('removes verified updates immediately and keeps them resolved after reselect,
   });
   await render(<AutomaticMemoryPanel project="project" />);
   await click('Review update');
-  await act(async () => document.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
-  await click('Confirm and apply');
+  await click('Apply update');
   expect(document.querySelector('dialog')).toBeNull();
   expect(document.querySelector('.automatic-memory-card')).toBeNull();
   expect(document.body.textContent).toContain('Update saved and verified');
@@ -715,7 +855,7 @@ it.each(['pending', 'conflict'] as const)(
     );
     expect(document.body.textContent).toContain('Private memory and source text are withheld');
     expect(document.querySelector('.automatic-review-comparison')).toBeNull();
-    expect(button('Confirm and apply')).toBeUndefined();
+    expect(button('Apply update')).toBeUndefined();
     expect(button('Preview exact update')).toBeUndefined();
     await click('Reject obsolete review');
     expect(posts).toEqual([{action: 'reject', project: 'project', reviewId, revision: 5}]);
@@ -782,7 +922,9 @@ it('shows a visible selected-review read state and stops loading after failure w
   vi.stubGlobal('fetch', async () => json(review()));
   await click('Reload exact review');
   expect(document.body.textContent).toContain('Accepted prose.');
-  expect(button('Preview exact update').disabled).toBe(false);
+  expect(document.querySelector('[role=alert]')?.textContent).toContain(
+    'applicable exact approval preview is unavailable',
+  );
 });
 
 it('shows preview progress at the action and focuses a ready preview with explicit apply controls', async () => {
@@ -796,21 +938,17 @@ it('shows preview progress at the action and focuses a ready preview with explic
     return Promise.resolve(json(review()));
   });
   await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
-  await click('Preview exact update');
-  expect(document.querySelector('.automatic-review-actions .review-progress')?.textContent).toContain(
-    'Preparing the exact full preview',
-  );
+  expect(document.querySelector('.review-progress')?.textContent).toContain('Preparing the exact full preview');
   expect(posts).toHaveLength(1);
   await act(async () => preview.resolve(json(review({revision: 2, approval: approval(), canApply: true}))));
   const exact = document.querySelector('.automatic-review-exact');
   expect(document.activeElement).toBe(exact);
   expect(exact?.textContent).toContain('Preview ready');
-  expect(exact?.querySelector('button')?.textContent).toBe('Confirm and apply');
-  expect(button('Confirm and apply').disabled).toBe(true);
+  expect(exact?.querySelector('button')?.textContent).toBe('Apply update');
+  expect(button('Apply update').disabled).toBe(false);
   expect(document.querySelector('.review-progress')).toBeNull();
   expect(posts).toHaveLength(1);
-  await act(async () => exact?.querySelector<HTMLInputElement>('input[type=checkbox]')?.click());
-  expect(button('Confirm and apply').disabled).toBe(false);
+  expect(button('Apply update').disabled).toBe(false);
 });
 
 it('bounds an unresponsive selected-review read and enables retry without an endless loading label', async () => {
@@ -831,4 +969,229 @@ it('bounds an unresponsive selected-review read and enables retry without an end
   } finally {
     vi.useRealTimers();
   }
+});
+
+it('prepares once across StrictMode and same-selection renders without approving a write', async () => {
+  const posts: Record<string, unknown>[] = [];
+  vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.body) posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    return json(init?.body ? review({revision: 2, approval: approval(), canApply: true}) : review());
+  });
+  const view = () => (
+    <React.StrictMode>
+      <AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />
+    </React.StrictMode>
+  );
+  await render(view());
+  await render(view());
+  expect(posts).toEqual([{action: 'preview', project: 'project', reviewId, revision: 1}]);
+  expect(button('Apply update').disabled).toBe(false);
+  expect(button('Preview exact update')).toBeUndefined();
+  expect(document.querySelector('input[type=checkbox]')).toBeNull();
+});
+
+it.each(['conflict', 'missing-preview', 'ineligible-preview'])(
+  'stops after a bounded preparation reconciliation for %s and preserves the reason until retry succeeds',
+  async failure => {
+    const posts: Record<string, unknown>[] = [];
+    let reads = 0;
+    let recovered = false;
+    vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (!init?.body) {
+        reads++;
+        return json(recovered ? review({revision: 3, approval: approval(), canApply: true}) : review());
+      }
+      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return failure === 'conflict'
+        ? json({error: 'Source changed before approval'}, 409)
+        : json(review(failure === 'ineligible-preview' ? {approval: approval(), canApply: false} : {}));
+    });
+    await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+    expect(reads).toBe(2);
+    expect(posts).toHaveLength(1);
+    expect(document.querySelector('[role=alert]')?.textContent).toContain(
+      failure === 'conflict' ? 'Source changed before approval' : 'applicable exact approval preview is unavailable',
+    );
+    expect(button('Apply update')).toBeUndefined();
+    await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+    expect(posts).toHaveLength(1);
+    expect(document.querySelector('[role=alert]')).not.toBeNull();
+    recovered = true;
+    await click('Reload exact review');
+    expect(posts).toHaveLength(1);
+    expect(button('Apply update').disabled).toBe(false);
+    expect(document.querySelector('[role=alert]')).toBeNull();
+  },
+);
+
+it('recovers an unknown preparation outcome by reusing canonical preview without replay', async () => {
+  const posts: Record<string, unknown>[] = [];
+  let reads = 0;
+  vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (!init?.body)
+      return json(++reads === 1 ? review() : review({revision: 2, approval: approval(), canApply: true}));
+    posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    throw new TypeError('Connection closed after preparation');
+  });
+  await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+  expect(reads).toBe(2);
+  expect(posts).toHaveLength(1);
+  expect(button('Apply update').disabled).toBe(false);
+  expect(document.querySelector('[role=alert]')).toBeNull();
+});
+
+it('keeps failed Apply blocked until explicit reload and uses the newly displayed revision and digest', async () => {
+  const posts: Record<string, unknown>[] = [];
+  const nextDigest = 'b'.repeat(64);
+  let current = review({revision: 2, approval: approval(), canApply: true});
+  const close = vi.fn();
+  vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (!init?.body) return json(current);
+    posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    return json({error: 'Stale approval revision'}, 409);
+  });
+  await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={close} />);
+  await act(async () => {
+    button('Apply update').click();
+    button('Apply update').click();
+  });
+  expect(posts).toEqual([
+    {action: 'apply', project: 'project', reviewId, revision: 2, approvalDigest: hash, approved: true},
+  ]);
+  expect(document.querySelector('[role=alert]')?.textContent).toContain('Stale approval revision');
+  expect(button('Apply update').disabled).toBe(true);
+  expect(close).not.toHaveBeenCalled();
+  current = review({revision: 7, approval: {...approval(), approvalDigest: nextDigest}, canApply: true});
+  await click('Reload exact review');
+  expect(posts).toHaveLength(1);
+  await click('Apply update');
+  expect(posts.at(-1)).toMatchObject({revision: 7, approvalDigest: nextDigest, approved: true});
+});
+
+it('aborts preparation on unmount and ignores its late result', async () => {
+  const pending = Promise.withResolvers<Response>();
+  let signal: AbortSignal | null | undefined;
+  const read = vi.fn();
+  vi.stubGlobal('fetch', (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (!init?.body) return Promise.resolve(json(review()));
+    signal = init.signal;
+    return pending.promise;
+  });
+  await render(
+    <AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} onRead={read} />,
+  );
+  expect(signal?.aborted).toBe(false);
+  await act(async () => root?.unmount());
+  root = undefined;
+  expect(signal?.aborted).toBe(true);
+  await act(async () => pending.resolve(json(review({revision: 2, approval: approval(), canApply: true}))));
+  expect(read).toHaveBeenCalledTimes(1);
+});
+
+it('bounds preparation timeout and reuses its completed preview on the reconciliation read', async () => {
+  vi.useFakeTimers();
+  try {
+    let reads = 0;
+    const posts: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (!init?.body)
+        return Promise.resolve(
+          json(++reads === 1 ? review() : review({revision: 2, approval: approval(), canApply: true})),
+        );
+      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      const pending = Promise.withResolvers<Response>();
+      init.signal?.addEventListener('abort', () => pending.reject(new DOMException('Aborted', 'AbortError')), {
+        once: true,
+      });
+      return pending.promise;
+    });
+    await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+    expect(document.querySelector('.review-progress')?.textContent).toContain('Preparing the exact full preview');
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(posts).toHaveLength(1);
+    expect(reads).toBe(2);
+    expect(button('Apply update').disabled).toBe(false);
+    expect(document.querySelector('.review-progress')).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('uses in-app links for both previews and blocks navigation while an explicit write is owned', async () => {
+  const open = vi.fn();
+  const pending = Promise.withResolvers<Response>();
+  const link = `[Related memory](<${uri}/related>)`;
+  const initial = review({
+    acceptedBody: link,
+    proposal: {...review().proposal, body: link},
+    approval: approval(),
+    canApply: true,
+  });
+  vi.stubGlobal('fetch', () => pending.promise);
+  await render(
+    <AutomaticMemoryReviewDialog
+      project="project"
+      reviewId={reviewId}
+      initialReview={initial}
+      onClose={() => undefined}
+      onOpenMemory={open}
+    />,
+  );
+  const links = [...document.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')];
+  expect(links.map(node => node.getAttribute('href'))).toEqual([`${uri}/related`, `${uri}/related`]);
+  for (const node of links)
+    await act(async () => node.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
+  expect(open.mock.calls).toEqual([[`${uri}/related`], [`${uri}/related`]]);
+  await act(async () => {
+    button('Apply update').click();
+    links[0].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+  });
+  expect(open).toHaveBeenCalledTimes(2);
+  await act(async () => pending.resolve(json(initial)));
+});
+
+it('prepares a parked review only after explicit resume and uses its current revision', async () => {
+  let current = review({state: 'deferred', approval: approval()});
+  const posts: Record<string, unknown>[] = [];
+  vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.body) {
+      const request = JSON.parse(String(init.body)) as Record<string, unknown>;
+      posts.push(request);
+      current =
+        request.action === 'resume'
+          ? review({revision: 3})
+          : review({revision: 4, approval: approval(), canApply: true});
+    }
+    return json(current);
+  });
+  await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+  expect(posts).toEqual([]);
+  expect(button('Apply update')).toBeUndefined();
+  await click('Resume review');
+  expect(posts).toEqual([
+    {action: 'resume', project: 'project', reviewId, revision: 1},
+    {action: 'preview', project: 'project', reviewId, revision: 3},
+  ]);
+  expect(button('Apply update').disabled).toBe(false);
+});
+
+it('refuses a recovery read that changes the selected target under the same review identity', async () => {
+  let reads = 0;
+  vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.body) throw new TypeError('Unknown prepare outcome');
+    return json(
+      ++reads === 1
+        ? review()
+        : review({
+            targetUri: `${uri}/other`,
+            acceptedBody: 'Wrong target private prose',
+            approval: approval(),
+            canApply: true,
+          }),
+    );
+  });
+  await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+  expect(document.querySelector('[role=alert]')?.textContent).toContain('selected review changed');
+  expect(document.body.textContent).not.toContain('Wrong target private prose');
+  expect(button('Apply update')).toBeUndefined();
 });

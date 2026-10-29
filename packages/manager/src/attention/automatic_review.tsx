@@ -15,11 +15,31 @@ export function automaticReviewIsVerified(review: ManagerAutomaticReview): boole
   );
 }
 
+function isNoUpdateAssessment(review: ManagerAutomaticReview): boolean {
+  return (
+    review.purpose === 'automatic' &&
+    ['insufficient-evidence', 'policy-conflict'].includes(review.proposal.draft.outcome)
+  );
+}
+
+function hasApplicablePreview(review: ManagerAutomaticReview): boolean {
+  return (
+    review.state === 'pending' &&
+    !review.ownerProposal &&
+    !isNoUpdateAssessment(review) &&
+    review.canApply &&
+    review.approval?.stage === 'preview' &&
+    /^[a-f0-9]{64}$/u.test(review.approval.approvalDigest) &&
+    /^[a-f0-9]{64}$/u.test(review.approval.contentHash)
+  );
+}
+
 export function AutomaticMemoryReviewDialog(props: {
   readonly project: string;
   readonly reviewId: string;
   readonly initialReview?: ManagerAutomaticReview;
   readonly onClose: () => void;
+  readonly onOpenMemory?: (uri: string) => void;
   readonly onChanged?: () => void;
   readonly onApplied?: (review: ManagerAutomaticReview) => void;
   readonly onRead?: (review: ManagerAutomaticReview) => void;
@@ -33,7 +53,6 @@ export function AutomaticMemoryReviewDialog(props: {
   const [focusPreview, setFocusPreview] = useState<string>();
   const previewRef = useRef<HTMLElement>(null);
   const [action, setAction] = useState('');
-  const [confirmed, setConfirmed] = useState(false);
   const [refresh, setRefresh] = useState(0);
   function acceptRead(result: ManagerAutomaticReviewResponse) {
     setReview(result);
@@ -41,13 +60,23 @@ export function AutomaticMemoryReviewDialog(props: {
     if (result.kind === 'automatic-memory-review') props.onRead?.(result);
   }
   const owned = useRef(false);
+  const acquiring = useRef(true);
   const epoch = useRef(0);
   const selection = JSON.stringify([props.project, props.reviewId]);
   const active = useRef(selection);
+  const selectedTarget = useRef<{selection: string; uri?: string}>({selection});
+  if (selectedTarget.current.selection !== selection) selectedTarget.current = {selection};
+  if (
+    selectedTarget.current.uri === undefined &&
+    props.initialReview?.project === props.project &&
+    props.initialReview.reviewId === props.reviewId
+  )
+    selectedTarget.current.uri = props.initialReview.targetUri;
   if (active.current !== selection) {
     active.current = selection;
     epoch.current++;
     owned.current = false;
+    acquiring.current = true;
   }
   const mounted = useRef(true);
   useEffect(() => {
@@ -59,74 +88,134 @@ export function AutomaticMemoryReviewDialog(props: {
   useEffect(() => {
     setBusy(false);
     setAction('');
-    setConfirmed(false);
     setFocusPreview(undefined);
     setReadFailed(false);
+    setError('');
   }, [selection]);
+  // Each selection/retry gets one bounded acquisition and at most one preparation.
+  // Unknown preparation outcomes are reconciled by reading, never by replaying the POST.
+  // Defer starting until after effect setup so StrictMode's discarded setup cannot prepare twice.
   useEffect(() => {
-    if (
-      props.initialReview?.project === props.project &&
-      props.initialReview.reviewId === props.reviewId &&
-      refresh === 0
-    ) {
-      setReview(previous =>
-        previous?.project === props.project && previous.reviewId === props.reviewId ? previous : props.initialReview,
-      );
-      setLoading(false);
-      return;
-    }
     const controller = new AbortController();
     const requestEpoch = epoch.current;
-    setError('');
+    const isCurrent = () =>
+      mounted.current && !controller.signal.aborted && active.current === selection && epoch.current === requestEpoch;
+    acquiring.current = true;
     setLoading(true);
     setReadFailed(false);
-    setConfirmed(false);
-    void api<ManagerAutomaticReviewResponse>(
-      `/api/attention/automatic-review?project=${encodeURIComponent(props.project)}&reviewId=${encodeURIComponent(props.reviewId)}`,
-      undefined,
-      {signal: controller.signal, timeoutMilliseconds: 30_000},
-    )
-      .then(result => {
+    setFocusPreview(undefined);
+    async function load() {
+      await Promise.resolve();
+      if (!isCurrent()) return;
+      try {
+        let result =
+          refresh === 0 &&
+          props.initialReview?.project === props.project &&
+          props.initialReview.reviewId === props.reviewId
+            ? props.initialReview
+            : await api<ManagerAutomaticReviewResponse>(
+                `/api/attention/automatic-review?project=${encodeURIComponent(props.project)}&reviewId=${encodeURIComponent(props.reviewId)}`,
+                undefined,
+                {signal: controller.signal, timeoutMilliseconds: 30_000},
+              );
+        if (!isCurrent() || owned.current) return;
+        validateResult(result);
+        const targetUri = result.kind === 'automatic-memory-review' ? result.targetUri : undefined;
+        acceptRead(result);
         if (
-          !controller.signal.aborted &&
-          active.current === selection &&
-          epoch.current === requestEpoch &&
-          !owned.current
+          result.kind === 'automatic-memory-review' &&
+          result.purpose === 'automatic' &&
+          !isNoUpdateAssessment(result) &&
+          result.state === 'pending' &&
+          !result.ownerProposal &&
+          !result.canFinishVerification &&
+          (!result.approval || result.approval.stage === 'preview') &&
+          !hasApplicablePreview(result)
         ) {
-          if (
-            !['automatic-memory-review', 'topic-maintenance-recovery'].includes(result.kind) ||
-            result.project !== props.project ||
-            result.reviewId !== props.reviewId
-          )
-            throw new Error('The selected review changed. Refresh its exact proposal.');
-          acceptRead(result);
-          setConfirmed(false);
+          setAction('preview');
+          let preparationError: Error | undefined;
+          try {
+            result = await api<ManagerAutomaticReviewResponse>(
+              '/api/attention/automatic-review',
+              {action: 'preview', project: props.project, reviewId: result.reviewId, revision: result.revision},
+              {signal: controller.signal, timeoutMilliseconds: 30_000},
+            );
+          } catch (cause) {
+            if (!isCurrent()) return;
+            preparationError = cause instanceof Error ? cause : new Error(errorMessage(cause));
+          }
+          if (!isCurrent() || owned.current) return;
+          validateResult(result, targetUri);
+          // A timed-out/disconnected request may already have saved the exact preview.
+          // Reuse the canonical outcome, including source-access recovery, without another prepare.
+          if (preparationError || (result.kind === 'automatic-memory-review' && !hasApplicablePreview(result))) {
+            const recovered = await api<ManagerAutomaticReviewResponse>(
+              `/api/attention/automatic-review?project=${encodeURIComponent(props.project)}&reviewId=${encodeURIComponent(props.reviewId)}`,
+              undefined,
+              {signal: controller.signal, timeoutMilliseconds: 30_000},
+            );
+            if (!isCurrent() || owned.current) return;
+            validateResult(recovered, targetUri);
+            result = recovered;
+            acceptRead(result);
+            if (preparationError && result.kind === 'automatic-memory-review' && !hasApplicablePreview(result))
+              throw preparationError;
+          } else acceptRead(result);
         }
-      })
-      .catch(cause => {
-        if (!controller.signal.aborted && active.current === selection && epoch.current === requestEpoch) {
+        if (
+          result.kind === 'automatic-memory-review' &&
+          result.state === 'pending' &&
+          !isNoUpdateAssessment(result) &&
+          !result.ownerProposal &&
+          !result.canFinishVerification &&
+          !hasApplicablePreview(result)
+        )
+          throw new Error(
+            'This update is blocked: an applicable exact approval preview is unavailable. Reload the exact review to retry.',
+          );
+        setError('');
+        if (result.kind === 'automatic-memory-review' && hasApplicablePreview(result))
+          setFocusPreview(result.approval!.approvalDigest);
+      } catch (cause) {
+        if (isCurrent()) {
           setError(errorMessage(cause));
           setReadFailed(true);
         }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted && active.current === selection && epoch.current === requestEpoch)
+      } finally {
+        if (isCurrent()) {
+          acquiring.current = false;
           setLoading(false);
-      });
+          setAction('');
+        }
+      }
+    }
+    void load();
     return () => controller.abort();
-  }, [selection, refresh, props.project, props.reviewId, props.initialReview]);
+  }, [selection, refresh]);
+  function validateResult(result: ManagerAutomaticReviewResponse, targetUri = selectedTarget.current.uri) {
+    if (
+      !['automatic-memory-review', 'topic-maintenance-recovery'].includes(result.kind) ||
+      result.project !== props.project ||
+      result.reviewId !== props.reviewId ||
+      (result.kind === 'automatic-memory-review' && targetUri !== undefined && result.targetUri !== targetUri)
+    )
+      throw new Error('The selected review changed. Reload its exact target.');
+    if (result.kind === 'automatic-memory-review') selectedTarget.current.uri = result.targetUri;
+  }
   const selected = review?.project === props.project && review.reviewId === props.reviewId ? review : undefined;
   const current = selected?.kind === 'automatic-memory-review' ? selected : undefined;
   const recovery = selected?.kind === 'topic-maintenance-recovery' ? selected : undefined;
-  async function act(nextAction: 'preview' | 'apply' | 'reject' | 'defer' | 'resume') {
+  async function act(nextAction: 'apply' | 'reject' | 'defer' | 'resume') {
     if (
       owned.current ||
+      active.current !== selection ||
+      !mounted.current ||
+      acquiring.current ||
       loading ||
       readFailed ||
       !selected ||
       (!current && nextAction !== 'reject' && nextAction !== 'resume') ||
-      (nextAction === 'apply' &&
-        ((!current?.canApply && !current?.canFinishVerification) || (!confirmed && !current?.canFinishVerification)))
+      (nextAction === 'apply' && (!current || (!hasApplicablePreview(current) && !current.canFinishVerification)))
     )
       return;
     owned.current = true;
@@ -135,7 +224,6 @@ export function AutomaticMemoryReviewDialog(props: {
     setBusy(true);
     setAction(nextAction);
     setError('');
-    setConfirmed(false);
     try {
       const result = await api<ManagerAutomaticReviewResponse>('/api/attention/automatic-review', {
         action: nextAction,
@@ -153,9 +241,6 @@ export function AutomaticMemoryReviewDialog(props: {
       )
         throw new Error('The selected review changed. Reload its exact target.');
       acceptRead(result);
-      if (nextAction === 'preview' && result.kind === 'automatic-memory-review' && result.approval && result.canApply) {
-        setFocusPreview(result.approval.approvalDigest);
-      }
       if (result.kind === 'topic-maintenance-recovery') {
         props.onChanged?.();
         if (nextAction === 'reject' && result.state === 'rejected') props.onClose();
@@ -167,13 +252,19 @@ export function AutomaticMemoryReviewDialog(props: {
         props.onClose();
         return;
       }
-      if (nextAction === 'apply')
+      if (nextAction === 'apply') {
         setError('The write is not yet verified. Reload this review and use Finish verification when available.');
+        setReadFailed(!result.canFinishVerification);
+      }
+      if (nextAction === 'resume') {
+        acquiring.current = true;
+        setRefresh(value => value + 1);
+      }
       props.onChanged?.();
     } catch (cause) {
       if (mounted.current && active.current === selection && epoch.current === requestEpoch) {
         setError(errorMessage(cause));
-        setRefresh(value => value + 1);
+        setReadFailed(true);
       }
     } finally {
       if (epoch.current === requestEpoch) owned.current = false;
@@ -183,6 +274,12 @@ export function AutomaticMemoryReviewDialog(props: {
       }
     }
   }
+  const reload = () => {
+    if (owned.current || acquiring.current) return;
+    acquiring.current = true;
+    setRefresh(value => value + 1);
+  };
+  const noUpdate = current ? isNoUpdateAssessment(current) : false;
   const approval = current?.approval;
   const controlsDisabled = busy || loading || readFailed;
   useEffect(() => {
@@ -191,34 +288,59 @@ export function AutomaticMemoryReviewDialog(props: {
       previewRef.current?.focus({preventScroll: true});
     }
   }, [focusPreview, approval?.approvalDigest]);
+  const openMemory = props.onOpenMemory
+    ? (uri: string) => {
+        if (!owned.current) props.onOpenMemory?.(uri);
+      }
+    : undefined;
   const close = () => {
     if (!owned.current) props.onClose();
   };
   return (
     <DetailModal
-      title={current?.purpose === 'manual-edit' ? 'Review your memory edit' : 'Review memory update'}
+      title={
+        current?.purpose === 'manual-edit'
+          ? 'Review your memory edit'
+          : noUpdate
+            ? 'Memory assessment'
+            : 'Review memory update'
+      }
       onClose={close}
       className="topic-review-dialog automatic-review-dialog"
     >
       {error ? (
         <ReviewNotice role="alert" title="Review needs attention" tone="warning">
           <p>{error}</p>
-          <button type="button" disabled={busy || loading} onClick={() => setRefresh(value => value + 1)}>
+          <button type="button" disabled={busy || loading} onClick={reload}>
             Reload exact review
           </button>
         </ReviewNotice>
       ) : null}
       {loading ? (
         <ReviewProgress
-          title="Loading the selected review…"
+          title={action === 'preview' ? 'Preparing the exact full preview…' : 'Loading the selected review…'}
           description="Checking the saved proposal and its current source access. You can close this dialog while it loads."
         />
       ) : null}
       {recovery ? (
-        <ReviewNotice title="Source access changed" tone="warning">
+        <ReviewNotice
+          title={
+            recovery.reason === 'target-changed'
+              ? 'Memory changed'
+              : recovery.reason === 'source-changed'
+                ? 'Source evidence changed'
+                : recovery.reason === 'scope-changed'
+                  ? 'Source scope changed'
+                  : recovery.reason === 'policy-changed'
+                    ? 'Source policy changed'
+                    : 'Source verification unavailable'
+          }
+          tone="warning"
+        >
           <p>
-            Private memory and source text are withheld. You can discard this exact obsolete review without changing the
-            memory, or restore source access and reload.
+            Private memory and source text are withheld until the exact target and all required sources can be verified.
+            Automatic proposals are checked again when evidence or source readiness changes. This does not establish
+            that source permissions changed.
           </p>
           <p>
             Review state: {recovery.state} · revision {recovery.revision}
@@ -233,7 +355,7 @@ export function AutomaticMemoryReviewDialog(props: {
               Resume review
             </button>
           ) : null}
-          <button type="button" disabled={busy || loading} onClick={() => setRefresh(value => value + 1)}>
+          <button type="button" disabled={busy || loading} onClick={reload}>
             Reload exact review
           </button>
         </ReviewNotice>
@@ -241,7 +363,7 @@ export function AutomaticMemoryReviewDialog(props: {
         <>
           <div className="attention-tags">
             <ReviewBadge tone="proposal">
-              {current.purpose === 'manual-edit' ? 'Your authored edit' : 'Proposed update'}
+              {current.purpose === 'manual-edit' ? 'Your authored edit' : noUpdate ? 'Assessment' : 'Proposed update'}
             </ReviewBadge>
             <ReviewBadge tone="neutral">{current.state}</ReviewBadge>
             <ReviewBadge tone="neutral">
@@ -281,14 +403,33 @@ export function AutomaticMemoryReviewDialog(props: {
               history are retained. Inspect the exact support metadata below.
             </ReviewNotice>
           ) : null}
+          {noUpdate ? (
+            <ReviewNotice title="No update proposed" tone="info">
+              <p>
+                {current.proposal.draft.outcome === 'insufficient-evidence'
+                  ? 'Waiting for sufficient evidence. The accepted memory is unchanged.'
+                  : 'Waiting for the source policy conflict to change. The accepted memory is unchanged.'}
+              </p>
+              <p>Automatic assessment can try again when material evidence changes.</p>
+              {current.proposal.draft.unresolvedQuestions.length ? (
+                <ul>
+                  {current.proposal.draft.unresolvedQuestions.map(question => (
+                    <li key={question}>{question}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </ReviewNotice>
+          ) : null}
           <div className="automatic-review-comparison">
-            <MemoryExcerpt label="Accepted memory" markdown>
+            <MemoryExcerpt label="Accepted memory" markdown onOpenMemory={openMemory}>
               {current.acceptedBody}
             </MemoryExcerpt>
-            <div className="review-proposal-preview">
-              <h3>Proposed memory</h3>
-              <MemoryBody content={current.proposal.body} />
-            </div>
+            {!noUpdate ? (
+              <div className="review-proposal-preview">
+                <h3>Proposed memory</h3>
+                <MemoryBody content={current.proposal.body} onOpenMemory={openMemory} />
+              </div>
+            ) : null}
           </div>
           <section className="automatic-review-roles">
             <h3>Paragraph roles & support</h3>
@@ -340,7 +481,7 @@ export function AutomaticMemoryReviewDialog(props: {
               tabIndex={-1}
               aria-label="Exact memory update preview"
             >
-              {current.canApply ? (
+              {hasApplicablePreview(current) ? (
                 <ReviewNotice title="Preview ready" tone="proposal">
                   Review the full document below, then approve and apply this exact update.
                 </ReviewNotice>
@@ -372,25 +513,9 @@ export function AutomaticMemoryReviewDialog(props: {
                   )}
                 </pre>
               </details>
-              {current.canApply && !current.canFinishVerification ? (
-                <label className="review-confirmation">
-                  <input
-                    type="checkbox"
-                    disabled={controlsDisabled}
-                    checked={confirmed}
-                    onChange={event => setConfirmed(event.target.checked)}
-                  />
-                  <span>I approve this exact full document and metadata.</span>
-                </label>
-              ) : null}
-              {current.canApply || current.canFinishVerification ? (
-                <button
-                  className="primary"
-                  type="button"
-                  disabled={controlsDisabled || (!confirmed && !current.canFinishVerification)}
-                  onClick={() => void act('apply')}
-                >
-                  {current.canFinishVerification ? 'Finish verification' : 'Confirm and apply'}
+              {hasApplicablePreview(current) || current.canFinishVerification ? (
+                <button className="primary" type="button" disabled={controlsDisabled} onClick={() => void act('apply')}>
+                  {current.canFinishVerification ? 'Finish verification' : 'Apply update'}
                 </button>
               ) : null}
             </section>
@@ -408,29 +533,8 @@ export function AutomaticMemoryReviewDialog(props: {
           <footer className="automatic-review-actions">
             {busy ? (
               <ReviewProgress
-                title={
-                  action === 'apply'
-                    ? 'Saving and verifying the approved document…'
-                    : action === 'preview'
-                      ? 'Preparing the exact full preview…'
-                      : 'Saving review decision…'
-                }
-                description={
-                  action === 'preview'
-                    ? 'The preview will open here when ready. Your memory is unchanged until you approve and apply it.'
-                    : undefined
-                }
+                title={action === 'apply' ? 'Saving and verifying the approved document…' : 'Saving review decision…'}
               />
-            ) : null}
-            {!current.ownerProposal && current.state === 'pending' && !current.canApply ? (
-              <button
-                className={!approval ? 'primary' : undefined}
-                disabled={controlsDisabled}
-                type="button"
-                onClick={() => void act('preview')}
-              >
-                Preview exact update
-              </button>
             ) : null}
             {current.state === 'pending' ? (
               <>

@@ -1,3 +1,5 @@
+import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
+import {refreshContextMaintenanceCase} from '../../src/memory/context/maintenance_refresh.js';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
@@ -1032,3 +1034,43 @@ describe('topic maintenance worker scheduling', () => {
       ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 });
+
+effectIt.effect('refreshes a selected stale topic observation without changing its canonical document', () =>
+  Effect.gen(function* () {
+    const fixture = yield* codeTopicFixture;
+    const {fs, source, commit, index, config, repository, caseId, memory, accepted, stateFile} = fixture;
+    const before = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+    yield* fs.writeFileString(source, 'export const retryLimit = 9;\n');
+    yield* commit('change selected source');
+    yield* index();
+    expect(Result.isFailure(yield* readContextMaintenancePacket(config, caseId).pipe(Effect.result))).toBe(true);
+    const route = yield* handleManagerAttentionAction({
+      config,
+      method: 'POST',
+      url: new URL('http://manager.test/api/attention/context-maintenance'),
+      body: Effect.succeed({action: 'refresh-case', project: 'fixture', caseId, memoryUri: fixture.uri}),
+    });
+    expect(route?.status).toBe(200);
+    const refreshed = route?.body as Effect.Success<ReturnType<typeof refreshContextMaintenanceCase>>;
+    expect(refreshed.outcome).toBe('ready');
+    if (refreshed.outcome !== 'ready') throw new Error(JSON.stringify(refreshed));
+    expect(refreshed.item.caseId).toBe(caseId);
+    expect(refreshed.item.evidenceRevision).not.toBe(before.evidenceRevision);
+    expect('topicEvidence' in refreshed.packet && refreshed.packet.topicEvidence.outcome).toBe('ready');
+    expect(yield* fs.readFileString(memory)).toBe(accepted);
+    const observedState = yield* fs.readFileString(stateFile);
+    const foreign = yield* handleManagerAttentionAction({
+      config,
+      method: 'POST',
+      url: new URL('http://manager.test/api/attention/context-maintenance'),
+      body: Effect.succeed({action: 'refresh-case', project: 'fixture', caseId, memoryUri: 'threadnote://foreign'}),
+    });
+    expect(foreign?.body).toMatchObject({outcome: 'unavailable'});
+    expect(yield* fs.readFileString(stateFile)).toBe(observedState);
+    expect((yield* refreshContextMaintenanceCase(config, {project: 'fixture', caseId, cwd: repository})).outcome).toBe(
+      'ready',
+    );
+    expect(yield* fs.readFileString(stateFile)).toBe(observedState);
+    expect(yield* fs.readFileString(memory)).toBe(accepted);
+  }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+);

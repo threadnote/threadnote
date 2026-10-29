@@ -42,6 +42,7 @@ export function LibraryArticle({
         <AutomaticMemoryPanel
           key={node.uri}
           uri={node.uri}
+          onOpenMemory={onOpenMemory}
           project={metadata.project ?? 'unscoped'}
           onChanged={onVerifiedUpdate ?? onChanged}
         />

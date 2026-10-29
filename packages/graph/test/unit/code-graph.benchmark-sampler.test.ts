@@ -8,10 +8,13 @@ import {describe, expect, it} from 'vitest';
 import {
   aggregateProcessTree,
   benchmarkSamplerProcessTreeExclusions,
+  createRssDiagnosticRun,
+  createRssDiagnosticTokenizer,
   isOpenTemporaryFilePath,
   mergeTemporaryFileSnapshots,
   observeTemporaryOpenInspection,
   parseCodeGraphBenchmarkSamplerArtifact,
+  parseCodeGraphBenchmarkSamplerArguments,
   parseCodeGraphBenchmarkSamplerCheckpoint,
   parseDarwinProcessList,
   parseDarwinOpenFileList,
@@ -19,11 +22,16 @@ import {
   parseLinuxProcessStat,
   parseProcessCpuTime,
   processTreeDelta,
+  recordRssPeakDiagnostic,
+  rssDiagnosticAcquisition,
+  samplerArtifact,
   samplerParentExited,
   samplerProcessTelemetryContract,
   samplerTemporaryTelemetryContract,
   temporaryFileObservationFromStats,
 } from '../../../../scripts/code-graph-benchmark-sampler.js';
+
+import {parseCodeGraphBenchmarkArguments} from '../../../../scripts/benchmark-code-graph.js';
 
 const validArtifact = {
   intervalMilliseconds: 25,
@@ -927,6 +935,441 @@ describe('code graph benchmark sampler artifact', () => {
       await rm(root, {force: true, recursive: true});
     }
   }, 15_000);
+});
+
+describe('optional RSS peak diagnostics', () => {
+  const tokenize = createRssDiagnosticTokenizer(new Uint8Array(32).fill(7));
+  const unknownInitial = {provenance: 'cached-initial-unknown'} as const;
+  const sampleFor = (rssBytes: number) =>
+    aggregateProcessTree([processEntry(10, 1, 'root-secret', 3, rssBytes, 1, 2)], 10, 'root-secret', [], tokenize)!;
+  const phaseFor = (rssBytes: number, processCount: number) => ({
+    cpuMilliseconds: 0,
+    databasePeakBytes: 0,
+    ioReadBytes: 0,
+    ioWriteBytes: 0,
+    journalPeakBytes: 0,
+    processPeakCount: processCount,
+    processSampleAttempts: 1,
+    processSampleFailures: 0,
+    processSampleGapPeakMilliseconds: 0,
+    processSamples: 1,
+    rssPeakBytes: rssBytes,
+    samples: 1,
+    shmPeakBytes: 0,
+    temporaryLinkedPeakBytes: 0,
+    temporaryOpenAttempts: 0,
+    temporaryOpenFailures: 0,
+    temporaryOpenPeakBytes: 0,
+    temporaryOpenSamples: 0,
+    temporaryPeakBytes: 0,
+    walPeakBytes: 0,
+  });
+  const artifactFor = (sample = sampleFor(3)) =>
+    samplerArtifact(
+      25,
+      new Map([['scanning:progress', phaseFor(sample.rssBytes, sample.processes.size)]]),
+      'linux',
+      samplerProcessTelemetryContract('linux', 'root-secret'),
+      samplerTemporaryTelemetryContract('linux', undefined),
+      1,
+      recordRssPeakDiagnostic(undefined, sample, unknownInitial),
+    );
+
+  it('does no secret, HMAC, or diagnostic clock work when disabled', () => {
+    let secretCalls = 0;
+    let clockCalls = 0;
+    const sources = {
+      randomKey: () => {
+        secretCalls += 1;
+        return new Uint8Array(32).fill(7);
+      },
+      now: () => {
+        clockCalls += 1;
+        return BigInt(clockCalls * 1_000);
+      },
+    };
+    const disabled = createRssDiagnosticRun(false, sources);
+    expect(disabled).toBeUndefined();
+    expect([secretCalls, clockCalls]).toEqual([0, 0]);
+    const entries = [processEntry(10, 1, 'root-secret', 3, 7, 1, 2)];
+    const legacy = aggregateProcessTree(entries, 10);
+    expect(JSON.stringify(aggregateProcessTree(entries, 10, undefined, [], disabled?.tokenize))).toBe(
+      JSON.stringify(legacy),
+    );
+    expect(legacy).not.toHaveProperty('rssContributors');
+    const enabled = createRssDiagnosticRun(true, sources)!;
+    expect(enabled.offsetMicroseconds()).toBe(1);
+    expect([secretCalls, clockCalls]).toEqual([1, 2]);
+    expect(enabled.tokenize(10, 'root-secret')).toBe(tokenize(10, 'root-secret'));
+  });
+
+  it('keeps fixed default v4 JSON bytes and default benchmark option shape', () => {
+    const actual = samplerArtifact(
+      25,
+      new Map([['scanning:progress', phaseFor(3, 1)]]),
+      'linux',
+      samplerProcessTelemetryContract('linux', 'root-secret'),
+      samplerTemporaryTelemetryContract('linux', undefined),
+      1,
+    );
+    const legacyJson =
+      '{"intervalMilliseconds":25,"phases":{"scanning:progress":{"cpuMilliseconds":0,"ioReadBytes":0,"ioWriteBytes":0,"processPeakCount":1,"processSampleAttempts":1,"processSampleFailures":0,"processSampleGapPeakMilliseconds":0,"processSamples":1,"rssPeakBytes":3,"temporaryLinkedPeakBytes":0,"databasePeakBytes":0,"journalPeakBytes":0,"samples":1,"shmPeakBytes":0,"temporaryPeakBytes":0,"walPeakBytes":0}},"platform":"linux","processTelemetry":{"availability":"available","ioCounters":"linux-proc-read-write-bytes","parentIdentityValidation":"linux-proc-starttime","sampleIntervalMilliseconds":25,"scope":"recursive-process-tree","source":"linux-proc"},"samples":1,"temporaryTelemetry":{"availability":"unavailable","reason":"open-file-inspection-unavailable","scope":"temporary-root-linked-files-only","source":"directory-walk"},"version":4}';
+    expect(JSON.stringify(actual)).toBe(legacyJson);
+    expect(JSON.stringify(parseCodeGraphBenchmarkSamplerArtifact(JSON.parse(legacyJson)))).toBe(legacyJson);
+    const defaults = parseCodeGraphBenchmarkArguments([]);
+    expect(defaults).not.toHaveProperty('rssPeakDiagnostics');
+    const {rssPeakDiagnostics, ...enabled} = parseCodeGraphBenchmarkArguments(['--rss-peak-diagnostics']);
+    expect(rssPeakDiagnostics).toBe(true);
+    expect(JSON.stringify(enabled)).toBe(JSON.stringify(defaults));
+    const samplerArgs = [
+      '--pid',
+      '10',
+      '--database',
+      '/tmp/db',
+      '--temp-root',
+      '/tmp/temp',
+      '--phase',
+      '/tmp/phase',
+      '--stop',
+      '/tmp/stop',
+      '--output',
+      '/tmp/output',
+      '--checkpoint-output',
+      '/tmp/checkpoint',
+      '--ready',
+      '/tmp/ready',
+      '--interval-ms',
+      '25',
+      '--checkpoint-ms',
+      '1000',
+    ];
+    const parsed = parseCodeGraphBenchmarkSamplerArguments(samplerArgs);
+    expect(parsed).not.toHaveProperty('rssPeakDiagnostics');
+    expect(parseCodeGraphBenchmarkSamplerArguments([...samplerArgs, '--rss-peak-diagnostics', 'false'])).toEqual(
+      parsed,
+    );
+    expect(
+      parseCodeGraphBenchmarkSamplerArguments([...samplerArgs, '--rss-peak-diagnostics', 'true']).rssPeakDiagnostics,
+    ).toBe(true);
+    expect(() => parseCodeGraphBenchmarkSamplerArguments([...samplerArgs, '--rss-peak-diagnostics', 'yes'])).toThrow();
+  });
+
+  it('uses keyed opaque identities without a history registry or raw identifiers', () => {
+    expect(tokenize(10, 'root-secret')).toMatch(/^[a-f0-9]{64}$/);
+    expect(tokenize(10, 'root-secret')).toBe(tokenize(10, 'root-secret'));
+    expect(tokenize(10, 'root-secret')).not.toBe(tokenize(10, 'reused-secret'));
+    expect(tokenize(10, 'root-secret')).not.toBe(
+      createRssDiagnosticTokenizer(new Uint8Array(32).fill(8))(10, 'root-secret'),
+    );
+    const projection = sampleFor(3).rssContributors!;
+    expect(projection.contributors[0]).toEqual({
+      token: tokenize(10, 'root-secret'),
+      parentToken: null,
+      role: 'root',
+      rssBytes: 3,
+    });
+    expect(JSON.stringify(projection)).not.toContain('root-secret');
+    expect(JSON.stringify(projection)).not.toContain('processId');
+  });
+
+  it('conserves admitted accounting and top16 ordering under bounded tree permutations', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.record({rss: fc.integer({min: 0, max: 1_000_000}), parent: fc.nat(), order: fc.integer()}), {
+          minLength: 1,
+          maxLength: 48,
+        }),
+        nodes => {
+          const entries = nodes.map((node, index) =>
+            processEntry(
+              100 + index,
+              index === 0 ? 1 : 100 + (node.parent % index),
+              `identity-${index}`,
+              index,
+              node.rss,
+              index,
+              index,
+            ),
+          );
+          // Independent parent-chain model: node 1 and every node whose ancestry contains it are excluded.
+          const admitted = entries.filter(entry => {
+            let index = entry.processId - 100;
+            while (index > 0) {
+              if (index === 1) return false;
+              index = entries[index].parentProcessId - 100;
+            }
+            return true;
+          });
+          const excluded = entries.length > 1 ? [101] : [];
+          const before = JSON.stringify(entries);
+          const shuffled = [...entries].sort((a, b) => nodes[a.processId - 100].order - nodes[b.processId - 100].order);
+          const observed = aggregateProcessTree(shuffled, 100, 'identity-0', excluded, tokenize)!;
+          const legacy = aggregateProcessTree(shuffled, 100, 'identity-0', excluded)!;
+          const {rssContributors: projection, ...unchanged} = observed;
+          expect(unchanged).toEqual(legacy);
+          const model = admitted
+            .map(entry => ({
+              token: tokenize(entry.processId, entry.startIdentity),
+              parentToken:
+                entry.processId === 100
+                  ? null
+                  : tokenize(entry.parentProcessId, entries[entry.parentProcessId - 100].startIdentity),
+              role: entry.processId === 100 ? 'root' : 'descendant',
+              rssBytes: entry.rssBytes,
+            }))
+            .sort((a, b) => b.rssBytes - a.rssBytes || (a.token < b.token ? -1 : a.token > b.token ? 1 : 0));
+          expect(projection?.contributors).toEqual(model.slice(0, 16));
+          expect(projection).toMatchObject({
+            admittedAccountingComplete: true,
+            processCount: admitted.length,
+            omittedProcessCount: Math.max(0, admitted.length - 16),
+            omittedRssBytes: model.slice(16).reduce((sum, entry) => sum + entry.rssBytes, 0),
+            rssBytes: admitted.reduce((sum, entry) => sum + entry.rssBytes, 0),
+          });
+          expect(aggregateProcessTree(entries, 100, 'identity-0', excluded, tokenize)?.rssContributors).toEqual(
+            projection,
+          );
+          expect(JSON.stringify(entries)).toBe(before);
+        },
+      ),
+      {numRuns: 120},
+    );
+  });
+
+  it('allows omitted parents and root, orders zero ties by token, and preserves saturated metrics', () => {
+    const entries = [
+      processEntry(10, 1, 'root-secret', 0, 0, 0, 0),
+      ...Array.from({length: 20}, (_, i) => processEntry(11 + i, 10, `child-${i}`, 0, 100, 0, 0)),
+    ];
+    const sample = aggregateProcessTree(entries, 10, undefined, [], tokenize)!;
+    expect(sample.rssContributors?.contributors).toHaveLength(16);
+    expect(
+      sample.rssContributors?.contributors.every(
+        entry => entry.role === 'descendant' && entry.parentToken === tokenize(10, 'root-secret'),
+      ),
+    ).toBe(true);
+    expect(sample.rssContributors?.omittedRssBytes).toBe(400);
+    expect(parseCodeGraphBenchmarkSamplerArtifact(artifactFor(sample))).toBeDefined();
+    const zeros = entries.map(entry => ({...entry, rssBytes: 0}));
+    const zeroProjection = aggregateProcessTree(zeros, 10, undefined, [], tokenize)!.rssContributors!;
+    expect(zeroProjection.contributors.map(entry => entry.token)).toEqual(
+      entries
+        .map(entry => tokenize(entry.processId, entry.startIdentity))
+        .sort()
+        .slice(0, 16),
+    );
+    const max = Number.MAX_SAFE_INTEGER;
+    const saturated = aggregateProcessTree(
+      [processEntry(10, 1, 'root-secret', 0, max, 0, 0), processEntry(11, 10, 'child', 0, 1, 0, 0)],
+      10,
+      undefined,
+      [],
+      tokenize,
+    )!;
+    expect(saturated.rssBytes).toBe(max);
+    expect(saturated.rssContributors).toMatchObject({admittedAccountingComplete: false, omittedRssBytes: null});
+    expect(parseCodeGraphBenchmarkSamplerArtifact(artifactFor(saturated))).toBeDefined();
+    expect(sampleFor(max).rssContributors).toMatchObject({admittedAccountingComplete: true, omittedRssBytes: 0});
+  });
+
+  it('records first valid zero, keeps startup unknown and ties, and replaces only with a higher admitted sample', () => {
+    const ticks = [0n, 120_000n, 480_000n];
+    const run = createRssDiagnosticRun(true, {randomKey: () => new Uint8Array(32), now: () => ticks.shift()!})!;
+    const window = rssDiagnosticAcquisition(
+      run.offsetMicroseconds(),
+      run.offsetMicroseconds(),
+      'scanning:progress',
+      'materializing:progress',
+    );
+    expect(recordRssPeakDiagnostic(undefined, undefined, window)).toBeUndefined();
+    expect(recordRssPeakDiagnostic(undefined, sampleFor(9), undefined)).toBeUndefined();
+    const first = recordRssPeakDiagnostic(undefined, sampleFor(0), unknownInitial)!;
+    expect(first).toMatchObject({rssBytes: 0, acquisition: {provenance: 'cached-initial-unknown'}});
+    expect(recordRssPeakDiagnostic(first, sampleFor(0), window)).toBe(first);
+    expect(recordRssPeakDiagnostic(first, undefined, window)).toBe(first);
+    const next = recordRssPeakDiagnostic(first, sampleFor(5), window)!;
+    expect(next.acquisition).toEqual({
+      provenance: 'monotonic-window',
+      startOffsetMicroseconds: 120,
+      endOffsetMicroseconds: 480,
+      phaseBefore: 'scanning:progress',
+      phaseAfter: 'materializing:progress',
+      transition: 'observed-between-phase-observations',
+    });
+    expect(recordRssPeakDiagnostic(next, sampleFor(4), window)).toBe(next);
+    expect(
+      recordRssPeakDiagnostic(next, aggregateProcessTree([processEntry(10, 1, 'root-secret', 0, 9, 0, 0)], 10), window),
+    ).toBe(next);
+    expect(rssDiagnosticAcquisition(3, 7, 'scanning:progress', 'scanning:progress')).toMatchObject({
+      transition: 'unknown',
+    });
+    expect(rssDiagnosticAcquisition(3, 7, '/private/customer/path', 'scanning:progress')).toMatchObject({
+      phaseBefore: null,
+      transition: 'unknown',
+    });
+    expect(rssDiagnosticAcquisition(3, 7, 'unexpected-label', 'other-label')).toMatchObject({
+      phaseBefore: null,
+      phaseAfter: null,
+      transition: 'unknown',
+    });
+  });
+
+  it('strictly rejects malformed optional diagnostics and inconsistent accounting or provenance', () => {
+    const valid = artifactFor();
+    expect(parseCodeGraphBenchmarkSamplerArtifact(valid)).toEqual(valid);
+    const exactMax = artifactFor(sampleFor(Number.MAX_SAFE_INTEGER));
+    expect(() =>
+      parseCodeGraphBenchmarkSamplerArtifact({
+        ...exactMax,
+        rssPeakDiagnostic: {
+          ...exactMax.rssPeakDiagnostic,
+          admittedAccountingComplete: false,
+          omittedRssBytes: null,
+        },
+      }),
+    ).toThrow();
+    const tree = aggregateProcessTree(
+      [
+        processEntry(10, 1, 'root-secret', 0, 1, 0, 0),
+        processEntry(11, 10, 'child', 0, 2, 0, 0),
+        processEntry(12, 11, 'grandchild', 0, 3, 0, 0),
+      ],
+      10,
+      undefined,
+      [],
+      tokenize,
+    )!;
+    const treeArtifact = artifactFor(tree);
+    const treePeak = treeArtifact.rssPeakDiagnostic!;
+    expect(() =>
+      parseCodeGraphBenchmarkSamplerArtifact({
+        ...treeArtifact,
+        rssPeakDiagnostic: {
+          ...treePeak,
+          contributors: [...treePeak.contributors].reverse(),
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseCodeGraphBenchmarkSamplerArtifact({
+        ...treeArtifact,
+        rssPeakDiagnostic: {
+          ...treePeak,
+          contributors: treePeak.contributors.map(entry =>
+            entry.role === 'descendant' ? {...entry, parentToken: 'a'.repeat(64)} : entry,
+          ),
+        },
+      }),
+    ).toThrow();
+    const peak = valid.rssPeakDiagnostic!;
+    const contributor = peak.contributors[0];
+    const window = rssDiagnosticAcquisition(5, 8, 'scanning:progress', 'materializing:progress');
+    const badPeaks = [
+      null,
+      {...peak, extra: 'leak'},
+      {...peak, processCount: 0},
+      {...peak, processCount: 17},
+      {...peak, rssBytes: 4},
+      {...peak, omittedRssBytes: 1},
+      {...peak, omittedProcessCount: 1},
+      {...peak, admittedAccountingComplete: false, omittedRssBytes: null},
+      {...peak, admittedAccountingComplete: 'true'},
+      {...peak, contributors: []},
+      {...peak, contributors: Array(17).fill(contributor)},
+      {...peak, contributors: [{...contributor, token: '10:root-secret'}]},
+      {...peak, contributors: [{...contributor, role: 'worker'}]},
+      {...peak, contributors: [{...contributor, role: 'descendant', parentToken: 'a'.repeat(64)}]},
+      {...peak, contributors: [{...contributor, parentToken: contributor.token}]},
+      {...peak, contributors: [{...contributor, rssBytes: -1}]},
+      {...peak, contributors: [{...contributor, executable: '/bin/secret'}]},
+      {...peak, acquisition: {...unknownInitial, startOffsetMicroseconds: 1}},
+      {...peak, acquisition: {...window, startOffsetMicroseconds: 9}},
+      {...peak, acquisition: {...window, endOffsetMicroseconds: Infinity}},
+      {...peak, acquisition: {...window, phaseAfter: '/private/path'}},
+      {...peak, acquisition: {...window, phaseAfter: 'scanning:progress'}},
+      {...peak, acquisition: {...window, transition: 'unknown'}},
+      {...peak, acquisition: {...window, processReadStart: 6}},
+    ];
+    for (const rssPeakDiagnostic of badPeaks) {
+      expect(() => parseCodeGraphBenchmarkSamplerArtifact({...valid, rssPeakDiagnostic})).toThrow();
+    }
+    expect(() => parseCodeGraphBenchmarkSamplerArtifact({...validArtifact, rssPeakDiagnostic: peak})).toThrow();
+    expect(() =>
+      parseCodeGraphBenchmarkSamplerArtifact({
+        ...valid,
+        processTelemetry: {
+          availability: 'unavailable',
+          parentIdentityValidation: 'process-liveness-only',
+          reason: 'parent-inspection-unavailable',
+          source: 'none',
+        },
+      }),
+    ).toThrow();
+  });
+
+  it.skipIf(!['darwin', 'linux'].includes(process.platform))(
+    'plumbs explicit diagnostics through disposable sampler checkpoints',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'threadnote-rss-diagnostic-'));
+      const stop = join(root, 'stop');
+      let sampler: ReturnType<typeof Bun.spawn> | undefined;
+      try {
+        const phase = join(root, 'phase');
+        const output = join(root, 'output.json');
+        const checkpoint = join(root, 'checkpoint.json');
+        const ready = join(root, 'ready.json');
+        await writeFile(phase, 'scanning:progress');
+        await writeFile(stop, 'complete');
+        sampler = Bun.spawn({
+          cmd: [
+            process.execPath,
+            fileURLToPath(new URL('../../../../scripts/code-graph-benchmark-sampler.ts', import.meta.url)),
+            '--pid',
+            String(process.pid),
+            '--database',
+            join(root, 'db'),
+            '--temp-root',
+            root,
+            '--phase',
+            phase,
+            '--stop',
+            stop,
+            '--output',
+            output,
+            '--checkpoint-output',
+            checkpoint,
+            '--ready',
+            ready,
+            '--interval-ms',
+            '10',
+            '--checkpoint-ms',
+            '20',
+            '--rss-peak-diagnostics',
+            'true',
+          ],
+          stderr: 'pipe',
+          stdout: 'ignore',
+        });
+        await waitForText(ready, 5_000);
+        const first = parseCodeGraphBenchmarkSamplerCheckpoint(JSON.parse(await readFile(checkpoint, 'utf8')));
+        expect(first.sampler.rssPeakDiagnostic?.acquisition).toEqual(unknownInitial);
+        await writeFile(stop, 'complete');
+        expect(await sampler.exited).toBe(0);
+        const text = await readFile(output, 'utf8');
+        const artifact = parseCodeGraphBenchmarkSamplerArtifact(JSON.parse(text));
+        expect(artifact.rssPeakDiagnostic?.contributors.length).toBeGreaterThanOrEqual(1);
+        expect(artifact.rssPeakDiagnostic?.contributors.length).toBeLessThanOrEqual(16);
+        expect(text).not.toContain(root);
+        expect(JSON.stringify(artifact.rssPeakDiagnostic)).not.toContain('processId');
+        expect(JSON.parse(await readFile(ready, 'utf8'))).toEqual({checkpointVersion: 4, version: 1});
+      } finally {
+        await writeFile(stop, 'complete').catch(() => undefined);
+        if (sampler) await sampler.exited;
+        await rm(root, {force: true, recursive: true});
+      }
+    },
+    10_000,
+  );
 });
 
 async function waitForText(file: string, timeoutMilliseconds = 2_000): Promise<string> {

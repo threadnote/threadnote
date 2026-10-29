@@ -4,6 +4,8 @@ import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {defaultUrlTransform} from 'react-markdown';
+import {MemoryBody} from '../../src/detail_modal.js';
+import {MemoryExcerpt} from '../../src/review_presentation.js';
 import {MarkdownViewer} from '../../src/ui/controls.js';
 
 let host: HTMLDivElement;
@@ -117,4 +119,25 @@ it('does not extend the memory link exception to image sources', async () => {
   await render('![memory image](<threadnote://user/test/memories/durable/projects/demo/image.png>)', () => undefined);
   expect(defaultUrlTransform('threadnote://user/test/memories/durable/projects/demo/image.png')).toBe('');
   expect(host.querySelector('img')?.getAttribute('src')).toBeNull();
+});
+
+it('preserves authorized memory navigation through review body and excerpt wrappers', async () => {
+  const target = 'threadnote://memory/tn_0123456789abcdef0123456789abcdef';
+  const markdown = `[Related](<${target}>)`;
+  const open = vi.fn();
+  await act(async () =>
+    root.render(
+      <>
+        <MemoryBody content={markdown} onOpenMemory={open} />
+        <MemoryExcerpt markdown onOpenMemory={open}>
+          {markdown}
+        </MemoryExcerpt>
+      </>,
+    ),
+  );
+  const links = [...host.querySelectorAll<HTMLAnchorElement>('a')];
+  expect(links.map(link => link.getAttribute('href'))).toEqual([target, target]);
+  for (const link of links)
+    await act(async () => link.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
+  expect(open.mock.calls).toEqual([[target], [target]]);
 });

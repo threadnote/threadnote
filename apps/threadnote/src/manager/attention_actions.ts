@@ -1,3 +1,4 @@
+import {refreshContextMaintenanceCase} from '../memory/context/maintenance_refresh.js';
 import {isManagerProjectName} from './project/name.js';
 import {Cause, Clock, Crypto, DateTime, Effect, Exit, Fiber, Result, Schema, Scope} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -32,10 +33,14 @@ import {readMemoryRecordsByUri} from '../mcp/server/memory.js';
 import {managerAttentionProjectRoot} from './attention.js';
 import {runManagerExplicitCwdGraphIndex} from './graph/actions.js';
 import type {ContextHealthRepairProposalV1} from '../memory/context/health_repair.js';
-import {previewSemanticReview, applySemanticReview} from '../memory/context/semantic_review.js';
+import {
+  previewSemanticReview,
+  applySemanticReview,
+  refreshSemanticComparison,
+} from '../memory/context/semantic_review.js';
 import type {ManagerSemanticReviewInputV1} from '@threadnote/manager/attention/contracts';
 import {SemanticReviewError} from '../memory/context/semantic_review_state.js';
-import {ResourceConflict, ResourceNotFound} from '@threadnote/store/resource-store';
+import {ResourceAccessDenied, ResourceConflict, ResourceNotFound} from '@threadnote/store/resource-store';
 import {handleManagerTopicReview, managerTopicPacketReviewId} from './topic_review.js';
 import {handleManagerTopicEnrollment} from './topic_enrollment.js';
 import {handleManagerTopicExpansion} from './topic_expansion.js';
@@ -125,6 +130,35 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
     }
     if (request.method !== 'POST') return undefined;
     const body = yield* request.body;
+    if (body.action === 'refresh-case') {
+      if (
+        typeof body.project !== 'string' ||
+        !isManagerProjectName(body.project) ||
+        typeof body.caseId !== 'string' ||
+        body.caseId.length > 256
+      )
+        return invalid('Select one decision in a valid project.');
+      if (
+        (body.memoryUri !== undefined && typeof body.memoryUri !== 'string') ||
+        (body.citationId !== undefined && typeof body.citationId !== 'string')
+      )
+        return invalid('Select an exact reference from this decision.');
+      const root = yield* managerAttentionProjectRoot(request.config, body.project);
+      const result = yield* refreshContextMaintenanceCase(
+        request.config,
+        {
+          project: body.project,
+          caseId: body.caseId,
+          cwd: root.state === 'available' ? root.cwd : (yield* SystemInfo).currentDirectory(),
+        },
+        {memoryUri: body.memoryUri, citationId: body.citationId},
+      );
+      if ('packet' in result && result.packet && 'topicEvidence' in result.packet) {
+        const reviewId = yield* managerTopicPacketReviewId(request.config, result.packet);
+        return {status: 200, body: {...result, packet: {...result.packet, ...(reviewId ? {reviewId} : {})}}};
+      }
+      return {status: 200, body: result};
+    }
     if (body.action === 'pause' || body.action === 'resume')
       return {status: 200, body: yield* setContextMaintenancePaused(request.config, body.action === 'pause')};
     if (body.action === 'undo' && typeof body.receiptId === 'string') {
@@ -161,6 +195,7 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
       '/api/context-health/citations/rebuild',
       '/api/context-health/citations/jobs',
       '/api/context-health/semantic/preview',
+      '/api/context-health/semantic/refresh',
       '/api/context-health/semantic/apply',
     ].includes(route) ||
     request.method !== 'POST'
@@ -169,8 +204,8 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   const body = yield* request.body;
   const project = typeof body.project === 'string' ? body.project : '';
   if (!isManagerProjectName(project)) return invalid('Select a valid project.');
-  if (route === '/api/context-health/semantic/preview') {
-    if (body.choice !== 'left' && body.choice !== 'right' && body.choice !== 'both')
+  if (route === '/api/context-health/semantic/preview' || route === '/api/context-health/semantic/refresh') {
+    if (route.endsWith('/preview') && body.choice !== 'left' && body.choice !== 'right' && body.choice !== 'both')
       return invalid('Choose which memory to keep, or keep both.');
     if (typeof body.contradictionId !== 'string' || !/^[a-f0-9]{64}$/u.test(body.contradictionId))
       return invalid('Select an exact semantic comparison.');
@@ -185,10 +220,29 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
       )
     )
       return invalid('Select both source revisions.');
+    if (route.endsWith('/refresh')) {
+      const result = yield* refreshSemanticComparison(request.config, {
+        project,
+        contradictionId: body.contradictionId,
+        left: body.left as ManagerSemanticReviewInputV1['left'],
+        right: body.right as ManagerSemanticReviewInputV1['right'],
+      }).pipe(Effect.result);
+      if (Result.isSuccess(result)) return {status: 200, body: result.success};
+      if (Schema.is(ResourceAccessDenied)(result.failure))
+        return {status: 403, body: {error: 'Access to a selected memory is no longer available.'}};
+      if (Schema.is(ResourceNotFound)(result.failure))
+        return {status: 404, body: {error: 'A selected memory is no longer available.'}};
+      if (Schema.is(SemanticReviewError)(result.failure))
+        return invalid('Select both exact source claims and their project.');
+      return {
+        status: 503,
+        body: {error: 'The selected memories could not be checked right now. Check current evidence to try again.'},
+      };
+    }
     const result = yield* previewSemanticReview(request.config, {
       project,
       contradictionId: body.contradictionId,
-      choice: body.choice,
+      choice: body.choice as ManagerSemanticReviewInputV1['choice'],
       left: body.left as ManagerSemanticReviewInputV1['left'],
       right: body.right as ManagerSemanticReviewInputV1['right'],
     }).pipe(Effect.result);

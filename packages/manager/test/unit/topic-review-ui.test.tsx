@@ -1,3 +1,4 @@
+import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -154,6 +155,32 @@ beforeEach(() => {
       if (url.pathname === '/api/consolidation-models')
         result = {models: [{id: 'local-model', label: 'Local model', isDefault: true}]};
       else if (url.pathname === '/api/attention/context-maintenance') {
+        if (init?.method === 'POST')
+          return new Response(
+            JSON.stringify(
+              packetFailure
+                ? {outcome: 'unavailable', reason: 'Source evidence is unavailable.'}
+                : {
+                    outcome: 'ready',
+                    item: {
+                      caseId: packet.caseId,
+                      project: packet.project,
+                      memoryId: 'memory-1',
+                      family: packet.family,
+                      slot: packet.slot,
+                      evidenceRevision: evidencePacket.evidenceRevision,
+                      disposition: 'needs-decision',
+                      reason: packet.reason,
+                      firstSeen: 'now',
+                      lastSeen: 'now',
+                      lastChecked: 'now',
+                      attemptCount: 1,
+                      events: [],
+                    },
+                    packet: evidencePacket,
+                  },
+            ),
+          );
         if (url.searchParams.get('view') === 'status')
           return new Response(
             JSON.stringify({
@@ -310,6 +337,7 @@ afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   root = undefined;
   document.body.replaceChildren();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -393,27 +421,27 @@ it('retains a dirty topic draft through unchanged evidence revalidation and free
   expect(editor?.value).toBe('Dirty current behavior.');
   await act(async () => root?.render(dialog(true)));
   await act(async () => root?.render(dialog(false)));
-  expect(button('Preview exact final document').disabled).toBe(true);
-  await click('Revalidate review evidence');
+  expect(button('Save draft').disabled).toBe(false);
   expect(document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed descriptive paragraph 1"]')).toBe(
     editor,
   );
   expect(editor?.value).toBe('Dirty current behavior.');
-  expect(button('Preview exact final document').disabled).toBe(false);
-  evidencePacket = {...packet, evidenceRevision: 'changed-revision'};
+  evidencePacket = {
+    ...packet,
+    evidenceRevision: 'changed-revision',
+    topicEvidence: {...packet.topicEvidence!, observationRevision: 'changed-source'},
+  };
   await act(async () => root?.render(dialog(true)));
   await act(async () => root?.render(dialog(false)));
-  await click('Revalidate review evidence');
-  expect(editor?.value).toBe('Dirty current behavior.');
-  expect(button('Preview exact final document').disabled).toBe(true);
   expect(
-    [...document.querySelectorAll('dialog [role="alert"]')].some(alert => alert.textContent?.includes('case changed')),
-  ).toBe(true);
-  expect(posted).toHaveLength(0);
+    document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed descriptive paragraph 1"]')?.value,
+  ).toBe('Dirty current behavior.');
+  expect(button('Save draft')?.disabled ?? true).toBe(true);
+  expect(posted.map(action => action.action)).toEqual(['preview']);
   packetFailure = true;
-  await click('Revalidate review evidence');
+  await act(async () => root?.render(dialog(true)));
   expect(document.body.textContent).not.toContain('Dirty current behavior.');
-  expect(button('Preview exact final document')?.disabled ?? true).toBe(true);
+  expect(button('Save draft')?.disabled ?? true).toBe(true);
 });
 
 it('previews a closed edited draft and applies only its exact revision and digest', async () => {
@@ -429,22 +457,22 @@ it('previews a closed edited draft and applies only its exact revision and diges
       onOpenLibrary={() => undefined}
     />,
   );
-  expect(button('Accept update').disabled).toBe(true);
+  expect(button('Apply update').disabled).toBe(false);
   expect(document.body.textContent).toContain('Policy requirement');
   await edit(0, 'Edited current behavior.');
-  expect(button('Accept update').disabled).toBe(true);
-  await click('Preview exact final document');
-  expect(posted[0].action).toBe('preview');
-  expect(JSON.parse(String(posted[0].editedDraftJson)).operations[0]).toMatchObject({
+  expect(button('Apply update').disabled).toBe(true);
+  await click('Save draft');
+  expect(posted[1].action).toBe('preview');
+  expect(JSON.parse(String(posted[1].editedDraftJson)).operations[0]).toMatchObject({
     ordinal: 0,
     text: 'Edited current behavior.',
   });
-  expect(button('Accept update').disabled).toBe(false);
-  await click('Accept update');
-  expect(posted[1]).toMatchObject({
+  expect(button('Apply update').disabled).toBe(false);
+  await click('Apply update');
+  expect(posted[2]).toMatchObject({
     action: 'apply',
     reviewId: 'review-1',
-    revision: 4,
+    revision: 5,
     approvalDigest: hash,
     approved: true,
   });
@@ -482,8 +510,8 @@ it('shows primary generation progress for the pending request without starting a
   expect(posted).toHaveLength(1);
   await act(async () => gate.resolve());
   expect(document.querySelector('.topic-review-progress')).toBeNull();
-  expect(document.body.textContent).toContain('Draft ready to review.');
-  expect(posted).toHaveLength(1);
+  expect(document.body.textContent).toContain('Exact final document prepared for review.');
+  expect(posted.map(action => action.action)).toEqual(['generate', 'preview']);
 });
 
 it('keeps a failed apply open and never acknowledges a resolved case', async () => {
@@ -499,9 +527,8 @@ it('keeps a failed apply open and never acknowledges a resolved case', async () 
       onOpenLibrary={() => undefined}
     />,
   );
-  await click('Preview exact final document');
   applyFailure = true;
-  await click('Accept update');
+  await click('Apply update');
   expect(document.querySelector('dialog[open]')).not.toBeNull();
   expect(document.querySelector('[role="alert"]')?.textContent).toContain('The source changed');
   expect(onClose).not.toHaveBeenCalled();
@@ -528,13 +555,13 @@ it('recovers a failed post-generation evidence read explicitly without another m
   await act(async () => gate.resolve());
   expect(document.querySelector('[role="alert"]')?.textContent).toContain('selected source evidence changed');
   expect(document.querySelector('dialog[open]')).not.toBeNull();
-  expect(button('Accept update').disabled).toBe(true);
+  expect(button('Apply update').disabled).toBe(true);
   expect(posted.map(item => item.action)).toEqual(['generate']);
   packetFailure = false;
   await click('Refresh evidence');
   expect(document.querySelector('[role="alert"]')).toBeNull();
-  expect(button('Preview exact final document').disabled).toBe(false);
-  expect(posted.map(item => item.action)).toEqual(['generate']);
+  expect(button('Apply update').disabled).toBe(false);
+  expect(posted.map(item => item.action)).toEqual(['generate', 'preview']);
   expect(onClose).not.toHaveBeenCalled();
 });
 
@@ -551,9 +578,8 @@ it('refuses to close or clear a case when the returned written approval digest d
       onOpenLibrary={() => undefined}
     />,
   );
-  await click('Preview exact final document');
   mismatchedApplyDigest = true;
-  await click('Accept update');
+  await click('Apply update');
   expect(document.querySelector('[role="alert"]')?.textContent).toContain('does not match this exact approval');
   expect(onClose).not.toHaveBeenCalled();
   expect(onApplied).not.toHaveBeenCalled();
@@ -571,7 +597,6 @@ it('freezes paragraph decisions, text and support while an exact preview is pend
       onOpenLibrary={() => undefined}
     />,
   );
-  await click('Preview exact final document');
   const decision = document.querySelector<HTMLSelectElement>('select[aria-label="Review decision for paragraph 1"]')!;
   const editor = document.querySelector<HTMLTextAreaElement>(
     'textarea[aria-label="Proposed descriptive paragraph 1"]',
@@ -587,13 +612,13 @@ it('freezes paragraph decisions, text and support while an exact preview is pend
   await act(async () => gate.resolve());
   expect(decision.value).toBe('update');
   expect(decision.disabled).toBe(false);
-  expect(button('Accept update').disabled).toBe(false);
+  expect(button('Apply update').disabled).toBe(false);
   await act(async () => {
     decision.value = 'unresolved';
     decision.dispatchEvent(new Event('change', {bubbles: true}));
   });
-  expect(button('Accept update').disabled).toBe(true);
-  expect(button('Preview exact final document').disabled).toBe(true);
+  expect(button('Apply update').disabled).toBe(true);
+  expect(button('Save draft')?.disabled ?? true).toBe(true);
   expect(posted.map(action => action.action)).toEqual(['preview']);
 });
 
@@ -656,7 +681,6 @@ it('keeps an inbox review open through preview and shows its exact final documen
   const trigger = button('Review and decide');
   trigger.focus();
   await click('Review and decide');
-  await click('Preview exact final document');
   expect(document.querySelector('dialog[open]')).toBeTruthy();
   expect(document.body.textContent).toContain('Exact final document to save');
   expect(document.body.textContent).toContain('Updated behavior.');
@@ -665,7 +689,7 @@ it('keeps an inbox review open through preview and shows its exact final documen
   expect(finalDocument.querySelector('article')?.textContent).not.toContain('memory_id:');
   expect(finalDocument.querySelector('details')?.open).toBe(false);
   expect(finalDocument.querySelector('details pre')?.textContent).toBe(current.approval?.content);
-  expect(button('Accept update').disabled).toBe(false);
+  expect(button('Apply update').disabled).toBe(false);
   await act(async () => {
     document.querySelector('dialog')!.dispatchEvent(new Event('cancel', {cancelable: true}));
   });
@@ -685,7 +709,6 @@ it('keeps a failed inbox preview visible for recovery', async () => {
     />,
   );
   await click('Review and decide');
-  await click('Preview exact final document');
   expect(document.querySelector('dialog[open]')).toBeTruthy();
   expect(document.body.textContent).toContain('The source changed. Refresh this review.');
 });
@@ -702,8 +725,7 @@ it('retains a learned review identity after acceptance instead of reloading its 
       onOpenLibrary={() => undefined}
     />,
   );
-  await click('Preview exact final document');
-  await click('Accept update');
+  await click('Apply update');
   await click('Refresh evidence');
   expect(current.state).toBe('applied');
   expect(document.body.textContent).toContain('Saved final document');
@@ -794,16 +816,15 @@ it('requires a new exact preview after an acceptance refusal even when a refresh
       onOpenLibrary={() => undefined}
     />,
   );
-  await click('Preview exact final document');
   applyFailure = true;
-  await click('Accept update');
-  expect(button('Accept update').disabled).toBe(true);
+  await click('Apply update');
+  expect(button('Apply update').disabled).toBe(true);
   await click('Refresh evidence');
-  expect(button('Accept update').disabled).toBe(true);
+  expect(button('Apply update').disabled).toBe(true);
   expect(document.body.textContent).toContain('Previous exact preview');
   applyFailure = false;
-  await click('Preview exact final document');
-  expect(button('Accept update').disabled).toBe(false);
+  await click('Retry preparing document');
+  expect(button('Apply update').disabled).toBe(false);
 });
 
 it('requires an explicit supported disposition for every eligible paragraph in a legacy model draft', async () => {
@@ -819,15 +840,15 @@ it('requires an explicit supported disposition for every eligible paragraph in a
       onOpenLibrary={() => undefined}
     />,
   );
-  expect(button('Preview exact final document').disabled).toBe(true);
+  expect(button('Save draft')?.disabled ?? true).toBe(true);
   expect(document.body.textContent).toContain('Paragraph review incomplete');
   const decision = document.querySelector<HTMLSelectElement>('select[aria-label="Review decision for paragraph 1"]')!;
   await act(async () => {
     decision.value = 'update';
     decision.dispatchEvent(new Event('change', {bubbles: true}));
   });
-  expect(button('Preview exact final document').disabled).toBe(false);
-  await click('Preview exact final document');
+  expect(button('Save draft').disabled).toBe(false);
+  await click('Save draft');
   expect(JSON.parse(String(posted[0].editedDraftJson)).paragraphDispositions.entries).toEqual([
     expect.objectContaining({
       ordinal: 0,
@@ -868,19 +889,21 @@ it('keeps an unresolved paragraph blocked until its unchanged decision has expli
       onOpenLibrary={() => undefined}
     />,
   );
-  expect(button('Preview exact final document').disabled).toBe(true);
+  expect(button('Save draft')?.disabled ?? true).toBe(true);
   const decision = document.querySelector<HTMLSelectElement>('select[aria-label="Review decision for paragraph 1"]')!;
   await act(async () => {
     decision.value = 'revalidate';
     decision.dispatchEvent(new Event('change', {bubbles: true}));
   });
-  expect(button('Preview exact final document').disabled).toBe(true);
+  expect(button('Save draft')?.disabled ?? true).toBe(true);
   const support = [...document.querySelectorAll('fieldset')]
     .find(item => item.querySelector('legend')?.textContent?.includes('paragraph 1'))!
     .querySelector<HTMLInputElement>('input[type="checkbox"]')!;
   expect(support.checked).toBe(false);
   await act(async () => support.click());
-  expect(button('Preview exact final document').disabled).toBe(false);
+  expect(button('Save draft').disabled).toBe(false);
+  expect(button('Apply update').disabled).toBe(true);
+  expect(posted).toHaveLength(0);
 });
 
 it('retains the first edited paragraph while previewing a second edit', async () => {
@@ -936,20 +959,20 @@ it('retains the first edited paragraph while previewing a second edit', async ()
     />,
   );
   await edit(0, 'First edited.');
-  await click('Preview exact final document');
+  await click('Save draft');
   expect(current.draft.operations[0]?.text).toBe('First edited.');
   expect(generatedDraft.operations[0]?.text).toBe('First proposed.');
   await edit(1, 'Second edited.');
-  expect(button('Accept update').disabled).toBe(true);
-  await click('Preview exact final document');
+  expect(button('Apply update').disabled).toBe(true);
+  await click('Save draft');
   expect(
-    (JSON.parse(String(posted[1].editedDraftJson)) as ManagerTopicReviewV1['draft']).operations.map(
+    (JSON.parse(String(posted[2].editedDraftJson)) as ManagerTopicReviewV1['draft']).operations.map(
       operation => operation.text,
     ),
   ).toEqual(['First edited.', 'Second edited.']);
   expect(document.body.textContent).toContain('First edited.');
   expect(document.body.textContent).toContain('Second edited.');
-  expect(button('Accept update').disabled).toBe(false);
+  expect(button('Apply update').disabled).toBe(false);
 });
 
 it.each([false, true])(
@@ -1021,7 +1044,7 @@ it('blocks acceptance when the source packet is unavailable even with a persiste
   );
   expect(document.body.textContent).toContain('Current source evidence is unavailable');
   expect(document.body.textContent).not.toContain('This draft needs fresh evidence');
-  expect(button('Accept update').disabled).toBe(true);
+  expect(button('Apply update').disabled).toBe(true);
 });
 
 it('persists defer and resume through the topic action route', async () => {
@@ -1035,10 +1058,10 @@ it('persists defer and resume through the topic action route', async () => {
     />,
   );
   await click('Defer');
-  expect(posted[0]).toMatchObject({action: 'defer', reviewId: 'review-1', revision: 3});
+  expect(posted[1]).toMatchObject({action: 'defer', reviewId: 'review-1', revision: 4});
   expect(button('Resume review')).toBeTruthy();
   await click('Resume review');
-  expect(posted[1]).toMatchObject({action: 'resume', reviewId: 'review-1', revision: 4});
+  expect(posted[2]).toMatchObject({action: 'resume', reviewId: 'review-1', revision: 5});
 });
 
 it('holds resume while the deferred revision reloads, then submits that revision', async () => {
@@ -1058,12 +1081,12 @@ it('holds resume while the deferred revision reloads, then submits that revision
   expect(document.body.textContent).toContain('Loading topic and review…');
   expect(button('Resume review').disabled).toBe(true);
   await click('Resume review');
-  expect(posted.map(action => action.action)).toEqual(['defer']);
+  expect(posted.map(action => action.action)).toEqual(['preview', 'defer']);
   await act(async () => gate.resolve());
   expect(button('Resume review').disabled).toBe(false);
   await click('Resume review');
-  expect(posted[1]).toMatchObject({action: 'resume', reviewId: 'review-1', revision: 4, caseId: 'case-1'});
-  expect(document.body.textContent).toContain('Review resumed.');
+  expect(posted[2]).toMatchObject({action: 'resume', reviewId: 'review-1', revision: 5, caseId: 'case-1'});
+  expect(document.body.textContent).toContain('Exact final document prepared for review.');
 });
 
 it('keeps the edited draft through defer and resume, then requires a new exact preview', async () => {
@@ -1077,20 +1100,19 @@ it('keeps the edited draft through defer and resume, then requires a new exact p
     />,
   );
   await edit(0, 'Reviewed current behavior.');
-  await click('Preview exact final document');
-  expect(button('Accept update').disabled).toBe(false);
+  await click('Save draft');
+  expect(button('Apply update').disabled).toBe(false);
   await clickExact('Defer');
   expect(document.body.textContent).toContain('Reviewed current behavior.');
   await click('Resume review');
   expect(
     document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed descriptive paragraph 1"]')?.value,
   ).toBe('Reviewed current behavior.');
-  expect(button('Accept update').disabled).toBe(true);
-  await click('Preview exact final document');
+  expect(button('Apply update').disabled).toBe(false);
   expect(
     (JSON.parse(String(posted.at(-1)?.editedDraftJson)) as ManagerTopicReviewV1['draft']).operations[0]?.text,
   ).toBe('Reviewed current behavior.');
-  expect(button('Accept update').disabled).toBe(false);
+  expect(button('Apply update').disabled).toBe(false);
 });
 
 it('retains a completed decision and its dialog when the inbox refresh fails', async () => {
@@ -1124,11 +1146,586 @@ it('allows closing a stale pending case while blocking preview and stale resume'
       onOpenLibrary={() => undefined}
     />,
   );
-  expect(document.body.textContent).toContain('The source case is unavailable.');
-  expect(document.body.textContent).not.toContain('This draft needs fresh evidence');
-  expect(button('Preview exact final document').disabled).toBe(true);
+  expect(document.body.textContent).not.toContain('The source case is unavailable.');
+  expect(document.body.textContent).toContain('This draft needs fresh evidence');
+  expect(button('Save draft')?.disabled ?? true).toBe(true);
   expect(button('Defer').disabled).toBe(false);
   await click('Defer');
   expect(posted[0]).toMatchObject({action: 'defer', caseId: 'case-1'});
   expect(button('Resume review').disabled).toBe(true);
+});
+
+function privatePacket(outcome: 'ready' | 'unavailable'): ManagerContextMaintenancePacketV2 {
+  return {
+    ...packet,
+    reviewId: undefined,
+    evidenceRevision: outcome === 'ready' ? 'authorized' : 'revoked',
+    topicEvidence: {
+      version: 2,
+      sourceKind: 'obsidian',
+      outcome,
+      targetUri: packet.memoryUri!,
+      targetHash: hash,
+      observationRevision: outcome,
+      coverage: 'declared-only',
+      canDraft: outcome === 'ready',
+      ...(outcome === 'ready'
+        ? {
+            body: 'Private accepted prose.',
+            paragraphs: [],
+            obsidian: {
+              current: {
+                sourceId: 'source',
+                sourceInstanceId: 'instance',
+                noteId: 'note',
+                relativePath: 'private.md',
+                revisionHash: hash,
+                sanitizerVersion: 'v1',
+                accessHash: hash,
+                vaultHash: hash,
+                inspectionDigest: hash,
+                content: 'Private imported excerpt.',
+                startOffset: 0 as const,
+                endOffset: 25,
+                truncated: false,
+              },
+            },
+          }
+        : {reason: 'Source access was revoked.', obsidian: {}}),
+      additionalDependencies: [],
+    },
+  };
+}
+
+it('adopts an unavailable imported observation without a generated review and discards old private text', async () => {
+  let selected = privatePacket('ready');
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string) =>
+      input.startsWith('/api/consolidation-models')
+        ? new Response(JSON.stringify({models: []}))
+        : input.startsWith('/api/attention/topic-review')
+          ? new Response(JSON.stringify({error: 'No saved review.'}), {status: 404})
+          : new Response(JSON.stringify(selected)),
+    ),
+  );
+  const element = () => (
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      initialPacket={selected}
+      onChanged={() => {}}
+      onClose={() => {}}
+      onOpenLibrary={() => {}}
+    />
+  );
+  await render(element());
+  expect(document.body.textContent).toContain('Private imported excerpt.');
+  selected = privatePacket('unavailable');
+  await act(async () => root?.render(element()));
+  expect(document.body.textContent).not.toContain('Private imported excerpt.');
+  expect(document.body.textContent).not.toContain('Private accepted prose.');
+  expect(document.body.textContent).toContain('Source access was revoked.');
+  expect([...document.querySelectorAll('button')].some(value => value.textContent?.includes('Apply update'))).toBe(
+    false,
+  );
+});
+
+it.each(['unavailable', 'not-ready', '403'] as const)(
+  'redacts a mounted imported topic after parent refresh returns %s with no generated review',
+  async failure => {
+    const selected = privatePacket('ready');
+    const item = {
+      caseId: 'case-1',
+      project: 'threadnote',
+      memoryId: 'memory-1',
+      subjectUri: packet.memoryUri,
+      family: 'topic-maintenance',
+      slot: 'declared-support',
+      evidenceRevision: 'authorized',
+      disposition: 'needs-decision' as const,
+      reason: 'source-changed',
+      firstSeen: 'now',
+      lastSeen: 'now',
+      lastChecked: 'now',
+      attemptCount: 1,
+      events: [],
+    };
+    const fetch = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.startsWith('/api/consolidation-models')) return new Response(JSON.stringify({models: []}));
+      if (input.startsWith('/api/attention/topic-review'))
+        return new Response(JSON.stringify({error: 'No saved review.'}), {status: 404});
+      if (init?.method === 'POST')
+        return failure === '403'
+          ? new Response(JSON.stringify({error: 'Source access was revoked.'}), {status: 403})
+          : new Response(
+              JSON.stringify(
+                failure === 'not-ready'
+                  ? {outcome: 'unavailable', reason: 'Source access was revoked.'}
+                  : {
+                      outcome: 'ready',
+                      item: {...item, disposition: 'waiting-evidence'},
+                      packet: privatePacket('unavailable'),
+                    },
+              ),
+            );
+      return new Response(JSON.stringify(input.includes('view=status') ? {version: 2, cases: [item]} : selected));
+    });
+    vi.stubGlobal('fetch', fetch);
+    const element = (stale: boolean) => (
+      <MaintenanceCaseDialog
+        project="threadnote"
+        caseId="case-1"
+        memoryUri={packet.memoryUri}
+        initialCase={item}
+        stale={stale}
+        onTask={() => {}}
+        onClose={() => {}}
+        onOpenLibrary={() => {}}
+      />
+    );
+    await render(element(false));
+    expect(document.body.textContent).toContain('Private imported excerpt.');
+    await act(async () => root?.render(element(true)));
+    expect(document.body.textContent).not.toContain('Private imported excerpt.');
+    expect(document.body.textContent).not.toContain('Private accepted prose.');
+    expect(
+      fetch.mock.calls
+        .filter(([, init]) => init?.method === 'POST')
+        .every(([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case'),
+    ).toBe(true);
+  },
+);
+
+it('adopts the exact refreshed code-topic observation without a generated review', async () => {
+  const citation = createMemoryCodeCitation({
+    version: 1,
+    repositoryId: 'b'.repeat(64),
+    repositoryIdentityKind: 'local',
+    sourceCommit: 'c'.repeat(40),
+    sourceDirty: false,
+    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    extractorSet: 'test',
+    path: 'source.ts',
+    fileContentHash: {algorithm: 'sha256', value: hash},
+    target: {kind: 'file'},
+  });
+  const excerpt = (content: string) => ({
+    content,
+    startLine: 1,
+    endLine: 1,
+    excerptHash: hash,
+    fileBytesHash: hash,
+    provenance: 'current-verified' as const,
+    supportsCitation: false,
+    truncated: false,
+    source: {
+      extractorSet: 'test',
+      fileContentHash: hash,
+      path: 'source.ts',
+      repositoryId: 'b'.repeat(64),
+      sourceCommit: 'c'.repeat(40),
+      sourceDirty: false,
+      sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    },
+  });
+  const initial: ManagerContextMaintenancePacketV2 = {
+    ...packet,
+    reviewId: undefined,
+    topicEvidence: {
+      ...packet.topicEvidence!,
+      version: 1,
+      sources: [
+        {
+          citationId: citation.id,
+          status: 'changed',
+          original: citation,
+          current: citation,
+          oldExcerpt: excerpt('Original source.'),
+          newExcerpt: excerpt('Previously observed source.'),
+        },
+      ],
+    },
+  };
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string) =>
+      input.startsWith('/api/consolidation-models')
+        ? new Response(JSON.stringify({models: []}))
+        : input.startsWith('/api/attention/topic-review')
+          ? new Response(JSON.stringify({error: 'No saved review.'}), {status: 404})
+          : new Response(JSON.stringify(initial)),
+    ),
+  );
+  const element = (selected: ManagerContextMaintenancePacketV2) => (
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      initialPacket={selected}
+      onChanged={() => {}}
+      onClose={() => {}}
+      onOpenLibrary={() => {}}
+    />
+  );
+  await render(element(initial));
+  expect(document.body.textContent).toContain('Previously observed source.');
+  const refreshed = {
+    ...initial,
+    evidenceRevision: 'fresh-observation',
+    topicEvidence: {
+      ...initial.topicEvidence!,
+      version: 1 as const,
+      sources: [
+        {
+          citationId: citation.id,
+          status: 'changed' as const,
+          original: citation,
+          current: citation,
+          oldExcerpt: excerpt('Original source.'),
+          newExcerpt: excerpt('Freshly observed source.'),
+        },
+      ],
+      observationRevision: 'fresh-observation',
+    },
+  };
+  await act(async () => root?.render(element(refreshed)));
+  expect(document.body.textContent).toContain('Freshly observed source.');
+  expect(document.body.textContent).not.toContain('Previously observed source.');
+});
+
+it('refreshes the selected topic observation from the visible control without a parent stale transition', async () => {
+  const item = {
+    caseId: 'case-1',
+    project: 'threadnote',
+    memoryId: 'memory-1',
+    subjectUri: packet.memoryUri,
+    family: 'topic-maintenance',
+    slot: 'declared-support',
+    evidenceRevision: 'old',
+    disposition: 'needs-decision' as const,
+    reason: 'source-changed',
+    firstSeen: 'now',
+    lastSeen: 'now',
+    lastChecked: 'now',
+    attemptCount: 1,
+    events: [],
+  };
+  let changed = false;
+  let refreshed = false;
+  const fresh: ManagerContextMaintenancePacketV2 = {
+    ...packet,
+    reviewId: undefined,
+    evidenceRevision: 'fresh',
+    topicEvidence: {
+      ...packet.topicEvidence!,
+      outcome: 'unavailable',
+      reason: 'Fresh selected source could not be verified.',
+      observationRevision: 'fresh',
+    },
+  };
+  const fetch = vi.fn(async (input: string, init?: RequestInit) => {
+    if (input.startsWith('/api/consolidation-models')) return new Response(JSON.stringify({models: []}));
+    if (input.startsWith('/api/attention/topic-review'))
+      return new Response(JSON.stringify({error: 'No saved review.'}), {status: 404});
+    if (init?.method === 'POST') {
+      refreshed = true;
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        action: 'refresh-case',
+        project: 'threadnote',
+        caseId: item.caseId,
+      });
+      return new Response(
+        JSON.stringify({outcome: 'ready', item: {...item, evidenceRevision: 'fresh'}, packet: fresh}),
+      );
+    }
+    if (input.includes('view=status')) return new Response(JSON.stringify({version: 2, cases: [item]}));
+    return changed && !refreshed
+      ? new Response(JSON.stringify({error: 'Saved source observation is stale.'}), {status: 409})
+      : new Response(JSON.stringify(refreshed ? fresh : {...packet, reviewId: undefined}));
+  });
+  vi.stubGlobal('fetch', fetch);
+  await render(
+    <MaintenanceCaseDialog
+      project="threadnote"
+      caseId={item.caseId}
+      memoryUri={packet.memoryUri}
+      initialCase={item}
+      stale={false}
+      onChanged={() => {}}
+      onClose={() => {}}
+      onOpenLibrary={() => {}}
+      onTask={() => {}}
+    />,
+  );
+  changed = true;
+  await click('Refresh evidence');
+  expect(refreshed).toBe(true);
+  expect(document.body.textContent).toContain('Fresh selected source could not be verified.');
+  expect(document.body.textContent).not.toContain('Saved source observation is stale.');
+  expect(fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+});
+
+it.each(['reviews', 'case'] as const)(
+  'adopts fresh selected evidence for a stale draft through the %s entry',
+  async entry => {
+    if (entry === 'reviews') {
+      await render(
+        <ReviewsPanel
+          project="threadnote"
+          projects={['threadnote']}
+          refreshGeneration={0}
+          onOpenLibrary={() => undefined}
+          onProjectChange={() => undefined}
+        />,
+      );
+      await click('Review and decide');
+    } else
+      await render(
+        <TopicReviewDialog
+          project="threadnote"
+          caseId="case-1"
+          reviewId="review-1"
+          onChanged={() => undefined}
+          onClose={() => undefined}
+          onOpenLibrary={() => undefined}
+        />,
+      );
+    current = review({...current, caseObservationMatches: false});
+    const citation = createMemoryCodeCitation({
+      version: 1,
+      repositoryId: 'b'.repeat(64),
+      repositoryIdentityKind: 'local',
+      sourceCommit: 'c'.repeat(40),
+      sourceDirty: false,
+      sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+      extractorSet: 'test',
+      path: 'source.ts',
+      fileContentHash: {algorithm: 'sha256', value: hash},
+      target: {kind: 'file'},
+    });
+    const excerpt = (content: string) => ({
+      content,
+      startLine: 1,
+      endLine: 1,
+      excerptHash: hash,
+      fileBytesHash: hash,
+      provenance: 'current-verified' as const,
+      supportsCitation: false,
+      truncated: false,
+      source: {
+        repositoryId: 'b'.repeat(64),
+        extractorSet: 'test',
+        fileContentHash: hash,
+        path: 'source.ts',
+        sourceCommit: 'c'.repeat(40),
+        sourceDirty: false,
+        sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+      },
+    });
+    evidencePacket = {
+      ...packet,
+      evidenceRevision: 'fresh',
+      topicEvidence: {
+        ...packet.topicEvidence!,
+        version: 1,
+        observationRevision: 'fresh',
+        body: 'Current source observation.',
+        sources: [
+          {
+            citationId: citation.id,
+            status: 'changed',
+            original: citation,
+            current: citation,
+            oldExcerpt: excerpt('Recorded source evidence.'),
+            newExcerpt: excerpt('Current source evidence after selected refresh.'),
+          },
+        ],
+      },
+    };
+    await click('Refresh evidence');
+    expect(document.body.textContent).toContain('Current source evidence after selected refresh.');
+    expect(document.body.textContent).toContain('Recorded source evidence.');
+    expect(button('Regenerate draft').disabled).toBe(false);
+    expect(button('Apply update').disabled).toBe(true);
+    expect(document.body.textContent).toContain('This draft needs fresh evidence');
+    expect(
+      vi
+        .mocked(globalThis.fetch)
+        .mock.calls.filter(
+          ([input, init]) => String(input).startsWith('/api/attention/context-maintenance') && init?.method === 'POST',
+        ),
+    ).toHaveLength(1);
+  },
+);
+
+it.each(['reviews', 'case'] as const)(
+  'prepares the canonical document once on open through %s, then accepts one explicit apply',
+  async entry => {
+    if (entry === 'reviews') {
+      await render(
+        <ReviewsPanel
+          project="threadnote"
+          projects={['threadnote']}
+          refreshGeneration={0}
+          onOpenLibrary={() => undefined}
+          onProjectChange={() => undefined}
+        />,
+      );
+      await click('Review and decide');
+    } else
+      await render(
+        <TopicReviewDialog
+          project="threadnote"
+          caseId="case-1"
+          reviewId="review-1"
+          onChanged={() => undefined}
+          onClose={() => undefined}
+          onOpenLibrary={() => undefined}
+        />,
+      );
+    expect(document.querySelector('[aria-label="Exact final document"] details pre')?.textContent).toBe(
+      current.approval?.content,
+    );
+    expect(button('Preview exact final document')).toBeUndefined();
+    expect(button('Save draft')).toBeUndefined();
+    expect(button('Apply update').disabled).toBe(false);
+    expect(posted.map(action => action.action)).toEqual(['preview']);
+    const gate = Promise.withResolvers<void>();
+    const base = globalThis.fetch;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === 'POST' && JSON.parse(String(init.body)).action === 'apply') await gate.promise;
+        return base(input, init);
+      }),
+    );
+    const apply = button('Apply update');
+    await act(async () => {
+      apply.click();
+      apply.click();
+    });
+    expect(button('Saving update…').disabled).toBe(true);
+    expect(posted.map(action => action.action)).toEqual(['preview']);
+    await act(async () => gate.resolve());
+    expect(posted.map(action => action.action)).toEqual(['preview', 'apply']);
+    expect(posted[1]).toMatchObject({revision: 4, approvalDigest: hash, approved: true});
+  },
+);
+
+it.each([false, true])('reconciles an unknown automatic preparation with GETs only (saved: %s)', async saved => {
+  const base = globalThis.fetch;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST' && JSON.parse(String(init.body)).action === 'preview') {
+        if (saved) await base(input, init);
+        else posted.push(JSON.parse(String(init.body)));
+        throw new Error('Preparation response disconnected.');
+      }
+      return base(input, init);
+    }),
+  );
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  expect(posted.map(action => action.action)).toEqual(['preview']);
+  expect(button('Apply update').disabled).toBe(true);
+  expect(!!document.querySelector('[aria-label="Exact final document"]')).toBe(saved);
+  expect(vi.mocked(globalThis.fetch).mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  await click('Refresh evidence');
+  // Only the human's explicit selected-observation refresh adds a POST; preparation is not replayed.
+  expect(posted.map(action => action.action)).toEqual(['preview']);
+  expect(button('Apply update').disabled).toBe(!saved);
+});
+
+it.each(['read-only', 'unresolved'] as const)('does not prepare a %s proposal automatically', async mode => {
+  if (mode === 'unresolved')
+    current = review({draft: {...review().draft, outcome: 'insufficient-evidence', operations: []}});
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      writesDisabled={mode === 'read-only'}
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  expect(posted).toHaveLength(0);
+  expect(button('Apply update').disabled).toBe(true);
+});
+
+it('bounds automatic preparation at 30 seconds and performs no mutation replay after timeout', async () => {
+  vi.useFakeTimers();
+  const base = globalThis.fetch;
+  let preparationSignal: AbortSignal | undefined;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST' && JSON.parse(String(init.body)).action === 'preview') {
+        posted.push(JSON.parse(String(init.body)));
+        preparationSignal = init.signal!;
+        const response = Promise.withResolvers<Response>();
+        preparationSignal.addEventListener('abort', () => response.reject(new DOMException('Aborted', 'AbortError')), {
+          once: true,
+        });
+        return response.promise;
+      }
+      return base(input, init);
+    }),
+  );
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await act(async () => vi.advanceTimersByTimeAsync(29_999));
+  expect(preparationSignal?.aborted).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(preparationSignal?.aborted).toBe(true);
+  expect(document.body.textContent).toContain('timed out after 30000 ms');
+  expect(posted.map(action => action.action)).toEqual(['preview']);
+  expect(button('Apply update').disabled).toBe(true);
+});
+
+it('aborts a pending automatic preparation on selection change and ignores its late result', async () => {
+  const gate = Promise.withResolvers<void>();
+  previewGate = gate.promise;
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  const request = vi.mocked(globalThis.fetch).mock.calls.find(([, init]) => init?.method === 'POST');
+  const signal = request?.[1]?.signal;
+  await act(async () =>
+    root?.render(
+      <TopicReviewDialog
+        project="other"
+        reviewId="review-other"
+        onChanged={() => undefined}
+        onClose={() => undefined}
+        onOpenLibrary={() => undefined}
+      />,
+    ),
+  );
+  expect(signal?.aborted).toBe(true);
+  await act(async () => gate.resolve());
+  expect(document.querySelector('[aria-label="Exact final document"]')).toBeNull();
+  expect(document.body.textContent).not.toContain('Updated behavior.');
+  expect(posted.map(action => action.action)).toEqual(['preview']);
 });

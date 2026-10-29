@@ -1,3 +1,4 @@
+import {ManagerReviewVerificationScope, ManagerReviewSourceReadiness} from './review_actionability.js';
 import {startAutomaticModelSetupScheduler} from '../models/setup_lifecycle.js';
 import {MANAGER_STATIC_FILES as STATIC_FILES} from './static-files.js';
 import {
@@ -204,7 +205,6 @@ const pathRelative = Effect.fn('manager.pathRelative')(function* (from: string, 
   const path = yield* Path.Path;
   return path.relative(from, to);
 });
-
 const pathSeparator = Effect.map(Path.Path, path => path.sep);
 
 const lstat = Effect.fn('manager.lstat')(function* (target: string) {
@@ -283,7 +283,7 @@ interface ApiContext {
   readonly config: RuntimeConfig;
   readonly jobs: Map<string, ConsolidationJob>;
   readonly worksetScope: Scope.Scope;
-  readonly runEffect?: ManagerEffectPromise;
+  readonly runEffect?: undefined;
   readonly token: string;
 }
 
@@ -310,7 +310,6 @@ interface ManagerResponseSink {
 }
 
 type ManagerOperation<A> = Effect.Effect<A, unknown, ApplicationServices>;
-type ManagerEffectPromise = undefined;
 const NATIVE_RESOURCE_BACKEND = 'threadnote-native';
 const GRAPH_MAINTENANCE_BUSY_MESSAGE =
   'Native code graph repair or maintenance is in progress. Wait for it to finish before starting or using Threadnote Manager.';
@@ -394,6 +393,7 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
               }),
               Effect.provideService(ManagerLiveConsumerChangeHints, observations.hints),
               Effect.provideService(ManagerConsumerClockHints, projectObservation.clockHints),
+              Effect.provideService(ManagerReviewSourceReadiness, {current: projectObservation.reviewReadiness}),
             ),
           );
           yield* startManagerContextSchedulers(config, automaticCompactionStatus, graph.compactionChanged).pipe(
@@ -431,7 +431,7 @@ export function createManagerServer(context: ApiContext) {
         yield* (yield* ManagerLiveChangeHints).canonical.pipe(Effect.ignoreCause);
       }
       return response.response;
-    }),
+    }).pipe(Effect.provideService(ManagerReviewVerificationScope, context.worksetScope)),
   );
 }
 
@@ -486,7 +486,7 @@ export const readManagedMemory = Effect.fn('manager.readManagedMemory')(function
 export const readContextUri = Effect.fn('manager.readContextUri')(function* (
   config: RuntimeConfig,
   uri: string,
-  runEffect?: ManagerEffectPromise,
+  runEffect?: undefined,
 ) {
   assertResourceUri(uri);
   const localMemory = yield* Effect.result(readManagedMemory(config, uri));
@@ -1145,7 +1145,7 @@ const readTree: (
 const saveMemory = Effect.fn('manager.saveMemory')(function (
   config: RuntimeConfig,
   body: Record<string, unknown>,
-  runEffect: ManagerEffectPromise | undefined,
+  runEffect: undefined,
 ) {
   const text = requireString(body.text, 'text');
   const replaceUri = optionalString(body.replaceUri);
@@ -1219,7 +1219,7 @@ const moveMemory = Effect.fn('manager.moveMemory')(function* (
   config: RuntimeConfig,
   sourceUri: string,
   target: TargetMemoryInput,
-  runEffect: ManagerEffectPromise | undefined,
+  runEffect: undefined,
 ) {
   assertResourceUri(sourceUri);
   const source = yield* readManagedMemory(config, sourceUri);
@@ -1378,7 +1378,7 @@ const fileUrisUnderFolder: (
 const runBulk = Effect.fn('manager.runBulk')(function* (
   config: RuntimeConfig,
   body: Record<string, unknown>,
-  runEffect: ManagerEffectPromise | undefined,
+  runEffect: undefined,
 ) {
   const action = requireString(body.action, 'action');
   const uris = requireStringArray(body.uris, 'uris');
@@ -1496,7 +1496,7 @@ const applyConsolidation = Effect.fn('manager.applyConsolidation')(function* (
   jobs: Map<string, ConsolidationJob>,
   id: string,
   body: Record<string, unknown>,
-  _runEffect: ManagerEffectPromise | undefined,
+  _runEffect: undefined,
 ) {
   const job = jobs.get(id);
   if (job && (job.status !== 'completed' || !job.draft))
@@ -1590,7 +1590,7 @@ function doctorStatus(value: string): DoctorCheck['status'] {
 
 const runCaptured = Effect.fn('manager.runCaptured')(function* (
   action: () => ManagerOperation<void>,
-  _runEffect?: ManagerEffectPromise,
+  _runEffect?: undefined,
 ) {
   const captured = yield* captureConsoleWithoutProgress(action());
   return {output: captured.output};
@@ -1599,7 +1599,7 @@ const runCaptured = Effect.fn('manager.runCaptured')(function* (
 const runManagerGraphAction = Effect.fn('manager.runGraphAction')(function* (
   config: RuntimeConfig,
   body: Record<string, unknown>,
-  runEffect?: ManagerEffectPromise,
+  runEffect?: undefined,
 ) {
   const action = yield* Effect.try({
     try: () => requireString(body.action, 'action'),

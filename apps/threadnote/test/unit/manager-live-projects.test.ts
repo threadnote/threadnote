@@ -1,7 +1,7 @@
 import {it as effectIt} from '@effect/vitest';
-import {Clock, DateTime, Deferred, Effect, FileSystem, Path, Stream} from 'effect';
+import {Clock, DateTime, Deferred, Effect, FileSystem, Path, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {resourceAccountMutationLockPath, resourceAccountMutationLockPolicy} from '@threadnote/store/resource/lock';
@@ -9,6 +9,7 @@ import {advanceCanonicalMutationGeneration} from '@threadnote/store/resource/mut
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as healthSources from '../../src/manager/live_health_sources.js';
 import {makeManagerProjectLiveObservation} from '../../src/manager/live_project_observation.js';
 import {draftQueueObservationDirectory} from '../../src/memory/context/maintenance_draft_queue.js';
 import {automaticPreparationObservationDirectory} from '../../src/memory/context/maintenance_preparation_state.js';
@@ -19,7 +20,203 @@ import {ManagerHealthObservationHints} from '../../src/manager/live_health_sourc
 import {handleManagerHomeRequest} from '../../src/manager/home.js';
 import {makeManagerGraphLiveObservation} from '../../src/manager/live_graph_observation.js';
 
+const registrationFixture = Effect.fn('managerProjectRegistration.fixture')(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-project-registration-'});
+  const config: RuntimeConfig = {
+    account: 'local',
+    agentContextHome: home,
+    agentId: 'test',
+    user: 'tester',
+    manifestPath: `${home}/manifest.yaml`,
+  };
+  yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+  let available = yield* Deferred.make<void>();
+  let underlyingReady = false;
+  let unavailableEvents = 0;
+  let latest: healthSources.ManagerHealthObservation | undefined;
+  yield* Effect.acquireRelease(
+    Effect.sync(() =>
+      vi.spyOn(healthSources, 'makeManagerHealthLiveSources').mockImplementation((_config, callbacks) =>
+        healthSources.makeManagerHealthLiveRegistry({
+          observe: (_project, input) =>
+            Effect.sync(() => {
+              latest = input;
+              return {revision: 'unchanged-source', directories: []};
+            }),
+          onInvalidate: callbacks.onInvalidate,
+          onAvailability: (project, ready) =>
+            callbacks.onAvailability(project, ready).pipe(
+              Effect.andThen(
+                Effect.gen(function* () {
+                  underlyingReady = ready;
+                  if (ready) yield* Deferred.succeed(available, undefined);
+                  else unavailableEvents++;
+                }),
+              ),
+            ),
+        }),
+      ),
+    ),
+    spy => Effect.sync(() => spy.mockRestore()),
+  );
+  const observer = yield* makeManagerProjectLiveObservation(config, {
+    onInvalidate: () => Effect.void,
+    onAvailability: () => Effect.void,
+  }).pipe(Effect.provideService(FileSystem.FileSystem, {...fs, watch: () => Stream.never}));
+  const subscribe = () => observer.subscribe('review-registration', [{topic: 'home', scope: 'account'}]);
+  yield* subscribe();
+  const register = (citations: healthSources.ManagerHealthObservation['citations'], forceAwait = false) =>
+    Effect.gen(function* () {
+      available = yield* Deferred.make<void>();
+      yield* observer.healthHints.register('alpha', {cwd: home, citations});
+      if (forceAwait || !underlyingReady) yield* Deferred.await(available);
+    });
+  return {observer, subscribe, register, latest: () => latest, unavailableEvents: () => unavailableEvents};
+});
+
 describe('Manager project live integration', () => {
+  effectIt.effect('refuses selector overflow without trimming coverage and clears retained selectors on release', () =>
+    Effect.gen(function* () {
+      const f = yield* registrationFixture();
+      const selector = (index: number) => ({
+        repositoryId: 'a'.repeat(64),
+        sourceCommit: index.toString(16).padStart(40, '0'),
+      });
+      yield* f.register(Array.from({length: 32}, (_, index) => selector(index)));
+      expect(f.latest()?.citations).toHaveLength(32);
+      expect(f.observer.reviewReadiness('alpha')).toBe(true);
+      for (let index = 32; index < 40; index++) yield* f.register([selector(index)]);
+      // One real excess selector is a bounded refusal frame; the existing observer cannot admit >32 sources.
+      expect(f.latest()?.citations).toHaveLength(33);
+      expect(f.observer.reviewReadiness('alpha')).toBe(false);
+      yield* f.observer.release('review-registration');
+      expect(f.observer.reviewReadiness('alpha')).toBeUndefined();
+      yield* f.subscribe();
+      yield* f.register([selector(0)], true);
+      expect(f.latest()?.citations).toEqual([selector(0)]);
+      expect(f.observer.reviewReadiness('alpha')).toBe(true);
+      yield* f.observer.release('review-registration');
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.prop(
+    'retains a deterministic normalized selector union without mutation or replay invalidation',
+    {
+      entries: Schema.Array(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 7}))).check(
+        Schema.isMinLength(1),
+        Schema.isMaxLength(12),
+      ),
+    },
+    ({entries}) =>
+      Effect.gen(function* () {
+        const f = yield* registrationFixture();
+        const inputs = entries.map((entry, index) => ({
+          repositoryId: 'a'.repeat(64),
+          sourceCommit: entry.toString(16).padStart(40, '0'),
+          path: `irrelevant-${index}.ts`,
+          sourceSnapshotId: `snapshot-${index}`,
+        }));
+        const before = JSON.stringify(inputs);
+        for (const input of inputs) yield* f.register([input]);
+        const settledUnavailable = f.unavailableEvents();
+        for (const input of [...inputs].reverse()) yield* f.register([input]);
+        const expected = [...new Set(entries)]
+          .sort((a, b) => a - b)
+          .map(entry => ({repositoryId: 'a'.repeat(64), sourceCommit: entry.toString(16).padStart(40, '0')}));
+        expect(f.latest()?.citations).toEqual(expected);
+        expect(f.unavailableEvents()).toBe(settledUnavailable);
+        expect(JSON.stringify(inputs)).toBe(before);
+        yield* f.observer.release('review-registration');
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    {arbitrary: {runs: 30}},
+  );
+
+  effectIt.effect('observes job-declared source projects for All reviews and releases them with the account view', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-account-review-source-'});
+      const root = `${home}/repository`;
+      yield* fs.makeDirectory(root);
+      yield* runCommandEffect('git', ['init', '--quiet', root]);
+      yield* fs.writeFileString(`${root}/source.ts`, 'export const value = 1;\n');
+      yield* runCommandEffect('git', ['-C', root, 'add', '.']);
+      yield* runCommandEffect('git', [
+        '-C',
+        root,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '--quiet',
+        '-m',
+        'fixture',
+      ]);
+      const config: RuntimeConfig = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'threadnote',
+        user: 'tester',
+        manifestPath: `${home}/manifest.yaml`,
+      };
+      yield* fs.writeFileString(
+        config.manifestPath,
+        `version: 1\nprojects:\n  - name: alpha\n    path: ${root}\n    uri: threadnote://resources/repos/alpha\n    seed: []\n`,
+      );
+      const changed = yield* Deferred.make<void>();
+      const observer = yield* makeManagerProjectLiveObservation(config, {
+        onInvalidate: resource =>
+          resource.topic === 'home' && 'scope' in resource
+            ? Deferred.succeed(changed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        onAvailability: () => Effect.void,
+      });
+      expect(observer.reviewReadiness('alpha')).toBeUndefined();
+      expect(yield* observer.subscribe('all-reviews', [{topic: 'home', scope: 'account'}])).toEqual([]);
+      yield* observer.healthHints.register('alpha', {cwd: root, citations: []});
+      yield* Deferred.await(changed).pipe(Effect.timeout('5 seconds'));
+      expect(observer.reviewReadiness('alpha')).toBe(true);
+      yield* observer.release('all-reviews');
+      expect(observer.reviewReadiness('alpha')).toBeUndefined();
+      expect(yield* observer.diagnostics).toEqual({resources: 0, connections: 0, watches: 0});
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('wakes account Reviews at the earliest contributed finite retry boundary', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-review-clock-'});
+      const config: RuntimeConfig = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'threadnote',
+        user: 'tester',
+        manifestPath: `${home}/manifest.yaml`,
+      };
+      yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+      const changes: string[] = [];
+      const observer = yield* makeManagerProjectLiveObservation(config, {
+        onInvalidate: resource =>
+          Effect.sync(() => {
+            changes.push(resource.topic);
+          }),
+        onAvailability: () => Effect.void,
+      }).pipe(Effect.provideService(FileSystem.FileSystem, {...fs, watch: () => Stream.never}));
+      const resource = {topic: 'home', scope: 'account'} as const;
+      expect(yield* observer.subscribe('reviews', [resource])).toEqual([]);
+      const now = yield* Clock.currentTimeMillis;
+      yield* observer.clockHints.register('home', '', now + 1_000);
+      yield* observer.clockHints.register('home', '', now + 60_000);
+      yield* observer.reconcileNow;
+      changes.length = 0;
+      yield* TestClock.adjust(1_100);
+      yield* observer.reconcileNow;
+      expect(changes).toContain('home');
+      yield* observer.release('reviews');
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('invalidates graph status when an external process removes a remembered worktree', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

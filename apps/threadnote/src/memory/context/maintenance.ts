@@ -1632,12 +1632,12 @@ const statePath = contextMaintenanceStatePath;
 const receiptPath = Effect.fn('contextMaintenance.receiptPath')(function* (config: RuntimeConfig, id: string) {
   return (yield* Path.Path).join(config.agentContextHome, 'context-maintenance', 'receipts', `${id}.json`);
 });
-function withStateLock<A, E, R>(config: RuntimeConfig, effect: Effect.Effect<A, E, R>) {
+export function withStateLock<A, E, R>(config: RuntimeConfig, effect: Effect.Effect<A, E, R>) {
   return Effect.gen(function* () {
     return yield* withExclusiveFileLock(yield* FileSystem.FileSystem, `${yield* statePath(config)}.lock`, LOCK, effect);
   });
 }
-const readState = Effect.fn('contextMaintenance.readState')(function* (config: RuntimeConfig) {
+export const readState = Effect.fn('contextMaintenance.readState')(function* (config: RuntimeConfig) {
   const state = yield* readJson<MaintenanceState>(yield* statePath(config));
   if (state === undefined) return emptyState();
   if (
@@ -1691,7 +1691,7 @@ const atomicJson = Effect.fn('contextMaintenance.atomicJson')(function* (file: s
     }),
   ).pipe(Effect.ignore);
 });
-function writeState(config: RuntimeConfig, state: MaintenanceState) {
+export function writeState(config: RuntimeConfig, state: MaintenanceState) {
   if (!validTopicMaintenanceCheckpoints(state.topicCheckpoints))
     return Effect.fail(fail('Maintenance topic checkpoints exceed their write boundary.'));
   return Effect.flatMap(statePath(config), file => atomicJson(file, state)).pipe(
@@ -1823,6 +1823,7 @@ export const readContextMaintenancePacket = Effect.fn('contextMaintenance.packet
     readonly startLine?: number;
     readonly maximumLines?: number;
   } = {},
+  selectedRecords?: readonly MemoryRecord[],
 ) {
   const state = yield* readState(config);
   const item = state.cases.find(item => item.caseId === caseId);
@@ -1864,7 +1865,7 @@ export const readContextMaintenancePacket = Effect.fn('contextMaintenance.packet
         'Preview this exact review revision before choosing approve, defer, or reject. Approval and destructive replacement require explicit user authorization. Candidate decisions use the review inbox, not context-health memory repair.',
     };
   }
-  const corpus = yield* readMaintenanceMemoryRecords(config, {requireReadable: true});
+  const corpus = selectedRecords ?? (yield* readMaintenanceMemoryRecords(config, {requireReadable: true}));
   const relatedMemories = ['semantic-contradiction', 'repository-recovery'].includes(item.family)
     ? corpus.filter(record => item.subjectContentHashes?.some(subject => subject.uri === record.uri) === true)
     : [];

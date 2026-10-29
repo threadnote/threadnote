@@ -122,3 +122,76 @@ it('does not poll a supported citation job and refreshes health once at terminal
   await flush();
   expect(healthReads - beforeTerminal).toBe(1);
 });
+
+it('keeps supported health content mounted while revalidating and retains the failure until an actual recovery', async () => {
+  const host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  const panel = (refreshGeneration: number) => (
+    <ManagerLiveProvider account="one">
+      <ContextHealthPanel
+        project="one"
+        projects={['one']}
+        refreshGeneration={refreshGeneration}
+        onOpenLibrary={() => undefined}
+        onProjectChange={() => undefined}
+      />
+    </ManagerLiveProvider>
+  );
+  await act(async () => root?.render(panel(0)));
+  await flush();
+  const socket = FakeManagerSocket.instances[0];
+  await act(async () => {
+    socket.open(['context-health', 'citation-repair-jobs']);
+    socket.ack();
+  });
+  await flush();
+  await act(async () => socket.ack());
+  await flush();
+  const metrics = document.querySelector('.attention-metrics');
+  expect(metrics).not.toBeNull();
+  const status = document.querySelector('.attention-refresh-status');
+  const pending = Promise.withResolvers<Response>();
+  vi.mocked(fetch).mockImplementationOnce(() => pending.promise);
+  await act(async () => socket.invalidate(1, {topic: 'context-health', project: 'one'}));
+  await flush();
+  expect(document.querySelector('.attention-metrics')).toBe(metrics);
+  expect(status?.textContent).toContain('Checking for context updates');
+  await act(async () => pending.reject(new Error('Temporary supported health failure')));
+  await flush();
+  const alert = status?.querySelector('[role=alert]');
+  expect(alert?.textContent).toContain('Temporary supported health failure');
+  const retry = Promise.withResolvers<Response>();
+  vi.mocked(fetch).mockImplementationOnce(() => retry.promise);
+  await act(async () => root?.render(panel(1)));
+  await flush();
+  expect(status?.querySelector('[role=alert]')).toBe(alert);
+  expect(document.querySelector('.attention-metrics')).toBe(metrics);
+  await act(async () =>
+    retry.resolve(
+      new Response(
+        JSON.stringify({
+          version: 1,
+          project: 'one',
+          findings: [],
+          recordPreviews: [],
+          recordsScanned: 0,
+          omittedFindings: 0,
+          repositoryEvidence: {state: 'available'},
+          semanticCompleteness: {state: 'complete'},
+          status: 'healthy',
+        }),
+      ),
+    ),
+  );
+  await flush();
+  expect(status?.querySelector('[role=alert]')).toBeNull();
+  expect(document.querySelector('.attention-metrics')).toBe(metrics);
+  vi.mocked(fetch).mockImplementationOnce(
+    async () => new Response(JSON.stringify({error: 'Current health access denied'}), {status: 403}),
+  );
+  await act(async () => socket.invalidate(2, {topic: 'context-health', project: 'one'}));
+  await flush();
+  expect(document.querySelector('.attention-metrics')).toBeNull();
+  expect(document.querySelector('[role=alert]')?.textContent).toContain('Current health access denied');
+});

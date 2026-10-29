@@ -1120,6 +1120,7 @@ describe('Manager retained reviewed provenance', () => {
           revision: prepared.revision,
           state: 'pending',
           recovery: {action: 'reject'},
+          reason: 'source-changed',
         });
         expect(JSON.stringify(recovery)).not.toMatch(/Edited info\.|Changed private source\.|Old info\.|Keep info\./u);
         const privateInbox = await fetch(`${server.url}/api/reviews?project=threadnote&view=pending`, {headers});

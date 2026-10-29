@@ -74,12 +74,132 @@ export type CodeGraphBenchmarkSamplerTemporaryTelemetry =
       readonly source: 'directory-walk';
     };
 
+/** Exact accounting is limited to entries admitted by this sample, not the entire OS tree. */
+export interface BenchmarkRssContributors {
+  readonly admittedAccountingComplete: boolean;
+  readonly contributors: readonly BenchmarkRssContributor[];
+  readonly omittedProcessCount: number;
+  readonly omittedRssBytes: number | null;
+  readonly processCount: number;
+  readonly rssBytes: number;
+}
+
+export interface BenchmarkRssContributor {
+  readonly token: string;
+  readonly parentToken: string | null;
+  readonly role: 'root' | 'descendant';
+  readonly rssBytes: number;
+}
+
+export type BenchmarkRssAcquisition =
+  | {readonly provenance: 'cached-initial-unknown'}
+  | {
+      readonly provenance: 'monotonic-window';
+      /** Includes both phase-label observations and the intervening process/storage sampling. */
+      readonly startOffsetMicroseconds: number;
+      readonly endOffsetMicroseconds: number;
+      readonly phaseBefore: string | null;
+      readonly phaseAfter: string | null;
+      readonly transition: 'observed-between-phase-observations' | 'unknown';
+    };
+
+export interface BenchmarkRssPeakDiagnostic extends BenchmarkRssContributors {
+  readonly acquisition: BenchmarkRssAcquisition;
+}
+
+// Exact allowlist: arbitrary phase-file text (including paths) never enters diagnostics.
+const RSS_DIAGNOSTIC_PHASES = new Set([
+  'start',
+  'preparing-fixture',
+  'preparing-runtime',
+  'registering:progress',
+  'waiting:progress',
+  'reclaiming:progress',
+  'scanning:progress',
+  'materializing:progress',
+  'embedding:progress',
+  'resolving:references',
+  'resolving:complete',
+  'sharing:applying-deltas',
+  'sharing:building-local-overlay',
+  'sharing:discovering-shared-base',
+  'sharing:downloading-checkpoint',
+  'activating:progress',
+  'activating:complete',
+  'activating:promoting',
+  'activating:structural-ready',
+  'activating:summarizing-analysis',
+  'activating:validating-input',
+  'activating:writing-and-checkpointing',
+]);
+
+export function rssDiagnosticPhase(value: string | undefined): string | null {
+  return value !== undefined && RSS_DIAGNOSTIC_PHASES.has(value) ? value : null;
+}
+
+export function rssDiagnosticAcquisition(
+  startOffsetMicroseconds: number,
+  endOffsetMicroseconds: number,
+  phaseBefore: string | undefined,
+  phaseAfter: string | undefined,
+): BenchmarkRssAcquisition {
+  const before = rssDiagnosticPhase(phaseBefore);
+  const after = rssDiagnosticPhase(phaseAfter);
+  return {
+    provenance: 'monotonic-window',
+    startOffsetMicroseconds,
+    endOffsetMicroseconds,
+    phaseBefore: before,
+    phaseAfter: after,
+    transition:
+      before !== null && after !== null && before !== after ? 'observed-between-phase-observations' : 'unknown',
+  };
+}
+
+/** Production's single operation peak: first valid sample wins even at zero; ties retain its evidence. */
+export function recordRssPeakDiagnostic(
+  previous: BenchmarkRssPeakDiagnostic | undefined,
+  sample: BenchmarkProcessTreeSample | undefined,
+  acquisition: BenchmarkRssAcquisition | undefined,
+): BenchmarkRssPeakDiagnostic | undefined {
+  const projection = sample?.rssContributors;
+  return projection !== undefined &&
+    acquisition !== undefined &&
+    (previous === undefined || projection.rssBytes > previous.rssBytes)
+    ? {...projection, acquisition}
+    : previous;
+}
+
+/** Stateless per-run correlation, without retaining a process identity registry. */
+export function createRssDiagnosticTokenizer(key: Uint8Array): (processId: number, startIdentity: string) => string {
+  return (processId, startIdentity) =>
+    new Bun.CryptoHasher('sha256', key).update(`${processId}:${startIdentity}`).digest('hex');
+}
+
+type RssDiagnosticTokenizer = ReturnType<typeof createRssDiagnosticTokenizer>;
+
+/** Narrow startup seam: disabled execution never requests a secret or reads the diagnostic clock. */
+export function createRssDiagnosticRun(
+  enabled: boolean,
+  sources?: {readonly randomKey: () => Uint8Array; readonly now: () => bigint},
+): {readonly tokenize: RssDiagnosticTokenizer; readonly offsetMicroseconds: () => number} | undefined {
+  if (!enabled) return undefined;
+  const key = sources?.randomKey() ?? crypto.getRandomValues(new Uint8Array(32));
+  const now = sources?.now ?? (() => process.hrtime.bigint());
+  const origin = now();
+  return {
+    tokenize: createRssDiagnosticTokenizer(key),
+    offsetMicroseconds: () => Number((now() - origin) / 1_000n),
+  };
+}
+
 export interface CodeGraphBenchmarkSamplerArtifact {
   readonly intervalMilliseconds: number;
   readonly phases: Readonly<Record<string, CodeGraphBenchmarkSamplerPhase>>;
   readonly platform: string;
   readonly processTelemetry: CodeGraphBenchmarkSamplerProcessTelemetry;
   readonly samples: number;
+  readonly rssPeakDiagnostic?: BenchmarkRssPeakDiagnostic;
   readonly temporaryTelemetry?: CodeGraphBenchmarkSamplerTemporaryTelemetry;
   readonly version: 2 | 3 | 4;
 }
@@ -126,7 +246,142 @@ export function parseCodeGraphBenchmarkSamplerArtifact(value: unknown): CodeGrap
   }
   if (phaseSamples !== artifact.samples)
     throw ScriptError.make({message: 'Benchmark sampler phase samples do not match its total.'});
+  if (
+    artifact.rssPeakDiagnostic !== undefined &&
+    (artifact.version !== 4 ||
+      processTelemetry.availability !== 'available' ||
+      !isRssPeakDiagnostic(artifact.rssPeakDiagnostic) ||
+      artifact.rssPeakDiagnostic.rssBytes !==
+        Math.max(...Object.values(artifact.phases).map(phase => phase.rssPeakBytes ?? 0)) ||
+      artifact.rssPeakDiagnostic.processCount >
+        Math.max(...Object.values(artifact.phases).map(phase => phase.processPeakCount ?? 0)) ||
+      !Object.values(artifact.phases).some(phase => (phase.processSamples ?? 0) > 0))
+  )
+    throw ScriptError.make({message: 'Benchmark sampler RSS peak diagnostic is invalid.'});
   return artifact as CodeGraphBenchmarkSamplerArtifact;
+}
+
+function exactKeys(value: object, keys: readonly string[]): boolean {
+  const observed = Object.keys(value);
+  return observed.length === keys.length && observed.every(key => keys.includes(key));
+}
+
+function isRssPeakDiagnostic(value: unknown): value is BenchmarkRssPeakDiagnostic {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !exactKeys(value, [
+      'admittedAccountingComplete',
+      'contributors',
+      'omittedProcessCount',
+      'omittedRssBytes',
+      'processCount',
+      'rssBytes',
+      'acquisition',
+    ])
+  )
+    return false;
+  const peak = value as BenchmarkRssPeakDiagnostic;
+  const safeCount = (count: unknown): count is number => Number.isSafeInteger(count) && Number(count) >= 0;
+  const token = (candidate: unknown): candidate is string =>
+    typeof candidate === 'string' && /^[a-f0-9]{64}$/.test(candidate);
+  if (
+    !safeCount(peak.processCount) ||
+    peak.processCount < 1 ||
+    !safeCount(peak.rssBytes) ||
+    !safeCount(peak.omittedProcessCount) ||
+    !Array.isArray(peak.contributors) ||
+    peak.contributors.length !== Math.min(16, peak.processCount) ||
+    peak.omittedProcessCount !== peak.processCount - peak.contributors.length
+  )
+    return false;
+  const seen = new Set<string>();
+  let retainedBytes = 0n;
+  let roots = 0;
+  for (const [index, contributor] of peak.contributors.entries()) {
+    if (
+      typeof contributor !== 'object' ||
+      contributor === null ||
+      !exactKeys(contributor, ['token', 'parentToken', 'role', 'rssBytes']) ||
+      !token(contributor.token) ||
+      seen.has(contributor.token) ||
+      !safeCount(contributor.rssBytes) ||
+      !(contributor.role === 'root'
+        ? contributor.parentToken === null
+        : contributor.role === 'descendant' &&
+          token(contributor.parentToken) &&
+          contributor.parentToken !== contributor.token)
+    )
+      return false;
+    seen.add(contributor.token);
+    if (contributor.role === 'root') roots += 1;
+    const before = peak.contributors[index - 1];
+    if (before !== undefined && compareRssContributors(before, contributor) > 0) return false;
+    retainedBytes += BigInt(contributor.rssBytes);
+  }
+  if (roots > 1 || (peak.processCount <= 16 && roots !== 1)) return false;
+  for (const contributor of peak.contributors) {
+    const ancestors = new Set([contributor.token]);
+    let parentToken = contributor.parentToken;
+    while (parentToken !== null) {
+      if (ancestors.has(parentToken)) return false;
+      ancestors.add(parentToken);
+      const parent = peak.contributors.find(candidate => candidate.token === parentToken);
+      if (parent === undefined) {
+        if (peak.omittedProcessCount === 0) return false;
+        break;
+      }
+      parentToken = parent.parentToken;
+    }
+  }
+  const omittedUpperBound = BigInt(peak.contributors.at(-1)!.rssBytes) * BigInt(peak.omittedProcessCount);
+  if (peak.admittedAccountingComplete === true) {
+    if (
+      !safeCount(peak.omittedRssBytes) ||
+      retainedBytes + BigInt(peak.omittedRssBytes) !== BigInt(peak.rssBytes) ||
+      BigInt(peak.omittedRssBytes) > omittedUpperBound ||
+      (peak.omittedProcessCount === 0 && peak.omittedRssBytes !== 0)
+    )
+      return false;
+  } else if (
+    peak.admittedAccountingComplete !== false ||
+    peak.omittedRssBytes !== null ||
+    peak.rssBytes !== Number.MAX_SAFE_INTEGER ||
+    retainedBytes + omittedUpperBound <= BigInt(Number.MAX_SAFE_INTEGER)
+  )
+    return false;
+  const acquisition = peak.acquisition;
+  if (typeof acquisition !== 'object' || acquisition === null) return false;
+  if (acquisition.provenance === 'cached-initial-unknown') return exactKeys(acquisition, ['provenance']);
+  if (
+    acquisition.provenance !== 'monotonic-window' ||
+    !exactKeys(acquisition, [
+      'provenance',
+      'startOffsetMicroseconds',
+      'endOffsetMicroseconds',
+      'phaseBefore',
+      'phaseAfter',
+      'transition',
+    ]) ||
+    !safeCount(acquisition.startOffsetMicroseconds) ||
+    !safeCount(acquisition.endOffsetMicroseconds) ||
+    acquisition.endOffsetMicroseconds < acquisition.startOffsetMicroseconds ||
+    !(acquisition.phaseBefore === null || RSS_DIAGNOSTIC_PHASES.has(acquisition.phaseBefore)) ||
+    !(acquisition.phaseAfter === null || RSS_DIAGNOSTIC_PHASES.has(acquisition.phaseAfter))
+  )
+    return false;
+  return (
+    acquisition.transition ===
+    (acquisition.phaseBefore !== null &&
+    acquisition.phaseAfter !== null &&
+    acquisition.phaseBefore !== acquisition.phaseAfter
+      ? 'observed-between-phase-observations'
+      : 'unknown')
+  );
+}
+
+function compareRssContributors(left: BenchmarkRssContributor, right: BenchmarkRssContributor): number {
+  return right.rssBytes - left.rssBytes || (left.token < right.token ? -1 : left.token > right.token ? 1 : 0);
 }
 
 export function parseCodeGraphBenchmarkSamplerCheckpoint(value: unknown): CodeGraphBenchmarkSamplerCheckpoint {
@@ -363,19 +618,29 @@ interface SamplerOptions {
   readonly phasePath: string;
   readonly processId: number;
   readonly readyPath: string;
+  readonly rssPeakDiagnostics?: true;
   readonly stopPath: string;
   readonly temporaryRoot: string;
 }
 
 const samplerMain = Effect.gen(function* () {
   const system = yield* SystemInfo;
-  const options = parseArguments(system.processArguments.slice(2));
+  const options = parseCodeGraphBenchmarkSamplerArguments(system.processArguments.slice(2));
+  const diagnosticRun = createRssDiagnosticRun(options.rssPeakDiagnostics === true);
+  const diagnosticTokenizer = diagnosticRun?.tokenize;
+  const diagnosticOffset = diagnosticRun?.offsetMicroseconds;
+  let rssPeakDiagnostic: BenchmarkRssPeakDiagnostic | undefined;
   const canonicalTemporaryRoot = yield* canonicalDirectory(options.temporaryRoot);
   const clockTicksPerSecond = yield* linuxClockTicksPerSecond();
   const processSampleIntervalMilliseconds = system.platform === 'darwin' ? 250 : options.intervalMilliseconds;
   const openFileSampleIntervalMilliseconds =
     system.platform === 'darwin' ? DARWIN_OPEN_FILE_SAMPLE_INTERVAL_MILLISECONDS : options.intervalMilliseconds;
-  const initialUnfilteredProcessSample = yield* readProcessTreeSample(options.processId, clockTicksPerSecond);
+  const initialUnfilteredProcessSample = yield* readProcessTreeSample(
+    options.processId,
+    clockTicksPerSecond,
+    [],
+    diagnosticTokenizer,
+  );
   const samplerProcessTreeExclusions = benchmarkSamplerProcessTreeExclusions(
     initialUnfilteredProcessSample,
     system.processId,
@@ -383,7 +648,12 @@ const samplerMain = Effect.gen(function* () {
   const initialProcessSample =
     samplerProcessTreeExclusions.length === 0
       ? initialUnfilteredProcessSample
-      : yield* readProcessTreeSample(options.processId, clockTicksPerSecond, samplerProcessTreeExclusions);
+      : yield* readProcessTreeSample(
+          options.processId,
+          clockTicksPerSecond,
+          samplerProcessTreeExclusions,
+          diagnosticTokenizer,
+        );
   const processTelemetry = samplerProcessTelemetryContract(
     system.platform,
     initialProcessSample?.rootStartIdentity,
@@ -412,6 +682,8 @@ const samplerMain = Effect.gen(function* () {
   let stopped: boolean;
   let stopState: CodeGraphBenchmarkSamplerCheckpoint['state'];
   do {
+    const diagnosticStartedAt = diagnosticOffset?.();
+    const cachedInitial = pendingInitialProcessSample !== undefined;
     const phase = (yield* readText(options.phasePath))?.trim() || 'unknown';
     const sampleStartedAt = yield* Clock.currentTimeMillis;
     const processSampleDue =
@@ -431,7 +703,12 @@ const samplerMain = Effect.gen(function* () {
           processSampleDue
             ? pendingInitialProcessSample !== undefined
               ? Effect.succeed(pendingInitialProcessSample)
-              : readProcessTreeSample(options.processId, clockTicksPerSecond, samplerProcessTreeExclusions)
+              : readProcessTreeSample(
+                  options.processId,
+                  clockTicksPerSecond,
+                  samplerProcessTreeExclusions,
+                  diagnosticTokenizer,
+                )
             : Effect.void,
         ],
         {concurrency: 'unbounded'},
@@ -454,10 +731,25 @@ const samplerMain = Effect.gen(function* () {
       pendingInitialTemporaryOpenFiles = undefined;
       lastTemporaryOpenSampleAt = yield* Clock.currentTimeMillis;
     }
+    const phaseAfter =
+      diagnosticOffset !== undefined && processSampleDue && !cachedInitial
+        ? (yield* readText(options.phasePath))?.trim()
+        : undefined;
+    const acquisition =
+      diagnosticOffset !== undefined && processSampleDue && !cachedInitial
+        ? rssDiagnosticAcquisition(diagnosticStartedAt!, diagnosticOffset(), phase, phaseAfter)
+        : undefined;
     const temporaryBytes = mergeTemporaryFileSnapshots(temporaryLinkedFiles, temporaryOpenFiles).bytes;
     const parentExists = system.isProcessRunning(options.processId);
     const parentExited = samplerParentExited(parentStartIdentity, processSample?.rootStartIdentity, parentExists);
     const telemetrySample = processTelemetry.availability === 'available' && !parentExited ? processSample : undefined;
+    if (diagnosticTokenizer !== undefined) {
+      rssPeakDiagnostic = recordRssPeakDiagnostic(
+        rssPeakDiagnostic,
+        telemetrySample ?? undefined,
+        cachedInitial ? {provenance: 'cached-initial-unknown'} : acquisition,
+      );
+    }
     const current = phases.get(phase) ?? {
       cpuMilliseconds: 0,
       databasePeakBytes: 0,
@@ -531,6 +823,7 @@ const samplerMain = Effect.gen(function* () {
           processTelemetry,
           temporaryTelemetry,
           samples,
+          rssPeakDiagnostic,
         ),
         stopState,
       );
@@ -550,17 +843,19 @@ const samplerMain = Effect.gen(function* () {
     processTelemetry,
     temporaryTelemetry,
     samples,
+    rssPeakDiagnostic,
   );
   yield* atomicWriteFile(options.outputPath, `${JSON.stringify(artifact)}\n`);
 });
 
-function samplerArtifact(
+export function samplerArtifact(
   intervalMilliseconds: number,
   phases: ReadonlyMap<string, MutablePhase>,
   platform: string,
   processTelemetry: CodeGraphBenchmarkSamplerProcessTelemetry,
   temporaryTelemetry: CodeGraphBenchmarkSamplerTemporaryTelemetry,
   samples: number,
+  rssPeakDiagnostic?: BenchmarkRssPeakDiagnostic,
 ): CodeGraphBenchmarkSamplerArtifact {
   return {
     intervalMilliseconds,
@@ -613,6 +908,7 @@ function samplerArtifact(
     samples,
     temporaryTelemetry,
     version: 4,
+    ...(rssPeakDiagnostic === undefined ? {} : {rssPeakDiagnostic}),
   };
 }
 
@@ -669,6 +965,7 @@ export interface BenchmarkProcessTreeSample {
   readonly rootRssBytes: number;
   readonly rootStartIdentity: string;
   readonly rssBytes: number;
+  readonly rssContributors?: BenchmarkRssContributors;
 }
 
 export interface BenchmarkProcessTreeDelta {
@@ -695,6 +992,7 @@ export function aggregateProcessTree(
   rootProcessId: number,
   expectedRootStartIdentity?: string,
   excludedDescendantRootProcessIds: readonly number[] = [],
+  diagnosticTokenizer?: RssDiagnosticTokenizer,
 ): BenchmarkProcessTreeSample | undefined {
   if (
     excludedDescendantRootProcessIds.some(processId => !Number.isSafeInteger(processId) || processId <= 0) ||
@@ -747,6 +1045,8 @@ export function aggregateProcessTree(
   const visited = new Set<number>();
   const processes = new Map<string, BenchmarkProcessCounters>();
   let rssBytes = 0;
+  const contributors: BenchmarkRssContributor[] | undefined = diagnosticTokenizer === undefined ? undefined : [];
+  let admittedAccountingComplete = true;
   while (pending.length > 0) {
     const processId = pending.shift();
     if (processId === undefined || visited.has(processId)) continue;
@@ -759,6 +1059,22 @@ export function aggregateProcessTree(
       ioReadBytes: entry.ioReadBytes,
       ioWriteBytes: entry.ioWriteBytes,
     });
+    if (contributors !== undefined && diagnosticTokenizer !== undefined) {
+      if (entry.rssBytes > Number.MAX_SAFE_INTEGER - rssBytes) admittedAccountingComplete = false;
+      const parent = byProcessId.get(entry.parentProcessId);
+      const contributor: BenchmarkRssContributor = {
+        token: diagnosticTokenizer(entry.processId, entry.startIdentity),
+        parentToken:
+          entry.processId === rootProcessId ? null : diagnosticTokenizer(parent!.processId, parent!.startIdentity),
+        role: entry.processId === rootProcessId ? 'root' : 'descendant',
+        rssBytes: entry.rssBytes,
+      };
+      const index = contributors.findIndex(current => compareRssContributors(contributor, current) < 0);
+      if (index !== -1) {
+        if (contributors.length === 16) contributors.pop();
+        contributors.splice(index, 0, contributor);
+      } else if (contributors.length < 16) contributors.push(contributor);
+    }
     rssBytes = safeAdd(rssBytes, entry.rssBytes);
     pending.push(...(children.get(processId) ?? []));
   }
@@ -768,6 +1084,20 @@ export function aggregateProcessTree(
     rootRssBytes: root.rssBytes,
     rootStartIdentity: root.startIdentity,
     rssBytes,
+    ...(contributors === undefined
+      ? {}
+      : {
+          rssContributors: {
+            admittedAccountingComplete,
+            contributors,
+            omittedProcessCount: processes.size - contributors.length,
+            omittedRssBytes: admittedAccountingComplete
+              ? rssBytes - contributors.reduce((total, contributor) => total + contributor.rssBytes, 0)
+              : null,
+            processCount: processes.size,
+            rssBytes,
+          },
+        }),
   };
 }
 
@@ -801,13 +1131,19 @@ export const readProcessTreeSample = Effect.fn('codeGraphBenchmarkSampler.readPr
   processId: number,
   clockTicksPerSecond: number,
   excludedDescendantRootProcessIds: readonly number[] = [],
+  diagnosticTokenizer?: RssDiagnosticTokenizer,
 ) {
   const system = yield* SystemInfo;
   if (system.platform === 'linux') {
-    return yield* readLinuxProcessTreeSample(processId, clockTicksPerSecond, excludedDescendantRootProcessIds);
+    return yield* readLinuxProcessTreeSample(
+      processId,
+      clockTicksPerSecond,
+      excludedDescendantRootProcessIds,
+      diagnosticTokenizer,
+    );
   }
   if (system.platform === 'darwin') {
-    return yield* readDarwinProcessTreeSample(processId, excludedDescendantRootProcessIds);
+    return yield* readDarwinProcessTreeSample(processId, excludedDescendantRootProcessIds, diagnosticTokenizer);
   }
   return undefined;
 });
@@ -816,6 +1152,7 @@ const readLinuxProcessTreeSample = Effect.fn('codeGraphBenchmarkSampler.readLinu
   rootProcessId: number,
   clockTicksPerSecond: number,
   excludedDescendantRootProcessIds: readonly number[],
+  diagnosticTokenizer?: RssDiagnosticTokenizer,
 ) {
   const pending: Array<{readonly expectedParent?: number; readonly processId: number}> = [{processId: rootProcessId}];
   const entries: BenchmarkProcessTreeEntry[] = [];
@@ -831,7 +1168,7 @@ const readLinuxProcessTreeSample = Effect.fn('codeGraphBenchmarkSampler.readLinu
     entries.push(observed.entry);
     pending.push(...observed.childProcessIds.map(processId => ({expectedParent: observed.entry.processId, processId})));
   }
-  return aggregateProcessTree(entries, rootProcessId, undefined, excludedDescendantRootProcessIds);
+  return aggregateProcessTree(entries, rootProcessId, undefined, excludedDescendantRootProcessIds, diagnosticTokenizer);
 });
 
 const readLinuxProcessEntry = Effect.fn('codeGraphBenchmarkSampler.readLinuxProcessEntry')(function* (
@@ -896,6 +1233,7 @@ export function parseLinuxProcessIo(
 const readDarwinProcessTreeSample = Effect.fn('codeGraphBenchmarkSampler.readDarwinProcessTreeSample')(function* (
   rootProcessId: number,
   excludedDescendantRootProcessIds: readonly number[],
+  diagnosticTokenizer?: RssDiagnosticTokenizer,
 ) {
   return yield* Effect.try({
     try: () => {
@@ -910,6 +1248,7 @@ const readDarwinProcessTreeSample = Effect.fn('codeGraphBenchmarkSampler.readDar
         rootProcessId,
         undefined,
         excludedDescendantRootProcessIds,
+        diagnosticTokenizer,
       );
     },
     catch: scriptError,
@@ -1417,7 +1756,7 @@ const readText = Effect.fn('codeGraphBenchmarkSampler.readText')(function* (file
   return yield* fs.readFileString(file).pipe(Effect.option, Effect.map(Option.getOrUndefined));
 });
 
-function parseArguments(args: readonly string[]): SamplerOptions {
+export function parseCodeGraphBenchmarkSamplerArguments(args: readonly string[]): SamplerOptions {
   const values = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
@@ -1431,6 +1770,9 @@ function parseArguments(args: readonly string[]): SamplerOptions {
     if (!value) throw ScriptError.make({message: `Missing benchmark sampler argument ${flag}.`});
     return value;
   };
+  const diagnosticFlag = values.get('--rss-peak-diagnostics');
+  if (diagnosticFlag !== undefined && diagnosticFlag !== 'true' && diagnosticFlag !== 'false')
+    throw ScriptError.make({message: 'Sampler RSS peak diagnostics must be true or false.'});
   const processId = Number(required('--pid'));
   const intervalMilliseconds = Number(required('--interval-ms'));
   const checkpointIntervalMilliseconds = Number(required('--checkpoint-ms'));
@@ -1464,6 +1806,7 @@ function parseArguments(args: readonly string[]): SamplerOptions {
     phasePath: required('--phase'),
     processId,
     readyPath,
+    ...(diagnosticFlag === 'true' ? {rssPeakDiagnostics: true as const} : {}),
     stopPath: required('--stop'),
     temporaryRoot: required('--temp-root'),
   };

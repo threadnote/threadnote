@@ -68,6 +68,7 @@ export interface ManagerReviewCandidateV1 {
 }
 
 export interface ManagerReviewInboxItemV1 {
+  readonly queueStatus?: 'assessment' | 'obsolete';
   readonly kind?: 'topic-maintenance' | 'automatic-memory';
   readonly candidates: readonly ManagerReviewCandidateV1[];
   readonly createdAt: string;
@@ -79,10 +80,27 @@ export interface ManagerReviewInboxItemV1 {
 }
 
 export interface ManagerReviewInboxResponseV1 {
+  readonly background?: ManagerReviewBackgroundV1;
   readonly items: readonly ManagerReviewInboxItemV1[];
   readonly pendingCount: number;
   readonly project: string;
   readonly version: 1;
+}
+
+export type ManagerReviewReadinessReason =
+  | 'checking'
+  | 'target-changed'
+  | 'source-changed'
+  | 'source-unavailable'
+  | 'scope-changed'
+  | 'policy-changed'
+  | 'verification-unavailable';
+export interface ManagerReviewBackgroundV1 {
+  assessments: number;
+  awaitingSources: number;
+  obsolete: number;
+  reasons: Partial<Record<ManagerReviewReadinessReason, number>>;
+  readonly nextRetryAt?: number;
 }
 
 export interface ManagerContextHealthCodePreviewV1 {
@@ -236,6 +254,8 @@ export interface ManagerContextMaintenanceStatusV2 {
 }
 
 export interface ManagerContextMaintenancePacketV2 {
+  readonly reference?: {readonly path: string; readonly citationId: string; readonly status: string};
+  readonly repairFinding?: ContextHealthReportV1['findings'][number];
   readonly reviewId?: string;
   readonly coverage?: 'declared-only';
   readonly topicEvidence?: TopicMaintenanceEvidencePacket;
@@ -272,3 +292,21 @@ export interface ManagerContextMaintenancePacketV2 {
     readonly publication: {readonly instructions: string};
   };
 }
+
+/** A refresh observes selected evidence; it never approves or repairs memory content. */
+export type ManagerMaintenanceRefreshResultV1 =
+  | {
+      readonly outcome: 'ready' | 'resolved';
+      readonly item: ManagerContextMaintenanceCaseV2;
+      readonly packet: ManagerContextMaintenancePacketV2;
+    }
+  | {
+      readonly outcome: 'changing' | 'incomplete' | 'unavailable' | 'superseded';
+      readonly reason: string;
+      readonly item?: ManagerContextMaintenanceCaseV2;
+    };
+
+export type ManagerSemanticRefreshInputV1 = Omit<ManagerSemanticReviewInputV1, 'choice'>;
+export type ManagerSemanticRefreshResultV1 =
+  | {readonly outcome: 'ready'; readonly evidence: ContextHealthSemanticContradictionV2}
+  | {readonly outcome: 'changing' | 'incomplete' | 'unavailable' | 'superseded'; readonly reason: string};
