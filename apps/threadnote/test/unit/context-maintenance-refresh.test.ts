@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path, Result, Schema} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Layer, Path, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {
@@ -11,6 +11,9 @@ import {
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
+import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
+import {createReviewedSupportSnapshot, type ReviewedMemorySupportV1} from '@threadnote/memory/reviewed-support';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {
   formatMemoryDocument,
@@ -30,6 +33,12 @@ import {
 } from '../../src/memory/context/maintenance_refresh.js';
 import {readContextMaintenancePacket, readState, writeState} from '../../src/memory/context/maintenance.js';
 import {readMemoryRecordsByUri} from '../../src/mcp/server/memory.js';
+import {collectContextHealth} from '../../src/memory/context/health_commands.js';
+import {
+  applyContextHealthRepair,
+  previewContextHealthRepairs,
+  renderContextHealthRepairPlan,
+} from '../../src/memory/context/health_repair_commands.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
@@ -137,6 +146,154 @@ function repository(data: Effect.Success<ReturnType<typeof fixture>>) {
 }
 
 describe('bounded selected relation maintenance refresh', () => {
+  effectIt.effect.each([false, true])(
+    'publishes exact refreshed citation evidence while paused (reviewed support: %s)',
+    reviewed =>
+      Effect.gen(function* () {
+        const data = yield* fixture();
+        const repo = yield* repository(data);
+        yield* data.fs.writeFileString(
+          data.config.manifestPath,
+          `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repo.root)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n`,
+        );
+        const indexer = yield* CodeGraphIndexer;
+        yield* indexer.index({cwd: repo.root, threadnoteHome: data.home, ensureVectors: false});
+        const roots = yield* captureMemoryCodeCitations(data.config, {
+          callerCwd: repo.root,
+          project: 'fixture',
+          refs: ['source.ts'],
+        });
+        expect(roots).toHaveLength(1);
+        let citations = roots;
+        if (reviewed) {
+          yield* data.fs.writeFileString(repo.source, 'export const supported = true; // reviewed support\n');
+          yield* repo.git(['add', '.']);
+          yield* repo.git([
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.invalid',
+            'commit',
+            '--quiet',
+            '-m',
+            'reviewed',
+          ]);
+          yield* indexer.index({cwd: repo.root, threadnoteHome: data.home, ensureVectors: false});
+          citations = yield* captureMemoryCodeCitations(data.config, {
+            callerCwd: repo.root,
+            project: 'fixture',
+            refs: ['source.ts'],
+          });
+        }
+        const source = {kind: 'code' as const, citation: citations[0]};
+        const evidenceId = automaticMaintenanceEvidenceId(source);
+        const bodyHash = sha256HexSync(data.record.body);
+        const reviewedSupport: ReviewedMemorySupportV1 | undefined = reviewed
+          ? {
+              type: 'reviewed-memory-support',
+              version: 1,
+              active: createReviewedSupportSnapshot({
+                bodyHash,
+                paragraphs: [
+                  {ordinal: 0, hash: bodyHash, role: 'descriptive', support: 'direct', evidenceIds: [evidenceId]},
+                ],
+                sources: [{id: evidenceId, source, scope: 'repository'}],
+                acceptance: {
+                  reviewId: 'review-citation-refresh',
+                  approvedAt: NOW,
+                  targetBeforeHash: bodyHash,
+                  preparationDigest: bodyHash,
+                  sourceVectorDigest: bodyHash,
+                },
+              }),
+            }
+          : undefined;
+        const subject = memory(data.uri, data.record.metadata.relations, {
+          schemaVersion: reviewed ? 11 : 5,
+          codeCitations: roots,
+          ...(reviewedSupport === undefined ? {} : {reviewedSupport}),
+        });
+        yield* data.write(subject);
+        const target = memory(data.record.metadata.relations![0].uri, [], {memoryId: 'tn_target'});
+        yield* data.write(
+          parseMemoryDocument(target.uri, formatMemoryDocument('MEMORY', target.metadata, 'Independent target.'))!,
+        );
+        yield* data.fs.writeFileString(repo.source, 'export const supported = false;\n');
+        yield* repo.git(['add', '.']);
+        yield* repo.git([
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.invalid',
+          'commit',
+          '--quiet',
+          '-m',
+          'changed',
+        ]);
+        yield* indexer.index({cwd: repo.root, threadnoteHome: data.home, ensureVectors: false});
+        const identity = {
+          project: 'fixture',
+          memoryId: 'tn_subject',
+          family: 'citation',
+          slot: contextHealthCitationCaseSlotV2(citations[0]),
+        };
+        const item = {
+          ...data.item,
+          ...identity,
+          caseId: contextHealthCaseIdV2(identity),
+          citationId: citations[0].id,
+          subjectContentHashes: [{uri: subject.uri, hash: maintenanceContentHash(subject.content)}],
+        };
+        yield* writeState(data.config, {...data.state, paused: true, cases: [item]});
+        const selector = {kind: 'durable', topic: 'subject', findingCategory: 'citation-changed'};
+        const deferred = yield* previewContextHealthRepairs(data.config, 'fixture', repo.root, selector);
+        expect(deferred.proposals).toEqual([]);
+        expect(deferred.citationCoverage).toMatchObject({eligible: 1, checked: 0, deferred: 1});
+        expect(renderContextHealthRepairPlan(deferred)).toContain('Zero proposals does not establish');
+        const refreshed = yield* refreshContextMaintenanceCase(data.config, {
+          project: 'fixture',
+          caseId: item.caseId,
+          cwd: repo.root,
+        });
+        expect(refreshed.outcome).toBe('ready');
+        if (refreshed.outcome !== 'ready') throw new Error('Expected exact retained citation packet.');
+        expect(refreshed.item).toMatchObject({disposition: 'needs-decision', reason: 'source-changed'});
+        expect(refreshed.packet.allowedOperations).toContain(
+          reviewed ? 'context_maintenance_review' : 'context_health_repair_preview',
+        );
+        const state = yield* readState(data.config);
+        const plan = yield* previewContextHealthRepairs(data.config, 'fixture', repo.root, selector);
+        expect(plan.proposals).toHaveLength(1);
+        expect(plan.proposals[0]).toMatchObject({
+          category: 'citation-changed',
+          mutation: {kind: 'review-only', subjectUri: subject.uri},
+          preconditions: [{uri: subject.uri, expectedContentHash: maintenanceContentHash(subject.content)}],
+        });
+        expect(plan.citationCoverage).toMatchObject({eligible: 1, checked: 1, deferred: 0});
+        expect(plan.knowledgeDelta.noAction).toBe(false);
+        const report = yield* collectContextHealth(data.config, 'fixture', [subject], repo.root);
+        expect(EffectArray.some(report.findings, finding => finding.category === 'citation-changed')).toBe(true);
+        expect(
+          yield* applyContextHealthRepair(data.config, {
+            ...selector,
+            project: 'fixture',
+            cwd: repo.root,
+            proposalId: plan.proposals[0].proposalId,
+            revision: plan.proposals[0].revision,
+            approved: true,
+          }),
+        ).toMatchObject({status: 'review-required'});
+        expect(yield* data.fs.readFileString(data.fileFor(subject.uri))).toBe(subject.content);
+        expect(yield* readState(data.config)).toEqual(state);
+        // Dirty source cannot reuse the clean refreshed decision as current evidence.
+        yield* data.fs.writeFileString(repo.source, 'export const supported = true;\n');
+        const stale = yield* previewContextHealthRepairs(data.config, 'fixture', repo.root, selector);
+        expect(stale.proposals).toEqual([]);
+        expect(stale.citationCoverage?.deferred).toBe(1);
+        expect(yield* data.fs.readFileString(data.fileFor(subject.uri))).toBe(subject.content);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('observes the selected canonical target without repairing bytes and is idempotent', () =>
     Effect.gen(function* () {
       const data = yield* fixture();

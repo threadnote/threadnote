@@ -14,6 +14,7 @@ import type {
   ContextHealthRepairDescriptorV1,
   ContextHealthReportV1,
 } from '@threadnote/context/health';
+import type {ContextHealthCitationCoverageV2} from '@threadnote/context/health_maintenance';
 import {isMemoryId, memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {
@@ -111,6 +112,8 @@ export interface ContextHealthRepairProposalV1 {
 }
 
 export interface ContextHealthRepairPlanV1 {
+  /** Incomplete citation coverage is not evidence that no repair is needed. */
+  readonly citationCoverage?: ContextHealthCitationCoverageV2;
   readonly knowledgeDelta: KnowledgeDeltaV1;
   readonly nextCursor?: string;
   readonly omittedProposals: number;
@@ -207,6 +210,7 @@ export function previewContextHealthRepairPlanV1(
   const limit = proposalLimit(options.limit);
   const selected = proposals.slice(0, limit);
   return {
+    ...(report.maintenance === undefined ? {} : {citationCoverage: report.maintenance.citationCoverage}),
     knowledgeDelta: projectContextHealthRepairKnowledgeDeltaV1(reportRevision, selected, recordsByUri),
     ...(report.nextCursor === undefined ? {} : {nextCursor: report.nextCursor}),
     omittedProposals: Math.max(0, proposals.length - limit),
@@ -756,16 +760,18 @@ function mutationPreconditions(
   recordsByUri: ReadonlyMap<string, MemoryRecord | undefined>,
 ): readonly ContextHealthRepairRecordPreconditionV1[] {
   if (mutation.kind === 'review-only') {
-    if (mutation.suggestedMutation?.kind !== 'supersede-memory') return [];
-    return EffectArray.flatMap(
-      [mutation.suggestedMutation.subjectUri, mutation.suggestedMutation.supersededByUri],
-      uri => {
-        const record = recordsByUri.get(uri);
-        return record === undefined
-          ? []
-          : [{expectedContentHash: memoryContentHash(record.content), expectedProject: project, uri}];
-      },
-    ).sort((left, right) => compareText(left.uri, right.uri));
+    const uris =
+      mutation.suggestedMutation?.kind === 'supersede-memory'
+        ? [mutation.suggestedMutation.subjectUri, mutation.suggestedMutation.supersededByUri]
+        : mutation.repairKind === 'repair-citation' && mutation.subjectUri !== undefined
+          ? [mutation.subjectUri]
+          : [];
+    return EffectArray.flatMap(uris, uri => {
+      const record = recordsByUri.get(uri);
+      return record === undefined
+        ? []
+        : [{expectedContentHash: memoryContentHash(record.content), expectedProject: project, uri}];
+    }).sort((left, right) => compareText(left.uri, right.uri));
   }
   const inactiveRelationTarget =
     mutation.kind === 'remove-relations' && mutation.targetPrecondition.state === 'inactive'
