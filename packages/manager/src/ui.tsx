@@ -65,8 +65,8 @@ import {
   type LibraryScope,
 } from './library_model.js';
 import {LibraryExplorer, LibraryHistoryControls} from './library_explorer.js';
-import {useLibrarySearch} from './library_search.js';
-import {canonicalizeLibraryHistory, emptyLibraryHistory, visitLibraryUri} from './library_navigation.js';
+import {librarySearchInputValue, useLibrarySearch} from './library_search.js';
+import {canonicalizeLibraryHistory, emptyLibraryHistory, isMemoryLink, visitLibraryUri} from './library_navigation.js';
 import {useLibraryNavigatorResize} from './library_layout.js';
 import {settleManagerRefreshTasks} from '@threadnote/manager/refresh';
 import {Metadata, TargetFields} from '@threadnote/manager/ui/controls';
@@ -224,6 +224,8 @@ function App({
   const scopedTree = useMemo(() => libraryScopeTree(tree, libraryScope), [tree, libraryScope]);
   const [showSystem, setShowSystem] = useState(false);
   const [navTreeTab, setNavTreeTab] = useState<NavTreeTab>('memories');
+  const librarySearchUri = Effect.pipe(filter, EffectString.trim);
+  const librarySearchIsUri = isMemoryLink(librarySearchUri);
   const librarySearch = useLibrarySearch(filter, libraryScope, panel === 'memory' && navTreeTab === 'memories', tree);
   const [toast, setToast] = useState('');
   const [output, setOutput] = useState('');
@@ -1684,11 +1686,16 @@ function App({
                       <input
                         type="search"
                         aria-label="Search Library"
-                        placeholder={navTreeTab === 'memories' ? 'Search memories by meaning' : 'Filter resources'}
-                        maxLength={1024}
+                        placeholder={navTreeTab === 'memories' ? 'Search memories or URI' : 'Filter resources'}
+                        maxLength={4096}
                         value={filter}
-                        disabled={controlsBlocked}
-                        onChange={event => setFilter(event.target.value)}
+                        disabled={historyBlocked}
+                        onChange={event => setFilter(librarySearchInputValue(event.target.value))}
+                        onKeyDown={event => {
+                          if (event.nativeEvent.isComposing || event.key !== 'Enter' || !librarySearchIsUri) return;
+                          event.preventDefault();
+                          void selectTreeUri(librarySearchUri);
+                        }}
                       />
                     </label>
                     <WorkspaceUtilities
@@ -1757,17 +1764,19 @@ function App({
                     scopeLabel={libraryScope === 'local' ? 'Local' : Effect.pipe(libraryScope, EffectString.slice(5))}
                     busy={bulkAction !== undefined}
                     controlsBlocked={controlsBlocked}
-                    filter={filter}
+                    filter={librarySearchIsUri ? '' : filter}
                     recalledUris={navTreeTab === 'memories' ? librarySearch.result?.uris : undefined}
                     searchStatus={
                       navTreeTab === 'memories' && Effect.pipe(filter, EffectString.trim)
-                        ? librarySearch.pending
-                          ? 'Searching memories…'
-                          : librarySearch.error
-                            ? 'Search unavailable. Showing title and path matches.'
-                            : librarySearch.result?.semantic !== 'available'
-                              ? 'Showing content, title and path matches. Semantic search is unavailable.'
-                              : 'Showing matches by meaning, content, title and path.'
+                        ? librarySearchIsUri
+                          ? 'Press Enter to open this memory.'
+                          : librarySearch.pending
+                            ? 'Searching memories…'
+                            : librarySearch.error
+                              ? 'Search unavailable. Showing title and path matches.'
+                              : librarySearch.result?.semantic !== 'available'
+                                ? 'Showing content, title and path matches. Semantic search is unavailable.'
+                                : 'Showing matches by meaning, content, title and path.'
                         : undefined
                     }
                     navTreeTab={navTreeTab}

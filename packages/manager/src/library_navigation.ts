@@ -1,5 +1,9 @@
 import {Array as EffectArray} from 'effect';
 
+export function isMemoryLink(uri: string): boolean {
+  return /^threadnote:\/\/(?:memory\/[^/?#\s]+|user\/[^/?#\s]+\/memories\/[^?#\s]+)$/.test(uri);
+}
+
 export interface LibraryHistory {
   readonly entries: readonly string[];
   readonly index: number;
