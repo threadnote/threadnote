@@ -23,6 +23,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   readBoundedProcessRegistrationNames,
   readManageableThreadnoteProcessDiagnostics,
+  type ManageableThreadnoteProcessDiagnostics,
 } from '../process/diagnostics.js';
 import {observeLiveWorktree} from '@threadnote/graph/live_observation';
 import {codeGraphWorksetCatalogLayout} from '@threadnote/graph/workset_catalog/layout';
@@ -100,6 +101,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
   let nextProcess = 0;
   let hinted = false;
   let changeSequence = 0;
+  let processSnapshot: ManageableThreadnoteProcessDiagnostics | undefined;
   const topics = MANAGER_CONSUMER_OBSERVED_TOPICS.filter(
     topic =>
       (topic !== 'model-setup' || options.modelPaths !== undefined) &&
@@ -177,6 +179,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
     if (names.truncated) return undefined;
     const snapshot = yield* readManageableThreadnoteProcessDiagnostics(config);
     if (snapshot.truncated) return undefined;
+    processSnapshot = snapshot;
     // Age and RSS are display clocks, not process membership or action state.
     const revision = sha256HexSync(
       JSON.stringify(
@@ -329,6 +332,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
       if (entries.get(managerLiveResourceKey(entry.resource)) !== entry) return;
       const observed = Option.getOrUndefined(result);
       if (observed === undefined) {
+        if (entry.resource.topic === 'processes') processSnapshot = undefined;
         entry.directories = [];
         entry.needsRecovery = true;
         yield* availability(entry, false);
@@ -438,6 +442,11 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
 
   return {
     topics: allTopics,
+    processSnapshot: Effect.sync(() =>
+      entries.get(managerLiveResourceKey({topic: 'processes', scope: 'account'}))?.available
+        ? processSnapshot
+        : undefined,
+    ),
     hints: {
       publish: (resource: ManagerLiveResource) =>
         Effect.gen(function* () {

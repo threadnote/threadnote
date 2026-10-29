@@ -3,7 +3,20 @@ import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import * as BunSocket from '@effect/platform-bun/BunSocket';
 import {it as effectIt} from '@effect/vitest';
-import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError, Ref, Schema, Stream} from 'effect';
+import {
+  Context,
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Path,
+  PlatformError,
+  Ref,
+  Schema,
+  Stream,
+  String as Str,
+} from 'effect';
 import {HttpClient, HttpClientRequest, HttpServer, HttpServerRequest, HttpServerResponse} from 'effect/http';
 import * as Socket from 'effect/socket/Socket';
 import {TestClock} from 'effect/testing';
@@ -613,6 +626,7 @@ const serveLive = Effect.fn('test.managerLive.serve')(function* (
   projects: Effect.Effect<ReadonlySet<string>> = Effect.succeed(new Set(['one', 'two'])),
   health?: ManagerLiveOptions['health'],
   observations?: ManagerLiveOptions['observations'],
+  snapshots?: ManagerLiveOptions['snapshots'],
 ) {
   const context = yield* Layer.build(
     BunHttpServer.layer({
@@ -634,6 +648,7 @@ const serveLive = Effect.fn('test.managerLive.serve')(function* (
     projects,
     health,
     observations,
+    snapshots,
   });
   yield* server.serve(
     Effect.gen(function* () {
@@ -681,12 +696,12 @@ const serveLive = Effect.fn('test.managerLive.serve')(function* (
         close: writer.write(new Socket.CloseEvent()),
       };
     });
-  const ticketWithBody = (body: unknown) =>
+  const ticketWithBody = (body: unknown, headers: Record<string, string> = {}) =>
     Effect.gen(function* () {
       const client = yield* HttpClient.HttpClient;
       const request = yield* HttpClientRequest.bodyJson(
         HttpClientRequest.post(`${origin}/api/live-session`, {
-          headers: {authorization: 'Bearer synthetic-live-token', origin},
+          headers: {authorization: 'Bearer synthetic-live-token', origin, ...headers},
         }),
         body,
       );
@@ -696,6 +711,202 @@ const serveLive = Effect.fn('test.managerLive.serve')(function* (
 });
 
 describe('Manager live protocol', () => {
+  effectIt.effect('pushes negotiated snapshots after ACK and retains legacy invalidation delivery', () =>
+    Effect.gen(function* () {
+      let value = 1;
+      const resources = [
+        {topic: 'processes', scope: 'account'},
+        {topic: 'graph-status', scope: 'account'},
+      ] as const;
+      const server = yield* serveLive(
+        undefined,
+        undefined,
+        {
+          topics: ['processes', 'graph-status'],
+          subscribe: () => Effect.succeed([]),
+          release: () => Effect.void,
+        },
+        {
+          processes: Effect.sync(() => ({data: {processes: [{processId: value}]}, reconcileMilliseconds: 2_000})),
+          'graph-status': Effect.sync(() => ({
+            data: {builds: [{state: 'running', value}]},
+            reconcileMilliseconds: 1_000,
+          })),
+        },
+      );
+      const ticketResponse = yield* server.ticketWithBody(
+        {topics: ['processes', 'graph-status']},
+        {
+          'x-threadnote-live-snapshots': 'processes,graph-status',
+        },
+      );
+      const client = yield* server.connect(
+        (yield* Schema.decodeUnknownEffect(Schema.Struct({ticket: Schema.String}))(yield* ticketResponse.json)).ticket,
+      );
+      expect(yield* client.next).toMatchObject({type: 'welcome', snapshots: ['processes', 'graph-status']});
+      yield* client.send({type: 'subscribe', version: 1, generation: 1, resources});
+      expect(yield* client.next).toMatchObject({type: 'subscribed', generation: 1, startingSequence: 0});
+      expect(yield* client.next).toMatchObject({
+        type: 'snapshot',
+        sequence: 1,
+        resource: resources[0],
+        data: {processes: [{processId: 1}]},
+      });
+      expect(yield* client.next).toMatchObject({
+        type: 'snapshot',
+        sequence: 2,
+        resource: resources[1],
+        data: {builds: [{value: 1}]},
+      });
+      const legacyResponse = yield* server.ticketWithBody({topics: ['processes', 'graph-status']});
+      const legacy = yield* server.connect(
+        (yield* Schema.decodeUnknownEffect(Schema.Struct({ticket: Schema.String}))(yield* legacyResponse.json)).ticket,
+      );
+      const welcome = yield* legacy.next;
+      expect(welcome).not.toHaveProperty('snapshots');
+      yield* legacy.send({type: 'subscribe', version: 1, generation: 1, resources});
+      expect(yield* legacy.next).toMatchObject({type: 'subscribed'});
+      value = 2;
+      for (const resource of resources) {
+        yield* server.live.publishResource(resource, 'changed');
+        expect(yield* client.next).toMatchObject({type: 'snapshot', resource});
+        expect(yield* legacy.next).toMatchObject({type: 'invalidation', resource});
+      }
+      yield* client.send({type: 'subscribe', version: 1, generation: 2, resources: [resources[1]]});
+      expect(yield* client.next).toMatchObject({type: 'subscribed', generation: 2});
+      expect(yield* client.next).toMatchObject({
+        type: 'snapshot',
+        generation: 2,
+        resource: resources[1],
+        data: {builds: [{value: 2}]},
+      });
+    }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect(
+    'streams authoritative snapshots with bounded reconciliation when passive observation is unavailable',
+    () =>
+      Effect.gen(function* () {
+        let value = 1;
+        const resources = [
+          {topic: 'processes', scope: 'account'},
+          {topic: 'graph-status', scope: 'account'},
+        ] as const;
+        const server = yield* serveLive(
+          undefined,
+          undefined,
+          {
+            topics: ['processes', 'graph-status'],
+            subscribe: () => Effect.succeed(resources),
+            release: () => Effect.void,
+          },
+          {
+            processes: Effect.sync(() => ({data: {value}, reconcileMilliseconds: 2_000})),
+            'graph-status': Effect.sync(() => ({data: {value}, reconcileMilliseconds: 2_000})),
+          },
+        );
+        const response = yield* server.ticketWithBody(
+          {topics: ['processes', 'graph-status']},
+          {'x-threadnote-live-snapshots': 'processes,graph-status'},
+        );
+        const ticket = yield* Schema.decodeUnknownEffect(Schema.Struct({ticket: Schema.String}))(yield* response.json);
+        const client = yield* server.connect(ticket.ticket);
+        yield* client.next;
+        yield* client.send({type: 'subscribe', version: 1, generation: 1, resources});
+        const ack = yield* client.next;
+        expect(ack).toMatchObject({type: 'subscribed'});
+        expect(ack).not.toHaveProperty('unavailable');
+        expect(yield* client.next).toMatchObject({type: 'snapshot', resource: resources[0], data: {value: 1}});
+        expect(yield* client.next).toMatchObject({type: 'snapshot', resource: resources[1], data: {value: 1}});
+        value = 2;
+        expect(yield* client.next).toMatchObject({type: 'snapshot', resource: resources[0], data: {value: 2}});
+        yield* server.live.publishResourceAvailability(resources[1], true);
+        expect(yield* client.next).toMatchObject({type: 'snapshot', resource: resources[1], data: {value: 2}});
+        const legacyResponse = yield* server.ticketWithBody({topics: ['processes', 'graph-status']});
+        const legacyTicket = yield* Schema.decodeUnknownEffect(Schema.Struct({ticket: Schema.String}))(
+          yield* legacyResponse.json,
+        );
+        const legacy = yield* server.connect(legacyTicket.ticket);
+        yield* legacy.next;
+        yield* legacy.send({type: 'subscribe', version: 1, generation: 1, resources});
+        expect(yield* legacy.next).toMatchObject({type: 'subscribed', unavailable: resources});
+      }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect('backs off failed initial snapshot reads when passive coverage is unavailable', () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const resource = {topic: 'processes', scope: 'account'} as const;
+      const server = yield* serveLive(
+        undefined,
+        undefined,
+        {
+          topics: ['processes'],
+          subscribe: () => Effect.succeed([resource]),
+          release: () => Effect.void,
+        },
+        {
+          processes: Effect.suspend(() => {
+            reads++;
+            return Effect.fail('unavailable');
+          }),
+        },
+      );
+      const response = yield* server.ticketWithBody(
+        {topics: ['processes']},
+        {'x-threadnote-live-snapshots': 'processes'},
+      );
+      const ticket = yield* Schema.decodeUnknownEffect(Schema.Struct({ticket: Schema.String}))(yield* response.json);
+      const client = yield* server.connect(ticket.ticket);
+      yield* client.next;
+      yield* client.send({type: 'subscribe', version: 1, generation: 1, resources: [resource]});
+      expect(yield* client.next).toMatchObject({type: 'subscribed'});
+      expect(yield* client.next).toMatchObject({type: 'invalidation'});
+      yield* Effect.sleep(1_100);
+      expect(reads).toBe(1);
+    }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect('falls back to invalidation for oversized or failed snapshots without closing the stream', () =>
+    Effect.gen(function* () {
+      let fail = false;
+      const resource = {topic: 'processes', scope: 'account'} as const;
+      const server = yield* serveLive(
+        undefined,
+        undefined,
+        {
+          topics: ['processes'],
+          subscribe: () => Effect.succeed([]),
+          release: () => Effect.void,
+        },
+        {
+          processes: Effect.suspend(() =>
+            fail
+              ? Effect.fail('unavailable')
+              : Effect.succeed({
+                  data: {value: Str.repeat(MANAGER_LIVE_LIMITS.snapshotBytes)('x')},
+                  reconcileMilliseconds: 2_000,
+                }),
+          ),
+        },
+      );
+      const response = yield* server.ticketWithBody(
+        {topics: ['processes']},
+        {'x-threadnote-live-snapshots': 'processes'},
+      );
+      const client = yield* server.connect(
+        (yield* Schema.decodeUnknownEffect(Schema.Struct({ticket: Schema.String}))(yield* response.json)).ticket,
+      );
+      yield* client.next;
+      yield* client.send({type: 'subscribe', version: 1, generation: 1, resources: [resource]});
+      expect(yield* client.next).toMatchObject({type: 'subscribed'});
+      expect(yield* client.next).toMatchObject({type: 'invalidation', sequence: 1, resource});
+      fail = true;
+      yield* server.live.publishResource(resource, 'failed');
+      expect(yield* client.next).toMatchObject({type: 'invalidation', sequence: 2, resource});
+    }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
+  );
+
   effectIt.effect('negotiates legacy and requested topics without advertising absent producers', () =>
     Effect.gen(function* () {
       const server = yield* serveLive(undefined, undefined, {

@@ -1,4 +1,17 @@
-import {Clock, Crypto, Effect, FileSystem, PubSub, Queue, Schema, Semaphore, Stream} from 'effect';
+import {
+  Array as Arr,
+  Clock,
+  Crypto,
+  Effect,
+  FileSystem,
+  Option,
+  PubSub,
+  Queue,
+  Schema,
+  Semaphore,
+  Stream,
+  String as Str,
+} from 'effect';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
@@ -7,11 +20,14 @@ import {managerRequestIsAuthorized} from '@threadnote/manager/authorization';
 import {
   MANAGER_LIVE_LIMITS,
   MANAGER_LIVE_VERSION,
+  MANAGER_LIVE_SNAPSHOT_HEADER,
+  ManagerLiveSnapshotResource,
   ManagerLiveTopic,
   ManagerLiveClientFrame,
   managerLiveResourceKey,
   type ManagerLiveResource,
   type ManagerLiveServerFrame,
+  type ManagerLiveSnapshotTopic,
 } from '@threadnote/manager/live/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseSeedManifest} from '@threadnote/workspace/manifest';
@@ -28,6 +44,7 @@ export const managerLiveWebSocketOptions = {
 export const managerLiveHttpLayer = (port: number) =>
   BunHttpServer.layer({hostname: '127.0.0.1', port, websocket: managerLiveWebSocketOptions});
 const utf8 = new TextEncoder();
+const isSnapshotResource = Schema.is(ManagerLiveSnapshotResource);
 const decode = Schema.decodeUnknownEffect(ManagerLiveClientFrame, {onExcessProperty: 'error'});
 
 class ManagerLiveProtocolError extends Schema.TaggedError<ManagerLiveProtocolError>()('ManagerLiveProtocolError', {
@@ -98,6 +115,9 @@ interface LiveConnection {
   readonly mailbox: ReturnType<typeof makeManagerLiveMailbox>;
   readonly availability: Map<string, {resource: ManagerLiveResource; available: boolean}>;
   readonly wake: PubSub.PubSub<void>;
+  readonly snapshots: readonly ManagerLiveSnapshotTopic[];
+  readonly unobserved: Map<string, ManagerLiveResource>;
+  readonly nextSnapshotSample: Map<string, number>;
   readonly close: Effect.Effect<void>;
   generation: number;
   sequence: number;
@@ -108,6 +128,20 @@ export interface ManagerLiveOptions {
   readonly token: string;
   /** A bounded account-local manifest read; no corpus or graph discovery. */
   readonly projects: Effect.Effect<ReadonlySet<string>, unknown>;
+  readonly snapshots?: Partial<
+    Readonly<
+      Record<
+        ManagerLiveSnapshotTopic,
+        Effect.Effect<
+          {
+            readonly data: unknown;
+            readonly reconcileMilliseconds: number;
+          },
+          unknown
+        >
+      >
+    >
+  >;
   readonly health?: {
     readonly subscribe: (connectionKey: string, projects: readonly string[]) => Effect.Effect<readonly string[], never>;
     readonly release: (connectionKey: string) => Effect.Effect<void, never>;
@@ -133,7 +167,10 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
     ]),
   ];
   const origin = new URL(options.origin);
-  const tickets = new Map<string, {expiresAt: number; topics: readonly ManagerLiveTopic[]}>();
+  const tickets = new Map<
+    string,
+    {expiresAt: number; topics: readonly ManagerLiveTopic[]; snapshots: readonly ManagerLiveSnapshotTopic[]}
+  >();
   const connections = new Set<LiveConnection>();
   let reservedConnections = 0;
   const pruneTickets = (now: number) => {
@@ -198,7 +235,11 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
       return requested as readonly ManagerLiveTopic[];
     });
 
-  const serveSocket = (socket: Socket.Socket, negotiatedTopics: readonly ManagerLiveTopic[]) =>
+  const serveSocket = (
+    socket: Socket.Socket,
+    negotiatedTopics: readonly ManagerLiveTopic[],
+    snapshots: readonly ManagerLiveSnapshotTopic[],
+  ) =>
     Effect.scoped(
       Effect.gen(function* () {
         const reader = yield* socket.reader;
@@ -214,6 +255,9 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
           mailbox: makeManagerLiveMailbox(),
           availability: new Map(),
           wake,
+          snapshots,
+          unobserved: new Map(),
+          nextSnapshotSample: new Map(),
           close,
           generation: 0,
           sequence: 0,
@@ -235,6 +279,7 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
           version: MANAGER_LIVE_VERSION,
           epoch,
           topics: negotiatedTopics,
+          ...(snapshots.length > 0 ? {snapshots} : {}),
           heartbeatMilliseconds: limits.heartbeatMilliseconds,
         });
         let lastMessage = yield* Clock.currentTimeMillis;
@@ -291,10 +336,17 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
                 options.observations === undefined
                   ? []
                   : yield* options.observations.subscribe(connectionKey, observationResources);
-              const unavailable: ManagerLiveResource[] = [
+              const sourceUnavailable: ManagerLiveResource[] = [
                 ...healthUnavailable.map(project => ({topic: 'context-health' as const, project})),
                 ...observationUnavailable,
               ];
+              connection.unobserved.clear();
+              connection.nextSnapshotSample.clear();
+              const unavailable = Arr.filter(sourceUnavailable, resource => {
+                if (!isSnapshotResource(resource) || !snapshots.includes(resource.topic)) return true;
+                connection.unobserved.set(managerLiveResourceKey(resource), resource);
+                return false;
+              });
               connection.generation = frame.generation;
               // Filters are live before this barrier; flush uses the same gate.
               yield* send({
@@ -305,6 +357,18 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
                 startingSequence: connection.sequence,
                 ...(unavailable.length > 0 ? {unavailable} : {}),
               });
+              for (const resource of frame.resources) {
+                if (
+                  isSnapshotResource(resource) &&
+                  snapshots.includes(resource.topic) &&
+                  !Arr.some(
+                    unavailable,
+                    missing => managerLiveResourceKey(missing) === managerLiveResourceKey(resource),
+                  )
+                )
+                  connection.mailbox.dirtyResource(resource, sha256HexSync('subscription'));
+              }
+              yield* PubSub.publish(wake, undefined);
             }),
           );
         });
@@ -318,6 +382,21 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
           ),
         );
         const processIncoming = Effect.forever(Queue.take(incoming).pipe(Effect.flatMap(processFrame)));
+        const reconcileSnapshots = Effect.forever(
+          Effect.sleep('1 second').pipe(
+            Effect.andThen(
+              Effect.gen(function* () {
+                const now = yield* Clock.currentTimeMillis;
+                for (const [key, resource] of connection.unobserved) {
+                  if (now < (connection.nextSnapshotSample.get(key) ?? 0)) continue;
+                  connection.nextSnapshotSample.set(key, now + 15_000);
+                  connection.mailbox.dirtyResource(resource, sha256HexSync('reconciliation'));
+                }
+                if (connection.unobserved.size > 0) yield* PubSub.publish(wake, undefined);
+              }),
+            ),
+          ),
+        );
         const flush = gate.withPermits(1)(
           Effect.gen(function* () {
             if (connection.generation === 0) return;
@@ -326,8 +405,44 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
             if (batch.reset) {
               yield* send({...common, type: 'reset', sequence: ++connection.sequence});
             } else {
-              for (const invalidation of batch.invalidations)
+              for (const invalidation of batch.invalidations) {
+                const resource = isSnapshotResource(invalidation.resource) ? invalidation.resource : undefined;
+                const readSnapshot =
+                  resource && connection.snapshots.includes(resource.topic)
+                    ? options.snapshots?.[resource.topic]
+                    : undefined;
+                if (readSnapshot && resource) {
+                  const result = yield* readSnapshot.pipe(
+                    Effect.timeoutOption('8 seconds'),
+                    Effect.catchCause(() => Effect.succeedNone),
+                  );
+                  if (Option.isSome(result)) {
+                    connection.nextSnapshotSample.set(
+                      managerLiveResourceKey(resource),
+                      (yield* Clock.currentTimeMillis) +
+                        Math.max(1_000, Math.min(15_000, result.value.reconcileMilliseconds)),
+                    );
+                    const frame = {
+                      ...common,
+                      type: 'snapshot' as const,
+                      sequence: connection.sequence + 1,
+                      resource,
+                      data: result.value.data,
+                    };
+                    if (utf8.encode(JSON.stringify(frame)).length <= limits.snapshotBytes) {
+                      yield* send(frame);
+                      connection.sequence++;
+                      continue;
+                    }
+                  }
+                  connection.nextSnapshotSample.set(
+                    managerLiveResourceKey(resource),
+                    (yield* Clock.currentTimeMillis) + 15_000,
+                  );
+                }
+                // A failed or oversized projection retains one event-triggered REST read.
                 yield* send({...common, type: 'invalidation', sequence: ++connection.sequence, ...invalidation});
+              }
             }
             const availability = [...connection.availability.values()];
             connection.availability.clear();
@@ -358,6 +473,7 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
         );
         yield* receive.pipe(
           Effect.raceFirst(processIncoming),
+          Effect.raceFirst(reconcileSnapshots),
           Effect.raceFirst(output),
           Effect.raceFirst(heartbeat),
           Effect.catchCause(() => close),
@@ -386,7 +502,16 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
       if (requested === undefined) return json(400, {error: 'Invalid live session request'});
       const ticket = yield* crypto.randomUUIDv4();
       const expiresAt = now + limits.ticketLifetimeMilliseconds;
-      tickets.set(ticket, {expiresAt, topics: topics.filter(topic => requested.includes(topic))});
+      const requestedSnapshots = Str.split(request.headers[MANAGER_LIVE_SNAPSHOT_HEADER] ?? '', ',');
+      const snapshots = Arr.filter(
+        ['processes', 'graph-status'] as const,
+        topic =>
+          topics.includes(topic) &&
+          requested.includes(topic) &&
+          requestedSnapshots.includes(topic) &&
+          options.snapshots?.[topic] !== undefined,
+      );
+      tickets.set(ticket, {expiresAt, topics: Arr.filter(topics, topic => requested.includes(topic)), snapshots});
       return json(200, {version: MANAGER_LIVE_VERSION, ticket, expiresAt});
     }
     if (request.method !== 'GET') return json(405, {error: 'Method not allowed'});
@@ -394,13 +519,14 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
     if (ticket === null || !tickets.has(ticket) || [...url.searchParams.keys()].some(key => key !== 'ticket'))
       return json(401, {error: 'Unauthorized'});
     const negotiatedTopics = tickets.get(ticket)?.topics ?? [];
+    const snapshots = tickets.get(ticket)?.snapshots ?? [];
     tickets.delete(ticket);
     if (reservedConnections >= limits.connections) return json(429, {error: 'Too many live sessions'});
     return yield* Effect.acquireUseRelease(
       Effect.sync(() => reservedConnections++),
       () =>
         request.upgrade.pipe(
-          Effect.flatMap(socket => serveSocket(socket, negotiatedTopics)),
+          Effect.flatMap(socket => serveSocket(socket, negotiatedTopics, snapshots)),
           Effect.as(HttpServerResponse.empty({status: 204})),
           Effect.catchCause(() => Effect.succeed(json(400, {error: 'Live upgrade refused'}))),
         ),
@@ -428,6 +554,15 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
       const key = managerLiveResourceKey(resource);
       for (const connection of connections) {
         if (!connection.mailbox.resources().some(subscribed => managerLiveResourceKey(subscribed) === key)) continue;
+        if (isSnapshotResource(resource) && connection.snapshots.includes(resource.topic)) {
+          if (available) {
+            connection.unobserved.delete(key);
+            connection.nextSnapshotSample.delete(key);
+          } else connection.unobserved.set(key, resource);
+          connection.mailbox.dirtyResource(resource, sha256HexSync('coverage'));
+          yield* PubSub.publish(connection.wake, undefined);
+          continue;
+        }
         connection.availability.set(key, {resource, available});
         // A connection can subscribe to at most 32 resources, so this map is
         // bounded independently of invalidation coalescing and reset state.

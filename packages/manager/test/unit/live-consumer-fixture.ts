@@ -1,9 +1,10 @@
+import {Array as Arr} from 'effect';
 export const liveFrame = (type: string, rest: Record<string, unknown> = {}) =>
   JSON.stringify({type, version: 1, ...rest});
 
 export class FakeManagerSocket {
   static instances: FakeManagerSocket[] = [];
-  readyState = 0;
+  readyState: 0 | 1 | 2 | 3 = 0;
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onclose: ((event: CloseEvent) => void) | null = null;
@@ -23,19 +24,23 @@ export class FakeManagerSocket {
   emit(value: string) {
     this.onmessage?.({data: value} as MessageEvent);
   }
-  open(topics: string[]) {
+  open(topics: string[], snapshots?: string[]) {
     this.readyState = 1;
     this.onopen?.({} as Event);
-    this.emit(liveFrame('welcome', {epoch: 'epoch-one', topics, heartbeatMilliseconds: 15_000}));
+    this.emit(liveFrame('welcome', {epoch: 'epoch-one', topics, heartbeatMilliseconds: 15_000, snapshots}));
   }
-  ack() {
-    const generation = this.sent.filter(item => item.type === 'subscribe').at(-1)?.generation;
-    this.emit(liveFrame('subscribed', {epoch: 'epoch-one', generation, startingSequence: 0}));
+  ack(startingSequence = 0) {
+    const generation = Arr.filter(this.sent, item => item.type === 'subscribe').at(-1)?.generation;
+    this.emit(liveFrame('subscribed', {epoch: 'epoch-one', generation, startingSequence}));
   }
   invalidate(sequence: number, resource: Record<string, unknown>) {
-    const generation = this.sent.filter(item => item.type === 'subscribe').at(-1)?.generation;
+    const generation = Arr.filter(this.sent, item => item.type === 'subscribe').at(-1)?.generation;
     this.emit(
       liveFrame('invalidation', {epoch: 'epoch-one', generation, sequence, resource, revision: String(sequence)}),
     );
+  }
+  snapshot(sequence: number, resource: Record<string, unknown>, data: unknown) {
+    const generation = Arr.filter(this.sent, item => item.type === 'subscribe').at(-1)?.generation;
+    this.emit(liveFrame('snapshot', {epoch: 'epoch-one', generation, sequence, resource, data}));
   }
 }

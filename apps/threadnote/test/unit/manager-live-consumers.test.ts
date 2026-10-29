@@ -183,11 +183,13 @@ describe('Manager consumer live observation', () => {
       }).pipe(Effect.provideService(SystemInfo, system));
       const resource = {topic: 'processes' as const, scope: 'account' as const};
       expect(yield* broker.subscribe('tab-a', [resource])).toEqual([]);
+      expect((yield* broker.processSnapshot)?.processes).toEqual([expect.objectContaining({processId})]);
       yield* broker.reconcileNow;
       expect(revisions).toHaveLength(0);
       alive = false;
       yield* broker.reconcileNow;
       expect(revisions).toHaveLength(1);
+      expect((yield* broker.processSnapshot)?.processes).toEqual([]);
       yield* broker.release('tab-a');
       expect((yield* broker.diagnostics).resources).toBe(0);
     }).pipe(withLayer),
@@ -259,7 +261,12 @@ describe('Manager consumer live observation', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
+      const system = yield* SystemInfo;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-graph-process-recovery-'});
+      const isolatedSystem = SystemInfo.of({
+        ...system,
+        environment: () => ({...system.environment(), THREADNOTE_INSTALL_ROOT: home}),
+      });
       const directory = path.join(home, 'runtime', 'processes');
       yield* fs.makeDirectory(directory, {recursive: true});
       for (let index = 1; index <= 257; index++) yield* fs.makeDirectory(path.join(directory, `extra-${index}`));
@@ -277,8 +284,12 @@ describe('Manager consumer live observation', () => {
           }),
       };
       const config = {agentContextHome: home} as RuntimeConfig;
-      const graph = yield* makeManagerGraphLiveObservation(config, callbacks);
-      const broker = yield* makeManagerLiveConsumerObservation(config, callbacks, {adapters: [graph]});
+      const graph = yield* makeManagerGraphLiveObservation(config, callbacks).pipe(
+        Effect.provideService(SystemInfo, isolatedSystem),
+      );
+      const broker = yield* makeManagerLiveConsumerObservation(config, callbacks, {adapters: [graph]}).pipe(
+        Effect.provideService(SystemInfo, isolatedSystem),
+      );
       expect(yield* broker.subscribe('graph-tab', [graphResource])).toContainEqual(graphResource);
       expect(availability).not.toContain(true);
       yield* fs.remove(path.join(directory, 'extra-257'), {recursive: true});

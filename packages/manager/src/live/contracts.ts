@@ -9,8 +9,9 @@ export const MANAGER_LIVE_LIMITS = {
   queries: 64,
   pendingResources: 16,
   messageBytes: 8_192,
+  snapshotBytes: 262_144,
   incomingFrames: 8,
-  bufferedBytes: 65_536,
+  bufferedBytes: 524_288,
   heartbeatMilliseconds: 15_000,
   clientTimeoutMilliseconds: 45_000,
 } as const;
@@ -50,6 +51,13 @@ export const ManagerLiveTopic = Schema.Literals([
   'worksets',
 ]);
 export type ManagerLiveTopic = typeof ManagerLiveTopic.Type;
+export const ManagerLiveSnapshotTopic = Schema.Literals(['processes', 'graph-status']);
+export type ManagerLiveSnapshotTopic = typeof ManagerLiveSnapshotTopic.Type;
+export const MANAGER_LIVE_SNAPSHOT_HEADER = 'x-threadnote-live-snapshots';
+export const ManagerLiveSnapshotResource = Schema.Struct({
+  topic: ManagerLiveSnapshotTopic,
+  scope: Schema.Literal('account'),
+});
 export const MANAGER_LIVE_SUPPORTED_TOPICS: readonly ManagerLiveTopic[] = [
   'context-health',
   'context-maintenance',
@@ -93,6 +101,7 @@ export const ManagerLiveServerFrame = Schema.Union([
     version,
     epoch: opaque,
     topics: Schema.Array(ManagerLiveTopic),
+    snapshots: Schema.optionalKey(Schema.Array(ManagerLiveSnapshotTopic)),
     heartbeatMilliseconds: Schema.Finite,
   }),
   Schema.Struct({
@@ -113,6 +122,16 @@ export const ManagerLiveServerFrame = Schema.Union([
     revision: opaque,
   }),
   Schema.Struct({type: Schema.Literal('reset'), version, epoch: opaque, generation, sequence}),
+  Schema.Struct({
+    type: Schema.Literal('snapshot'),
+    version,
+    epoch: opaque,
+    generation,
+    sequence,
+    resource: ManagerLiveSnapshotResource,
+    // These are the same authenticated JSON projections returned by the REST readers.
+    data: Schema.Unknown,
+  }),
   Schema.Struct({
     type: Schema.Literal('availability'),
     version,

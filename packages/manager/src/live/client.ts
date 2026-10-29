@@ -1,4 +1,4 @@
-import {Schema} from 'effect';
+import {Array as Arr, Schema} from 'effect';
 import {
   MANAGER_LIVE_LIMITS,
   MANAGER_LIVE_VERSION,
@@ -51,6 +51,8 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
   let epoch: string | undefined;
   let sequence = 0;
   let topics = new Set<string>();
+  let snapshotTopics = new Set<string>();
+  const streams = (entry: ManagerLiveEntry) => snapshotTopics.has(entry.resource.topic);
   let heartbeatMilliseconds: number = MANAGER_LIVE_LIMITS.heartbeatMilliseconds;
   let lastFrame = 0;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -134,6 +136,7 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
     releaseSocket();
     acknowledged = false;
     epoch = undefined;
+    snapshotTopics.clear();
     staleAll();
     if (running && connection !== 'unsupported') {
       setConnection('stale');
@@ -142,7 +145,8 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
   };
   const send = (frame: unknown) => socket?.send(JSON.stringify(frame));
   const supported = (entry: ManagerLiveEntry) => topics.has(entry.resource.topic);
-  const read = (entry: ManagerLiveEntry) => {
+  const read = (entry: ManagerLiveEntry, fallback = false) => {
+    if (streams(entry) && !fallback) return;
     if (!running || !acknowledged || !supported(entry) || !entry.available || entry.reading) return;
     entry.reading = true;
     entry.dirty = false;
@@ -166,11 +170,12 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
         if (entry.version !== version) return;
         entry.reading = false;
         entry.controller = undefined;
-        if (entry.dirty) read(entry);
+        if (entry.dirty) read(entry, fallback);
       });
   };
-  const dirty = (entry: ManagerLiveEntry) => {
+  const dirty = (entry: ManagerLiveEntry, fallback = false) => {
     if (!supported(entry) || !entry.available) return;
+    if (streams(entry) && !fallback) return subscribeFrame();
     if (entry.reading) {
       entry.dirty = true;
       if (entry.snapshot.status !== 'stale' && entry.snapshot.status !== 'loading')
@@ -178,7 +183,7 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
       return;
     }
     update(entry, 'data' in entry.snapshot ? 'stale' : 'loading');
-    read(entry);
+    read(entry, fallback);
   };
   const subscribeFrame = () => {
     if (!socket || socket.readyState !== 1 || !epoch) return;
@@ -192,13 +197,16 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
   const receive = (raw: unknown) => {
     if (
       typeof raw !== 'string' ||
-      raw.length > MANAGER_LIVE_LIMITS.messageBytes ||
-      textBytes.encode(raw).length > MANAGER_LIVE_LIMITS.messageBytes
+      raw.length > (snapshotTopics.size ? MANAGER_LIVE_LIMITS.snapshotBytes : MANAGER_LIVE_LIMITS.messageBytes) ||
+      textBytes.encode(raw).length >
+        (snapshotTopics.size ? MANAGER_LIVE_LIMITS.snapshotBytes : MANAGER_LIVE_LIMITS.messageBytes)
     )
       return disconnect();
     let frame: ManagerLiveServerFrame;
     try {
       frame = decode(JSON.parse(raw));
+      if (frame.type !== 'snapshot' && textBytes.encode(raw).length > MANAGER_LIVE_LIMITS.messageBytes)
+        return disconnect();
     } catch {
       return disconnect();
     }
@@ -207,6 +215,7 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
       if (epoch) return disconnect();
       epoch = frame.epoch;
       topics = new Set(frame.topics);
+      snapshotTopics = new Set(Arr.filter(frame.snapshots ?? [], topic => topics.has(topic)));
       heartbeatMilliseconds = Math.max(1_000, Math.min(60_000, frame.heartbeatMilliseconds));
       for (const entry of store.values()) if (!supported(entry)) update(entry, 'unsupported');
       if (store.values().length && store.values().every(entry => !supported(entry))) {
@@ -246,6 +255,15 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
     sequence = frame.sequence;
     const entries = store.queries(frame.resource);
     if (!entries.length) return;
+    if (frame.type === 'snapshot') {
+      if (!snapshotTopics.has(frame.resource.topic)) return disconnect();
+      for (const entry of entries) {
+        if (!entry.available) continue;
+        fence(entry);
+        store.update(entry, {status: 'ready', data: frame.data});
+      }
+      return;
+    }
     if (frame.type === 'availability') {
       if (!frame.available) {
         for (const entry of entries) {
@@ -261,7 +279,7 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
     }
     // Sequence numbers deduplicate delivery. Content revisions can legitimately
     // recur, including while a new subscription's snapshot is in flight.
-    for (const entry of entries) dirty(entry);
+    for (const entry of entries) dirty(entry, true);
   };
   const connect = async () => {
     if (!running) return;
@@ -325,6 +343,7 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
       releaseSocket();
       acknowledged = false;
       epoch = undefined;
+      snapshotTopics.clear();
       store.clear();
       setConnection('stopped');
       connectionListeners.clear();
@@ -354,7 +373,10 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
       const existed = store.has(resource);
       const entry = store.add(resource, queryKey, reader, listener);
       if (!existed && epoch && socket?.readyState === 1) subscribeFrame();
-      else if (acknowledged && supported(entry) && entry.available) read(entry);
+      else if (acknowledged && supported(entry) && entry.available) {
+        if (streams(entry) && entry.snapshot.status === 'loading') subscribeFrame();
+        else read(entry);
+      }
       if ((epoch && (!supported(entry) || !entry.available)) || (connection === 'unsupported' && !epoch))
         update(entry, 'unsupported');
       return () => {
@@ -368,10 +390,12 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
       return (store.get(resource, queryKey)?.snapshot ?? emptySnapshot) as ManagerLiveSnapshot<T>;
     },
     invalidate(resource: ManagerLiveResource, queryKey?: string) {
+      if (Arr.some(store.queries(resource), entry => streams(entry) && entry.available)) return subscribeFrame();
       for (const entry of queryKey === undefined ? store.queries(resource) : [store.get(resource, queryKey)])
         if (entry) dirty(entry);
     },
     revalidate() {
+      if (Arr.some(store.values(), entry => streams(entry) && entry.available)) return subscribeFrame();
       for (const entry of store.values()) dirty(entry);
     },
     getConnectionSnapshot: () => connection,
