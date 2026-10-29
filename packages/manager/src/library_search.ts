@@ -3,6 +3,7 @@ import {useEffect, useState} from 'react';
 import {api, errorMessage} from './ui/support.js';
 import type {LibraryScope} from './library_model.js';
 import type {LibrarySearchResponse, TreeNode} from './ui/contracts.js';
+import {isMemoryLink} from './library_navigation.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
@@ -13,8 +14,13 @@ interface SearchState {
   readonly error?: string;
 }
 
+export function librarySearchInputValue(value: string): string {
+  return isMemoryLink(Effect.pipe(value, EffectString.trim)) ? value : Effect.pipe(value, EffectString.slice(0, 1024));
+}
+
 export function useLibrarySearch(query: string, scope: LibraryScope, enabled: boolean, tree?: TreeNode) {
-  const text = Effect.pipe(query, EffectString.trim);
+  const input = Effect.pipe(query, EffectString.trim);
+  const text = isMemoryLink(input) ? '' : input;
   const key = JSON.stringify([text, scope]);
   const [state, setState] = useState<SearchState>();
   useEffect(() => {
