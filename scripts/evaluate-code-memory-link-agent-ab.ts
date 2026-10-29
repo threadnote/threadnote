@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Console, Effect, FileSystem} from 'effect';
@@ -18,6 +19,8 @@ import {parseCodeMemoryLinkAgentEvidenceJsonl} from '@threadnote/threadnote/eval
 import {verifyManagedDevelopmentRuntimeForSource} from './development-runtime.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const program = Effect.gen(function* () {
   const options = parseArguments(yield* scriptArguments());
@@ -62,7 +65,8 @@ const program = Effect.gen(function* () {
       ScriptError.make({message: 'Agent A/B candidate does not match the verified installed runtime.', cause}),
   });
   yield* Console.log(JSON.stringify(result, undefined, 2));
-  if (result.gate.status !== 'passed') return yield* ScriptError.make({message: result.gate.failures.join('\n')});
+  if (result.gate.status !== 'passed')
+    return yield* ScriptError.make({message: EffectArray.join(result.gate.failures, '\n')});
 });
 
 function parseArguments(args: readonly string[]): {
@@ -106,7 +110,12 @@ function parseArguments(args: readonly string[]): {
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }
 

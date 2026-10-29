@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphActiveViewFence, type CodeGraphActiveViewIdentity} from './models.js';
@@ -61,7 +62,8 @@ export const selectActiveViewIdentities = Effect.fn('codeGraph.selectActiveViewI
      LIMIT ?`,
     [boundedLimit],
   );
-  return rows.map(
+  return EffectArray.map(
+    rows,
     row =>
       ({
         ...(typeof row.activated_at === 'string' ? {activatedAt: row.activated_at} : {}),

@@ -1,11 +1,23 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {testHttpFetch} from '@threadnote/testing/http-fetch';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {parseSourceConfiguration} from '@threadnote/threadnote/integrations/config';
+import {isJsonObject} from '@threadnote/platform/json';
 import {startManagerTestServer, type ManagerTestServer} from '../helpers/manager-test-server.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireJsonObjectArray(value: unknown): Record<string, unknown>[] {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array of JSON objects.');
+  return EffectArray.map(value, requireJsonObject);
+}
 
 let home: string;
 let server: ManagerTestServer;
@@ -35,7 +47,8 @@ async function request(path: string, body?: Record<string, unknown>, authorized 
     headers: {...(authorized ? {authorization: `Bearer ${authToken}`} : {}), 'content-type': 'application/json'},
     ...(body ? {body: JSON.stringify(body)} : {}),
   });
-  return {status: response.status, body: (await response.json()) as Record<string, unknown>};
+  const value: unknown = await response.json();
+  return {status: response.status, body: requireJsonObject(value)};
 }
 
 describe('Manager Superhuman integration HTTP boundary', () => {
@@ -117,8 +130,10 @@ describe('Manager Superhuman integration HTTP boundary', () => {
     expect((await request('/api/integrations', undefined, false)).status).toBe(401);
     const response = await request('/api/integrations');
     expect(response.status).toBe(200);
-    expect((response.body.obsidian as {sources: {id: string}[]}).sources.map(source => source.id)).toEqual(['vault']);
-    const source = (response.body.superhuman as {sources: Record<string, unknown>[]}).sources[0];
+    expect(
+      EffectArray.map(requireJsonObjectArray(requireJsonObject(response.body.obsidian).sources), source => source.id),
+    ).toEqual(['vault']);
+    const source = requireJsonObjectArray(requireJsonObject(response.body.superhuman).sources)[0];
     expect(source).toMatchObject({id: 'docs', credentialConfigured: false, status: 'needs-attention', chunks: 0});
     expect(JSON.stringify(response.body)).not.toContain('synthetic-manager-token');
     expect((await request('/api/integrations/superhuman')).status).toBe(200);
@@ -161,8 +176,12 @@ describe('Manager Superhuman integration HTTP boundary', () => {
       ).status,
     ).toBe(200);
     let sources = parseSourceConfiguration(await readFile(configPath, 'utf8')).sources;
-    expect(sources.find(source => source.id === 'docs')?.enabled).toBe(false);
-    expect(sources.find(source => source.id === 'vault')?.type).toBe('obsidian');
+    expect(EffectOption.getOrUndefined(EffectArray.findFirst(sources, source => source.id === 'docs'))?.enabled).toBe(
+      false,
+    );
+    expect(EffectOption.getOrUndefined(EffectArray.findFirst(sources, source => source.id === 'vault'))?.type).toBe(
+      'obsidian',
+    );
     expect((await request('/api/integrations/superhuman', {action: 'remove-source', id: 'docs'})).status).toBe(200);
     expect(parseSourceConfiguration(await readFile(configPath, 'utf8')).sources).toHaveLength(2);
     expect(
@@ -170,7 +189,7 @@ describe('Manager Superhuman integration HTTP boundary', () => {
         .status,
     ).toBe(200);
     sources = parseSourceConfiguration(await readFile(configPath, 'utf8')).sources;
-    expect(sources.map(source => source.id)).toEqual(['vault']);
+    expect(EffectArray.map(sources, source => source.id)).toEqual(['vault']);
   });
 
   it('creates and edits a local-token source while retaining its paused state and page selections', async () => {
@@ -264,7 +283,7 @@ describe('Manager Superhuman integration HTTP boundary', () => {
     expect(source).toMatchObject({type: 'superhuman', credentialEnv: credentialEnvName});
     expect(source).not.toHaveProperty('credentialStorage');
     const listed = await request('/api/integrations/superhuman');
-    expect((listed.body.sources as Record<string, unknown>[])[0]).toMatchObject({credentialConfigured: true});
+    expect(requireJsonObjectArray(listed.body.sources)[0]).toMatchObject({credentialConfigured: true});
     const resolvedWithEnvironment = await request('/api/integrations/superhuman', {
       action: 'resolve-links',
       links: ['https://other.example/d/a'],

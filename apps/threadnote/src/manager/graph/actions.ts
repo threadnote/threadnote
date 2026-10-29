@@ -6,13 +6,13 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {errorMessage} from '@threadnote/platform/errors';
 import {requireString} from '@threadnote/manager/request_inputs';
 
-class ManagerExplicitGraphActionError extends Schema.TaggedError<ManagerExplicitGraphActionError>()(
-  'ManagerExplicitGraphActionError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class ManagerExplicitGraphActionError extends Schema.TaggedError<
+  ManagerExplicitGraphActionError,
+  {readonly brand: unique symbol}
+>()('ManagerExplicitGraphActionError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export const runManagerExplicitCwdGraphIndex = Effect.fn('managerGraphActions.runExplicitCwdGraphIndex')(function* (
   config: RuntimeConfig,

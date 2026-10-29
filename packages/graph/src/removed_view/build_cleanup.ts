@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, PlatformError, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runtimeTextDirectoryNamePage} from '@threadnote/platform/system';
@@ -5,6 +6,8 @@ import {parseCodeGraphBuildStatus, type CodeGraphBuildStatus} from '../build_sta
 import {codeGraphRepositoryRoot} from '../layout.js';
 import type {CodeGraphRemovedViewCleanupPageResult} from './cleanup.js';
 import {codeGraphScopeViewKey} from '../scope/identity.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_REMOVED_VIEW_BUILD_STATUS_LIMIT = 10_000;
 export const CODE_GRAPH_REMOVED_VIEW_BUILD_DIRECTORY_ENTRY_LIMIT = CODE_GRAPH_REMOVED_VIEW_BUILD_STATUS_LIMIT * 2 + 2;
@@ -38,7 +41,11 @@ export function codeGraphRemovedViewBuildStatusInventory(page: {
   readonly overflow: boolean;
 }): readonly string[] | undefined {
   if (page.overflow || page.names.length > CODE_GRAPH_REMOVED_VIEW_BUILD_DIRECTORY_ENTRY_LIMIT) return undefined;
-  const statusNames = page.names.filter(name => BUILD_STATUS_FILE.test(name)).sort();
+  const names = page.names;
+  const statusNames = EffectArray.filter(
+    names,
+    (name, __effectArrayIndex) => __effectArrayIndex in names && BUILD_STATUS_FILE.test(name),
+  ).sort();
   return statusNames.length <= CODE_GRAPH_REMOVED_VIEW_BUILD_STATUS_LIMIT ? statusNames : undefined;
 }
 
@@ -68,10 +75,13 @@ type BuildStatusCursor =
       readonly mode: 'verify';
     };
 
-class InvalidBuildSidecarError extends Schema.TaggedError<InvalidBuildSidecarError>()('InvalidBuildSidecarError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class InvalidBuildSidecarError extends Schema.TaggedError<InvalidBuildSidecarError, {readonly brand: unique symbol}>()(
+  'InvalidBuildSidecarError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 /**
  * Remove at most one exact terminal status for the tombstoned snapshot.
@@ -150,7 +160,7 @@ const cleanupBuildStatusUnit = Effect.fn('codeGraph.cleanupRemovedViewBuildStatu
       state: 'progress',
     } as const satisfies CodeGraphRemovedViewCleanupPageResult;
   }
-  const remainingNames = statusNames.filter(name => {
+  const remainingNames = EffectArray.filter(statusNames, name => {
     if (scan.afterBuildId === undefined) return true;
     return name > `${scan.afterBuildId}.json`;
   });
@@ -181,7 +191,9 @@ const cleanupBuildStatusUnit = Effect.fn('codeGraph.cleanupRemovedViewBuildStatu
   }
   if (candidate === undefined) {
     const hasMore = remainingNames.length > pageNames.length;
-    const lastBuildId = pageNames.at(-1)?.slice(0, -5);
+    const lastBuildId = Effect2.pipe(pageNames.at(-1), effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.slice(0, -5)),
+    );
     if (hasMore) {
       if (lastBuildId === undefined) {
         return yield* InvalidBuildSidecarError.make({message: 'Build status page cursor is unavailable.'});
@@ -334,7 +346,7 @@ const readManagerContextCandidate = Effect.fn('codeGraph.readRemovedViewManagerC
         typeof value.worktreePath === 'string' &&
         value.worktreePath.length > 0 &&
         new TextEncoder().encode(value.worktreePath).byteLength <= 4_096 &&
-        !value.worktreePath.includes('\0')
+        !Effect2.pipe(value.worktreePath, EffectString.includes('\0'))
       );
     },
     catch: () => InvalidBuildSidecarError.make({message: 'Build manager context is invalid.'}),
@@ -409,7 +421,7 @@ function sameObservedSidecar(left: ObservedBuildSidecar, right: ObservedBuildSid
 }
 
 function parseBuildStatusCursor(cursor: string): BuildStatusCursor | undefined {
-  const fields = cursor.split(':');
+  const fields = Effect2.pipe(cursor, EffectString.split(':'));
   if (fields[0] !== 'bs1') return undefined;
   if (
     fields.length === 4 &&
@@ -448,7 +460,10 @@ function parseBuildStatusCursor(cursor: string): BuildStatusCursor | undefined {
 
 function nextBuildStatusScanDigest(digest: string, observed: BuildStatusCandidate): string {
   return sha256HexSync(
-    ['threadnote-code-graph-build-cleanup-page-v1', digest, observed.status.buildId, observed.identity].join('\0'),
+    EffectArray.join(
+      ['threadnote-code-graph-build-cleanup-page-v1', digest, observed.status.buildId, observed.identity],
+      '\0',
+    ),
   );
 }
 
@@ -464,12 +479,12 @@ function buildResetCursor(...identity: readonly string[]): string {
   return sealedBuildCursor([
     'bs1',
     'r',
-    sha256HexSync(['threadnote-code-graph-build-cleanup-reset-v1', ...identity].join('\0')),
+    sha256HexSync(EffectArray.join(['threadnote-code-graph-build-cleanup-reset-v1', ...identity], '\0')),
   ]);
 }
 
 function sealedBuildCursor(fields: readonly string[]): string {
-  return [...fields, buildCursorSeal(fields)].join(':');
+  return EffectArray.join([...fields, buildCursorSeal(fields)], ':');
 }
 
 function validBuildCursorSeal(fields: readonly string[], seal: string): boolean {
@@ -477,7 +492,7 @@ function validBuildCursorSeal(fields: readonly string[], seal: string): boolean 
 }
 
 function buildCursorSeal(fields: readonly string[]): string {
-  return sha256HexSync(['threadnote-code-graph-build-cleanup-cursor-v1', ...fields].join('\0'));
+  return sha256HexSync(EffectArray.join(['threadnote-code-graph-build-cleanup-cursor-v1', ...fields], '\0'));
 }
 
 function sameOptionalObservedSidecar(
@@ -501,15 +516,18 @@ function sameObservedFileInfo(left: FileSystem.File.Info, right: FileSystem.File
 
 function sidecarIdentity(info: FileSystem.File.Info, contentDigest: string): string {
   return sha256HexSync(
-    [
-      'threadnote-code-graph-build-cleanup-file-v1',
-      contentDigest,
-      String(info.dev),
-      String(Option.getOrUndefined(info.ino)),
-      String(info.size),
-      String(info.mode),
-      String(Option.getOrUndefined(info.mtime)?.getTime()),
-    ].join('\0'),
+    EffectArray.join(
+      [
+        'threadnote-code-graph-build-cleanup-file-v1',
+        contentDigest,
+        String(info.dev),
+        String(Option.getOrUndefined(info.ino)),
+        String(info.size),
+        String(info.mode),
+        String(Option.getOrUndefined(info.mtime)?.getTime()),
+      ],
+      '\0',
+    ),
   );
 }
 

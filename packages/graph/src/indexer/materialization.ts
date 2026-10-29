@@ -1,3 +1,6 @@
+import {degradedParserCacheIdentity, groupFilesByCacheIdentity} from './materialization_batch.js';
+export {cachedFactsMetadata} from './materialization_batch.js';
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, Effect, FileSystem, Option, Path} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -73,6 +76,8 @@ import {
   type CodeGraphSymbol,
   type RepositoryIdentity,
 } from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface DirectPersistentCapacityContext {
   readonly capacityProtection?: DirectPersistentCapacityProtection;
@@ -198,6 +203,9 @@ export interface CodeGraphCacheContentCoalescer {
 
 const CODE_GRAPH_CACHE_TIMESTAMP_CAPACITY_PLACEHOLDER = '1970-01-01T00:00:00.000Z';
 
+/** Store surface required by the content coalescer. */
+export type CodeGraphCacheContentStore = Pick<CodeGraphStoreShape, 'cacheFacts'>;
+
 /** @internal Exposed for cache coalescing/cancellation contract tests. */
 export function cacheContentBatch(options: {
   readonly databasePath: string;
@@ -217,7 +225,7 @@ export function cacheContentBatch(options: {
   readonly parserPool: CodeGraphParserPoolShape;
   readonly preparationGate?: CodeGraphIndexResourceGate;
   readonly persistentCapacityProtector: CodeGraphDirectPersistentCapacityProtector;
-  readonly store: CodeGraphStoreShape;
+  readonly store: CodeGraphCacheContentStore;
   readonly threadnoteHome: string;
   readonly treeSitter: TreeSitterRuntimeShape;
 }): CodeGraphCacheContentCoalescer {
@@ -306,8 +314,8 @@ export function cacheContentBatch(options: {
           message: 'Code graph cache persistence context is unavailable.',
         });
       const representative = group.files[0];
-      const groupBytes = group.files.reduce((total, file) => total + file.size, 0);
-      const groupFactBytes = group.facts.reduce((total, fact) => total + fact.bytes, 0);
+      const groupBytes = EffectArray.reduce(group.files, 0, (total, file) => total + file.size);
+      const groupFactBytes = EffectArray.reduce(group.facts, 0, (total, fact) => total + fact.bytes);
       yield* emitContentProgress(
         options.onProgress,
         context,
@@ -360,10 +368,10 @@ export function cacheContentBatch(options: {
           language: representative.language,
           path: representative.path,
           persistMilliseconds: elapsed,
-          relations: group.facts.reduce((total, fact) => total + fact.facts.edges.length, 0),
+          relations: EffectArray.reduce(group.facts, 0, (total, fact) => total + fact.facts.edges.length),
           sizeBucket: codeGraphSourceSizeBucket(groupBytes),
           stage: 'persisting',
-          symbols: group.facts.reduce((total, fact) => total + fact.facts.symbols.length, 0),
+          symbols: EffectArray.reduce(group.facts, 0, (total, fact) => total + fact.facts.symbols.length),
         },
         extractionMilliseconds,
         persistenceMilliseconds,
@@ -460,9 +468,9 @@ export function cacheContentBatch(options: {
         const lane = planCodeGraphExtractionLanes(remainingGroups, parserCapacity, extractionCostModel)[0];
         const [groupWindow, rest] = takeCodeGraphExtractionWindow(lane.groups, windowSize);
         remainingGroups = rest;
-        const window = groupWindow
-          .flatMap(group => group.files)
-          .sort((left, right) => compareCodeUnits(left.path, right.path));
+        const window = EffectArray.flatMap(groupWindow, group => group.files).sort((left, right) =>
+          compareCodeUnits(left.path, right.path),
+        );
         const runExtraction = () =>
           Effect.gen(function* () {
             let windowCompleted = 0;
@@ -595,13 +603,21 @@ export function cacheContentBatch(options: {
                 requestMilliseconds: observed.requestMilliseconds,
               });
             }
-            extractionMilliseconds += results.reduce((total, result) => total + result.result.parseMilliseconds, 0);
+            extractionMilliseconds += EffectArray.reduce(
+              results,
+              0,
+              (total, result) => total + result.result.parseMilliseconds,
+            );
             parsedCompleted += results.length;
-            const resultsByPath = new Map(results.map(result => [result.file.path, result.result]));
+            const resultsByPath = new Map(EffectArray.map(results, result => [result.file.path, result.result]));
             const extractedRows: CodeGraphCacheExtractedRow[] = [];
             for (const group of groupFilesByCacheIdentity(window, options.languagePacks)) {
-              const durableFiles = group.files.filter(file => !resultsByPath.get(file.path)!.degraded);
-              const degradedFiles = group.files.filter(file => resultsByPath.get(file.path)!.degraded);
+              const durableFiles = EffectArray.filter(group.files, file => !resultsByPath.get(file.path)!.degraded);
+              const degradedFiles = EffectArray.filter(
+                group.files,
+                (file, __effectArrayIndex) =>
+                  __effectArrayIndex in group.files && resultsByPath.get(file.path)!.degraded,
+              );
               for (const [degraded, cacheFiles] of [
                 [false, durableFiles],
                 [true, degradedFiles],
@@ -722,16 +738,12 @@ function extractParserFacts(
   });
 }
 
-function degradedParserCacheIdentity(activeIdentity: string): string {
-  return sha256HexSync(`code-graph-parser-degraded-v1\n${activeIdentity}`);
-}
-
 /** Cache generations that can satisfy inventory content admission for active parser packs. */
 export function codeGraphParserCacheLookupGenerations(activeIdentities: readonly string[]): readonly {
   readonly activeIdentity: string;
   readonly storedIdentity: string;
 }[] {
-  return [...new Set(activeIdentities)].sort(compareCodeUnits).flatMap(activeIdentity => [
+  return EffectArray.flatMap([...new Set(activeIdentities)].sort(compareCodeUnits), activeIdentity => [
     {activeIdentity, storedIdentity: activeIdentity},
     {activeIdentity, storedIdentity: degradedParserCacheIdentity(activeIdentity)},
   ]);
@@ -741,9 +753,12 @@ export function codeGraphParserCacheLookupGenerations(activeIdentities: readonly
 export function codeGraphActiveParserCacheKey(key: string, storedIdentity: string, activeIdentity: string): string {
   if (storedIdentity === activeIdentity) return key;
   const terminalGeneration = `\0${storedIdentity}`;
-  if (key.endsWith(terminalGeneration)) return `${key.slice(0, -terminalGeneration.length)}\0${activeIdentity}`;
+  if (Effect2.pipe(key, EffectString.endsWith(terminalGeneration)))
+    return `${Effect2.pipe(key, EffectString.slice(0, -terminalGeneration.length))}\0${activeIdentity}`;
   const embeddedGeneration = `\0${storedIdentity}\0`;
-  return key.includes(embeddedGeneration) ? key.replace(embeddedGeneration, () => `\0${activeIdentity}\0`) : key;
+  if (!Effect2.pipe(key, EffectString.includes(embeddedGeneration))) return key;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The opaque identity must remain literal even when it contains dollar replacement patterns; Effect String accepts replacement strings only.
+  return key.replace(embeddedGeneration, () => `\0${activeIdentity}\0`);
 }
 
 export {verifyIndexInput} from './input/observation.js';
@@ -752,7 +767,7 @@ export function extractorSetIdentity(
   files: readonly {readonly contentHash: string; readonly path: string}[],
   languagePacks: CodeGraphLanguagePackRegistryShape = BUILTIN_LANGUAGE_PACK_REGISTRY,
 ): string {
-  const paths = files.map(file => file.path);
+  const paths = EffectArray.map(files, file => file.path);
   return codeGraphExtractorSetIdentityFromIdentities(
     languagePacks.activeCacheIdentities(paths),
     languagePacks.activeDerivationIdentities(paths),
@@ -783,11 +798,10 @@ export function snapshotIdentity(
     `snapshot-v2\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${identity.repositoryId}\n` +
     `${dirty ? identity.worktreeId : 'shared-commit'}\n${identity.headCommit}\n${dirty ? 'dirty' : 'clean'}\n` +
     `${extractorSet}\n${codeGraphScopeIdentitySuffix(scope)}`;
-  return `cgsn_${codeGraphInventorySha256Hex(
-    prefix,
-    files,
-    file => `${file.path}\0${file.contentHash}\0${file.source}`,
-  ).slice(0, 40)}`;
+  return `cgsn_${Effect2.pipe(
+    codeGraphInventorySha256Hex(prefix, files, file => `${file.path}\0${file.contentHash}\0${file.source}`),
+    EffectString.slice(0, 40),
+  )}`;
 }
 
 /**
@@ -805,9 +819,12 @@ export function sparseOverlaySnapshotIdentity(
   overlayFingerprint: string,
   scope?: CodeGraphScopeIdentity,
 ): string {
-  return `cgsn_${sha256HexSync(
-    `snapshot-sparse-overlay-v2\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${identity.repositoryId}\n${identity.worktreeId}\n${identity.headCommit}\n${baseSnapshotId}\n${extractorSet}\n${overlayFingerprint}${codeGraphScopeIdentitySuffix(scope)}`,
-  ).slice(0, 40)}`;
+  return `cgsn_${Effect2.pipe(
+    sha256HexSync(
+      `snapshot-sparse-overlay-v2\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${identity.repositoryId}\n${identity.worktreeId}\n${identity.headCommit}\n${baseSnapshotId}\n${extractorSet}\n${overlayFingerprint}${codeGraphScopeIdentitySuffix(scope)}`,
+    ),
+    EffectString.slice(0, 40),
+  )}`;
 }
 
 /** Content identity for a persisted-base delta without a flat full-inventory hash. */
@@ -817,9 +834,12 @@ export function sparseOverlayGraphContentIdentity(
   overlayFingerprint: string,
   scope?: CodeGraphScopeIdentity,
 ): string {
-  return `cgc_${sha256HexSync(
-    `graph-content-sparse-overlay-v2\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${baseGraphContentId}\n${extractorSet}\n${overlayFingerprint}${codeGraphScopeIdentitySuffix(scope)}`,
-  ).slice(0, 40)}`;
+  return `cgc_${Effect2.pipe(
+    sha256HexSync(
+      `graph-content-sparse-overlay-v2\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${baseGraphContentId}\n${extractorSet}\n${overlayFingerprint}${codeGraphScopeIdentitySuffix(scope)}`,
+    ),
+    EffectString.slice(0, 40),
+  )}`;
 }
 
 /**
@@ -1195,7 +1215,7 @@ function saturatingMultiply(value: number, multiplier: number): number {
 }
 
 function saturatingAdd(...values: readonly number[]): number {
-  return values.reduce((total, value) => Math.min(Number.MAX_SAFE_INTEGER, total + value), 0);
+  return EffectArray.reduce(values, 0, (total, value) => Math.min(Number.MAX_SAFE_INTEGER, total + value));
 }
 
 export interface CodeGraphMaterializationReplayMetrics {
@@ -1402,10 +1422,12 @@ export function materializationRows(
     deduplicatedEdges: deduplicated.edges,
     deduplicatedReferences: deduplicated.references,
     edges,
-    lookupKeys: symbols.reduce((total, symbol) => total + (symbol.lookupKeys?.length ?? 0), 0),
-    referenceCandidates: references.reduce(
-      (total, reference) => total + reference.lookupTiers.reduce((tierTotal, tier) => tierTotal + tier.length, 0),
+    lookupKeys: EffectArray.reduce(symbols, 0, (total, symbol) => total + (symbol.lookupKeys?.length ?? 0)),
+    referenceCandidates: EffectArray.reduce(
+      references,
       0,
+      (total, reference) =>
+        total + EffectArray.reduce(reference.lookupTiers, 0, (tierTotal, tier) => tierTotal + tier.length),
     ),
     references: references.length,
     symbols: symbols.length,
@@ -1653,7 +1675,7 @@ export function incrementalMaterializationMetrics(
   storage: MaterializationStorageTelemetry,
   dirty: boolean,
 ): CodeGraphMaterializationMetrics {
-  const sourceBytesTotal = assessment.files.reduce((total, file) => total + file.size, 0);
+  const sourceBytesTotal = EffectArray.reduce(assessment.files, 0, (total, file) => total + file.size);
   return {
     attributedFilesCompleted: assessment.files.length,
     batchesCompleted: 1,
@@ -1680,7 +1702,7 @@ export function materializationStorageFiles(
       Effect.map(info => Math.min(Number(info.size), Number.MAX_SAFE_INTEGER)),
       Effect.orElseSucceed(() => 0),
     );
-  const sidecarFiles = sidecarDatabasePaths.flatMap(sidecar => [
+  const sidecarFiles = EffectArray.flatMap(sidecarDatabasePaths, sidecar => [
     bytes(sidecar),
     bytes(`${sidecar}-journal`),
     bytes(`${sidecar}-shm`),
@@ -1771,7 +1793,7 @@ export function cachedFileKeys(
     const cacheIdentities =
       files === undefined
         ? languagePacks.cacheIdentities
-        : languagePacks.activeCacheIdentities(files.map(file => file.path));
+        : languagePacks.activeCacheIdentities(EffectArray.map(files, file => file.path));
     const generations = codeGraphParserCacheLookupGenerations(cacheIdentities);
     const sets = yield* Effect.forEach(
       generations,
@@ -1782,7 +1804,7 @@ export function cachedFileKeys(
             Effect.map(
               keys =>
                 new Set(
-                  [...keys].map(key =>
+                  EffectArray.map([...keys], key =>
                     codeGraphActiveParserCacheKey(key, generation.storedIdentity, generation.activeIdentity),
                   ),
                 ),
@@ -1790,7 +1812,7 @@ export function cachedFileKeys(
           ),
       {concurrency: 1},
     );
-    const keys = new Set(sets.flatMap(set => [...set]));
+    const keys = new Set(EffectArray.flatMap(sets, set => [...set]));
     yield* onProgress?.({
       activity: {
         elapsedMilliseconds: Math.max(0, (yield* Clock.currentTimeMillis) - startedAt),
@@ -1822,7 +1844,7 @@ export function loadCachedFacts(
     group =>
       Effect.gen(function* () {
         const active = yield* store.loadCachedFacts(databasePath, group.files, group.cacheIdentity);
-        const missing = group.files.filter(file => !active.facts.has(file.path));
+        const missing = EffectArray.filter(group.files, file => !active.facts.has(file.path));
         if (missing.length === 0) return active;
         const degraded = yield* store.loadCachedFacts(
           databasePath,
@@ -1876,7 +1898,7 @@ export function loadCachedFactsWithPackProvenance(
   },
   unknown
 > {
-  const provenanceById = new Map(provenance.map(pack => [pack.id, pack]));
+  const provenanceById = new Map(EffectArray.map(provenance, pack => [pack.id, pack]));
   const groups = new Map<string, CodeGraphInventoryFile[]>();
   let unmatched = false;
   for (const file of files) {
@@ -1896,7 +1918,7 @@ export function loadCachedFactsWithPackProvenance(
     ([cacheIdentity, groupFiles]) =>
       Effect.gen(function* () {
         const active = yield* store.loadCachedFacts(databasePath, groupFiles, cacheIdentity);
-        const missing = groupFiles.filter(file => !active.facts.has(file.path));
+        const missing = EffectArray.filter(groupFiles, file => !active.facts.has(file.path));
         if (missing.length === 0) return active;
         const degraded = yield* store.loadCachedFacts(
           databasePath,
@@ -1934,67 +1956,4 @@ export function loadCachedFactsWithPackProvenance(
       return {bytes, bytesByPath, facts};
     }),
   );
-}
-
-export function cachedFactsMetadata(
-  store: CodeGraphStoreShape,
-  databasePath: string,
-  files: readonly CodeGraphInventoryFile[],
-  languagePacks: CodeGraphLanguagePackRegistryShape,
-): Effect.Effect<
-  {readonly bytes: number; readonly bytesByPath: ReadonlyMap<string, number>; readonly files: number},
-  unknown
-> {
-  return Effect.forEach(
-    groupFilesByCacheIdentity(files, languagePacks),
-    group =>
-      Effect.gen(function* () {
-        const active = yield* store.loadCachedFacts(databasePath, group.files, group.cacheIdentity, {decode: false});
-        const activeKeys = active.keys ?? new Set(active.facts.keys());
-        const missing = group.files.filter(file => !activeKeys.has(file.path));
-        if (missing.length === 0)
-          return {bytes: active.bytes, bytesByPath: active.bytesByPath ?? new Map(), keys: activeKeys};
-        const degraded = yield* store.loadCachedFacts(
-          databasePath,
-          missing,
-          degradedParserCacheIdentity(group.cacheIdentity),
-          {decode: false},
-        );
-        const degradedKeys = degraded.keys ?? new Set(degraded.facts.keys());
-        return {
-          bytes: active.bytes + degraded.bytes,
-          bytesByPath: new Map([...(active.bytesByPath ?? []), ...(degraded.bytesByPath ?? [])]),
-          keys: new Set([...activeKeys, ...degradedKeys]),
-        };
-      }),
-    {concurrency: 1},
-  ).pipe(
-    Effect.map(groups => {
-      const bytesByPath = new Map(
-        groups.flatMap(group => [...group.bytesByPath]).map(([path, bytes]) => [path, bytes] as const),
-      );
-      return {
-        bytes: [...bytesByPath.values()].reduce((total, bytes) => total + bytes, 0),
-        bytesByPath,
-        files: new Set(groups.flatMap(group => [...group.keys])).size,
-      };
-    }),
-  );
-}
-
-function groupFilesByCacheIdentity<T extends {readonly path: string}>(
-  files: readonly T[],
-  languagePacks: CodeGraphLanguagePackRegistryShape,
-): readonly {readonly cacheIdentity: string; readonly files: readonly T[]}[] {
-  const groups = new Map<string, T[]>();
-  for (const file of files) {
-    const matched = languagePacks.cacheIdentityForPath(file.path);
-    const identity = matched._tag === 'Some' ? matched.value : 'unmatched';
-    const group = groups.get(identity);
-    if (group) group.push(file);
-    else groups.set(identity, [file]);
-  }
-  return [...groups]
-    .sort(([left], [right]) => compareCodeUnits(left, right))
-    .map(([cacheIdentity, groupedFiles]) => ({cacheIdentity, files: groupedFiles}));
 }

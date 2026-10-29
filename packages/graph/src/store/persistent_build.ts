@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import {Clock, DateTime, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -39,6 +40,8 @@ import {
   stageSnapshotMonikers,
 } from './staging_core.js';
 import {persistentReexportAliasCapacityBoundary, type ReexportClosureRow} from './resolution/core.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** @internal Exposed for deterministic SQLite snapshot-contract tests. */
 
@@ -263,7 +266,9 @@ const retireIncompleteWorktreeSnapshots = Effect.fn('codeGraph.retireIncompleteW
             )
           ORDER BY id
         `;
-        const reclaimableIds = [...new Set(reclaimable.map(snapshot => snapshot.id))].sort(compareCodeUnits);
+        const reclaimableIds = [...new Set(EffectArray.map(reclaimable, snapshot => snapshot.id))].sort(
+          compareCodeUnits,
+        );
         for (const snapshotIds of chunk(reclaimableIds, 100)) {
           yield* sql`DELETE FROM snapshot_build_owners WHERE ${sql.in('snapshot_id', snapshotIds)}`;
         }
@@ -376,7 +381,7 @@ const failBuildingSnapshot = Effect.fn('codeGraph.failBuildingSnapshot')(functio
     Effect.gen(function* () {
       yield* sql`
         UPDATE snapshots
-        SET state = ${targetState}, failure_summary = COALESCE(failure_summary, ${summary.slice(0, 2_000)}),
+        SET state = ${targetState}, failure_summary = COALESCE(failure_summary, ${Effect2.pipe(summary, EffectString.slice(0, 2_000))}),
           completed_at = ${DateTime.formatIso(yield* DateTime.now)}
         WHERE id = ${snapshotId}
           AND state = 'building'
@@ -413,7 +418,7 @@ const releasePersistentSnapshotBuild = Effect.fn('codeGraph.releasePersistentSna
     Effect.gen(function* () {
       const released = yield* sql<{readonly id: string}>`
         UPDATE snapshots
-        SET failure_summary = COALESCE(failure_summary, ${summary.slice(0, 2_000)})
+        SET failure_summary = COALESCE(failure_summary, ${Effect2.pipe(summary, EffectString.slice(0, 2_000))})
         WHERE id = ${snapshotId}
           AND state = 'building'
           AND EXISTS (
@@ -664,7 +669,10 @@ const expandTransitiveReexportAliases = Effect.fn('codeGraph.expandTransitiveRee
     const closure = yield* sql.unsafe<ReexportClosureRow>(
       `WITH RECURSIVE
        requested(source_path, local_name) AS (
-         VALUES ${seeds.map(() => '(?, ?)').join(', ')}
+         VALUES ${EffectArray.join(
+           EffectArray.map(seeds, () => '(?, ?)'),
+           ', ',
+         )}
        ),
        closure(source_path, local_name, target_path, imported_name) AS (
          SELECT provenance.source_path, provenance.local_name,
@@ -695,7 +703,7 @@ const expandTransitiveReexportAliases = Effect.fn('codeGraph.expandTransitiveRee
        ORDER BY closure.source_path, closure.local_name, closure.target_path, closure.imported_name
        LIMIT ${REEXPORT_CLOSURE_PAGE_MAXIMUM_ROWS + 1}`,
       [
-        ...seeds.flatMap(seed => [seed.source_path, seed.local_name]),
+        ...EffectArray.flatMap(seeds, seed => [seed.source_path, seed.local_name]),
         ...(persistent ? [snapshotId, snapshotId, snapshotId] : []),
       ],
     );
@@ -707,7 +715,7 @@ const expandTransitiveReexportAliases = Effect.fn('codeGraph.expandTransitiveRee
       continue;
     }
     const encoded = uniqueBy(
-      closure.map(row => ({
+      EffectArray.map(closure, row => ({
         ...row,
         sourceKeyComponent: `path:${encodeURIComponent(row.source_path)}:name:${encodeURIComponent(row.local_name)}`,
         targetKeyComponent: `path:${encodeURIComponent(row.target_path)}:name:${encodeURIComponent(row.imported_name)}`,
@@ -725,8 +733,11 @@ const expandTransitiveReexportAliases = Effect.fn('codeGraph.expandTransitiveRee
         `INSERT INTO activation_reexport_closure_page (
            source_path, local_name, target_path, imported_name,
            source_key_component, target_key_component
-         ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?)').join(', ')}`,
-        batch.flatMap(row => [
+         ) VALUES ${EffectArray.join(
+           EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?)'),
+           ', ',
+         )}`,
+        EffectArray.flatMap(batch, row => [
           row.source_path,
           row.local_name,
           row.target_path,
@@ -868,8 +879,11 @@ const expandTransitiveReexportAliases = Effect.fn('codeGraph.expandTransitiveRee
               `INSERT OR IGNORE INTO snapshot_symbol_lookup (
                  snapshot_id, lookup_key, symbol_id, resolution_domain, exported,
                  provenance, evidence_edge_id, evidence_path
-               ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-              batch.flatMap(row => [
+               ) VALUES ${EffectArray.join(
+                 EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?, ?)'),
+                 ', ',
+               )}`,
+              EffectArray.flatMap(batch, row => [
                 mode.snapshotId,
                 row.lookup_key,
                 row.symbol_id,
@@ -885,8 +899,11 @@ const expandTransitiveReexportAliases = Effect.fn('codeGraph.expandTransitiveRee
               `INSERT OR IGNORE INTO activation_symbol_lookup (
                  lookup_key, symbol_id, resolution_domain, exported,
                  provenance, evidence_edge_id, evidence_path
-               ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-              batch.flatMap(row => [
+               ) VALUES ${EffectArray.join(
+                 EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?)'),
+                 ', ',
+               )}`,
+              EffectArray.flatMap(batch, row => [
                 row.lookup_key,
                 row.symbol_id,
                 'typescript',

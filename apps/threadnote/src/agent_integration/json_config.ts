@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {JsonObject} from '@threadnote/platform/json';
 import {
   applyEdits,
@@ -10,6 +11,9 @@ import {
   type ParseError,
 } from 'jsonc-parser';
 import {escapeRegExp, isJsonObject} from '../utils.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 /** A string is a literal key (including dots); arrays address nested objects. */
 export type AgentJsonContainer = string | readonly string[];
@@ -46,7 +50,7 @@ export function parseAgentJson(content: string | undefined, codec: 'json' | 'jso
 
 function jsoncNodeValue(node: Node | undefined): unknown {
   if (node === undefined) return undefined;
-  if (node.type === 'array') return (node.children ?? []).map(jsoncNodeValue);
+  if (node.type === 'array') return EffectArray.map(node.children ?? [], jsoncNodeValue);
   if (node.type === 'object') {
     const result: Record<string, unknown> = {};
     for (const property of node.children ?? []) {
@@ -96,15 +100,15 @@ export function agentJsonHasComments(content: string): boolean {
 }
 
 function preserveJsoncComments(original: string, updated: string): string {
-  const eol = original.includes('\r\n') ? '\r\n' : '\n';
+  const eol = Effect.pipe(original, EffectString.includes('\r\n')) ? '\r\n' : '\n';
   const remaining = jsoncComments(updated);
-  const missing = jsoncComments(original).filter(comment => {
+  const missing = EffectArray.filter(jsoncComments(original), comment => {
     const index = remaining.indexOf(comment);
     if (index === -1) return true;
     remaining.splice(index, 1);
     return false;
   });
-  return missing.length === 0 ? updated : `${missing.join(eol)}${eol}${updated}`;
+  return missing.length === 0 ? updated : `${EffectArray.join(missing, eol)}${eol}${updated}`;
 }
 
 function jsoncComments(content: string): string[] {
@@ -113,7 +117,7 @@ function jsoncComments(content: string): string[] {
   for (let token = scanner.scan(); token !== SyntaxKind.EOF; token = scanner.scan()) {
     if (token === SyntaxKind.LineCommentTrivia || token === SyntaxKind.BlockCommentTrivia) {
       const offset = scanner.getTokenOffset();
-      comments.push(content.slice(offset, offset + scanner.getTokenLength()));
+      comments.push(Effect.pipe(content, EffectString.slice(offset, offset + scanner.getTokenLength())));
     }
   }
   return comments;
@@ -123,14 +127,18 @@ function patchJsoncValue(raw: string, target: string[], current: unknown, next: 
   if (JSON.stringify(current) === JSON.stringify(next)) return raw;
   if (isJsonObject(current) && isJsonObject(next)) {
     let updated = raw;
-    for (const key of new Set([...Object.keys(current), ...Object.keys(next)]))
+    for (const key of new Set([...EffectRecord.keys(current), ...EffectRecord.keys(next)]))
       updated = patchJsoncValue(updated, [...target, key], current[key], next[key]);
     return updated;
   }
   return applyEdits(
     raw,
     modify(raw, target, next, {
-      formattingOptions: {insertSpaces: true, tabSize: 2, eol: raw.includes('\r\n') ? '\r\n' : '\n'},
+      formattingOptions: {
+        insertSpaces: true,
+        tabSize: 2,
+        eol: Effect.pipe(raw, EffectString.includes('\r\n')) ? '\r\n' : '\n',
+      },
     }),
   );
 }
@@ -146,7 +154,7 @@ export function mergeAgentServer(
     const key = keys[depth];
     const child = current[key];
     if (child !== undefined && !isJsonObject(child))
-      throw new Error(`Expected an object at ${keys.slice(0, depth + 1).join('.')}.`);
+      throw new Error(`Expected an object at ${EffectArray.join(keys.slice(0, depth + 1), '.')}.`);
     return {
       ...current,
       [key]: depth === keys.length - 1 ? {...(child ?? {}), [name]: entry} : merge(child ?? {}, depth + 1),
@@ -170,7 +178,7 @@ export function removeAgentServer(
     const nextChild = depth === keys.length - 1 ? {...child} : remove(child, depth + 1);
     if (depth === keys.length - 1) delete nextChild[name];
     const next = {...current, [key]: nextChild};
-    if (createdContainer && depth >= keys.length - 1 - createdParents && Object.keys(nextChild).length === 0)
+    if (createdContainer && depth >= keys.length - 1 - createdParents && EffectRecord.keys(nextChild).length === 0)
       delete next[key];
     return next;
   };
@@ -191,18 +199,24 @@ export function jsonServerDisabled(
     typeof value === 'string' &&
     (policyGlobs
       ? new RegExp(
-          `^${value
-            .split('*')
-            .map(part => part.split('?').map(escapeRegExp).join('.'))
-            .join('.*')}$`,
+          `^${EffectArray.join(
+            EffectArray.map(Effect.pipe(value, EffectString.split('*')), part =>
+              EffectArray.join(EffectArray.map(Effect.pipe(part, EffectString.split('?')), escapeRegExp), '.'),
+            ),
+            '.*',
+          )}$`,
         ).test(name)
       : value === name);
   return (
     server.disabled === true ||
     server.enabled === false ||
-    [config.disabledServers, policy.excluded, policy.excludedServers].some(
-      value => Array.isArray(value) && value.some(matches),
+    EffectArray.some(
+      [config.disabledServers, policy.excluded, policy.excludedServers],
+      value => EffectArray.isArray(value) && EffectArray.some(value, matches),
     ) ||
-    [policy.allowed, policy.allowedServers].some(value => Array.isArray(value) && !value.some(matches))
+    EffectArray.some(
+      [policy.allowed, policy.allowedServers],
+      value => EffectArray.isArray(value) && !EffectArray.some(value, matches),
+    )
   );
 }

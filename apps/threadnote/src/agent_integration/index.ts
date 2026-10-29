@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {
   AGENT_CLIENTS,
@@ -33,6 +34,9 @@ import {toolRoot} from '@threadnote/workspace/installation';
 import {resolveAgentHostPaths} from './host_paths.js';
 import {LEGACY_ARTIFACT_TARGETS as HOST_TARGETS} from './adapters/legacy_targets.js';
 import {AGENT_SKILLS, CODEX_CLOUD_PERSONAL_AGENT_SKILLS, CURSOR_CLOUD_PERSONAL_AGENT_SKILLS} from './skills.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface InstallAgentIntegrationOptions {
   readonly cwd?: string;
@@ -57,10 +61,13 @@ interface AgentArtifactPlan {
 
 type AgentArtifactProfile = NonNullable<AgentIntegrationMcpReceipt['artifactProfile']>;
 
-class AgentIntegrationError extends Schema.TaggedError<AgentIntegrationError>()('AgentIntegrationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class AgentIntegrationError extends Schema.TaggedError<AgentIntegrationError, {readonly brand: unique symbol}>()(
+  'AgentIntegrationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export {readAgentIntegrationRegistry, registeredAgentClients, repairableAgentClients};
 
@@ -134,7 +141,10 @@ export const migrateLegacyAgentIntegrationsInTransaction = Effect.fn('agentInteg
   function* (config: RuntimeConfig, inferredClients: readonly AgentClient[], dryRun: boolean) {
     const existing = yield* readAgentIntegrationRegistry(config);
     if (existing !== undefined) return registeredAgentClients(existing);
-    const selected = AGENT_CLIENTS.filter(agent => inferredClients.includes(agent));
+    const selected = EffectArray.filter(
+      AGENT_CLIENTS,
+      (agent, __effectArrayIndex) => __effectArrayIndex in AGENT_CLIENTS && inferredClients.includes(agent),
+    );
     const unknownMcp: AgentIntegrationMcpReceipt = {name: 'threadnote', repair: false};
     if (dryRun) {
       yield* removeOrphanedLegacyInstructions(selected, true);
@@ -191,11 +201,17 @@ export const agentIntegrationDoctorChecks = Effect.fn('agentIntegrations.doctorC
 ) {
   const registry = yield* readAgentIntegrationRegistry(config);
   if (registry === undefined) {
-    return AGENT_CLIENTS.filter(agent => legacyInferredClients.includes(agent)).map(agent => ({
-      detail: 'legacy Threadnote MCP entry detected; repair will register host-specific instructions and skills',
-      name: `${agent} agent integration`,
-      status: 'warn' as const,
-    }));
+    return EffectArray.map(
+      EffectArray.filter(
+        AGENT_CLIENTS,
+        (agent, __effectArrayIndex) => __effectArrayIndex in AGENT_CLIENTS && legacyInferredClients.includes(agent),
+      ),
+      agent => ({
+        detail: 'legacy Threadnote MCP entry detected; repair will register host-specific instructions and skills',
+        name: `${agent} agent integration`,
+        status: 'warn' as const,
+      }),
+    );
   }
   const checks: DoctorCheck[] = [];
   for (const agent of registeredAgentClients(registry)) {
@@ -245,7 +261,12 @@ export const removeAgentIntegrationsInTransaction = Effect.fn('agentIntegrations
     const receipt = registry?.hosts[agent];
     const plan = yield* agentArtifacts(agent, receipt?.mcp.artifactProfile, receipt?.mcp.hostRoot);
     for (const artifact of plan.artifacts) {
-      if (Object.values(registry?.surfaces ?? {}).some(surface => surface.artifacts[artifact.path] !== undefined))
+      if (
+        EffectArray.some(
+          EffectRecord.values(registry?.surfaces ?? {}),
+          surface => surface.artifacts[artifact.path] !== undefined,
+        )
+      )
         continue;
       yield* removeArtifact(artifact, dryRun);
     }
@@ -263,7 +284,7 @@ export const removeAgentIntegrationsInTransaction = Effect.fn('agentIntegrations
   }
   const target = yield* agentIntegrationRegistryPath(config);
   const fs = yield* FileSystem.FileSystem;
-  if (registry !== undefined && Object.keys(registry.surfaces ?? {}).length > 0) {
+  if (registry !== undefined && EffectRecord.keys(registry.surfaces ?? {}).length > 0) {
     if (!dryRun) yield* writeAgentIntegrationRegistry(config, {...registry, hosts: {}});
     return;
   }
@@ -303,7 +324,7 @@ export const installAgentIntegrationInTransaction = Effect.fn('agentIntegrations
           yield* removeArtifact(artifact, true);
       }
     }
-    if (agent === 'cursor' && !plan.artifacts.some(artifact => artifact.name === 'instructions')) {
+    if (agent === 'cursor' && !EffectArray.some(plan.artifacts, artifact => artifact.name === 'instructions')) {
       yield* removeManagedPath(
         yield* expandPath(HOST_TARGETS.cursor.instruction.path),
         'duplicate Cursor instructions',
@@ -337,7 +358,7 @@ export const installAgentIntegrationInTransaction = Effect.fn('agentIntegrations
     `legacy:${agent}`,
   );
   yield* writeAgentIntegrationRegistry(config, withAgentIntegrationHost(currentRegistry, agent, receipt));
-  if (agent === 'cursor' && !plan.artifacts.some(artifact => artifact.name === 'instructions')) {
+  if (agent === 'cursor' && !EffectArray.some(plan.artifacts, artifact => artifact.name === 'instructions')) {
     yield* removeManagedPath(
       yield* expandPath(HOST_TARGETS.cursor.instruction.path),
       'duplicate Cursor instructions',
@@ -363,7 +384,9 @@ function removeObsoleteCursorCloudPersonalGraphSkill(
 ) {
   return Effect.gen(function* () {
     if (profile !== 'cursor-cloud-personal') return;
-    const contextSkill = plan.artifacts.find(artifact => artifact.name === 'skill threadnote-context');
+    const contextSkill = EffectOption.getOrUndefined(
+      EffectArray.findFirst(plan.artifacts, artifact => artifact.name === 'skill threadnote-context'),
+    );
     if (contextSkill === undefined) return;
     const path = yield* Path.Path;
     const target = path.join(path.dirname(path.dirname(contextSkill.path)), 'threadnote-code-graph', 'SKILL.md');
@@ -389,9 +412,10 @@ function agentArtifacts(agent: AgentClient, requestedProfile?: AgentArtifactProf
     const profile = requestedProfile ?? 'default';
     const profileRoot =
       profile === 'default' ? path.join(root, 'config') : path.join(root, 'config', 'agent-profiles', profile);
-    const bootstrap = (yield* (yield* FileSystem.FileSystem).readFileString(
-      path.join(profileRoot, 'agent-instructions.md'),
-    )).trim();
+    const bootstrap = Effect2.pipe(
+      yield* (yield* FileSystem.FileSystem).readFileString(path.join(profileRoot, 'agent-instructions.md')),
+      EffectString.trim,
+    );
     const block = `${USER_INSTRUCTIONS_START_MARKER}\n${bootstrap}\n${USER_INSTRUCTIONS_END_MARKER}`;
     const instructionContent = renderInstructionContent(agent, host?.instruction.kind ?? 'block', block);
     const cursorPluginProvidesInstructions =
@@ -415,9 +439,10 @@ function agentArtifacts(agent: AgentClient, requestedProfile?: AgentArtifactProf
           ? CODEX_CLOUD_PERSONAL_AGENT_SKILLS
           : CURSOR_CLOUD_PERSONAL_AGENT_SKILLS;
     for (const skill of skills) {
-      const content = `${(yield* (yield* FileSystem.FileSystem).readFileString(
-        path.join(profileRoot, 'agent-skills', skill, 'SKILL.md'),
-      )).trim()}\n`;
+      const content = `${Effect2.pipe(
+        yield* (yield* FileSystem.FileSystem).readFileString(path.join(profileRoot, 'agent-skills', skill, 'SKILL.md')),
+        EffectString.trim,
+      )}\n`;
       artifacts.push({
         content,
         hash: yield* sha256Hex(content),
@@ -427,7 +452,7 @@ function agentArtifacts(agent: AgentClient, requestedProfile?: AgentArtifactProf
       });
     }
     if (profile === 'codex-cloud-personal') {
-      const content = `${(yield* (yield* FileSystem.FileSystem).readFileString(path.join(profileRoot, 'start-skill.md'))).trim()}\n`;
+      const content = `${Effect2.pipe(yield* (yield* FileSystem.FileSystem).readFileString(path.join(profileRoot, 'start-skill.md')), EffectString.trim)}\n`;
       artifacts.push({
         content,
         hash: yield* sha256Hex(content),
@@ -450,7 +475,7 @@ function hostReceipt(
   status: AgentIntegrationHostReceipt['status'],
 ): AgentIntegrationHostReceipt {
   return {
-    artifacts: Object.fromEntries(plan.artifacts.map(artifact => [artifact.path, artifact.hash])),
+    artifacts: EffectRecord.fromEntries(EffectArray.map(plan.artifacts, artifact => [artifact.path, artifact.hash])),
     artifactVersion: AGENT_INTEGRATION_ARTIFACT_VERSION,
     installedVersion,
     mcp: {...mcp, ...(plan.hostRoot === undefined ? {} : {hostRoot: plan.hostRoot})},
@@ -476,7 +501,7 @@ function renderInstructionContent(agent: AgentClient, kind: 'block' | 'file', bl
           'applyTo: "**"',
           '---',
         ];
-  return [...frontmatter, '', block, ''].join('\n');
+  return EffectArray.join([...frontmatter, '', block, ''], '\n');
 }
 
 function logArtifactPlan(artifact: AgentArtifact) {
@@ -507,7 +532,8 @@ const plannedArtifactContent = Effect.fn('agentIntegrations.plannedArtifactConte
       unmanagedContent !== undefined &&
       (isExactLegacyCopilotInstructionFrontmatter(unmanagedContent) ||
         isGeneratedInstructionFrontmatter(unmanagedContent) ||
-        (artifact.name.startsWith('skill ') && isGeneratedSkillFrontmatter(unmanagedContent)));
+        (Effect2.pipe(artifact.name, EffectString.startsWith('skill ')) &&
+          isGeneratedSkillFrontmatter(unmanagedContent)));
     const markerlessLegacyInstruction =
       currentBlock === undefined &&
       artifact.name === 'instructions' &&
@@ -586,7 +612,7 @@ const removeManagedPath = Effect.fn('agentIntegrations.removeManagedPath')(funct
   }
   if (next === current) return;
   const shouldRemove =
-    next.trim().length === 0 ||
+    Effect2.pipe(next, EffectString.trim).length === 0 ||
     (removeWholeFile &&
       (current === expectedContent || isGeneratedInstructionFrontmatter(next) || isGeneratedSkillFrontmatter(next)));
   if (dryRun) {
@@ -601,28 +627,38 @@ const removeManagedPath = Effect.fn('agentIntegrations.removeManagedPath')(funct
 });
 
 function isGeneratedInstructionFrontmatter(content: string): boolean {
-  const trimmed = content.trim();
+  const trimmed = Effect2.pipe(content, EffectString.trim);
   if (!/^---\n[\s\S]*\n---$/.test(trimmed)) return false;
   return (
-    trimmed.includes('description: Route non-trivial work through installed Threadnote skills') &&
-    (trimmed.includes('alwaysApply: true') || trimmed.includes('applyTo: "**"'))
+    Effect2.pipe(
+      trimmed,
+      EffectString.includes('description: Route non-trivial work through installed Threadnote skills'),
+    ) &&
+    (Effect2.pipe(trimmed, EffectString.includes('alwaysApply: true')) ||
+      Effect2.pipe(trimmed, EffectString.includes('applyTo: "**"')))
   );
 }
 
-const LEGACY_COPILOT_INSTRUCTION_FRONTMATTER = [
-  '---',
-  'name: Threadnote',
-  'description: Shared local context and handoffs through Threadnote',
-  'applyTo: "**"',
-  '---',
-].join('\n');
+const LEGACY_COPILOT_INSTRUCTION_FRONTMATTER = EffectArray.join(
+  [
+    '---',
+    'name: Threadnote',
+    'description: Shared local context and handoffs through Threadnote',
+    'applyTo: "**"',
+    '---',
+  ],
+  '\n',
+);
 
 export function isExactLegacyCopilotInstructionFrontmatter(content: string): boolean {
-  return content.replaceAll('\r\n', '\n').replace(/\n+$/u, '') === LEGACY_COPILOT_INSTRUCTION_FRONTMATTER;
+  return (
+    Effect2.pipe(content, EffectString.replaceAll('\r\n', '\n'), EffectString.replace(/\n+$/u, '')) ===
+    LEGACY_COPILOT_INSTRUCTION_FRONTMATTER
+  );
 }
 
 function isGeneratedSkillFrontmatter(content: string): boolean {
-  const trimmed = content.trim();
+  const trimmed = Effect2.pipe(content, EffectString.trim);
   return (
     /^---\n[\s\S]*\n---$/.test(trimmed) &&
     /^name: threadnote-(?:context|code-graph|memory|health)$/mu.test(trimmed) &&
@@ -631,36 +667,71 @@ function isGeneratedSkillFrontmatter(content: string): boolean {
 }
 
 export function extractManagedBlock(content: string): string | undefined {
-  const startIndex = content.indexOf(USER_INSTRUCTIONS_START_MARKER);
-  const endIndex = content.indexOf(USER_INSTRUCTIONS_END_MARKER);
+  const startIndex = Effect2.pipe(
+    content,
+    EffectString.indexOf(USER_INSTRUCTIONS_START_MARKER),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const endIndex = Effect2.pipe(
+    content,
+    EffectString.indexOf(USER_INSTRUCTIONS_END_MARKER),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) return undefined;
-  return content.slice(startIndex, endIndex + USER_INSTRUCTIONS_END_MARKER.length);
+  return Effect2.pipe(content, EffectString.slice(startIndex, endIndex + USER_INSTRUCTIONS_END_MARKER.length));
 }
 
 export function upsertManagedBlock(content: string, block: string): string | undefined {
-  const startIndex = content.indexOf(USER_INSTRUCTIONS_START_MARKER);
-  const endIndex = content.indexOf(USER_INSTRUCTIONS_END_MARKER);
+  const startIndex = Effect2.pipe(
+    content,
+    EffectString.indexOf(USER_INSTRUCTIONS_START_MARKER),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const endIndex = Effect2.pipe(
+    content,
+    EffectString.indexOf(USER_INSTRUCTIONS_END_MARKER),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if ((startIndex === -1) !== (endIndex === -1) || endIndex < startIndex) return undefined;
   if (startIndex !== -1) {
-    const before = content.slice(0, startIndex).trimEnd();
-    const after = content.slice(endIndex + USER_INSTRUCTIONS_END_MARKER.length).trimStart();
+    const before = Effect2.pipe(content, EffectString.slice(0, startIndex), EffectString.trimEnd);
+    const after = Effect2.pipe(
+      content,
+      EffectString.slice(endIndex + USER_INSTRUCTIONS_END_MARKER.length),
+      EffectString.trimStart,
+    );
     return joinMarkdownSections([before, block, after]);
   }
-  return joinMarkdownSections([content.trimEnd(), block]);
+  return joinMarkdownSections([Effect2.pipe(content, EffectString.trimEnd), block]);
 }
 
 function removeManagedBlock(content: string): string | undefined {
-  const startIndex = content.indexOf(USER_INSTRUCTIONS_START_MARKER);
-  const endIndex = content.indexOf(USER_INSTRUCTIONS_END_MARKER);
+  const startIndex = Effect2.pipe(
+    content,
+    EffectString.indexOf(USER_INSTRUCTIONS_START_MARKER),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const endIndex = Effect2.pipe(
+    content,
+    EffectString.indexOf(USER_INSTRUCTIONS_END_MARKER),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if ((startIndex === -1) !== (endIndex === -1) || endIndex < startIndex) return undefined;
   if (startIndex === -1) return content;
-  const before = content.slice(0, startIndex).trimEnd();
-  const after = content.slice(endIndex + USER_INSTRUCTIONS_END_MARKER.length).trimStart();
+  const before = Effect2.pipe(content, EffectString.slice(0, startIndex), EffectString.trimEnd);
+  const after = Effect2.pipe(
+    content,
+    EffectString.slice(endIndex + USER_INSTRUCTIONS_END_MARKER.length),
+    EffectString.trimStart,
+  );
   return joinMarkdownSections([before, after]);
 }
 
 function joinMarkdownSections(sections: readonly string[]): string {
-  return `${sections.filter(section => section.length > 0).join('\n\n')}\n`;
+  return `${EffectArray.join(
+    EffectArray.filter(sections, section => section.length > 0),
+    '\n\n',
+  )}\n`;
 }
 
 export const atomicAgentWrite = Effect.fn('agentIntegrations.atomicWrite')(function* (

@@ -1,8 +1,9 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {Clock, DateTime, Effect, FileSystem, Layer, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
@@ -19,6 +20,14 @@ import {rebuildVectorIndex, selectedSemanticScores, vectorIndexDatabaseFilename}
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {atomicWrite, printJson, scriptArguments} from './effect/script.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw ScriptError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 const DEFAULT_DISTRACTORS_PER_CLASS = 525;
@@ -31,7 +40,9 @@ const OTHER_PROJECT = 'other-app';
 const ORDINARY_QUERY = 'deployment safemode contract';
 const APPROVED_QUERY = 'approved canonical deployment safemode contract';
 const PROFILES = ['unrestricted', 'explicit-project', 'approved-authoritative'] as const;
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+const manifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
 
 type Profile = (typeof PROFILES)[number];
 
@@ -78,7 +89,7 @@ const runtimeLayer = Layer.succeed(
   LocalModelRuntime.of({
     diagnostics: Effect.succeed({backend: 'fixture', buildType: 'prebuilt', cpuMathCores: 1}),
     embedMany: ({inputs, manifest: requested}) =>
-      Effect.sync(() => inputs.map(input => fixtureVector(requested.dimensions ?? 0, input))),
+      Effect.sync(() => EffectArray.map(inputs, input => fixtureVector(requested.dimensions ?? 0, input))),
     generate: () => Effect.die(ScriptError.make({message: 'Unexpected generation'})),
     rerank: () => Effect.die(ScriptError.make({message: 'Unexpected reranking'})),
   }),
@@ -125,8 +136,8 @@ const benchmarkRecallEligibilityProduction = Effect.scoped(
       }
     }
 
-    const lexicalDurations = new Map<Profile, number[]>(PROFILES.map(profile => [profile, []]));
-    const vectorDurations = new Map<Profile, number[]>(PROFILES.map(profile => [profile, []]));
+    const lexicalDurations = new Map<Profile, number[]>(EffectArray.map(PROFILES, profile => [profile, []]));
+    const vectorDurations = new Map<Profile, number[]>(EffectArray.map(PROFILES, profile => [profile, []]));
     const lexicalSummaries = new Map<Profile, LexicalPassResult>();
     const vectorSummaries = new Map<Profile, VectorPassResult>();
     for (let sample = 0; sample < options.samples; sample += 1) {
@@ -152,7 +163,7 @@ const benchmarkRecallEligibilityProduction = Effect.scoped(
       [git(['rev-parse', 'HEAD']), git(['status', '--porcelain']), system.hardwareInfo, getThreadnoteVersion()],
       {concurrency: 'unbounded'},
     );
-    const measurements = PROFILES.flatMap(profile => [
+    const measurements = EffectArray.flatMap(PROFILES, profile => [
       benchmarkMeasurement(`lexical:${profile}:latency`, 'milliseconds', lexicalDurations.get(profile)!),
       benchmarkMeasurement(`vector:${profile}:latency`, 'milliseconds', vectorDurations.get(profile)!),
     ]);
@@ -193,8 +204,8 @@ const benchmarkRecallEligibilityProduction = Effect.scoped(
       },
       suite: 'recall-eligibility-production',
       summaries: {
-        lexical: Object.fromEntries(lexicalSummaries),
-        vector: Object.fromEntries(vectorSummaries),
+        lexical: EffectRecord.fromEntries(lexicalSummaries),
+        vector: EffectRecord.fromEntries(vectorSummaries),
       },
       version: 1,
       warmups: options.warmups,
@@ -224,7 +235,7 @@ function runLexicalPass(
     });
     return {
       ...summarizeUris(
-        result.candidates.map(candidate => candidate.uri),
+        EffectArray.map(result.candidates, candidate => candidate.uri),
         fixture,
       ),
       ...diagnostics,
@@ -256,8 +267,15 @@ function summarizeUris(uris: readonly string[], fixture: Fixture): Omit<VectorPa
     projectlessRecovered: uris.includes(fixture.projectlessUri),
     resultCount: uris.length,
     targetRecovered: uris.includes(fixture.targetUri),
-    unapprovedResults: uris.filter(uri => uri.includes('/memories/durable/projects/target-app/unapproved-')).length,
-    wrongProjectResults: uris.filter(uri => uri.includes('/projects/other-app/wrong-')).length,
+    unapprovedResults: EffectArray.filter(
+      uris,
+      (uri, index) =>
+        index in uris && Effect2.pipe(uri, EffectString.includes('/memories/durable/projects/target-app/unapproved-')),
+    ).length,
+    wrongProjectResults: EffectArray.filter(
+      uris,
+      (uri, index) => index in uris && Effect2.pipe(uri, EffectString.includes('/projects/other-app/wrong-')),
+    ).length,
   };
 }
 
@@ -321,15 +339,15 @@ function readVectorEligibilityRows(path: Path.Path, home: string): Readonly<Reco
   try {
     const count = (predicate: string, parameters: readonly string[] = []) =>
       Number(
-        (
+        requiredRow(
           database
-            .query(
+            .query<{readonly count: number}, SQLQueryBindings[]>(
               `SELECT COUNT(*) AS count
                FROM vector_chunks
                WHERE generation = (SELECT generation FROM vector_pointer WHERE singleton = 1)
                  AND ${predicate}`,
             )
-            .get(...parameters) as {readonly count: number}
+            .get(...parameters),
         ).count,
       );
     return {
@@ -364,11 +382,11 @@ function writeFixture(
     const records = [
       ...Array.from({length: distractorsPerClass}, (_unused, index) => ({
         content: strongerMemory(OTHER_PROJECT, `wrong-${index}`, index, 'wrong-project-strong-vector', true),
-        path: path.join(wrongRoot, `wrong-${String(index).padStart(4, '0')}.md`),
+        path: path.join(wrongRoot, `wrong-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}.md`),
       })),
       ...Array.from({length: distractorsPerClass}, (_unused, index) => ({
         content: strongerMemory(TARGET_PROJECT, `unapproved-${index}`, index, 'unapproved-strong-vector', false),
-        path: path.join(unapprovedRoot, `unapproved-${String(index).padStart(4, '0')}.md`),
+        path: path.join(unapprovedRoot, `unapproved-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}.md`),
       })),
       {
         content: weakerMemory(TARGET_PROJECT, 'eligible-target', 'eligible-weaker-vector'),
@@ -386,9 +404,9 @@ function writeFixture(
     return {
       manifestSha256: sha256HexSync(
         JSON.stringify({
-          records: records.map(record => ({
+          records: EffectArray.map(records, record => ({
             contentSha256: sha256HexSync(record.content),
-            relativePath: path.relative(memoriesRoot, record.path).replaceAll('\\', '/'),
+            relativePath: Effect2.pipe(path.relative(memoriesRoot, record.path), EffectString.replaceAll('\\', '/')),
           })),
           version: 1,
         }),
@@ -407,42 +425,51 @@ function strongerMemory(
   vectorMarker: string,
   strongest: boolean,
 ): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    `project: ${project}`,
-    `topic: approved-canonical-deployment-safemode-contract-${topic}`,
-    'keywords: approved canonical deployment safemode contract',
-    'source_agent_client: benchmark',
-    'timestamp: 2026-08-20T00:00:00.000Z',
-    '',
+  return EffectArray.join(
     [
-      'Approved canonical deployment safemode contract deployment safemode contract',
-      ...(strongest ? ['approved canonical deployment safemode contract'] : []),
-      `${vectorMarker} record ${index}.`,
-    ].join(' '),
-  ].join('\n');
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      `project: ${project}`,
+      `topic: approved-canonical-deployment-safemode-contract-${topic}`,
+      'keywords: approved canonical deployment safemode contract',
+      'source_agent_client: benchmark',
+      'timestamp: 2026-08-20T00:00:00.000Z',
+      '',
+      EffectArray.join(
+        [
+          'Approved canonical deployment safemode contract deployment safemode contract',
+          ...(strongest ? ['approved canonical deployment safemode contract'] : []),
+          `${vectorMarker} record ${index}.`,
+        ],
+        ' ',
+      ),
+    ],
+    '\n',
+  );
 }
 
 function weakerMemory(project: string | undefined, topic: string, vectorMarker: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    ...(project === undefined ? [] : [`project: ${project}`]),
-    `topic: ${topic}`,
-    'source_agent_client: benchmark',
-    'timestamp: 2026-08-20T00:00:00.000Z',
-    '',
-    `Approved canonical deployment safemode contract ${vectorMarker}.`,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      ...(project === undefined ? [] : [`project: ${project}`]),
+      `topic: ${topic}`,
+      'source_agent_client: benchmark',
+      'timestamp: 2026-08-20T00:00:00.000Z',
+      '',
+      `Approved canonical deployment safemode contract ${vectorMarker}.`,
+    ],
+    '\n',
+  );
 }
 
 function fixtureVector(dimensions: number, input: string): readonly number[] {
-  if (input.includes('eligible-weaker-vector')) return blendedVector(dimensions, 0.8);
-  if (input.includes('projectless-approved-vector')) return blendedVector(dimensions, 0.9);
-  if (input.includes('unapproved-strong-vector')) return blendedVector(dimensions, 0.98);
+  if (Effect2.pipe(input, EffectString.includes('eligible-weaker-vector'))) return blendedVector(dimensions, 0.8);
+  if (Effect2.pipe(input, EffectString.includes('projectless-approved-vector'))) return blendedVector(dimensions, 0.9);
+  if (Effect2.pipe(input, EffectString.includes('unapproved-strong-vector'))) return blendedVector(dimensions, 0.98);
   return unitVector(dimensions);
 }
 
@@ -511,7 +538,9 @@ export function parseRecallEligibilityBenchmarkArguments(args: readonly string[]
 }
 
 const git = Effect.fn('benchmark.git')((arguments_: readonly string[]) =>
-  runCommandEffect('git', arguments_, {timeoutMs: 30_000}).pipe(Effect.map(result => result.stdout.trim())),
+  runCommandEffect('git', arguments_, {timeoutMs: 30_000}).pipe(
+    Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+  ),
 );
 
 function positiveInteger(value: string | undefined, option: string): number {
@@ -531,6 +560,7 @@ function nonNegativeInteger(value: string | undefined, option: string): number {
 }
 
 function requiredValue(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }

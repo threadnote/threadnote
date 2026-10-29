@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -6,6 +7,7 @@ import {
   observeMaterializationStorage,
   type MaterializationStorageFiles,
 } from '@threadnote/graph/indexer/materialization';
+import * as EffectRecord from 'effect/Record';
 
 const bytes = FC.integer({max: 1_000_000_000, min: 0});
 const storageFiles = FC.record({
@@ -21,7 +23,7 @@ const storageFiles = FC.record({
   fields =>
     ({
       ...fields,
-      totalBytes: Object.values(fields).reduce((total, value) => total + value, 0),
+      totalBytes: EffectArray.reduce(EffectRecord.values(fields), 0, (total, value) => total + value),
     }) satisfies MaterializationStorageFiles,
 );
 
@@ -54,29 +56,33 @@ fcProp(
     const latest = observations.at(-1)!;
     expect(telemetry).toMatchObject({
       durableDatabaseFileBytes: latest.databaseBytes,
-      durableDatabaseFileHighWaterBytes: Math.max(...observations.map(value => value.databaseBytes)),
+      durableDatabaseFileHighWaterBytes: Math.max(...EffectArray.map(observations, value => value.databaseBytes)),
       durableDatabaseGrowthBytes: Math.max(0, latest.databaseBytes - observations[0].databaseBytes),
       durableDatabaseGrowthHighWaterBytes: Math.max(
-        ...observations.map(value => Math.max(0, value.databaseBytes - observations[0].databaseBytes)),
+        ...EffectArray.map(observations, value => Math.max(0, value.databaseBytes - observations[0].databaseBytes)),
       ),
       durableDatabaseStartBytes: observations[0].databaseBytes,
       durableFilesystemBytes: latest.totalBytes,
-      durableFilesystemHighWaterBytes: Math.max(...observations.map(value => value.totalBytes)),
+      durableFilesystemHighWaterBytes: Math.max(...EffectArray.map(observations, value => value.totalBytes)),
       durableJournalBytes: latest.journalBytes,
-      durableJournalHighWaterBytes: Math.max(...observations.map(value => value.journalBytes)),
+      durableJournalHighWaterBytes: Math.max(...EffectArray.map(observations, value => value.journalBytes)),
       durableSharedMemoryBytes: latest.sharedMemoryBytes,
-      durableSharedMemoryHighWaterBytes: Math.max(...observations.map(value => value.sharedMemoryBytes)),
+      durableSharedMemoryHighWaterBytes: Math.max(...EffectArray.map(observations, value => value.sharedMemoryBytes)),
       durableWalBytes: latest.walBytes,
-      durableWalHighWaterBytes: Math.max(...observations.map(value => value.walBytes)),
+      durableWalHighWaterBytes: Math.max(...EffectArray.map(observations, value => value.walBytes)),
     });
     if (includeSidecar) {
       expect(telemetry).toMatchObject({
         durableSidecarDatabaseBytes: latest.sidecarDatabaseBytes,
-        durableSidecarDatabaseHighWaterBytes: Math.max(...observations.map(value => value.sidecarDatabaseBytes)),
+        durableSidecarDatabaseHighWaterBytes: Math.max(
+          ...EffectArray.map(observations, value => value.sidecarDatabaseBytes),
+        ),
         durableSidecarJournalBytes: latest.sidecarJournalBytes,
-        durableSidecarJournalHighWaterBytes: Math.max(...observations.map(value => value.sidecarJournalBytes)),
+        durableSidecarJournalHighWaterBytes: Math.max(
+          ...EffectArray.map(observations, value => value.sidecarJournalBytes),
+        ),
         durableSidecarWalBytes: latest.sidecarWalBytes,
-        durableSidecarWalHighWaterBytes: Math.max(...observations.map(value => value.sidecarWalBytes)),
+        durableSidecarWalHighWaterBytes: Math.max(...EffectArray.map(observations, value => value.sidecarWalBytes)),
       });
     } else {
       expect(telemetry.durableSidecarDatabaseBytes).toBeUndefined();

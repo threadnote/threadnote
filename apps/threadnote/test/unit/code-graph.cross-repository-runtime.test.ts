@@ -1,5 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
-import {Effect, FileSystem} from 'effect';
+import {Cause, Effect, Exit, FileSystem, Layer} from 'effect';
+import {it as effectIt} from '@effect/vitest';
 import {describe, expect, it, vi} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -28,8 +30,13 @@ import {
   type CodeGraphCrossRepositoryTraversalEndpointV1,
 } from '@threadnote/graph/cross_repository/traversal';
 import {findCodeGraphWorksetPath, inspectCodeGraphWorksetTopology} from '@threadnote/graph/cross_repository/runtime';
+import type {ApplicationServices} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {provideTestLayer} from '../helpers/effect-layer.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const mocks = vi.hoisted(() => ({
   expandPath: vi.fn(),
@@ -81,7 +88,7 @@ vi.mock('@threadnote/graph/cross_repository/store', async importOriginal => ({
   readPublishedCodeGraphWorksetCatalogBridgeSetSummary: mocks.readBridgeSummary,
 }));
 
-const generationId = `cgwg_${'a'.repeat(40)}`;
+const generationId = `cgwg_${Effect2.pipe('a', EffectString.repeat(40))}`;
 const span = {column: 1, endColumn: 8, endLine: 1, line: 1} as const;
 
 describe('cross-repository graph runtime safety', () => {
@@ -162,80 +169,86 @@ describe('cross-repository graph runtime safety', () => {
     ).rejects.toThrow(/bridge|changed|count|digest|receipt/iu);
   });
 
-  it('rejects ambiguous or unknown component selectors before reading graph adjacency', async () => {
-    const fixture = runtimeFixture(2);
-    configureRuntimeMocks(fixture);
+  effectIt.effect('rejects ambiguous or unknown component selectors before reading graph adjacency', () =>
+    Effect.gen(function* () {
+      const fixture = runtimeFixture(2);
+      configureRuntimeMocks(fixture);
 
-    await expect(
-      runRuntime(
+      const ambiguous = yield* runRuntime(
         findCodeGraphWorksetPath(config, {
-          from: `cgp_${'a'.repeat(32)}`,
-          to: `${fixture.members[0].repositoryKey}:cgp_${'b'.repeat(32)}`,
+          from: `cgp_${Effect2.pipe('a', EffectString.repeat(32))}`,
+          to: `${fixture.members[0].repositoryKey}:cgp_${Effect2.pipe('b', EffectString.repeat(32))}`,
           worksetName: 'engineering',
         }),
-      ),
-    ).rejects.toThrow(/multi-repository workset/iu);
+      ).pipe(Effect.exit);
+      expect(Exit.isFailure(ambiguous)).toBe(true);
+      if (Exit.isFailure(ambiguous)) expect(Cause.pretty(ambiguous.cause)).toMatch(/multi-repository workset/iu);
 
-    await expect(
-      runRuntime(
+      const unknown = yield* runRuntime(
         findCodeGraphWorksetPath(config, {
-          from: `unknown:cgp_${'a'.repeat(32)}`,
-          to: `${fixture.members[0].repositoryKey}:cgp_${'b'.repeat(32)}`,
+          from: `unknown:cgp_${Effect2.pipe('a', EffectString.repeat(32))}`,
+          to: `${fixture.members[0].repositoryKey}:cgp_${Effect2.pipe('b', EffectString.repeat(32))}`,
           worksetName: 'engineering',
         }),
-      ),
-    ).rejects.toThrow(/unknown generation member/iu);
-    expect(mocks.readBridgePage).not.toHaveBeenCalled();
-  });
+      ).pipe(Effect.exit);
+      expect(Exit.isFailure(unknown)).toBe(true);
+      if (Exit.isFailure(unknown)) expect(Cause.pretty(unknown.cause)).toMatch(/unknown generation member/iu);
+      expect(mocks.readBridgePage).not.toHaveBeenCalled();
+    }),
+  );
 
-  it('rejects a qualified reference whose repository is outside the published generation', async () => {
-    const fixture = runtimeFixture(2);
-    configureRuntimeMocks(fixture);
-    const ref = `cgr_${'c'.repeat(40)}`;
-    mocks.resolveQualifiedRef.mockReturnValue(
-      Effect.succeed({
-        nodeId: `cgs_${'d'.repeat(32)}`,
-        ref,
-        repositoryId: digest('outside-generation'),
-      }),
-    );
-
-    await expect(
-      runRuntime(
-        findCodeGraphWorksetPath(config, {
-          from: ref,
-          to: `${fixture.members[0].repositoryKey}:cgp_${'b'.repeat(32)}`,
-          worksetName: 'engineering',
+  effectIt.effect('rejects a qualified reference whose repository is outside the published generation', () =>
+    Effect.gen(function* () {
+      const fixture = runtimeFixture(2);
+      configureRuntimeMocks(fixture);
+      const ref = `cgr_${Effect2.pipe('c', EffectString.repeat(40))}`;
+      mocks.resolveQualifiedRef.mockReturnValue(
+        Effect.succeed({
+          nodeId: `cgs_${Effect2.pipe('d', EffectString.repeat(32))}`,
+          ref,
+          repositoryId: digest('outside-generation'),
         }),
-      ),
-    ).rejects.toThrow(/not in this workset generation/iu);
-    expect(mocks.readBridgePage).not.toHaveBeenCalled();
-  });
+      );
 
-  it('rejects a historical qualified reference missing from the published snapshot projection', async () => {
-    const fixture = runtimeFixture(2);
-    configureRuntimeMocks(fixture);
-    const ref = `cgr_${'c'.repeat(40)}`;
-    mocks.resolveQualifiedRef.mockReturnValue(
-      Effect.succeed({
-        nodeId: `cgs_${'d'.repeat(32)}`,
-        ref,
-        repositoryId: fixture.members[0].repositoryId,
-      }),
-    );
-    mocks.projectionContainsNode.mockReturnValue(Effect.succeed(false));
-
-    await expect(
-      runRuntime(
+      const result = yield* runRuntime(
         findCodeGraphWorksetPath(config, {
           from: ref,
-          to: `${fixture.members[1].repositoryKey}:cgp_${'b'.repeat(32)}`,
+          to: `${fixture.members[0].repositoryKey}:cgp_${Effect2.pipe('b', EffectString.repeat(32))}`,
           worksetName: 'engineering',
         }),
-      ),
-    ).rejects.toThrow(/not present|published snapshot|stale/iu);
-    expect(mocks.readBridgePage).not.toHaveBeenCalled();
-  });
+      ).pipe(Effect.exit);
+      expect(Exit.isFailure(result)).toBe(true);
+      if (Exit.isFailure(result)) expect(Cause.pretty(result.cause)).toMatch(/not in this workset generation/iu);
+      expect(mocks.readBridgePage).not.toHaveBeenCalled();
+    }),
+  );
+
+  effectIt.effect('rejects a historical qualified reference missing from the published snapshot projection', () =>
+    Effect.gen(function* () {
+      const fixture = runtimeFixture(2);
+      configureRuntimeMocks(fixture);
+      const ref = `cgr_${Effect2.pipe('c', EffectString.repeat(40))}`;
+      mocks.resolveQualifiedRef.mockReturnValue(
+        Effect.succeed({
+          nodeId: `cgs_${Effect2.pipe('d', EffectString.repeat(32))}`,
+          ref,
+          repositoryId: fixture.members[0].repositoryId,
+        }),
+      );
+      mocks.projectionContainsNode.mockReturnValue(Effect.succeed(false));
+
+      const result = yield* runRuntime(
+        findCodeGraphWorksetPath(config, {
+          from: ref,
+          to: `${fixture.members[1].repositoryKey}:cgp_${Effect2.pipe('b', EffectString.repeat(32))}`,
+          worksetName: 'engineering',
+        }),
+      ).pipe(Effect.exit);
+      expect(Exit.isFailure(result)).toBe(true);
+      if (Exit.isFailure(result)) expect(Cause.pretty(result.cause)).toMatch(/not present|published snapshot|stale/iu);
+      expect(mocks.readBridgePage).not.toHaveBeenCalled();
+    }),
+  );
 
   it('withholds query neighbor expansion when the published bridge receipt is incomplete', async () => {
     const fixture = runtimeFixture(2);
@@ -307,64 +320,70 @@ describe('cross-repository graph runtime safety', () => {
       attachCodeGraphWorksetBridgeRelationships(
         [card],
         [bridge],
-        new Set(fixture.members.map(member => member.repositoryKey)),
+        new Set(EffectArray.map(fixture.members, member => member.repositoryKey)),
       )[0]?.relationships,
     ).toEqual([expect.objectContaining({provenance: 'declared', relation: 'imports'})]);
   });
 
-  it('withholds topology on incomplete coverage without reading any bridge page', async () => {
-    const fixture = runtimeFixture(2);
-    configureRuntimeMocks(fixture);
-    mocks.readBridgeSummary.mockReturnValue(
-      Effect.succeed({
-        bridgeCount: 0,
-        coverage: {
-          diagnostics: ['moniker-read-failed'],
-          failedRepositoryCount: 1,
-          rejectionCount: 0,
-          repositoriesRead: 1,
-          repositoryCount: 2,
-          state: 'partial',
-        },
-        digest: digest('partial-runtime'),
-        generationId,
-        resolverVersion: 1,
-        worksetName: 'engineering',
-      }),
-    );
-
-    const result = await runRuntime(inspectCodeGraphWorksetTopology(config, {worksetName: 'engineering'}));
-    expect(result).toMatchObject({state: 'unavailable', warnings: [expect.stringMatching(/incomplete/iu)]});
-    expect(mocks.readBridgeGenerationPage).not.toHaveBeenCalled();
-    expect(mocks.status).toHaveBeenCalledTimes(2);
-    expect(mocks.status.mock.calls.every(call => call[2]?.requestMaintenance === false)).toBe(true);
-  });
-
-  it('fences topology assembly against a changed page receipt', async () => {
-    const fixture = runtimeFixture(2);
-    configureRuntimeMocks(fixture);
-    const first = packageBridge('orders');
-    const second = packageBridge('billing', first.source);
-    mocks.readBridgeSummary.mockReturnValue(Effect.succeed(completeBridgeSummary(2)));
-    mocks.readBridgeGenerationPage
-      .mockReturnValueOnce(
-        Effect.succeed(
-          bridgePage({
-            bridges: [first],
-            digest: digest('runtime-set'),
-            next: {bridgeId: first.id, ordinal: 0},
-            totalBridges: 2,
-          }),
-        ),
-      )
-      .mockReturnValueOnce(
-        Effect.succeed(bridgePage({bridges: [second], digest: digest('replacement-runtime-set'), totalBridges: 2})),
+  effectIt.effect('withholds topology on incomplete coverage without reading any bridge page', () =>
+    Effect.gen(function* () {
+      const fixture = runtimeFixture(2);
+      configureRuntimeMocks(fixture);
+      mocks.readBridgeSummary.mockReturnValue(
+        Effect.succeed({
+          bridgeCount: 0,
+          coverage: {
+            diagnostics: ['moniker-read-failed'],
+            failedRepositoryCount: 1,
+            rejectionCount: 0,
+            repositoriesRead: 1,
+            repositoryCount: 2,
+            state: 'partial',
+          },
+          digest: digest('partial-runtime'),
+          generationId,
+          resolverVersion: 1,
+          worksetName: 'engineering',
+        }),
       );
 
-    await expect(runRuntime(inspectCodeGraphWorksetTopology(config, {worksetName: 'engineering'}))).rejects.toThrow(
-      /changed|unavailable/iu,
-    );
-  });
+      const result = yield* runRuntime(inspectCodeGraphWorksetTopology(config, {worksetName: 'engineering'}));
+      expect(result).toMatchObject({state: 'unavailable', warnings: [expect.stringMatching(/incomplete/iu)]});
+      expect(mocks.readBridgeGenerationPage).not.toHaveBeenCalled();
+      expect(mocks.status).toHaveBeenCalledTimes(2);
+      expect(EffectArray.every(mocks.status.mock.calls, call => call[2]?.requestMaintenance === false)).toBe(true);
+    }),
+  );
+
+  effectIt.effect('fences topology assembly against a changed page receipt', () =>
+    Effect.gen(function* () {
+      const fixture = runtimeFixture(2);
+      configureRuntimeMocks(fixture);
+      const first = packageBridge('orders');
+      const second = packageBridge('billing', first.source);
+      mocks.readBridgeSummary.mockReturnValue(Effect.succeed(completeBridgeSummary(2)));
+      mocks.readBridgeGenerationPage
+        .mockReturnValueOnce(
+          Effect.succeed(
+            bridgePage({
+              bridges: [first],
+              digest: digest('runtime-set'),
+              next: {bridgeId: first.id, ordinal: 0},
+              totalBridges: 2,
+            }),
+          ),
+        )
+        .mockReturnValueOnce(
+          Effect.succeed(bridgePage({bridges: [second], digest: digest('replacement-runtime-set'), totalBridges: 2})),
+        );
+
+      const result = yield* runRuntime(inspectCodeGraphWorksetTopology(config, {worksetName: 'engineering'})).pipe(
+        Effect.exit,
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      if (Exit.isFailure(result)) expect(Cause.pretty(result.cause)).toMatch(/changed|unavailable/iu);
+    }),
+  );
 });
 
 const config: RuntimeConfig = {
@@ -394,7 +413,7 @@ interface RuntimeFixture {
 
 function runtimeFixture(memberCount: number): RuntimeFixture {
   const members = Array.from({length: memberCount}, (_, index) => publishedMember(index));
-  const projects = members.map((member, index) => ({
+  const projects = EffectArray.map(members, (member, index) => ({
     name: member.repositoryKey,
     path: `/repositories/${index}`,
     uri: `threadnote://resources/repos/${index}`,
@@ -408,7 +427,7 @@ function runtimeFixture(memberCount: number): RuntimeFixture {
       members,
       worksetName: 'engineering',
     },
-    statuses: new Map(projects.map((project, index) => [project.path, memberStatus(members[index])])),
+    statuses: new Map(EffectArray.map(projects, (project, index) => [project.path, memberStatus(members[index])])),
     workset: {name: 'engineering', projects, unresolvedProjects: []},
   };
 }
@@ -445,33 +464,30 @@ function configureRuntimeMocks(fixture: RuntimeFixture): void {
   mocks.releaseLease.mockReturnValue(Effect.void);
 }
 
-function runRuntime<A, E>(effect: Effect.Effect<A, E, unknown>): Promise<A> {
-  const fs = {exists: () => Effect.succeed(true)} as unknown as FileSystem.FileSystem;
-  const query = {status: mocks.status};
-  const store = {
-    acquireSnapshotLease: mocks.acquireLease,
-    releaseSnapshotLease: mocks.releaseLease,
-  };
-  return runEffect(
-    effect.pipe(
-      Effect.provideService(FileSystem.FileSystem, fs),
-      Effect.provideService(CodeGraphQueryService, query as never),
-      Effect.provideService(CodeGraphStore, store as never),
-    ) as never,
+function runRuntime<A, E>(effect: Effect.Effect<A, E, ApplicationServices>): Effect.Effect<A, unknown, never> {
+  const fs = FileSystem.makeNoop({exists: () => Effect.succeed(true)});
+  const graphServices = Layer.mergeAll(
+    Layer.succeed(FileSystem.FileSystem, fs),
+    Layer.mock(CodeGraphQueryService, {status: mocks.status}),
+    Layer.mock(CodeGraphStore, {
+      acquireSnapshotLease: mocks.acquireLease,
+      releaseSnapshotLease: mocks.releaseLease,
+    }),
   );
+  return effect.pipe(provideTestLayer(Layer.merge(ApplicationLayer, graphServices)));
 }
 
 function publishedMember(index: number) {
   const seed = String(index);
   return {
     checkoutId: digest(`checkout:${seed}`),
-    commitId: digest(`commit:${seed}`).slice(0, 40),
+    commitId: Effect2.pipe(digest(`commit:${seed}`), EffectString.slice(0, 40)),
     ordinal: index,
     projectionDigest: digest(`projection:${seed}`),
     repositoryId: digest(`runtime-repository:${seed}`),
     repositoryKey: `repository-${index}`,
     snapshotDigest: digest(`snapshot-digest:${seed}`),
-    snapshotId: `cgsn_${digest(`runtime-snapshot:${seed}`).slice(0, 40)}`,
+    snapshotId: `cgsn_${Effect2.pipe(digest(`runtime-snapshot:${seed}`), EffectString.slice(0, 40))}`,
     symbolCount: 1,
     worktreeId: digest(`worktree:${seed}`),
   } as const;
@@ -515,7 +531,7 @@ function completeBridgeSummary(bridgeCount: number) {
 }
 
 function routerFixture(fixture: RuntimeFixture): CodeGraphWorksetRouterResultV1 {
-  const repositories = fixture.members.map((member, index) => ({
+  const repositories = EffectArray.map(fixture.members, (member, index) => ({
     bestSymbolKey: `symbol-${index}`,
     exactSymbolCount: 0,
     matchingSymbolCount: 1,
@@ -574,11 +590,11 @@ function packageBridgeForMembers(
     resolutionDomain: 'package:npm',
     resolver: {name: 'threadnote-native-moniker', reason: 'declared-npm-package-compatible', version: 1},
     source: endpoint(seed, 'import', sourceMember, identity, {
-      componentId: `cgp_${digest(`runtime-component:${sourceMember.repositoryId}`).slice(0, 32)}`,
+      componentId: `cgp_${Effect2.pipe(digest(`runtime-component:${sourceMember.repositoryId}`), EffectString.slice(0, 32))}`,
       kind: 'component',
     }),
     target: endpoint(seed, 'export', targetMember, identity, {
-      componentId: `cgp_${digest(`runtime-component:${targetMember.repositoryId}`).slice(0, 32)}`,
+      componentId: `cgp_${Effect2.pipe(digest(`runtime-component:${targetMember.repositoryId}`), EffectString.slice(0, 32))}`,
       kind: 'component',
     }),
     version: 1,
@@ -602,11 +618,11 @@ function protobufBridgeForMembers(
     resolver: {name: 'threadnote-native-moniker', reason: 'exact-protobuf-identity', version: 1},
     source: endpoint(seed, 'import', sourceMember, identity, {
       kind: 'qualified-ref',
-      ref: `cgr_${digest('runtime-source-ref').slice(0, 40)}`,
+      ref: `cgr_${Effect2.pipe(digest('runtime-source-ref'), EffectString.slice(0, 40))}`,
     }),
     target: endpoint(seed, 'export', targetMember, identity, {
       kind: 'qualified-ref',
-      ref: `cgr_${digest('runtime-target-ref').slice(0, 40)}`,
+      ref: `cgr_${Effect2.pipe(digest('runtime-target-ref'), EffectString.slice(0, 40))}`,
     }),
     version: 1,
   };
@@ -614,7 +630,7 @@ function protobufBridgeForMembers(
 
 function evidenceCard(ref: string, repositoryKey: string): CodeGraphEvidenceCardV1 {
   return {
-    id: `cge_${digest(`card:${ref}`).slice(0, 40)}`,
+    id: `cge_${Effect2.pipe(digest(`card:${ref}`), EffectString.slice(0, 40))}`,
     reason: {score: 1, signals: ['exact-name'], summary: 'Exact symbol match.'},
     ref,
     relationships: [],
@@ -685,11 +701,11 @@ function packageBridge(seed: string, sourceOverride?: CodeGraphBridgeEndpointV1)
     source:
       sourceOverride ??
       endpoint(seed, 'import', consumer, identity, {
-        componentId: `cgp_${digest('component:consumer').slice(0, 32)}`,
+        componentId: `cgp_${Effect2.pipe(digest('component:consumer'), EffectString.slice(0, 32))}`,
         kind: 'component',
       }),
     target: endpoint(seed, 'export', producer, identity, {
-      componentId: `cgp_${digest(`component:${seed}`).slice(0, 32)}`,
+      componentId: `cgp_${Effect2.pipe(digest(`component:${seed}`), EffectString.slice(0, 32))}`,
       kind: 'component',
     }),
     version: 1,
@@ -726,7 +742,7 @@ function repository(seed: string, repositoryKey: string) {
   return {
     repositoryId: digest(`repository:${seed}`),
     repositoryKey,
-    snapshotId: `cgsn_${digest(`snapshot:${seed}`).slice(0, 40)}`,
+    snapshotId: `cgsn_${Effect2.pipe(digest(`snapshot:${seed}`), EffectString.slice(0, 40))}`,
   } as const;
 }
 

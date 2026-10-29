@@ -1,3 +1,4 @@
+import {Array as EffectArray2} from 'effect';
 import {compareCodeUnits} from '../ordering.js';
 
 export const CODE_GRAPH_LIFECYCLE_STATES = [
@@ -141,7 +142,14 @@ function normalizeProtections(
   protections: readonly CodeGraphLifecycleProtection[],
 ): readonly CodeGraphLifecycleProtection[] {
   const known = new Set<CodeGraphLifecycleProtection>(CODE_GRAPH_LIFECYCLE_PROTECTIONS);
-  return [...new Set(protections.filter(protection => known.has(protection)))].sort(compareCodeUnits);
+  return [
+    ...new Set(
+      EffectArray2.filter(
+        protections,
+        (protection, __effectArrayIndex) => __effectArrayIndex in protections && known.has(protection),
+      ),
+    ),
+  ].sort(compareCodeUnits);
 }
 
 function reclaimAction(

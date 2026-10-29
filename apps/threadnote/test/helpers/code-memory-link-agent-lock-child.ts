@@ -8,6 +8,8 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideScriptLayer, ScriptError} from '../../../../scripts/effect/errors.js';
 import {atomicWrite, scriptArguments} from '../../../../scripts/effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const program = Effect.gen(function* () {
   const [root] = yield* scriptArguments();
@@ -24,7 +26,7 @@ const program = Effect.gen(function* () {
     10_000,
     Effect.gen(function* () {
       const current = (yield* fs.exists(layout.trialsPath)) ? yield* fs.readFileString(layout.trialsPath) : '';
-      if (current.trim()) return;
+      if (Effect2.pipe(current, EffectString.trim)) return;
       const executions = path.join(root, 'external-executions');
       yield* fs.makeDirectory(executions, {recursive: true, mode: 0o700});
       yield* fs.writeFileString(path.join(executions, `${system.processId}.marker`), 'executed\n', {

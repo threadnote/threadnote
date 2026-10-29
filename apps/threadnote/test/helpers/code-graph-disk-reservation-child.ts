@@ -3,6 +3,8 @@ import {provideTestLayer} from './effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Clock, Effect, FileSystem, Layer, Path} from 'effect';
 import {withCodeGraphDiskReservation} from '@threadnote/graph/disk/reservation';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const [
   ledgerRoot,
@@ -27,9 +29,9 @@ if (
   !/^[1-9][0-9]*$/.test(iterationsText) ||
   (!barrierDisabled &&
     (!barrierReadyRoot ||
-      barrierReadyRoot.includes('\0') ||
+      Effect2.pipe(barrierReadyRoot, EffectString.includes('\0')) ||
       !barrierReleasePath ||
-      barrierReleasePath.includes('\0') ||
+      Effect2.pipe(barrierReleasePath, EffectString.includes('\0')) ||
       !/^[0-9]+$/.test(barrierChildId)))
 ) {
   process.stderr.write('invalid disk-reservation child arguments\n');

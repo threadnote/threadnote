@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {canonicalJson, type CanonicalJsonValue} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -12,6 +13,9 @@ import {
   type ProductCaptureSource,
   type Threadnote5ProductEventV1,
 } from './threadnote-5-product-capture-events.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const PRODUCT_CAPTURE_LIMITS = {
   arrayItems: 256,
@@ -72,11 +76,11 @@ export function productCaptureCanonicalJson(value: unknown): string {
     if (typeof item === 'string' && Buffer.byteLength(item, 'utf8') > limits.stringBytes) {
       throw new Error('Product capture string exceeds its byte bound.');
     }
-    if (Array.isArray(item)) {
+    if (EffectArray.isArray(item)) {
       if (item.length > limits.arrayItems) throw new Error('Product capture array exceeds its cardinality bound.');
       for (const entry of item) visit(entry);
     } else if (item !== null && typeof item === 'object') {
-      const entries = Object.entries(item);
+      const entries = EffectRecord.toEntries(item);
       if (entries.length > limits.objectFields) throw new Error('Product capture object exceeds its field bound.');
       for (const [key, entry] of entries) {
         if (Buffer.byteLength(key, 'utf8') > limits.keyBytes)
@@ -95,7 +99,9 @@ export function parseThreadnote5ProductCaptureIdentityV1(value: unknown): Thread
   if (input.version !== 1 || !integerIn(input.attempt, 0, 63) || !integerIn(input.trial, 0, 63)) {
     throw new Error('Product capture version or trial/attempt identity is invalid.');
   }
-  const scenario = THREADNOTE_5_RELEASE_SCENARIOS.find(item => item === input.scenario);
+  const scenario = EffectOption.getOrUndefined(
+    EffectArray.findFirst(THREADNOTE_5_RELEASE_SCENARIOS, item => item === input.scenario),
+  );
   if (scenario === undefined) throw new Error('Product capture scenario is unsupported.');
   return {
     attempt: input.attempt,
@@ -152,7 +158,7 @@ export function productCaptureIdentityDigest(identity: Threadnote5ProductCapture
 
 export function productCaptureFilename(value: Threadnote5ProductCaptureV1): string {
   const parsed = parseThreadnote5ProductCaptureV1(value);
-  return `${parsed.source}-${String(parsed.sequence).padStart(3, '0')}.json`;
+  return `${parsed.source}-${Effect.pipe(String(parsed.sequence), EffectString.padStart(3, '0'))}.json`;
 }
 
 export function parseProductCaptureConfiguration(value: string): {
@@ -167,8 +173,20 @@ export function parseProductCaptureConfiguration(value: string): {
   if (
     typeof input.root !== 'string' ||
     Buffer.byteLength(input.root, 'utf8') > PRODUCT_CAPTURE_LIMITS.rootBytes ||
-    [...input.root].some(
-      character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || character === '\\',
+    EffectArray.some(
+      [...input.root],
+      character =>
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) < 32 ||
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) === 127 ||
+        character === '\\',
     )
   ) {
     throw new Error('Product capture root is invalid.');

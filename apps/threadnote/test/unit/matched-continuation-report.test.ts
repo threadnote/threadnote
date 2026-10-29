@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -15,6 +16,8 @@ import {
   type MatchedContinuationStudyTaskV1,
   type MatchedContinuationVariant,
 } from '@threadnote/threadnote/evaluation/matched-continuation-study';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('matched continuation claim report', () => {
   it('reports failure-inclusive full-workflow tokens, time, and clustered intervals by variant', () => {
@@ -22,9 +25,15 @@ describe('matched continuation claim report', () => {
     const outcomes = createOutcomes(study);
 
     const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-    const files = report.variants.find(result => result.variant === 'files-bare')!;
-    const preloaded = report.variants.find(result => result.variant === 'threadnote-preloaded-resume')!;
-    const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
+    const files = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.variants, result => result.variant === 'files-bare'),
+    )!;
+    const preloaded = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.variants, result => result.variant === 'threadnote-preloaded-resume'),
+    )!;
+    const primary = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+    )!;
 
     expect(files.fullLifecycleProviderTokens?.totalTokens).toBe(500);
     expect(files.tokensPerVerifiedCompletion).toBe(100);
@@ -49,8 +58,12 @@ describe('matched continuation claim report', () => {
     });
 
     const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-    const files = report.variants.find(result => result.variant === 'files-bare')!;
-    const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
+    const files = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.variants, result => result.variant === 'files-bare'),
+    )!;
+    const primary = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+    )!;
 
     expect(files.assigned).toBe(5);
     expect(files.failed).toBe(1);
@@ -69,7 +82,9 @@ describe('matched continuation claim report', () => {
     expect(parseMatchedContinuationOutcomeV1(JSON.parse(JSON.stringify(outcomes[0])))).toEqual(outcomes[0]);
     expect(() =>
       evaluateMatchedContinuationStudyV1({
-        outcomes: outcomes.map((outcome, index) => (index === 0 ? {...outcome, planSha256: 'f'.repeat(64)} : outcome)),
+        outcomes: EffectArray.map(outcomes, (outcome, index) =>
+          index === 0 ? {...outcome, planSha256: Effect.pipe('f', EffectString.repeat(64))} : outcome,
+        ),
         study,
       }),
     ).toThrow('outcome hash does not match');
@@ -85,7 +100,9 @@ describe('matched continuation claim report', () => {
     });
 
     const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-    const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
+    const primary = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+    )!;
 
     expect(primary.completionDeltaPercentagePoints95).toBeNull();
     expect(primary.hybridCompletionDeltaPercentagePoints95).toBeNull();
@@ -107,7 +124,9 @@ describe('matched continuation claim report', () => {
     });
 
     const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-    const files = report.variants.find(result => result.variant === 'files-bare')!;
+    const files = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.variants, result => result.variant === 'files-bare'),
+    )!;
 
     expect(files.fullLifecycleProviderTokens?.totalTokens).toBe(500);
     expect(files.missingProviderUsage).toBe(0);
@@ -123,8 +142,12 @@ describe('matched continuation claim report', () => {
     });
 
     const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-    const files = report.variants.find(result => result.variant === 'files-bare')!;
-    const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
+    const files = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.variants, result => result.variant === 'files-bare'),
+    )!;
+    const primary = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+    )!;
 
     expect(files.fullLifecycleProviderTokens?.totalTokens).toBe(500);
     expect(files.verifiedCompletions).toBe(4);
@@ -145,7 +168,9 @@ describe('matched continuation claim report', () => {
           outcomes: createOutcomes(study, {tokenScale: factor}),
           study,
         });
-        const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
+        const primary = EffectOption.getOrUndefined(
+          EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+        )!;
         expect(primary.tokenReductionPercent).toBe(40);
         expect(primary.tokenReductionPercent95).toEqual({high: 40, low: 40});
       }),
@@ -156,10 +181,15 @@ describe('matched continuation claim report', () => {
   it('reports a three-arm one-task pilot without promoting it to a claim', () => {
     const study = createStudy({taskCount: 1, variants: MATCHED_CONTEXT_CONTINUATION_VARIANTS});
     const report = evaluateMatchedContinuationStudyV1({outcomes: createOutcomes(study), study});
-    const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
+    const primary = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+    )!;
 
-    expect(report.variants.map(result => result.variant)).toEqual(MATCHED_CONTEXT_CONTINUATION_VARIANTS);
-    expect(report.comparisons.map(result => result.target)).toEqual(['manual-handoff', 'threadnote-preloaded-resume']);
+    expect(EffectArray.map(report.variants, result => result.variant)).toEqual(MATCHED_CONTEXT_CONTINUATION_VARIANTS);
+    expect(EffectArray.map(report.comparisons, result => result.target)).toEqual([
+      'manual-handoff',
+      'threadnote-preloaded-resume',
+    ]);
     expect(primary.tokenReductionPercent).toBe(40);
     expect(primary.status).toBe('inconclusive');
     expect(primary.insufficiencies).toContain('study has 1 repository cluster; 5 required for claim eligibility');
@@ -173,8 +203,8 @@ describe('matched continuation claim report', () => {
     const study = createStudy({taskCount: 2, variants: AUTOMATED_CONTEXT_CONTINUATION_VARIANTS});
     const report = evaluateMatchedContinuationStudyV1({outcomes: createOutcomes(study), study});
 
-    expect(report.variants.map(result => result.variant)).toEqual(AUTOMATED_CONTEXT_CONTINUATION_VARIANTS);
-    expect(report.comparisons.map(result => result.target)).toEqual(['threadnote-preloaded-resume']);
+    expect(EffectArray.map(report.variants, result => result.variant)).toEqual(AUTOMATED_CONTEXT_CONTINUATION_VARIANTS);
+    expect(EffectArray.map(report.comparisons, result => result.target)).toEqual(['threadnote-preloaded-resume']);
     expect(report.primaryComparison).toEqual({baseline: 'files-bare', target: 'threadnote-preloaded-resume'});
     expect(report.limitations).toContain(
       'Claims apply only to the frozen repositories, tasks, candidate, model configuration, and 2 continuation treatments.',
@@ -189,15 +219,19 @@ describe('matched continuation claim report', () => {
       variants: AUTOMATED_CONTEXT_CONTINUATION_VARIANTS,
     });
     const outcomes = rechainOutcomes(
-      createOutcomes(study).map(outcome => ({
+      EffectArray.map(createOutcomes(study), outcome => ({
         ...outcome,
         assessment: {...outcome.assessment!, correctnessScoreMilli: 0, judgeCompleted: false},
       })),
     );
 
     const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-    const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
-    const preloaded = report.variants.find(result => result.variant === 'threadnote-preloaded-resume')!;
+    const primary = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+    )!;
+    const preloaded = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.variants, result => result.variant === 'threadnote-preloaded-resume'),
+    )!;
 
     expect(preloaded.hybridVerifiedCompletions).toBe(preloaded.verifiedCompletions);
     expect(primary.status).toBe('passed');
@@ -216,7 +250,7 @@ describe('matched continuation claim report', () => {
     });
     let injectedSafetyFailure = false;
     const outcomes = rechainOutcomes(
-      createOutcomes(study).map(outcome => {
+      EffectArray.map(createOutcomes(study), outcome => {
         if (outcome.variant !== 'threadnote-preloaded-resume' || injectedSafetyFailure) return outcome;
         injectedSafetyFailure = true;
         return {
@@ -227,8 +261,12 @@ describe('matched continuation claim report', () => {
     );
 
     const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-    const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
-    const preloaded = report.variants.find(result => result.variant === 'threadnote-preloaded-resume')!;
+    const primary = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+    )!;
+    const preloaded = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.variants, result => result.variant === 'threadnote-preloaded-resume'),
+    )!;
 
     expect(preloaded.verifiedCompletions).toBe(5);
     expect(preloaded.hybridVerifiedCompletions).toBe(4);
@@ -240,7 +278,7 @@ describe('matched continuation claim report', () => {
   it('reports deterministic completion costs even when the blinded safety assessment fails closed', () => {
     const study = createStudy({taskCount: 1, variants: MATCHED_CONTEXT_CONTINUATION_VARIANTS});
     const outcomes = rechainOutcomes(
-      createOutcomes(study).map(outcome =>
+      EffectArray.map(createOutcomes(study), outcome =>
         outcome.variant === 'threadnote-preloaded-resume'
           ? {...outcome, assessment: {...outcome.assessment!, harmfulActions: 1, judgeCompleted: false}}
           : outcome,
@@ -248,8 +286,12 @@ describe('matched continuation claim report', () => {
     );
 
     const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-    const preloaded = report.variants.find(result => result.variant === 'threadnote-preloaded-resume')!;
-    const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
+    const preloaded = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.variants, result => result.variant === 'threadnote-preloaded-resume'),
+    )!;
+    const primary = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+    )!;
 
     expect(preloaded.verifiedCompletions).toBe(1);
     expect(preloaded.hybridVerifiedCompletions).toBe(0);
@@ -273,14 +315,16 @@ describe('matched continuation claim report', () => {
         }),
         assessmentPatch => {
           const outcomes = rechainOutcomes(
-            createOutcomes(study).map(outcome =>
+            EffectArray.map(createOutcomes(study), outcome =>
               outcome.variant === 'threadnote-preloaded-resume'
                 ? {...outcome, assessment: {...outcome.assessment!, ...assessmentPatch}}
                 : outcome,
             ),
           );
           const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-          const preloaded = report.variants.find(result => result.variant === 'threadnote-preloaded-resume')!;
+          const preloaded = EffectOption.getOrUndefined(
+            EffectArray.findFirst(report.variants, result => result.variant === 'threadnote-preloaded-resume'),
+          )!;
 
           expect(preloaded.verifiedCompletions).toBe(1);
           expect(preloaded.tokensPerVerifiedCompletion).toBe(60);
@@ -302,14 +346,16 @@ describe('matched continuation claim report', () => {
   it('does not claim token savings when deterministic completions lack judge-qualified correctness', () => {
     const study = createStudy();
     const outcomes = rechainOutcomes(
-      createOutcomes(study).map(outcome => ({
+      EffectArray.map(createOutcomes(study), outcome => ({
         ...outcome,
         assessment: {...outcome.assessment!, judgeCompleted: false},
       })),
     );
 
     const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-    const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
+    const primary = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+    )!;
 
     expect(primary.tokenReductionPercent).toBe(40);
     expect(primary.status).toBe('failed');
@@ -325,7 +371,9 @@ describe('matched continuation claim report', () => {
       statusFor: new Map([['files-bare:0', 'failed']]),
     });
     const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-    const primary = report.comparisons.find(result => result.target === 'threadnote-preloaded-resume')!;
+    const primary = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.comparisons, result => result.target === 'threadnote-preloaded-resume'),
+    )!;
 
     expect(primary.completionDeltaPercentagePoints).toBe(100);
     expect(primary.completionDeltaPercentagePoints95).toEqual({high: 100, low: 100});
@@ -352,8 +400,11 @@ function createOutcomes(
   };
   const scale = options.tokenScale ?? 1;
   let previousOutcomeHash: string | null = null;
-  return study.schedule.map(scheduled => {
-    const taskIndex = study.tasks.findIndex(task => task.taskId === scheduled.taskId);
+  return EffectArray.map(study.schedule, scheduled => {
+    const taskIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(study.tasks, task => task.taskId === scheduled.taskId),
+      () => -1,
+    );
     const key = `${scheduled.variant}:${taskIndex}`;
     const status = options.statusFor?.get(key) ?? 'completed';
     const measuredUnavailable = status === 'unavailable' && options.measuredUnavailableFor?.has(key) === true;
@@ -424,12 +475,12 @@ function createStudy(
   const tasks = Array.from({length: options.taskCount ?? 5}, (_, index): MatchedContinuationStudyTaskV1 => ({
     checkpointRepositoryFixtureHash: hex(index + 40),
     checkpointRevision: commit(index + 40),
-    clusterId: `cluster_${hex(index + 10).slice(-16)}`,
+    clusterId: `cluster_${Effect.pipe(hex(index + 10), EffectString.slice(-16))}`,
     planSha256: hex(index + 50),
     repositoryUrl: `https://example.com/org/repository-${index}.git`,
     sourceRepositoryFixtureHash: hex(index + 20),
     sourceRevision: commit(index + 20),
-    taskId: `tsk_${hex(index + 30).slice(-16)}`,
+    taskId: `tsk_${Effect.pipe(hex(index + 30), EffectString.slice(-16))}`,
   }));
   let globalRunOrder = 0;
   return createMatchedContinuationStudyV1({
@@ -449,13 +500,13 @@ function createStudy(
       minimumCorrectnessScoreMilli: options.minimumCorrectnessScoreMilli ?? 1_000,
       minimumTokenReductionBasisPoints: 500,
     },
-    schedule: tasks.flatMap((task, taskIndex) =>
+    schedule: EffectArray.flatMap(tasks, (task, taskIndex) =>
       Array.from({length: variants.length}, (_, position) => {
         const variant = variants[options.unbalanced === true ? position : (position + taskIndex) % variants.length];
         globalRunOrder += 1;
         return {
           globalRunOrder,
-          runNonce: `run_${globalRunOrder.toString(16).padStart(32, '0')}`,
+          runNonce: `run_${Effect.pipe(globalRunOrder.toString(16), EffectString.padStart(32, '0'))}`,
           taskId: task.taskId,
           variant,
           withinTaskRunOrder: position + 1,
@@ -479,7 +530,7 @@ function createStudy(
 
 function rechainOutcomes(outcomes: readonly MatchedContinuationOutcomeV1[]): readonly MatchedContinuationOutcomeV1[] {
   let previousOutcomeHash: string | null = null;
-  return outcomes.map(outcome => {
+  return EffectArray.map(outcomes, outcome => {
     const {outcomeHash: _outcomeHash, version: _version, ...input} = outcome;
     const rechained = createMatchedContinuationOutcomeV1({...input, previousOutcomeHash});
     previousOutcomeHash = rechained.outcomeHash;
@@ -498,9 +549,9 @@ function underlyingArm(variant: MatchedContinuationVariant) {
 }
 
 function hex(seed: number): string {
-  return seed.toString(16).padStart(64, '0');
+  return Effect.pipe(seed.toString(16), EffectString.padStart(64, '0'));
 }
 
 function commit(seed: number): string {
-  return seed.toString(16).padStart(40, '0');
+  return Effect.pipe(seed.toString(16), EffectString.padStart(40, '0'));
 }

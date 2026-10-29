@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdtempSync, renameSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -12,6 +13,9 @@ import {
   resolveRepositoryIdentity,
 } from '@threadnote/graph/repository';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph Git worktree registry', () => {
   it('preserves a registered worktree whose folder is temporarily unavailable', async () => {
@@ -49,7 +53,7 @@ describe('code graph Git worktree registry', () => {
     const parsed = parseRepositoryWorktreeRegistryOutput(output, 'linux');
 
     expect(parsed).toHaveLength(2);
-    expect(parsed.map(entry => Object.keys(entry).sort())).toEqual([
+    expect(EffectArray.map(parsed, entry => EffectRecord.keys(entry).sort())).toEqual([
       ['locked', 'prunable', 'worktreeId'],
       ['locked', 'prunable', 'worktreeId'],
     ]);
@@ -67,11 +71,15 @@ describe('code graph Git worktree registry', () => {
         {fields: ['HEAD def'], root: '/checkout/main'},
       ]),
     ],
-    ['oversized path', registryOutput([{fields: ['HEAD abc'], root: `/checkout/${'a'.repeat(4_097)}`}])],
+    [
+      'oversized path',
+      registryOutput([{fields: ['HEAD abc'], root: `/checkout/${Effect2.pipe('a', EffectString.repeat(4_097))}`}]),
+    ],
     [
       'oversized output',
       registryOutput([
         {
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           fields: [`unknown ${'a'.repeat(CODE_GRAPH_WORKTREE_REGISTRY_LIMITS.maxOutputBytes)}`],
           root: '/checkout/main',
         },
@@ -120,7 +128,7 @@ describe('code graph Git worktree registry', () => {
         }),
         entries => {
           const output = registryOutput(
-            entries.map(value => ({
+            EffectArray.map(entries, value => ({
               fields: [
                 'HEAD abc',
                 ...(value.locked ? ['locked reason'] : []),
@@ -134,9 +142,19 @@ describe('code graph Git worktree registry', () => {
 
           expect(first).toEqual(second);
           expect(first).toHaveLength(entries.length);
-          expect(new Set(first.map(value => value.worktreeId))).toHaveLength(entries.length);
-          expect(first.filter(value => value.locked)).toHaveLength(entries.filter(value => value.locked).length);
-          expect(first.filter(value => value.prunable)).toHaveLength(entries.filter(value => value.prunable).length);
+          expect(new Set(EffectArray.map(first, value => value.worktreeId))).toHaveLength(entries.length);
+          expect(
+            EffectArray.filter(first, (value, __effectArrayIndex) => __effectArrayIndex in first && value.locked),
+          ).toHaveLength(
+            EffectArray.filter(entries, (value, __effectArrayIndex) => __effectArrayIndex in entries && value.locked)
+              .length,
+          );
+          expect(
+            EffectArray.filter(first, (value, __effectArrayIndex) => __effectArrayIndex in first && value.prunable),
+          ).toHaveLength(
+            EffectArray.filter(entries, (value, __effectArrayIndex) => __effectArrayIndex in entries && value.prunable)
+              .length,
+          );
         },
       ),
       {numRuns: 100},
@@ -145,7 +163,12 @@ describe('code graph Git worktree registry', () => {
 });
 
 function registryOutput(entries: readonly {readonly fields: readonly string[]; readonly root: string}[]): string {
-  return entries.map(entry => [`worktree ${entry.root}`, ...entry.fields].join('\0')).join('\0\0') + '\0\0';
+  return (
+    EffectArray.join(
+      EffectArray.map(entries, entry => EffectArray.join([`worktree ${entry.root}`, ...entry.fields], '\0')),
+      '\0\0',
+    ) + '\0\0'
+  );
 }
 
 function localRepository(): string {

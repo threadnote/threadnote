@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -17,6 +18,8 @@ import {
   parseRecallRerankerValidationPolicyV1,
   recallRerankerForbiddenTextsHashV1,
 } from './training/recall-reranker-contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const program = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -42,8 +45,8 @@ const program = Effect.gen(function* () {
   const evaluationFixture = createRecallEvaluationFixtureV2();
   const evaluationHash = sha256HexSync(serializeRecallEvaluationFixtureV2Identity(evaluationFixture));
   const forbiddenTexts = [
-    ...evaluationFixture.documents.map(document => document.text),
-    ...evaluationFixture.queries.map(query => query.query),
+    ...EffectArray.map(evaluationFixture.documents, document => document.text),
+    ...EffectArray.map(evaluationFixture.queries, query => query.query),
   ];
   const forbiddenTextsHash = recallRerankerForbiddenTextsHashV1(forbiddenTexts);
   if (
@@ -56,7 +59,8 @@ const program = Effect.gen(function* () {
     });
   }
   if (
-    !manifest.reservedEvaluations.some(
+    !EffectArray.some(
+      manifest.reservedEvaluations,
       candidate => candidate.name === policy.reservedEvaluation.name && candidate.sha256 === evaluationHash,
     )
   ) {
@@ -103,7 +107,12 @@ function parseArguments(args: readonly string[], resolve: (value: string) => str
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
 

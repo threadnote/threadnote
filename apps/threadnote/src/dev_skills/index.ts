@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {listDevSkillsTargets} from '../agent_integration/skill_targets.js';
@@ -10,6 +11,10 @@ import {withDevSkillsMutationLease, type DevSkillsMutationLease} from './lease.j
 import {devSkillsReadiness} from './readiness.js';
 import {readDevSkillsRefresh as readRefresh} from './refresh_state.js';
 import {installedSummary} from './capabilities.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 export {readDevSkillsRuntimeCapabilities} from './capabilities.js';
 
 export {withDevSkillsMutationLease};
@@ -34,7 +39,7 @@ export const previewDevSkills = Effect.fn('devSkills.preview')(function* (
     readiness: yield* devSkillsReadiness(
       config,
       mutation.plan.target,
-      receipt && Object.keys(receipt.consumers).length ? receipt.manifest : undefined,
+      receipt && EffectRecord.keys(receipt.consumers).length ? receipt.manifest : undefined,
     ),
   } satisfies DevSkillsPlan;
 });
@@ -46,7 +51,7 @@ export const statusDevSkills = Effect.fn('devSkills.status')(function* (
   const context = yield* enrollmentContext(config);
   const selectors: DevSkillsSelector[] = selector
     ? [selector]
-    : Object.values(context.homeIndex.targets).map(entry => ({
+    : EffectArray.map(EffectRecord.values(context.homeIndex.targets), entry => ({
         agent: entry.target.surfaceId,
         profile: entry.target.profile,
         scope: entry.target.scope,
@@ -65,18 +70,29 @@ export const statusDevSkills = Effect.fn('devSkills.status')(function* (
       enrollmentState: context.homeIndex.targets[mutation.plan.consumerId]?.state ?? 'unregistered',
       enabled: context.homeIndex.targets[mutation.plan.consumerId]?.enabled ?? false,
       ...(receipt?.consumers[mutation.plan.consumerId] &&
-      !mutation.plan.issues.some(issue =>
+      !EffectArray.some(mutation.plan.issues, issue =>
         ['generation-conflict', 'historical-ownership-conflict', 'incomplete'].includes(issue.code),
       )
         ? {installed: installedSummary(receipt.manifest)}
         : {}),
-      ...(receipt && Object.keys(receipt.consumers).length ? {installedDigest: receipt.manifest.digest} : {}),
+      ...(receipt && EffectRecord.keys(receipt.consumers).length ? {installedDigest: receipt.manifest.digest} : {}),
       ...(refresh._tag === 'Success' &&
-      refresh.success?.targets.find(item => item.consumerId === mutation.plan.consumerId)
-        ? {lastRefresh: refresh.success.targets.find(item => item.consumerId === mutation.plan.consumerId)!.outcome}
+      refresh.success !== undefined &&
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(refresh.success?.targets), __effectOptionalTargets =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(__effectOptionalTargets, item => item.consumerId === mutation.plan.consumerId),
+          ),
+        ),
+      )
+        ? {
+            lastRefresh: EffectOption.getOrUndefined(
+              EffectArray.findFirst(refresh.success.targets, item => item.consumerId === mutation.plan.consumerId),
+            )!.outcome,
+          }
         : {}),
       issues: [
-        ...mutation.plan.issues.filter(issue => issue.code !== 'explicit-update-required'),
+        ...EffectArray.filter(mutation.plan.issues, issue => issue.code !== 'explicit-update-required'),
         ...(refresh._tag === 'Failure'
           ? [
               {
@@ -90,7 +106,7 @@ export const statusDevSkills = Effect.fn('devSkills.status')(function* (
       readiness: yield* devSkillsReadiness(
         config,
         mutation.plan.target,
-        receipt && Object.keys(receipt.consumers).length ? receipt.manifest : undefined,
+        receipt && EffectRecord.keys(receipt.consumers).length ? receipt.manifest : undefined,
       ),
     });
   }
@@ -115,9 +131,10 @@ export const removeOwnedDevSkills = Effect.fn('devSkills.removeOwned')(function*
 ) {
   if (!(yield* hasDevSkillsHomeState(config))) return [];
   const context = yield* enrollmentContext(config);
-  const entries = Object.values(context.homeIndex.targets)
-    .filter(entry => entry.state === 'enrolled')
-    .sort((a, b) => a.target.skillRoot.localeCompare(b.target.skillRoot));
+  const entries = EffectArray.filter(
+    EffectRecord.values(context.homeIndex.targets),
+    entry => entry.state === 'enrolled',
+  ).sort((a, b) => Effect2.pipe(a.target.skillRoot, EffectString.localeCompare(b.target.skillRoot)));
   const results: (DevSkillsPlan | DevSkillsResult)[] = [];
   for (const entry of entries) {
     const selector = {

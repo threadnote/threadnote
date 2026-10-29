@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {RefreshCw} from 'lucide-react';
 import {PageActions} from '../workspace.js';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
@@ -62,6 +64,8 @@ import {
   NodeInspector,
 } from './panels.js';
 import {ThreeGraph} from './scene.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function GraphWorkspace(props: {
   readonly administration?: CodeGraphLocalDiagnosticsReport;
@@ -155,25 +159,46 @@ export function GraphWorkspace(props: {
   const catalogRequestSequence = useRef(0);
   const baseCatalogIdentity = useMemo(
     () =>
-      (props.catalog?.repositories ?? [])
-        .flatMap(group => group.views.map(view => `${view.id}:${view.snapshot.id}`))
-        .sort(compareCodeUnits)
-        .join('|'),
+      EffectArray.join(
+        EffectArray.flatMap(props.catalog?.repositories ?? [], group =>
+          EffectArray.map(group.views, view => `${view.id}:${view.snapshot.id}`),
+        ).sort(compareCodeUnits),
+        '|',
+      ),
     [props.catalog?.repositories],
   );
   const repositories = useMemo(
     () => mergeGraphRepositoryGroups(props.catalog?.repositories ?? [], catalogAdditions),
     [catalogAdditions, props.catalog?.repositories],
   );
-  const repositoryGroup = repositories.find(candidate => candidate.id === repositoryId) ?? repositories[0];
+  const repositoryGroup =
+    EffectOption.getOrUndefined(EffectArray.findFirst(repositories, candidate => candidate.id === repositoryId)) ??
+    repositories[0];
   const repository =
-    repositoryGroup?.views.find(candidate => candidate.id === viewId) ??
-    repositoryGroup?.views.find(candidate => candidate.id === repositoryGroup.defaultViewId) ??
+    EffectOption.getOrUndefined(
+      EffectOption.flatMap(EffectOption.fromNullishOr(repositoryGroup?.views), __effectOptionalArrayReceiver =>
+        EffectArray.findFirst(__effectOptionalArrayReceiver, candidate => candidate.id === viewId),
+      ),
+    ) ??
+    EffectOption.getOrUndefined(
+      EffectOption.flatMap(EffectOption.fromNullishOr(repositoryGroup?.views), __effectOptionalArrayReceiver =>
+        EffectArray.findFirst(
+          __effectOptionalArrayReceiver,
+          candidate => candidate.id === repositoryGroup.defaultViewId,
+        ),
+      ),
+    ) ??
     repositoryGroup?.views[0];
-  const baseRepositoryGroup = (props.catalog?.repositories ?? []).find(
-    candidate => candidate.id === repositoryGroup?.id,
+  const baseRepositoryGroup = EffectOption.getOrUndefined(
+    EffectArray.findFirst(props.catalog?.repositories ?? [], candidate => candidate.id === repositoryGroup?.id),
   );
-  const baseRepository = baseRepositoryGroup?.views.find(candidate => candidate.id === repository?.id);
+  const baseRepository = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(baseRepositoryGroup?.views), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(__effectArrayReceiver, candidate => candidate.id === repository?.id),
+      ),
+    ),
+  );
   const analysisScope = `${repository?.id ?? ''}:${repository?.snapshot.id ?? ''}`;
   const analysisScopeRef = useRef(analysisScope);
   analysisScopeRef.current = analysisScope;
@@ -187,15 +212,31 @@ export function GraphWorkspace(props: {
       graphSource && expandedNeighborhood ? graphWithNodeNeighborhood(graphSource, expandedNeighborhood) : graphSource,
     [expandedNeighborhood, graphSource],
   );
-  const selectedNode = graph?.nodes.find(node => node.id === selectedNodeId);
+  const selectedNode = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(graph?.nodes), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, node => node.id === selectedNodeId)),
+    ),
+  );
   const relations = useMemo(
-    () => [...new Set(graph?.edges.map(edge => edge.relation) ?? [])].sort(compareCodeUnits),
+    () =>
+      [
+        ...new Set(
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(graph?.edges), __effectArrayReceiver =>
+              EffectArray.map(__effectArrayReceiver, edge => edge.relation),
+            ),
+          ) ?? [],
+        ),
+      ].sort(compareCodeUnits),
     [graph],
   );
-  const visibleBuilds = useMemo(
-    () => orderGraphBuildStatuses((props.catalog?.builds ?? []).filter(graphBuildShouldDisplay), repositories),
-    [props.catalog?.builds, repositories],
-  );
+  const visibleBuilds = useMemo(() => {
+    const builds = props.catalog?.builds ?? [];
+    return orderGraphBuildStatuses(
+      EffectArray.filter(builds, (build, index) => index in builds && graphBuildShouldDisplay(build)),
+      repositories,
+    );
+  }, [props.catalog?.builds, repositories]);
   const administrationJobs = useMemo(
     () => graphAdministrationJobSelection(visibleBuilds, props.catalog?.waiters ?? []),
     [props.catalog?.waiters, visibleBuilds],
@@ -212,7 +253,8 @@ export function GraphWorkspace(props: {
     lifecyclePending: props.catalog?.lifecyclePending,
     maintenance: props.catalog?.maintenance,
   });
-  const selectedRepositoryIsIndexing = visibleBuilds.some(
+  const selectedRepositoryIsIndexing = EffectArray.some(
+    visibleBuilds,
     build =>
       repository !== undefined &&
       build.identity.checkoutId === repository.checkoutId &&
@@ -467,21 +509,42 @@ export function GraphWorkspace(props: {
   }, [graph?.repository.snapshot.id, props.loadNodeDetail, repository?.id, selectedNode?.id, selectedNode?.type]);
 
   const searchResults = useMemo(() => {
-    const needle = search.trim().toLowerCase();
+    const needle = Effect.pipe(search, EffectString.trim, EffectString.toLowerCase);
     if (!needle || !graph) return [];
-    return graph.nodes
-      .filter(
-        node =>
-          node.label.toLowerCase().includes(needle) ||
-          node.qualifiedName?.toLowerCase().includes(needle) ||
-          node.path?.toLowerCase().includes(needle),
-      )
+    return EffectArray.filter(
+      graph.nodes,
+      (node, index) =>
+        index in graph.nodes &&
+        Boolean(
+          Effect.pipe(node.label, EffectString.toLowerCase, EffectString.includes(needle)) ||
+          Effect.pipe(
+            node.qualifiedName,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes(needle)),
+          ) ||
+          Effect.pipe(
+            node.path,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes(needle)),
+          ),
+        ),
+    )
       .sort((left, right) => right.degree - left.degree || compareCodeUnits(left.label, right.label))
       .slice(0, 8);
   }, [graph, search]);
 
   const chooseRepository = (nextRepositoryId: string): void => {
-    const next = repositories.find(candidate => candidate.id === nextRepositoryId);
+    const next = EffectOption.getOrUndefined(
+      EffectArray.findFirst(repositories, candidate => candidate.id === nextRepositoryId),
+    );
     setRepositoryId(nextRepositoryId);
     setViewId(next?.defaultViewId ?? next?.views[0]?.id ?? '');
     setProjectId('all');
@@ -559,7 +622,14 @@ export function GraphWorkspace(props: {
       setExpandedNeighborhood(undefined);
       return;
     }
-    if (baseGraph?.nodes.some(node => node.id === nodeId)) setExpandedNeighborhood(undefined);
+    if (
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(baseGraph?.nodes), __effectArrayReceiver =>
+          EffectArray.some(__effectArrayReceiver, node => node.id === nodeId),
+        ),
+      )
+    )
+      setExpandedNeighborhood(undefined);
     if (focus) {
       focusSequence.current += 1;
       setFocusRequest({nodeId, sequence: focusSequence.current});
@@ -568,7 +638,7 @@ export function GraphWorkspace(props: {
 
   const loadCatalogContinuation = (requestedQuery: string): void => {
     if (!repository || !repositoryGroup || catalogLoading) return;
-    const query = requestedQuery.trim().slice(0, 256);
+    const query = Effect.pipe(requestedQuery, EffectString.trim, EffectString.slice(0, 256));
     const continuation = catalogContinuation?.viewId === repository.id ? catalogContinuation : undefined;
     const offsets =
       query.length === 0
@@ -632,14 +702,23 @@ export function GraphWorkspace(props: {
           setCatalogContinuation({
             projectHasMore: catalogPage.repository.projectsTruncated,
             projectOffset:
-              projectOffset + catalogPage.repository.projects.filter(project => project.id.startsWith('cgp_')).length,
+              projectOffset +
+              EffectArrayPipe(catalogPage.repository.projects, __effectArrayValues =>
+                EffectArray.filter(
+                  __effectArrayValues,
+                  (project, __effectArrayIndex) =>
+                    __effectArrayIndex in __effectArrayValues &&
+                    Effect.pipe(project.id, EffectString.startsWith('cgp_')),
+                ),
+              ).length,
             viewHasMore: viewPage.hasMore,
             viewId: repository.id,
             viewOffset:
               viewOffset +
-              viewPage.repositories
-                .flatMap(group => group.views)
-                .filter(view => view.checkoutId === repository.checkoutId).length,
+              EffectArray.filter(
+                EffectArray.flatMap(viewPage.repositories, group => group.views),
+                view => view.checkoutId === repository.checkoutId,
+              ).length,
             workspaceHasMore: catalogPage.repository.workspacesTruncated,
             workspaceOffset: workspaceOffset + catalogPage.repository.workspaces.length,
           });
@@ -746,7 +825,7 @@ export function GraphWorkspace(props: {
           ) : null}
           {administrationJobs.jobs.length > 0 ? (
             <div className="graph-build-status" aria-live="polite">
-              {administrationJobs.jobs.map(build => (
+              {EffectArray.map(administrationJobs.jobs, build => (
                 <GraphBuildProgress
                   build={build}
                   configuredProjects={props.catalog?.configuredProjects}
@@ -768,7 +847,7 @@ export function GraphWorkspace(props: {
           {props.catalog?.diagnostics.length ? (
             <div className="graph-catalog-diagnostics" role="status">
               <strong>Some indexed views need attention</strong>
-              {props.catalog.diagnostics.map(diagnostic => (
+              {EffectArray.map(props.catalog.diagnostics, diagnostic => (
                 <span key={`${diagnostic.checkoutId}:${diagnostic.code}`}>{diagnostic.message}</span>
               ))}
             </div>
@@ -794,7 +873,7 @@ export function GraphWorkspace(props: {
                 onChange={event => chooseRepository(event.target.value)}
                 value={repositoryGroup?.id ?? ''}
               >
-                {repositories.map(item => (
+                {EffectArray.map(repositories, item => (
                   <option key={item.id} value={item.id}>
                     {graphRepositoryScopeLabel(
                       graphRepositoryOptionLabel(item, repositories),
@@ -813,7 +892,7 @@ export function GraphWorkspace(props: {
                   onChange={event => chooseView(event.target.value)}
                   value={repository?.id ?? ''}
                 >
-                  {repositoryGroup.views.map(view => (
+                  {EffectArray.map(repositoryGroup.views, view => (
                     <option key={view.id} value={view.id}>
                       {graphRepositoryScopeLabel(view.displayName, view.scopeId, props.catalog?.configuredProjects)} ·{' '}
                       {view.label}
@@ -833,14 +912,24 @@ export function GraphWorkspace(props: {
                 value={projectId}
               >
                 <option value="all">All components</option>
-                {(repository?.workspaces ?? []).map(workspace => {
-                  const projects = repository?.projects.filter(project => project.workspaceId === workspace.id) ?? [];
+                {EffectArray.map(repository?.workspaces ?? [], workspace => {
+                  const projects =
+                    EffectOption.getOrUndefined(
+                      EffectOption.map(
+                        EffectOption.fromNullishOr(repository?.projects),
+                        __effectOptionalArrayReceiver =>
+                          EffectArray.filter(
+                            __effectOptionalArrayReceiver,
+                            project => project.workspaceId === workspace.id,
+                          ),
+                      ),
+                    ) ?? [];
                   return projects.length > 0 ? (
                     <optgroup
                       key={workspace.id}
                       label={`${workspace.name} · ${workspace.buildSystem} · ${workspace.root || 'repository root'}`}
                     >
-                      {projects.map(project => (
+                      {EffectArray.map(projects, project => (
                         <option key={project.id} value={project.id}>
                           {project.label} · {graphProjectBadge(project)} ·{' '}
                           {repository?.metrics === 'deferred'
@@ -851,18 +940,24 @@ export function GraphWorkspace(props: {
                     </optgroup>
                   ) : null;
                 })}
-                {(repository?.projects ?? [])
-                  .filter(
+                {EffectArray.map(
+                  EffectArray.filter(
+                    repository?.projects ?? [],
                     project =>
                       !project.workspaceId ||
-                      !repository?.workspaces.some(workspace => workspace.id === project.workspaceId),
-                  )
-                  .map(project => (
+                      !EffectOption.getOrUndefined(
+                        EffectOption.map(EffectOption.fromNullishOr(repository?.workspaces), __effectArrayReceiver =>
+                          EffectArray.some(__effectArrayReceiver, workspace => workspace.id === project.workspaceId),
+                        ),
+                      ),
+                  ),
+                  project => (
                     <option key={project.id} value={project.id}>
                       {project.label} · {graphProjectBadge(project)} ·{' '}
                       {repository?.metrics === 'deferred' ? 'count on demand' : compactNumber(project.symbolCount ?? 0)}
                     </option>
-                  ))}
+                  ),
+                )}
               </select>
             </label>
           </div>
@@ -876,10 +971,10 @@ export function GraphWorkspace(props: {
               type="search"
               value={search}
             />
-            {search.trim() ? (
+            {Effect.pipe(search, EffectString.trim) ? (
               <div className="graph-search-results">
                 {searchResults.length > 0 ? (
-                  searchResults.map(node => (
+                  EffectArray.map(searchResults, node => (
                     <button
                       key={node.id}
                       onClick={() => {
@@ -959,11 +1054,15 @@ export function GraphWorkspace(props: {
                     value={catalogQuery}
                   />
                   <button
-                    disabled={!repository || catalogLoading || catalogQuery.trim().length === 0}
+                    disabled={
+                      !repository || catalogLoading || Effect.pipe(catalogQuery, EffectString.trim).length === 0
+                    }
                     onClick={() => loadCatalogContinuation(catalogQuery)}
                     type="button"
                   >
-                    {catalogLoading && catalogQuery.trim().length > 0 ? 'Searching…' : 'Find options'}
+                    {catalogLoading && Effect.pipe(catalogQuery, EffectString.trim).length > 0
+                      ? 'Searching…'
+                      : 'Find options'}
                   </button>
                 </div>
                 {projectCatalogHasMore || workspaceCatalogHasMore || viewCatalogHasMore ? (
@@ -973,7 +1072,9 @@ export function GraphWorkspace(props: {
                     onClick={() => loadCatalogContinuation('')}
                     type="button"
                   >
-                    {catalogLoading && catalogQuery.trim().length === 0 ? 'Loading…' : 'Load more options'}
+                    {catalogLoading && Effect.pipe(catalogQuery, EffectString.trim).length === 0
+                      ? 'Loading…'
+                      : 'Load more options'}
                   </button>
                 ) : null}
                 {catalogError ? <small role="alert">{catalogError}</small> : null}
@@ -995,7 +1096,7 @@ export function GraphWorkspace(props: {
                         {catalogSearchResult.options.projects.length > 0 ? (
                           <div className="graph-catalog-result-group">
                             <span>Components and workspace matches</span>
-                            {catalogSearchResult.options.projects.map(option => (
+                            {EffectArray.map(catalogSearchResult.options.projects, option => (
                               <button
                                 key={`${option.viewId}:${option.id}`}
                                 onClick={() => chooseProject(option.id)}
@@ -1010,7 +1111,7 @@ export function GraphWorkspace(props: {
                         {catalogSearchResult.options.views.length > 0 ? (
                           <div className="graph-catalog-result-group">
                             <span>Indexed views</span>
-                            {catalogSearchResult.options.views.map(option => (
+                            {EffectArray.map(catalogSearchResult.options.views, option => (
                               <button
                                 key={`${option.repositoryId}:${option.id}`}
                                 onClick={() => chooseCatalogView(option.repositoryId, option.id)}
@@ -1075,7 +1176,7 @@ export function GraphWorkspace(props: {
                       value={relationFilter}
                     >
                       <option value="all">All relationships</option>
-                      {relations.map(relation => (
+                      {EffectArray.map(relations, relation => (
                         <option key={relation} value={relation}>
                           {relationLabel(relation)}
                         </option>
@@ -1107,24 +1208,25 @@ export function GraphWorkspace(props: {
                   <div className="graph-focus-control">
                     <span>Selection focus</span>
                     <div className="segmented-control" aria-label="Selection focus">
-                      {(
+                      {EffectArray.map(
                         [
                           ['all', 'All'],
                           ['neighbors', 'Neighbors'],
                           ['incoming', 'Incoming'],
                           ['outgoing', 'Outgoing'],
-                        ] as const
-                      ).map(([mode, label]) => (
-                        <button
-                          aria-pressed={focusMode === mode}
-                          disabled={!selectedNode}
-                          key={mode}
-                          onClick={() => setFocusMode(mode)}
-                          type="button"
-                        >
-                          {label}
-                        </button>
-                      ))}
+                        ] as const,
+                        ([mode, label]) => (
+                          <button
+                            aria-pressed={focusMode === mode}
+                            disabled={!selectedNode}
+                            key={mode}
+                            onClick={() => setFocusMode(mode)}
+                            type="button"
+                          >
+                            {label}
+                          </button>
+                        ),
+                      )}
                     </div>
                   </div>
                   {selectedNode ? (
@@ -1252,7 +1354,7 @@ export function GraphWorkspace(props: {
 
         {graph && [...new Set([...graph.warnings, ...(graph.query?.warnings ?? [])])].length ? (
           <footer className="graph-notes">
-            {[...new Set([...graph.warnings, ...(graph.query?.warnings ?? [])])].map(warning => (
+            {EffectArray.map([...new Set([...graph.warnings, ...(graph.query?.warnings ?? [])])], warning => (
               <span key={warning}>{warning}</span>
             ))}
           </footer>

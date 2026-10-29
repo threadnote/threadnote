@@ -1,3 +1,22 @@
+import {LibraryReaderHeader, LibraryScopeControls, LibraryContentTabs} from './library_controls.js';
+import {
+  isCheckssharesResponse,
+  isCodeGraphLocalDiagnosticsReport,
+  isGraphCatalog,
+  isGraphIndexActionResponse,
+  isJobResponse2,
+  isManagerGraphViewRemovalResponse,
+  isMemoryResponse,
+  isOutputResponse2,
+  isReadResponse,
+  isResultsResponse,
+  isSharesResponse,
+  isStateResponse,
+  isTreeResponse,
+} from './api/response_guards.js';
+import {mountManagerApp} from './mount.js';
+import {Option as EffectOption} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {requestGraphAdministrationAction} from './graph/index_action.js';
 import {useManualSupportEdit} from './attention/manual_edit.js';
 import {ConsolidationPanel} from './consolidation_review.js';
@@ -12,35 +31,18 @@ import {IntegrationsPanel} from './integrations_view.js';
 import type {IntegrationRegistration} from './integration_registration.js';
 import {RuntimeHealthPanel} from './runtime_health_view.js';
 import '@mdxeditor/editor/style.css';
-import {
-  ArrowLeft,
-  Brain,
-  Check,
-  ChevronRight,
-  Files,
-  HardDrive,
-  Info,
-  ListChecks,
-  Pencil,
-  Plus,
-  RefreshCw,
-  Search,
-  Settings2,
-  Users,
-} from 'lucide-react';
+import {ArrowLeft, Check, ChevronRight, ListChecks, Pencil, Plus, RefreshCw, Search, Settings2} from 'lucide-react';
 import {DetailModal} from './detail_modal.js';
 import {LibraryArticle} from './library_article.js';
 import React, {useEffect, useMemo, useReducer, useRef, useState} from 'react';
-import {createRoot} from 'react-dom/client';
+
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
 import {ContextPanel} from './context/view.js';
-import {ManagerDialogProvider, useManagerDialogs} from '@threadnote/manager/dialog';
+import {useManagerDialogs} from '@threadnote/manager/dialog';
 import {DevSkillsPanel} from './dev_skills/view.js';
 import {WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {ProcessesPanel} from './processes_view.js';
-import {ManagerProcessesProvider} from './process/live.js';
-import {ManagerLiveProvider} from './live/provider.js';
-import {ModelSetupProvider} from './model_setup_live.js';
+
 import {useGraphLiveStatus, useManagerRuntimeConnection} from './ui/live.js';
 import {ManagerOperationsFooter} from './operations_footer.js';
 import {ManagerHomePanel} from './home_view.js';
@@ -52,14 +54,12 @@ import {
   useContextHealthDecisionCount,
   useNavigationCollapse,
 } from './navigation.js';
-import {ActionMenu} from './action_menu.js';
 import {libraryItemActions} from './library_actions.js';
 import {MemoryEditor} from './memory_editor.js';
 import {WorkspaceUtilities} from './workspace_utilities.js';
 import {
   descendantMemoryUris,
   libraryScopeTree,
-  libraryItemTitle,
   reconcileMemorySelection,
   toggleMemorySelection,
   type LibraryScope,
@@ -131,6 +131,8 @@ export {
 } from '@threadnote/manager/ui/support';
 import type {
   ConsolidationJobResponse as ConsolidationJob,
+  AgentClient,
+  StateResponse,
   TreeResponse,
   DoctorCheck,
   MemoryResponse,
@@ -142,6 +144,9 @@ import type {
   TargetForm,
   TreeNode,
 } from '@threadnote/manager/ui/contracts';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export type {
   BulkItemResult,
   MemoryMetadata,
@@ -152,36 +157,9 @@ export type {
   TreeNode,
 } from '@threadnote/manager/ui/contracts';
 type NavTreeTab = 'memories' | 'resources';
-type AgentClient = 'claude' | 'codex' | 'copilot' | 'cursor' | 'effect-ai' | 'local-ai';
+
 type MemoryViewMode = 'edit' | 'preview';
-interface AgentOption {
-  readonly available: boolean;
-  readonly command?: string;
-  readonly id: AgentClient;
-  readonly label: string;
-}
-interface StateResponse {
-  readonly agents: readonly AgentOption[];
-  readonly autoUpdate: {
-    readonly effectivePolicy: 'automatic' | 'notify';
-    readonly lastFailure?: {readonly attempt: number; readonly failedAt: string; readonly summary: string};
-    readonly lastSuccess?: {
-      readonly completedAt: string;
-      readonly fromVersion: string;
-      readonly repairRequired: boolean;
-      readonly toVersion: string;
-    };
-    readonly running?: {readonly attempt: number; readonly fromVersion: string; readonly startedAt: string};
-  };
-  readonly config: {
-    readonly account: string;
-    readonly agentContextHome: string;
-    readonly user: string;
-  };
-  readonly latestVersion?: string;
-  readonly updateAvailable: boolean;
-  readonly version: string;
-}
+
 const EMPTY_SELECTED_URIS: ReadonlySet<string> = new Set();
 function App({
   integrations,
@@ -304,7 +282,7 @@ function App({
   });
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (draftRef.current || (creatingMemory && content.trim())) event.preventDefault();
+      if (draftRef.current || (creatingMemory && Effect.pipe(content, EffectString.trim))) event.preventDefault();
     };
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
@@ -369,8 +347,27 @@ function App({
   }, [resourceTree, selectedUri, tree]);
   useEffect(() => {
     const firstAvailable =
-      state?.agents.find(item => item.available && item.id === 'local-ai') ??
-      state?.agents.find(item => item.available && ['codex', 'claude', 'effect-ai'].includes(item.id));
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(state), __effectFindState =>
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(__effectFindState.agents), __effectFindAgents =>
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(__effectFindAgents, item => item.available && item.id === 'local-ai'),
+              ),
+            ),
+          ),
+        ),
+      ) ??
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(state), __effectFindState1 =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              __effectFindState1.agents,
+              item => item.available && ['codex', 'claude', 'effect-ai'].includes(item.id),
+            ),
+          ),
+        ),
+      );
     if (firstAvailable) {
       setAgent(firstAvailable.id);
     }
@@ -394,7 +391,7 @@ function App({
     () =>
       uniqueSelectorValues([
         ...managerProjectOptions(tree),
-        ...(graphCatalog?.configuredProjects ?? []).map(project => project.name),
+        ...EffectArray.map(graphCatalog?.configuredProjects ?? [], project => project.name),
       ]),
     [graphCatalog?.configuredProjects, tree],
   );
@@ -403,7 +400,7 @@ function App({
     setWorkspaceProject('');
   }, [projectOptions, workspaceProject]);
   const teamOptions = useMemo(
-    () => uniqueSelectorValues(['default', ...shares.map(share => share.name), target.team]),
+    () => uniqueSelectorValues(['default', ...EffectArray.map(shares, share => share.name), target.team]),
     [shares, target.team],
   );
   async function refreshAll(): Promise<void> {
@@ -413,9 +410,14 @@ function App({
         label: 'Graph indexes',
         run: async () => {
           try {
-            const catalog = await api<GraphCatalog>('/api/graphs', undefined, {
-              timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-            });
+            const catalog = await api<GraphCatalog>(
+              '/api/graphs',
+              undefined,
+              {
+                timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
+              },
+              isGraphCatalog,
+            );
             graphCatalogAuthoritativeRef.current = true;
             graphCatalogRef.current = catalog;
             setGraphCatalog(catalog);
@@ -430,7 +432,7 @@ function App({
         label: 'Runtime',
         run: async () => {
           try {
-            const next = await api<StateResponse>('/api/state');
+            const next = await api<StateResponse>('/api/state', undefined, undefined, isStateResponse);
             setState(next);
             onAccount(next.config.account);
             dispatchAvailability('runtime-ready');
@@ -444,7 +446,7 @@ function App({
         label: 'Memory library',
         run: async () => {
           try {
-            nextTree = await api<TreeResponse>('/api/tree');
+            nextTree = await api<TreeResponse>('/api/tree', undefined, undefined, isTreeResponse);
             setLibraryError('');
           } catch (cause) {
             setLibraryError(errorMessage(cause));
@@ -454,7 +456,11 @@ function App({
       },
       {
         label: 'Shares',
-        run: async () => setShares((await api<{shares: readonly ShareSummary[]}>('/api/shares')).shares),
+        run: async () =>
+          setShares(
+            (await api<{shares: readonly ShareSummary[]}>('/api/shares', undefined, undefined, isSharesResponse))
+              .shares,
+          ),
       },
     ]);
     if (nextTree) {
@@ -462,14 +468,19 @@ function App({
       setResourceTree(nextTree.resourcesTree);
     }
     setAttentionRefreshGeneration(generation => generation + 1);
-    toastMessage(failures.length === 0 ? 'Refreshed' : `Refresh incomplete · ${failures.join(' · ')}`);
+    toastMessage(failures.length === 0 ? 'Refreshed' : `Refresh incomplete · ${EffectArray.join(failures, ' · ')}`);
   }
 
   async function refreshGraphCatalog(notify = true): Promise<void> {
     try {
-      const next = await api<GraphCatalog>('/api/graphs', undefined, {
-        timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-      });
+      const next = await api<GraphCatalog>(
+        '/api/graphs',
+        undefined,
+        {
+          timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
+        },
+        isGraphCatalog,
+      );
       graphCatalogAuthoritativeRef.current = true;
       graphCatalogRef.current = next;
       setGraphCatalog(next);
@@ -499,6 +510,7 @@ function App({
         `/api/graphs/diagnostics?analyze=${options.analyze}&deep=${options.deep}`,
         undefined,
         {signal},
+        isCodeGraphLocalDiagnosticsReport,
       );
       if (signal?.aborted) return false;
       setGraphDiagnostics(report);
@@ -524,27 +536,41 @@ function App({
       let result: {readonly output: string};
       let removedViewConfirmed = false;
       if (action.action === 'remove-view' && action.dryRun !== true) {
-        const preview = await api<ManagerGraphViewRemovalResponse>('/api/graphs/action', {
-          ...action,
-          dryRun: true,
-        });
+        const preview = await api<ManagerGraphViewRemovalResponse>(
+          '/api/graphs/action',
+          {
+            ...action,
+            dryRun: true,
+          },
+          undefined,
+          isManagerGraphViewRemovalResponse,
+        );
         const approvalDialog = graphViewRemovalApprovalDialog(preview);
         if (approvalDialog && !(await dialogs.confirm(approvalDialog))) {
           setGraphAdministrationOutput(preview.output);
           return;
         }
         const removal = approvalDialog
-          ? await api<ManagerGraphViewRemovalResponse>('/api/graphs/action', {
-              ...action,
-              approvalDigest: preview.approvalDigest,
-              confirm: true,
-            })
+          ? await api<ManagerGraphViewRemovalResponse>(
+              '/api/graphs/action',
+              {
+                ...action,
+                approvalDigest: preview.approvalDigest,
+                confirm: true,
+              },
+              undefined,
+              isManagerGraphViewRemovalResponse,
+            )
           : preview;
         result = removal;
         removedViewConfirmed = graphViewRemovalTargetIsAbsent(removal);
         if (removedViewConfirmed) projectRemovedGraphView(action);
       } else {
-        const response = await requestGraphAdministrationAction(action, api, dialogs);
+        const response = await requestGraphAdministrationAction(
+          action,
+          (path, body) => api(path, body, undefined, isGraphIndexActionResponse),
+          dialogs,
+        );
         if (!response) return;
         result = response;
       }
@@ -569,7 +595,12 @@ function App({
     setGraphDiagnostics(current => withoutRemovedGraphDiagnosticsView(current, target));
   }
   async function loadMemory(uri: string, accept: () => boolean = () => true): Promise<string | undefined> {
-    const next = await api<MemoryResponse>(`/api/memory?uri=${encodeURIComponent(uri)}`);
+    const next = await api<MemoryResponse>(
+      `/api/memory?uri=${encodeURIComponent(uri)}`,
+      undefined,
+      undefined,
+      isMemoryResponse,
+    );
     if (!accept()) return undefined;
     showMemory(next);
     return next.node.uri;
@@ -593,7 +624,7 @@ function App({
     });
   }
   async function loadResource(uri: string, accept: () => boolean = () => true): Promise<string | undefined> {
-    const result = await api<ReadResponse>('/api/read', {uri});
+    const result = await api<ReadResponse>('/api/read', {uri}, undefined, isReadResponse);
     if (!accept()) return undefined;
     setMemory(undefined);
     setLoadedUri(uri);
@@ -655,7 +686,7 @@ function App({
     }
   }
   async function refreshTreeOnly(): Promise<TreeResponse> {
-    const next = await api<TreeResponse>('/api/tree');
+    const next = await api<TreeResponse>('/api/tree', undefined, undefined, isTreeResponse);
     setLibraryError('');
     setTree(next.tree);
     setResourceTree(next.resourcesTree);
@@ -680,15 +711,20 @@ function App({
       return;
     }
     await runAction('Saved memory', () =>
-      api<{readonly output?: string}>('/api/memory/save', {
-        kind: target.kind,
-        project: target.project,
-        expectedContent: memory?.content,
-        replaceUri: memory?.node.uri,
-        status: target.status,
-        text: content,
-        topic: target.topic,
-      }).then(result => {
+      api<{readonly output?: string}>(
+        '/api/memory/save',
+        {
+          kind: target.kind,
+          project: target.project,
+          expectedContent: memory?.content,
+          replaceUri: memory?.node.uri,
+          status: target.status,
+          text: content,
+          topic: target.topic,
+        },
+        undefined,
+        isOutputResponse2,
+      ).then(result => {
         draftRef.current = undefined;
         return result;
       }),
@@ -716,21 +752,31 @@ function App({
   }
 
   async function saveNew(): Promise<void> {
-    if (savingMemory || !content.trim() || !target.topic.trim()) return;
+    if (savingMemory || !Effect.pipe(content, EffectString.trim) || !Effect.pipe(target.topic, EffectString.trim))
+      return;
     setSavingMemory(true);
     try {
-      const result = await api<{readonly output?: string}>('/api/memory/save', {
-        kind: target.kind,
-        project: target.project,
-        status: target.status,
-        text: content,
-        topic: target.topic,
-        sourceAgentClient: 'user',
-      });
+      const result = await api<{readonly output?: string}>(
+        '/api/memory/save',
+        {
+          kind: target.kind,
+          project: target.project,
+          status: target.status,
+          text: content,
+          topic: target.topic,
+          sourceAgentClient: 'user',
+        },
+        undefined,
+        isOutputResponse2,
+      );
       draftRef.current = undefined;
       setOutput(result.output ?? '');
       await refreshTreeOnly();
-      const uri = resourceUrisFromText(result.output ?? '').find(value => value.endsWith('.md'));
+      const uri = EffectOption.getOrUndefined(
+        EffectArray.findFirst(resourceUrisFromText(result.output ?? ''), value =>
+          Effect.pipe(value, EffectString.endsWith('.md')),
+        ),
+      );
       if (uri) setSelectedUri(uri);
       else {
         setContent('');
@@ -754,7 +800,9 @@ function App({
       title: 'Archive this memory?',
     });
     if (!confirmed) return;
-    await runAction('Archived memory', () => api('/api/memory/archive', {confirm: true, uri}));
+    await runAction('Archived memory', () =>
+      api('/api/memory/archive', {confirm: true, uri}, undefined, isOutputResponse2),
+    );
   }
 
   async function forgetCurrent(uri = selectedUri): Promise<void> {
@@ -803,7 +851,7 @@ function App({
     const fileCount = countFiles(node);
     const confirmed = await dialogs.confirm({
       confirmLabel: 'Remove folder',
-      detail: [node.uri, ...descendantMemoryUris(node)].join('\n'),
+      detail: EffectArray.join([node.uri, ...descendantMemoryUris(node)], '\n'),
       message: `This permanently removes ${fileCount} memory file${fileCount === 1 ? '' : 's'} from local context.`,
       title: 'Remove folder and forget its memories?',
       tone: 'danger',
@@ -811,14 +859,26 @@ function App({
     if (!confirmed) return;
     setLibraryActionBusy(true);
     try {
-      const result = await api<{readonly output?: string}>('/api/folder/remove', {
-        confirm: true,
-        uri: node.uri,
-      });
+      const result = await api<{readonly output?: string}>(
+        '/api/folder/remove',
+        {
+          confirm: true,
+          uri: node.uri,
+        },
+        undefined,
+        isOutputResponse2,
+      );
       if (result.output) {
         setOutput(result.output);
       }
-      if (selectedUri === node.uri || selectedUri?.startsWith(node.uri + '/')) {
+      if (
+        selectedUri === node.uri ||
+        Effect.pipe(selectedUri, effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect.pipe(effectOptionalString, EffectString.startsWith(node.uri + '/')),
+        )
+      ) {
         draftRef.current = undefined;
         setPendingCanonical(undefined);
         setSelectedUri(undefined);
@@ -852,7 +912,9 @@ function App({
       title: 'Publish memory',
     });
     if (!values) return;
-    await runAction('Published memory', () => api('/api/memory/publish', {confirm: true, team: values.team, uri}));
+    await runAction('Published memory', () =>
+      api('/api/memory/publish', {confirm: true, team: values.team, uri}, undefined, isOutputResponse2),
+    );
   }
 
   async function unpublishCurrent(uri = selectedUri, team = target.team): Promise<void> {
@@ -865,7 +927,9 @@ function App({
       tone: 'danger',
     });
     if (!confirmed) return;
-    await runAction('Unpublished memory', () => api('/api/memory/unpublish', {confirm: true, team, uri}));
+    await runAction('Unpublished memory', () =>
+      api('/api/memory/unpublish', {confirm: true, team, uri}, undefined, isOutputResponse2),
+    );
   }
 
   async function moveCurrent(): Promise<void> {
@@ -896,15 +960,20 @@ function App({
     });
     if (!values) return;
     await runAction('Moved memory', () =>
-      api('/api/memory/move', {
-        confirm: true,
-        kind: target.kind,
-        project: values.project,
-        status: target.status,
-        team: values.team,
-        topic: values.topic,
-        uri: selectedUri,
-      }),
+      api(
+        '/api/memory/move',
+        {
+          confirm: true,
+          kind: target.kind,
+          project: values.project,
+          status: target.status,
+          team: values.team,
+          topic: values.topic,
+          uri: selectedUri,
+        },
+        undefined,
+        isOutputResponse2,
+      ),
     );
   }
 
@@ -926,7 +995,7 @@ function App({
           : action === 'unpublish'
             ? 'Remove every selected memory from its shared repository projection.'
             : 'Only the currently selected memories will be changed.',
-      detail: uris.join('\n'),
+      detail: EffectArray.join(uris, '\n'),
       title,
       tone: action === 'forget' || action === 'unpublish' ? 'danger' : 'default',
     });
@@ -935,20 +1004,28 @@ function App({
       action === 'publish'
         ? values.team
         : action === 'unpublish' && libraryScope !== 'local'
-          ? libraryScope.slice(5)
+          ? Effect.pipe(libraryScope, EffectString.slice(5))
           : undefined;
     const currentSelectedUri = selectedUri;
     setBulkCount(uris.length);
     setBulkAction(action);
     try {
-      const result = await api<{readonly results: readonly BulkItemResult[]}>('/api/bulk', {
-        action,
-        confirm: true,
-        team,
-        uris,
-      });
+      const result = await api<{readonly results: readonly BulkItemResult[]}>(
+        '/api/bulk',
+        {
+          action,
+          confirm: true,
+          team,
+          uris,
+        },
+        undefined,
+        isResultsResponse,
+      );
       setOutput(formatBulkResults(action, result.results));
-      const failedUris = result.results.filter(item => !item.ok).map(item => item.uri);
+      const failedUris = EffectArray.map(
+        EffectArray.filter(result.results, item => !item.ok),
+        item => item.uri,
+      );
       setSelectedUris(new Set(failedUris));
       if (currentSelectedUri && uris.includes(currentSelectedUri)) {
         if (failedUris.includes(currentSelectedUri)) {
@@ -974,7 +1051,12 @@ function App({
   }
 
   async function loadDoctorChecks(showToast = false): Promise<void> {
-    const next = await api<{checks: readonly DoctorCheck[]; shares: readonly ShareSummary[]}>('/api/doctor');
+    const next = await api<{checks: readonly DoctorCheck[]; shares: readonly ShareSummary[]}>(
+      '/api/doctor',
+      undefined,
+      undefined,
+      isCheckssharesResponse,
+    );
     setDoctor(next.checks);
     setShares(next.shares);
     if (showToast) {
@@ -1009,7 +1091,7 @@ function App({
     if (consolidationBusy) return;
     if (
       consolidationSourceUris.length !== selectedList.length ||
-      consolidationSourceUris.some(uri => !visibleSelectedUris.has(uri))
+      EffectArray.some(consolidationSourceUris, uri => !visibleSelectedUris.has(uri))
     ) {
       clearConsolidationDraft(selectedList);
       setConsolidationTopic('');
@@ -1031,15 +1113,20 @@ function App({
     setDraftingConsolidation(true);
     clearConsolidationDraft(uris);
     try {
-      const result = await api<{job: ConsolidationJob}>('/api/consolidations', {
-        agent,
-        model,
-        kind: 'durable',
-        project: consolidationProject ?? target.project,
-        status: 'active',
-        topic: consolidationTopic,
-        uris,
-      });
+      const result = await api<{job: ConsolidationJob}>(
+        '/api/consolidations',
+        {
+          agent,
+          model,
+          kind: 'durable',
+          project: consolidationProject ?? target.project,
+          status: 'active',
+          topic: consolidationTopic,
+          uris,
+        },
+        undefined,
+        isJobResponse2,
+      );
       if (result.job.status === 'completed') {
         setJobId(result.job.id);
         setDraft(result.job.draft ?? '');
@@ -1071,10 +1158,15 @@ function App({
     if (!confirmed) return;
     setApplyingConsolidation(true);
     try {
-      const result = await api<{readonly output?: string}>(`/api/consolidations/${receipt.operationId}/apply`, {
-        confirm: true,
-        resultUri: memory.record.uri,
-      });
+      const result = await api<{readonly output?: string}>(
+        `/api/consolidations/${receipt.operationId}/apply`,
+        {
+          confirm: true,
+          resultUri: memory.record.uri,
+        },
+        undefined,
+        isOutputResponse2,
+      );
       if (result.output) setOutput(result.output);
       await refreshAll();
       toastMessage('Saved consolidation cleanup verified');
@@ -1097,16 +1189,21 @@ function App({
     const currentSelectedUri = selectedUri;
     setApplyingConsolidation(true);
     try {
-      const result = await api<{readonly output?: string}>(`/api/consolidations/${jobId}/apply`, {
-        cleanup: 'archive',
-        confirm: true,
-        draft,
-        reviews: consolidationReviews,
-        kind: 'durable',
-        project: consolidationProject ?? target.project,
-        status: 'active',
-        topic: consolidationTopic,
-      });
+      const result = await api<{readonly output?: string}>(
+        `/api/consolidations/${jobId}/apply`,
+        {
+          cleanup: 'archive',
+          confirm: true,
+          draft,
+          reviews: consolidationReviews,
+          kind: 'durable',
+          project: consolidationProject ?? target.project,
+          status: 'active',
+          topic: consolidationTopic,
+        },
+        undefined,
+        isOutputResponse2,
+      );
       if (result.output) {
         setOutput(result.output);
       }
@@ -1136,11 +1233,13 @@ function App({
       title: 'Repair Threadnote?',
     });
     if (!confirmed) return;
-    await runDoctorAction('Repair complete', 'Running repair', () => api('/api/doctor/repair', {confirm: true}));
+    await runDoctorAction('Repair complete', 'Running repair', () =>
+      api('/api/doctor/repair', {confirm: true}, undefined, isOutputResponse2),
+    );
   }
 
   async function confirmDiscardDraft(): Promise<boolean> {
-    if (!draftRef.current && (!creatingMemory || !content.trim())) return true;
+    if (!draftRef.current && (!creatingMemory || !Effect.pipe(content, EffectString.trim))) return true;
     return dialogs.confirm({
       title: 'Discard unsaved changes?',
       message: 'Save your memory before leaving to keep these changes.',
@@ -1197,7 +1296,9 @@ function App({
       }))
     )
       return;
-    await runAction('Removed indexed resource', () => api('/api/memory/forget', {confirm: true, uri: node.uri}));
+    await runAction('Removed indexed resource', () =>
+      api('/api/memory/forget', {confirm: true, uri: node.uri}, undefined, isOutputResponse2),
+    );
     if (selectedUri === node.uri) {
       setSelectedUri(undefined);
       setContent('');
@@ -1397,7 +1498,7 @@ function App({
                 onChange={event => setWorkspaceProject(event.target.value)}
               >
                 <option value="">All</option>
-                {projectOptions.map(project => (
+                {EffectArray.map(projectOptions, project => (
                   <option key={project} value={project}>
                     {project}
                   </option>
@@ -1435,7 +1536,11 @@ function App({
             {panel === 'memory' && authoringMemory ? (
               <button
                 className="primary"
-                disabled={controlsBlocked || (creatingMemory && (!content.trim() || !target.topic.trim()))}
+                disabled={
+                  controlsBlocked ||
+                  (creatingMemory &&
+                    (!Effect.pipe(content, EffectString.trim) || !Effect.pipe(target.topic, EffectString.trim)))
+                }
                 onClick={() => void (creatingMemory ? saveNew() : saveCurrent())}
               >
                 <Check aria-hidden="true" />
@@ -1556,76 +1661,24 @@ function App({
             <section className={`panel library-panel is-active${authoringMemory ? ' is-authoring' : ''}`}>
               {!authoringMemory ? (
                 <>
-                  <div className="library-tabs">
-                    <div className="segmented-control" aria-label="Library content">
-                      {(['memories', 'resources'] as const).map(tab => (
-                        <button
-                          key={tab}
-                          aria-pressed={navTreeTab === tab}
-                          className={navTreeTab === tab ? 'is-active' : undefined}
-                          disabled={controlsBlocked}
-                          onClick={() => {
-                            void switchLibrary(tab);
-                          }}
-                        >
-                          {tab === 'memories' ? <Brain aria-hidden="true" /> : <Files aria-hidden="true" />}
-                          {tab === 'memories' ? 'Memories' : 'Resources'}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                  <LibraryContentTabs
+                    navTreeTab={navTreeTab}
+                    controlsBlocked={controlsBlocked}
+                    onTab={tab => void switchLibrary(tab)}
+                  />
                   <div className="library-toolbar">
                     <LibraryHistoryControls
                       backDisabled={historyBlocked || libraryHistory.index <= 0}
                       forwardDisabled={historyBlocked || libraryHistory.index >= libraryHistory.entries.length - 1}
                       onNavigate={navigateLibraryHistory}
                     />
-                    {navTreeTab === 'memories' ? (
-                      <div className="library-scope">
-                        <div className="segmented-control" aria-label="Memory scope">
-                          <button
-                            className={libraryScope === 'local' ? 'is-active' : undefined}
-                            disabled={controlsBlocked}
-                            aria-pressed={libraryScope === 'local'}
-                            onClick={() => {
-                              void switchLibrary('memories', 'local');
-                            }}
-                          >
-                            <HardDrive aria-hidden="true" />
-                            Local
-                          </button>
-                          <button
-                            className={libraryScope !== 'local' ? 'is-active' : undefined}
-                            disabled={controlsBlocked || shares.length === 0}
-                            aria-pressed={libraryScope !== 'local'}
-                            onClick={() => {
-                              void switchLibrary('memories', `team:${shares[0]?.name ?? ''}`);
-                            }}
-                          >
-                            <Users aria-hidden="true" />
-                            Team
-                          </button>
-                        </div>
-                        {libraryScope !== 'local' ? (
-                          <select
-                            aria-label="Shared team"
-                            value={libraryScope.slice(5)}
-                            disabled={controlsBlocked}
-                            onChange={event => {
-                              void switchLibrary('memories', `team:${event.target.value}`);
-                            }}
-                          >
-                            {shares.map(share => (
-                              <option key={share.name} value={share.name}>
-                                {share.name}
-                              </option>
-                            ))}
-                          </select>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <span className="muted">Indexed source material · read-only</span>
-                    )}
+                    <LibraryScopeControls
+                      navTreeTab={navTreeTab}
+                      controlsBlocked={controlsBlocked}
+                      libraryScope={libraryScope}
+                      shares={shares}
+                      onScope={scope => void switchLibrary('memories', scope)}
+                    />
                     <label className="library-search">
                       <Search aria-hidden="true" />
                       <input
@@ -1701,13 +1754,13 @@ function App({
                 ) : null}
                 {!authoringMemory ? (
                   <LibraryExplorer
-                    scopeLabel={libraryScope === 'local' ? 'Local' : libraryScope.slice(5)}
+                    scopeLabel={libraryScope === 'local' ? 'Local' : Effect.pipe(libraryScope, EffectString.slice(5))}
                     busy={bulkAction !== undefined}
                     controlsBlocked={controlsBlocked}
                     filter={filter}
                     recalledUris={navTreeTab === 'memories' ? librarySearch.result?.uris : undefined}
                     searchStatus={
-                      navTreeTab === 'memories' && filter.trim()
+                      navTreeTab === 'memories' && Effect.pipe(filter, EffectString.trim)
                         ? librarySearch.pending
                           ? 'Searching memories…'
                           : librarySearch.error
@@ -1737,53 +1790,21 @@ function App({
                 {!authoringMemory ? libraryNavigator.resizer : null}
                 <div className="content-grid">
                   <section className="editor-pane">
-                    <div className="pane-head reader-head">
-                      <span className="reader-location">
-                        {authoringMemory
-                          ? creatingMemory
-                            ? 'New memory · Unsaved'
-                            : selectedNode
-                              ? libraryItemTitle(selectedNode)
-                              : 'Memory draft'
-                          : selectedNode
-                            ? selectedNode.relativePath.split('/').slice(0, -1).filter(Boolean).slice(-1).join(' / ') ||
-                              'Library'
-                            : 'Library'}
-                      </span>
-                      <div className="action-row">
-                        {selectedUri && !selectedIsDir && !selectedIsResource ? (
-                          <button
-                            disabled={selectedNode?.isSystem || controlsBlocked}
-                            onClick={() => setMemoryViewMode(memoryViewMode === 'preview' ? 'edit' : 'preview')}
-                          >
-                            {authoringMemory ? <Files aria-hidden="true" /> : <Pencil aria-hidden="true" />}
-                            {authoringMemory ? 'Preview' : 'Edit'}
-                          </button>
-                        ) : null}
-                        {selectedNode ? (
-                          <button
-                            className="quiet-icon"
-                            aria-label="Memory details"
-                            disabled={!selectedIsReadable && !selectedIsDir}
-                            onClick={() => setLibraryDialog('details')}
-                          >
-                            <Info aria-hidden="true" />
-                          </button>
-                        ) : null}
-                        {selectedNode && !selectedNode.isSystem ? (
-                          <ActionMenu
-                            label={`Actions for ${selectedNode.name}`}
-                            disabled={controlsBlocked}
-                            actions={[
-                              ...itemActions(selectedNode),
-                              ...(!selectedNode.isDir && !selectedIsResource
-                                ? [{label: 'Move…', disabled: !canMutate, onSelect: () => void moveCurrent()}]
-                                : []),
-                            ]}
-                          />
-                        ) : null}
-                      </div>
-                    </div>
+                    <LibraryReaderHeader
+                      authoringMemory={authoringMemory}
+                      creatingMemory={creatingMemory}
+                      selectedNode={selectedNode}
+                      selectedUri={selectedUri}
+                      selectedIsDir={selectedIsDir}
+                      selectedIsResource={selectedIsResource}
+                      selectedIsReadable={selectedIsReadable}
+                      controlsBlocked={controlsBlocked}
+                      canMutate={canMutate}
+                      itemActions={itemActions}
+                      onToggleView={() => setMemoryViewMode(memoryViewMode === 'preview' ? 'edit' : 'preview')}
+                      onDetails={() => setLibraryDialog('details')}
+                      onMove={() => void moveCurrent()}
+                    />
                     {pendingCanonical && selectedUri === pendingCanonical.node.uri ? (
                       <div className="manager-draft-reconcile" role="alert">
                         <p>The saved record changed. Your unsaved draft is preserved.</p>
@@ -1931,11 +1952,13 @@ function App({
               busy={doctorAction}
               output={doctorOutput}
               onVerify={() =>
-                void runDoctorAction('Runtime ready', 'Checking runtime', () => api('/api/doctor/start', {}))
+                void runDoctorAction('Runtime ready', 'Checking runtime', () =>
+                  api('/api/doctor/start', {}, undefined, isOutputResponse2),
+                )
               }
               onPreviewRepair={() =>
                 runDoctorAction('Repair preview complete', 'Preparing repair preview', () =>
-                  api('/api/doctor/repair-dry-run', {}),
+                  api('/api/doctor/repair-dry-run', {}, undefined, isOutputResponse2),
                 )
               }
               onRepair={() => void repairThreadnote()}
@@ -1962,35 +1985,7 @@ function App({
   );
   return app;
 }
-function AccountApp({integrations}: {readonly integrations: readonly IntegrationRegistration[]}): React.ReactElement {
-  const [scope, setScope] = useState<{account?: string; generation: number}>({generation: 0});
-  const setAccount = (account: string) =>
-    setScope(current =>
-      current.account === account
-        ? current
-        : {
-            account,
-            generation: current.account === undefined ? current.generation : current.generation + 1,
-          },
-    );
-  return (
-    <ManagerLiveProvider account={scope.account} key={scope.generation}>
-      <ModelSetupProvider>
-        <ManagerProcessesProvider>
-          <App integrations={integrations} onAccount={setAccount} />
-        </ManagerProcessesProvider>
-      </ModelSetupProvider>
-    </ManagerLiveProvider>
-  );
-}
-export function mountManager({integrations}: {readonly integrations: readonly IntegrationRegistration[]}): void {
-  const root = document.getElementById('root');
-  if (!root) {
-    throw new Error('Missing #root');
-  }
-  createRoot(root).render(
-    <ManagerDialogProvider>
-      <AccountApp integrations={integrations} />
-    </ManagerDialogProvider>,
-  );
+
+export function mountManager(options: {readonly integrations: readonly IntegrationRegistration[]}): void {
+  mountManagerApp(App, options);
 }

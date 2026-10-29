@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -19,7 +20,7 @@ const selection = {
 };
 let root: Root | undefined;
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(function (this: HTMLDialogElement) {
     this.open = true;
   });
@@ -77,8 +78,11 @@ it('opens a scope dialog, requires an explicit choice, and forwards the exact Re
   );
   expect(request).toHaveBeenCalledTimes(1);
   await act(async () => input.click());
-  const option = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(
-    button => button.textContent === 'docs-mobile',
+  const option = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')],
+      button => button.textContent === 'docs-mobile',
+    ),
   )!;
   await act(async () => option.click());
   await act(async () =>

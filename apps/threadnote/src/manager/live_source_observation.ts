@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   Clock,
   Effect,
@@ -21,10 +22,10 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runtimeTextDirectoryNamePage} from '@threadnote/platform/system';
 import {modelSetupFileIdentity} from '@threadnote/inference/models/setup';
 
-class ManagerSourceObservationError extends Schema.TaggedError<ManagerSourceObservationError>()(
-  'ManagerSourceObservationError',
-  {message: Schema.String},
-) {}
+class ManagerSourceObservationError extends Schema.TaggedError<
+  ManagerSourceObservationError,
+  {readonly brand: unique symbol}
+>()('ManagerSourceObservationError', {message: Schema.String}) {}
 
 export interface ManagerSourceProbe {
   readonly revision: string;
@@ -50,11 +51,13 @@ export const managerSourceFileIdentity = Effect.fn('manager.sourceLive.fileIdent
   );
   if (!stat) return 'absent';
   if (stat.type !== 'File') return yield* ManagerSourceObservationError.make({message: 'Invalid live source'});
-  return [
-    stat.size.toString(),
-    Option.getOrUndefined(stat.ino)?.toString(),
-    Option.getOrUndefined(stat.mtime)?.getTime(),
-  ].join(':');
+  return EffectArray.join(
+    EffectArray.map(
+      [stat.size.toString(), Option.getOrUndefined(stat.ino)?.toString(), Option.getOrUndefined(stat.mtime)?.getTime()],
+      item => (item === null || item === undefined ? '' : String(item)),
+    ),
+    ':',
+  );
 });
 
 /** Enumerate before allocation with a fixed cap; absence is a stable, watched source. */
@@ -71,10 +74,10 @@ export const managerSourceDirectoryFiles = Effect.fn('manager.sourceLive.directo
   const page = yield* runtimeTextDirectoryNamePage(directory, limit);
   if (page.overflow)
     return yield* ManagerSourceObservationError.make({message: 'Live source directory budget exceeded'});
-  return page.names
-    .filter(select)
-    .sort()
-    .map(name => path.join(directory, name));
+  const names = page.names;
+  return EffectArray.map(EffectArray.filter(names, (name, index) => index in names && select(name)).sort(), name =>
+    path.join(directory, name),
+  );
 });
 
 export const managerSourceFilesProbe = Effect.fn('manager.sourceLive.filesProbe')(function* (
@@ -102,14 +105,14 @@ export const managerSourceFilesProbe = Effect.fn('manager.sourceLive.filesProbe'
         : managerSourceFileIdentity(file),
     {concurrency: 4},
   );
-  const watched = new Set([...directories, ...sorted.map(file => path.dirname(file))]);
+  const watched = new Set([...directories, ...EffectArray.map(sorted, file => path.dirname(file))]);
   for (const directory of [...watched]) {
     let ancestor = path.dirname(directory);
     while (!(yield* fs.exists(ancestor)) && path.dirname(ancestor) !== ancestor) ancestor = path.dirname(ancestor);
     watched.add(ancestor);
   }
   return {
-    revision: sha256HexSync(JSON.stringify(sorted.map((file, index) => [file, identities[index]]))),
+    revision: sha256HexSync(JSON.stringify(EffectArray.map(sorted, (file, index) => [file, identities[index]]))),
     directories: [...watched],
   } satisfies ManagerSourceProbe;
 });
@@ -145,7 +148,7 @@ export const makeManagerSourceObservation = Effect.fn('manager.sourceLive.observ
       yield* callbacks.onAvailability(entry.resource, available);
     });
   const updateWatches = Effect.gen(function* () {
-    const desired = new Set([...entries.values()].flatMap(entry => entry.directories));
+    const desired = new Set(EffectArray.flatMap([...entries.values()], entry => entry.directories));
     if (desired.size > 128) {
       for (const entry of entries.values()) {
         entry.directories = [];
@@ -189,7 +192,7 @@ export const makeManagerSourceObservation = Effect.fn('manager.sourceLive.observ
       }
       const prior = entry.revision;
       entry.directories = probe.directories;
-      if (new Set([...entries.values()].flatMap(value => value.directories)).size > 128) {
+      if (new Set(EffectArray.flatMap([...entries.values()], value => value.directories)).size > 128) {
         entry.directories = [];
         yield* availability(entry, false);
         return;
@@ -209,7 +212,10 @@ export const makeManagerSourceObservation = Effect.fn('manager.sourceLive.observ
   yield* Effect.forever(
     Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
-      const due = Math.min(nextReconcile, ...[...entries.values()].map(entry => entry.deadline ?? Infinity));
+      const due = Math.min(
+        nextReconcile,
+        ...EffectArray.map([...entries.values()], entry => entry.deadline ?? Infinity),
+      );
       if (Number.isFinite(due)) yield* Effect.race(Queue.take(wake), Effect.sleep(Math.max(1, due - now)));
       else yield* Queue.take(wake);
       yield* Effect.sleep('25 millis');
@@ -219,7 +225,7 @@ export const makeManagerSourceObservation = Effect.fn('manager.sourceLive.observ
   yield* Effect.addFinalizer(() => Queue.shutdown(wake));
   const prune = Effect.gen(function* () {
     const retained = new Map(
-      [...connections.values()].flat().map(resource => [managerLiveResourceKey(resource), resource]),
+      EffectArray.map([...connections.values()].flat(), resource => [managerLiveResourceKey(resource), resource]),
     );
     for (const key of entries.keys()) if (!retained.has(key)) entries.delete(key);
     for (const [key, resource] of retained)
@@ -232,7 +238,10 @@ export const makeManagerSourceObservation = Effect.fn('manager.sourceLive.observ
     topics,
     subscribe: (connection: string, requested: readonly ManagerLiveResource[]) =>
       Effect.gen(function* () {
-        const supported = requested.filter(resource => topics.includes(resource.topic));
+        const supported = EffectArray.filter(
+          requested,
+          (resource, __effectArrayIndex) => __effectArrayIndex in requested && topics.includes(resource.topic),
+        );
         connections.set(connection, supported);
         yield* prune;
         yield* Effect.forEach(
@@ -244,7 +253,7 @@ export const makeManagerSourceObservation = Effect.fn('manager.sourceLive.observ
           {concurrency: 2, discard: true},
         );
         yield* updateWatches;
-        return supported.filter(resource => !entries.get(managerLiveResourceKey(resource))?.available);
+        return EffectArray.filter(supported, resource => !entries.get(managerLiveResourceKey(resource))?.available);
       }).pipe(gate.withPermit),
     release: (connection: string) =>
       Effect.sync(() => connections.delete(connection)).pipe(Effect.andThen(prune), gate.withPermit),

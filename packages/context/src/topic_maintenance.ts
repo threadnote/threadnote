@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -26,6 +28,8 @@ import {
   type ContextHealthCitationSourceExcerptV1,
 } from './citation_validation.js';
 import type {ContextBriefCitationValidationReceiptV2} from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const TOPIC_MAINTENANCE_EVIDENCE_VERSION = 1 as const;
 export const TOPIC_MAINTENANCE_PACKET_MAX_BYTES = 64 * 1024;
@@ -63,12 +67,15 @@ function declaredCitations(record: MemoryRecord) {
   if (!isCodeTopicMaintenanceManifest(manifest))
     throw new Error('Imported topic maintenance is unavailable until its reviewed adapter is enabled.');
   const ids = new Set([
-    ...manifest.paragraphs.flatMap(paragraph => paragraph.citationIds),
-    ...manifest.additionalDependencies.map(dependency => dependency.citationId),
+    ...EffectArray.flatMap(manifest.paragraphs, paragraph => paragraph.citationIds),
+    ...EffectArray.map(manifest.additionalDependencies, dependency => dependency.citationId),
   ]);
-  return (record.metadata.codeCitations ?? [])
-    .filter(citation => ids.has(citation.id))
-    .sort((a, b) => a.id.localeCompare(b.id));
+  return EffectArrayPipe(record.metadata.codeCitations ?? [], __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (citation, __effectArrayIndex2) => __effectArrayIndex2 in __effectArrayValues && ids.has(citation.id),
+    ),
+  ).sort((a, b) => Effect2.pipe(a.id, EffectString.localeCompare(b.id)));
 }
 
 function relevantHash(source: TopicMaintenanceSourceObservationV1): string | undefined {
@@ -94,11 +101,14 @@ export function projectTopicMaintenanceObservation(
   sources: readonly TopicMaintenanceSourceObservationV1[],
 ): TopicMaintenanceObservationV1 {
   const originals = declaredCitations(record);
-  const baselines = originals.map(original => topicMaintenanceAcceptedCitation(record, original.id));
-  if (sources.length !== originals.length || new Set(sources.map(source => source.citationId)).size !== sources.length)
+  const baselines = EffectArray.map(originals, original => topicMaintenanceAcceptedCitation(record, original.id));
+  if (
+    sources.length !== originals.length ||
+    new Set(EffectArray.map(sources, source => source.citationId)).size !== sources.length
+  )
     throw new Error('Topic evidence must cover every declared citation exactly once.');
-  const byId = new Map(sources.map(source => [source.citationId, source]));
-  const ordered = originals.map(original => {
+  const byId = new Map(EffectArray.map(sources, source => [source.citationId, source]));
+  const ordered = EffectArray.map(originals, original => {
     const source = byId.get(original.id);
     if (!source) throw new Error('Topic evidence cites an undeclared source.');
     if (
@@ -116,7 +126,7 @@ export function projectTopicMaintenanceObservation(
     JSON.stringify([
       TOPIC_MAINTENANCE_EVIDENCE_VERSION,
       targetHash,
-      originals.map((original, index) => {
+      EffectArray.map(originals, (original, index) => {
         const source = ordered[index];
         const baseline = baselines[index];
         return [
@@ -133,9 +143,12 @@ export function projectTopicMaintenanceObservation(
       }),
     ]),
   );
-  const unavailable = ordered.some((source, index) => relevantState(baselines[index], source) === 'unavailable');
-  const changed = ordered.some((source, index) => relevantState(baselines[index], source) !== 'same');
-  const truncatedForReview = changed && ordered.some(source => source.excerptTruncated === true);
+  const unavailable = EffectArray.some(
+    ordered,
+    (source, index) => relevantState(baselines[index], source) === 'unavailable',
+  );
+  const changed = EffectArray.some(ordered, (source, index) => relevantState(baselines[index], source) !== 'same');
+  const truncatedForReview = changed && EffectArray.some(ordered, source => source.excerptTruncated === true);
   const outcome = unavailable || truncatedForReview ? 'unavailable' : changed ? 'review-required' : 'unchanged';
   return {
     version: TOPIC_MAINTENANCE_EVIDENCE_VERSION,
@@ -158,7 +171,7 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
 ) {
   const citations = declaredCitations(record);
   const baselines = new Map(
-    citations.map(citation => [citation.id, topicMaintenanceAcceptedCitation(record, citation.id)]),
+    EffectArray.map(citations, citation => [citation.id, topicMaintenanceAcceptedCitation(record, citation.id)]),
   );
   const trustedPrevious = (() => {
     if (!previous || previous.version !== TOPIC_MAINTENANCE_EVIDENCE_VERSION) return undefined;
@@ -175,7 +188,7 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
   const clean =
     identity && (yield* observeCleanRepositoryWorktree(callerCwd).pipe(Effect.orElseSucceed(() => undefined)));
   const scope = {kind: 'repository' as const, callerCwd};
-  if (!identity || !clean || citations.some(citation => citation.repositoryId !== identity.repositoryId)) {
+  if (!identity || !clean || EffectArray.some(citations, citation => citation.repositoryId !== identity.repositoryId)) {
     const reason = !clean ? 'dirty-or-unavailable-source' : 'repository-mismatch';
     const unavailable = yield* Effect.forEach(
       citations,
@@ -185,10 +198,11 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
             citationId: citation.id,
             status: 'unknown' as const,
             reason,
-            historicalAvailable: evidence.excerpts.some(
+            historicalAvailable: EffectArray.some(
+              evidence.excerpts,
               excerpt => excerpt.provenance === 'historical-verified' && excerpt.supportsCitation,
             ),
-            excerptTruncated: evidence.excerpts.some(excerpt => excerpt.truncated),
+            excerptTruncated: EffectArray.some(evidence.excerpts, excerpt => excerpt.truncated),
           })),
           Effect.orElseSucceed(() => ({
             citationId: citation.id,
@@ -204,11 +218,15 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
   const validated = yield* validateContextHealthMemoryCitations(config, scope, [
     {
       uri: record.uri,
-      codeCitations: [...new Map([...baselines.values()].map(citation => [citation.id, citation])).values()],
+      codeCitations: [
+        ...new Map(EffectArray.map([...baselines.values()], citation => [citation.id, citation])).values(),
+      ],
     },
   ]).pipe(Effect.orElseSucceed(() => []));
   const receipts = new Map(
-    validated.flatMap(item => item.receipts.map(receipt => [receipt.citationId, receipt] as const)),
+    EffectArray.flatMap(validated, item =>
+      EffectArray.map(item.receipts, receipt => [receipt.citationId, receipt] as const),
+    ),
   );
   const sources = yield* Effect.forEach(
     citations,
@@ -225,13 +243,39 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
             : yield* readContextHealthCitationEvidence(config, scope, baseline, excerptOptions).pipe(
                 Effect.orElseSucceed(() => undefined),
               );
-        const old = evidence?.excerpts.find(
-          excerpt => excerpt.provenance === 'historical-verified' && excerpt.supportsCitation,
+        const old = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(evidence?.excerpts), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                __effectArrayReceiver,
+                __effectArrayValue =>
+                  !!(excerpt => excerpt.provenance === 'historical-verified' && excerpt.supportsCitation)(
+                    __effectArrayValue,
+                  ),
+              ),
+            ),
+          ),
         );
-        const accepted = baselineEvidence?.excerpts.find(
-          excerpt => excerpt.provenance === 'historical-verified' && excerpt.supportsCitation,
+        const accepted = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(baselineEvidence?.excerpts), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                __effectArrayReceiver,
+                __effectArrayValue =>
+                  !!(excerpt => excerpt.provenance === 'historical-verified' && excerpt.supportsCitation)(
+                    __effectArrayValue,
+                  ),
+              ),
+            ),
+          ),
         );
-        const now = baselineEvidence?.excerpts.find(excerpt => excerpt.provenance === 'current-verified');
+        const now = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(baselineEvidence?.excerpts), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(__effectArrayReceiver, excerpt => excerpt.provenance === 'current-verified'),
+            ),
+          ),
+        );
         const status = receipt?.status ?? 'unknown';
         const base = {
           citationId: citation.id,
@@ -243,7 +287,13 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
           ...(receipt?.observedNodeId === undefined ? {} : {observedNodeId: receipt.observedNodeId}),
         };
         if (!now || !receipt || receipt.coverage !== 'current-complete') return base;
-        const prior = trustedPrevious?.sources.find(source => source.citationId === citation.id);
+        const prior = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(trustedPrevious?.sources), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(__effectArrayReceiver, source => source.citationId === citation.id),
+            ),
+          ),
+        );
         const sameLocator =
           prior?.observedPath === receipt.observedPath && prior?.observedNodeId === receipt.observedNodeId;
         let current: MemoryCodeCitationV1 | undefined;
@@ -294,7 +344,7 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
   if (!closing || closing.worktreeChanged || closing.headCommit !== identity.headCommit)
     return projectTopicMaintenanceObservation(
       record,
-      sources.map(source => ({
+      EffectArray.map(sources, source => ({
         citationId: source.citationId,
         status: 'unknown' as const,
         reason: 'source-changed-during-observation',
@@ -447,7 +497,7 @@ export const buildTopicMaintenanceEvidencePacket = Effect.fn('topicMaintenance.b
   )
     return unavailable('observation-stale-or-unavailable');
   if (observation.outcome === 'unavailable') {
-    const truncated = observation.sources.filter(source => source.excerptTruncated === true).length;
+    const truncated = EffectArray.filter(observation.sources, source => source.excerptTruncated === true).length;
     return truncated > 0
       ? unavailable('excerpt-truncated', truncated)
       : unavailable('observation-stale-or-unavailable');
@@ -458,7 +508,9 @@ export const buildTopicMaintenanceEvidencePacket = Effect.fn('topicMaintenance.b
     sources,
     original =>
       Effect.gen(function* () {
-        const observed = observation.sources.find(item => item.citationId === original.id);
+        const observed = EffectOption.getOrUndefined(
+          EffectArray.findFirst(observation.sources, item => item.citationId === original.id),
+        );
         if (!observed?.current) return undefined;
         const sameCitation = observed.current.id === original.id;
         const old = yield* readContextHealthCitationEvidence(config, scope, original, {
@@ -471,10 +523,28 @@ export const buildTopicMaintenanceEvidencePacket = Effect.fn('topicMaintenance.b
               ...excerptOptions,
               purpose: 'current',
             }).pipe(Effect.orElseSucceed(() => undefined));
-        const oldExcerpt = old?.excerpts.find(
-          item => item.provenance === 'historical-verified' && item.supportsCitation,
+        const oldExcerpt = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(old?.excerpts), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                __effectArrayReceiver,
+                __effectArrayValue =>
+                  !!(item => item.provenance === 'historical-verified' && item.supportsCitation)(__effectArrayValue),
+              ),
+            ),
+          ),
         );
-        const newExcerpt = next?.excerpts.find(item => item.provenance === 'current-verified' && item.supportsCitation);
+        const newExcerpt = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(next?.excerpts), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                __effectArrayReceiver,
+                __effectArrayValue =>
+                  !!(item => item.provenance === 'current-verified' && item.supportsCitation)(__effectArrayValue),
+              ),
+            ),
+          ),
+        );
         if (!oldExcerpt || !newExcerpt || newExcerpt.fileBytesHash !== observed.currentFileBytesHash) return undefined;
         return {
           citationId: original.id,
@@ -487,8 +557,15 @@ export const buildTopicMaintenanceEvidencePacket = Effect.fn('topicMaintenance.b
       }),
     {concurrency: 2},
   );
-  if (entries.some(entry => entry === undefined)) return unavailable('historical-or-current-evidence-unavailable');
-  const truncatedExcerpts = entries.filter(entry => entry!.oldExcerpt.truncated || entry!.newExcerpt.truncated).length;
+  const availableEntries = EffectArray.filter(
+    entries,
+    (entry): entry is Exclude<typeof entry, undefined> => entry !== undefined,
+  );
+  if (availableEntries.length !== entries.length) return unavailable('historical-or-current-evidence-unavailable');
+  const truncatedExcerpts = EffectArray.filter(
+    availableEntries,
+    entry => entry.oldExcerpt.truncated || entry.newExcerpt.truncated,
+  ).length;
   if (truncatedExcerpts > 0) return unavailable('excerpt-truncated', truncatedExcerpts);
   const packet: TopicMaintenanceEvidencePacketV1 = {
     version: 1,
@@ -500,7 +577,7 @@ export const buildTopicMaintenanceEvidencePacket = Effect.fn('topicMaintenance.b
     body: record.body,
     paragraphs: record.metadata.topicMaintenance!.paragraphs,
     additionalDependencies: record.metadata.topicMaintenance!.additionalDependencies,
-    sources: entries as Exclude<(typeof entries)[number], undefined>[],
+    sources: availableEntries,
     truncatedExcerpts: 0,
   };
   return boundTopicMaintenanceEvidencePacket(packet);

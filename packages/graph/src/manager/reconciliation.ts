@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {
   CodeGraphLifecycleOpportunityResult,
   CodeGraphLifecycleOpportunityTarget,
@@ -35,8 +36,12 @@ export function projectManagerGraphReconciliationStatus(input: {
   if (input.maintenance) return {reason: 'maintenance', state: 'deferred'};
   if (input.observation === undefined) return {state: 'unavailable'};
 
-  const pending = input.observation.lifecycleTargets.filter(target => target.reconciliationPending === true);
-  const blockedRepositories = pending.filter(
+  const pending = EffectArray.filter(
+    input.observation.lifecycleTargets,
+    target => target.reconciliationPending === true,
+  );
+  const blockedRepositories = EffectArray.filter(
+    pending,
     target => target.anchorIdentity === undefined && target.anchorPath === undefined,
   ).length;
   const viewCleanupAdvanced =

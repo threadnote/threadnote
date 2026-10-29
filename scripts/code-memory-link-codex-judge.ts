@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed static-judge adapter owns disposable filesystem and child-process boundaries. */
 import {createHash} from 'node:crypto';
 import {chmod, mkdir, readFile, realpath, stat, writeFile} from 'node:fs/promises';
@@ -21,6 +22,9 @@ import {
   assertCodeMemoryLinkRepositorySnapshot,
   type CodeMemoryLinkRepositorySnapshotV1,
 } from './code-memory-link-repository-snapshot.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface CodeMemoryLinkJudgeRunResultV1 {
   readonly commandArtifactId: string;
@@ -53,7 +57,7 @@ export async function materializeCodeMemoryLinkArtifacts(
   await mkdir(root, {recursive: true, mode: 0o700});
   for (const artifact of artifacts) {
     const destination = resolve(root, artifact.destination);
-    if (destination !== root && !destination.startsWith(`${root}${sep}`)) {
+    if (destination !== root && !Effect.pipe(destination, EffectString.startsWith(`${root}${sep}`))) {
       throw new Error('Materialized sealed artifact escaped its disposable root.');
     }
     await mkdir(dirname(destination), {recursive: true, mode: 0o700});
@@ -82,7 +86,10 @@ export async function runCodeMemoryLinkStaticJudge(input: {
   const temporary = join(input.judgeRoot, '.runner-tmp');
   await Promise.all([mkdir(privateHome, {mode: 0o700}), mkdir(temporary, {mode: 0o700})]);
   const guardArtifactId = codeMemoryLinkAgentSuiteGuardArtifactId(input.taskId);
-  const guardRequired = input.rubric.predicates.some(predicate => predicate.assertion.artifactId === guardArtifactId);
+  const guardRequired = EffectArray.some(
+    input.rubric.predicates,
+    predicate => predicate.assertion.artifactId === guardArtifactId,
+  );
   let output: {readonly stderr: string; readonly stdout: string};
   try {
     output = await captureCodeMemoryLinkProcessGroup({
@@ -142,7 +149,7 @@ export async function collectCodeMemoryLinkPublicArtifacts(
   repositorySnapshot: CodeMemoryLinkRepositorySnapshotV1,
 ): Promise<readonly CodeMemoryLinkPublicArtifactDescriptorV1[]> {
   const files = await assertCodeMemoryLinkRepositorySnapshot(repositorySnapshot);
-  return files.map(file => ({
+  return EffectArray.map(files, file => ({
     byteCount: file.byteCount,
     contentSha256: file.contentSha256,
     pathDigest: domainDigest('public-path', file.relativePath),
@@ -162,11 +169,11 @@ function parseJudgeOutput(
   }
   const envelope = object(parsed, 'static judge output');
   exactKeys(envelope, ['artifacts', 'version'], 'static judge output');
-  if (envelope.version !== 1 || !Array.isArray(envelope.artifacts)) {
+  if (envelope.version !== 1 || !EffectArray.isArray(envelope.artifacts)) {
     throw new Error('Static judge output version or artifacts are invalid.');
   }
   let totalBytes = 0;
-  const artifacts = envelope.artifacts.map((entry, index) => {
+  const artifacts = EffectArray.map(envelope.artifacts, (entry, index) => {
     const artifact = object(entry, `static artifact ${index + 1}`);
     exactKeys(artifact, ['artifactId', 'content', 'mediaType', 'sha256'], `static artifact ${index + 1}`);
     if (typeof artifact.artifactId !== 'string' || !/^art_[0-9a-f]{16,64}$/u.test(artifact.artifactId)) {
@@ -198,10 +205,12 @@ function parseJudgeOutput(
       sha256: expectedSha256,
     } satisfies CodeMemoryLinkStaticArtifactInputV1;
   });
-  const requiredIds = [...new Set(rubric.predicates.map(predicate => predicate.assertion.artifactId))].sort();
+  const requiredIds = [
+    ...new Set(EffectArray.map(rubric.predicates, predicate => predicate.assertion.artifactId)),
+  ].sort();
   if (
     artifacts.length !== requiredIds.length ||
-    artifacts.some((artifact, index) => artifact.artifactId !== requiredIds[index])
+    EffectArray.some(artifacts, (artifact, index) => artifact.artifactId !== requiredIds[index])
   ) {
     throw new Error('Static judge must return exactly the canonical rubric artifact roster.');
   }
@@ -217,15 +226,14 @@ async function assertMaterializedArtifact(path: string, artifact: CodeMemoryLink
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object.`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error(`${label} must be an object.`);
+  return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     throw new Error(`${label} has unsupported or missing fields.`);
   }
 }

@@ -15,10 +15,13 @@ import {recordPublishedFrontier, runGraphShareControlServer} from '@threadnote/g
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {graphSharingLayout, graphSharingTagPath} from '@threadnote/graph/sharing/layout';
 import {graphShareFrontierDiscoveryTag} from '@threadnote/graph/sharing/namespace';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const sharingLayer = Layer.mergeAll(BunServices.layer, BunHttpClient.layer, TestSystemInfoLayer);
 const hex40 = FC.array(FC.constantFrom(...'0123456789abcdef'), {minLength: 40, maxLength: 40}).map(value =>
-  value.join(''),
+  EffectArray.join(value, ''),
 );
 
 const startCoordinator = Effect.gen(function* () {
@@ -27,7 +30,12 @@ const startCoordinator = Effect.gen(function* () {
   const threadnoteHome = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-authority-'});
   const casRoot = path.join(threadnoteHome, 'cas');
   yield* fs.makeDirectory(casRoot, {recursive: true, mode: 0o700});
-  const options = {casRoot, organization: 'acme', repositoryId: 'a'.repeat(64), threadnoteHome};
+  const options = {
+    casRoot,
+    organization: 'acme',
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+    threadnoteHome,
+  };
   const ready = yield* Deferred.make<{readonly url: string}>();
   yield* Effect.forkScoped(
     runGraphShareControlServer({
@@ -89,13 +97,13 @@ describe('graph contributor authority', () => {
           generation: 1,
           manifestDigest: sha256Digest('manifest-one'),
           repositoryId: server.repositoryId,
-          sourceCommit: 'b'.repeat(40),
+          sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
         };
         yield* recordPublishedFrontier(server, published);
         const next = {...published, descriptorDigest: sha256Digest('descriptor-two'), generation: 2};
         yield* recordPublishedFrontier(server, next);
         expect(yield* graphShareControlGetTag(server.url, tag)).toBe(next.descriptorDigest);
-        const actionTag = `tn-action-${'c'.repeat(64)}`;
+        const actionTag = `tn-action-${Effect2.pipe('c', EffectString.repeat(64))}`;
         const actionDigest = sha256Digest('worker-result');
         yield* graphShareControlPutTag(server.url, actionTag, actionDigest);
         expect(yield* graphShareControlGetTag(server.url, actionTag)).toBe(actionDigest);
@@ -120,12 +128,15 @@ describe('graph contributor authority', () => {
           generation: 1,
           manifestDigest: sha256Digest('manifest'),
           repositoryId: server.repositoryId,
-          sourceCommit: 'b'.repeat(40),
+          sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
         };
         yield* recordPublishedFrontier(server, published);
         const statePath = graphSharingLayout(path, server.threadnoteHome).coordinatorStatePath;
         const before = yield* fs.readFileString(statePath);
-        for (const body of [JSON.stringify({batchId: 'c'.repeat(40), idempotencyKey: 'worker-lease'}), '{']) {
+        for (const body of [
+          JSON.stringify({batchId: Effect2.pipe('c', EffectString.repeat(40)), idempotencyKey: 'worker-lease'}),
+          '{',
+        ]) {
           const response = yield* client.execute(
             HttpClientRequest.post(`${server.url}/v1/assembly-leases`).pipe(
               HttpClientRequest.bodyUint8Array(new TextEncoder().encode(body), 'application/json'),

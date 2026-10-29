@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -18,6 +19,8 @@ import {
   type CodeGraphDiskCapacityDemand,
   type CodeGraphDiskCapacitySelectedScope,
 } from './capacity.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_DISK_RESERVATION_LIMITS = {
   classificationConcurrency: 16,
@@ -90,6 +93,38 @@ const RUNTIME_PLATFORMS = new Set<NodeJS.Platform>([
   'win32',
 ]);
 const OPERATIONS = new Set<CodeGraphDirectPersistentCapacityOperation>(CODE_GRAPH_DISK_RESERVATION_OPERATIONS);
+const CodeGraphDiskReservationReceiptSchema = Schema.Struct({
+  calibrationIdentity: Schema.String,
+  filesystems: Schema.Array(Schema.Struct({bytes: Schema.Finite, key: Schema.String})),
+  operation: Schema.Literals(CODE_GRAPH_DISK_RESERVATION_OPERATIONS),
+  processId: Schema.Finite,
+  processStartIdentity: Schema.String,
+  token: Schema.String,
+  version: Schema.Literal(1),
+});
+const CodeGraphDiskCapacityDecisionFilesystemSchema = Schema.Struct({
+  activeReservationBytes: Schema.Finite,
+  availableBytes: Schema.Finite,
+  requiredBytes: Schema.Finite,
+  role: Schema.Literals(['durable', 'shared', 'temporary']),
+});
+const CodeGraphDiskCapacityDecisionSchema = Schema.Union([
+  Schema.Struct({
+    calibrationIdentity: Schema.String,
+    filesystems: Schema.Array(CodeGraphDiskCapacityDecisionFilesystemSchema),
+    state: Schema.Literals(['healthy', 'pressure']),
+  }),
+  Schema.Struct({
+    calibrationIdentity: Schema.String,
+    reason: Schema.Literals([
+      'available-space-unknown',
+      'calibration-input-unknown',
+      'filesystem-topology-unknown',
+      'page-storage-unknown',
+    ]),
+    state: Schema.Literal('unknown'),
+  }),
+]);
 // Recovery authority is local-process state for one exact immutable receipt.
 // Receipt paths include the ledger identity, so a copied token/canonical body
 // in another Threadnote home can never consume that authority.
@@ -143,22 +178,22 @@ export interface CodeGraphDiskReservationLease {
   readonly token: string;
 }
 
-class CodeGraphDiskReservationLedgerError extends Schema.TaggedError<CodeGraphDiskReservationLedgerError>()(
-  'CodeGraphDiskReservationLedgerError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphDiskReservationLedgerError extends Schema.TaggedError<
+  CodeGraphDiskReservationLedgerError,
+  {readonly brand: unique symbol}
+>()('CodeGraphDiskReservationLedgerError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
-class CodeGraphDiskReservationClaimControl extends Schema.TaggedError<CodeGraphDiskReservationClaimControl>()(
-  'CodeGraphDiskReservationClaimControl',
-  {
-    decision: Schema.optionalKey(Schema.Any),
-    message: Schema.String,
-    state: Schema.Literals(['physical-pressure', 'reservation-pressure', 'unknown']),
-  },
-) {
+class CodeGraphDiskReservationClaimControl extends Schema.TaggedError<
+  CodeGraphDiskReservationClaimControl,
+  {readonly brand: unique symbol}
+>()('CodeGraphDiskReservationClaimControl', {
+  decision: Schema.optionalKey(Schema.Any),
+  message: Schema.String,
+  state: Schema.Literals(['physical-pressure', 'reservation-pressure', 'unknown']),
+}) {
   static of(
     state: 'physical-pressure' | 'reservation-pressure' | 'unknown',
     decision?: CodeGraphDiskCapacityDecision,
@@ -206,9 +241,9 @@ export function aggregateCodeGraphDiskReservationReceipts(
       );
     }
   }
-  return [...reservedByFilesystem]
-    .map(([key, bytes]) => ({bytes, key}))
-    .sort((left, right) => left.key.localeCompare(right.key));
+  return EffectArray.map([...reservedByFilesystem], ([key, bytes]) => ({bytes, key})).sort((left, right) =>
+    Effect2.pipe(left.key, EffectString.localeCompare(right.key)),
+  );
 }
 
 /** Strict canonical serializer for the immutable receipt-v1 wire format. */
@@ -222,7 +257,7 @@ export function serializeCodeGraphDiskReservationReceipt(receipt: CodeGraphDiskR
     processStartIdentity: receipt.processStartIdentity,
     operation: receipt.operation,
     calibrationIdentity: receipt.calibrationIdentity,
-    filesystems: receipt.filesystems.map(value => ({key: value.key, bytes: value.bytes})),
+    filesystems: EffectArray.map(receipt.filesystems, value => ({key: value.key, bytes: value.bytes})),
   });
   if (codeGraphUtf8ByteLength(canonical) > CODE_GRAPH_DISK_RESERVATION_LIMITS.receiptBytes) {
     throw CodeGraphDiskReservationLedgerError.make({message: 'Disk reservation receipt exceeds its byte budget.'});
@@ -238,7 +273,7 @@ export function parseCodeGraphDiskReservationReceipt(
   const token = RECEIPT_NAME.exec(fileName)?.[1];
   if (!token || codeGraphUtf8ByteLength(content) > CODE_GRAPH_DISK_RESERVATION_LIMITS.receiptBytes) return undefined;
   try {
-    const parsed = JSON.parse(content) as CodeGraphDiskReservationReceipt;
+    const parsed = Schema.decodeUnknownSync(CodeGraphDiskReservationReceiptSchema)(JSON.parse(content));
     if (parsed.token !== token || !validReceipt(parsed)) return undefined;
     return serializeCodeGraphDiskReservationReceipt(parsed) === content ? parsed : undefined;
   } catch {
@@ -408,7 +443,15 @@ export function withCodeGraphDiskReservation<A, E, R, R2>(
       ).pipe(
         Effect.map(value => ({state: 'completed' as const, value})),
         Effect.catchIf(Schema.is(CodeGraphDiskReservationClaimControl), error =>
-          Effect.succeed({decision: error.decision as CodeGraphDiskCapacityDecision | undefined, state: error.state}),
+          Effect.succeed({
+            decision:
+              error.decision === undefined
+                ? undefined
+                : Option.getOrUndefined(
+                    Schema.decodeUnknownOption(CodeGraphDiskCapacityDecisionSchema)(error.decision),
+                  ),
+            state: error.state,
+          }),
         ),
       );
       if (attempted.state === 'completed') return attempted.value;
@@ -574,7 +617,9 @@ const claimAttempt = Effect.fn('codeGraph.diskReservation.claimAttempt')(functio
       const token = sha256HexSync(`${system.processId}\0${yield* crypto.randomUUIDv4()}`);
       const receipt: CodeGraphDiskReservationReceipt = {
         calibrationIdentity: projection.calibrationIdentity,
-        filesystems: [...projection.filesystems].sort((left, right) => left.key.localeCompare(right.key)),
+        filesystems: [...projection.filesystems].sort((left, right) =>
+          Effect2.pipe(left.key, EffectString.localeCompare(right.key)),
+        ),
         operation: options.boundary.operation,
         processId: system.processId,
         processStartIdentity,
@@ -691,7 +736,9 @@ const scanLedger = Effect.fn('codeGraph.diskReservation.scan')(function* (
     receipts.push({canonicalReceipt: content, name, receipt});
   }
 
-  const processIds = [...new Set(receipts.map(value => value.receipt.processId))].sort((left, right) => left - right);
+  const processIds = [...new Set(EffectArray.map(receipts, value => value.receipt.processId))].sort(
+    (left, right) => left - right,
+  );
   const classifications = yield* Effect.forEach(
     processIds,
     processId =>
@@ -738,7 +785,7 @@ const scanLedger = Effect.fn('codeGraph.diskReservation.scan')(function* (
   if (temporaryNames.length + staleNames.length > 0) yield* syncDirectoryBestEffort(fs, root);
 
   const reservedByFilesystem = new Map(
-    aggregateCodeGraphDiskReservationReceipts(retained).map(value => [value.key, value.bytes]),
+    EffectArray.map(aggregateCodeGraphDiskReservationReceipts(retained), value => [value.key, value.bytes]),
   );
   return {reservedByFilesystem};
 });
@@ -789,7 +836,7 @@ function validReceipt(receipt: CodeGraphDiskReservationReceipt): boolean {
     !CALIBRATION_IDENTITY.test(receipt.calibrationIdentity) ||
     codeGraphUtf8ByteLength(receipt.calibrationIdentity) < 1 ||
     codeGraphUtf8ByteLength(receipt.calibrationIdentity) > 256 ||
-    !Array.isArray(receipt.filesystems) ||
+    !EffectArray.isArray(receipt.filesystems) ||
     receipt.filesystems.length < 1 ||
     receipt.filesystems.length > 2
   ) {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {DateTime, Effect, FileSystem, Path} from 'effect';
@@ -18,6 +19,8 @@ import {
 } from '@threadnote/recall/memory/connections';
 import {rankRecallCandidates, type RecallCandidate} from '@threadnote/recall/rank';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NOW = new Date('2026-08-31T12:00:00.000Z');
 
@@ -29,7 +32,7 @@ describe('recall memory connection properties', () => {
       suffix: FC.array(FC.constantFrom(...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-'), {
         maxLength: 64,
         minLength: 1,
-      }).map(characters => characters.join('')),
+      }).map(characters => EffectArray.join(characters, '')),
     },
     ({suffix}) =>
       Effect.sync(() => {
@@ -88,8 +91,8 @@ describe('recall memory connection properties', () => {
           context,
         );
         expect(forward.results[0]?.candidate.uri).toBe(direct.uri);
-        expect(reverse.results.map(result => result.candidate.uri)).toEqual(
-          forward.results.map(result => result.candidate.uri),
+        expect(EffectArray.map(reverse.results, result => result.candidate.uri)).toEqual(
+          EffectArray.map(forward.results, result => result.candidate.uri),
         );
       }),
     {fastCheck: {numRuns: 32}},
@@ -118,7 +121,7 @@ describe('recall memory connection properties', () => {
           home,
           'seed',
           'tn_property_seed',
-          neighborIds.map(id => ({type: 'related_to', uri: `threadnote://memory/tn_neighbor_${id}`})),
+          EffectArray.map(neighborIds, id => ({type: 'related_to', uri: `threadnote://memory/tn_neighbor_${id}`})),
         );
         yield* writeMemory(fs, path, home, 'topical-noise', 'tn_topical_noise');
         yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
@@ -128,19 +131,21 @@ describe('recall memory connection properties', () => {
         yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
         const rebuilt = yield* retrieve(config);
         const normalize = (result: typeof incremental) => ({
-          connections: result.connections.map(connection => ({
+          connections: EffectArray.map(result.connections, connection => ({
             direction: connection.direction,
             memoryId: connection.neighborMemoryId,
             relationType: connection.relationType,
             resolution: connection.resolution,
           })),
-          memoryIds: result.candidates.map(value => value.memoryId),
-          premises: result.premises.map(value => value.state),
+          memoryIds: EffectArray.map(result.candidates, value => value.memoryId),
+          premises: EffectArray.map(result.premises, value => value.state),
         });
         expect(normalize(rebuilt)).toEqual(normalize(incremental));
         expect(incremental.candidates).toHaveLength(Math.min(8, neighborIds.length));
-        expect(new Set(incremental.candidates.map(value => value.memoryId)).size).toBe(incremental.candidates.length);
-        expect(incremental.candidates.map(value => value.memoryId)).not.toContain('tn_topical_noise');
+        expect(new Set(EffectArray.map(incremental.candidates, value => value.memoryId)).size).toBe(
+          incremental.candidates.length,
+        );
+        expect(EffectArray.map(incremental.candidates, value => value.memoryId)).not.toContain('tn_topical_noise');
         expect(incremental.diagnostics.canonicalRereads).toBe(neighborIds.length + 2);
         expect(incremental.diagnostics.rawLinkRows).toBe(neighborIds.length);
         expect(incremental.coverage.truncated).toBe(neighborIds.length > 8);
@@ -190,11 +195,16 @@ describe('recall memory connection properties', () => {
             toUri: currentUri,
           });
           yield* store.remove(location, formerUri);
-          yield* store.write(location, currentUri, content.replace(`memory_id: ${memoryId}\n`, ''), {mode: 'upsert'});
+          yield* store.write(
+            location,
+            currentUri,
+            Effect2.pipe(content, EffectString.replace(`memory_id: ${memoryId}\n`, '')),
+            {mode: 'upsert'},
+          );
           yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
 
           const refs = [alias, currentUri, formerUri] as const;
-          const orderedRefs = order.map(index => refs[index]);
+          const orderedRefs = EffectArray.map(order, index => refs[index]);
           const result = yield* retrieveRecallMemoryConnections(config, {
             allowedUriScopes: [`threadnote://user/${config.user}/memories`],
             memoryRefs: orderedRefs,

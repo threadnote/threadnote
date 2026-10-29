@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import {compareCodeUnits} from '../ordering.js';
 import type {
@@ -10,6 +12,7 @@ import type {
 import type {CodeGraphMonikerV1} from '../cross_repository/types.js';
 import {canonicalCodeGraphMonikers} from '../cross_repository/monikers.js';
 import {parseCodeGraphFileFacts} from './validation.js';
+import * as EffectRecord from 'effect/Record';
 
 export const CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM = 8 * 1_048_576;
 export const CODE_GRAPH_REFERENCE_CANDIDATES_PER_REFERENCE_MAXIMUM = 100_000;
@@ -112,13 +115,13 @@ export function finalCodeGraphFactBatches(
   maximumBytes = CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM,
 ): readonly (readonly MeasuredCodeGraphFact[])[] {
   const canonical = canonicalMaterializationFacts(facts);
-  const measured = canonical.map(fact => measureBoundedCodeGraphFact(fact, maximumBytes));
+  const measured = EffectArray.map(canonical, fact => measureBoundedCodeGraphFact(fact, maximumBytes));
   const closed = closeMaterializationFacts(
     canonical,
-    measured.map(value => value.facts),
+    EffectArray.map(measured, value => value.facts),
   );
   return boundedCodeGraphFactBatches(
-    closed.map((fact, index) =>
+    EffectArray.map(closed, (fact, index) =>
       fact === measured[index].facts ? measured[index] : measureBoundedCodeGraphFact(fact, maximumBytes),
     ),
     maximumBytes,
@@ -242,10 +245,10 @@ function selectCachedCodeGraphFactsWithinBudget(
     const reference = Option.fromUndefinedOr(referencesByEdgeId.get(edge.id));
     const references = Option.toArray(reference);
     const dependencyIds = new Set<string>();
-    for (const id of [edge.sourceId, edge.targetId, ...references.map(value => value.sourceId)]) {
+    for (const id of [edge.sourceId, edge.targetId, ...EffectArray.map(references, value => value.sourceId)]) {
       if (id !== undefined && localSymbolIds.has(id)) dependencyIds.add(id);
     }
-    const missingSymbols = [...dependencyIds].flatMap(id => {
+    const missingSymbols = EffectArray.flatMap([...dependencyIds], id => {
       if (selectedSymbolIds.has(id)) return [];
       return Option.toArray(Option.fromUndefinedOr(symbolsById.get(id)));
     });
@@ -265,31 +268,31 @@ function selectCachedCodeGraphFactsWithinBudget(
     return true;
   };
 
-  for (const symbol of orderedSymbols.filter(value => cachedFactSymbolPriority(value) === 0)) {
+  for (const symbol of EffectArray.filter(orderedSymbols, value => cachedFactSymbolPriority(value) === 0)) {
     tryAddSymbols([symbol.id]);
   }
-  for (const edge of orderedEdges.filter(value => cachedFactRelationshipPriority(value.relation) === 0)) {
+  for (const edge of EffectArray.filter(orderedEdges, value => cachedFactRelationshipPriority(value.relation) === 0)) {
     tryAddRelationship(edge);
   }
-  for (const edge of orderedEdges.filter(value => cachedFactRelationshipPriority(value.relation) === 1)) {
+  for (const edge of EffectArray.filter(orderedEdges, value => cachedFactRelationshipPriority(value.relation) === 1)) {
     tryAddRelationship(edge);
   }
-  for (const symbol of orderedSymbols.filter(value => cachedFactSymbolPriority(value) === 1)) {
+  for (const symbol of EffectArray.filter(orderedSymbols, value => cachedFactSymbolPriority(value) === 1)) {
     tryAddSymbols([symbol.id]);
   }
-  for (const symbol of orderedSymbols.filter(value => cachedFactSymbolPriority(value) === 2)) {
+  for (const symbol of EffectArray.filter(orderedSymbols, value => cachedFactSymbolPriority(value) === 2)) {
     tryAddSymbols([symbol.id]);
   }
-  for (const edge of orderedEdges.filter(value => cachedFactRelationshipPriority(value.relation) === 2)) {
+  for (const edge of EffectArray.filter(orderedEdges, value => cachedFactRelationshipPriority(value.relation) === 2)) {
     tryAddRelationship(edge);
   }
-  for (const edge of orderedEdges.filter(value => cachedFactRelationshipPriority(value.relation) === 3)) {
+  for (const edge of EffectArray.filter(orderedEdges, value => cachedFactRelationshipPriority(value.relation) === 3)) {
     tryAddRelationship(edge);
   }
-  for (const symbol of orderedSymbols.filter(value => cachedFactSymbolPriority(value) === 3)) {
+  for (const symbol of EffectArray.filter(orderedSymbols, value => cachedFactSymbolPriority(value) === 3)) {
     tryAddSymbols([symbol.id]);
   }
-  for (const edge of orderedEdges.filter(value => cachedFactRelationshipPriority(value.relation) === 4)) {
+  for (const edge of EffectArray.filter(orderedEdges, value => cachedFactRelationshipPriority(value.relation) === 4)) {
     tryAddRelationship(edge);
   }
   for (const diagnostic of [...new Set(compacted.diagnostics)].sort(compareCodeUnits).slice(0, 20)) {
@@ -306,7 +309,12 @@ function selectCachedCodeGraphFactsWithinBudget(
  */
 export function budgetCodeGraphReferenceCandidates(facts: CodeGraphFileFacts): CodeGraphFileFacts {
   if (facts.references === undefined) return facts;
-  const references = facts.references.filter(isCodeGraphReferenceWithinCandidateBudget);
+  const sourceReferences = facts.references;
+  const references = EffectArray.filter(
+    sourceReferences,
+    (__effectFilterValue: (typeof facts.references)[number], __effectFilterIndex: number) =>
+      __effectFilterIndex in sourceReferences && isCodeGraphReferenceWithinCandidateBudget(__effectFilterValue),
+  );
   if (references.length === facts.references.length) return facts;
   return {
     ...facts,
@@ -359,14 +367,14 @@ function canonicalMaterializationFacts(facts: readonly CodeGraphFileFacts[]): re
   for (const fact of facts) {
     for (const reference of fact.references ?? []) referencesByEdgeId.set(reference.edgeId, reference);
   }
-  const includeReferences = facts.some(fact => fact.references !== undefined);
-  return facts.map(fact => {
-    const symbols = fact.symbols.filter(symbol => {
+  const includeReferences = EffectArray.some(facts, fact => fact.references !== undefined);
+  return EffectArray.map(facts, fact => {
+    const symbols = EffectArray.filter(fact.symbols, symbol => {
       if (symbolIds.has(symbol.id)) return false;
       symbolIds.add(symbol.id);
       return true;
     });
-    const edges = fact.edges.filter(edge => {
+    const edges = EffectArray.filter(fact.edges, edge => {
       if (edgeIds.has(edge.id)) return false;
       edgeIds.add(edge.id);
       return true;
@@ -375,7 +383,11 @@ function canonicalMaterializationFacts(facts: readonly CodeGraphFileFacts[]): re
       ...fact,
       edges,
       ...(includeReferences
-        ? {references: edges.flatMap(edge => Option.toArray(Option.fromUndefinedOr(referencesByEdgeId.get(edge.id))))}
+        ? {
+            references: EffectArray.flatMap(edges, edge =>
+              Option.toArray(Option.fromUndefinedOr(referencesByEdgeId.get(edge.id))),
+            ),
+          }
         : {}),
       symbols,
     };
@@ -387,24 +399,40 @@ function closeMaterializationFacts(
   original: readonly CodeGraphFileFacts[],
   bounded: readonly CodeGraphFileFacts[],
 ): readonly CodeGraphFileFacts[] {
-  const originalSymbolIds = new Set(original.flatMap(fact => fact.symbols.map(symbol => symbol.id)));
-  const retainedSymbolIds = new Set(bounded.flatMap(fact => fact.symbols.map(symbol => symbol.id)));
-  return bounded.map(fact => {
-    const edges = fact.edges.filter(
-      edge =>
-        (edge.sourceId === undefined ||
-          !originalSymbolIds.has(edge.sourceId) ||
-          retainedSymbolIds.has(edge.sourceId)) &&
-        (edge.targetId === undefined || !originalSymbolIds.has(edge.targetId) || retainedSymbolIds.has(edge.targetId)),
+  const originalSymbolIds = new Set(
+    EffectArray.flatMap(original, fact => EffectArray.map(fact.symbols, symbol => symbol.id)),
+  );
+  const retainedSymbolIds = new Set(
+    EffectArray.flatMap(bounded, fact => EffectArray.map(fact.symbols, symbol => symbol.id)),
+  );
+  return EffectArray.map(bounded, fact => {
+    const edges = EffectArrayPipe(fact.edges, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (edge, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues &&
+          (edge.sourceId === undefined ||
+            !originalSymbolIds.has(edge.sourceId) ||
+            retainedSymbolIds.has(edge.sourceId)) &&
+          (edge.targetId === undefined ||
+            !originalSymbolIds.has(edge.targetId) ||
+            retainedSymbolIds.has(edge.targetId)),
+      ),
     );
-    const retainedEdgeIds = new Set(edges.map(edge => edge.id));
-    const references = fact.references?.filter(
-      reference =>
-        retainedEdgeIds.has(reference.edgeId) &&
-        (reference.sourceId === undefined ||
-          !originalSymbolIds.has(reference.sourceId) ||
-          retainedSymbolIds.has(reference.sourceId)),
-    );
+    const retainedEdgeIds = new Set(EffectArray.map(edges, edge => edge.id));
+    const originalReferences = fact.references;
+    const references =
+      originalReferences === undefined
+        ? undefined
+        : EffectArray.filter(
+            originalReferences,
+            (reference, __effectArrayIndex) =>
+              __effectArrayIndex in originalReferences &&
+              retainedEdgeIds.has(reference.edgeId) &&
+              (reference.sourceId === undefined ||
+                !originalSymbolIds.has(reference.sourceId) ||
+                retainedSymbolIds.has(reference.sourceId)),
+          );
     if (edges.length === fact.edges.length && references?.length === fact.references?.length) return fact;
     return {...fact, edges, ...(references === undefined ? {} : {references})};
   });
@@ -426,12 +454,12 @@ function cachedJsonByteUpperBound(value: unknown): number {
       return 4;
     case 'object': {
       if (value === null) return 4;
-      if (Array.isArray(value)) {
+      if (EffectArray.isArray(value)) {
         let bytes = saturatingAdd(2, Math.max(0, value.length - 1));
         for (const entry of value) bytes = saturatingAdd(bytes, cachedJsonByteUpperBound(entry));
         return bytes;
       }
-      const entries = Object.entries(value);
+      const entries = EffectRecord.toEntries(value);
       let bytes = saturatingAdd(2, Math.max(0, entries.length - 1));
       for (const [key, entry] of entries) {
         bytes = saturatingAdd(bytes, cachedJsonByteUpperBound(key), 1, cachedJsonByteUpperBound(entry));
@@ -501,5 +529,5 @@ function saturatingMultiply(value: number, multiplier: number): number {
 }
 
 function saturatingAdd(...values: readonly number[]): number {
-  return values.reduce((total, value) => Math.min(Number.MAX_SAFE_INTEGER, total + value), 0);
+  return EffectArray.reduce(values, 0, (total, value) => Math.min(Number.MAX_SAFE_INTEGER, total + value));
 }

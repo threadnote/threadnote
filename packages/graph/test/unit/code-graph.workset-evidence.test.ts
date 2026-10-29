@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -15,6 +16,9 @@ import {
   type CodeGraphWorksetQueryResultV2,
   type RepositoryEvidenceReceiptV1,
 } from '@threadnote/graph/workset/evidence';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph workset evidence', () => {
   it('strictly parses repository-qualified cards and exact relationship provenance', () => {
@@ -116,8 +120,14 @@ describe('code graph workset evidence', () => {
       remainingEstimate: 24 - projected.structuredContent.cards.length,
     });
     expect(continuationOffsets).toEqual([returnedCards]);
-    expect(Object.keys(projected.structuredContent.repositories)).toEqual(['repository']);
-    expect(projected.text.match(/^- /gmu)?.length ?? 0).toBeLessThanOrEqual(3);
+    expect(EffectRecord.keys(projected.structuredContent.repositories)).toEqual(['repository']);
+    expect(
+      Effect.pipe(
+        projected.text,
+        EffectString.match(/^- /gmu),
+        Effect.Option.getOrElse(() => null),
+      )?.length ?? 0,
+    ).toBeLessThanOrEqual(3);
     expect(parseCodeGraphWorksetEvidenceProjectionV2(JSON.parse(JSON.stringify(projected.structuredContent)))).toEqual(
       projected.structuredContent,
     );
@@ -166,7 +176,7 @@ describe('code graph workset evidence', () => {
     );
 
     expect(projected.structuredContent.cards).toHaveLength(1);
-    expect(Object.keys(projected.structuredContent.repositories).sort()).toEqual(['consumer', 'producer']);
+    expect(EffectRecord.keys(projected.structuredContent.repositories).sort()).toEqual(['consumer', 'producer']);
     expect(projected.structuredContent.output.truncated).toBe(false);
     expect(projected.structuredContent.continuation).toBeUndefined();
     expect(reversedReceipts).toEqual(projected);
@@ -221,7 +231,7 @@ describe('code graph workset evidence', () => {
       fc.property(fc.string({maxLength: 80}), fc.integer({min: 0, max: 10_000}), (seed, offset) => {
         const repositoryId = digest(`repository:${seed}`);
         const otherRepositoryId = digest(`other-repository:${seed}`);
-        const nodeId = `cgs_${digest(`node:${seed}`).slice(0, 32)}`;
+        const nodeId = `cgs_${Effect.pipe(digest(`node:${seed}`), EffectString.slice(0, 32))}`;
         const ref = codeGraphQualifiedRefHandle({nodeId, repositoryId});
         const repeated = codeGraphQualifiedRefHandle({nodeId, repositoryId});
         const other = codeGraphQualifiedRefHandle({nodeId, repositoryId: otherRepositoryId});
@@ -270,7 +280,7 @@ describe('code graph workset evidence', () => {
       repositories: {...first.repositories, sibling: siblingReceipt},
     };
 
-    expect(parseCodeGraphWorksetQueryResultV2(result).cards.map(card => card.ref)).toEqual([
+    expect(EffectArray.map(parseCodeGraphWorksetQueryResultV2(result).cards, card => card.ref)).toEqual([
       original.ref,
       original.ref,
     ]);
@@ -332,17 +342,16 @@ function evidenceResult(
   const repositoryKey = 'repository';
   const generationDigest = digest('generation');
   const receipt = readyReceipt(repositoryId, 'repository');
-  const cards = seeds
-    .slice(0, cardCount)
-    .map((seed, index) =>
-      card(
-        repositoryId,
-        repositoryKey,
-        index,
-        `symbol${seed}${'x'.repeat(qualifiedNamePadding)}`,
-        `src/symbol-${index}.ts`,
-      ),
-    );
+  const cards = EffectArray.map(seeds.slice(0, cardCount), (seed, index) =>
+    card(
+      repositoryId,
+      repositoryKey,
+      index,
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
+      `symbol${seed}${'x'.repeat(qualifiedNamePadding)}`,
+      `src/symbol-${index}.ts`,
+    ),
+  );
   return {
     cards,
     coverage: {
@@ -363,7 +372,7 @@ function evidenceResult(
     version: 2,
     warnings: [],
     workset: {
-      generation: {digest: generationDigest, id: `cgwg_${generationDigest.slice(0, 40)}`},
+      generation: {digest: generationDigest, id: `cgwg_${Effect.pipe(generationDigest, EffectString.slice(0, 40))}`},
       name: 'engineering',
     },
   };
@@ -373,14 +382,14 @@ function relationshipResult(): CodeGraphWorksetQueryResultV2 {
   const producerId = digest('producer');
   const consumerId = digest('consumer');
   const producerRef = codeGraphQualifiedRefHandle({
-    nodeId: `cgs_${digest('producer-node').slice(0, 32)}`,
+    nodeId: `cgs_${Effect.pipe(digest('producer-node'), EffectString.slice(0, 32))}`,
     repositoryId: producerId,
   });
   const consumerRef = codeGraphQualifiedRefHandle({
-    nodeId: `cgs_${digest('consumer-node').slice(0, 32)}`,
+    nodeId: `cgs_${Effect.pipe(digest('consumer-node'), EffectString.slice(0, 32))}`,
     repositoryId: consumerId,
   });
-  const producerSnapshot = `cgsn_${digest('producer-snapshot').slice(0, 40)}`;
+  const producerSnapshot = `cgsn_${Effect.pipe(digest('producer-snapshot'), EffectString.slice(0, 40))}`;
   const generationDigest = digest('relationship-generation');
   const producerCard: CodeGraphEvidenceCardV1 = {
     id: codeGraphEvidenceCardId(producerRef, producerSnapshot, digest('worktree:producer')),
@@ -435,7 +444,7 @@ function relationshipResult(): CodeGraphWorksetQueryResultV2 {
     version: 2,
     warnings: [],
     workset: {
-      generation: {digest: generationDigest, id: `cgwg_${generationDigest.slice(0, 40)}`},
+      generation: {digest: generationDigest, id: `cgwg_${Effect.pipe(generationDigest, EffectString.slice(0, 40))}`},
       name: 'relationships',
     },
   };
@@ -448,11 +457,11 @@ function readyReceipt(repositoryId: string, seed: string, snapshotId?: string): 
     repositoryId,
     snapshot: {
       checkoutId: digest(`checkout:${seed}`),
-      commit: digest(`commit:${seed}`).slice(0, 40),
+      commit: Effect.pipe(digest(`commit:${seed}`), EffectString.slice(0, 40)),
       digest: digest(`snapshot-digest:${seed}`),
       dirty: false,
       freshness: 'current',
-      id: snapshotId ?? `cgsn_${digest(`snapshot:${seed}`).slice(0, 40)}`,
+      id: snapshotId ?? `cgsn_${Effect.pipe(digest(`snapshot:${seed}`), EffectString.slice(0, 40))}`,
       projectionDigest: digest(`projection:${seed}`),
       provenance: 'ready-snapshot',
       worktreeId: digest(`worktree:${seed}`),
@@ -469,10 +478,10 @@ function card(
   path: string,
 ): CodeGraphEvidenceCardV1 {
   const ref = codeGraphQualifiedRefHandle({
-    nodeId: `cgs_${digest(`node:${ordinal}`).slice(0, 32)}`,
+    nodeId: `cgs_${Effect.pipe(digest(`node:${ordinal}`), EffectString.slice(0, 32))}`,
     repositoryId,
   });
-  const snapshotId = `cgsn_${digest('snapshot:repository').slice(0, 40)}`;
+  const snapshotId = `cgsn_${Effect.pipe(digest('snapshot:repository'), EffectString.slice(0, 40))}`;
   return {
     id: codeGraphEvidenceCardId(ref, snapshotId, digest('worktree:repository')),
     reason: {score: 1 - ordinal / 1_000, signals: ['lexical-name'], summary: 'Globally ranked lexical match.'},

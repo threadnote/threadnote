@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import type {
@@ -8,6 +9,9 @@ import {
   projectManagerGraphReconciliationStatus,
   type ManagerGraphReconciliationObservation,
 } from '../../src/manager/reconciliation.js';
+
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const checkedAt = '2026-10-09T12:00:00.000Z';
 
@@ -48,6 +52,7 @@ describe('Manager graph reconciliation status', () => {
 
     expect(projected).toMatchObject({blockedRepositories: 1, pendingRepositories: 3});
     expect(input).toEqual(before);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     expect(Object.keys(projected).sort()).toEqual([
       'blockedRepositories',
       'checkedAt',
@@ -63,7 +68,7 @@ describe('Manager graph reconciliation status', () => {
 
   it('reports worktree cleanup progress without claiming an active-view removal count', () => {
     const result = {
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect.pipe('a', EffectString.repeat(64)),
       opportunity: 'status',
       result: {
         cleanup: 'removed-worktree-view',
@@ -151,7 +156,7 @@ describe('Manager graph reconciliation status', () => {
           viewsTruncated: FC.boolean(),
         }),
         ({rows, viewsTruncated}) => {
-          const targets = rows.flatMap(row =>
+          const targets = EffectArray.flatMap(rows, row =>
             row.available
               ? [
                   target({
@@ -165,7 +170,7 @@ describe('Manager graph reconciliation status', () => {
           const inputObservation = {
             lifecycleTargets: targets,
             repositoryCount: rows.length,
-            unavailableRepositories: rows.filter(row => !row.available).length,
+            unavailableRepositories: EffectArray.filter(rows, row => !row.available).length,
             viewsTruncated,
           };
           const before = structuredClone(inputObservation);
@@ -175,10 +180,15 @@ describe('Manager graph reconciliation status', () => {
             maintenance: false,
             observation: inputObservation,
           });
-          const pendingCount = rows.reduce((count, row) => count + Number(row.available && row.pending), 0);
-          const blockedCount = rows.reduce(
-            (count, row) => count + Number(row.available && row.pending && row.anchor === 'none'),
+          const pendingCount = EffectArray.reduce(
+            rows,
             0,
+            (count, row) => count + Number(row.available && row.pending),
+          );
+          const blockedCount = EffectArray.reduce(
+            rows,
+            0,
+            (count, row) => count + Number(row.available && row.pending && row.anchor === 'none'),
           );
 
           expect(result).toEqual({
@@ -188,7 +198,7 @@ describe('Manager graph reconciliation status', () => {
             viewCleanupAdvanced: false,
             repositoryCount: rows.length,
             state: 'observed',
-            unavailableRepositories: rows.filter(row => !row.available).length,
+            unavailableRepositories: EffectArray.filter(rows, row => !row.available).length,
             viewsTruncated,
           });
           expect(inputObservation).toEqual(before);
@@ -222,17 +232,17 @@ function target(input: {
             caseMode: 'sensitive',
             displayName: 'synthetic/repository',
             gitCommonDirectory: '/private/repository/.git',
-            headCommit: 'd'.repeat(40),
+            headCommit: Effect.pipe('d', EffectString.repeat(40)),
             objectFormat: 'sha1',
             repoRoot: '/private/repository',
-            checkoutId: 'a'.repeat(64),
-            repositoryId: 'b'.repeat(64),
-            worktreeId: 'c'.repeat(64),
+            checkoutId: Effect.pipe('a', EffectString.repeat(64)),
+            repositoryId: Effect.pipe('b', EffectString.repeat(64)),
+            worktreeId: Effect.pipe('c', EffectString.repeat(64)),
           },
         }
       : {}),
     ...(input.anchorPath ? {anchorPath: '/private/repository/path'} : {}),
-    checkoutId: 'a'.repeat(64),
+    checkoutId: Effect.pipe('a', EffectString.repeat(64)),
     databasePath: '/private/graph/database.sqlite',
     reconciliationPending: input.pending,
   };

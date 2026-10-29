@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from './system-layer.js';
 import {provideTestLayer} from './effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -12,6 +13,8 @@ import {
   isCodeGraphStoreError,
 } from '@threadnote/graph/types';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const EXTRACTOR_SET = 'cache-os-extractor-v1';
 const DERIVATION_IDENTITY = 'cache-os-derivation-v1';
@@ -33,7 +36,8 @@ const [
   committedMarkerPath = '-',
 ] = process.argv.slice(2);
 
-const validPath = (value: string | undefined) => value !== undefined && value.length > 0 && !value.includes('\0');
+const validPath = (value: string | undefined) =>
+  value !== undefined && value.length > 0 && !Effect2.pipe(value, EffectString.includes('\0'));
 if (
   (mode !== 'facts' && mode !== 'shards') ||
   (action !== 'concurrent' && action !== 'crash' && action !== 'retry') ||
@@ -45,7 +49,8 @@ if (
   !/^[0-9a-f]{64}$/u.test(filesystemKey ?? '') ||
   !/^[0-9]+$/u.test(childIdText ?? '') ||
   (action === 'concurrent' &&
-    (![readyRoot, startReleasePath, receiptReadyRoot, transactionReleasePath].every(
+    (!EffectArray.every(
+      [readyRoot, startReleasePath, receiptReadyRoot, transactionReleasePath],
       value => value !== '-' && validPath(value),
     ) ||
       committedMarkerPath !== '-')) ||
@@ -147,10 +152,10 @@ Effect.runPromise(program).catch(cause => {
 });
 
 function cacheFile(index: number): CodeGraphInventoryFile {
-  const suffix = index.toString().padStart(6, '0');
+  const suffix = Effect2.pipe(index.toString(), EffectString.padStart(6, '0'));
   return {
-    blobId: (index + 1).toString(16).padStart(40, '0'),
-    contentHash: (index + 1).toString(16).padStart(64, '0'),
+    blobId: Effect2.pipe((index + 1).toString(16), EffectString.padStart(40, '0')),
+    contentHash: Effect2.pipe((index + 1).toString(16), EffectString.padStart(64, '0')),
     language: 'typescript',
     mode: '100644',
     path: `src/os-child/file-${suffix}.ts`,

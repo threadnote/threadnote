@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {composeWorkflowSetup, maintainPersonalWorkflows} from '../setup/workflows.js';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {
@@ -26,6 +27,9 @@ import {
   composerShareId,
   type ComposerHttpMcpEntry,
 } from '../mcp/composer_attach.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const ORG_CLOUD_POLICY = {
   ...ORG_COMPOSER_POLICY,
@@ -51,13 +55,13 @@ export const MAX_CURSOR_CLOUD_TEAMS = 16;
 
 export type CursorCloudMode = 'org' | 'personal' | 'remote-hybrid';
 
-export class CursorCloudOperationError extends Schema.TaggedError<CursorCloudOperationError>()(
-  'CursorCloudOperationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CursorCloudOperationError extends Schema.TaggedError<
+  CursorCloudOperationError,
+  {readonly brand: unique symbol}
+>()('CursorCloudOperationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export interface CursorCloudProfileV1 {
   readonly account: string;
@@ -205,7 +209,7 @@ export function cursorCloudMemoryRoot(user: string, team: string): string {
 
 export function normalizeCursorCloudTeams(teams: string | readonly string[] | undefined): readonly string[] {
   const values = teams === undefined ? [] : typeof teams === 'string' ? [teams] : teams;
-  const normalized = [...new Set(values.map(team => normalizeTeamName(team)))].sort();
+  const normalized = [...new Set(EffectArray.map(values, team => normalizeTeamName(team)))].sort();
   const selected = normalized.length === 0 ? [DEFAULT_CURSOR_CLOUD_IDENTITY] : normalized;
   if (selected.length > MAX_CURSOR_CLOUD_TEAMS) {
     throw CursorCloudOperationError.make({
@@ -216,11 +220,11 @@ export function normalizeCursorCloudTeams(teams: string | readonly string[] | un
 }
 
 export function cursorCloudScopeRoots(scope: CursorCloudMemoryScope): readonly string[] {
-  return [...scope.shares.map(share => share.root), ...(scope.localReadRoots ?? [])];
+  return [...EffectArray.map(scope.shares, share => share.root), ...(scope.localReadRoots ?? [])];
 }
 
 export function cursorCloudScopeTeams(scope: CursorCloudMemoryScope): readonly string[] {
-  return scope.shares.map(share => share.team);
+  return EffectArray.map(scope.shares, share => share.team);
 }
 
 export function cursorCloudShareForTeam(
@@ -229,24 +233,29 @@ export function cursorCloudShareForTeam(
 ): CursorCloudShareScope | undefined {
   if (team === undefined) return scope.shares.length === 1 ? scope.shares[0] : undefined;
   const normalized = normalizeTeamName(team);
-  return scope.shares.find(share => share.team === normalized);
+  return EffectOption.getOrUndefined(EffectArray.findFirst(scope.shares, share => share.team === normalized));
 }
 
 export function cursorCloudShareForUri(scope: CursorCloudMemoryScope, uri: string): CursorCloudShareScope | undefined {
-  return scope.shares.find(share => resourceIdIsWithin(uri, share.root));
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      scope.shares,
+      __effectArrayValue => !!(share => resourceIdIsWithin(uri, share.root))(__effectArrayValue),
+    ),
+  );
 }
 
 export function cursorCloudUriWithinScope(scope: CursorCloudMemoryScope, uri: string): boolean {
-  return cursorCloudScopeRoots(scope).some(root => resourceIdIsWithin(uri, root));
+  return EffectArray.some(cursorCloudScopeRoots(scope), root => resourceIdIsWithin(uri, root));
 }
 
 export function cursorCloudMemoryScopeReceipt(scope: CursorCloudMemoryScope) {
-  const shares = scope.shares.map(share => ({root: share.root, team: share.team}));
+  const shares = EffectArray.map(scope.shares, share => ({root: share.root, team: share.team}));
   return {
-    memoryRoots: shares.map(share => share.root),
+    memoryRoots: EffectArray.map(shares, share => share.root),
     mode: scope.mode,
     shares,
-    teams: shares.map(share => share.team),
+    teams: EffectArray.map(shares, share => share.team),
     type: 'threadnote-memory-scope',
     version: 2,
   } as const;
@@ -357,7 +366,7 @@ function buildCursorCloudLocalGraphMcpConfig(
 }
 
 export function cursorCloudRemoteShareId(shareId: string): string {
-  const normalized = shareId.trim();
+  const normalized = Effect2.pipe(shareId, EffectString.trim);
   if (!CURSOR_CLOUD_SHARE_ID_PATTERN.test(normalized)) {
     throw CursorCloudOperationError.make({
       message:
@@ -368,9 +377,14 @@ export function cursorCloudRemoteShareId(shareId: string): string {
 }
 
 export function cursorCloudMemoryEndpoint(endpoint: string): string {
-  const normalized = endpoint.trim();
-  const hasUnsafeCharacter = [...normalized].some(character => {
-    const codePoint = character.codePointAt(0) ?? 0;
+  const normalized = Effect2.pipe(endpoint, EffectString.trim);
+  const hasUnsafeCharacter = EffectArray.some([...normalized], character => {
+    const codePoint =
+      Effect2.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect2.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return /\s/u.test(character) || codePoint <= 0x1f || codePoint === 0x7f;
   });
   if (!normalized || hasUnsafeCharacter) {
@@ -421,9 +435,14 @@ export function cursorCloudRuntimeConfig(
 }
 
 export function credentialFreeGitRemote(remote: string, provider = 'Cursor Cloud'): string {
-  const normalized = remote.trim();
-  const hasForbiddenCharacter = [...normalized].some(character => {
-    const codePoint = character.codePointAt(0) ?? 0;
+  const normalized = Effect2.pipe(remote, EffectString.trim);
+  const hasForbiddenCharacter = EffectArray.some([...normalized], character => {
+    const codePoint =
+      Effect2.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect2.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return /\s/u.test(character) || codePoint <= 0x1f || codePoint === 0x7f;
   });
   if (!normalized || hasForbiddenCharacter) {
@@ -482,16 +501,20 @@ export const resolveCursorCloudMemoryScope = Effect.fn('cursorCloud.resolveMemor
   }
   return {
     mode: 'shared-read-write',
-    shares: teams.map(team => ({root: cursorCloudMemoryRoot(config.user, team), team})),
+    shares: EffectArray.map(teams, team => ({root: cursorCloudMemoryRoot(config.user, team), team})),
   } satisfies CursorCloudMemoryScope;
 });
 
 export function registeredCursorCloudTeams(teamsFile: ShareTeamsFile): readonly string[] {
   return [
     ...new Set(
-      Object.entries(teamsFile.teams)
-        .filter(([, team]) => shareTeamAccess(team) === 'read-write')
-        .map(([name]) => normalizeTeamName(name)),
+      EffectArray.map(
+        EffectArray.filter(
+          EffectRecord.toEntries(teamsFile.teams),
+          ([, team]) => shareTeamAccess(team) === 'read-write',
+        ),
+        ([name]) => normalizeTeamName(name),
+      ),
     ),
   ].sort();
 }
@@ -639,7 +662,10 @@ export const runCursorCloudStart = Effect.fn('cursorCloud.start')(function* (
   });
   if (workflows.state === 'pending' || workflows.state === 'setup-needed')
     yield* Console.error(
-      `Development workflows: ${workflows.state}. ${workflows.issues.map(issue => issue.message).join(' ')}`,
+      `Development workflows: ${workflows.state}. ${EffectArray.join(
+        EffectArray.map(workflows.issues, issue => issue.message),
+        ' ',
+      )}`,
     );
   const restored = yield* captureConsoleWithoutProgress(installCursorCloudAgentIntegration(config, false));
   if (restored.output) yield* Console.error(restored.output);
@@ -723,11 +749,11 @@ export const runCursorCloudVerify = Effect.fn('cursorCloud.verify')(function* (
   const receipt: CursorCloudVerifyReceiptV2 = {
     checks,
     memoryRoot: firstShare.root,
-    memoryRoots: shares.map(share => share.root),
+    memoryRoots: EffectArray.map(shares, share => share.root),
     profile: 'shared-read-write',
     provider: 'cursor-cloud',
     shares,
-    status: checks.some(check => check.status === 'fail') ? 'fail' : 'ok',
+    status: EffectArray.some(checks, check => check.status === 'fail') ? 'fail' : 'ok',
     team: firstShare.team,
     teams,
     version: 2,
@@ -754,16 +780,25 @@ export const cursorCloudRemoteHybridStatus = Effect.fn('cursorCloud.remoteHybrid
   const system = yield* SystemInfo;
   const graph = yield* CodeGraphQueryService;
   const environment = system.environment();
-  const org = options.mode === 'org' || environment[CURSOR_CLOUD_MODE_ENV]?.trim() === 'org';
+  const org =
+    options.mode === 'org' ||
+    Effect2.pipe(environment[CURSOR_CLOUD_MODE_ENV], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) === 'org';
   const endpoint = org ? composerMcpUrl(options.endpoint) : cursorCloudMemoryEndpoint(options.endpoint);
-  const environmentShareId = environment[CURSOR_CLOUD_MEMORY_SHARE_ID_ENV]?.trim();
+  const environmentShareId = Effect2.pipe(environment[CURSOR_CLOUD_MEMORY_SHARE_ID_ENV], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   const shareId = requiredRemoteShareId(options.shareId ?? environmentShareId);
   const shareBindingMatches =
     environmentShareId === undefined || safeCursorCloudRemoteShareId(environmentShareId) === shareId;
   const cwdIsAbsolute = path.isAbsolute(options.cwd);
   const cwdExists = cwdIsAbsolute && (yield* fs.exists(options.cwd));
   const homeExists = yield* fs.exists(config.agentContextHome);
-  const socket = environment.CURSOR_AGENT_SOCKET?.trim() || '/run/cursor/api.sock';
+  const socket =
+    Effect2.pipe(environment.CURSOR_AGENT_SOCKET, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || '/run/cursor/api.sock';
   const socketPresent = path.isAbsolute(socket) && (yield* fs.exists(socket));
   const checks: CursorCloudVerifyCheck[] = [
     {
@@ -850,7 +885,7 @@ export const cursorCloudRemoteHybridStatus = Effect.fn('cursorCloud.remoteHybrid
       status: 'ok',
     },
   );
-  const status = checks.some(check => check.status === 'fail') ? ('fail' as const) : ('ok' as const);
+  const status = EffectArray.some(checks, check => check.status === 'fail') ? ('fail' as const) : ('ok' as const);
   if (org) {
     return {
       ...ORG_CLOUD_POLICY,
@@ -926,12 +961,15 @@ const printCursorCloudVerifyReceipt = Effect.fn('cursorCloud.printVerifyReceipt'
   yield* Console.log('Cursor Cloud verification');
   for (const check of receipt.checks) {
     const plane = check.plane ? ` [${check.plane}]` : '';
-    yield* Console.log(`${check.status.toUpperCase()}${plane} ${check.name}: ${check.detail}`);
+    yield* Console.log(
+      `${Effect2.pipe(check.status, EffectString.toUpperCase)}${plane} ${check.name}: ${check.detail}`,
+    );
   }
   yield* Console.log(`Status: ${receipt.status}`);
 });
 
 function requiredHybridEndpoint(endpoint: string | undefined, mode: 'org' | 'remote-hybrid'): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining narrows `endpoint` for the return below.
   if (!endpoint?.trim()) {
     throw CursorCloudOperationError.make({
       message:
@@ -944,6 +982,7 @@ function requiredHybridEndpoint(endpoint: string | undefined, mode: 'org' | 'rem
 }
 
 function requiredRemoteShareId(shareId: string | undefined): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining narrows `shareId` for the call below.
   if (!shareId?.trim()) {
     throw CursorCloudOperationError.make({message: 'Cursor Cloud remote-hybrid mode requires --share-id.'});
   }
@@ -959,6 +998,7 @@ function safeCursorCloudRemoteShareId(shareId: string): string | undefined {
 }
 
 function requiredRemoteCheckout(cwd: string | undefined): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining narrows `cwd` for the return below.
   if (!cwd?.trim()) {
     throw CursorCloudOperationError.make({message: 'Cursor Cloud remote-hybrid bootstrap requires --cwd.'});
   }
@@ -966,8 +1006,8 @@ function requiredRemoteCheckout(cwd: string | undefined): string {
 }
 
 function requiredIdentity(value: string, label: string): string {
-  const normalized = uriSegment(value.trim());
-  if (!value.trim() || normalized === 'unknown') {
+  const normalized = uriSegment(Effect2.pipe(value, EffectString.trim));
+  if (!Effect2.pipe(value, EffectString.trim) || normalized === 'unknown') {
     throw CursorCloudOperationError.make({message: `Cursor Cloud ${label} must contain a portable identifier.`});
   }
   return normalized;
@@ -981,7 +1021,7 @@ function cursorCloudDefaultIdentity(
 }
 
 function assertEquivalentWritableTeam(existing: ShareTeamConfig, remote: string, team: string, provider: string): void {
-  if (existing.remote.trim() !== remote) {
+  if (Effect2.pipe(existing.remote, EffectString.trim) !== remote) {
     throw CursorCloudOperationError.make({
       message: `${provider} memory team "${team}" already uses a different remote. Review it with threadnote share status before changing configuration.`,
     });
@@ -1029,11 +1069,19 @@ export const configuredTeamChecks = Effect.fn('cursorCloud.configuredTeamChecks'
   ] satisfies readonly CursorCloudVerifyCheck[];
 });
 
+function isNonEmptyCursorCloudTeam(value: unknown): value is string {
+  return typeof value === 'string' && Boolean(Effect2.pipe(value, EffectString.trim));
+}
+
 function cursorCloudTeamsFromEnvironment(
   environment: Readonly<Record<string, string | undefined>>,
 ): readonly string[] | undefined {
-  const rawTeams = environment[CURSOR_CLOUD_TEAMS_ENV]?.trim();
-  const rawTeam = environment[CURSOR_CLOUD_TEAM_ENV]?.trim();
+  const rawTeams = Effect2.pipe(environment[CURSOR_CLOUD_TEAMS_ENV], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
+  const rawTeam = Effect2.pipe(environment[CURSOR_CLOUD_TEAM_ENV], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (!rawTeams && !rawTeam) {
     return undefined;
   }
@@ -1045,9 +1093,9 @@ function cursorCloudTeamsFromEnvironment(
       throw CursorCloudOperationError.make({message: `${CURSOR_CLOUD_TEAMS_ENV} must be a JSON array of share names.`});
     }
     if (
-      !Array.isArray(decoded) ||
+      !EffectArray.isArray(decoded) ||
       decoded.length === 0 ||
-      decoded.some(team => typeof team !== 'string' || !team.trim())
+      !EffectArray.every(decoded, isNonEmptyCursorCloudTeam)
     ) {
       throw CursorCloudOperationError.make({
         message: `${CURSOR_CLOUD_TEAMS_ENV} must be a non-empty JSON array of share names.`,
@@ -1056,7 +1104,7 @@ function cursorCloudTeamsFromEnvironment(
   } else {
     return normalizeCursorCloudTeams(rawTeam);
   }
-  const teams = normalizeCursorCloudTeams(decoded as readonly string[] | undefined);
+  const teams = normalizeCursorCloudTeams(decoded);
   if (rawTeam && !teams.includes(normalizeTeamName(rawTeam))) {
     throw CursorCloudOperationError.make({
       message: `${CURSOR_CLOUD_TEAM_ENV} must name one of the shares in ${CURSOR_CLOUD_TEAMS_ENV}.`,

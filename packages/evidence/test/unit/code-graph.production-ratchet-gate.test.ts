@@ -1,5 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {parseCodeGraphProductionRatchetGateArguments} from '../../../../tools/ci/code-graph-production-ratchet-gate.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph production ratchet gate', () => {
   it('requires an explicit paired control contract', () => {
@@ -12,17 +14,17 @@ describe('code graph production ratchet gate', () => {
         '--control',
         'control.json',
         '--expected-candidate-commit',
-        'b'.repeat(40),
+        Effect.pipe('b', EffectString.repeat(40)),
         '--expected-control-commit',
-        'a'.repeat(40),
+        Effect.pipe('a', EffectString.repeat(40)),
         '--initial-candidate',
         'initial-candidate.json',
       ]),
     ).toEqual({
       artifactPath: 'candidate.json',
       controlPath: 'control.json',
-      expectedCandidateCommit: 'b'.repeat(40),
-      expectedControlCommit: 'a'.repeat(40),
+      expectedCandidateCommit: Effect.pipe('b', EffectString.repeat(40)),
+      expectedControlCommit: Effect.pipe('a', EffectString.repeat(40)),
       initialCandidatePath: 'initial-candidate.json',
       ratchetPath: 'ratchet.json',
     });
@@ -45,9 +47,9 @@ describe('code graph production ratchet gate', () => {
         '--control',
         'control.json',
         '--expected-candidate-commit',
-        'b'.repeat(40),
+        Effect.pipe('b', EffectString.repeat(40)),
         '--expected-control-commit',
-        'a'.repeat(40),
+        Effect.pipe('a', EffectString.repeat(40)),
       ]),
     ).toThrow(/must be provided together/u);
     expect(() =>
@@ -59,7 +61,7 @@ describe('code graph production ratchet gate', () => {
         '--control',
         'control.json',
         '--expected-candidate-commit',
-        'b'.repeat(40),
+        Effect.pipe('b', EffectString.repeat(40)),
       ]),
     ).toThrow(/must be provided together/u);
     expect(() =>

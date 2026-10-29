@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema, Stdio, Stream} from 'effect';
 import {CommandExecutor, type CommandExecutionError} from '@threadnote/platform/command';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -25,14 +26,16 @@ import {
   type CodeGraphActiveStorage,
   type CodeGraphCompactionSummary,
 } from '../storage.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class CodeGraphAutomaticCompactionError extends Schema.TaggedError<CodeGraphAutomaticCompactionError>()(
-  'CodeGraphAutomaticCompactionError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphAutomaticCompactionError extends Schema.TaggedError<
+  CodeGraphAutomaticCompactionError,
+  {readonly brand: unique symbol}
+>()('CodeGraphAutomaticCompactionError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export const CODE_GRAPH_AUTOMATIC_COMPACTION_INITIAL_DELAY_MILLISECONDS = 15_000;
 export const CODE_GRAPH_AUTOMATIC_COMPACTION_INTERVAL_MILLISECONDS = 60_000;
@@ -209,9 +212,10 @@ export const runCodeGraphAutomaticCompactionPassWith = Effect.fn('codeGraph.auto
   threadnoteHome: string,
   options: {readonly offset?: number} = {},
 ) {
-  const allCheckoutIds = [...new Set(yield* dependencies.listCheckoutIds(threadnoteHome))]
-    .filter(checkoutId => /^[0-9a-f]{64}$/u.test(checkoutId))
-    .sort(compareCodeUnits);
+  const allCheckoutIds = EffectArray.filter(
+    [...new Set(yield* dependencies.listCheckoutIds(threadnoteHome))],
+    checkoutId => /^[0-9a-f]{64}$/u.test(checkoutId),
+  ).sort(compareCodeUnits);
   const offset =
     allCheckoutIds.length === 0 || !Number.isSafeInteger(options.offset) || (options.offset ?? 0) < 0
       ? 0
@@ -226,9 +230,9 @@ export const runCodeGraphAutomaticCompactionPassWith = Effect.fn('codeGraph.auto
       ),
     {concurrency: 2},
   );
-  const inspectionFailures = observations.filter(observation => observation === undefined).length;
+  const inspectionFailures = EffectArray.filter(observations, observation => observation === undefined).length;
   const rankedCandidates = [
-    ...observations.flatMap(observation => {
+    ...EffectArray.flatMap(observations, observation => {
       if (observation === undefined || observation.storage.state !== 'available') {
         return [];
       }
@@ -568,7 +572,11 @@ export const listCodeGraphAutomaticCompactionCheckoutIds = Effect.fn('codeGraph.
       });
     }
     const checkoutIds: string[] = [];
-    for (const checkoutId of page.names.filter(name => /^[0-9a-f]{64}$/u.test(name)).sort(compareCodeUnits)) {
+    const pageNames = page.names;
+    for (const checkoutId of EffectArray.filter(
+      pageNames,
+      (name, __effectArrayIndex) => __effectArrayIndex in pageNames && /^[0-9a-f]{64}$/u.test(name),
+    ).sort(compareCodeUnits)) {
       const repositoryRoot = path.join(repositories, checkoutId);
       if (Option.isSome(yield* fs.readLink(repositoryRoot).pipe(Effect.option))) continue;
       const repositoryInfo = yield* fs.stat(repositoryRoot).pipe(Effect.option);
@@ -650,7 +658,7 @@ function readBoundedAutomaticCompactionWorkerInput(stdio: Stdio.Stdio): Effect.E
         return Effect.succeed({chunks: state.chunks, size});
       },
     ),
-    Effect.map(state => state.chunks.join('')),
+    Effect.map(state => EffectArray.join(state.chunks, '')),
   );
 }
 
@@ -659,7 +667,7 @@ export function decodeAutomaticCompactionWorkerRequest(
   content: string,
 ): CodeGraphAutomaticCompactionWorkerRequest | undefined {
   try {
-    const parsed: unknown = JSON.parse(content.trim());
+    const parsed: unknown = JSON.parse(Effect2.pipe(content, EffectString.trim));
     if (!Predicate.isObject(parsed)) return undefined;
     const record = parsed;
     if (
@@ -667,7 +675,7 @@ export function decodeAutomaticCompactionWorkerRequest(
       typeof record.threadnoteHome !== 'string' ||
       record.threadnoteHome.length === 0 ||
       record.threadnoteHome.length > 8_192 ||
-      record.threadnoteHome.includes('\0') ||
+      Effect2.pipe(record.threadnoteHome, EffectString.includes('\0')) ||
       !automaticCompactionAbsolutePath(record.threadnoteHome) ||
       typeof record.checkoutId !== 'string' ||
       !/^[0-9a-f]{64}$/u.test(record.checkoutId) ||
@@ -694,7 +702,7 @@ export function decodeAutomaticCompactionWorkerResponse(
   expectedCheckoutId?: string,
 ): CodeGraphAutomaticCompactionWorkerResponse | undefined {
   try {
-    const parsed: unknown = JSON.parse(content.trim());
+    const parsed: unknown = JSON.parse(Effect2.pipe(content, EffectString.trim));
     if (!Predicate.isObject(parsed)) return undefined;
     const record = parsed;
     if (record.protocol !== CODE_GRAPH_AUTOMATIC_COMPACTION_PROTOCOL || typeof record.ok !== 'boolean') {
@@ -732,7 +740,11 @@ export function decodeAutomaticCompactionWorkerResponse(
 }
 
 function automaticCompactionAbsolutePath(value: string): boolean {
-  return value.startsWith('/') || value.startsWith('\\\\') || /^[A-Za-z]:[/\\]/u.test(value);
+  return (
+    Effect2.pipe(value, EffectString.startsWith('/')) ||
+    Effect2.pipe(value, EffectString.startsWith('\\\\')) ||
+    /^[A-Za-z]:[/\\]/u.test(value)
+  );
 }
 
 function isAutomaticCompactionAction(value: unknown): value is CodeGraphAutomaticCompactionResult['action'] {
@@ -764,7 +776,11 @@ export function codeGraphAutomaticCompactionWorkerInvocation(
   readonly arguments: readonly string[];
   readonly executable: string;
 } {
-  const executableName = system.executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  const executableName = Effect2.pipe(
+    Effect2.pipe(system.executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   if (executableName !== 'bun' && executableName !== 'bun.exe') {
     return {arguments: [CODE_GRAPH_COMPACTION_WORKER_ARGUMENT], executable: system.executablePath};
   }

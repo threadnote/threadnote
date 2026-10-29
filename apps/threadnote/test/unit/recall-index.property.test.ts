@@ -1,5 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {Effect} from 'effect';
@@ -12,6 +13,8 @@ import {
 } from '@threadnote/recall/index';
 import {join, mkdir, mkdtemp, rm, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface CorpusPut {
   readonly id: number;
@@ -119,19 +122,17 @@ function assertCorpusMatchesModel(
   model: ReadonlyMap<number, number>,
 ): void {
   expect(projectCandidates(candidates)).toEqual(
-    [...model]
-      .map(([id, variant]) => ({
-        text: expect.stringContaining(termFor(variant)),
-        uri: uriFor(id),
-      }))
-      .sort((left, right) => left.uri.localeCompare(right.uri)),
+    EffectArray.map([...model], ([id, variant]) => ({
+      text: expect.stringContaining(termFor(variant)),
+      uri: uriFor(id),
+    })).sort((left, right) => Effect2.pipe(left.uri, EffectString.localeCompare(right.uri))),
   );
 }
 
 function projectCandidates(candidates: readonly {readonly text: string; readonly uri: string}[]) {
-  return candidates
-    .map(candidate => ({text: candidate.text, uri: candidate.uri}))
-    .sort((left, right) => left.uri.localeCompare(right.uri));
+  return EffectArray.map(candidates, candidate => ({text: candidate.text, uri: candidate.uri})).sort((left, right) =>
+    Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)),
+  );
 }
 
 async function assertIndexInternalsMatchModel(home: string, model: ReadonlyMap<number, number>): Promise<void> {
@@ -146,11 +147,18 @@ async function assertIndexInternalsMatchModel(home: string, model: ReadonlyMap<n
 
   const database = new Database(join(home, 'indexes', 'lexical', recallIndexDatabaseFilename(false)), {readonly: true});
   try {
-    const documents = database.query('SELECT uri, candidate_json FROM documents ORDER BY uri').all() as readonly {
-      readonly candidate_json: string;
-      readonly uri: string;
-    }[];
-    expect(documents.map(document => document.uri)).toEqual([...model.keys()].map(uriFor).sort());
+    const documents = database
+      .query<
+        {
+          readonly candidate_json: string;
+          readonly uri: string;
+        },
+        SQLQueryBindings[]
+      >('SELECT uri, candidate_json FROM documents ORDER BY uri')
+      .all();
+    expect(EffectArray.map(documents, document => document.uri)).toEqual(
+      EffectArray.map([...model.keys()], uriFor).sort(),
+    );
     for (const document of documents) {
       expect(JSON.parse(document.candidate_json)).toMatchObject({uri: document.uri});
     }
@@ -174,9 +182,9 @@ async function assertExactMatchesMatchModel(
   model: ReadonlyMap<number, number>,
 ): Promise<void> {
   expect(await exactMatches(config, model)).toEqual(
-    [...model]
-      .map(([id, variant]) => ({terms: [termFor(variant)], uri: uriFor(id)}))
-      .sort((left, right) => left.uri.localeCompare(right.uri)),
+    EffectArray.map([...model], ([id, variant]) => ({terms: [termFor(variant)], uri: uriFor(id)})).sort((left, right) =>
+      Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)),
+    ),
   );
 }
 
@@ -184,7 +192,10 @@ async function exactMatches(
   config: {readonly account: string; readonly agentContextHome: string; readonly user: string},
   model: ReadonlyMap<number, number>,
 ) {
-  const terms = [...new Set(model.values())].sort((left, right) => left - right).map(termFor);
+  const terms = EffectArray.map(
+    [...new Set(model.values())].sort((left, right) => left - right),
+    termFor,
+  );
   const matches = await runEffect(
     loadRecallExactMatches(config, {
       forceRefresh: true,
@@ -194,9 +205,9 @@ async function exactMatches(
       uriScopes: ['threadnote://resources/repos/property'],
     }),
   );
-  return matches
-    .map(match => ({terms: [...match.terms].sort(), uri: match.uri}))
-    .sort((left, right) => left.uri.localeCompare(right.uri));
+  return EffectArray.map(matches, match => ({terms: [...match.terms].sort(), uri: match.uri})).sort((left, right) =>
+    Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)),
+  );
 }
 
 function documentText(id: number, variant: number): string {

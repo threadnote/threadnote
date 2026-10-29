@@ -6,9 +6,12 @@ import {expandPath} from '@threadnote/platform/paths';
 import {buildPilotReport, serializePilotReport} from '../pilot.js';
 import {exportPilotReport, managePilotReports} from './storage.js';
 
-export class PilotCommandError extends Schema.TaggedError<PilotCommandError>()('PilotCommandError', {
-  message: Schema.String,
-}) {}
+export class PilotCommandError extends Schema.TaggedError<PilotCommandError, {readonly brand: unique symbol}>()(
+  'PilotCommandError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export interface PilotCommandOptions {
   readonly action: 'report' | 'export' | 'retention' | 'reset';
@@ -39,7 +42,7 @@ export const runPilotCommand = Effect.fn('valueReport.pilot.command')(function* 
     if (options.input === undefined || (options.action === 'report' && options.apply === true)) {
       return yield* PilotCommandError.make({message: 'Report requires input and does not accept apply.'});
     }
-    const raw = yield* readOperatorJson<unknown>(options.input);
+    const raw = yield* readOperatorJson(options.input);
     const report = yield* Effect.try(() => buildPilotReport(raw));
     if (options.action === 'export' && options.apply === true) {
       const receipt = yield* exportPilotReport(config.agentContextHome, report, true);

@@ -1,5 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Array as A, Effect} from 'effect';
+import {Effect, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {CommandExecutor, CommandFailed} from '@threadnote/platform/command';
@@ -21,6 +22,10 @@ import {
 import {devSkillsReleaseFixture, devSkillsTestLayer, fixture} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
+const ActiveReleaseSchema = Schema.Struct({version: Schema.String});
+const activeReleaseVersion = (serialized: string) =>
+  Schema.decodeUnknownEffect(ActiveReleaseSchema)(JSON.parse(serialized)).pipe(Effect.map(release => release.version));
+
 /** In-process command boundary, with real capability/intent/ownership files and child lock acquisition. */
 const commands = Effect.fn('test.update.commands')(function* (f: Effect.Success<ReturnType<typeof fixture>>) {
   const context = yield* Effect.context<Effect.Services<ReturnType<typeof runDevSkillsRefresh>>>();
@@ -30,8 +35,7 @@ const commands = Effect.fn('test.update.commands')(function* (f: Effect.Success<
       Effect.gen(function* () {
         calls.push({executable, args, env: options?.env});
         const root = f.path.dirname(executable);
-        const version = (JSON.parse(yield* f.fs.readFileString(f.path.join(root, 'release.json'))) as {version: string})
-          .version;
+        const version = yield* activeReleaseVersion(yield* f.fs.readFileString(f.path.join(root, 'release.json')));
         expect(args.slice(0, 3)).toEqual(['--home', f.config.agentContextHome, 'dev-skills']);
         expect(args[args.indexOf('--protocol-version') + 1]).toBe('1');
         const candidate =
@@ -97,8 +101,7 @@ effectIt.effect(
         )
         .pipe(Effect.provideService(CommandExecutor, boundary.executor));
       expect(
-        (JSON.parse(yield* f.fs.readFileString(f.path.join(f.runtime, 'active-release.json'))) as {version: string})
-          .version,
+        yield* activeReleaseVersion(yield* f.fs.readFileString(f.path.join(f.runtime, 'active-release.json'))),
       ).toBe(old.releaseVersion);
       expect((yield* f.run(readDevSkillsRefresh(f.config)))?.repairRequired).toBe(true);
       yield* f.fs.rename(next.bundleRoot, next.releaseRoot);
@@ -108,7 +111,7 @@ effectIt.effect(
         .pipe(Effect.provideService(CommandExecutor, boundary.executor));
       expect(result.repairRequired).toBe(false);
       expect(result).toMatchObject({current: 1, skipped: 0, pending: 0});
-      expect(boundary.calls.map(call => call.executable)).toEqual([
+      expect(EffectArray.map(boundary.calls, call => call.executable)).toEqual([
         f.path.join(next.bundleRoot, f.system.platform === 'win32' ? 'threadnote.exe' : 'threadnote'),
         f.path.join(next.bundleRoot, f.system.platform === 'win32' ? 'threadnote.exe' : 'threadnote'),
         f.path.join(next.releaseRoot, f.system.platform === 'win32' ? 'threadnote.exe' : 'threadnote'),
@@ -149,10 +152,9 @@ effectIt.effect('rejects candidate incompatibility before preparing an activatio
       .pipe(Effect.provideService(CommandExecutor, boundary.executor), Effect.result);
     expect(result._tag).toBe('Failure');
     expect(yield* f.run(readDevSkillsRefresh(f.config))).toBeUndefined();
-    expect(
-      (JSON.parse(yield* f.fs.readFileString(f.path.join(f.runtime, 'active-release.json'))) as {version: string})
-        .version,
-    ).toBe(old.releaseVersion);
+    expect(yield* activeReleaseVersion(yield* f.fs.readFileString(f.path.join(f.runtime, 'active-release.json')))).toBe(
+      old.releaseVersion,
+    );
     expect(yield* f.fs.exists(f.path.join(f.runtime, 'versions', '5.3.0-beta.3'))).toBe(false);
   }).pipe(provideTestLayer(devSkillsTestLayer), TestClock.withLive),
 );
@@ -194,13 +196,13 @@ effectIt.effect(
         .run(refreshReleaseDevSkills(f.config, prepared).pipe(Effect.provideService(SystemInfo, parent)))
         .pipe(Effect.provideService(CommandExecutor, boundary.executor));
       expect(result).toMatchObject({repairRequired: false, current: 0, skipped: 0, pending: 0});
-      expect(A.map(boundary.calls, call => call.args[3])).toEqual([
+      expect(EffectArray.map(boundary.calls, call => call.args[3])).toEqual([
         'prepare-update',
         'update-status',
         'refresh-update',
         'update-status',
       ]);
-      expect(A.map(boundary.calls, call => call.env?.THREADNOTE_INSTALL_ROOT)).toEqual([
+      expect(EffectArray.map(boundary.calls, call => call.env?.THREADNOTE_INSTALL_ROOT)).toEqual([
         f.runtime,
         f.runtime,
         f.runtime,

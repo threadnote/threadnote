@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {expect, it} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {describe} from 'vitest';
@@ -11,6 +12,8 @@ import {runSharePublishTool} from '@threadnote/threadnote/mcp/server/share';
 import {runForget} from '@threadnote/threadnote/memory/commands';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('MCP share-publish citation policy', () => {
   it.effect('rechecks the exact source inside the publish lock after an initially clean read', () =>
@@ -80,7 +83,10 @@ describe('MCP share-publish citation policy', () => {
         const result = yield* runSharePublishTool(config, sourceUri, {push: false}).pipe(
           Effect.provideService(ResourceStore, initialReadStore),
         );
-        const text = result.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const text = EffectArray.join(
+          EffectArray.map(result.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
 
         expect(result.isError).toBe(true);
         expect(sourceReads).toBe(2);
@@ -88,7 +94,7 @@ describe('MCP share-publish citation policy', () => {
         expect(yield* fs.readFileString(sourcePath)).toBe(swapped);
         expect(yield* fs.exists(path.join(worktree, 'durable', 'projects', 'threadnote', 'policy.md'))).toBe(false);
 
-        const changedKind = clean.replace('kind: durable', 'kind: handoff');
+        const changedKind = Effect2.pipe(clean, EffectString.replace('kind: durable', 'kind: handoff'));
         yield* fs.writeFileString(sourcePath, changedKind);
         let kindReads = 0;
         const kindSwapStore = ResourceStore.of({
@@ -101,7 +107,10 @@ describe('MCP share-publish citation policy', () => {
         const kindResult = yield* runSharePublishTool(config, sourceUri, {push: false}).pipe(
           Effect.provideService(ResourceStore, kindSwapStore),
         );
-        const kindText = kindResult.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const kindText = EffectArray.join(
+          EffectArray.map(kindResult.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
         expect(kindResult.isError).toBe(true);
         expect(kindReads).toBe(2);
         expect(kindText).toContain('only active personal durable memories');
@@ -176,12 +185,18 @@ describe('MCP share-publish citation policy', () => {
         );
         yield* fs.writeFileString(
           sourcePath,
-          ['MEMORY', 'kind: durable', 'status: active', 'project: threadnote', 'topic: pending', '', 'Body'].join('\n'),
+          EffectArray.join(
+            ['MEMORY', 'kind: durable', 'status: active', 'project: threadnote', 'topic: pending', '', 'Body'],
+            '\n',
+          ),
         );
         yield* fs.writeFileString(pendingPath, '{}\n');
 
         const refused = yield* runSharePublishTool(config, sourceUri, {preview: true});
-        const refusedText = refused.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const refusedText = EffectArray.join(
+          EffectArray.map(refused.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
         expect(refused.isError).toBe(true);
         expect(refusedText).toContain('code citations are still pending');
         expect(refusedText).toContain('finalize_code_refs');
@@ -191,7 +206,10 @@ describe('MCP share-publish citation policy', () => {
           allowUncitedPendingCodeRefs: true,
           preview: true,
         });
-        const previewText = preview.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const previewText = EffectArray.join(
+          EffectArray.map(preview.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
         expect(preview.isError).toBeUndefined();
         expect(previewText).toContain('PREVIEW source:');
         expect(yield* fs.exists(pendingPath)).toBe(true);
@@ -265,7 +283,10 @@ describe('MCP share-publish citation policy', () => {
         );
         yield* fs.writeFileString(
           sourcePath,
-          ['MEMORY', 'kind: durable', 'status: active', 'project: threadnote', 'topic: pending', '', 'Body'].join('\n'),
+          EffectArray.join(
+            ['MEMORY', 'kind: durable', 'status: active', 'project: threadnote', 'topic: pending', '', 'Body'],
+            '\n',
+          ),
         );
         yield* fs.writeFileString(pendingPath, '{}\n', {mode: 0o600});
         yield* fs.chmod(pendingPath, 0o600);
@@ -278,7 +299,10 @@ describe('MCP share-publish citation policy', () => {
           allowUncitedPendingCodeRefs: true,
           push: false,
         });
-        const publishedText = published.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const publishedText = EffectArray.join(
+          EffectArray.map(published.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
         expect(published.isError, publishedText).not.toBe(true);
         expect(publishedText).toContain(`Published ${sourceUri}`);
         expect(yield* fs.exists(sourcePath)).toBe(false);
@@ -323,20 +347,25 @@ describe('MCP share-publish citation policy', () => {
           relativePath,
         );
         const worktreePath = path.join(worktree, relativePath);
-        const previous = [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          'visibility: shared',
-          'project: threadnote',
-          'topic: replacement-cycle',
-          'memory_id: tn_replacement_cycle',
-          '',
-          'Previous reviewed body.',
-        ].join('\n');
-        const replacement = previous
-          .replace('visibility: shared', 'visibility: personal')
-          .replace('Previous reviewed body.', 'Replacement reviewed body.');
+        const previous = EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            'visibility: shared',
+            'project: threadnote',
+            'topic: replacement-cycle',
+            'memory_id: tn_replacement_cycle',
+            '',
+            'Previous reviewed body.',
+          ],
+          '\n',
+        );
+        const replacement = Effect2.pipe(
+          previous,
+          EffectString.replace('visibility: shared', 'visibility: personal'),
+          EffectString.replace('Previous reviewed body.', 'Replacement reviewed body.'),
+        );
         const config: RuntimeConfig = {
           account: 'local',
           agentContextHome: home,
@@ -379,25 +408,39 @@ describe('MCP share-publish citation policy', () => {
 
         const refused = yield* runSharePublishTool(config, sourceUri, {push: false});
         expect(refused.isError).toBe(true);
-        expect(refused.content.map(item => (item.type === 'text' ? item.text : '')).join('\n')).toContain(
-          'already exists in the shared namespace',
-        );
+        expect(
+          EffectArray.join(
+            EffectArray.map(refused.content, item => (item.type === 'text' ? item.text : '')),
+            '\n',
+          ),
+        ).toContain('already exists in the shared namespace');
         yield* runForget(config, targetUri, {dryRun: true});
         expect(yield* fs.exists(targetPath)).toBe(true);
         yield* runForget(config, targetUri, {});
-        expect((yield* runCommandEffect('git', ['-C', worktree, 'status', '--porcelain'])).stdout.trim()).toBe('');
+        expect(
+          Effect2.pipe(
+            (yield* runCommandEffect('git', ['-C', worktree, 'status', '--porcelain'])).stdout,
+            EffectString.trim,
+          ),
+        ).toBe('');
         yield* fs.writeFileString(path.join(worktree, 'unrelated.md'), 'Unrelated staged work.\n');
         yield* runCommandEffect('git', ['-C', worktree, 'add', '--', 'unrelated.md']);
 
         const published = yield* runSharePublishTool(config, sourceUri, {push: false});
-        const publishedText = published.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const publishedText = EffectArray.join(
+          EffectArray.map(published.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
         expect(published.isError, publishedText).not.toBe(true);
         expect(publishedText).toContain(`Published ${sourceUri} -> ${targetUri}`);
         expect(yield* fs.exists(sourcePath)).toBe(false);
         expect(yield* fs.readFileString(targetPath)).toContain('Replacement reviewed body.');
         expect(yield* fs.readFileString(worktreePath)).toContain('Replacement reviewed body.');
         expect(
-          (yield* runCommandEffect('git', ['-C', worktree, 'diff', '--cached', '--name-only'])).stdout.trim(),
+          Effect2.pipe(
+            (yield* runCommandEffect('git', ['-C', worktree, 'diff', '--cached', '--name-only'])).stdout,
+            EffectString.trim,
+          ),
         ).toBe('unrelated.md');
         expect(
           (yield* runCommandEffect('git', ['-C', worktree, 'ls-tree', '--name-only', 'HEAD', 'unrelated.md'])).stdout,
@@ -459,23 +502,29 @@ describe('MCP share-publish citation policy', () => {
         );
         yield* fs.writeFileString(
           sourcePath,
-          [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'project: threadnote',
-            'topic: relations',
-            'memory_id: tn_share_publish_relations',
-            'relation: related_to threadnote://memory/tn_1c56a4a00279466aa450ac4db78a1a72',
-            'relation: related_to threadnote://user/tester/memories/durable/projects/threadnote/private.md',
-            '',
-            'Body',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'project: threadnote',
+              'topic: relations',
+              'memory_id: tn_share_publish_relations',
+              'relation: related_to threadnote://memory/tn_1c56a4a00279466aa450ac4db78a1a72',
+              'relation: related_to threadnote://user/tester/memories/durable/projects/threadnote/private.md',
+              '',
+              'Body',
+              '',
+            ],
+            '\n',
+          ),
         );
 
         const result = yield* runSharePublishTool(config, sourceUri, {preview: true});
-        const text = result.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const text = EffectArray.join(
+          EffectArray.map(result.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
 
         expect(result.isError).toBeUndefined();
         expect(text).toContain('relation: related_to threadnote://memory/tn_1c56a4a00279466aa450ac4db78a1a72');
@@ -492,13 +541,13 @@ describe('MCP share-publish citation policy', () => {
 function citedMemory(sourceDirty: boolean): string {
   const citation = createMemoryCodeCitation({
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
     path: 'src/mcp_server_share.ts',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
     sourceDirty,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });

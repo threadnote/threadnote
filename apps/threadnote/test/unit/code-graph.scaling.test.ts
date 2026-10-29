@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
@@ -18,21 +19,26 @@ describe('code graph hot-path scaling', () => {
         Effect.gen(function* () {
           const durations: number[] = [];
           for (const count of [1_000, 5_000, 10_000]) {
-            const methods = Array.from(
-              {length: count},
-              (_, index) => `public int method${index}() { return helper(${index}); }`,
-            ).join('\n');
+            const methods = EffectArray.join(
+              Array.from({length: count}, (_, index) => `public int method${index}() { return helper(${index}); }`),
+              '\n',
+            );
             const content = `package bench; public class Scale { public int helper(int value) { return value; }\n${methods} }`;
             const startedAt = performance.now();
             const facts = yield* runExtraction(inventoryFile('src/main/java/bench/Scale.java', content, 'java'));
             durations.push(performance.now() - startedAt);
 
-            expect(facts.symbols.filter(symbol => symbol.kind === 'method')).toHaveLength(count + 1);
-            expect(facts.edges.filter(edge => edge.relation === 'calls' && edge.targetName === 'helper')).toHaveLength(
-              count,
-            );
+            expect(EffectArray.filter(facts.symbols, symbol => symbol.kind === 'method')).toHaveLength(count + 1);
             expect(
-              facts.edges.find(edge => edge.targetName === `method${count - 1}` && edge.relation === 'contains'),
+              EffectArray.filter(facts.edges, edge => edge.relation === 'calls' && edge.targetName === 'helper'),
+            ).toHaveLength(count);
+            expect(
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(
+                  facts.edges,
+                  edge => edge.targetName === `method${count - 1}` && edge.relation === 'contains',
+                ),
+              ),
             ).toMatchObject({sourceName: 'Scale'});
           }
 
@@ -51,7 +57,10 @@ describe('code graph hot-path scaling', () => {
     const files: CodeGraphInventoryFile[] = [
       inventoryFile(
         'settings.gradle.kts',
-        `rootProject.name = "scale"\ninclude(${modulePaths.map(value => `"${value}"`).join(',')})`,
+        `rootProject.name = "scale"\ninclude(${EffectArray.join(
+          EffectArray.map(modulePaths, value => `"${value}"`),
+          ',',
+        )})`,
         'gradle',
       ),
     ];

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -26,16 +27,37 @@ import {
 import {CODE_GRAPH_EXTRACTOR_SET_VERSION, type RepositoryIdentity} from '@threadnote/graph/types';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const testLayer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 
 describe('bounded persisted build scheduling', () => {
   it('records the first home admission timestamp without overwriting it on later scoped admissions', () => {
-    const status = {
+    const status = parseCodeGraphBuildStatus({
+      buildId: '0123456789abcdef',
+      counters: {},
+      identity: {
+        checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
+        commit: Effect2.pipe('a', EffectString.repeat(40)),
+        repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+        worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
+      },
+      owner: {processId: 1, runtime: 'bun', runtimeVersion: '1.4.4'},
       phase: 'waiting',
       scheduling: {},
+      schemaVersion: 1,
       state: 'running',
-    } as CodeGraphBuildStatus;
+      timestamps: {
+        heartbeatAt: '2026-09-17T12:00:00.000Z',
+        lastProgressAt: '2026-09-17T12:00:00.000Z',
+        phaseStartedAt: '2026-09-17T12:00:00.000Z',
+        startedAt: '2026-09-17T12:00:00.000Z',
+        updatedAt: '2026-09-17T12:00:00.000Z',
+      },
+    });
+    if (status === undefined) throw new Error('Build status fixture is invalid.');
     const first = observeCodeGraphBuildAdmission(status, undefined, Date.parse('2026-09-17T12:00:00.000Z'));
     const later = observeCodeGraphBuildAdmission(first, undefined, Date.parse('2026-09-17T12:01:00.000Z'));
     expect(later.scheduling?.admittedAt).toBe('2026-09-17T12:00:00.000Z');
@@ -49,15 +71,15 @@ describe('bounded persisted build scheduling', () => {
       const identity: RepositoryIdentity = {
         branch: 'main',
         caseMode: 'sensitive',
-        checkoutId: 'a'.repeat(64),
+        checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
         displayName: 'fixture',
         gitCommonDirectory: path.join(home, '.git'),
-        headCommit: 'd'.repeat(40),
+        headCommit: Effect2.pipe('d', EffectString.repeat(40)),
         objectFormat: 'sha1',
         remoteIdentity: 'fixture',
         repoRoot: home,
-        repositoryId: 'b'.repeat(64),
-        worktreeId: 'c'.repeat(64),
+        repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+        worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
       };
       const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
       const reporter = yield* makeCodeGraphBuildReporter(identity, layout);
@@ -99,7 +121,7 @@ describe('bounded persisted build scheduling', () => {
         edgeCount: 2,
         extractorSet: CODE_GRAPH_EXTRACTOR_SET_VERSION,
         fileCount: 1,
-        id: `cgsn_${'f'.repeat(40)}`,
+        id: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`,
         repositoryId: identity.repositoryId,
         state: 'ready',
         symbolCount: 3,
@@ -119,9 +141,11 @@ describe('bounded persisted build scheduling', () => {
         ...status,
         scheduling: {
           ...status.scheduling,
-          phaseMilliseconds: Object.fromEntries(CODE_GRAPH_BUILD_PHASES.map(phase => [phase, Number.MAX_SAFE_INTEGER])),
-          waitMilliseconds: Object.fromEntries(
-            CODE_GRAPH_BUILD_WAIT_REASONS.map(reason => [reason, Number.MAX_SAFE_INTEGER]),
+          phaseMilliseconds: EffectRecord.fromEntries(
+            EffectArray.map(CODE_GRAPH_BUILD_PHASES, phase => [phase, Number.MAX_SAFE_INTEGER]),
+          ),
+          waitMilliseconds: EffectRecord.fromEntries(
+            EffectArray.map(CODE_GRAPH_BUILD_WAIT_REASONS, reason => [reason, Number.MAX_SAFE_INTEGER]),
           ),
         },
       };
@@ -145,7 +169,7 @@ describe('bounded persisted build scheduling', () => {
           let current = initial;
           for (const elapsed of intervals)
             current = {...current, scheduling: accumulateCodeGraphBuildScheduling(current, elapsed)};
-          const total = intervals.reduce((sum, elapsed) => sum + elapsed, 0);
+          const total = EffectArray.reduce(intervals, 0, (sum, elapsed) => sum + elapsed);
           if (intervals.length > 0)
             expect(current.scheduling).toEqual(accumulateCodeGraphBuildScheduling(initial, total));
           expect(accumulateCodeGraphBuildScheduling({...initial, scheduling: undefined}, total)).toBeUndefined();

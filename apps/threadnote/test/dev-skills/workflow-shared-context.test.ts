@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {isJsonObject} from '@threadnote/platform/json';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -9,9 +11,34 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
-import type {WorkflowReadResult, WorkflowRequest} from '../../src/workflow_memory/protocol.js';
+import type {WorkflowRequest} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {workflowPropertyDiagnostics} from './workflow-property-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+type SuccessfulWorkflowRead = {
+  readonly status: 'ok';
+  readonly canonicalUri: string;
+  readonly revision: string;
+  readonly relations: readonly unknown[];
+  readonly verifiedReadback: true;
+  readonly storageKind: string;
+};
+
+function assertSuccessfulWorkflowRead(value: unknown): asserts value is SuccessfulWorkflowRead {
+  if (
+    !isJsonObject(value) ||
+    value.status !== 'ok' ||
+    typeof value.canonicalUri !== 'string' ||
+    typeof value.revision !== 'string' ||
+    !EffectArray.isArray(value.relations) ||
+    value.verifiedReadback !== true ||
+    typeof value.storageKind !== 'string'
+  )
+    throw new Error('Expected a successful workflow read result.');
+}
 
 const rootUri = 'threadnote://user/tester/memories';
 const fixture = Effect.fn('test.workflowSharedContext.fixture')(function* (cloud = false) {
@@ -38,8 +65,11 @@ const fixture = Effect.fn('test.workflowSharedContext.fixture')(function* (cloud
         path.join(home, 'share/teams.json'),
         JSON.stringify({
           version: 1,
-          teams: Object.fromEntries(
-            teams.map(name => [name, {name, access, remote: 'https://example.invalid/memories.git', worktree: repo}]),
+          teams: EffectRecord.fromEntries(
+            EffectArray.map(teams, name => [
+              name,
+              {name, access, remote: 'https://example.invalid/memories.git', worktree: repo},
+            ]),
           ),
         }),
       );
@@ -76,7 +106,7 @@ const fixture = Effect.fn('test.workflowSharedContext.fixture')(function* (cloud
   const location = {account: config.account, home, user: config.user};
   const store = yield* ResourceStore;
   const seed = (uri: string, topic = 'prior-context') => {
-    const memoryId = `tn_${sha256HexSync(uri).slice(0, 20)}`;
+    const memoryId = `tn_${Effect2.pipe(sha256HexSync(uri), EffectString.slice(0, 20))}`;
     const body = 'Relevant reviewed context.\n';
     const content = formatMemoryDocument(
       'MEMORY',
@@ -126,12 +156,13 @@ describe('workflow configured shared context', () => {
       }
       expect(yield* f.journal()).toBe(original);
       for (const [index, uri] of [source.uri, `threadnote://memory/${source.memoryId}`].entries()) {
-        const written = (yield* f.call({
+        const written: unknown = yield* f.call({
           ...f.write,
           operationId: `plan-${index}`,
           artifactKey: `plan-${index}`,
           relations: [{type: 'references', uri}],
-        })) as WorkflowReadResult;
+        });
+        assertSuccessfulWorkflowRead(written);
         expect(written).toMatchObject({status: 'ok', verifiedReadback: true, storageKind: 'durable'});
         expect(written.canonicalUri).toContain('/durable/projects/fixture/workflow-');
         expect(written.relations).toEqual([{type: 'references', uri: `threadnote://memory/${source.memoryId}`}]);
@@ -180,7 +211,8 @@ describe('workflow configured shared context', () => {
       expect(yield* f.journal()).toBe(prepared);
       expect(yield* f.store.read(f.location, source.uri)).toBe(source.content);
       yield* f.configure(['default']);
-      const written = (yield* f.call(recover)) as WorkflowReadResult;
+      const written: unknown = yield* f.call(recover);
+      assertSuccessfulWorkflowRead(written);
       expect(written).toMatchObject({status: 'ok', verifiedReadback: true});
       expect(yield* f.call(request)).toEqual(written);
       expect(JSON.parse(yield* f.journal()).binding).toEqual(f.binding);

@@ -3,12 +3,23 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {access, readFile} from '@threadnote/testing/node-fs-promises';
 import {join} from '@threadnote/testing/node-path';
 import {expect, it} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {describe} from 'vitest';
 import {USER_INSTRUCTIONS_END_MARKER, USER_INSTRUCTIONS_START_MARKER} from '@threadnote/threadnote/constants';
 import {cursorPluginDoctorChecks} from '@threadnote/threadnote/cursor/plugin';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+
+function parseJsonRecord(serialized: string): Readonly<Record<string, unknown>> {
+  const value: unknown = JSON.parse(serialized);
+  if (!Schema.is(JsonRecordSchema)(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 const root = process.cwd();
 const pluginRoot = join(root, 'cursor-plugin');
@@ -43,10 +54,10 @@ describe('Cursor plugin package', () => {
       readFile(join(root, 'assets', 'brand', 'threadnote-logo.svg'), 'utf8'),
       readFile(join(pluginRoot, 'CHANGELOG.md'), 'utf8'),
     ]);
-    const marketplace = JSON.parse(marketplaceRaw) as Record<string, unknown>;
-    const manifest = JSON.parse(manifestRaw) as Record<string, unknown>;
+    const marketplace = parseJsonRecord(marketplaceRaw);
+    const manifest = parseJsonRecord(manifestRaw);
 
-    expect(Object.keys(marketplace).sort()).toEqual(['metadata', 'name', 'owner', 'plugins']);
+    expect(EffectRecord.keys(marketplace).sort()).toEqual(['metadata', 'name', 'owner', 'plugins']);
     expect(marketplace).toMatchObject({
       name: 'threadnote',
       plugins: [
@@ -57,7 +68,7 @@ describe('Cursor plugin package', () => {
         },
       ],
     });
-    expect(Object.keys(manifest).sort()).toEqual(
+    expect(EffectRecord.keys(manifest).sort()).toEqual(
       [
         'author',
         'category',
@@ -87,9 +98,9 @@ describe('Cursor plugin package', () => {
     expect(/^## (\S+)/m.exec(changelog)?.[1]).toBe(cursorPluginVersion);
     expect(rule).toMatch(/^---\ndescription: .+\nalwaysApply: true\n---\n/);
     expect(rule).toContain(
-      `${USER_INSTRUCTIONS_START_MARKER}\n${instructions.trim()}\n${USER_INSTRUCTIONS_END_MARKER}`,
+      `${USER_INSTRUCTIONS_START_MARKER}\n${Effect2.pipe(instructions, EffectString.trim)}\n${USER_INSTRUCTIONS_END_MARKER}`,
     );
-    expect(pluginLicense.startsWith('MIT License')).toBe(true);
+    expect(Effect2.pipe(pluginLicense, EffectString.startsWith('MIT License'))).toBe(true);
     expect(licenseScope).toContain('`.cursor-plugin/` and `cursor-plugin/`');
     expect(JSON.parse(packageRaw)).toMatchObject({license: 'AGPL-3.0-or-later'});
     expect(await pathExists(join(pluginRoot, '.threadnote-managed.json'))).toBe(false);
@@ -151,9 +162,9 @@ describe('Cursor plugin package', () => {
         const cachedManifest = path.join(cachedRoot, '.cursor-plugin', 'plugin.json');
         yield* fs.writeFileString(
           cachedManifest,
-          (yield* fs.readFileString(cachedManifest)).replace(
-            `"version": "${cursorPluginVersion}"`,
-            '"version": "0.9.0"',
+          Effect2.pipe(
+            yield* fs.readFileString(cachedManifest),
+            EffectString.replace(`"version": "${cursorPluginVersion}"`, '"version": "0.9.0"'),
           ),
         );
         const outdated = yield* doctor();
@@ -163,7 +174,10 @@ describe('Cursor plugin package', () => {
 
         yield* fs.copy(pluginRoot, cachedRoot, {overwrite: true});
         const cachedRule = path.join(cachedRoot, 'rules', 'threadnote.mdc');
-        yield* fs.writeFileString(cachedRule, (yield* fs.readFileString(cachedRule)).replace('alwaysApply: true', ''));
+        yield* fs.writeFileString(
+          cachedRule,
+          Effect2.pipe(yield* fs.readFileString(cachedRule), EffectString.replace('alwaysApply: true', '')),
+        );
         const invalid = yield* doctor();
         expect(invalid).toMatchObject([{name: 'Cursor plugin', status: 'fail'}]);
         expect(invalid[0]?.detail).toContain('Cursor Marketplace');
@@ -171,9 +185,9 @@ describe('Cursor plugin package', () => {
         yield* fs.copy(pluginRoot, cachedRoot, {overwrite: true});
         yield* fs.writeFileString(
           cachedRule,
-          (yield* fs.readFileString(cachedRule)).replace(
-            'unfamiliar source relationships',
-            'unfamiliar source relationships for this task',
+          Effect2.pipe(
+            yield* fs.readFileString(cachedRule),
+            EffectString.replace('unfamiliar source relationships', 'unfamiliar source relationships for this task'),
           ),
         );
         const sameVersionMismatch = yield* doctor();

@@ -22,6 +22,8 @@ import {
   withCodeGraphWorksetCatalogWriter,
 } from '@threadnote/graph/workset_catalog/store';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
 const scope = (name: string) => ({
@@ -32,7 +34,7 @@ const scope = (name: string) => ({
 });
 const draft = {
   checkoutId: hash('checkout'),
-  commitId: 'a'.repeat(40),
+  commitId: Effect2.pipe('a', EffectString.repeat(40)),
   componentCount: 1,
   extractorGeneration: 1,
   projectorVersion: 2 as const,

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type * as SqlClient from 'effect/sql/SqlClient';
 import {CodeGraphStoreError} from '../types.js';
@@ -19,6 +20,10 @@ import {
   type CodeGraphEmbeddingDemandTarget,
   type CodeGraphEmbeddingDemandAcknowledgement,
 } from './demand_scheduler.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 export type {
   CodeGraphEmbeddingDemandLane,
   CodeGraphEmbeddingDemandClaim,
@@ -38,10 +43,12 @@ export const CODE_GRAPH_EMBEDDING_DEMAND_WRITE_BOUNDARY = {
   finalFactBytes: 8192,
 } as const;
 const normalizeSql = (sql: string) =>
-  sql
-    .replace(/CREATE TABLE IF NOT EXISTS/u, 'CREATE TABLE')
-    .replaceAll(/\s+/gu, ' ')
-    .trim();
+  Effect2.pipe(
+    sql,
+    EffectString.replace(/CREATE TABLE IF NOT EXISTS/u, 'CREATE TABLE'),
+    EffectString.replaceAll(/\s+/gu, ' '),
+    EffectString.trim,
+  );
 export const codeGraphEmbeddingDemandSchemaState = Effect.fn('codeGraph.embeddingDemandSchemaState')(function* (
   sql: SqlClient.SqlClient,
 ) {
@@ -114,14 +121,14 @@ const boundedText = (value: unknown, maximum: number) =>
   typeof value === 'string' &&
   value.length > 0 &&
   new TextEncoder().encode(value).length <= maximum &&
-  !value.includes('\0');
+  !Effect2.pipe(value, EffectString.includes('\0'));
 function exactKeys(value: unknown, keys: readonly string[]): boolean {
   return (
     typeof value === 'object' &&
     value !== null &&
-    !Array.isArray(value) &&
-    Object.keys(value).length === keys.length &&
-    Object.keys(value).every(key => keys.includes(key))
+    !EffectArray.isArray(value) &&
+    EffectRecord.keys(value).length === keys.length &&
+    EffectArray.every(EffectRecord.keys(value), key => keys.includes(key))
   );
 }
 function validModel(model: CodeGraphEmbeddingDemandModel): boolean {
@@ -283,7 +290,7 @@ export const readCodeGraphEmbeddingDemandPage = Effect.fn('codeGraph.readEmbeddi
     [input.after?.worktreeId ?? '', input.after?.worktreeId ?? '', input.after ? scopeOf(input.after) : '', limit],
   );
   return yield* Effect.try({
-    try: () => rows.map(decodeDemand),
+    try: () => EffectArray.map(rows, decodeDemand),
     catch: () => CodeGraphStoreError.of('Code graph embedding demand page is invalid.'),
   });
 });
@@ -428,7 +435,7 @@ export const blockUnclaimedCodeGraphEmbeddingDemand = Effect.fn('codeGraph.block
       yield* writeLane(sql, {
         ...current,
         state: 'blocked',
-        reason: input.reason.slice(0, 512) || 'unavailable',
+        reason: Effect2.pipe(input.reason, EffectString.slice(0, 512)) || 'unavailable',
         active: undefined,
       });
       return true;

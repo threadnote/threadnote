@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_VECTOR_DATABASE_VERSION, CODE_GRAPH_VECTOR_DATABASE_FILENAME} from './vector/generation_schema.js';
 import {
   commitCodeGraphGenerationStep,
@@ -40,21 +41,26 @@ import {
   prepareCodeGraphVectorRetirement,
   requireCodeGraphVectorRetirementSchema,
 } from './vector/retirement.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class CodeGraphEmbeddingError extends Schema.TaggedError<CodeGraphEmbeddingError>()('CodeGraphEmbeddingError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
-
-class CodeGraphVectorOwnerExpired extends Schema.TaggedError<CodeGraphVectorOwnerExpired>()(
-  'CodeGraphVectorOwnerExpired',
-  {message: Schema.String},
+class CodeGraphEmbeddingError extends Schema.TaggedError<CodeGraphEmbeddingError, {readonly brand: unique symbol}>()(
+  'CodeGraphEmbeddingError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
 ) {}
 
-class CodeGraphVectorClaimCleanupPending extends Schema.TaggedError<CodeGraphVectorClaimCleanupPending>()(
-  'CodeGraphVectorClaimCleanupPending',
-  {cause: Schema.Defect(), message: Schema.String},
-) {
+class CodeGraphVectorOwnerExpired extends Schema.TaggedError<
+  CodeGraphVectorOwnerExpired,
+  {readonly brand: unique symbol}
+>()('CodeGraphVectorOwnerExpired', {message: Schema.String}) {}
+
+class CodeGraphVectorClaimCleanupPending extends Schema.TaggedError<
+  CodeGraphVectorClaimCleanupPending,
+  {readonly brand: unique symbol}
+>()('CodeGraphVectorClaimCleanupPending', {cause: Schema.Defect(), message: Schema.String}) {
   get retryable(): boolean {
     return (
       isFileLockTimeout(this.cause) ||
@@ -521,22 +527,30 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
               ? yield* input.symbols.loadPage(cursor, VECTOR_PAGE_SIZE)
               : input.symbols.slice(progress.array_offset, progress.array_offset + VECTOR_PAGE_SIZE);
             if (rawPage.length === 0) break;
-            let projectedPage = selectGraphEmbeddingSymbols(rawPage).map(projectSymbol);
+            let projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), projectSymbol);
             const existing =
               projectedPage.length === 0
                 ? []
                 : yield* sql.unsafe<{readonly symbol_id: string}>(
-                    `SELECT symbol_id FROM vectors WHERE generation = ? AND symbol_id IN (${projectedPage.map(() => '?').join(', ')})`,
-                    [generation, ...projectedPage.map(item => item.id)],
+                    `SELECT symbol_id FROM vectors WHERE generation = ? AND symbol_id IN (${EffectArray.join(
+                      EffectArray.map(projectedPage, () => '?'),
+                      ', ',
+                    )})`,
+                    [generation, ...EffectArray.map(projectedPage, item => item.id)],
                   );
-            const inserted = new Set(existing.map(row => row.symbol_id));
-            let projected = projectedPage.filter(item => !inserted.has(item.id));
+            const inserted = new Set(EffectArray.map(existing, row => row.symbol_id));
+            let projected = EffectArray.filter(projectedPage, item => !inserted.has(item.id));
             // A step consumes at most one inference batch. Cursor advances only over its raw prefix.
             const reusable = progress.reusable_generation
               ? yield* loadReusableVectors(sql, progress.reusable_generation, projected, selected.manifest.dimensions!)
               : new Map<string, Uint8Array>();
             // A background step may stop within a structural page; its cursor covers only that prefix.
-            const missingIds = new Set(projected.filter(item => !reusable.has(item.id)).map(item => item.id));
+            const missingIds = new Set(
+              EffectArray.map(
+                EffectArray.filter(projected, item => !reusable.has(item.id)),
+                item => item.id,
+              ),
+            );
             let missingCount = 0;
             let consumed = rawPage.length;
             const seen = new Set<string>();
@@ -553,8 +567,8 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
             const truncated = consumed < rawPage.length;
             rawPage = rawPage.slice(0, consumed);
             if (truncated) {
-              projectedPage = selectGraphEmbeddingSymbols(rawPage).map(projectSymbol);
-              projected = projectedPage.filter(item => !inserted.has(item.id));
+              projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), projectSymbol);
+              projected = EffectArray.filter(projectedPage, item => !inserted.has(item.id));
             }
             const rows: Array<readonly [string, string, string, Uint8Array]> = [];
             const missing: ProjectedSymbol[] = [];
@@ -577,7 +591,10 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                   yield* protect(1, 4096, lock(renewCodeGraphGenerationClaim(sql, generation, ownerToken)));
                   return yield* input.runtime.embedMany({
                     embeddingContextPoolSize: input.embeddingContextPoolSize ?? CODE_GRAPH_EMBEDDING_CONTEXT_CAP,
-                    inputs: batch.map(item => `${selected.manifest.promptPrefixes?.document ?? ''}${item.text}`),
+                    inputs: EffectArray.map(
+                      batch,
+                      item => `${selected.manifest.promptPrefixes?.document ?? ''}${item.text}`,
+                    ),
                     manifest: selected.manifest,
                     modelPath: selected.modelPath,
                   });
@@ -600,7 +617,11 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
             const nextCursor = JSON.stringify({id: last.id, path: last.path, qualifiedName: last.qualifiedName});
             progress = yield* protect(
               rows.length + 1,
-              rows.reduce((sum, row) => sum + row[3].byteLength + row[1].length + row[2].length + 256, 4096),
+              EffectArray.reduce(
+                rows,
+                4096,
+                (sum, row) => sum + row[3].byteLength + row[1].length + row[2].length + 256,
+              ),
               lock(
                 commitCodeGraphGenerationStep(sql, {
                   generation,
@@ -808,7 +829,7 @@ const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input
           [active.generation, cursor, VECTOR_PAGE_SIZE],
         );
         if (rows.length === 0) break;
-        const records = rows.map(row => ({
+        const records = EffectArray.map(rows, row => ({
           id: row.symbol_id,
           vector: decodeVector(row.vector, active.dimensions),
         }));
@@ -821,7 +842,7 @@ const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input
         cursor = rows.at(-1)!.symbol_id;
         if (rows.length < VECTOR_PAGE_SIZE) break;
       }
-      return new Map(best.map(match => [match.id, Math.max(0, match.score)]));
+      return new Map(EffectArray.map(best, match => [match.id, Math.max(0, match.score)]));
     }),
   );
 });
@@ -851,14 +872,16 @@ function isSymbolPageSource(source: CodeGraphEmbeddingSymbolSource): source is C
 }
 
 export function selectGraphEmbeddingSymbols(symbols: readonly CodeGraphSymbol[]): readonly CodeGraphSymbol[] {
-  const selected = symbols.filter(
-    symbol =>
-      symbol.exported ||
-      ['class', 'document', 'function', 'heading', 'interface', 'method', 'module', 'package', 'type'].includes(
-        symbol.kind,
-      ),
+  const selected = EffectArray.filter(
+    symbols,
+    (symbol, __effectArrayIndex) =>
+      __effectArrayIndex in symbols &&
+      (symbol.exported ||
+        ['class', 'document', 'function', 'heading', 'interface', 'method', 'module', 'package', 'type'].includes(
+          symbol.kind,
+        )),
   );
-  return [...new Map(selected.map(symbol => [symbol.id, symbol])).values()].sort(
+  return [...new Map(EffectArray.map(selected, symbol => [symbol.id, symbol])).values()].sort(
     (left, right) =>
       vectorPriority(right) - vectorPriority(left) ||
       compareCodeUnits(left.path, right.path) ||
@@ -884,15 +907,21 @@ function vectorPriority(symbol: CodeGraphSymbol): number {
 }
 
 function projectSymbol(symbol: CodeGraphSymbol): ProjectedSymbol {
-  const text = [
-    `${symbol.kind} ${symbol.qualifiedName}`,
-    symbol.signature ? `signature: ${symbol.signature}` : '',
-    symbol.packageName ? `package: ${symbol.packageName}` : '',
-    `path: ${symbol.path}`,
-    symbol.documentation ? `documentation: ${symbol.documentation.slice(0, 1_024)}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  const text = EffectArray.join(
+    EffectArray.filter(
+      [
+        `${symbol.kind} ${symbol.qualifiedName}`,
+        symbol.signature ? `signature: ${symbol.signature}` : '',
+        symbol.packageName ? `package: ${symbol.packageName}` : '',
+        `path: ${symbol.path}`,
+        symbol.documentation
+          ? `documentation: ${Effect2.pipe(symbol.documentation, EffectString.slice(0, 1_024))}`
+          : '',
+      ],
+      Boolean,
+    ),
+    '\n',
+  );
   return {
     fingerprint: sha256HexSync(`code-graph-embedding-v${CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION}\n${text}`),
     id: symbol.id,
@@ -907,11 +936,14 @@ const loadReusableVectors = Effect.fn('codeGraph.loadReusableVectors')(function*
   dimensions: number,
 ) {
   if (symbols.length === 0) return new Map<string, Uint8Array>();
-  const expected = new Map(symbols.map(symbol => [symbol.id, symbol.fingerprint]));
+  const expected = new Map(EffectArray.map(symbols, symbol => [symbol.id, symbol.fingerprint]));
   const rows = yield* sql.unsafe<VectorRow>(
     `SELECT symbol_id, fingerprint, vector FROM vectors
-     WHERE generation = ? AND symbol_id IN (${symbols.map(() => '?').join(', ')})`,
-    [generation, ...symbols.map(symbol => symbol.id)],
+     WHERE generation = ? AND symbol_id IN (${EffectArray.join(
+       EffectArray.map(symbols, () => '?'),
+       ', ',
+     )})`,
+    [generation, ...EffectArray.map(symbols, symbol => symbol.id)],
   );
   const reusable = new Map<string, Uint8Array>();
   for (const row of rows) {
@@ -945,10 +977,10 @@ function decodeVector(value: unknown, dimensions: number): readonly number[] {
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const vector = Array.from({length: dimensions}, (_, index) => view.getFloat32(index * 4, true));
-  if (vector.some(component => !Number.isFinite(component))) {
+  if (EffectArray.some(vector, component => !Number.isFinite(component))) {
     throw CodeGraphEmbeddingError.make({message: 'Stored vector contains a non-finite component.'});
   }
-  const magnitude = Math.sqrt(vector.reduce((sum, component) => sum + component * component, 0));
+  const magnitude = Math.sqrt(EffectArray.reduce(vector, 0, (sum, component) => sum + component * component));
   if (Math.abs(magnitude - 1) > 0.002)
     throw CodeGraphEmbeddingError.make({message: 'Stored vector is not L2-normalized.'});
   return vector;

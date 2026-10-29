@@ -12,6 +12,8 @@ import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/regist
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import type {CodeGraphSnapshot} from '@threadnote/graph/types';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('snapshot admission cache', () => {
   fcEffectProp(
@@ -27,23 +29,28 @@ describe('snapshot admission cache', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-admission-cache-'});
-        const layout = codeGraphLayout(path, home, 'c'.repeat(64), 'd'.repeat(64));
+        const layout = codeGraphLayout(
+          path,
+          home,
+          Effect2.pipe('c', EffectString.repeat(64)),
+          Effect2.pipe('d', EffectString.repeat(64)),
+        );
         const snapshot: CodeGraphSnapshot = {
-          ...(layered ? {baseSnapshotId: `cgsn_${'0'.repeat(40)}`} : {}),
-          commit: 'e'.repeat(40),
+          ...(layered ? {baseSnapshotId: `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`} : {}),
+          commit: Effect2.pipe('e', EffectString.repeat(40)),
           dirty,
           edgeCount: 0,
-          extractorSet: 'f'.repeat(64),
+          extractorSet: Effect2.pipe('f', EffectString.repeat(64)),
           fileCount: 1,
-          id: `cgsn_${suffix.toString(16).padStart(40, '0')}`,
-          repositoryId: 'a'.repeat(64),
+          id: `cgsn_${Effect2.pipe(suffix.toString(16), EffectString.padStart(40, '0'))}`,
+          repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
           state: 'ready',
           symbolCount: 1,
           worktreeId: layout.worktreeId,
         };
         const packs = BUILTIN_LANGUAGE_PACK_REGISTRY;
-        const first = '1'.repeat(64),
-          second = '2'.repeat(64);
+        const first = Effect2.pipe('1', EffectString.repeat(64)),
+          second = Effect2.pipe('2', EffectString.repeat(64));
         expect(yield* codeGraphSnapshotAdmissionCurrent(layout, snapshot, first, packs)).toBe(false);
         yield* recordCodeGraphSnapshotAdmission(layout, snapshot, first, packs, false);
         expect(yield* codeGraphSnapshotAdmissionCurrent(layout, snapshot, first, packs)).toBe(true);
@@ -67,13 +74,18 @@ describe('snapshot admission cache', () => {
         const replacement = {...snapshot, id: `${snapshot.id}-next`};
         expect(yield* codeGraphSnapshotAdmissionCurrent(layout, replacement, first, packs)).toBe(false);
         expect(
-          yield* codeGraphSnapshotAdmissionCurrent(layout, {...snapshot, repositoryId: 'b'.repeat(64)}, first, packs),
+          yield* codeGraphSnapshotAdmissionCurrent(
+            layout,
+            {...snapshot, repositoryId: Effect2.pipe('b', EffectString.repeat(64))},
+            first,
+            packs,
+          ),
         ).toBe(false);
         yield* recordCodeGraphSnapshotAdmission(layout, replacement, second, packs, true);
         expect(yield* codeGraphSnapshotAdmissionCurrent(layout, snapshot, first, packs)).toBe(false);
         expect(yield* codeGraphSnapshotAdmissionCurrent(layout, replacement, second, packs)).toBe(true);
         const target = path.join(layout.repositoryRoot, 'admission', `${layout.worktreeId}.json`);
-        for (const broken of ['{"version":', ' '.repeat(4_097)]) {
+        for (const broken of ['{"version":', Effect2.pipe(' ', EffectString.repeat(4_097))]) {
           yield* fs.writeFileString(target, broken);
           expect(yield* codeGraphSnapshotAdmissionCurrent(layout, replacement, second, packs)).toBe(false);
         }
@@ -90,13 +102,13 @@ describe('snapshot admission cache', () => {
     },
     ({suffix, dirty}) => {
       const identity = {
-        checkoutId: 'c'.repeat(64),
-        headCommit: 'e'.repeat(40),
-        repositoryId: 'a'.repeat(64),
-        worktreeId: 'd'.repeat(64),
+        checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
+        headCommit: Effect2.pipe('e', EffectString.repeat(40)),
+        repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+        worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
       };
-      const environment = suffix.toString(16).padStart(64, '0');
-      const changed = (suffix + 1).toString(16).padStart(64, '0');
+      const environment = Effect2.pipe(suffix.toString(16), EffectString.padStart(64, '0'));
+      const changed = Effect2.pipe((suffix + 1).toString(16), EffectString.padStart(64, '0'));
       const key = (value: string) =>
         codeGraphBuildRequestKey(
           identity,

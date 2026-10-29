@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, FileSystem, Layer, Path, Predicate} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runCommandEffect, type CommandExecutor} from '@threadnote/platform/command';
@@ -18,6 +19,9 @@ import {
   type CodeMemoryLinkScaleRunnerBindingV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-scale-contract';
 import {ScriptError} from './effect/errors.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Only this service can supply release authority to executable entrypoints.
  * Tests may replace the service; production always verifies GitHub/Sigstore signatures
@@ -83,7 +87,7 @@ export const verifyCodeMemoryLinkScaleProvenance = Effect.fn('codeMemoryLinkScal
   });
   if (artifact.evidenceClass !== 'release-scale' || !artifact.gate.passed) {
     return yield* ScriptError.make({
-      message: `Verified capture failed release-scale gate: ${artifact.gate.failures.join('; ')}`,
+      message: `Verified capture failed release-scale gate: ${EffectArray.join(artifact.gate.failures, '; ')}`,
     });
   }
   return {artifact, runnerBinding};
@@ -172,7 +176,7 @@ function bindingFromVerifiedAttestation(
   subjectHash: string,
   identity: CodeMemoryLinkScaleIdentityV1,
 ): CodeMemoryLinkScaleRunnerBindingV1 {
-  if (!Array.isArray(value) || value.length === 0) throw new Error('Missing verified attestations');
+  if (!EffectArray.isArray(value) || value.length === 0) throw new Error('Missing verified attestations');
   const repository = identity.github.repository;
   if (!isCodeMemoryLinkScaleGitHubRepository(repository)) throw new Error('Unexpected Threadnote repository');
   const repositoryUrl = `https://github.com/${repository}`;
@@ -196,10 +200,14 @@ function bindingFromVerifiedAttestation(
       runInvocationURI: expectedInvocation,
       runnerEnvironment: 'github-hosted',
     };
-    if (Object.entries(expected).some(([key, expectedValue]) => certificate[key] !== expectedValue)) continue;
     if (
-      !Array.isArray(statement.subject) ||
-      !statement.subject.some(
+      EffectArray.some(EffectRecord.toEntries(expected), ([key, expectedValue]) => certificate[key] !== expectedValue)
+    )
+      continue;
+    if (
+      !EffectArray.isArray(statement.subject) ||
+      !EffectArray.some(
+        statement.subject,
         subject => object(object(subject, 'subject').digest, 'subject digest').sha256 === subjectHash,
       )
     )
@@ -215,7 +223,10 @@ function bindingFromVerifiedAttestation(
         runId: identity.github.runId,
         runAttempt: identity.github.runAttempt,
         sha: string(certificate.sourceRepositoryDigest, 'source digest'),
-        workflowRef: string(certificate.buildConfigURI, 'workflow URI').slice('https://github.com/'.length),
+        workflowRef: Effect2.pipe(
+          string(certificate.buildConfigURI, 'workflow URI'),
+          EffectString.slice('https://github.com/'.length),
+        ),
         workflowSha: string(certificate.buildConfigDigest, 'workflow digest'),
       },
       runnerClass: CODE_MEMORY_LINK_SCALE_RELEASE_RUNNER_CLASS,
@@ -249,27 +260,31 @@ function assertGithubRunAndJob(
     throw new Error('Run metadata mismatch');
   }
   const jobs = object(jobsValue, 'GitHub jobs');
-  if (!Array.isArray(jobs.jobs) || jobs.total_count !== jobs.jobs.length)
+  if (!EffectArray.isArray(jobs.jobs) || jobs.total_count !== jobs.jobs.length)
     throw new Error('Incomplete bounded job metadata');
-  const matches = jobs.jobs
-    .map(value => object(value, 'job'))
-    .filter(job => job.name === CODE_MEMORY_LINK_SCALE_GITHUB_JOB_NAME);
+  const matches = EffectArray.filter(
+    EffectArray.map(jobs.jobs, value => object(value, 'job')),
+    job => job.name === CODE_MEMORY_LINK_SCALE_GITHUB_JOB_NAME,
+  );
   if (matches.length !== 1) throw new Error('Missing unique governed scale job');
   const job = matches[0];
   if (
     job.run_id !== github.runId ||
     job.run_attempt !== github.runAttempt ||
     job.head_sha !== github.sha ||
-    !Array.isArray(job.labels) ||
+    !EffectArray.isArray(job.labels) ||
     !job.labels.includes('macos-15') ||
     job.labels.includes('self-hosted') ||
     !((job.status === 'completed' && job.conclusion === 'success') || job.status === 'in_progress')
   ) {
     throw new Error('Runner job identity or status mismatch');
   }
-  if (!Array.isArray(job.steps)) throw new Error('Missing capture/signing steps');
+  if (!EffectArray.isArray(job.steps)) throw new Error('Missing capture/signing steps');
   for (const name of [CODE_MEMORY_LINK_SCALE_CAPTURE_STEP, CODE_MEMORY_LINK_SCALE_ATTEST_STEP]) {
-    const steps = job.steps.map(value => object(value, 'step')).filter(step => step.name === name);
+    const steps = EffectArray.filter(
+      EffectArray.map(job.steps, value => object(value, 'step')),
+      step => step.name === name,
+    );
     if (steps.length !== 1 || steps[0].status !== 'completed' || steps[0].conclusion !== 'success') {
       throw new Error(`Missing successful ${name}`);
     }

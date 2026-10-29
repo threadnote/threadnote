@@ -1,4 +1,10 @@
 import {
+  isFiniteNumber as checkedIsFiniteNumber,
+  isSafeInteger as checkedIsSafeInteger,
+  isOneOf as checkedIsOneOf,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {
   consolidationRevision,
   consolidationSections,
   buildConsolidationProvenanceV2,
@@ -49,8 +55,12 @@ import {
   validateReviewedMemorySupport,
   type ReviewedMemorySupportV1,
 } from './reviewed-support.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const HASH = /^[a-f0-9]{64}$/u;
+const ACCEPTANCE_STAGES = ['preview', 'parked', 'prepared', 'written', 'conflict'] as const;
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength;
 export const MAX_TOPIC_MAINTENANCE_PREVIEW_BYTES = 256 * 1024;
 
@@ -120,14 +130,15 @@ function exactKeys(
   return (
     typeof value === 'object' &&
     value !== null &&
-    !Array.isArray(value) &&
-    required.every(key => Object.hasOwn(value, key)) &&
-    Object.keys(value).every(key => required.includes(key) || optional.includes(key))
+    !EffectArray.isArray(value) &&
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    EffectArray.every(required, key => Object.hasOwn(value, key)) &&
+    EffectArray.every(EffectRecord.keys(value), key => required.includes(key) || optional.includes(key))
   );
 }
 
 function checkedTimestamp(value: string): void {
-  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value)
+  if (typeof value !== 'string' || !checkedIsFiniteNumber(Date.parse(value)) || new Date(value).toISOString() !== value)
     fail('approval timestamp must be canonical ISO time.');
 }
 
@@ -165,13 +176,14 @@ function rawBodyWithReviewedReplacements(
   const chunks: {start: number; end: number; text: string}[] = [];
   let cursor = 0;
   const add = (end: number) => {
-    const chunk = rawBody.slice(cursor, end);
-    const text = chunk.trim();
+    const chunk = Effect.pipe(rawBody, EffectString.slice(cursor, end));
+    const text = Effect.pipe(chunk, EffectString.trim);
     if (text) {
-      const start = cursor + chunk.length - chunk.trimStart().length;
+      const start = cursor + chunk.length - Effect.pipe(chunk, EffectString.trimStart).length;
       chunks.push({start, end: start + text.length, text});
     }
   };
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native matchAll preserves the standard RegExpMatchArray index type.
   for (const match of rawBody.matchAll(/\r?\n[\t ]*\r?\n/gu)) {
     add(match.index);
     cursor = match.index + match[0].length;
@@ -180,18 +192,23 @@ function rawBodyWithReviewedReplacements(
   const sections = consolidationSections(acceptedBody);
   if (
     chunks.length !== sections.length ||
-    chunks.some((chunk, index) => chunk.text.replace(/\r\n/gu, '\n') !== sections[index])
+    EffectArray.some(
+      chunks,
+      (chunk, index) => Effect.pipe(chunk.text, EffectString.replace(/\r\n/gu, '\n')) !== sections[index],
+    )
   )
     fail('raw target paragraph geometry differs from the reviewed body.');
-  const replacements = new Map(proposal.draft.operations.map(operation => [operation.ordinal, operation.text]));
+  const replacements = new Map(
+    EffectArray.map(proposal.draft.operations, operation => [operation.ordinal, operation.text]),
+  );
   let output = '';
   cursor = 0;
   for (const [ordinal, chunk] of chunks.entries()) {
-    output += rawBody.slice(cursor, chunk.start);
-    output += replacements.get(ordinal) ?? rawBody.slice(chunk.start, chunk.end);
+    output += Effect.pipe(rawBody, EffectString.slice(cursor, chunk.start));
+    output += replacements.get(ordinal) ?? Effect.pipe(rawBody, EffectString.slice(chunk.start, chunk.end));
     cursor = chunk.end;
   }
-  return output + rawBody.slice(cursor);
+  return output + Effect.pipe(rawBody, EffectString.slice(cursor));
 }
 
 function patchHeader(
@@ -199,24 +216,44 @@ function patchHeader(
   replacements: Readonly<Record<string, readonly string[]>>,
   optional: readonly string[],
 ): string {
-  const parts = header.split(/(\r?\n)/u);
+  const parts = Effect.pipe(header, EffectString.split(/(\r?\n)/u));
   const rows = Array.from({length: Math.ceil(parts.length / 2)}, (_, index) => ({
     text: parts[index * 2] ?? '',
     ending: parts[index * 2 + 1] ?? '',
   }));
-  const ending = rows.find(row => row.ending)?.ending ?? '\n';
+  const ending = EffectOption.getOrUndefined(EffectArray.findFirst(rows, row => Boolean(row.ending)))?.ending ?? '\n';
   const output: typeof rows = [];
-  for (const [key, values] of Object.entries(replacements)) {
-    const matched = rows.filter(row => /^\s*[^:]+\s*:/u.test(row.text) && row.text.trimStart().startsWith(`${key}:`));
+  for (const [key, values] of EffectRecord.toEntries(replacements)) {
+    const matched = EffectArray.filter(
+      rows,
+      row =>
+        /^\s*[^:]+\s*:/u.test(row.text) &&
+        Effect.pipe(row.text, __effectPipeInput => {
+          const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.trimStart);
+          const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.startsWith(`${key}:`));
+          return __effectPipeStage1;
+        }),
+    );
     if (key !== 'code_citation' && matched.length > 1) fail(`duplicate ${key} header.`);
     if (!matched.length && !optional.includes(key)) fail(`missing ${key} header.`);
-    if (matched.some(row => !row.text.startsWith(`${key}: `))) fail(`noncanonical ${key} header.`);
+    if (EffectArray.some(matched, row => !Effect.pipe(row.text, EffectString.startsWith(`${key}: `))))
+      fail(`noncanonical ${key} header.`);
     if (values.length === 0 && key !== 'code_citation') fail(`empty ${key} replacement.`);
   }
   const done = new Set<string>();
   for (const row of rows) {
-    const key = Object.keys(replacements).find(
-      name => /^\s*[^:]+\s*:/u.test(row.text) && row.text.trimStart().startsWith(`${name}:`),
+    const key = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectRecord.keys(replacements),
+        __effectArrayValue =>
+          !!(name =>
+            /^\s*[^:]+\s*:/u.test(row.text) &&
+            Effect.pipe(row.text, __effectPipeInput => {
+              const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.trimStart);
+              const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.startsWith(`${name}:`));
+              return __effectPipeStage1;
+            }))(__effectArrayValue),
+      ),
     );
     if (!key) {
       output.push(row);
@@ -225,16 +262,23 @@ function patchHeader(
     if (done.has(key)) continue;
     done.add(key);
     const values = replacements[key];
-    values.forEach((text, index) => output.push({text, ending: index === values.length - 1 ? row.ending : ending}));
+    EffectArray.forEach(values, (text, index) =>
+      output.push({text, ending: index === values.length - 1 ? row.ending : ending}),
+    );
   }
   for (const key of optional) {
     if (done.has(key)) continue;
     const values = replacements[key];
     if (!values?.length) continue;
     if (output.length) output[output.length - 1].ending = ending;
-    values.forEach((text, index) => output.push({text, ending: index === values.length - 1 ? '' : ending}));
+    EffectArray.forEach(values, (text, index) =>
+      output.push({text, ending: index === values.length - 1 ? '' : ending}),
+    );
   }
-  return output.map(row => row.text + row.ending).join('');
+  return EffectArray.join(
+    EffectArray.map(output, row => row.text + row.ending),
+    '',
+  );
 }
 
 function metadataDiff(before: string, after: string): TopicMaintenanceAcceptancePreviewV1['metadataDiff'] {
@@ -250,14 +294,18 @@ function metadataDiff(before: string, after: string): TopicMaintenanceAcceptance
   ];
   const values = (content: string, key: string) => {
     const boundary = /\r?\n\r?\n/u.exec(content);
-    const header = boundary ? content.slice(0, boundary.index) : content;
-    if (key === 'body') return boundary ? content.slice(boundary.index + boundary[0].length) : '';
-    return header
-      .split(/\r?\n/u)
-      .filter(line => line.startsWith(`${key}: `))
-      .join('\n');
+    const header = boundary ? Effect.pipe(content, EffectString.slice(0, boundary.index)) : content;
+    if (key === 'body')
+      return boundary ? Effect.pipe(content, EffectString.slice(boundary.index + boundary[0].length)) : '';
+    return EffectArray.join(
+      EffectArray.filter(
+        Effect.pipe(header, EffectString.split(/\r?\n/u)),
+        __effectArrayValue2 => !!(line => Effect.pipe(line, EffectString.startsWith(`${key}: `)))(__effectArrayValue2),
+      ),
+      '\n',
+    );
   };
-  return keys.flatMap(field => {
+  return EffectArray.flatMap(keys, field => {
     const oldValue = values(before, field);
     const newValue = values(after, field);
     return oldValue === newValue
@@ -327,26 +375,37 @@ function assembleTopicMaintenanceAcceptance(
     fail('review outcome has no acceptable update.');
   if (approvedProposal.body !== record.body && (record.metadata.sourceEvidence || record.metadata.obsidianEvidence))
     fail('body-bound imported evidence cannot yet be rebuilt for a changed topic body.');
-  const evidence = new Map(review.reviewEvidence.map(item => [item.handleId, item]));
-  const paragraphs = old.paragraphs.map((paragraph, ordinal) => {
-    const operation = approvedProposal.draft.operations.find(item => item.ordinal === ordinal);
-    const revalidation = approvedProposal.draft.paragraphDispositions?.entries.find(
-      item => item.ordinal === ordinal && item.disposition === 'revalidate',
+  const evidence = new Map(EffectArray.map(review.reviewEvidence, item => [item.handleId, item]));
+  const paragraphs = EffectArray.map(old.paragraphs, (paragraph, ordinal) => {
+    const operation = EffectOption.getOrUndefined(
+      EffectArray.findFirst(approvedProposal.draft.operations, item => item.ordinal === ordinal),
+    );
+    const revalidation = EffectOption.getOrUndefined(
+      EffectOption.map(
+        EffectOption.fromNullishOr(approvedProposal.draft.paragraphDispositions?.entries),
+        __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              __effectArrayReceiver,
+              item => item.ordinal === ordinal && item.disposition === 'revalidate',
+            ),
+          ),
+      ),
     );
     const supportHandles = operation?.supportHandles ?? revalidation?.supportHandles;
     return {
       ...paragraph,
       hash: consolidationRevision(consolidationSections(approvedProposal.body)[ordinal]),
       citationIds: supportHandles
-        ? [...new Set(supportHandles.map(handle => evidence.get(handle)!.citation.id))].sort()
+        ? [...new Set(EffectArray.map(supportHandles, handle => evidence.get(handle)!.citation.id))].sort()
         : paragraph.citationIds,
     };
   });
   const declared = new Set([
-    ...paragraphs.flatMap(paragraph => paragraph.citationIds),
-    ...old.additionalDependencies.map(dependency => dependency.citationId),
+    ...EffectArray.flatMap(paragraphs, paragraph => paragraph.citationIds),
+    ...EffectArray.map(old.additionalDependencies, dependency => dependency.citationId),
   ]);
-  const acceptedSources = [...declared].sort().map(citationId => {
+  const acceptedSources = EffectArray.map([...declared].sort(), citationId => {
     const historical = evidence.get(`historical:${citationId}`);
     const current = evidence.get(`current:${citationId}`);
     const acceptedCitationId = current?.citation.id ?? (historical ? historical.citation.id : citationId);
@@ -362,7 +421,7 @@ function assembleTopicMaintenanceAcceptance(
     additionalDependencies: old.additionalDependencies,
     originCitationIds:
       old.version === 1
-        ? (record.metadata.codeCitations ?? []).map(citation => citation.id).sort()
+        ? EffectArray.map(record.metadata.codeCitations ?? [], citation => citation.id).sort()
         : old.originCitationIds,
     acceptedSources,
   };
@@ -375,30 +434,36 @@ function assembleTopicMaintenanceAcceptance(
           ...(old.dependencyExpansions ? {dependencyExpansions: old.dependencyExpansions} : {}),
         }
       : legacyManifest;
-  const priorAccepted = new Set(old.version !== 1 ? old.acceptedSources.map(item => item.acceptedCitationId) : []);
-  const preserved = (record.metadata.codeCitations ?? []).filter(
+  const priorAccepted = new Set(
+    old.version !== 1 ? EffectArray.map(old.acceptedSources, item => item.acceptedCitationId) : [],
+  );
+  const preserved = EffectArray.filter(
+    record.metadata.codeCitations ?? [],
     citation =>
       manifest.originCitationIds.includes(citation.id) || !priorAccepted.has(citation.id) || declared.has(citation.id),
   );
-  const citationsById = new Map<string, MemoryCodeCitationV1>(preserved.map(citation => [citation.id, citation]));
+  const citationsById = new Map<string, MemoryCodeCitationV1>(
+    EffectArray.map(preserved, citation => [citation.id, citation]),
+  );
   for (const item of review.reviewEvidence)
     citationsById.set(item.citation.id, assertMemoryCodeCitation(item.citation));
   const required = new Set([
     ...manifest.originCitationIds,
     ...declared,
-    ...acceptedSources.map(source => source.acceptedCitationId),
+    ...EffectArray.map(acceptedSources, source => source.acceptedCitationId),
   ]);
   const original = record.metadata.consolidation;
   if (original) {
     const origin = original.version === 1 ? original : original.origin;
     for (const source of origin.sources)
       for (const citation of source.codeCitations)
-        if (preserved.some(item => item.id === citation.id)) required.add(citation.id);
+        if (EffectArray.some(preserved, item => item.id === citation.id)) required.add(citation.id);
   }
   for (const citation of preserved) required.add(citation.id);
-  const codeCitations = [...required]
-    .map(id => citationsById.get(id) ?? fail(`missing reviewed citation ${id}.`))
-    .sort((left, right) => left.id.localeCompare(right.id));
+  const codeCitations = EffectArray.map(
+    [...required],
+    id => citationsById.get(id) ?? fail(`missing reviewed citation ${id}.`),
+  ).sort((left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id)));
   if (codeCitations.length > MAX_MEMORY_CODE_CITATIONS)
     fail(`citation union has ${codeCitations.length} entries; limit is ${MAX_MEMORY_CODE_CITATIONS}.`);
   formatMemoryCodeCitationLines(codeCitations);
@@ -470,8 +535,8 @@ export function validateTopicMaintenanceAcceptancePreview(
     input.contentHash !== consolidationRevision(input.content) ||
     typeof input.approvalDigest !== 'string' ||
     !HASH.test(input.approvalDigest) ||
-    !Array.isArray(input.codeCitations) ||
-    !Array.isArray(input.metadataDiff)
+    !EffectArray.isArray(input.codeCitations) ||
+    !EffectArray.isArray(input.metadataDiff)
   )
     fail('approval preview is malformed or oversized.');
   checkedTimestamp(input.approvedAt);
@@ -501,7 +566,27 @@ export function validateTopicMaintenanceAcceptancePreview(
     JSON.stringify(parsed.metadata.consolidation ?? null) !== JSON.stringify(input.consolidation ?? null)
   )
     fail('approval preview has invalid final document provenance.');
-  const preview = input as unknown as TopicMaintenanceAcceptancePreviewV1;
+  const codeCitations = parsed.metadata.codeCitations;
+  if (!codeCitations) fail('approval preview has no parsed citation list.');
+  const consolidation = parsed.metadata.consolidation;
+  if (consolidation !== undefined && consolidation.version !== 2)
+    fail('approval preview has an unsupported consolidation version.');
+  const preview: TopicMaintenanceAcceptancePreviewV1 = {
+    version: 1,
+    reviewId: input.reviewId,
+    approvedAt: input.approvedAt,
+    targetUri: input.targetUri,
+    beforeContent: input.beforeContent,
+    beforeContentHash: input.beforeContentHash,
+    content: input.content,
+    contentHash: input.contentHash,
+    approvedProposal: proposal,
+    manifest: parsed.metadata.topicMaintenance,
+    codeCitations,
+    ...(consolidation === undefined ? {} : {consolidation}),
+    metadataDiff: metadataDiff(input.beforeContent, input.content),
+    approvalDigest: input.approvalDigest,
+  };
   const {approvalDigest: digest, ...base} = preview;
   if (approvalDigest(base) !== digest) fail('approval preview digest differs from final document.');
   const reproduced = assembleTopicMaintenanceAcceptance(prior, review, {
@@ -523,16 +608,16 @@ export function validateTopicMaintenanceApprovalReceipt(
   if (
     !exactKeys(input, ['version', 'reviewRevision', 'stage', 'preview']) ||
     input.version !== 1 ||
-    !Number.isSafeInteger(input.reviewRevision) ||
-    (input.reviewRevision as number) < 1 ||
-    (input.reviewRevision as number) > revision ||
-    !['preview', 'parked', 'prepared', 'written', 'conflict'].includes(input.stage as string)
+    !checkedIsSafeInteger(input.reviewRevision) ||
+    input.reviewRevision < 1 ||
+    input.reviewRevision > revision ||
+    !checkedIsOneOf(ACCEPTANCE_STAGES, input.stage)
   )
     fail('approval receipt is malformed.');
   const preview = validateTopicMaintenanceAcceptancePreview(input.preview, reviewPayload);
   if (preview.reviewId !== reviewId || (input.stage === 'preview' && input.reviewRevision !== revision))
     fail('approval receipt differs from its review identity or revision.');
-  return input as unknown as TopicMaintenanceApprovalReceiptV1;
+  return {version: 1, reviewRevision: input.reviewRevision, stage: input.stage, preview};
 }
 
 export function validateApprovedTopicMaintenanceWrite(
@@ -574,8 +659,8 @@ function assembleAcceptanceDocument(
   const raw = canonicalMemoryDocumentContent(record.content);
   const separator = /\r?\n\r?\n/u.exec(raw);
   if (!separator) fail('target document lacks a canonical header/body boundary.');
-  const header = raw.slice(0, separator.index);
-  const body = raw.slice(separator.index + separator[0].length);
+  const header = Effect.pipe(raw, EffectString.slice(0, separator.index));
+  const body = Effect.pipe(raw, EffectString.slice(separator.index + separator[0].length));
   const patchedBody = rawBodyWithReviewedReplacements(body, record.body, proposal);
   const replacements = {
     schema_version: [`schema_version: 10`],
@@ -638,10 +723,21 @@ export function prepareTopicMaintenanceObsidianAcceptance(
     fail('review outcome has no acceptable update.');
   assertTopicMaintenanceAcceptanceCoverage(review, proposal);
   const id = topicMaintenanceObsidianCitationId(review.basis.currentEvidence);
-  const paragraphs = old.paragraphs.map((paragraph, ordinal) => {
-    const operation = proposal.draft.operations.find(item => item.ordinal === ordinal);
-    const revalidation = proposal.draft.paragraphDispositions?.entries.find(
-      item => item.ordinal === ordinal && item.disposition === 'revalidate',
+  const paragraphs = EffectArray.map(old.paragraphs, (paragraph, ordinal) => {
+    const operation = EffectOption.getOrUndefined(
+      EffectArray.findFirst(proposal.draft.operations, item => item.ordinal === ordinal),
+    );
+    const revalidation = EffectOption.getOrUndefined(
+      EffectOption.map(
+        EffectOption.fromNullishOr(proposal.draft.paragraphDispositions?.entries),
+        __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              __effectArrayReceiver,
+              item => item.ordinal === ordinal && item.disposition === 'revalidate',
+            ),
+          ),
+      ),
     );
     if (operation && paragraph.support !== 'direct')
       fail('imported updates require directly supported descriptive paragraphs.');
@@ -774,27 +870,32 @@ export function validateTopicMaintenanceSourceApprovalReceipt(
       !exactKeys(input, ['version', 'kind', 'reviewRevision', 'stage', 'preview']) ||
       input.version !== 3 ||
       input.kind !== 'automatic' ||
-      !Number.isSafeInteger(input.reviewRevision) ||
-      (input.reviewRevision as number) < 1 ||
-      (input.reviewRevision as number) > revision ||
-      !['preview', 'parked', 'prepared', 'written', 'conflict'].includes(input.stage as string)
+      !checkedIsSafeInteger(input.reviewRevision) ||
+      input.reviewRevision < 1 ||
+      input.reviewRevision > revision ||
+      !checkedIsOneOf(ACCEPTANCE_STAGES, input.stage)
     )
       fail('automatic approval receipt is malformed.');
     const preview = validateAutomaticMaintenanceAcceptancePreview(input.preview, review);
     if (preview.reviewId !== reviewId || (input.stage === 'preview' && input.reviewRevision !== revision))
       fail('automatic approval identity changed.');
-    return input as unknown as AutomaticMaintenanceApprovalReceiptV3;
+    return {
+      version: 3,
+      kind: 'automatic',
+      reviewRevision: input.reviewRevision,
+      stage: input.stage,
+      preview,
+    };
   }
   if (
     !exactKeys(input, ['version', 'sourceKind', 'reviewRevision', 'stage', 'preview']) ||
     input.version !== 2 ||
     input.sourceKind !== 'obsidian' ||
     typeof input.reviewRevision !== 'number' ||
-    !Number.isSafeInteger(input.reviewRevision) ||
+    !checkedIsSafeInteger(input.reviewRevision) ||
     input.reviewRevision < 1 ||
     input.reviewRevision > revision ||
-    typeof input.stage !== 'string' ||
-    !['preview', 'parked', 'prepared', 'written', 'conflict'].includes(input.stage)
+    !checkedIsOneOf(ACCEPTANCE_STAGES, input.stage)
   )
     fail('imported approval receipt is malformed.');
   const preview = validateTopicMaintenanceObsidianAcceptancePreview(input.preview, review);
@@ -804,7 +905,7 @@ export function validateTopicMaintenanceSourceApprovalReceipt(
     version: 2,
     sourceKind: 'obsidian',
     reviewRevision: input.reviewRevision,
-    stage: input.stage as TopicMaintenanceApprovalReceiptV1['stage'],
+    stage: input.stage,
     preview,
   };
 }
@@ -852,16 +953,17 @@ export function prepareAutomaticMaintenanceAcceptance(
   if (record.metadata.reviewedSupportError) fail('existing approved support is malformed.');
   if (prior) validateReviewedMemorySupport(prior, record.body);
   if (proposal.draft.purpose === 'manual-edit' && prior) {
-    const final = proposal.body
-      .trim()
-      .split(/\n[\t ]*\n/u)
-      .map(text => text.trim())
-      .filter(Boolean);
-    const currentIds = new Set(review.reviewEvidence.map(entry => entry.descriptor.id));
+    const final = EffectArray.filter(
+      EffectArray.map(Effect.pipe(proposal.body, EffectString.trim, EffectString.split(/\n[\t ]*\n/u)), text =>
+        Effect.pipe(text, EffectString.trim),
+      ),
+      Boolean,
+    );
+    const currentIds = new Set(EffectArray.map(review.reviewEvidence, entry => entry.descriptor.id));
     for (const [ordinal, decision] of proposal.draft.paragraphDecisions.entries()) {
       const approved = prior.active.paragraphs[ordinal];
       const same = approved?.hash === consolidationRevision(final[ordinal]);
-      const valid = same && approved.evidenceIds.every(id => currentIds.has(id));
+      const valid = same && EffectArray.every(approved.evidenceIds, id => currentIds.has(id));
       if (
         valid
           ? decision.role !== approved.role ||
@@ -872,20 +974,27 @@ export function prepareAutomaticMaintenanceAcceptance(
         fail('manual preview must retain unchanged valid approval and visibly invalidate affected support.');
     }
   }
-  const sections = proposal.body
-    .trim()
-    .split(/\n[\t ]*\n/u)
-    .map(text => text.trim())
-    .filter(Boolean);
-  const sourceIds = new Set(proposal.draft.paragraphDecisions.flatMap(item => item.evidenceIds));
-  const sources = review.reviewEvidence
-    .filter(entry => sourceIds.has(entry.descriptor.id))
-    .map(entry => entry.descriptor)
-    .filter((entry, index, all) => all.findIndex(other => other.id === entry.id) === index);
+  const sections = EffectArray.filter(
+    EffectArray.map(Effect.pipe(proposal.body, EffectString.trim, EffectString.split(/\n[\t ]*\n/u)), text =>
+      Effect.pipe(text, EffectString.trim),
+    ),
+    Boolean,
+  );
+  const sourceIds = new Set(EffectArray.flatMap(proposal.draft.paragraphDecisions, item => item.evidenceIds));
+  const sourceDescriptors = EffectArray.map(
+    EffectArray.filter(review.reviewEvidence, entry => sourceIds.has(entry.descriptor.id)),
+    entry => entry.descriptor,
+  );
+  const seenSourceIds = new Set<string>();
+  const sources = EffectArray.filter(sourceDescriptors, entry => {
+    if (seenSourceIds.has(entry.id)) return false;
+    seenSourceIds.add(entry.id);
+    return true;
+  });
   if (sources.length !== sourceIds.size) fail('approved mapping lacks its exact reviewed source.');
   const snapshot = createReviewedSupportSnapshot({
     bodyHash: consolidationRevision(proposal.body),
-    paragraphs: proposal.draft.paragraphDecisions.map((decision, ordinal) => {
+    paragraphs: EffectArray.map(proposal.draft.paragraphDecisions, (decision, ordinal) => {
       const old = review.basis.paragraphs[ordinal] ?? prior?.active.paragraphs[ordinal];
       const preserveContext =
         proposal.draft.purpose !== 'manual-edit' || old?.hash === consolidationRevision(sections[ordinal]);
@@ -934,12 +1043,18 @@ export function prepareAutomaticMaintenanceAcceptance(
     'updated_at',
     'last_reviewed',
   ]);
-  const header = before
-    .slice(0, separator.index)
-    .split(/\r?\n/u)
-    .filter(line => !removed.has(/^([^:]+):/u.exec(line)?.[1] ?? ''))
-    .join('\n');
-  const rawBody = before.slice(separator.index + separator[0].length);
+  const header = EffectArray.join(
+    EffectArray.filter(
+      Effect.pipe(before, __effectPipeInput => {
+        const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.slice(0, separator.index));
+        const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.split(/\r?\n/u));
+        return __effectPipeStage1;
+      }),
+      line => !removed.has(/^([^:]+):/u.exec(line)?.[1] ?? ''),
+    ),
+    '\n',
+  );
+  const rawBody = Effect.pipe(before, EffectString.slice(separator.index + separator[0].length));
   const body =
     proposal.draft.purpose === 'manual-edit'
       ? proposal.draft.desiredBody!

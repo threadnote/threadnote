@@ -1,4 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {stableJson} from './protocol.js';
+import * as EffectRecord from 'effect/Record';
 
 const defaultCacheBytes = 64 * 1024 * 1024;
 const utf8 = new TextEncoder();
@@ -30,7 +32,7 @@ export function makeRequestCanonicalJson(
     if (provenImmutable.has(object)) return true;
     active.add(object);
     try {
-      const array = Array.isArray(object);
+      const array = EffectArray.isArray(object);
       const prototype = Object.getPrototypeOf(object);
       if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) return false;
       if (Object.getOwnPropertySymbols(object).length > 0) return false;
@@ -40,7 +42,7 @@ export function makeRequestCanonicalJson(
       let deeplyFrozen = Object.isFrozen(object);
       const names = Object.getOwnPropertyNames(object);
       if (array) {
-        const length = (object as unknown[]).length;
+        const length = object.length;
         // Sparse arrays can observe mutable numeric properties on Array.prototype.
         if (names.length !== length + 1) return false;
         for (const name of names) {
@@ -104,7 +106,7 @@ export function makeRequestCanonicalJson(
   let retainedBytes = 0;
 
   const encode = (value: unknown): string => {
-    const inheritedToJson = [Object.prototype, Array.prototype].some(prototype => {
+    const inheritedToJson = EffectArray.some([Object.prototype, Array.prototype], prototype => {
       const descriptor = Object.getOwnPropertyDescriptor(prototype, 'toJSON');
       return descriptor !== undefined && (!('value' in descriptor) || typeof descriptor.value === 'function');
     });
@@ -126,22 +128,25 @@ export function makeRequestCanonicalJson(
       if (active.has(object)) return stableJson(value);
       active.add(object);
       try {
-        if (Array.isArray(object)) {
+        if (EffectArray.isArray(object)) {
           const parts = Array.from({length: object.length}, (_, index) => {
             const descriptor = Object.getOwnPropertyDescriptor(object, String(index));
             if (!descriptor) return 'null';
             return serialize(descriptor.value, active);
           });
-          return `[${parts.join(',')}]`;
+          return `[${EffectArray.join(parts, ',')}]`;
         }
 
-        const entries = Object.entries(object as Record<string, unknown>)
-          .filter(([, item]) => item !== undefined)
-          .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
-        const lexicallySortedKeys = Object.fromEntries(entries.map(([key]) => [key, true]));
-        const orderedKeys = Object.keys(lexicallySortedKeys);
+        const entries = EffectArray.filter(EffectRecord.toEntries(object), ([, item]) => item !== undefined).sort(
+          ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
+        );
+        const lexicallySortedKeys = EffectRecord.fromEntries(EffectArray.map(entries, ([key]) => [key, true]));
+        const orderedKeys = EffectRecord.keys(lexicallySortedKeys);
         const values = new Map(entries);
-        return `{${orderedKeys.map(key => `${JSON.stringify(key)}:${serialize(values.get(key), active)}`).join(',')}}`;
+        return `{${EffectArray.join(
+          EffectArray.map(orderedKeys, key => `${JSON.stringify(key)}:${serialize(values.get(key), active)}`),
+          ',',
+        )}}`;
       } finally {
         active.delete(object);
       }

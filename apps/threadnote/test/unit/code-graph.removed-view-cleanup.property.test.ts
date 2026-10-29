@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -20,16 +21,18 @@ import {
 } from '@threadnote/graph/store';
 import {CODE_GRAPH_EXTRACTOR_GENERATION} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
-const REPOSITORY_ID = 'b'.repeat(64);
-const WORKTREE_ID = 'c'.repeat(64);
-const OTHER_WORKTREE_ID = 'd'.repeat(64);
-const RECORD_DIGEST = 'e'.repeat(64);
-const RECORD_IDENTITY = 'f'.repeat(64);
-const SNAPSHOT_A = `cgsn_${'1'.repeat(40)}`;
-const SNAPSHOT_B = `cgsn_${'2'.repeat(40)}`;
-const SNAPSHOT_C = `cgsn_${'3'.repeat(40)}`;
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
+const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
+const WORKTREE_ID = Effect2.pipe('c', EffectString.repeat(64));
+const OTHER_WORKTREE_ID = Effect2.pipe('d', EffectString.repeat(64));
+const RECORD_DIGEST = Effect2.pipe('e', EffectString.repeat(64));
+const RECORD_IDENTITY = Effect2.pipe('f', EffectString.repeat(64));
+const SNAPSHOT_A = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+const SNAPSHOT_B = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
+const SNAPSHOT_C = `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`;
 
 type StateMachineCommand =
   'advance' | 'bad-attempt' | 'clear-cursor' | 'defer' | 'no-op' | 'progress' | 'replay' | 'skip';
@@ -155,7 +158,7 @@ describe('removed code graph view cleanup state-machine properties', () => {
           );
           expect(claimedB.epoch).toBeGreaterThan(claimedA.epoch);
           expect(
-            readSnapshotLeases(databasePath, SNAPSHOT_B).filter(row => row.retire_when_inactive === 1),
+            EffectArray.filter(readSnapshotLeases(databasePath, SNAPSHOT_B), row => row.retire_when_inactive === 1),
           ).toHaveLength(1);
 
           yield* Effect.sync(() => legacyReplaceTombstone(databasePath, SNAPSHOT_B, removedAt));
@@ -380,8 +383,8 @@ function seedSnapshot(database: Database, snapshotId: string, worktreeId: string
       snapshotId,
       REPOSITORY_ID,
       worktreeId,
-      '1'.repeat(40),
-      `cgc_${snapshotId.slice(-40)}`,
+      Effect2.pipe('1', EffectString.repeat(40)),
+      `cgc_${Effect2.pipe(snapshotId, EffectString.slice(-40))}`,
       new Date(0).toISOString(),
       new Date(0).toISOString(),
     );
@@ -446,7 +449,9 @@ function findClaim(
   entries: readonly CodeGraphRemovedViewCleanupEntry[],
   snapshotId: string,
 ): CodeGraphRemovedViewCleanupEntry {
-  const entry = entries.find(candidate => candidate.expectedSnapshotId === snapshotId);
+  const entry = EffectOption.getOrUndefined(
+    EffectArray.findFirst(entries, candidate => candidate.expectedSnapshotId === snapshotId),
+  );
   expect(entry).toBeDefined();
   return entry!;
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem} from 'effect';
 import * as TestClock from 'effect/testing/TestClock';
@@ -9,6 +10,8 @@ import {formatMemoryDocument} from '@threadnote/memory/document';
 import {runBinaryCommandEffect} from '@threadnote/platform/command';
 import {localUserMemoriesRoot} from '../../src/memory/migrations.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Manager attention API', () => {
   effectIt.effect('opens spaced project names without selecting their slug-shaped neighbor', () =>
@@ -118,7 +121,10 @@ describe('Manager attention API', () => {
           name: 'current',
           project: 'threadnote',
           status: 'active' as const,
-          relations: ['inactive', 'other', 'absent'].map(name => ({type: 'references' as const, uri: uri(name)})),
+          relations: EffectArray.map(['inactive', 'other', 'absent'], name => ({
+            type: 'references' as const,
+            uri: uri(name),
+          })),
         },
         {name: 'inactive', project: 'threadnote', status: 'archived' as const, relations: []},
         {name: 'other', project: 'other', status: 'active' as const, relations: []},
@@ -153,7 +159,7 @@ describe('Manager attention API', () => {
             fs.readFileString(file, ...args).pipe(
               Effect.tap(() =>
                 Effect.sync(() => {
-                  if (documents.some(document => file === `${root}/${document.name}.md`)) {
+                  if (EffectArray.some(documents, document => file === `${root}/${document.name}.md`)) {
                     reads.set(file, (reads.get(file) ?? 0) + 1);
                   }
                 }),
@@ -163,7 +169,12 @@ describe('Manager attention API', () => {
       );
       expect(response?.status).toBe(200);
       if (response?.status !== 200 || !('findings' in response.body)) throw new Error('Expected health report');
-      const relations = response.body.findings.filter(finding => finding.category.startsWith('relation-target-'));
+      const findings = response.body.findings;
+      const relations = EffectArray.filter(
+        findings,
+        (finding, index) =>
+          index in findings && Effect2.pipe(finding.category, EffectString.startsWith('relation-target-')),
+      );
       expect(relations).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -176,8 +187,8 @@ describe('Manager attention API', () => {
           }),
         ]),
       );
-      expect(relations.some(finding => finding.repair.targetUri === uri('other'))).toBe(false);
-      expect(documents.map(document => reads.get(`${root}/${document.name}.md`))).toEqual([1, 1, 1]);
+      expect(EffectArray.some(relations, finding => finding.repair.targetUri === uri('other'))).toBe(false);
+      expect(EffectArray.map(documents, document => reads.get(`${root}/${document.name}.md`))).toEqual([1, 1, 1]);
     }).pipe(TestClock.withLive, Effect.scoped, provideTestLayer(ApplicationLayer)),
   );
   effectIt.effect('separates pending, deferred, and completed reviews without changing the total attention count', () =>
@@ -204,7 +215,7 @@ describe('Manager attention API', () => {
         createdAt: '2026-10-07T00:00:00Z',
         codeCitations: [],
         auditEvents: [],
-        candidates: states.map(state => ({
+        candidates: EffectArray.map(states, state => ({
           candidateId: state,
           state,
           categories: ['decision'],
@@ -232,9 +243,11 @@ describe('Manager attention API', () => {
         });
         if (response?.status !== 200 || !('items' in response.body) || !response.body.items)
           throw new Error('Expected review inbox');
-        expect(response.body.items.flatMap(item => item.candidates.map(candidate => candidate.state))).toEqual(
-          expected,
-        );
+        expect(
+          EffectArray.flatMap(response.body.items, item =>
+            EffectArray.map(item.candidates, candidate => candidate.state),
+          ),
+        ).toEqual(expected);
         expect(response.body.pendingCount).toBe(3);
       }
       for (const view of ['pending', 'deferred', 'history']) {
@@ -247,7 +260,7 @@ describe('Manager attention API', () => {
           throw new Error('Expected All review inbox');
         expect(response.body.project).toBe('');
         expect(response.body.pendingCount).toBe(6);
-        expect(response.body.items.map(item => item.project).sort()).toEqual(['threadnote', 'unrelated']);
+        expect(EffectArray.map(response.body.items, item => item.project).sort()).toEqual(['threadnote', 'unrelated']);
       }
       const allHealth = yield* handleManagerAttentionRequest({
         config,

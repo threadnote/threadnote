@@ -8,8 +8,10 @@ import {
   type SecondSurfaceReadObservationV1,
   type SecondSurfaceRecallObservationV1,
 } from '@threadnote/threadnote/activation/second/surface';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const digest = (character: string) => character.repeat(64);
+const digest = (character: string) => Effect.pipe(character, EffectString.repeat(64));
 const startedAt = '2026-09-18T08:00:00.000Z';
 const recallAt = '2026-09-18T08:00:10.000Z';
 const readAt = '2026-09-18T08:00:12.000Z';
@@ -247,7 +249,7 @@ describe('activation second-surface proof', () => {
       code: 'input-invalid',
       status: 'rejected',
     });
-    const overlongUri = `${context.decision.canonicalUri}/${'a'.repeat(1_024)}`;
+    const overlongUri = `${context.decision.canonicalUri}/${Effect.pipe('a', EffectString.repeat(1_024))}`;
     const overlong = {...context, decision: {...context.decision, canonicalUri: overlongUri}};
     expect(() => planSecondSurfaceRecallV1(overlong)).not.toThrow();
     expect(planSecondSurfaceRecallV1(overlong)).toEqual({code: 'input-invalid', status: 'rejected'});

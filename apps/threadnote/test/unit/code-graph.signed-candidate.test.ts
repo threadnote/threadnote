@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
@@ -28,22 +29,25 @@ import {
   signedCandidateQueuePath,
   type GraphSharePendingSignedCandidate,
   type GraphShareSignedCandidateV2,
+  type GraphShareSignedCandidateStore,
 } from '@threadnote/graph/sharing/signed/candidate';
-import type {CodeGraphStoreShape} from '@threadnote/graph/store/shape';
-import type {CodeGraphInventoryFile, CodeGraphSnapshot} from '@threadnote/graph/types';
+import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSnapshot} from '@threadnote/graph/types';
 import {SystemInfo} from '@threadnote/platform/system';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const layer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 const packs = BUILTIN_LANGUAGE_PACK_REGISTRY.activePackProvenance(['src/index.ts', 'src/main.py']);
-const commit = 'a'.repeat(40);
-const repositoryId = 'b'.repeat(64);
+const commit = Effect2.pipe('a', EffectString.repeat(40));
+const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
 const profileDigest = sha256Digest('producer-profile');
 const pathName = 'src/index.ts';
-const blobId = 'd'.repeat(40);
+const blobId = Effect2.pipe('d', EffectString.repeat(40));
 const contentHash = codeGraphCommittedContentHash('sha1', blobId);
-const facts = {diagnostics: [], edges: [], path: pathName, symbols: []};
+const facts: CodeGraphFileFacts = {diagnostics: [], edges: [], path: pathName, symbols: []};
 const file: CodeGraphInventoryFile = {
   blobId,
   contentHash,
@@ -75,13 +79,13 @@ const snapshot: CodeGraphSnapshot = {
   commit,
   dirty: false,
   edgeCount: 0,
-  extractorSet: 'e'.repeat(64),
+  extractorSet: Effect2.pipe('e', EffectString.repeat(64)),
   fileCount: 2,
-  id: `cgsn_${'f'.repeat(40)}`,
+  id: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`,
   repositoryId,
   state: 'ready',
   symbolCount: 0,
-  worktreeId: '1'.repeat(64),
+  worktreeId: Effect2.pipe('1', EffectString.repeat(64)),
 };
 const pendingFixture: GraphSharePendingSignedCandidate = {
   actionKey,
@@ -100,7 +104,7 @@ const pendingFixture: GraphSharePendingSignedCandidate = {
 };
 const candidateFixture: GraphShareSignedCandidateV2 = {
   ...pendingFixture,
-  graphAbi: '2'.repeat(64),
+  graphAbi: Effect2.pipe('2', EffectString.repeat(64)),
   partialCoverage: false,
   resourceLimits: [],
   snapshotId: snapshot.id,
@@ -142,14 +146,17 @@ const fixture = Effect.fn('test.signedCandidate.fixture')(function* () {
     effectiveSnapshotFilesByPaths: (_databasePath: string, id: string, paths: readonly string[]) => {
       observed.push(`files:${id}`);
       return Effect.succeed(
-        paths.map(pathValue => ({path: pathValue, file: pathValue === file.path ? file : undefined})),
+        EffectArray.map(paths, pathValue => ({path: pathValue, file: pathValue === file.path ? file : undefined})),
       );
     },
-    loadCachedFacts: (_databasePath: string, files: readonly CodeGraphInventoryFile[], extractorSet: string) => {
+    loadCachedFacts: (_databasePath, files, extractorSet) => {
       observed.push(`cache:${extractorSet}`);
-      return Effect.succeed({bytes: resultBytes.byteLength, facts: new Map(files.map(item => [item.path, facts]))});
+      return Effect.succeed({
+        bytes: resultBytes.byteLength,
+        facts: new Map(EffectArray.map(files, item => [item.path, facts])),
+      });
     },
-  } as unknown as CodeGraphStoreShape;
+  } satisfies GraphShareSignedCandidateStore;
   return {casRoot, fs, home, observed, path, pending, store};
 });
 
@@ -219,9 +226,13 @@ describe('producer-bound signed candidate evidence', () => {
           });
         expect((yield* finalize({...snapshot, dirty: true})).queued).toBe(0);
         expect(f.observed).toEqual([]);
-        expect((yield* finalize({...snapshot, commit: '9'.repeat(40)})).queued).toBe(0);
+        expect((yield* finalize({...snapshot, commit: Effect2.pipe('9', EffectString.repeat(40))})).queued).toBe(0);
         expect(f.observed).toEqual([`packs:${snapshot.id}`]);
-        const missing = {snapshotPackProvenance: () => Effect.void} as unknown as CodeGraphStoreShape;
+        const missing = {
+          effectiveSnapshotFilesByPaths: () => Effect.succeed([]),
+          loadCachedFacts: () => Effect.succeed({bytes: 0, facts: new Map<string, CodeGraphFileFacts>()}),
+          snapshotPackProvenance: () => Effect.succeed([]),
+        } satisfies GraphShareSignedCandidateStore;
         expect((yield* finalize(snapshot, missing)).queued).toBe(0);
         expect(yield* f.fs.exists(signedCandidateQueuePath(f.path, f.home, repositoryId))).toBe(false);
       }).pipe(provideTestLayer(layer)),
@@ -255,7 +266,7 @@ describe('producer-bound signed candidate evidence', () => {
     Effect.gen(function* () {
       const f = yield* fixture();
       yield* persistGraphSharePendingSignedCandidates({candidates: [f.pending], repositoryId, threadnoteHome: f.home});
-      const finalize = (store: CodeGraphStoreShape) =>
+      const finalize = (store: GraphShareSignedCandidateStore) =>
         finalizeGraphShareSignedCandidates({
           databasePath: '/exact/ready.sqlite',
           repositoryId,
@@ -271,8 +282,8 @@ describe('producer-bound signed candidate evidence', () => {
       const changedCache = {
         ...f.store,
         loadCachedFacts: () =>
-          Effect.succeed({bytes: 1, facts: new Map([[pathName, {...facts, symbols: [{name: 'changed'}]}]])}),
-      } as unknown as CodeGraphStoreShape;
+          Effect.succeed({bytes: 1, facts: new Map([[pathName, {...facts, path: 'src/changed.ts'}]])}),
+      } satisfies GraphShareSignedCandidateStore;
       expect((yield* finalize(changedCache)).queued).toBe(0);
       expect((yield* finalize(f.store)).verified).toBe(1);
     }).pipe(provideTestLayer(layer)),
@@ -285,7 +296,7 @@ describe('producer-bound signed candidate evidence', () => {
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-signed-journal-capacity-'});
       const additions = Array.from({length: 600}, (_, index) => ({
         ...pendingFixture,
-        actionKey: index.toString(16).padStart(64, '0'),
+        actionKey: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
       }));
       expect(
         (yield* persistGraphSharePendingSignedCandidates({
@@ -305,8 +316,10 @@ describe('producer-bound signed candidate evidence', () => {
         );
         recovered.push(...page.candidates);
       }
-      expect(recovered.map(candidate => candidate.actionKey)).toEqual(additions.map(candidate => candidate.actionKey));
-      const final = recovered.map(candidate => ({
+      expect(EffectArray.map(recovered, candidate => candidate.actionKey)).toEqual(
+        EffectArray.map(additions, candidate => candidate.actionKey),
+      );
+      const final = EffectArray.map(recovered, candidate => ({
         ...candidate,
         graphAbi: candidateFixture.graphAbi,
         partialCoverage: false,
@@ -318,9 +331,12 @@ describe('producer-bound signed candidate evidence', () => {
       expect(ids.length).toBeGreaterThan(1);
       const pages = [];
       for (const id of ids) pages.push((yield* readGraphShareSignedCandidatePage(home, repositoryId, id))!);
-      expect(pages.flatMap(page => page.candidates).map(candidate => candidate.actionKey)).toEqual(
-        additions.map(candidate => candidate.actionKey),
-      );
+      expect(
+        EffectArray.map(
+          EffectArray.flatMap(pages, page => page.candidates),
+          candidate => candidate.actionKey,
+        ),
+      ).toEqual(EffectArray.map(additions, candidate => candidate.actionKey));
       const identity = graphShareSignedCandidateIdentity(pages[0].candidates[0]);
       expect(
         (yield* acknowledgeGraphShareSignedCandidatePage(home, repositoryId, ids[0], new Set([identity]))).acknowledged,
@@ -339,7 +355,7 @@ describe('producer-bound signed candidate evidence', () => {
       const pending: GraphSharePendingSignedCandidate[] = [];
       for (let index = 0; index < 520; index++) {
         const filePath = `src/file-${index}.ts`;
-        const gitBlobId = (index + 1).toString(16).padStart(40, '0');
+        const gitBlobId = Effect2.pipe((index + 1).toString(16), EffectString.padStart(40, '0'));
         const fileContentHash = codeGraphCommittedContentHash('sha1', gitBlobId);
         const fileFacts = {...facts, path: filePath};
         const key = graphShareParseActionKey({
@@ -380,10 +396,13 @@ describe('producer-bound signed candidate evidence', () => {
       const restartedStore = {
         snapshotPackProvenance: () => Effect.succeed(packs),
         effectiveSnapshotFilesByPaths: (_databasePath: string, _snapshotId: string, paths: readonly string[]) =>
-          Effect.succeed(paths.map(filePath => ({path: filePath, file: files.get(filePath)}))),
-        loadCachedFacts: (_databasePath: string, selected: readonly CodeGraphInventoryFile[]) =>
-          Effect.succeed({bytes: 0, facts: new Map(selected.map(item => [item.path, factsByPath.get(item.path)!]))}),
-      } as unknown as CodeGraphStoreShape;
+          Effect.succeed(EffectArray.map(paths, filePath => ({path: filePath, file: files.get(filePath)}))),
+        loadCachedFacts: (_databasePath, selected) =>
+          Effect.succeed({
+            bytes: 0,
+            facts: new Map(EffectArray.map(selected, item => [item.path, factsByPath.get(item.path) ?? facts])),
+          }),
+      } satisfies GraphShareSignedCandidateStore;
       const finalized = yield* finalizeGraphShareSignedCandidates({
         databasePath: '/exact/ready.sqlite',
         repositoryId,
@@ -397,9 +416,15 @@ describe('producer-bound signed candidate evidence', () => {
       const observed: string[] = [];
       for (const id of ids) {
         const page = yield* readGraphShareSignedCandidatePage(f.home, repositoryId, id);
-        observed.push(...(page?.candidates.map(candidate => candidate.actionKey) ?? []));
+        observed.push(
+          ...(EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(page?.candidates), __effectArrayReceiver =>
+              EffectArray.map(__effectArrayReceiver, candidate => candidate.actionKey),
+            ),
+          ) ?? []),
+        );
       }
-      expect(observed).toEqual(pending.map(candidate => candidate.actionKey));
+      expect(observed).toEqual(EffectArray.map(pending, candidate => candidate.actionKey));
       const pendingManifest = JSON.parse(
         yield* f.fs.readFileString(pendingCandidateQueuePath(f.path, f.home, repositoryId)),
       );
@@ -411,7 +436,7 @@ describe('producer-bound signed candidate evidence', () => {
     Effect.gen(function* () {
       const f = yield* fixture();
       const pendingPath = pendingCandidateQueuePath(f.path, f.home, repositoryId);
-      const orphan = {...f.pending, actionKey: '0'.repeat(64)};
+      const orphan = {...f.pending, actionKey: Effect2.pipe('0', EffectString.repeat(64))};
       const orphanBytes = `${JSON.stringify({candidates: [orphan], schemaVersion: 1})}\n`;
       const orphanPath = f.path.join(`${pendingPath}.d`, `${sha256HexSync(orphanBytes)}.json`);
       yield* f.fs.makeDirectory(f.path.dirname(orphanPath), {recursive: true});
@@ -444,9 +469,9 @@ describe('producer-bound signed candidate evidence', () => {
   effectIt.effect('deduplicates overlapping batches and rereads a rewritten page for the second acknowledgement', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const a = {...f.pending, actionKey: '1'.repeat(64)};
-      const b = {...f.pending, actionKey: '2'.repeat(64)};
-      const c = {...f.pending, actionKey: '3'.repeat(64)};
+      const a = {...f.pending, actionKey: Effect2.pipe('1', EffectString.repeat(64))};
+      const b = {...f.pending, actionKey: Effect2.pipe('2', EffectString.repeat(64))};
+      const c = {...f.pending, actionKey: Effect2.pipe('3', EffectString.repeat(64))};
       expect(
         (yield* persistGraphSharePendingSignedCandidates({
           candidates: [a, b],
@@ -472,9 +497,9 @@ describe('producer-bound signed candidate evidence', () => {
       expect((yield* persistGraphShareSignedCandidates(f.home, repositoryId, [final(a), final(c)])).queued).toBe(1);
       const ids = yield* listGraphShareSignedCandidatePageIds(f.home, repositoryId);
       const first = (yield* readGraphShareSignedCandidatePage(f.home, repositoryId, ids[0]))!;
-      expect(first.candidates.map(candidate => candidate.actionKey)).toEqual([a.actionKey, b.actionKey]);
+      expect(EffectArray.map(first.candidates, candidate => candidate.actionKey)).toEqual([a.actionKey, b.actionKey]);
       const second = (yield* readGraphShareSignedCandidatePage(f.home, repositoryId, ids[1]))!;
-      expect(second.candidates.map(candidate => candidate.actionKey)).toEqual([c.actionKey]);
+      expect(EffectArray.map(second.candidates, candidate => candidate.actionKey)).toEqual([c.actionKey]);
       expect(
         (yield* acknowledgeGraphShareSignedCandidatePage(
           f.home,
@@ -492,7 +517,7 @@ describe('producer-bound signed candidate evidence', () => {
       expect(stale).toEqual({acknowledged: 0, absent: false});
       const currentIds = yield* listGraphShareSignedCandidatePageIds(f.home, repositoryId);
       const replacement = (yield* readGraphShareSignedCandidatePage(f.home, repositoryId, currentIds[0]))!;
-      expect(replacement.candidates.map(candidate => candidate.actionKey)).toEqual([b.actionKey]);
+      expect(EffectArray.map(replacement.candidates, candidate => candidate.actionKey)).toEqual([b.actionKey]);
       expect(
         (yield* acknowledgeGraphShareSignedCandidatePage(
           f.home,
@@ -549,9 +574,9 @@ describe('producer-bound signed candidate evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-signed-journal-property-'});
-        const additions = [...first, ...second].map(index => ({
+        const additions = EffectArray.map([...first, ...second], index => ({
           ...pendingFixture,
-          actionKey: index.toString(16).padStart(64, '0'),
+          actionKey: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
         }));
         const before = JSON.stringify(additions);
         yield* persistGraphSharePendingSignedCandidates({
@@ -584,9 +609,9 @@ describe('producer-bound signed candidate evidence', () => {
           const page = parseGraphSharePendingSignedCandidateQueue(
             JSON.parse(yield* fs.readFileString(path.join(`${pendingPath}.d`, `${segment.id}.json`))),
           );
-          observed.push(...page.candidates.map(candidate => candidate.actionKey));
+          observed.push(...EffectArray.map(page.candidates, candidate => candidate.actionKey));
         }
-        expect(observed).toEqual([...new Set(additions.map(candidate => candidate.actionKey))]);
+        expect(observed).toEqual([...new Set(EffectArray.map(additions, candidate => candidate.actionKey))]);
       }).pipe(provideTestLayer(layer)),
     {fastCheck: {numRuns: 20}},
   );
@@ -604,7 +629,7 @@ describe('producer-bound signed candidate evidence', () => {
     ).toThrow();
     expect(() =>
       parseGraphSharePendingSignedCandidateQueue({
-        candidates: [{...pendingFixture, batchId: '0'.repeat(40)}],
+        candidates: [{...pendingFixture, batchId: Effect2.pipe('0', EffectString.repeat(40))}],
         schemaVersion: 1,
       }),
     ).toThrow();

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, FileSystem, Path} from 'effect';
 import type {CanonicalMutationGenerationTransition} from './mutation_generation.js';
 import type {SystemInfo} from '@threadnote/platform/system';
@@ -55,7 +56,7 @@ class InvalidationReceipt {
       this.#location.home === location.home &&
       this.#location.account === location.account &&
       this.#location.user === location.user &&
-      uris.every(uri => this.#uris.has(uri))
+      EffectArray.every(uris, uri => this.#uris.has(uri))
     );
   }
 }
@@ -125,7 +126,7 @@ export const makeResourceRecallInvalidationObservation = (location: Invalidation
       if (expected.size !== verified.size || expected.size !== actual.size) return undefined;
       for (const [uri, count] of expected)
         if (verified.get(uri) !== count || actual.get(uri) !== count) return undefined;
-      if (uris.some(uri => !expected.has(uri))) return undefined;
+      if (EffectArray.some(uris, uri => !expected.has(uri))) return undefined;
       return new InvalidationReceipt(location, [...expected.keys()]);
     },
   };

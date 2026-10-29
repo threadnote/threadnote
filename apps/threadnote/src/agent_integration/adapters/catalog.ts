@@ -1,5 +1,6 @@
 import {Effect} from 'effect';
 import {AgentAdapterActionError, type AgentAdapterDefinition, type AgentAdapterMutation} from './contract.js';
+import {Array as EffectArray} from 'effect';
 
 const unsupported: AgentAdapterMutation = (_config, adapter) =>
   AgentAdapterActionError.make({
@@ -15,7 +16,7 @@ export function defineCatalogAgentAdapter(id: string): AgentAdapterDefinition {
       status: (_config, adapter) =>
         Effect.succeed({
           state: adapter.catalog.tier === 'manual' ? 'manual' : 'unsupported',
-          detail: adapter.catalog.caveats.join(' '),
+          detail: EffectArray.join(adapter.catalog.caveats, ' '),
         }),
     },
     adapterVersion: 1,

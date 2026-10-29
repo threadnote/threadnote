@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {makeTopicDraftWireBasis, makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
 import {decodeTopicDraftWire} from '../../src/manager/topic_draft_schema.js';
@@ -22,13 +23,15 @@ import {
   TopicGenerationRequestError,
   withTopicGenerationObservation,
 } from '../../src/memory/context/maintenance_generation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const identity = {
-  caseId: 'health-case-' + 'a'.repeat(40),
-  reviewId: 'review-' + 'b'.repeat(24),
-  targetHash: 'c'.repeat(64),
-  observationRevision: 'd'.repeat(64),
-  packetDigest: 'e'.repeat(64),
+  caseId: 'health-case-' + Effect2.pipe('a', EffectString.repeat(40)),
+  reviewId: 'review-' + Effect2.pipe('b', EffectString.repeat(24)),
+  targetHash: Effect2.pipe('c', EffectString.repeat(64)),
+  observationRevision: Effect2.pipe('d', EffectString.repeat(64)),
+  packetDigest: Effect2.pipe('e', EffectString.repeat(64)),
   agent: 'local-ai' as const,
   model: 'fixture',
   promptVersion: 'v5',
@@ -63,7 +66,7 @@ describe('private topic generation lifecycle', () => {
             return observation.summary();
           }),
         );
-        expect(summary.attempts.map(a => a.status)).toEqual(['draft-invalid', 'accepted']);
+        expect(EffectArray.map(summary.attempts, a => a.status)).toEqual(['draft-invalid', 'accepted']);
         expect(summary.attempts[0].promptBytes).toBe(6);
         const receipt = yield* loadTopicGenerationReceipt(home, summary.receiptId);
         expect(receipt.firstFailedOutput).toMatchObject({
@@ -199,10 +202,10 @@ describe('private topic generation lifecycle', () => {
         expect(failure).toBeInstanceOf(TopicGenerationRequestError);
         if (Schema.is(TopicGenerationRequestError)(failure)) {
           const receipt = yield* loadTopicGenerationReceipt(home, failure.diagnostics!.receiptId);
-          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'deadline']);
+          expect(EffectArray.map(receipt.attempts, attempt => attempt.status)).toEqual(['draft-invalid', 'deadline']);
           expect(receipt.firstFailedOutput?.text).toBe('first invalid');
           expect(receipt.elapsedMilliseconds).toBe(120_000);
-          expect(receipt.attempts.map(attempt => attempt.elapsedMilliseconds)).toEqual([20_000, 100_000]);
+          expect(EffectArray.map(receipt.attempts, attempt => attempt.elapsedMilliseconds)).toEqual([20_000, 100_000]);
         }
       }),
     );
@@ -214,7 +217,7 @@ describe('private topic generation lifecycle', () => {
         ).pipe(Effect.flip);
         if (!Schema.is(TopicGenerationRequestError)(failure)) throw new Error('Expected safe generation error');
         const receipt = yield* loadTopicGenerationReceipt(home, failure.diagnostics!.receiptId);
-        expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['provider-failed']);
+        expect(EffectArray.map(receipt.attempts, attempt => attempt.status)).toEqual(['provider-failed']);
         expect(receipt.attempts[0].usage).toEqual({status: 'unavailable'});
         expect(receipt.firstFailedOutput).toBeUndefined();
       }),

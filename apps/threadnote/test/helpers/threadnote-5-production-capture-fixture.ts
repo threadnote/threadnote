@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -55,12 +56,113 @@ import {createProcedureVerificationReceipt, parseProcedureManifest} from '@threa
 import {aggregateValueReportV1} from '@threadnote/threadnote/value_report/index';
 import {summarizeLocalValueEvents} from '@threadnote/threadnote/value_report/events';
 import {renderManagedGuidanceBlock, upsertGuidanceBlock} from '@threadnote/threadnote/guidance/index';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const ActivationArtifactSchema = withRest(
+  Schema.Struct({
+    trials: Schema.Array(
+      withRest(
+        Schema.Struct({
+          offlineObservation: Schema.optionalKey(Schema.Unknown),
+          resumeBoundaryRevision: Schema.optionalKey(Schema.Unknown),
+          secondSurface: Schema.optionalKey(
+            Schema.NullOr(withRest(Schema.Struct({challenge: Schema.optionalKey(Schema.Unknown)}))),
+          ),
+          state: withRest(
+            Schema.Struct({
+              plan: withRest(Schema.Struct({activationId: Schema.String})),
+              receipt: withRest(Schema.Struct({revision: Schema.String})),
+            }),
+          ),
+        }),
+      ),
+    ),
+  }),
+);
+const ContextBriefArtifactSchema = withRest(Schema.Struct({attempts: Schema.Array(Schema.Unknown)}));
+const ValueReportArtifactSchema = withRest(
+  Schema.Struct({
+    feedbackTrials: Schema.Array(
+      withRest(
+        Schema.Struct({
+          event: Schema.Unknown,
+          laneId: Schema.String,
+          offlineObservation: Schema.NullOr(Schema.Unknown),
+        }),
+      ),
+    ),
+  }),
+);
+const ProposalReviewSchema = withRest(
+  Schema.Struct({
+    auditEvents: Schema.Array(
+      withRest(
+        Schema.Struct({
+          action: Schema.String,
+          candidateId: Schema.optionalKey(Schema.String),
+        }),
+      ),
+    ),
+    reviewId: Schema.String,
+    revision: Schema.Finite,
+  }),
+);
+const ProposalArtifactSchema = withRest(
+  Schema.Struct({
+    attempts: Schema.Array(
+      withRest(
+        Schema.Struct({
+          input: withRest(
+            Schema.Struct({
+              mutations: Schema.Array(
+                withRest(
+                  Schema.Struct({
+                    approval: withRest(Schema.Struct({expectedSourceContentHash: Schema.String})),
+                    candidateId: Schema.String,
+                    sourceUri: Schema.String,
+                  }),
+                ),
+              ),
+            }),
+          ),
+          proposal: withRest(Schema.Struct({proposalHash: Schema.String})),
+          review: ProposalReviewSchema,
+        }),
+      ),
+    ),
+  }),
+);
+const ProcedureArtifactSchema = withRest(
+  Schema.Struct({
+    attempts: Schema.Array(
+      withRest(
+        Schema.Struct({
+          manifest: Schema.Unknown,
+          statusInput: withRest(Schema.Struct({receipt: Schema.Unknown})),
+        }),
+      ),
+    ),
+  }),
+);
+const HealthArtifactSchema = withRest(
+  Schema.Struct({
+    aggregate: withRest(
+      Schema.Struct({
+        input: withRest(Schema.Struct({teams: Schema.Array(withRest(Schema.Struct({team: Schema.String})))})),
+      }),
+    ),
+  }),
+);
 
 export const PRODUCTION_CAPTURE_CANDIDATE: Threadnote5SourceV1 = {
-  commit: '1'.repeat(40),
-  executableSha256: '2'.repeat(64),
+  commit: Effect.pipe('1', EffectString.repeat(40)),
+  executableSha256: Effect.pipe('2', EffectString.repeat(64)),
   id: 'threadnote-5.0.0',
-  version: `5.0.0-local.g${'1'.repeat(40)}`,
+  version: `5.0.0-local.g${Effect.pipe('1', EffectString.repeat(40))}`,
 };
 
 export function productionCaptureFixture(): {
@@ -76,35 +178,35 @@ export function productionCaptureFixture(): {
   if (interruptedBoundary === undefined) throw new Error('Interrupted fixture lacks an intermediate revision.');
 
   const records = [
-    record('solo', 'activation', {trials: soloJourneys.map(item => item.activationTrial)}),
+    record('solo', 'activation', {trials: EffectArray.map(soloJourneys, item => item.activationTrial)}),
     contextBriefRecord(soloJourneys),
     valueReportRecord(
       'solo',
-      soloJourneys.map(item => item.firstBriefLaneId),
+      EffectArray.map(soloJourneys, item => item.firstBriefLaneId),
     ),
-    record('two-agent', 'activation', {trials: twoAgentJourneys.map(item => item.activationTrial)}),
-    record('two-agent', 'recall', {trials: twoAgentJourneys.map(item => ({proof: item.proof}))}),
+    record('two-agent', 'activation', {trials: EffectArray.map(twoAgentJourneys, item => item.activationTrial)}),
+    record('two-agent', 'recall', {trials: EffectArray.map(twoAgentJourneys, item => ({proof: item.proof}))}),
     valueReportRecord(
       'two-agent',
-      twoAgentJourneys.map(item => item.proof.proofHash),
+      EffectArray.map(twoAgentJourneys, item => item.proof.proofHash),
       twoAgentJourneys,
     ),
     record('git-shared', 'sharing', {
-      trials: sharedJourneys.map(item => ({
+      trials: EffectArray.map(sharedJourneys, item => ({
         decision: item.decision,
         plan: item.plan,
         receipt: item.publicationReceipt,
       })),
     }),
-    record('git-shared', 'recall', {trials: sharedJourneys.map(item => ({proof: item.proof}))}),
+    record('git-shared', 'recall', {trials: EffectArray.map(sharedJourneys, item => ({proof: item.proof}))}),
     valueReportRecord(
       'git-shared',
-      sharedJourneys.map(item => item.proof.proofHash),
+      EffectArray.map(sharedJourneys, item => item.proof.proofHash),
     ),
     offlineActivationRecord(offlineJourneys),
     valueReportRecord(
       'offline',
-      offlineJourneys.map(item => item.firstBriefLaneId),
+      EffectArray.map(offlineJourneys, item => item.firstBriefLaneId),
       undefined,
       true,
     ),
@@ -141,14 +243,14 @@ function journey(prefix: string, index: number) {
     receipt: publicationReceipt,
     receiptChain,
   } = activationChain(repositoryIdentityHash, startedAt);
-  const publicationReceiptHash = publicationReceipt.operations.find(
-    operation => operation.kind === 'decision.publish',
+  const publicationReceiptHash = EffectOption.getOrUndefined(
+    EffectArray.findFirst(publicationReceipt.operations, operation => operation.kind === 'decision.publish'),
   )?.subsystemReceiptHash;
   if (publicationReceiptHash === undefined) throw new Error('Activation fixture has no publication receipt.');
   const decision = {
     canonicalUri: `threadnote://user/test/memories/shared/default/durable/projects/threadnote/${prefix}-${index}.md`,
     contentHash: sha256HexSync(`${prefix}:content:${index}`),
-    memoryId: `tn_${sha256HexSync(`${prefix}:memory:${index}`).slice(0, 20)}`,
+    memoryId: `tn_${Effect.pipe(sha256HexSync(`${prefix}:memory:${index}`), EffectString.slice(0, 20))}`,
     publicationReceiptHash,
   };
   const context: SecondSurfaceProofContextV1 = {
@@ -208,13 +310,9 @@ function journey(prefix: string, index: number) {
   const proofResult = completeSecondSurfaceProofV1(context, recall, read);
   if (proofResult.status !== 'verified') throw new Error(`Fixture proof failed: ${proofResult.code}.`);
   const proof = proofResult.receipt;
-  const finalReceipt = recordSuccessfulOperation(
-    plan,
-    publicationReceipt,
-    plan.operations.at(-1)!,
-    proof.proofHash,
-    approvals,
-  );
+  const finalOperation = plan.operations.at(-1);
+  if (finalOperation === undefined) throw new Error('The production capture plan has no final operation.');
+  const finalReceipt = recordSuccessfulOperation(plan, publicationReceipt, finalOperation, proof.proofHash, approvals);
   const challengeId = secondSurfaceChallengeIdV1(context);
   const contextHash = secondSurfaceProofContextHashV1(context);
   const nonceHash = sha256HexSync(`${prefix}:nonce:${index}`);
@@ -240,7 +338,9 @@ function journey(prefix: string, index: number) {
     version: 1 as const,
   };
   const fullChain = [...receiptChain, finalReceipt];
-  const firstBriefReceipt = fullChain.find(receipt => receipt.firstBrief !== undefined);
+  const firstBriefReceipt = EffectOption.getOrUndefined(
+    EffectArray.findFirst(fullChain, receipt => receipt.firstBrief !== undefined),
+  );
   if (firstBriefReceipt?.firstBrief === undefined) throw new Error('Activation fixture has no first brief.');
   const identity = {
     activationId: plan.activationId,
@@ -269,27 +369,27 @@ function journey(prefix: string, index: number) {
 function surface(surfaceId: string, capability: string, config: string, receipt: string) {
   return {
     access: 'local-stdio' as const,
-    capabilitiesFingerprint: capability.repeat(64),
+    capabilitiesFingerprint: Effect.pipe(capability, EffectString.repeat(64)),
     configurationState: 'current' as const,
     mcpCapability: 'managed' as const,
-    mcpConfigFingerprint: config.repeat(64),
-    mcpReceiptFingerprint: receipt.repeat(64),
-    mcpServerFingerprint: '9'.repeat(64),
+    mcpConfigFingerprint: Effect.pipe(config, EffectString.repeat(64)),
+    mcpReceiptFingerprint: Effect.pipe(receipt, EffectString.repeat(64)),
+    mcpServerFingerprint: Effect.pipe('9', EffectString.repeat(64)),
     surfaceId,
   };
 }
 
 function activationChain(repositoryIdentityHash: string, startedAt: string) {
   const plan = createActivationPlanV1({
-    catalogSnapshotHash: 'a'.repeat(64),
+    catalogSnapshotHash: Effect.pipe('a', EffectString.repeat(64)),
     primarySurfaceId: 'codex-cli',
     publicationMode: 'direct',
     repositoryIdentityHash,
     secondarySurfaceId: 'claude-code',
-    selectedSourceSetHash: 'c'.repeat(64),
-    taskHash: 'd'.repeat(64),
+    selectedSourceSetHash: Effect.pipe('c', EffectString.repeat(64)),
+    taskHash: Effect.pipe('d', EffectString.repeat(64)),
     teamId: 'default',
-    teamShareStateHash: 'e'.repeat(64),
+    teamShareStateHash: Effect.pipe('e', EffectString.repeat(64)),
     threadnoteVersion: '5.0.0-test',
   });
   let receipt = createActivationReceiptV1(plan, startedAt);
@@ -318,7 +418,7 @@ function recordSuccessfulOperation(
   const approval =
     operation.approvalKind === undefined
       ? undefined
-      : bindActivationApprovalV1(plan, receipt, operation.id, 'f'.repeat(64));
+      : bindActivationApprovalV1(plan, receipt, operation.id, Effect.pipe('f', EffectString.repeat(64)));
   if (approval !== undefined) approvals.push(approval);
   const result = recordActivationOutcomeV1({
     approval,
@@ -340,7 +440,7 @@ function recordSuccessfulOperation(
 function contextBriefRecord(items: readonly ReturnType<typeof journey>[]) {
   const structuredContent = contextBriefContent();
   return record('solo', 'context-brief', {
-    attempts: items.map(item => ({
+    attempts: EffectArray.map(items, item => ({
       event: {
         activationId: item.plan.activationId,
         activationReceiptRevision: item.firstBriefReceipt.revision,
@@ -389,7 +489,7 @@ function valueReportRecord(
   activationJourneys?: readonly ReturnType<typeof journey>[],
   offline = false,
 ) {
-  const captures = laneIds.map((laneId, index) => {
+  const captures = EffectArray.map(laneIds, (laneId, index) => {
     const from = new Date(Date.UTC(2026, 8, 18, scenarioOrdinal(scenario), index)).toISOString();
     const to = new Date(Date.parse(from) + 30_000).toISOString();
     const event = {
@@ -411,25 +511,29 @@ function valueReportRecord(
     };
     return {event, input, laneId, report: aggregateValueReportV1(input)};
   });
-  const activationTrials = activationJourneys?.map(item => {
-    const events = activationValueEventsV1(item.finalReceipt);
-    const from = new Date(Date.parse(item.finalReceipt.startedAt) - 1_000).toISOString();
-    const to = new Date(Date.parse(item.finalReceipt.updatedAt) + 1_000).toISOString();
-    const input = {period: {from, to}};
-    return {
-      events,
-      input,
-      report: aggregateValueReportV1({
-        ...input,
-        counts: summarizeLocalValueEvents(events, {from: new Date(from), to: new Date(to)}),
+  const activationTrials = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(activationJourneys), __effectArrayReceiver =>
+      EffectArray.map(__effectArrayReceiver, item => {
+        const events = activationValueEventsV1(item.finalReceipt);
+        const from = new Date(Date.parse(item.finalReceipt.startedAt) - 1_000).toISOString();
+        const to = new Date(Date.parse(item.finalReceipt.updatedAt) + 1_000).toISOString();
+        const input = {period: {from, to}};
+        return {
+          events,
+          input,
+          report: aggregateValueReportV1({
+            ...input,
+            counts: summarizeLocalValueEvents(events, {from: new Date(from), to: new Date(to)}),
+          }),
+          state: {plan: item.plan, receipt: item.finalReceipt},
+        };
       }),
-      state: {plan: item.plan, receipt: item.finalReceipt},
-    };
-  });
+    ),
+  );
   return record(scenario, 'value-report', {
     ...(activationTrials === undefined ? {} : {activationTrials}),
-    captures: captures.map(({input, report}) => ({input, report})),
-    feedbackTrials: captures.map(({event, laneId}) => ({
+    captures: EffectArray.map(captures, ({input, report}) => ({input, report})),
+    feedbackTrials: EffectArray.map(captures, ({event, laneId}) => ({
       event,
       laneId,
       offlineObservation: offline ? {afterAttemptCount: 0, beforeAttemptCount: 0} : null,
@@ -443,7 +547,7 @@ function scenarioOrdinal(scenario: string) {
 
 function offlineActivationRecord(items: readonly ReturnType<typeof journey>[]) {
   return record('offline', 'activation', {
-    trials: items.map(item => {
+    trials: EffectArray.map(items, item => {
       const first = item.activationTrial.receiptChain[0];
       return {
         ...item.activationTrial,
@@ -466,7 +570,7 @@ function review(
   index: number,
   application?: {readonly contentHash: string; readonly sourceUri: string},
 ): CandidateReview {
-  const reviewId = `review-${index.toString(16).padStart(16, '0')}`;
+  const reviewId = `review-${Effect.pipe(index.toString(16), EffectString.padStart(16, '0'))}`;
   const candidateId = `${reviewId}-1`;
   const sourceUri =
     application?.sourceUri ?? `threadnote://user/test/memories/durable/projects/threadnote/topic-${index}.md`;
@@ -522,15 +626,15 @@ function review(
 }
 
 function proposalRecord() {
-  const attempts = reviews(300).map((candidateReview, index) => {
+  const attempts = EffectArray.map(reviews(300), (candidateReview, index) => {
     const number = 300 + index;
     const candidate = candidateReview.candidates[0];
     const sourceUri = candidate.applyTargetUri!;
-    const sourceContent = approvedSource(candidate.candidateId, candidate.topic, number);
+    const sourceContent = approvedSource(candidate.candidateId, candidate.topic ?? candidateReview.topic, number);
     const contentHash = sha256HexSync(canonicalMemoryDocumentContent(sourceContent));
     const updatedReview = review(number, {contentHash, sourceUri});
     const input = {
-      baseCommit: 'a'.repeat(40),
+      baseCommit: Effect.pipe('a', EffectString.repeat(40)),
       mutations: [
         {
           approval: {
@@ -547,7 +651,7 @@ function proposalRecord() {
         },
       ],
       project: 'threadnote',
-      target: {repositoryId: 'b'.repeat(64), team: 'default'},
+      target: {repositoryId: Effect.pipe('b', EffectString.repeat(64)), team: 'default'},
     };
     const built = buildKnowledgeDeltaGitProposalV1({...input, delta: projectKnowledgeDeltaV1(updatedReview)});
     return {artifact: built.artifact, input, proposal: built.proposal, review: updatedReview};
@@ -556,23 +660,26 @@ function proposalRecord() {
 }
 
 function approvedSource(candidateId: string, topic: string, index: number) {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    `topic: ${topic}`,
-    'source_agent_client: codex',
-    'timestamp: 2026-09-17T00:00:00.000Z',
-    'schema_version: 5',
-    `memory_id: tn_release_${index}`,
-    'visibility: personal',
-    'authority: user_approved',
-    'trust: approved',
-    `candidate_id: ${candidateId}`,
-    '',
-    `Approved decision ${index}.`,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      `topic: ${topic}`,
+      'source_agent_client: codex',
+      'timestamp: 2026-09-17T00:00:00.000Z',
+      'schema_version: 5',
+      `memory_id: tn_release_${index}`,
+      'visibility: personal',
+      'authority: user_approved',
+      'trust: approved',
+      `candidate_id: ${candidateId}`,
+      '',
+      `Approved decision ${index}.`,
+    ],
+    '\n',
+  );
 }
 
 function procedureRecord() {
@@ -605,7 +712,7 @@ function procedureRecord() {
 function contextCheckRecord() {
   const boundary = (extra: Record<string, unknown>) => ({
     candidate: PRODUCTION_CAPTURE_CANDIDATE,
-    digest: 'c'.repeat(64),
+    digest: Effect.pipe('c', EffectString.repeat(64)),
     ...extra,
   });
   return record('dirty-worktree', 'context-check', {
@@ -629,13 +736,13 @@ function contextCheckRecord() {
 function migrationRecord() {
   const baseline = {
     commit: '80ca4acdb7347a4d00b0381f3757a5ac984d9fbf',
-    executableSha256: '4'.repeat(64),
+    executableSha256: Effect.pipe('4', EffectString.repeat(64)),
     id: 'threadnote-4.7.x' as const,
     version: '4.7.8',
   };
   const execution = (from: Threadnote5SourceV1, to: Threadnote5SourceV1, outcome: 'readable' | 'safe-refusal') => ({
-    afterDigest: 'a'.repeat(64),
-    beforeDigest: 'b'.repeat(64),
+    afterDigest: Effect.pipe('a', EffectString.repeat(64)),
+    beforeDigest: Effect.pipe('b', EffectString.repeat(64)),
     from,
     outcome,
     protectedWriteCount: 0,
@@ -659,12 +766,13 @@ function guidanceRecord() {
     previousManagedBlockHash: null,
     project: 'threadnote',
     removeTargetWhenEmpty: false,
-    repositoryId: 'e'.repeat(64),
-    sources: [...items]
-      .sort((left, right) => (left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0))
-      .map(({contentHash, uri}) => ({contentHash, uri})),
+    repositoryId: Effect.pipe('e', EffectString.repeat(64)),
+    sources: EffectArray.map(
+      [...items].sort((left, right) => (left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0)),
+      ({contentHash, uri}) => ({contentHash, uri}),
+    ),
     state: 'current' as const,
-    targetIdentity: 'f'.repeat(64),
+    targetIdentity: Effect.pipe('f', EffectString.repeat(64)),
     targetPath: 'AGENTS.md',
     version: 2 as const,
     wrapperOwned: false,
@@ -768,7 +876,7 @@ function healthMaintenanceRecord() {
   const aggregateInput = {
     personal: {reason: 'snapshot-unreadable' as const, scope: 'personal' as const, state: 'unknown' as const},
     project: 'threadnote',
-    teams: scheduleInput.teams.map(team => ({
+    teams: EffectArray.map(scheduleInput.teams, team => ({
       reason: 'snapshot-unreadable' as const,
       scope: 'team' as const,
       state: 'unknown' as const,
@@ -782,7 +890,7 @@ function healthMaintenanceRecord() {
     jsonRoundTrip({
       aggregate: {aggregate: aggregateContextHealthReportsV1(aggregateInput), input: aggregateInput},
       repairs,
-      reports: repairs.map(item => ({input: item.input, report: item.report})),
+      reports: EffectArray.map(repairs, item => ({input: item.input, report: item.report})),
       schedule: {input: scheduleInput, observedArgv: ['threadnote', ...plan.argv], plan},
     }),
   );
@@ -791,7 +899,7 @@ function healthMaintenanceRecord() {
 function healthRepair(index: number) {
   const expired = memoryRecord(`expired-${index}`, `Expired ${index}.`, {validTo: '2026-09-16T00:00:00.000Z'});
   const input = {
-    now: new Date(`2026-09-17T12:${String(index).padStart(2, '0')}:00.000Z`),
+    now: new Date(`2026-09-17T12:${Effect.pipe(String(index), EffectString.padStart(2, '0'))}:00.000Z`),
     project: 'threadnote',
     records: [expired],
   };
@@ -859,15 +967,12 @@ function authorityManifestFor(
 }
 
 function activationAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): Threadnote5LocalAuthorityEntryV1 {
-  const trials = (item.artifact as {readonly trials: readonly Record<string, unknown>[]}).trials;
+  const {trials} = Schema.decodeUnknownSync(ActivationArtifactSchema)(item.artifact);
   return {
     recordDigest: item.digest,
-    trials: trials.map(trial => {
-      const state = trial.state as {
-        readonly plan: {readonly activationId: string};
-        readonly receipt: {readonly revision: string};
-      };
-      const challenge = (trial.secondSurface as {readonly challenge?: unknown} | undefined)?.challenge;
+    trials: EffectArray.map(trials, trial => {
+      const state = trial.state;
+      const challenge = trial.secondSurface?.challenge;
       return {
         activationId: state.plan.activationId,
         attestationDigest: challenge === undefined ? null : threadnote5ActivationAttestationDigest(challenge),
@@ -884,10 +989,10 @@ function activationAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): Th
 }
 
 function contextBriefAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): Threadnote5LocalAuthorityEntryV1 {
-  const attempts = (item.artifact as {readonly attempts: readonly unknown[]}).attempts;
+  const {attempts} = Schema.decodeUnknownSync(ContextBriefArtifactSchema)(item.artifact);
   return {
     recordDigest: item.digest,
-    trials: attempts.map(attempt => ({
+    trials: EffectArray.map(attempts, attempt => ({
       attemptDigest: threadnote5ContextBriefAttemptDigest(attempt),
       firstPlanCorrect: true,
       firstPlanSourceCited: true,
@@ -897,18 +1002,10 @@ function contextBriefAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): 
 }
 
 function valueReportAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): Threadnote5LocalAuthorityEntryV1 {
-  const trials = (
-    item.artifact as {
-      readonly feedbackTrials: readonly {
-        readonly event: unknown;
-        readonly laneId: string;
-        readonly offlineObservation: unknown | null;
-      }[];
-    }
-  ).feedbackTrials;
+  const {feedbackTrials: trials} = Schema.decodeUnknownSync(ValueReportArtifactSchema)(item.artifact);
   return {
     recordDigest: item.digest,
-    trials: trials.map(trial => ({
+    trials: EffectArray.map(trials, trial => ({
       feedbackEventDigest: threadnote5RecallFeedbackEventDigest(trial.event),
       laneId: trial.laneId,
       offlineObservationDigest:
@@ -921,23 +1018,18 @@ function valueReportAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): T
 }
 
 function proposalAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): Threadnote5LocalAuthorityEntryV1 {
-  const attempts = (item.artifact as {readonly attempts: readonly Record<string, unknown>[]}).attempts;
+  const {attempts} = Schema.decodeUnknownSync(ProposalArtifactSchema)(item.artifact);
   return {
     recordDigest: item.digest,
-    trials: attempts.map(attempt => {
-      const proposal = attempt.proposal as {readonly proposalHash: string};
-      const candidateReview = attempt.review as CandidateReview;
-      const input = attempt.input as {
-        readonly mutations: readonly {
-          readonly approval: {readonly expectedSourceContentHash: string};
-          readonly candidateId: string;
-          readonly sourceUri: string;
-        }[];
-      };
+    trials: EffectArray.map(attempts, attempt => {
+      const {proposal, review: candidateReview, input} = attempt;
       return {
-        approvals: input.mutations.map(mutation => {
-          const event = candidateReview.auditEvents.find(
-            candidate => candidate.action === 'apply' && candidate.candidateId === mutation.candidateId,
+        approvals: EffectArray.map(input.mutations, mutation => {
+          const event = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              candidateReview.auditEvents,
+              candidate => candidate.action === 'apply' && candidate.candidateId === mutation.candidateId,
+            ),
           );
           if (event === undefined) throw new Error('Proposal fixture lacks apply audit.');
           return {
@@ -958,19 +1050,17 @@ function proposalAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): Thre
 }
 
 function procedureAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): Threadnote5LocalAuthorityEntryV1 {
-  const attempt = (item.artifact as {readonly attempts: readonly Record<string, unknown>[]}).attempts[0];
+  const attempt = Schema.decodeUnknownSync(ProcedureArtifactSchema)(item.artifact).attempts[0];
   const manifest = parseProcedureManifest(attempt.manifest);
   return {
     artifactId: manifest.artifact.id,
     automaticExecutionCount: 0,
-    commandResults: manifest.verification.commands.map(command => ({
+    commandResults: EffectArray.map(manifest.verification.commands, command => ({
       commandId: command.id,
       exitCode: 0,
       outputDigest: sha256HexSync(`verified-output:${command.id}`),
     })),
-    receiptDigest: threadnote5ProcedureVerificationReceiptDigest(
-      (attempt.statusInput as {readonly receipt: unknown}).receipt,
-    ),
+    receiptDigest: threadnote5ProcedureVerificationReceiptDigest(attempt.statusInput.receipt),
     recordDigest: item.digest,
     semanticVersion: manifest.artifact.semanticVersion,
     type: 'procedure-verification',
@@ -978,19 +1068,21 @@ function procedureAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): Thr
 }
 
 function healthAuthority(item: Threadnote5LocalSubsystemReceiptRecordV1): Threadnote5LocalAuthorityEntryV1 {
-  const teams = (
-    item.artifact as {readonly aggregate: {readonly input: {readonly teams: readonly {readonly team: string}[]}}}
-  ).aggregate.input.teams;
+  const {
+    aggregate: {
+      input: {teams},
+    },
+  } = Schema.decodeUnknownSync(HealthArtifactSchema)(item.artifact);
   return {
     aggregate: {
       networkActivityCount: 0,
-      teamSnapshots: teams.map((source, index) => ({
-        postHead: String(index + 1).repeat(40),
-        postIndexDigest: String(index + 3).repeat(64),
-        postWorktreeDigest: String(index + 5).repeat(64),
-        preHead: String(index + 1).repeat(40),
-        preIndexDigest: String(index + 3).repeat(64),
-        preWorktreeDigest: String(index + 5).repeat(64),
+      teamSnapshots: EffectArray.map(teams, (source, index) => ({
+        postHead: Effect.pipe(String(index + 1), EffectString.repeat(40)),
+        postIndexDigest: Effect.pipe(String(index + 3), EffectString.repeat(64)),
+        postWorktreeDigest: Effect.pipe(String(index + 5), EffectString.repeat(64)),
+        preHead: Effect.pipe(String(index + 1), EffectString.repeat(40)),
+        preIndexDigest: Effect.pipe(String(index + 3), EffectString.repeat(64)),
+        preWorktreeDigest: Effect.pipe(String(index + 5), EffectString.repeat(64)),
         team: source.team,
       })),
       writeActivityCount: 0,
@@ -1014,6 +1106,6 @@ function record(
   }
 }
 
-function jsonRoundTrip<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+function jsonRoundTrip(value: unknown): unknown {
+  return JSON.parse(JSON.stringify(value));
 }

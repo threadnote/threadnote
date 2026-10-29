@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
@@ -12,16 +13,18 @@ describe('registry retention inventory', () => {
           maxLength: 60,
         }),
         input => {
-          const sizes = new Map(input.map(entry => [entry.id, entry.size]));
-          const entries = [...sizes].map(([id, size]) => ({digest: sha256Digest(String(id)), size}));
+          const sizes = new Map(EffectArray.map(input, entry => [entry.id, entry.size]));
+          const entries = EffectArray.map([...sizes], ([id, size]) => ({digest: sha256Digest(String(id)), size}));
           const before = JSON.stringify(entries);
           const first = graphShareRegistryRetentionRoot(entries);
           const reversed = graphShareRegistryRetentionRoot([...entries].reverse().concat(entries));
           expect(reversed.bytes).toEqual(first.bytes);
           expect(first.digest).toBe(sha256Digest(first.bytes));
-          expect(first.totalBytes).toBe(2 + [...sizes.values()].reduce((sum, size) => sum + size, 0));
+          expect(first.totalBytes).toBe(2 + EffectArray.reduce([...sizes.values()], 0, (sum, size) => sum + size));
           expect(first.entries).toHaveLength(sizes.size + 1);
-          expect(first.entries.some(entry => entry.digest === GRAPH_SHARE_OCI_EMPTY_CONFIG_DIGEST)).toBe(true);
+          expect(EffectArray.some(first.entries, entry => entry.digest === GRAPH_SHARE_OCI_EMPTY_CONFIG_DIGEST)).toBe(
+            true,
+          );
           expect(JSON.stringify(entries)).toBe(before);
         },
       ),

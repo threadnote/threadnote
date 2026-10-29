@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 import React, {act, useState} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -10,22 +11,24 @@ import {
 import type {SelectId} from '../../src/ui/contracts.js';
 import type {ConsolidationReview, ConsolidationSource} from '@threadnote/memory/consolidation';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const citation = createMemoryCodeCitation({
   extractorSet: 'test',
-  fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+  fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
   path: 'source.ts',
-  repositoryId: 'b'.repeat(64),
+  repositoryId: Effect.pipe('b', EffectString.repeat(64)),
   repositoryIdentityKind: 'local',
-  sourceCommit: 'c'.repeat(40),
+  sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+  sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
   target: {kind: 'file'},
   version: 1,
 });
 const source: ConsolidationSource = {
   uri: 'threadnote://user/test/memories/durable/global/source.md',
-  revision: 'e'.repeat(64),
+  revision: Effect.pipe('e', EffectString.repeat(64)),
   fragments: ['Claim.'],
   codeCitations: [citation],
   relations: [{type: 'depends_on', uri: 'threadnote://memory/tn_target'}],
@@ -127,17 +130,33 @@ it.each([true, false])('offers local generation with actionable model choices (i
   await act(async () => root?.render(<Harness />));
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]')!.click());
   const choices = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
-  expect(choices.map(item => item.textContent)).toEqual([
+  expect(EffectArray.map(choices, item => item.textContent)).toEqual([
     'Codex',
     `Threadnote local AI${installed ? '' : ' (install a model)'}`,
   ]);
-  const local = choices.find(item => item.textContent?.startsWith('Threadnote local AI'))!;
+  const local = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      choices,
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.startsWith('Threadnote local AI')),
+          ))(__effectArrayValue),
+    ),
+  )!;
   expect(local.disabled).toBe(false);
   await act(async () => local.click());
   expect(catalogs).toEqual(['codex', 'local-ai']);
   const model = container.querySelector<HTMLSelectElement>('[aria-label="Consolidation model"]')!;
   const generate = () =>
-    [...container.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === 'Generate draft')!;
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...container.querySelectorAll<HTMLButtonElement>('button')],
+        item => item.textContent === 'Generate draft',
+      ),
+    )!;
   if (!installed) {
     expect(model.disabled).toBe(true);
     expect(generate().disabled).toBe(true);
@@ -217,10 +236,16 @@ it('validates browser evidence without Node Buffer and preserves UTF-8 resource 
     },
   ];
   expect(consolidationReviewProblem('Claim.', [source], reviews)).toBeUndefined();
-  const unicode = {...source, uri: `threadnote://memory/${encodeURIComponent(`${'é'.repeat(127)}a`)}`};
+  const unicode = {
+    ...source,
+    uri: `threadnote://memory/${encodeURIComponent(`${Effect.pipe('é', EffectString.repeat(127))}a`)}`,
+  };
   const reviewed = [{...reviews[0], supports: [{...reviews[0].supports[0], sourceUri: unicode.uri}]}];
   expect(consolidationReviewProblem('Claim.', [unicode], reviewed)).toBeUndefined();
-  const oversized = {...unicode, uri: `threadnote://memory/${encodeURIComponent('é'.repeat(128))}`};
+  const oversized = {
+    ...unicode,
+    uri: `threadnote://memory/${encodeURIComponent(Effect.pipe('é', EffectString.repeat(128)))}`,
+  };
   expect(
     consolidationReviewProblem(
       'Claim.',

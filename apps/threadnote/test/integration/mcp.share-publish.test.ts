@@ -1,17 +1,30 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {chmod, mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {delimiter, join} from '@threadnote/testing/node-path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const sourceUri = 'threadnote://user/test-user/memories/durable/projects/foo/bar.md';
 const targetUri = 'threadnote://user/test-user/memories/shared/default/durable/projects/foo/bar.md';
 const dependencyUri = 'threadnote://user/test-user/memories/shared/default/durable/projects/foo/dependency.md';
 
-interface TextContent {
-  readonly text: string;
-  readonly type: 'text';
+function joinTextContent(content: unknown): string {
+  if (!EffectArray.isArray(content)) {
+    throw new Error('Expected MCP result content to be an array.');
+  }
+  return EffectArray.join(
+    EffectArray.map(content, item => {
+      if (!Predicate.isObject(item) || item.type !== 'text' || typeof item.text !== 'string') {
+        throw new Error('Expected every MCP result content block to be text.');
+      }
+      return item.text;
+    }),
+    '\n',
+  );
 }
 
 async function makeHome(root: string): Promise<string> {
@@ -30,19 +43,22 @@ async function makeHome(root: string): Promise<string> {
     'bar.md',
   );
   const gitdir = join(home, 'share', 'teams', 'default.gitdir');
-  const dependencyContent = [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'visibility: shared',
-    'project: foo',
-    'topic: dependency',
-    'memory_id: tn_shared_dependency',
-    'source_agent_client: test',
-    'timestamp: 2026-07-23T00:00:00.000Z',
-    '',
-    'Shared dependency.',
-  ].join('\n');
+  const dependencyContent = EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'visibility: shared',
+      'project: foo',
+      'topic: dependency',
+      'memory_id: tn_shared_dependency',
+      'source_agent_client: test',
+      'timestamp: 2026-07-23T00:00:00.000Z',
+      '',
+      'Shared dependency.',
+    ],
+    '\n',
+  );
   const canonicalDependencyPath = join(
     home,
     'data',
@@ -66,24 +82,27 @@ async function makeHome(root: string): Promise<string> {
   await writeFile(worktreeDependencyPath, dependencyContent);
   await writeFile(
     sourcePath,
-    [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      'project: foo',
-      'topic: bar',
-      'memory_id: tn_foo_bar',
-      'source_agent_client: test',
-      'timestamp: 2026-07-23T00:00:00.000Z',
-      'visibility: personal',
-      '',
-      'Body',
-      '',
-      '<!-- threadnote:hygiene-sources:v1 -->',
-      '## Threadnote Hygiene Sources',
-      '',
-      '- threadnote://user/test-user/memories/handoffs/archived/foo/private-task.md',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        'project: foo',
+        'topic: bar',
+        'memory_id: tn_foo_bar',
+        'source_agent_client: test',
+        'timestamp: 2026-07-23T00:00:00.000Z',
+        'visibility: personal',
+        '',
+        'Body',
+        '',
+        '<!-- threadnote:hygiene-sources:v1 -->',
+        '## Threadnote Hygiene Sources',
+        '',
+        '- threadnote://user/test-user/memories/handoffs/archived/foo/private-task.md',
+      ],
+      '\n',
+    ),
   );
   await mkdir(join(home, 'share'), {recursive: true});
   await writeFile(
@@ -139,7 +158,10 @@ if (args.includes('fetch') || args.includes('add') || args.includes('ls-files') 
 }
 if (args.includes('rev-parse') && args.includes('--git-path')) {
   process.stdout.write(${JSON.stringify(
-    Array.from({length: 6}, (_, index) => join(root, `absent-git-operation-${index}`)).join('\n') + '\n',
+    EffectArray.join(
+      Array.from({length: 6}, (_, index) => join(root, `absent-git-operation-${index}`)),
+      '\n',
+    ) + '\n',
   )});
   process.exit(0);
 }
@@ -206,9 +228,7 @@ describe('Threadnote MCP share_publish', () => {
         {timeout: 5000},
       );
       expect(aliasPublish.isError).toBe(true);
-      expect((aliasPublish.content as TextContent[]).map(item => item.text).join('\n')).toContain(
-        'threadnote://memory/tn_foo_bar',
-      );
+      expect(joinTextContent(aliasPublish.content)).toContain('threadnote://memory/tn_foo_bar');
       expect(
         await readFile(
           join(home, 'data', 'local', 'user', 'test-user', 'memories', 'durable', 'projects', 'foo', 'bar.md'),
@@ -227,25 +247,28 @@ describe('Threadnote MCP share_publish', () => {
         undefined,
         {timeout: 5000},
       );
-      const previewText = (preview.content as TextContent[]).map(item => item.text).join('\n');
+      const previewText = joinTextContent(preview.content);
       expect(previewText).toContain('Body');
       expect(previewText).toContain('visibility: shared');
       expect(previewText).not.toContain('visibility: personal');
       expect(previewText).not.toContain('threadnote:hygiene-sources');
       expect(previewText).not.toContain('/private-task.md');
 
-      const legacyPublishedContent = [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: foo',
-        'topic: bar',
-        'memory_id: tn_foo_bar',
-        'source_agent_client: test',
-        'timestamp: 2026-07-23T00:00:00.000Z',
-        '',
-        'Body',
-      ].join('\n');
+      const legacyPublishedContent = EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: foo',
+          'topic: bar',
+          'memory_id: tn_foo_bar',
+          'source_agent_client: test',
+          'timestamp: 2026-07-23T00:00:00.000Z',
+          '',
+          'Body',
+        ],
+        '\n',
+      );
       const canonicalTargetPath = join(
         home,
         'data',
@@ -263,9 +286,12 @@ describe('Threadnote MCP share_publish', () => {
       const worktreeTargetPath = join(home, 'share', 'worktrees', 'default', 'durable', 'projects', 'foo', 'bar.md');
       await writeFile(
         canonicalTargetPath,
-        legacyPublishedContent.replace(
-          'timestamp: 2026-07-23T00:00:00.000Z',
-          'timestamp: 2026-07-23T00:00:00.000Z\nvisibility: shared',
+        Effect.pipe(
+          legacyPublishedContent,
+          EffectString.replace(
+            'timestamp: 2026-07-23T00:00:00.000Z',
+            'timestamp: 2026-07-23T00:00:00.000Z\nvisibility: shared',
+          ),
         ),
       );
       await writeFile(worktreeTargetPath, legacyPublishedContent);
@@ -283,8 +309,8 @@ describe('Threadnote MCP share_publish', () => {
       );
 
       expect(result.isError).toBe(false);
-      expect(Array.isArray(result.content)).toBe(true);
-      const text = (result.content as TextContent[]).map(item => item.text).join('\n');
+      expect(EffectArray.isArray(result.content)).toBe(true);
+      const text = joinTextContent(result.content);
       expect(text).toContain(`Published ${sourceUri} -> ${targetUri}`);
       expect(text).toContain('git push skipped (push=false)');
       const published = await readFile(worktreeTargetPath, 'utf8');
@@ -350,9 +376,7 @@ describe('Threadnote MCP share_publish', () => {
         {timeout: 30_000},
       );
       expect(aliasReplacement.isError, JSON.stringify(aliasReplacement)).not.toBe(true);
-      expect((aliasReplacement.content as TextContent[]).map(item => item.text).join('\n')).toContain(
-        `Updated shared memory: ${targetUri}`,
-      );
+      expect(joinTextContent(aliasReplacement.content)).toContain(`Updated shared memory: ${targetUri}`);
       await expect(readFile(canonicalTargetPath, 'utf8')).resolves.toContain(
         'Updated shared body through its stable identity.',
       );
@@ -360,7 +384,7 @@ describe('Threadnote MCP share_publish', () => {
       await client.close().catch(() => undefined);
       await rm(root, {force: true, recursive: true});
     }
-    expect(stderrChunks.join('')).toContain('Threadnote local MCP adapter running');
+    expect(EffectArray.join(stderrChunks, '')).toContain('Threadnote local MCP adapter running');
   });
 
   it('does not delete a personal source that changes after the shared write', async () => {
@@ -407,7 +431,7 @@ describe('Threadnote MCP share_publish', () => {
       );
 
       expect(result.isError).toBe(true);
-      const text = (result.content as TextContent[]).map(item => item.text).join('\n');
+      const text = joinTextContent(result.content);
       expect(text).toContain('changed while publication was in progress');
       expect(await readFile(sourcePath, 'utf8')).toContain('Concurrent newer body');
       await expect(readFile(join(root, 'source-remove-invoked'), 'utf8')).rejects.toBeDefined();

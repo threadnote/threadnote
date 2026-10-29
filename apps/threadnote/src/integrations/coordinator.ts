@@ -11,6 +11,8 @@ import {pocketSourceWork} from '@threadnote/integration-pocket/source';
 import {githubSourceWork} from '@threadnote/integration-github/source';
 import {linearSourceWork} from '@threadnote/integration-linear/source';
 import {INTEGRATION_SYNC_WORKER_ARGUMENT} from '../worker_protocol.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const sourceWorkRegistrations = [
   obsidianSourceWork,
@@ -25,7 +27,11 @@ export function integrationSyncWorkerInvocation(
   developmentEntrypoint: string,
   home: string,
 ): {readonly executable: string; readonly arguments: readonly string[]} {
-  const executableName = executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  const executableName = Effect2.pipe(
+    Effect2.pipe(executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   return {
     executable: executablePath,
     arguments: [

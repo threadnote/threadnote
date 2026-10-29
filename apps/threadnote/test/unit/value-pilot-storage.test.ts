@@ -15,6 +15,8 @@ import {
 } from '@threadnote/threadnote/value_report/storage';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {pilotInput} from '../helpers/value-pilot-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
 
@@ -26,7 +28,7 @@ effectIt.effect('keeps preview read-only, exports idempotently, and resets only 
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'value-pilot-'});
       yield* TestClock.setTime(Date.parse('2026-09-01T00:00:00.000Z'));
       const report = buildPilotReport(pilotInput());
-      const directory = path.join(home, ...VALUE_REPORT_EXPORT_DIRECTORY.split('/'));
+      const directory = path.join(home, ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')));
       const before = yield* fs.readDirectory(home);
       expect((yield* exportPilotReport(home, report, false)).applied).toBe(false);
       expect(yield* fs.readDirectory(home)).toEqual(before);
@@ -102,9 +104,9 @@ effectIt.effect('includes abandoned artifact staging in pilot reset, retention, 
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'value-pilot-staging-'});
-      const directory = path.join(home, ...VALUE_REPORT_EXPORT_DIRECTORY.split('/'));
-      const pilot = `.threadnote-value-pilot-report-v1-${'a'.repeat(24)}.staging`;
-      const general = `.threadnote-value-report-export-v1-${'b'.repeat(24)}.staging`;
+      const directory = path.join(home, ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')));
+      const pilot = `.threadnote-value-pilot-report-v1-${Effect2.pipe('a', EffectString.repeat(24))}.staging`;
+      const general = `.threadnote-value-report-export-v1-${Effect2.pipe('b', EffectString.repeat(24))}.staging`;
       const seed = (name: string) =>
         Effect.gen(function* () {
           yield* fs.makeDirectory(path.join(directory, name), {recursive: true});
@@ -145,8 +147,8 @@ effectIt.effect('does not remove staging while its writer owns the storage lock'
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'value-pilot-active-'});
       const staging = path.join(
         home,
-        ...VALUE_REPORT_EXPORT_DIRECTORY.split('/'),
-        `.threadnote-value-pilot-report-v1-${'a'.repeat(24)}.staging`,
+        ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')),
+        `.threadnote-value-pilot-report-v1-${Effect2.pipe('a', EffectString.repeat(24))}.staging`,
       );
       const started = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();

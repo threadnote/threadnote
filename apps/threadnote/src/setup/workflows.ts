@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {findAgentSurface} from '@threadnote/integrations/catalog';
 import {resolveDevSkillsTarget} from '../agent_integration/skill_targets.js';
 import {Console, Crypto, Effect, FileSystem, Option, Path} from 'effect';
@@ -13,6 +14,7 @@ import {
 import type {DevSkillsMutationLease, DevSkillsSelector} from '../dev_skills/index.js';
 import type {DevSkillsEnsureResult} from '../dev_skills/index.js';
 import {SetupOperationError} from './contract.js';
+import * as EffectRecord from 'effect/Record';
 
 /** Native skill scopes are catalog-owned, independently of the core MCP scope. */
 export function setupWorkflowSelector(
@@ -57,7 +59,10 @@ export const ensureSetupWorkflows = Effect.fn('setup.ensureWorkflows')(function*
   });
   if (result.state === 'pending' || result.state === 'setup-needed')
     return yield* SetupOperationError.make({
-      message: `Core setup remains available; development workflows are incomplete. ${result.issues.map(issue => issue.message).join(' ')}`,
+      message: `Core setup remains available; development workflows are incomplete. ${EffectArray.join(
+        EffectArray.map(result.issues, issue => issue.message),
+        ' ',
+      )}`,
     });
   yield* Console.log(`Development workflows: ${result.state}.`);
   return {...result, operationId: identity.operationId};
@@ -146,6 +151,27 @@ interface WorkflowCheckpoint {
   readonly bundleDigest: string;
   readonly choice: 'default' | 'disabled';
 }
+const isWorkflowCheckpoint = (value: unknown): value is WorkflowCheckpoint => {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    EffectArray.isArray(value) ||
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') !== 'bundleDigest,choice,operationId' ||
+    !('operationId' in value) ||
+    !('bundleDigest' in value) ||
+    !('choice' in value)
+  )
+    return false;
+  return (
+    typeof value.operationId === 'string' &&
+    /^setup:[a-f0-9]{64}$/u.test(value.operationId) &&
+    typeof value.bundleDigest === 'string' &&
+    /^[a-f0-9]{64}$/u.test(value.bundleDigest) &&
+    (value.choice === 'default' || value.choice === 'disabled')
+  );
+};
+const isWorkflowCheckpointArray = (value: unknown): value is readonly WorkflowCheckpoint[] =>
+  EffectArray.isArray(value) && value.length <= 512 && EffectArray.every(value, isWorkflowCheckpoint);
 interface WorkflowCheckpointOwner {
   readonly selector: DevSkillsSelector;
   readonly key: string;
@@ -166,21 +192,8 @@ const readWorkflowCheckpoints = Effect.fn('setup.readWorkflowCheckpoints')(funct
   const entries = yield* Effect.try({
     try: () => {
       const value: unknown = JSON.parse(raw);
-      if (
-        !Array.isArray(value) ||
-        value.length > 512 ||
-        !value.every(
-          item =>
-            typeof item === 'object' &&
-            item !== null &&
-            Object.keys(item).sort().join(',') === 'bundleDigest,choice,operationId' &&
-            /^setup:[a-f0-9]{64}$/u.test(item.operationId) &&
-            /^[a-f0-9]{64}$/u.test(item.bundleDigest) &&
-            ['default', 'disabled'].includes(item.choice),
-        )
-      )
-        throw new Error('invalid');
-      return value as WorkflowCheckpoint[];
+      if (!isWorkflowCheckpointArray(value)) throw new Error('invalid');
+      return value;
     },
     catch: () => SetupOperationError.make({message: 'Invalid workflow setup checkpoint index; preserved.'}),
   });
@@ -200,7 +213,7 @@ export const recordSetupWorkflowCheckpoint = Effect.fn('setup.recordWorkflowChec
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const prior = yield* readWorkflowCheckpoints(file, owner);
-  if (prior.some(entry => entry.operationId === identity.operationId)) return;
+  if (EffectArray.some(prior, entry => entry.operationId === identity.operationId)) return;
   if (prior.length >= 512)
     return yield* SetupOperationError.make({message: 'Workflow setup history limit reached; preserve checkpoints.'});
   const crypto = yield* Crypto.Crypto;

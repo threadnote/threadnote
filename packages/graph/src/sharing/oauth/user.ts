@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {dlopen} from 'bun:ffi';
 import {Clock, Console, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {createRemoteAccessTokenVerifier, type AccessTokenClaims} from '@threadnote/protocol/access-token';
@@ -13,6 +14,8 @@ import {sha256Digest} from '../digest.js';
 import {graphSharingFailure, graphSharingUnavailable} from '../errors.js';
 import {graphSharingLayout} from '../layout.js';
 import {canonicalOAuthUrl, sameOriginOAuthEndpoint} from './m2m_config.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const Text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512));
 const ClientId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{8,128}$/u));
@@ -133,7 +136,10 @@ export const configureGraphOAuthUser = Effect.fn('codeGraph.sharing.configureOAu
   if (options.profile === 'legacy-auth0' && !isLegacyAuth0Profile(validated))
     return yield* graphSharingFailure('Legacy Auth0 setup requires the legacy provider profile.');
   if (
-    (yield* readConfigs(config.agentContextHome, 'registry')).some(binding => binding.audience === validated.audience)
+    EffectArray.some(
+      yield* readConfigs(config.agentContextHome, 'registry'),
+      binding => binding.audience === validated.audience,
+    )
   )
     return yield* graphSharingFailure('Graph OAuth audience must differ from the registry audience.');
   const fs = yield* FileSystem.FileSystem;
@@ -155,8 +161,11 @@ export const configureGraphOAuthUser = Effect.fn('codeGraph.sharing.configureOAu
     );
     bindings = existing.bindings;
   }
-  const match = bindings.find(
-    binding => binding.coordinatorUrl === validated.coordinatorUrl && binding.organization === validated.organization,
+  const match = Option.getOrUndefined(
+    EffectArray.findFirst(
+      bindings,
+      binding => binding.coordinatorUrl === validated.coordinatorUrl && binding.organization === validated.organization,
+    ),
   );
   const helper = options.profile === 'legacy-auth0' ? 'auth0' : 'oauth';
   if (
@@ -166,20 +175,25 @@ export const configureGraphOAuthUser = Effect.fn('codeGraph.sharing.configureOAu
       : match.helper !== 'auth0' && match.helper !== 'oauth')
   )
     return yield* graphSharingFailure('The graph credential binding already uses another helper.');
-  const next = bindings.filter(
+  const next = EffectArray.filter(
+    bindings,
     binding => binding.coordinatorUrl !== validated.coordinatorUrl || binding.organization !== validated.organization,
   );
   if (next.length >= 32) return yield* graphSharingFailure('Graph credential binding capacity is full.');
-  const nextOAuth = existingOAuth.filter(
+  const nextOAuth = EffectArray.filter(
+    existingOAuth,
     binding => binding.coordinatorUrl !== validated.coordinatorUrl || binding.organization !== validated.organization,
   );
   if (nextOAuth.length >= 32) return yield* graphSharingFailure('Graph OAuth configuration capacity is full.');
-  const replaced = existingOAuth.find(
-    binding => binding.coordinatorUrl === validated.coordinatorUrl && binding.organization === validated.organization,
+  const replaced = Option.getOrUndefined(
+    EffectArray.findFirst(
+      existingOAuth,
+      binding => binding.coordinatorUrl === validated.coordinatorUrl && binding.organization === validated.organization,
+    ),
   );
   if (options.profile === 'legacy-auth0') {
     yield* writePrivateJsonFile(path.join(root, 'auth0-user.json'), {
-      bindings: [...nextOAuth.map(legacyStoredConfig), legacyStoredConfig(validated)],
+      bindings: [...EffectArray.map(nextOAuth, legacyStoredConfig), legacyStoredConfig(validated)],
       schemaVersion: 1,
     });
   } else {
@@ -243,16 +257,17 @@ export const configureRegistryOAuthUser = Effect.fn('codeGraph.sharing.configure
     return yield* graphSharingFailure('Registry OAuth authority must use an exact HTTPS origin and subject.');
   if (options.profile === 'legacy-auth0' && !isLegacyAuth0Profile(validated))
     return yield* graphSharingFailure('Legacy Auth0 setup requires the legacy provider profile.');
-  if ((yield* readConfigs(config.agentContextHome)).some(binding => binding.audience === validated.audience))
+  if (EffectArray.some(yield* readConfigs(config.agentContextHome), binding => binding.audience === validated.audience))
     return yield* graphSharingFailure('Registry OAuth audience must differ from graph control.');
   const existing = yield* readConfigs(config.agentContextHome, 'registry');
   if (
-    existing.some(
+    EffectArray.some(
+      existing,
       binding => binding.coordinatorUrl === validated.coordinatorUrl && binding.organization !== validated.organization,
     )
   )
     return yield* graphSharingFailure('Registry OAuth origin is already bound to another organization.');
-  const next = existing.filter(binding => binding.coordinatorUrl !== validated.coordinatorUrl);
+  const next = EffectArray.filter(existing, binding => binding.coordinatorUrl !== validated.coordinatorUrl);
   if (next.length >= 32) return yield* graphSharingFailure('Registry OAuth configuration capacity is full.');
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
@@ -268,7 +283,9 @@ export const configureRegistryOAuthUser = Effect.fn('codeGraph.sharing.configure
     return yield* graphSharingFailure('Registry OAuth binding must not be a symbolic link.');
   const crypto = yield* Crypto.Crypto;
   const staged = `${destination}.${yield* crypto.randomUUIDv4()}.pending`;
-  const replaced = existing.find(binding => binding.coordinatorUrl === validated.coordinatorUrl);
+  const replaced = Option.getOrUndefined(
+    EffectArray.findFirst(existing, binding => binding.coordinatorUrl === validated.coordinatorUrl),
+  );
   const persisted =
     options.profile !== 'legacy-auth0' &&
     (replaced?.credentialAccountVersion === 'legacy-auth0-v1' ||
@@ -278,7 +295,7 @@ export const configureRegistryOAuthUser = Effect.fn('codeGraph.sharing.configure
   yield* writePrivateJsonFile(
     staged,
     options.profile === 'legacy-auth0'
-      ? {bindings: [...next.map(legacyStoredConfig), legacyStoredConfig(validated)], schemaVersion: 1}
+      ? {bindings: [...EffectArray.map(next, legacyStoredConfig), legacyStoredConfig(validated)], schemaVersion: 1}
       : {bindings: [...next, persisted], schemaVersion: 2},
   );
   // Stage the binding first; Docker conflicts leave it unpublished, and a retry can reuse an installed helper.
@@ -327,7 +344,7 @@ export const loginGraphOAuthUser = Effect.fn('codeGraph.sharing.loginOAuthUser')
   const backend: OAuthUserBackend = backendOverride ?? (yield* makeBackend());
   const deviceForm: Record<string, string> = {
     client_id: config.clientId,
-    scope: `offline_access ${scopes.join(' ')}`,
+    scope: `offline_access ${EffectArray.join(scopes, ' ')}`,
   };
   if (config.audienceParameter !== undefined) deviceForm.audience = config.audienceParameter;
   const response = yield* backend
@@ -400,7 +417,9 @@ export const getRegistryOAuthUserCredential = Effect.fn('codeGraph.sharing.getRe
   backendOverride?: OAuthUserBackend,
 ) {
   const configs = yield* readConfigs(home, 'registry');
-  const config = configs.find(item => new URL(item.coordinatorUrl).host === server);
+  const config = Option.getOrUndefined(
+    EffectArray.findFirst(configs, item => new URL(item.coordinatorUrl).host === server),
+  );
   if (config === undefined || server !== new URL(config.coordinatorUrl).host)
     return yield* graphSharingFailure('Registry OAuth helper request is outside configured authority.');
   return yield* getStoredOAuthUserCredential(home, config, 'registry:read', 'registry', backendOverride);
@@ -445,7 +464,11 @@ const getStoredOAuthUserCredential = Effect.fn('codeGraph.sharing.getStoredOAuth
         return yield* graphSharingFailure('OAuth Keychain credentials have different authority.');
       if (
         !current.scopes.includes(scope) ||
-        (target === 'registry' && current.scopes.some(item => item.startsWith('registry:') && item !== scope))
+        (target === 'registry' &&
+          EffectArray.some(
+            current.scopes,
+            item => Effect2.pipe(item, EffectString.startsWith('registry:')) && item !== scope,
+          ))
       )
         return yield* graphSharingFailure('OAuth token lacks the requested scope.');
       const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
@@ -506,31 +529,37 @@ function account(
   version: typeof CredentialAccountVersion.Type = config.credentialAccountVersion,
 ): string {
   if (version === 'legacy-auth0-v1')
-    return sha256Digest(
+    return Effect2.pipe(
+      sha256Digest(
+        JSON.stringify([
+          home,
+          config.issuer,
+          config.audience,
+          config.clientId,
+          config.coordinatorUrl,
+          config.organization,
+        ]),
+      ),
+      EffectString.slice(7),
+    );
+  return Effect2.pipe(
+    sha256Digest(
       JSON.stringify([
         home,
         config.issuer,
         config.audience,
         config.clientId,
+        config.clientIdClaim,
+        config.deviceAuthorizationUrl,
+        config.tokenUrl,
+        config.jwksUrl,
+        config.audienceParameter ?? null,
         config.coordinatorUrl,
         config.organization,
       ]),
-    ).slice(7);
-  return sha256Digest(
-    JSON.stringify([
-      home,
-      config.issuer,
-      config.audience,
-      config.clientId,
-      config.clientIdClaim,
-      config.deviceAuthorizationUrl,
-      config.tokenUrl,
-      config.jwksUrl,
-      config.audienceParameter ?? null,
-      config.coordinatorUrl,
-      config.organization,
-    ]),
-  ).slice(7);
+    ),
+    EffectString.slice(7),
+  );
 }
 
 function oauthUserLockPath(
@@ -579,8 +608,19 @@ function validProviderConfig(config: OAuthUserConfig): boolean {
     sameOriginOAuthEndpoint(config.jwksUrl, config.issuer) &&
     (config.audienceParameter === undefined ||
       (config.audienceParameter.length <= 512 &&
-        ![...config.audienceParameter].some(
-          character => character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127,
+        !EffectArray.some(
+          [...config.audienceParameter],
+          character =>
+            Effect2.pipe(
+              character,
+              EffectString.charCodeAt(0),
+              Effect2.Option.getOrElse(() => NaN),
+            ) <= 32 ||
+            Effect2.pipe(
+              character,
+              EffectString.charCodeAt(0),
+              Effect2.Option.getOrElse(() => NaN),
+            ) === 127,
         )))
   );
 }
@@ -641,17 +681,24 @@ const readConfigs = Effect.fn('codeGraph.sharing.readOAuthUserConfigs')(function
   const usingLegacy = !(yield* fs.exists(filename));
   const selectedFilename = usingLegacy ? legacyFilename : filename;
   const bytes = yield* readBoundedPrivateBytes(selectedFilename, 65_536);
-  const decoded = yield* Schema.decodeEffect(
-    Schema.fromJsonString(usingLegacy ? LegacyConfigs : Configs),
-    STRICT,
-  )(new TextDecoder().decode(bytes)).pipe(
-    Effect.mapError(() => graphSharingFailure(`${label} configuration is invalid.`)),
-  );
-  const bindings: ReadonlyArray<OAuthUserConfig> = usingLegacy
-    ? (decoded.bindings as ReadonlyArray<typeof LegacyConfig.Type>).map(legacyProviderConfig)
-    : (decoded.bindings as ReadonlyArray<OAuthUserConfig>);
+  const serialized = new TextDecoder().decode(bytes);
+  let bindings: ReadonlyArray<OAuthUserConfig>;
+  if (usingLegacy) {
+    const decoded = yield* Schema.decodeEffect(
+      Schema.fromJsonString(LegacyConfigs),
+      STRICT,
+    )(serialized).pipe(Effect.mapError(() => graphSharingFailure(`${label} configuration is invalid.`)));
+    bindings = EffectArray.map(decoded.bindings, legacyProviderConfig);
+  } else {
+    const decoded = yield* Schema.decodeEffect(
+      Schema.fromJsonString(Configs),
+      STRICT,
+    )(serialized).pipe(Effect.mapError(() => graphSharingFailure(`${label} configuration is invalid.`)));
+    bindings = decoded.bindings;
+  }
   if (
-    bindings.some(
+    EffectArray.some(
+      bindings,
       config =>
         !canonicalOAuthUrl(config.coordinatorUrl) ||
         !canonicalOAuthUrl(config.audience) ||
@@ -662,9 +709,10 @@ const readConfigs = Effect.fn('codeGraph.sharing.readOAuthUserConfigs')(function
             config.audience !== config.coordinatorUrl ||
             config.subject === undefined)),
     ) ||
-    new Set(bindings.map(config => JSON.stringify([config.coordinatorUrl, config.organization]))).size !==
+    new Set(EffectArray.map(bindings, config => JSON.stringify([config.coordinatorUrl, config.organization]))).size !==
       bindings.length ||
-    (target === 'registry' && new Set(bindings.map(config => config.coordinatorUrl)).size !== bindings.length)
+    (target === 'registry' &&
+      new Set(EffectArray.map(bindings, config => config.coordinatorUrl)).size !== bindings.length)
   )
     return yield* graphSharingFailure(`${label} configuration has invalid URLs.`);
   return bindings;
@@ -687,8 +735,11 @@ const readConfig = Effect.fn('codeGraph.sharing.readOAuthUserConfig')(function* 
       );
     return bindings[0];
   }
-  const selected = bindings.find(
-    config => config.coordinatorUrl === selector.coordinatorUrl && config.organization === selector.organization,
+  const selected = Option.getOrUndefined(
+    EffectArray.findFirst(
+      bindings,
+      config => config.coordinatorUrl === selector.coordinatorUrl && config.organization === selector.organization,
+    ),
   );
   if (selected === undefined) return yield* graphSharingFailure(`${label} organization is not configured.`);
   return selected;
@@ -734,7 +785,7 @@ const verifiedCredential = Effect.fn('codeGraph.sharing.verifyOAuthCredential')(
   if (
     !isRecord(raw) ||
     typeof raw.token_type !== 'string' ||
-    raw.token_type.toLowerCase() !== 'bearer' ||
+    Effect2.pipe(raw.token_type, EffectString.toLowerCase) !== 'bearer' ||
     !boundedText(raw.access_token, 16_384)
   )
     return yield* graphSharingFailure('OAuth did not return a usable graph credential.');
@@ -750,9 +801,12 @@ const verifiedCredential = Effect.fn('codeGraph.sharing.verifyOAuthCredential')(
     claims.subject.length > 512 ||
     (previous !== undefined && claims.subject !== previous.subject) ||
     (config.subject !== undefined && claims.subject !== config.subject) ||
-    !(target === 'registry' ? REGISTRY_SCOPES : SCOPES).every(scope => claims.scopes.has(scope)) ||
+    !EffectArray.every(target === 'registry' ? REGISTRY_SCOPES : SCOPES, scope => claims.scopes.has(scope)) ||
     (target === 'registry' &&
-      [...claims.scopes].some(scope => scope.startsWith('registry:') && scope !== 'registry:read'))
+      EffectArray.some(
+        [...claims.scopes],
+        scope => Effect2.pipe(scope, EffectString.startsWith('registry:')) && scope !== 'registry:read',
+      ))
   )
     return yield* graphSharingFailure('OAuth token lacks the configured identity or scopes.');
   const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
@@ -773,7 +827,7 @@ const verifiedCredential = Effect.fn('codeGraph.sharing.verifyOAuthCredential')(
 });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function boundedText(value: unknown, max: number): value is string {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Option} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -15,6 +16,9 @@ import {
   type BenchmarkProcessTreeSample,
 } from './code-graph-benchmark-sampler.js';
 import {ScriptError} from './effect/errors.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CONTEXT_BRIEF_CITATION_RSS_OBSERVER_MODE = '--internal-context-brief-citation-rss-observer';
 
@@ -305,19 +309,19 @@ export function parseContextBriefCitationRssArtifact(value: unknown): ContextBri
   );
   const contract = parseObserverContract(artifact);
   if (
-    !Array.isArray(artifact.observations) ||
+    !EffectArray.isArray(artifact.observations) ||
     artifact.observations.length > CONTEXT_BRIEF_CITATION_RSS_MAXIMUM_OBSERVATIONS
   ) {
     invalid('RSS observer artifact observations are invalid.');
   }
-  const observations = artifact.observations.map(parseObservation);
-  if (new Set(observations.map(observation => observation.observationId)).size !== observations.length) {
+  const observations = EffectArray.map(artifact.observations, parseObservation);
+  if (new Set(EffectArray.map(observations, observation => observation.observationId)).size !== observations.length) {
     invalid('RSS observer artifact observation IDs must be unique.');
   }
   const finalSample = parseFinalSample(artifact.finalSample);
   parseSampleGapPolicy(artifact.sampleGapPolicy);
   const expected = observationTotals(observations, finalSample);
-  for (const [key, value] of Object.entries(expected)) {
+  for (const [key, value] of EffectRecord.toEntries(expected)) {
     if (artifact[key] !== value) invalid(`RSS observer artifact ${key} is inconsistent.`);
   }
   return {
@@ -378,7 +382,7 @@ export function applyContextBriefCitationRssRequest(
     if (current.observations.length >= CONTEXT_BRIEF_CITATION_RSS_MAXIMUM_OBSERVATIONS) {
       invalid('RSS observer observation bound exceeded.');
     }
-    if (current.observations.some(observation => observation.observationId === request.observationId)) {
+    if (EffectArray.some(current.observations, observation => observation.observationId === request.observationId)) {
       invalid('RSS observer observation ID was reused.');
     }
     const attempted = requiredBarrierSample(current, barrierSample);
@@ -690,7 +694,8 @@ function requiredBarrierSample(
 ): ContextBriefCitationRssSampleAttempt & {readonly sample: BenchmarkProcessTreeSample} {
   if (attempt === undefined) invalid('RSS observer barriers require a process-tree sample.');
   const parsed = parseSampleAttempt(state, attempt, true);
-  return parsed as ContextBriefCitationRssSampleAttempt & {readonly sample: BenchmarkProcessTreeSample};
+  if (parsed.sample === undefined) invalid('RSS observer barrier did not obtain a process-tree sample.');
+  return {...parsed, sample: parsed.sample};
 }
 
 function parseSampleAttempt(
@@ -719,10 +724,13 @@ function validateProcessTreeSample(
 ): void {
   if (sample.rootStartIdentity !== state.rootStartIdentity) invalid('RSS observer benchmark root identity changed.');
   if (
-    !Array.isArray(sample.processIds) ||
+    !EffectArray.isArray(sample.processIds) ||
     sample.processIds.length < 1 ||
     new Set(sample.processIds).size !== sample.processIds.length ||
-    sample.processIds.some(processId => !Number.isSafeInteger(processId) || processId <= 0)
+    EffectArray.some(
+      sample.processIds,
+      processId => typeof processId !== 'number' || !Number.isSafeInteger(processId) || processId <= 0,
+    )
   ) {
     invalid('RSS observer process-tree membership is invalid.');
   }
@@ -773,11 +781,54 @@ function parseObservation(value: unknown): ContextBriefCitationRssObservationV2 
     'treeRssPeakObservedBytes',
   ] as const;
   exactKeys(observation, keys, 'RSS observer observation');
-  const parsed = Object.fromEntries(
-    keys
-      .filter(key => key !== 'observationId')
-      .map(key => [key, nonNegativeSafeInteger(observation[key], `RSS observer observation ${key}`)]),
-  ) as unknown as Omit<ContextBriefCitationRssObservationV2, 'observationId'>;
+  const parsed = {
+    durationMilliseconds: nonNegativeSafeInteger(
+      observation.durationMilliseconds,
+      'RSS observer observation durationMilliseconds',
+    ),
+    maximumSampleGapMilliseconds: nonNegativeSafeInteger(
+      observation.maximumSampleGapMilliseconds,
+      'RSS observer observation maximumSampleGapMilliseconds',
+    ),
+    processCountBaseline: nonNegativeSafeInteger(
+      observation.processCountBaseline,
+      'RSS observer observation processCountBaseline',
+    ),
+    processCountPeakObserved: nonNegativeSafeInteger(
+      observation.processCountPeakObserved,
+      'RSS observer observation processCountPeakObserved',
+    ),
+    rootRssBaselineBytes: nonNegativeSafeInteger(
+      observation.rootRssBaselineBytes,
+      'RSS observer observation rootRssBaselineBytes',
+    ),
+    rootRssGrowthObservedBytes: nonNegativeSafeInteger(
+      observation.rootRssGrowthObservedBytes,
+      'RSS observer observation rootRssGrowthObservedBytes',
+    ),
+    rootRssPeakObservedBytes: nonNegativeSafeInteger(
+      observation.rootRssPeakObservedBytes,
+      'RSS observer observation rootRssPeakObservedBytes',
+    ),
+    sampleAttempts: nonNegativeSafeInteger(observation.sampleAttempts, 'RSS observer observation sampleAttempts'),
+    sampleFailures: nonNegativeSafeInteger(observation.sampleFailures, 'RSS observer observation sampleFailures'),
+    successfulSamples: nonNegativeSafeInteger(
+      observation.successfulSamples,
+      'RSS observer observation successfulSamples',
+    ),
+    treeRssBaselineBytes: nonNegativeSafeInteger(
+      observation.treeRssBaselineBytes,
+      'RSS observer observation treeRssBaselineBytes',
+    ),
+    treeRssGrowthObservedBytes: nonNegativeSafeInteger(
+      observation.treeRssGrowthObservedBytes,
+      'RSS observer observation treeRssGrowthObservedBytes',
+    ),
+    treeRssPeakObservedBytes: nonNegativeSafeInteger(
+      observation.treeRssPeakObservedBytes,
+      'RSS observer observation treeRssPeakObservedBytes',
+    ),
+  } satisfies Omit<ContextBriefCitationRssObservationV2, 'observationId'>;
   const result = {
     ...parsed,
     observationId: boundedIdentifier(observation.observationId, 'RSS observer observation ID'),
@@ -835,14 +886,22 @@ function observationTotals(
   finalSample: ContextBriefCitationRssFinalSampleV2,
 ) {
   return {
-    ...contextBriefCitationRssSampleGapSummary(observations.map(value => value.maximumSampleGapMilliseconds)),
+    ...contextBriefCitationRssSampleGapSummary(
+      EffectArray.map(observations, value => value.maximumSampleGapMilliseconds),
+    ),
     processCountPeakObserved: Math.max(
       finalSample.processCount,
-      ...observations.map(value => value.processCountPeakObserved),
+      ...EffectArray.map(observations, value => value.processCountPeakObserved),
     ),
-    sampleAttempts: boundedSum([...observations.map(value => value.sampleAttempts), finalSample.sampleAttempts]),
-    sampleFailures: boundedSum([...observations.map(value => value.sampleFailures), finalSample.sampleFailures]),
-    successfulSamples: boundedSum([...observations.map(value => value.successfulSamples), 1]),
+    sampleAttempts: boundedSum([
+      ...EffectArray.map(observations, value => value.sampleAttempts),
+      finalSample.sampleAttempts,
+    ]),
+    sampleFailures: boundedSum([
+      ...EffectArray.map(observations, value => value.sampleFailures),
+      finalSample.sampleFailures,
+    ]),
+    successfulSamples: boundedSum([...EffectArray.map(observations, value => value.successfulSamples), 1]),
   };
 }
 
@@ -944,7 +1003,13 @@ function parseObserverArguments(args: readonly string[]): ContextBriefCitationRs
   for (let index = 1; index < args.length; index += 2) {
     const flag = args[index];
     const value = args[index + 1];
-    if (!flag?.startsWith('--') || value === undefined || values.has(flag)) {
+    if (
+      !Effect2.pipe(flag, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.startsWith('--')),
+      ) ||
+      value === undefined ||
+      values.has(flag)
+    ) {
       invalid(`RSS observer argument ${flag ?? '<missing>'} is invalid.`);
     }
     values.set(flag, value);
@@ -963,7 +1028,7 @@ function parseObserverArguments(args: readonly string[]): ContextBriefCitationRs
     '--ready',
     '--request',
   ]);
-  if (values.size !== allowed.size || [...values.keys()].some(key => !allowed.has(key))) {
+  if (values.size !== allowed.size || EffectArray.some([...values.keys()], key => !allowed.has(key))) {
     invalid('RSS observer arguments do not match the bounded protocol.');
   }
   const paths = {
@@ -972,7 +1037,7 @@ function parseObserverArguments(args: readonly string[]): ContextBriefCitationRs
     readyPath: required('--ready'),
     requestPath: required('--request'),
   };
-  if (new Set(Object.values(paths)).size !== Object.keys(paths).length) {
+  if (new Set(EffectRecord.values(paths)).size !== EffectRecord.keys(paths).length) {
     invalid('RSS observer protocol paths must be distinct.');
   }
   const intervalMilliseconds = positiveSafeInteger(Number(required('--interval-ms')), 'RSS observer interval');
@@ -1013,14 +1078,18 @@ function parseJson(text: string, label: string): unknown {
 }
 
 function record(value: unknown, label: string): Readonly<Record<string, unknown>> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object.`);
-  return value as Readonly<Record<string, unknown>>;
+  if (!isUnknownRecord(value)) invalid(`${label} must be an object.`);
+  return value;
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function exactKeys(value: Readonly<Record<string, unknown>>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid(`${label} fields are invalid.`);
   }
 }
@@ -1036,8 +1105,12 @@ function boundedText(value: unknown, label: string, maximumLength: number): stri
     typeof value !== 'string' ||
     value.length === 0 ||
     value.length > maximumLength ||
-    Array.from(value).some(character => {
-      const codePoint = character.codePointAt(0)!;
+    EffectArray.some(Array.from(value), character => {
+      const codePoint = Effect2.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect2.Option.getOrElse(() => undefined),
+      )!;
       return codePoint <= 0x1f || codePoint === 0x7f;
     })
   ) {
@@ -1064,7 +1137,7 @@ function nonNegativeSafeInteger(value: unknown, label: string): number {
 }
 
 function boundedSum(values: readonly number[]): number {
-  return values.reduce((total, value) => Math.min(Number.MAX_SAFE_INTEGER, total + value), 0);
+  return EffectArray.reduce(values, 0, (total, value) => Math.min(Number.MAX_SAFE_INTEGER, total + value));
 }
 
 function stableJson(value: unknown): string {

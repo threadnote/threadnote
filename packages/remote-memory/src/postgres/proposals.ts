@@ -1,4 +1,4 @@
-import type {TransactionSql} from 'postgres';
+import type {ISql} from 'postgres';
 import type {RemoteMemoryReceiptV1} from '@threadnote/memory/remote/receipts';
 import {randomUuidV4} from '@threadnote/platform/uuid';
 import type {AuthorizedRemotePrincipal} from '../authorization.js';
@@ -19,8 +19,9 @@ import {
   type StoredRemoteMemoryProposalSummaryRow,
 } from '../proposals.js';
 import {requirePrincipalProject, requireShareState} from '../repository_policy.js';
+import {Array as EffectArray} from 'effect';
 
-export type ProposalTenantRunner = <A>(use: (transaction: TransactionSql) => Promise<A>) => Promise<A>;
+export type ProposalTenantRunner = <A>(use: (transaction: ISql) => Promise<A>) => Promise<A>;
 
 export interface StoredProposalApprovalContext {
   readonly proposal: StoredRemoteMemoryProposalRow;
@@ -40,11 +41,11 @@ export type StoredProposalReviewClaim =
 
 export async function claimStoredRemoteMemoryProposalReview(input: {
   readonly attestationId?: string;
-  readonly beforeRead: (transaction: TransactionSql) => Promise<void>;
+  readonly beforeRead: (transaction: ISql) => Promise<void>;
   readonly now: Date;
   readonly principal: AuthorizedRemotePrincipal;
   readonly review: RemoteMemoryProposalReviewInputV1;
-  readonly validate: (transaction: TransactionSql, proposal: StoredRemoteMemoryProposalRow) => Promise<void>;
+  readonly validate: (transaction: ISql, proposal: StoredRemoteMemoryProposalRow) => Promise<void>;
   readonly withTenant: ProposalTenantRunner;
 }): Promise<StoredProposalReviewClaim> {
   const normalizedReason = normalizedProposalReviewReason(input.review);
@@ -178,7 +179,7 @@ export async function claimStoredRemoteMemoryProposalReview(input: {
 }
 
 async function expireStoredRemoteMemoryProposal(
-  transaction: TransactionSql,
+  transaction: ISql,
   principal: AuthorizedRemotePrincipal,
   row: StoredRemoteMemoryProposalRow,
   now: Date,
@@ -216,7 +217,7 @@ export async function listStoredRemoteMemoryProposals(
     `;
     const visible = rows.slice(0, input.limit);
     return {
-      entries: visible.map(remoteMemoryProposalSummaryFromRow),
+      entries: EffectArray.map(visible, remoteMemoryProposalSummaryFromRow),
       ...(rows.length > input.limit && visible.at(-1) ? {nextProposalId: visible.at(-1)!.id} : {}),
     };
   });
@@ -248,7 +249,7 @@ export async function finishStoredRemoteMemoryProposalDecision(
   result: RemoteMemoryReceiptV1 | undefined,
   now: Date,
   withTenant: ProposalTenantRunner,
-  validate: (transaction: TransactionSql) => Promise<void>,
+  validate: (transaction: ISql) => Promise<void>,
 ): Promise<RemoteMemoryProposalV1> {
   return withTenant(async transaction => {
     await validate(transaction);
@@ -265,7 +266,7 @@ export async function finishStoredRemoteMemoryProposalDecision(
 }
 
 export async function finishStoredRemoteMemoryProposalDecisionInTransaction(
-  transaction: TransactionSql,
+  transaction: ISql,
   principal: AuthorizedRemotePrincipal,
   proposal: StoredRemoteMemoryProposalRow,
   input: RemoteMemoryProposalReviewInputV1,

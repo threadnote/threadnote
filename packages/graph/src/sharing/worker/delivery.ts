@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, Effect, FileSystem, Path, Random, Schema} from 'effect';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {canonicalJson} from '../../checkpoint/canonical_json.js';
@@ -47,6 +48,8 @@ import {signGraphWorkerResultAnnouncement} from './announcement.js';
 import {graphWorkerRegistryForProfile, uploadGraphWorkerArtifactToRegistry} from './registry_upload.js';
 import {createGraphWorkerResultArtifact, type GraphWorkerResultAuthority} from './result.js';
 import {advanceGraphWorkerCandidateScan, nextGraphWorkerCandidateScan} from './candidate_scan.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ADMISSION_ACK = Schema.Struct({
   idempotencyKey: Schema.String.check(Schema.isPattern(SHA256_DIGEST)),
@@ -62,7 +65,7 @@ const WORKER_MINIMUM_VALIDITY_SECONDS = 390;
 
 /** Legacy worker metadata is deliberately never submitted to an OCI-backed org. */
 export function usesSignedGraphWorkerDelivery(trust: GraphShareTrustReceiptV1): boolean {
-  return trust.registryCanonical.startsWith('oci://');
+  return Effect2.pipe(trust.registryCanonical, EffectString.startsWith('oci://'));
 }
 
 /** One bounded background round, independent of the foreground/legacy 30-second lease. */
@@ -114,7 +117,10 @@ const drainSignedBatch = Effect.fn('codeGraph.sharing.drainSignedBatch')(functio
     ).deliveryPausedReason !== undefined
   )
     return {sent: 0};
-  if (profile.coordinator?.url !== state.coordinatorUrl || !profile.registry.worker.startsWith('oci://'))
+  if (
+    profile.coordinator?.url !== state.coordinatorUrl ||
+    !Effect2.pipe(profile.registry.worker, EffectString.startsWith('oci://'))
+  )
     return yield* graphSharingFailure('Signed graph worker profile is outside its trusted transport.');
   yield* Effect.try({
     try: () =>
@@ -153,7 +159,7 @@ const drainSignedBatch = Effect.fn('codeGraph.sharing.drainSignedBatch')(functio
   const scope = graphWorkerDeliveryScope(
     {
       expiresAt: enrollment.worker.expiresAt,
-      graphAbi: '0'.repeat(64),
+      graphAbi: Effect2.pipe('0', EffectString.repeat(64)),
       principalId: enrollment.worker.principalId,
       profileDigest: trust.profileDigest,
       repositoryId: trust.repositoryId,
@@ -172,16 +178,24 @@ const drainSignedBatch = Effect.fn('codeGraph.sharing.drainSignedBatch')(functio
     const scopes = yield* listGraphWorkerDeliveryPrincipalScopes(input.threadnoteHome, scope);
     const operations = (yield* Effect.forEach(scopes, previousScope =>
       listGraphWorkerDeliveryOutboxOperations(input.threadnoteHome, previousScope).pipe(
-        Effect.map(items => items.map(operation => ({operation, scope: previousScope}))),
+        Effect.map(items => EffectArray.map(items, operation => ({operation, scope: previousScope}))),
       ),
     )).flat();
     const replay =
-      operations.find(item => item.operation.state === 'admitted' || item.operation.state === 'superseded') ??
-      operations.find(
-        item =>
-          item.operation.state === 'prepared' &&
-          item.scope.workerId === scope.workerId &&
-          item.operation.authority.expiresAt > now + SIGNED_DELIVERY_DEADLINE_MILLISECONDS / 1000,
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          operations,
+          item => item.operation.state === 'admitted' || item.operation.state === 'superseded',
+        ),
+      ) ??
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          operations,
+          item =>
+            item.operation.state === 'prepared' &&
+            item.scope.workerId === scope.workerId &&
+            item.operation.authority.expiresAt > now + SIGNED_DELIVERY_DEADLINE_MILLISECONDS / 1000,
+        ),
       );
     if (replay !== undefined) {
       if (replay.operation.state !== 'prepared') {
@@ -290,7 +304,7 @@ const prepareCandidate = Effect.fn('codeGraph.sharing.prepareSignedCandidate')(f
     candidate.organization !== trust.organization ||
     candidate.profileDigest !== trust.profileDigest ||
     candidate.casRoot !== casRoot ||
-    candidate.sourceCommit.slice(0, 40) !== candidate.batchId
+    Effect2.pipe(candidate.sourceCommit, EffectString.slice(0, 40)) !== candidate.batchId
   )
     return yield* graphSharingFailure('Signed graph worker candidate is outside its current authority.');
   const resultBytes = yield* readVerifiedCasBlobBounded(
@@ -469,7 +483,14 @@ export const finishAdmittedGraphWorkerResult = Effect.fn('codeGraph.sharing.fini
     for (const pageId of yield* listGraphShareSignedCandidatePageIds(input.threadnoteHome, input.repositoryId)) {
       const page = yield* readGraphShareSignedCandidatePage(input.threadnoteHome, input.repositoryId, pageId);
       if (
-        page?.candidates.some(candidate => graphShareSignedCandidateIdentity(candidate) === operation.candidateIdentity)
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(page?.candidates), __effectArrayReceiver =>
+            EffectArray.some(
+              __effectArrayReceiver,
+              candidate => graphShareSignedCandidateIdentity(candidate) === operation.candidateIdentity,
+            ),
+          ),
+        )
       )
         yield* acknowledgeGraphShareSignedCandidatePage(input.threadnoteHome, input.repositoryId, pageId, accepted);
     }

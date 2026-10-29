@@ -1,6 +1,12 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {benchmarkMeasurement, type BenchmarkMeasurementV1} from '@threadnote/evidence/benchmark';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MEMORY_CONNECTIONS_SCALE_ID = 'memory-connections-one-hop-scale-v1' as const;
 export const MEMORY_CONNECTIONS_SCALE_VERSION = 1 as const;
@@ -15,7 +21,10 @@ export const MEMORY_CONNECTIONS_SCALE_FIXTURE = Object.freeze({
   project: 'threadnote',
   scenarios: [
     {
-      expectedMemoryIds: Array.from({length: 8}, (_, index) => `tn_hub_${String(index).padStart(6, '0')}`),
+      expectedMemoryIds: Array.from(
+        {length: 8},
+        (_, index) => `tn_hub_${Effect.pipe(String(index), EffectString.padStart(6, '0'))}`,
+      ),
       expectedTruncated: true,
       id: 'incoming-hub',
       premiseMemoryId: 'tn_scale_hub',
@@ -215,7 +224,9 @@ export function memoryConnectionsScaleFixtureHash(): string {
 }
 
 export function memoryConnectionsScaleExpectedIds(id: MemoryConnectionsScaleScenarioId): readonly string[] {
-  return MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios.find(scenario => scenario.id === id)!.expectedMemoryIds;
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios, scenario => scenario.id === id),
+  )!.expectedMemoryIds;
 }
 
 export function memoryConnectionsScaleCandidateBinding(
@@ -227,13 +238,16 @@ export function memoryConnectionsScaleCandidateBinding(
   const version = nonEmptyString(manifest.version, 'candidate package version');
   if (!CANDIDATE_PACKAGE_VERSION.test(version)) invalid('candidate package version must be an explicit version');
   const packageManager = nonEmptyString(manifest.packageManager, 'candidate package manager');
-  if (!packageManager.startsWith('bun@') || !CANDIDATE_PACKAGE_VERSION.test(packageManager.slice('bun@'.length))) {
+  if (
+    !Effect.pipe(packageManager, EffectString.startsWith('bun@')) ||
+    !CANDIDATE_PACKAGE_VERSION.test(Effect.pipe(packageManager, EffectString.slice('bun@'.length)))
+  ) {
     invalid('candidate package manager must pin an explicit Bun version');
   }
   return {
     commit,
     packageManager,
-    runtime: `bun/${packageManager.slice('bun@'.length)}`,
+    runtime: `bun/${Effect.pipe(packageManager, EffectString.slice('bun@'.length))}`,
     sourceVersion: `threadnote-${version}`,
   };
 }
@@ -241,8 +255,10 @@ export function memoryConnectionsScaleCandidateBinding(
 function expectedScaleConnectionReceipts(
   id: MemoryConnectionsScaleScenarioId,
 ): readonly MemoryConnectionsScaleConnectionReceiptEvidenceV1[] {
-  const scenario = MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios.find(value => value.id === id)!;
-  return scenario.expectedMemoryIds.map(memoryId => ({
+  const scenario = EffectOption.getOrUndefined(
+    EffectArray.findFirst(MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios, value => value.id === id),
+  )!;
+  return EffectArray.map(scenario.expectedMemoryIds, memoryId => ({
     currentness: 'current',
     direction: 'incoming',
     distance: 1,
@@ -278,8 +294,8 @@ function connectionReceiptIdentityMatches(
 export function parseMemoryConnectionsScaleBudgetV1(value: unknown): MemoryConnectionsScaleBudgetV1 {
   if (!Predicate.isObject(value)) invalid('budget must be an object');
   const budget = value;
-  const expectedEntries = Object.entries(MEMORY_CONNECTIONS_SCALE_APPROVED_BUDGET);
-  if (Object.keys(budget).length !== expectedEntries.length)
+  const expectedEntries = EffectRecord.toEntries(MEMORY_CONNECTIONS_SCALE_APPROVED_BUDGET);
+  if (EffectRecord.keys(budget).length !== expectedEntries.length)
     invalid('budget fields do not match the approved contract');
   for (const [key, expected] of expectedEntries) {
     if (budget[key] !== expected) invalid(`budget ${key} does not match the reviewed value ${expected}`);
@@ -308,12 +324,21 @@ export function evaluateMemoryConnectionsScaleCapture(input: {
     capture.corpus.authorizedHubMemoryCount === budget.corpusMemoryCount - 6 &&
     capture.corpus.materializedMemoryCount === budget.corpusMemoryCount &&
     capture.corpus.indexedMemoryCount === budget.corpusMemoryCount &&
-    capture.scenarios.every(
+    EffectArray.every(
+      capture.scenarios,
       scenario => scenario.warmups.length >= budget.minimumWarmups && scenario.samples.length >= budget.minimumSamples,
     );
   const evidenceClass: MemoryConnectionsScaleEvidenceClass = releaseShape ? 'release-scale' : 'development-smoke';
-  const all = capture.scenarios.flatMap(scenario => [scenario.cold, ...scenario.warmups, ...scenario.samples]);
-  const measured = capture.scenarios.flatMap(scenario => scenario.samples);
+  const all = EffectArrayPipe(capture.scenarios, __effectFlatMapValues =>
+    EffectArray.flatMap(__effectFlatMapValues, (scenario, __effectFlatMapIndex) =>
+      __effectFlatMapIndex in __effectFlatMapValues ? [scenario.cold, ...scenario.warmups, ...scenario.samples] : [],
+    ),
+  );
+  const measured = EffectArrayPipe(capture.scenarios, __effectArrayValues2 =>
+    EffectArray.flatMap(__effectArrayValues2, (scenario, __effectArrayIndex2) =>
+      __effectArrayIndex2 in __effectArrayValues2 ? scenario.samples : [],
+    ),
+  );
   let expectedCount = 0;
   let returnedCount = 0;
   let truePositiveCount = 0;
@@ -327,14 +352,26 @@ export function evaluateMemoryConnectionsScaleCapture(input: {
   let incorrectPremiseStateCount = 0;
   for (const scenario of capture.scenarios) {
     const expected = new Set(scenario.expectedMemoryIds);
-    const fixture = MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios.find(value => value.id === scenario.id)!;
+    const fixture = EffectOption.getOrUndefined(
+      EffectArray.findFirst(MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios, value => value.id === scenario.id),
+    )!;
     const expectedReceiptMemoryIds = new Set([...scenario.expectedMemoryIds, fixture.premiseMemoryId]);
     const expectedConnectionReceipts = expectedScaleConnectionReceipts(scenario.id);
     for (const observation of [scenario.cold, ...scenario.warmups, ...scenario.samples]) {
       expectedCount += expected.size;
       returnedCount += observation.returnedMemoryIds.length;
-      truePositiveCount += observation.returnedMemoryIds.filter(id => expected.has(id)).length;
-      unexpectedResultCount += observation.returnedMemoryIds.filter(id => !expected.has(id)).length;
+      truePositiveCount += EffectArrayPipe(observation.returnedMemoryIds, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (id, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && expected.has(id),
+        ),
+      ).length;
+      unexpectedResultCount += EffectArrayPipe(observation.returnedMemoryIds, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (id, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && !expected.has(id),
+        ),
+      ).length;
       duplicateResultCount += observation.returnedMemoryIds.length - new Set(observation.returnedMemoryIds).size;
       for (const [index, receipt] of observation.projectedConnections.entries()) {
         if (receipt.currentness !== 'current') incorrectConnectionCurrentnessCount += 1;
@@ -342,9 +379,13 @@ export function evaluateMemoryConnectionsScaleCapture(input: {
         if (!connectionReceiptIdentityMatches(receipt, expectedConnectionReceipts[index])) {
           incorrectConnectionReceiptIdentityCount += 1;
         }
-        unexpectedReceiptIdentityCount += [receipt.neighborMemoryId, receipt.sourceMemoryId, receipt.targetMemoryId]
-          .filter((memoryId): memoryId is string => memoryId !== null)
-          .filter(memoryId => !expectedReceiptMemoryIds.has(memoryId)).length;
+        unexpectedReceiptIdentityCount += EffectArray.filter(
+          EffectArray.filter(
+            [receipt.neighborMemoryId, receipt.sourceMemoryId, receipt.targetMemoryId],
+            (memoryId): memoryId is string => memoryId !== null,
+          ),
+          memoryId => !expectedReceiptMemoryIds.has(memoryId),
+        ).length;
       }
       for (const receipt of observation.projectedPremises) {
         if (receipt.state !== 'current') incorrectPremiseStateCount += 1;
@@ -357,11 +398,20 @@ export function evaluateMemoryConnectionsScaleCapture(input: {
       }
     }
   }
-  const noAnswer = capture.scenarios
-    .filter(scenario => scenario.expectedMemoryIds.length === 0)
-    .flatMap(scenario => [scenario.cold, ...scenario.warmups, ...scenario.samples]);
+  const noAnswer = EffectArray.flatMap(
+    EffectArrayPipe(capture.scenarios, __effectFilterValues =>
+      EffectArray.filter(
+        __effectFilterValues,
+        (scenario, __effectFilterIndex) =>
+          __effectFilterIndex in __effectFilterValues && scenario.expectedMemoryIds.length === 0,
+      ),
+    ),
+    scenario => [scenario.cold, ...scenario.warmups, ...scenario.samples],
+  );
   const metrics: MemoryConnectionsScaleMetricsV1 = {
-    boundedResultAccuracy: mean(all.map(value => (value.returnedMemoryIds.length <= budget.queryLimit ? 1 : 0))),
+    boundedResultAccuracy: mean(
+      EffectArray.map(all, value => (value.returnedMemoryIds.length <= budget.queryLimit ? 1 : 0)),
+    ),
     duplicateResultCount,
     incorrectConnectionCurrentnessCount,
     incorrectConnectionReceiptIdentityCount,
@@ -371,37 +421,50 @@ export function evaluateMemoryConnectionsScaleCapture(input: {
     lookupMilliseconds: benchmarkMeasurement(
       'memory-connections-one-hop',
       'milliseconds',
-      measured.map(value => value.milliseconds),
+      EffectArray.map(measured, value => value.milliseconds),
     ),
-    maximumCanonicalRereads: Math.max(0, ...all.map(value => value.canonicalRereads)),
-    maximumEstimatedTokens: Math.max(0, ...all.map(value => value.estimatedTokens)),
-    maximumRawLinkRows: Math.max(0, ...all.map(value => value.rawLinkRows)),
-    maximumReturnedMemories: Math.max(0, ...all.map(value => value.returnedMemoryIds.length)),
-    noAnswerAccuracy: mean(noAnswer.map(value => (value.returnedMemoryIds.length === 0 ? 1 : 0))),
+    maximumCanonicalRereads: Math.max(0, ...EffectArray.map(all, value => value.canonicalRereads)),
+    maximumEstimatedTokens: Math.max(0, ...EffectArray.map(all, value => value.estimatedTokens)),
+    maximumRawLinkRows: Math.max(0, ...EffectArray.map(all, value => value.rawLinkRows)),
+    maximumReturnedMemories: Math.max(0, ...EffectArray.map(all, value => value.returnedMemoryIds.length)),
+    noAnswerAccuracy: mean(EffectArray.map(noAnswer, value => (value.returnedMemoryIds.length === 0 ? 1 : 0))),
     precision: ratio(truePositiveCount, returnedCount),
     projectedConnectionCoverageAccuracy: mean(
-      capture.scenarios.flatMap(scenario =>
-        [scenario.cold, ...scenario.warmups, ...scenario.samples].map(value =>
-          projectedConnectionCoverageIsExact(value) ? 1 : 0,
+      EffectArrayPipe(capture.scenarios, __effectArrayValues2 =>
+        EffectArray.flatMap(__effectArrayValues2, (scenario, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues2
+            ? EffectArray.map([scenario.cold, ...scenario.warmups, ...scenario.samples], value =>
+                projectedConnectionCoverageIsExact(value) ? 1 : 0,
+              )
+            : [],
         ),
       ),
     ),
-    projectedOutputCompletenessAccuracy: mean(all.map(value => (value.projectedOutputTruncated ? 0 : 1))),
+    projectedOutputCompletenessAccuracy: mean(EffectArray.map(all, value => (value.projectedOutputTruncated ? 0 : 1))),
     projectedReceiptAccountingAccuracy: mean(
-      capture.scenarios.flatMap(scenario =>
-        [scenario.cold, ...scenario.warmups, ...scenario.samples].map(value =>
-          value.projectedConnections.length + value.omittedConnectionReceiptCount ===
-            scenario.expectedMemoryIds.length && value.projectedPremises.length + value.omittedPremiseReceiptCount === 1
-            ? 1
-            : 0,
+      EffectArrayPipe(capture.scenarios, __effectArrayValues2 =>
+        EffectArray.flatMap(__effectArrayValues2, (scenario, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues2
+            ? EffectArray.map([scenario.cold, ...scenario.warmups, ...scenario.samples], value =>
+                value.projectedConnections.length + value.omittedConnectionReceiptCount ===
+                  scenario.expectedMemoryIds.length &&
+                value.projectedPremises.length + value.omittedPremiseReceiptCount === 1
+                  ? 1
+                  : 0,
+              )
+            : [],
         ),
       ),
     ),
     recall: ratio(truePositiveCount, expectedCount),
     truncationAccuracy: mean(
-      capture.scenarios.flatMap(scenario =>
-        [scenario.cold, ...scenario.warmups, ...scenario.samples].map(value =>
-          value.retrievalTruncated === scenario.expectedTruncated ? 1 : 0,
+      EffectArrayPipe(capture.scenarios, __effectArrayValues2 =>
+        EffectArray.flatMap(__effectArrayValues2, (scenario, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues2
+            ? EffectArray.map([scenario.cold, ...scenario.warmups, ...scenario.samples], value =>
+                value.retrievalTruncated === scenario.expectedTruncated ? 1 : 0,
+              )
+            : [],
         ),
       ),
     ),
@@ -419,19 +482,30 @@ export function evaluateMemoryConnectionsScaleCapture(input: {
   exact(failures, 'materialized memory corpus', capture.corpus.materializedMemoryCount, budget.corpusMemoryCount);
   exact(failures, 'indexed memory corpus', capture.corpus.indexedMemoryCount, budget.corpusMemoryCount);
   exact(failures, 'authorized dense-hub corpus', capture.corpus.authorizedHubMemoryCount, budget.corpusMemoryCount - 6);
-  if (capture.scenarios.map(value => value.id).join(',') !== MEMORY_CONNECTIONS_SCALE_SCENARIOS.join(',')) {
+  if (
+    EffectArray.join(
+      EffectArray.map(capture.scenarios, value => value.id),
+      ',',
+    ) !== EffectArray.join(MEMORY_CONNECTIONS_SCALE_SCENARIOS, ',')
+  ) {
     failures.push('scale scenarios are missing or out of order');
   }
   for (const scenario of capture.scenarios) {
-    if (scenario.expectedMemoryIds.join(',') !== memoryConnectionsScaleExpectedIds(scenario.id).join(',')) {
+    if (
+      EffectArray.join(scenario.expectedMemoryIds, ',') !==
+      EffectArray.join(memoryConnectionsScaleExpectedIds(scenario.id), ',')
+    ) {
       failures.push(`${scenario.id} expected truth differs from the frozen fixture`);
     }
-    const fixtureScenario = MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios.find(value => value.id === scenario.id)!;
+    const fixtureScenario = EffectOption.getOrUndefined(
+      EffectArray.findFirst(MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios, value => value.id === scenario.id),
+    )!;
     if (scenario.expectedTruncated !== fixtureScenario.expectedTruncated) {
       failures.push(`${scenario.id} expected truncation differs from the frozen fixture`);
     }
     if (
-      [scenario.cold, ...scenario.warmups, ...scenario.samples].some(
+      EffectArray.some(
+        [scenario.cold, ...scenario.warmups, ...scenario.samples],
         observation => !sameJson(observation.returnedMemoryIds, scenario.expectedMemoryIds),
       )
     ) {
@@ -546,74 +620,78 @@ export function memoryConnectionsScaleReleaseIdentityFailures(
   identity: MemoryConnectionsScaleIdentityV1,
   candidate?: MemoryConnectionsScaleCandidateBinding,
 ): readonly string[] {
-  const packageManagerRuntime = identity.packageManager.startsWith('bun@')
-    ? `bun/${identity.packageManager.slice('bun@'.length)}`
+  const packageManagerRuntime = Effect.pipe(identity.packageManager, EffectString.startsWith('bun@'))
+    ? `bun/${Effect.pipe(identity.packageManager, EffectString.slice('bun@'.length))}`
     : '';
-  return [
-    candidate === undefined ? 'release evidence requires an independently derived candidate binding' : '',
-    candidate === undefined || /^[0-9a-f]{40}$/u.test(candidate.commit)
-      ? ''
-      : 'candidate binding commit is not exact lowercase Git SHA-1',
-    candidate === undefined ||
-    (candidate.packageManager.startsWith('bun@') &&
-      CANDIDATE_PACKAGE_VERSION.test(candidate.packageManager.slice('bun@'.length)))
-      ? ''
-      : 'candidate binding package manager must pin an explicit Bun version',
-    candidate === undefined || candidate.runtime === `bun/${candidate.packageManager.slice('bun@'.length)}`
-      ? ''
-      : 'candidate binding runtime does not match its package manager',
-    candidate === undefined ||
-    (candidate.sourceVersion.startsWith('threadnote-') &&
-      CANDIDATE_PACKAGE_VERSION.test(candidate.sourceVersion.slice('threadnote-'.length)))
-      ? ''
-      : 'candidate binding source version must name an explicit Threadnote package version',
-    candidate === undefined || identity.candidateCommit === candidate.commit
-      ? ''
-      : `claimed candidate ${identity.candidateCommit}; required reviewed candidate ${candidate.commit}`,
-    candidate === undefined || identity.packageManager === candidate.packageManager
-      ? ''
-      : `package manager ${identity.packageManager}; required ${candidate.packageManager}`,
-    candidate === undefined || identity.runtime === candidate.runtime
-      ? ''
-      : `runtime ${identity.runtime}; required ${candidate.runtime}`,
-    candidate === undefined || identity.sourceVersion === candidate.sourceVersion
-      ? ''
-      : `source version ${identity.sourceVersion}; required ${candidate.sourceVersion}`,
-    identity.observedCommit === identity.candidateCommit
-      ? ''
-      : `observed commit ${identity.observedCommit}; required candidate ${identity.candidateCommit}`,
-    identity.dirty ? 'release candidate checkout is dirty' : '',
-    identity.gitStatusObserved ? '' : 'release candidate Git status could not be observed',
-    identity.githubActions ? '' : 'release evidence was not produced by GitHub Actions',
-    identity.runnerClass === MEMORY_CONNECTIONS_SCALE_RELEASE_RUNNER_CLASS
-      ? ''
-      : `runner class ${identity.runnerClass}; required ${MEMORY_CONNECTIONS_SCALE_RELEASE_RUNNER_CLASS}`,
-    identity.runnerArchitecture === 'ARM64'
-      ? ''
-      : `runner architecture label ${identity.runnerArchitecture}; required ARM64`,
-    identity.runnerEnvironment === 'github-hosted'
-      ? ''
-      : `runner environment ${identity.runnerEnvironment}; required github-hosted`,
-    identity.runnerOperatingSystem === 'macOS'
-      ? ''
-      : `runner operating system label ${identity.runnerOperatingSystem}; required macOS`,
-    identity.architecture === 'arm64' ? '' : `runner architecture ${identity.architecture}; required arm64`,
-    /^Apple M1(?:$|\s)/u.test(identity.cpu) ? '' : `runner CPU ${identity.cpu}; required Apple M1 class`,
-    identity.operatingSystem.startsWith('macOS ')
-      ? ''
-      : `runner operating system ${identity.operatingSystem}; required macOS`,
-    identity.runtime === packageManagerRuntime
-      ? ''
-      : `runtime ${identity.runtime}; required package-manager runtime ${packageManagerRuntime || 'bun/<version>'}`,
-    identity.packageManager.startsWith('bun@') &&
-    CANDIDATE_PACKAGE_VERSION.test(identity.packageManager.slice('bun@'.length))
-      ? ''
-      : 'package manager must pin an explicit Bun version',
-    identity.sourceVersion.startsWith('threadnote-') &&
-    CANDIDATE_PACKAGE_VERSION.test(identity.sourceVersion.slice('threadnote-'.length))
-      ? ''
-      : 'source version must name an explicit Threadnote package version',
-  ].filter(Boolean);
+  return EffectArray.filter(
+    [
+      candidate === undefined ? 'release evidence requires an independently derived candidate binding' : '',
+      candidate === undefined || /^[0-9a-f]{40}$/u.test(candidate.commit)
+        ? ''
+        : 'candidate binding commit is not exact lowercase Git SHA-1',
+      candidate === undefined ||
+      (Effect.pipe(candidate.packageManager, EffectString.startsWith('bun@')) &&
+        CANDIDATE_PACKAGE_VERSION.test(Effect.pipe(candidate.packageManager, EffectString.slice('bun@'.length))))
+        ? ''
+        : 'candidate binding package manager must pin an explicit Bun version',
+      candidate === undefined ||
+      candidate.runtime === `bun/${Effect.pipe(candidate.packageManager, EffectString.slice('bun@'.length))}`
+        ? ''
+        : 'candidate binding runtime does not match its package manager',
+      candidate === undefined ||
+      (Effect.pipe(candidate.sourceVersion, EffectString.startsWith('threadnote-')) &&
+        CANDIDATE_PACKAGE_VERSION.test(Effect.pipe(candidate.sourceVersion, EffectString.slice('threadnote-'.length))))
+        ? ''
+        : 'candidate binding source version must name an explicit Threadnote package version',
+      candidate === undefined || identity.candidateCommit === candidate.commit
+        ? ''
+        : `claimed candidate ${identity.candidateCommit}; required reviewed candidate ${candidate.commit}`,
+      candidate === undefined || identity.packageManager === candidate.packageManager
+        ? ''
+        : `package manager ${identity.packageManager}; required ${candidate.packageManager}`,
+      candidate === undefined || identity.runtime === candidate.runtime
+        ? ''
+        : `runtime ${identity.runtime}; required ${candidate.runtime}`,
+      candidate === undefined || identity.sourceVersion === candidate.sourceVersion
+        ? ''
+        : `source version ${identity.sourceVersion}; required ${candidate.sourceVersion}`,
+      identity.observedCommit === identity.candidateCommit
+        ? ''
+        : `observed commit ${identity.observedCommit}; required candidate ${identity.candidateCommit}`,
+      identity.dirty ? 'release candidate checkout is dirty' : '',
+      identity.gitStatusObserved ? '' : 'release candidate Git status could not be observed',
+      identity.githubActions ? '' : 'release evidence was not produced by GitHub Actions',
+      identity.runnerClass === MEMORY_CONNECTIONS_SCALE_RELEASE_RUNNER_CLASS
+        ? ''
+        : `runner class ${identity.runnerClass}; required ${MEMORY_CONNECTIONS_SCALE_RELEASE_RUNNER_CLASS}`,
+      identity.runnerArchitecture === 'ARM64'
+        ? ''
+        : `runner architecture label ${identity.runnerArchitecture}; required ARM64`,
+      identity.runnerEnvironment === 'github-hosted'
+        ? ''
+        : `runner environment ${identity.runnerEnvironment}; required github-hosted`,
+      identity.runnerOperatingSystem === 'macOS'
+        ? ''
+        : `runner operating system label ${identity.runnerOperatingSystem}; required macOS`,
+      identity.architecture === 'arm64' ? '' : `runner architecture ${identity.architecture}; required arm64`,
+      /^Apple M1(?:$|\s)/u.test(identity.cpu) ? '' : `runner CPU ${identity.cpu}; required Apple M1 class`,
+      Effect.pipe(identity.operatingSystem, EffectString.startsWith('macOS '))
+        ? ''
+        : `runner operating system ${identity.operatingSystem}; required macOS`,
+      identity.runtime === packageManagerRuntime
+        ? ''
+        : `runtime ${identity.runtime}; required package-manager runtime ${packageManagerRuntime || 'bun/<version>'}`,
+      Effect.pipe(identity.packageManager, EffectString.startsWith('bun@')) &&
+      CANDIDATE_PACKAGE_VERSION.test(Effect.pipe(identity.packageManager, EffectString.slice('bun@'.length)))
+        ? ''
+        : 'package manager must pin an explicit Bun version',
+      Effect.pipe(identity.sourceVersion, EffectString.startsWith('threadnote-')) &&
+      CANDIDATE_PACKAGE_VERSION.test(Effect.pipe(identity.sourceVersion, EffectString.slice('threadnote-'.length)))
+        ? ''
+        : 'source version must name an explicit Threadnote package version',
+    ],
+    Boolean,
+  );
 }
 
 function parseCapture(value: unknown): MemoryConnectionsScaleCaptureV1 {
@@ -631,14 +709,12 @@ function parseCapture(value: unknown): MemoryConnectionsScaleCaptureV1 {
     'recallDatabaseBytes',
     'recallStorageBytes',
   ]);
-  const scenarios = boundedArray(
-    capture.scenarios,
-    'capture scenarios',
-    1,
-    MEMORY_CONNECTIONS_SCALE_SCENARIOS.length,
-  ).map(parseScenario);
+  const scenarios = EffectArray.map(
+    boundedArray(capture.scenarios, 'capture scenarios', 1, MEMORY_CONNECTIONS_SCALE_SCENARIOS.length),
+    parseScenario,
+  );
   assertUnique(
-    scenarios.map(scenario => scenario.id),
+    EffectArray.map(scenarios, scenario => scenario.id),
     'scenario ids',
   );
   return {
@@ -670,7 +746,8 @@ function parseScenario(value: unknown): MemoryConnectionsScaleScenarioCaptureV1 
   exactKeys(scenario, ['cold', 'expectedMemoryIds', 'expectedTruncated', 'id', 'samples', 'warmups']);
   if (!isScenarioId(scenario.id)) invalid(`unsupported scenario ${String(scenario.id)}`);
   if (typeof scenario.expectedTruncated !== 'boolean') invalid('scenario expectedTruncated must be boolean');
-  const expectedMemoryIds = boundedArray(scenario.expectedMemoryIds, 'scenario expectedMemoryIds', 0, 64).map(
+  const expectedMemoryIds = EffectArray.map(
+    boundedArray(scenario.expectedMemoryIds, 'scenario expectedMemoryIds', 0, 64),
     (memoryId, index) => nonEmptyString(memoryId, `expected memory id ${index}`),
   );
   assertUnique(expectedMemoryIds, 'expected memory ids');
@@ -679,8 +756,8 @@ function parseScenario(value: unknown): MemoryConnectionsScaleScenarioCaptureV1 
     expectedMemoryIds,
     expectedTruncated: scenario.expectedTruncated,
     id: scenario.id,
-    samples: boundedArray(scenario.samples, 'scenario samples', 1, 256).map(parseObservation),
-    warmups: boundedArray(scenario.warmups, 'scenario warmups', 0, 256).map(parseObservation),
+    samples: EffectArray.map(boundedArray(scenario.samples, 'scenario samples', 1, 256), parseObservation),
+    warmups: EffectArray.map(boundedArray(scenario.warmups, 'scenario warmups', 0, 256), parseObservation),
   };
 }
 
@@ -715,7 +792,8 @@ function parseObservation(value: unknown): MemoryConnectionsScaleObservationV1 {
       observation.omittedPremiseReceiptCount,
       'omitted premise receipt count',
     ),
-    projectedConnections: boundedArray(observation.projectedConnections, 'projected connections', 0, 64).map(
+    projectedConnections: EffectArray.map(
+      boundedArray(observation.projectedConnections, 'projected connections', 0, 64),
       parseConnectionReceipt,
     ),
     projectedCoverageConnectionCount: nonNegativeInteger(
@@ -735,10 +813,14 @@ function parseObservation(value: unknown): MemoryConnectionsScaleObservationV1 {
       'projected connection coverage truncated',
     ),
     projectedOutputTruncated: booleanValue(observation.projectedOutputTruncated, 'projected output truncated'),
-    projectedPremises: boundedArray(observation.projectedPremises, 'projected premises', 0, 8).map(parsePremiseReceipt),
+    projectedPremises: EffectArray.map(
+      boundedArray(observation.projectedPremises, 'projected premises', 0, 8),
+      parsePremiseReceipt,
+    ),
     rawLinkRows: nonNegativeInteger(observation.rawLinkRows, 'raw link rows'),
     retrievalTruncated: booleanValue(observation.retrievalTruncated, 'retrieval truncated'),
-    returnedMemoryIds: boundedArray(observation.returnedMemoryIds, 'returned memory ids', 0, 64).map(
+    returnedMemoryIds: EffectArray.map(
+      boundedArray(observation.returnedMemoryIds, 'returned memory ids', 0, 64),
       (memoryId, index) => nonEmptyString(memoryId, `returned memory id ${index}`),
     ),
   };
@@ -835,21 +917,27 @@ function parseIdentity(value: unknown): MemoryConnectionsScaleIdentityV1 {
 function projectedConnectionCoverageIsExact(value: MemoryConnectionsScaleObservationV1): boolean {
   const returnedMemoryIds = new Set(value.returnedMemoryIds);
   const receiptBackedMemoryIds = new Set(
-    value.projectedConnections.flatMap(connection =>
-      connection.neighborMemoryId !== null && returnedMemoryIds.has(connection.neighborMemoryId)
-        ? [connection.neighborMemoryId]
-        : [],
+    EffectArrayPipe(value.projectedConnections, __effectFlatMapValues =>
+      EffectArray.flatMap(__effectFlatMapValues, (connection, __effectFlatMapIndex) =>
+        __effectFlatMapIndex in __effectFlatMapValues
+          ? connection.neighborMemoryId !== null && returnedMemoryIds.has(connection.neighborMemoryId)
+            ? [connection.neighborMemoryId]
+            : []
+          : [],
+      ),
     ),
   );
   const hasRequiredActionableBundle =
     value.returnedMemoryIds.length === 0 ||
-    value.projectedConnections.some(
+    EffectArray.some(
+      value.projectedConnections,
       connection =>
         connection.resolution === 'resolved' &&
         (connection.currentness === 'current' || connection.currentness === 'historical') &&
         connection.neighborMemoryId !== null &&
         returnedMemoryIds.has(connection.neighborMemoryId) &&
-        value.projectedPremises.some(
+        EffectArray.some(
+          value.projectedPremises,
           premise =>
             premise.requestedOrdinal === connection.requestedOrdinal &&
             (premise.state === 'current' || premise.state === 'historical'),
@@ -870,7 +958,7 @@ function ratio(numerator: number, denominator: number): number {
 }
 
 function mean(values: readonly number[]): number {
-  return values.length === 0 ? 1 : values.reduce((total, value) => total + value, 0) / values.length;
+  return values.length === 0 ? 1 : EffectArray.reduce(values, 0, (total, value) => total + value) / values.length;
 }
 
 function exact(failures: string[], label: string, actual: number, expected: number): void {
@@ -886,21 +974,21 @@ function maximum(failures: string[], label: string, actual: number, expected: nu
 }
 
 function boundedArray(value: unknown, label: string, minimum: number, maximum: number): readonly unknown[] {
-  if (!Array.isArray(value) || value.length < minimum || value.length > maximum) {
+  if (!EffectArray.isArray(value) || value.length < minimum || value.length > maximum) {
     invalid(`${label} must contain between ${minimum} and ${maximum} entries`);
   }
   return value;
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (!Predicate.isObject(value) || Array.isArray(value)) invalid(`${label} must be an object`);
+  if (!Predicate.isObject(value) || EffectArray.isArray(value)) invalid(`${label} must be an object`);
   return value;
 }
 
 function exactKeys(value: Readonly<Record<string, unknown>>, keys: readonly string[]): void {
-  const actual = Object.keys(value).sort(compareText);
+  const actual = EffectRecord.keys(value).sort(compareText);
   const expected = [...keys].sort(compareText);
-  if (!sameJson(actual, expected)) invalid(`unexpected keys ${actual.join(', ')}`);
+  if (!sameJson(actual, expected)) invalid(`unexpected keys ${EffectArray.join(actual, ', ')}`);
 }
 
 function nonNegativeInteger(value: unknown, label: string): number {
@@ -929,7 +1017,8 @@ function nullableString(value: unknown, label: string): string | null {
 
 function nonEmptyString(value: unknown, label: string): string {
   const parsed = stringValue(value, label);
-  if (!parsed.trim() || parsed.length > 2_048) invalid(`${label} must be non-empty and at most 2048 characters`);
+  if (!Effect.pipe(parsed, EffectString.trim) || parsed.length > 2_048)
+    invalid(`${label} must be non-empty and at most 2048 characters`);
   return parsed;
 }
 

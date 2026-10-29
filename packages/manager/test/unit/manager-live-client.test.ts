@@ -1,7 +1,11 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {createManagerLiveClient} from '../../src/live/client.js';
-import {MANAGER_LIVE_LIMITS, type ManagerLiveResource} from '../../src/live/contracts.js';
+import {MANAGER_LIVE_LIMITS, ManagerLiveResource} from '../../src/live/contracts.js';
+import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const resource: ManagerLiveResource = {topic: 'context-health', project: 'one'};
 const other: ManagerLiveResource = {topic: 'context-health', project: 'two'};
@@ -33,11 +37,11 @@ class FakeSocket {
   }
   open(topics: string[] = ['context-health']) {
     this.readyState = 1;
-    this.onopen?.({} as Event);
+    this.onopen?.(new Event('open'));
     this.emit(frame('welcome', {epoch: 'epoch-one', topics, heartbeatMilliseconds: 15_000}));
   }
   emit(text: string) {
-    this.onmessage?.({data: text} as MessageEvent);
+    this.onmessage?.(new MessageEvent('message', {data: text}));
   }
   ack(generation?: number, startingSequence = 0, unavailable?: ManagerLiveResource[]) {
     this.emit(
@@ -50,7 +54,9 @@ class FakeSocket {
     );
   }
   lastGeneration(): number {
-    return this.sent.filter(value => value.type === 'subscribe').at(-1)?.generation as number;
+    const generation = EffectArray.filter(this.sent, value => value.type === 'subscribe').at(-1)?.generation;
+    if (typeof generation !== 'number') throw new Error('Expected a subscribed generation.');
+    return generation;
   }
 }
 function harness(requestTicket: (signal: AbortSignal) => Promise<unknown> = async () => ({ticket: 'ticket'})) {
@@ -110,7 +116,7 @@ describe('Manager live client', () => {
     pending.resolve(1);
     await flush();
     expect(h.client.getQuerySnapshot(resource, 'first')).toEqual({status: 'loading'});
-    expect(socket.sent.filter(value => value.type === 'subscribe')).toHaveLength(1);
+    expect(EffectArray.filter(socket.sent, value => value.type === 'subscribe')).toHaveLength(1);
     releaseSecond();
     expect(socket.sent.at(-1)?.resources).toEqual([]);
     h.client.stop();
@@ -128,7 +134,7 @@ describe('Manager live client', () => {
     socket.open();
     socket.ack();
     await flush();
-    expect(readers.map(reader => reader.mock.calls.length)).toEqual([1, 1]);
+    expect(EffectArray.map(readers, reader => reader.mock.calls.length)).toEqual([1, 1]);
     for (let sequence = 1; sequence <= 100; sequence++)
       socket.emit(
         frame('invalidation', {
@@ -143,7 +149,7 @@ describe('Manager live client', () => {
     pending[0].resolve(1);
     pending[1].resolve(2);
     await flush();
-    expect(readers.map(reader => reader.mock.calls.length)).toEqual([2, 2]);
+    expect(EffectArray.map(readers, reader => reader.mock.calls.length)).toEqual([2, 2]);
     socket.emit(
       frame('availability', {
         epoch: 'epoch-one',
@@ -164,8 +170,8 @@ describe('Manager live client', () => {
         available: true,
       }),
     );
-    expect(socket.sent.filter(value => value.type === 'subscribe')).toHaveLength(2);
-    const before = readers.map(reader => reader.mock.calls.length);
+    expect(EffectArray.filter(socket.sent, value => value.type === 'subscribe')).toHaveLength(2);
+    const before = EffectArray.map(readers, reader => reader.mock.calls.length);
     socket.emit(
       frame('invalidation', {
         epoch: 'epoch-one',
@@ -177,7 +183,9 @@ describe('Manager live client', () => {
     );
     socket.ack();
     await flush();
-    expect(readers.map(reader => reader.mock.calls.length)).toEqual(before.map(count => count + 1));
+    expect(EffectArray.map(readers, reader => reader.mock.calls.length)).toEqual(
+      EffectArray.map(before, count => count + 1),
+    );
     h.client.stop();
   });
 
@@ -310,7 +318,7 @@ describe('Manager live client', () => {
                 if (action === 'gap') acknowledged = false;
               }
             } else if (action === 'resolve') {
-              const row = reads.find(candidate => !candidate.settled);
+              const row = EffectOption.getOrUndefined(EffectArray.findFirst(reads, candidate => !candidate.settled));
               if (row) {
                 row.settled = true;
                 row.pending.resolve(row.value);
@@ -329,21 +337,24 @@ describe('Manager live client', () => {
               acknowledged = false;
             }
             await flush();
-            const expectedGroups = new Set([...mounted.keys()].map(id => Number(id[0])));
-            const sent = socket.sent.filter(value => value.type === 'subscribe').at(-1);
+            const expectedGroups = new Set(EffectArray.map([...mounted.keys()], id => Number(id[0])));
+            const sent = EffectArray.filter(socket.sent, value => value.type === 'subscribe').at(-1);
             expect(
-              ((sent?.resources ?? []) as ManagerLiveResource[]).map(value => JSON.stringify(value)).sort(),
-            ).toEqual([...expectedGroups].map(index => JSON.stringify(groups[index])).sort());
+              EffectArray.map(
+                Schema.decodeUnknownSync(Schema.Array(ManagerLiveResource))(sent?.resources ?? []),
+                value => JSON.stringify(value),
+              ).sort(),
+            ).toEqual(EffectArray.map([...expectedGroups], index => JSON.stringify(groups[index])).sort());
             for (let g = 0; g < 2; g++)
               for (let q = 0; q < 2; q++) {
-                const snapshot = h.client.getQuerySnapshot<{scope: number; revision: number; query: number}>(
-                  groups[g],
-                  key(g, q),
-                );
+                const snapshot = h.client.getQuerySnapshot(groups[g], key(g, q));
                 if (!mounted.has(key(g, q))) expect(snapshot.status).toBe('loading');
                 if (snapshot.status === 'ready') expect(snapshot.data).toEqual({scope, revision: latest[g], query: q});
                 expect(
-                  reads.filter(row => row.group === g && row.query === q && !row.settled && !row.signal.aborted).length,
+                  EffectArray.filter(
+                    reads,
+                    row => row.group === g && row.query === q && !row.settled && !row.signal.aborted,
+                  ).length,
                 ).toBeLessThanOrEqual(1);
               }
           }
@@ -419,7 +430,7 @@ describe('Manager live client', () => {
     second.resolve(2);
     await flush();
     expect(observed.at(-1)).toBe('ready');
-    expect(h.client.getSnapshot<number>(resource)).toMatchObject({status: 'ready', data: 2});
+    expect(h.client.getSnapshot(resource)).toMatchObject({status: 'ready', data: 2});
     h.client.stop();
   });
 
@@ -587,7 +598,7 @@ describe('Manager live client', () => {
     await flush();
     const socket = h.sockets[0];
     socket.open(['context-health', 'context-maintenance']);
-    const subscription = socket.sent.filter(value => value.type === 'subscribe').at(-1);
+    const subscription = EffectArray.filter(socket.sent, value => value.type === 'subscribe').at(-1);
     expect(subscription?.resources).toEqual([resource, maintenance]);
     socket.ack(undefined, 0, [resource]);
     await flush();
@@ -606,7 +617,7 @@ describe('Manager live client', () => {
     socket.ack();
     await flush();
     expect(healthRead).toHaveBeenCalledTimes(1);
-    expect(h.client.getSnapshot<number>(resource)).toMatchObject({status: 'ready', data: 2});
+    expect(h.client.getSnapshot(resource)).toMatchObject({status: 'ready', data: 2});
     h.client.stop();
   });
 
@@ -628,7 +639,7 @@ describe('Manager live client', () => {
     socket.ack();
     await flush();
     expect(read).toHaveBeenCalledTimes(1);
-    expect(h.client.getSnapshot<number>(resource)).toMatchObject({status: 'ready', data: 7});
+    expect(h.client.getSnapshot(resource)).toMatchObject({status: 'ready', data: 7});
     h.client.invalidate(resource);
     await flush();
     expect(read).toHaveBeenCalledTimes(2);
@@ -641,7 +652,7 @@ describe('Manager live client', () => {
         available: false,
       }),
     );
-    expect(h.client.getSnapshot<number>(resource)).toMatchObject({status: 'unsupported', data: 7});
+    expect(h.client.getSnapshot(resource)).toMatchObject({status: 'unsupported', data: 7});
     const afterLoss = statuses.length;
     first.resolve(11);
     await flush();
@@ -663,7 +674,7 @@ describe('Manager live client', () => {
     expect(read).toHaveBeenCalledTimes(3);
     recovery.resolve(22);
     await flush();
-    expect(h.client.getSnapshot<number>(resource)).toMatchObject({status: 'ready', data: 22});
+    expect(h.client.getSnapshot(resource)).toMatchObject({status: 'ready', data: 22});
     h.client.stop();
   });
 
@@ -732,7 +743,7 @@ describe('Manager live client', () => {
     await flush();
     const silent = h.sockets[1];
     silent.readyState = 1;
-    silent.onopen?.({} as Event);
+    silent.onopen?.(new Event('open'));
     await vi.advanceTimersByTimeAsync(10_000);
     expect(silent.closed).toBe(true);
     expect(h.client.getSnapshot(resource).status).toBe('loading');
@@ -762,7 +773,15 @@ describe('Manager live client', () => {
   });
 
   it('rejects malformed successful ticket responses before creating a socket', async () => {
-    for (const payload of [undefined, null, {}, {ticket: null}, {ticket: 1}, {ticket: ''}, {ticket: 'x'.repeat(129)}]) {
+    for (const payload of [
+      undefined,
+      null,
+      {},
+      {ticket: null},
+      {ticket: 1},
+      {ticket: ''},
+      {ticket: Effect.pipe('x', EffectString.repeat(129))},
+    ]) {
       const h = harness(async () => payload);
       const reader = vi.fn(async () => 1);
       h.client.subscribe(resource, reader, () => {});
@@ -808,7 +827,7 @@ describe('Manager live client', () => {
     await flush();
     reads[1].resolve('A');
     await flush();
-    socket.onclose?.({} as CloseEvent);
+    socket.onclose?.(new CloseEvent('close'));
     await vi.advanceTimersByTimeAsync(375);
     socket = h.sockets[1];
     socket.open();
@@ -865,7 +884,7 @@ describe('Manager live client', () => {
         let socket = h.sockets[0];
         socket.open();
         const settle = async () => {
-          const row = reads.find(value => !value.settled);
+          const row = EffectOption.getOrUndefined(EffectArray.findFirst(reads, value => !value.settled));
           if (row) {
             row.settled = true;
             row.pending.resolve(row.value);
@@ -912,7 +931,7 @@ describe('Manager live client', () => {
                 h.client.setScope(`scope-${scope}`);
                 unsubscribe = h.client.subscribe(resource, reader, () => {});
               } else {
-                socket.onclose?.({} as CloseEvent);
+                socket.onclose?.(new CloseEvent('close'));
                 source++;
                 await vi.advanceTimersToNextTimerAsync();
               }
@@ -923,15 +942,15 @@ describe('Manager live client', () => {
               acknowledged = false;
             }
             await flush();
-            const activeReads = reads.filter(row => !row.settled && !row.signal.aborted);
+            const activeReads = EffectArray.filter(reads, row => !row.settled && !row.signal.aborted);
             expect(activeReads.length).toBeLessThanOrEqual(1);
             if (!acknowledged) expect(activeReads).toHaveLength(0);
-            const snapshot = h.client.getSnapshot<{source: number; scope: number}>(resource);
+            const snapshot = h.client.getSnapshot(resource);
             if (snapshot.status === 'ready') expect(snapshot.data).toEqual({source, scope});
           }
           if (!acknowledged) socket.ack(undefined, sequence);
           await flush();
-          while (reads.some(row => !row.settled)) await settle();
+          while (EffectArray.some(reads, row => !row.settled)) await settle();
           expect(h.client.getSnapshot(resource)).toEqual({status: 'ready', data: {source, scope}});
         } finally {
           h.client.stop();

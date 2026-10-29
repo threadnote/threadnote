@@ -1,3 +1,5 @@
+import {isJsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
@@ -12,17 +14,20 @@ import {
   serializeCodeGraphDiskReservationReceipt,
   type CodeGraphDiskReservationReceipt,
 } from '@threadnote/graph/disk/reservation';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph disk reservation ledger', () => {
   effectIt.effect('round trips one canonical path-free receipt', () =>
     Effect.sync(() => {
       const receipt = {
         calibrationIdentity: 'graph-v14:native-code-graph-14:direct-persistent:capacity-v1',
-        filesystems: [{bytes: 4_096, key: 'a'.repeat(64)}],
+        filesystems: [{bytes: 4_096, key: Effect2.pipe('a', EffectString.repeat(64))}],
         operation: 'stage persistent code graph facts' as const,
         processId: 42,
         processStartIdentity: 'linux:1234',
-        token: 'b'.repeat(64),
+        token: Effect2.pipe('b', EffectString.repeat(64)),
         version: 1 as const,
       };
       const serialized = serializeCodeGraphDiskReservationReceipt(receipt);
@@ -71,11 +76,11 @@ describe('code graph disk reservation ledger', () => {
       Effect.sync(() => {
         const receipt: CodeGraphDiskReservationReceipt = {
           calibrationIdentity: 'fixture-v1',
-          filesystems: [{bytes: 1, key: 'a'.repeat(64)}],
+          filesystems: [{bytes: 1, key: Effect2.pipe('a', EffectString.repeat(64))}],
           operation: 'stage persistent code graph facts',
           processId: 42,
           processStartIdentity,
-          token: 'b'.repeat(64),
+          token: Effect2.pipe('b', EffectString.repeat(64)),
           version: 1,
         };
         expect(() => serializeCodeGraphDiskReservationReceipt(receipt)).toThrow();
@@ -118,12 +123,14 @@ describe('code graph disk reservation ledger', () => {
     },
     ({bytes, operation, processId, processStart, tokenSeed, twoFilesystems}) =>
       Effect.sync(() => {
-        const token = tokenSeed.toString(16).padStart(64, '0');
+        const token = Effect2.pipe(tokenSeed.toString(16), EffectString.padStart(64, '0'));
         const receipt: CodeGraphDiskReservationReceipt = {
           calibrationIdentity: 'graph-v14:native-code-graph-14:direct-persistent:capacity-v1',
           filesystems: [
-            {bytes, key: 'a'.repeat(64)},
-            ...(twoFilesystems ? [{bytes: Math.floor(bytes / 2), key: 'b'.repeat(64)}] : []),
+            {bytes, key: Effect2.pipe('a', EffectString.repeat(64))},
+            ...(twoFilesystems
+              ? [{bytes: Math.floor(bytes / 2), key: Effect2.pipe('b', EffectString.repeat(64))}]
+              : []),
           ],
           operation,
           processId,
@@ -132,10 +139,12 @@ describe('code graph disk reservation ledger', () => {
           version: 1,
         };
         const serialized = serializeCodeGraphDiskReservationReceipt(receipt);
-        const parsed = JSON.parse(serialized) as Record<string, unknown>;
+        const parsedValue: unknown = JSON.parse(serialized);
+        if (!isJsonObject(parsedValue)) throw new Error('Expected a reservation object.');
+        const parsed = parsedValue;
 
         expect(new TextEncoder().encode(serialized).byteLength).toBeLessThanOrEqual(4_096);
-        expect(Object.keys(parsed)).toEqual([
+        expect(EffectRecord.keys(parsed)).toEqual([
           'version',
           'token',
           'processId',
@@ -146,7 +155,9 @@ describe('code graph disk reservation ledger', () => {
         ]);
         expect(serialized).not.toContain('/private/customer/repository');
         expect(parseCodeGraphDiskReservationReceipt(`v1-${token}.json`, serialized)).toEqual(receipt);
-        expect(parseCodeGraphDiskReservationReceipt(`v1-${'f'.repeat(64)}.json`, serialized)).toBeUndefined();
+        expect(
+          parseCodeGraphDiskReservationReceipt(`v1-${Effect2.pipe('f', EffectString.repeat(64))}.json`, serialized),
+        ).toBeUndefined();
         expect(parseCodeGraphDiskReservationReceipt(`v1-${token}.json`, `${serialized}\n`)).toBeUndefined();
       }),
     {fastCheck: {numRuns: 300}},
@@ -166,23 +177,25 @@ describe('code graph disk reservation ledger', () => {
     },
     ({entries}) =>
       Effect.sync(() => {
-        const receipts = entries.map((entry, index): CodeGraphDiskReservationReceipt => ({
+        const receipts = EffectArray.map(entries, (entry, index): CodeGraphDiskReservationReceipt => ({
           calibrationIdentity: 'fixture-v1',
-          filesystems: [{bytes: entry.bytes, key: ['a', 'b', 'c'][entry.keyIndex].repeat(64)}],
+          filesystems: [
+            {bytes: entry.bytes, key: Effect2.pipe(['a', 'b', 'c'][entry.keyIndex], EffectString.repeat(64))},
+          ],
           operation: 'stage persistent code graph facts',
           processId: index + 1,
           processStartIdentity: `linux:${index + 1}`,
-          token: index.toString(16).padStart(64, '0'),
+          token: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
           version: 1,
         }));
         const independent = new Map<string, number>();
         for (const entry of entries) {
-          const key = ['a', 'b', 'c'][entry.keyIndex].repeat(64);
+          const key = Effect2.pipe(['a', 'b', 'c'][entry.keyIndex], EffectString.repeat(64));
           independent.set(key, saturatingCapacityAdd(independent.get(key) ?? 0, entry.bytes));
         }
-        const expected = [...independent]
-          .map(([key, bytes]) => ({bytes, key}))
-          .sort((left, right) => left.key.localeCompare(right.key));
+        const expected = EffectArray.map([...independent], ([key, bytes]) => ({bytes, key})).sort((left, right) =>
+          Effect2.pipe(left.key, EffectString.localeCompare(right.key)),
+        );
 
         expect(aggregateCodeGraphDiskReservationReceipts(receipts)).toEqual(expected);
         expect(aggregateCodeGraphDiskReservationReceipts([...receipts].reverse())).toEqual(expected);

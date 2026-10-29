@@ -1,4 +1,6 @@
-import {Clock, Effect, FileSystem} from 'effect';
+import {Option as EffectOption} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Clock, Effect, FileSystem, String as EffectString, pipe} from 'effect';
 import {runtimeHostHardwareInfo} from '@threadnote/platform/system';
 import {
   READY_QUERY_CPU_PRESSURE_PERCENT_MAXIMUM,
@@ -52,8 +54,13 @@ export function parseReadyQueryLinuxHostSample(input: {
   readonly stat: string;
   readonly vmstat: string;
 }): ReadyQueryLinuxHostSample {
-  const cpu = /^cpu\s+(.+)$/m.exec(input.stat)?.[1]?.trim().split(/\s+/).map(Number);
-  const runnable = Number.parseInt(input.load.trim().split(/\s+/)[3]?.split('/')[0] ?? '', 10);
+  const cpu = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(/^cpu\s(.+)$/m.exec(input.stat)?.[1]), line =>
+      pipe(line, EffectString.trim, EffectString.split(/\s+/), EffectArray.map(Number)),
+    ),
+  );
+  const loadFields = pipe(input.load, EffectString.trim, EffectString.split(/\s+/));
+  const runnable = Number.parseInt(EffectString.split('/')(loadFields[3] ?? '')[0], 10);
   const cpuPressure = pressureTotal(input.cpuPressure);
   const ioPressure = pressureTotal(input.ioPressure);
   const memoryPressure = pressureTotal(input.memoryPressure);
@@ -63,7 +70,7 @@ export function parseReadyQueryLinuxHostSample(input: {
   if (
     !Number.isFinite(input.observedAtMilliseconds) ||
     input.observedAtMilliseconds < 0 ||
-    values.some(value => value === undefined || !Number.isSafeInteger(value) || value < 0)
+    EffectArray.some(values, value => value === undefined || !Number.isSafeInteger(value) || value < 0)
   ) {
     throw new Error('Linux host contention counters are unavailable or malformed.');
   }
@@ -102,7 +109,7 @@ export function readyQueryHostEvidence(
   const stealTicksDelta = monotonicDelta(first.stealTicks, last.stealTicks);
   const swapInputPagesDelta = monotonicDelta(first.swapInputPages, last.swapInputPages);
   const swapOutputPagesDelta = monotonicDelta(first.swapOutputPages, last.swapOutputPages);
-  const maxRunnableProcesses = Math.max(...ordered.map(sample => sample.runnableProcesses));
+  const maxRunnableProcesses = Math.max(...EffectArray.map(ordered, sample => sample.runnableProcesses));
   const reasons = [
     ...(cpuPressurePercentMaximum > READY_QUERY_CPU_PRESSURE_PERCENT_MAXIMUM ? (['cpu-pressure'] as const) : []),
     ...(stealTicksDelta > 0 ? (['cpu-steal'] as const) : []),
@@ -114,7 +121,7 @@ export function readyQueryHostEvidence(
     ...(swapInputPagesDelta > 0 || swapOutputPagesDelta > 0 ? (['swap-activity'] as const) : []),
   ];
   if (reasons.length > 0) {
-    throw new Error(`Host contention invalidates ready-query evidence: ${reasons.join(', ')}.`);
+    throw new Error(`Host contention invalidates ready-query evidence: ${EffectArray.join(reasons, ', ')}.`);
   }
   return {
     available: true,
@@ -134,7 +141,7 @@ export function readyQueryHostEvidence(
 }
 
 function pressureTotal(value: string): number {
-  return Number(/(?:^|\n)some\s+[^\n]*\btotal=(\d+)(?:\s|$)/.exec(value)?.[1]);
+  return Number(/(?:^|\n)some\s[^\n]*\btotal=(\d+)(?:\s|$)/.exec(value)?.[1]);
 }
 
 function pressurePercentMaximum(

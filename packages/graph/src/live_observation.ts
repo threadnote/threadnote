@@ -1,9 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runCommandEffect, type CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {inspectContainedStableRegularFile, materializeContainedStableRegularFile} from './inventory/contained_file.js';
 import {parsePorcelainV1Status} from './inventory/porcelain.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface LiveWorktreeObservationLimits {
   readonly timeoutMs?: number;
@@ -37,10 +41,13 @@ const unavailable = (reason: ObservationUnavailable['reason']): ObservationUnava
 });
 const validRelative = (value: string) =>
   value.length > 0 &&
-  !value.startsWith('/') &&
-  !value.includes('\\') &&
-  value.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..' && segment !== '.git') &&
-  !value.includes('\0');
+  !Effect2.pipe(value, EffectString.startsWith('/')) &&
+  !Effect2.pipe(value, EffectString.includes('\\')) &&
+  EffectArray.every(
+    Effect2.pipe(value, EffectString.split('/')),
+    segment => segment !== '' && segment !== '.' && segment !== '..' && segment !== '.git',
+  ) &&
+  !Effect2.pipe(value, EffectString.includes('\0'));
 
 /** Passive, bounded observation of one registered worktree. It never prepares a graph. */
 export const observeLiveWorktree = (
@@ -53,7 +60,7 @@ export const observeLiveWorktree = (
     maxChangedFiles: Math.min(requested.maxChangedFiles ?? DEFAULTS.maxChangedFiles, DEFAULTS.maxChangedFiles),
     maxReadBytes: Math.min(requested.maxReadBytes ?? DEFAULTS.maxReadBytes, DEFAULTS.maxReadBytes),
   };
-  if (Object.values(limits).some(value => !Number.isSafeInteger(value) || value <= 0))
+  if (EffectArray.some(EffectRecord.values(limits), value => !Number.isSafeInteger(value) || value <= 0))
     return Effect.succeed({state: 'unavailable', reason: 'budget'});
 
   const probe = Effect.gen(function* () {
@@ -64,24 +71,31 @@ export const observeLiveWorktree = (
         maxOutputBytes: limits.maxGitOutputBytes,
         timeoutMs: limits.timeoutMs,
       }).pipe(
-        Effect.map(result => result.stdout),
-        Effect.mapError(error =>
-          unavailable(
-            error._tag === 'CommandOutputLimitExceeded' || error._tag === 'CommandTimedOut' ? 'budget' : 'error',
-          ),
-        ),
+        Effect.mapBoth({
+          onSuccess: result => result.stdout,
+          onFailure: error =>
+            unavailable(
+              error._tag === 'CommandOutputLimitExceeded' || error._tag === 'CommandTimedOut' ? 'budget' : 'error',
+            ),
+        }),
       );
-    const metadata = (yield* git([
-      'rev-parse',
-      '--path-format=absolute',
-      '--show-toplevel',
-      '--git-dir',
-      '--git-common-dir',
-      'HEAD',
-    ]).pipe(Effect.mapError(error => (error.reason === 'error' ? unavailable('missing') : error))))
-      .trimEnd()
-      .split('\n');
-    if (metadata.length !== 4 || metadata.some(value => !value) || !/^[0-9a-f]{40,64}$/.test(metadata[3]))
+    const metadata = Effect2.pipe(
+      yield* git([
+        'rev-parse',
+        '--path-format=absolute',
+        '--show-toplevel',
+        '--git-dir',
+        '--git-common-dir',
+        'HEAD',
+      ]).pipe(Effect.mapError(error => (error.reason === 'error' ? unavailable('missing') : error))),
+      EffectString.trimEnd,
+      EffectString.split('\n'),
+    );
+    if (
+      metadata.length !== 4 ||
+      Boolean(EffectArray.some(metadata, value => !value)) ||
+      !/^[0-9a-f]{40,64}$/.test(metadata[3])
+    )
       return yield* Effect.fail(unavailable('missing'));
     const [rawRoot, rawGitDir, rawCommonDir, headCommit] = metadata;
     const root = yield* fs.realPath(rawRoot).pipe(Effect.mapError(() => unavailable('missing')));
@@ -92,7 +106,7 @@ export const observeLiveWorktree = (
       .realPath(path.resolve(root, rawCommonDir))
       .pipe(Effect.mapError(() => unavailable('missing')));
     const canonicalCwd = yield* fs.realPath(cwd).pipe(Effect.mapError(() => unavailable('missing')));
-    if (canonicalCwd !== root && !canonicalCwd.startsWith(root + path.sep))
+    if (canonicalCwd !== root && !Effect2.pipe(canonicalCwd, EffectString.startsWith(root + path.sep)))
       return yield* Effect.fail(unavailable('missing'));
     const statusArgs = [
       'status',
@@ -115,7 +129,7 @@ export const observeLiveWorktree = (
       },
     ).pipe(Effect.mapError(() => unavailable('error')));
     if (excludes.exitCode > 1) return yield* Effect.fail(unavailable('error'));
-    const externalExcludes = excludes.exitCode === 0 ? excludes.stdout.trimEnd() : undefined;
+    const externalExcludes = excludes.exitCode === 0 ? Effect2.pipe(excludes.stdout, EffectString.trimEnd) : undefined;
     if (externalExcludes !== undefined && !path.isAbsolute(externalExcludes))
       return yield* Effect.fail(unavailable('error'));
     const controlPaths = [
@@ -175,21 +189,26 @@ export const observeLiveWorktree = (
     const indexFlags = yield* git(indexFlagsArgs);
     // Git deliberately hides these paths from status. Without inspecting their
     // entire content set we cannot claim complete passive source coverage.
-    if (indexFlags.split('\0').some(row => row && (row[0] === 'S' || row[0] === row[0].toLowerCase())))
+    if (
+      EffectArray.some(Effect2.pipe(indexFlags, EffectString.split('\0')), row =>
+        Boolean(row && (row[0] === 'S' || row[0] === Effect2.pipe(row[0], EffectString.toLowerCase))),
+      )
+    )
       return yield* Effect.fail(unavailable('error'));
     const controls = yield* controlRows;
     const status = yield* git(statusArgs);
     const staged = yield* git(stageArgs);
     const overlay = parsePorcelainV1Status(status);
     const absent = new Set(overlay.deleted);
-    for (const record of status.split('\0')) {
+    for (const record of Effect2.pipe(status, EffectString.split('\0'))) {
       if (record.length >= 4 && record[2] === ' ' && record[1] === 'D' && record[0] !== 'U')
-        absent.add(record.slice(3));
+        absent.add(Effect2.pipe(record, EffectString.slice(3)));
     }
-    const changed = [...overlay.changed].filter(relative => !absent.has(relative)).sort();
+    const changed = EffectArray.filter([...overlay.changed], relative => !absent.has(relative)).sort();
     const listed = new Set([...changed, ...absent]);
     if (listed.size > limits.maxChangedFiles) return yield* Effect.fail(unavailable('budget'));
-    if ([...listed].some(relative => !validRelative(relative))) return yield* Effect.fail(unavailable('error'));
+    if (EffectArray.some([...listed], relative => !validRelative(relative)))
+      return yield* Effect.fail(unavailable('error'));
 
     // Metadata admission is separate from reads, so a large dirty set fails before any content work.
     let total = 0;
@@ -222,7 +241,8 @@ export const observeLiveWorktree = (
     });
     const first = yield* readRows;
     const second = yield* readRows;
-    if (first.some((row, index) => row !== second[index])) return yield* Effect.fail(unavailable('unstable'));
+    if (EffectArray.some(first, (row, index) => row !== second[index]))
+      return yield* Effect.fail(unavailable('unstable'));
     const finalStatus = yield* git(statusArgs);
     const finalStaged = yield* git(stageArgs);
     const finalConfig = yield* git(configArgs);
@@ -237,14 +257,10 @@ export const observeLiveWorktree = (
       },
     ).pipe(Effect.mapError(() => unavailable('error')));
     const finalControls = yield* controlRows;
-    const finalMetadata = (yield* git([
-      'rev-parse',
-      '--path-format=absolute',
-      '--show-toplevel',
-      '--git-dir',
-      '--git-common-dir',
-      'HEAD',
-    ])).trimEnd();
+    const finalMetadata = Effect2.pipe(
+      yield* git(['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir', '--git-common-dir', 'HEAD']),
+      EffectString.trimEnd,
+    );
     if (
       status !== finalStatus ||
       staged !== finalStaged ||
@@ -252,14 +268,15 @@ export const observeLiveWorktree = (
       indexFlags !== finalIndexFlags ||
       excludes.exitCode !== finalExcludes.exitCode ||
       excludes.stdout !== finalExcludes.stdout ||
-      controls.some((row, index) => row !== finalControls[index]) ||
-      metadata.join('\n') !== finalMetadata
+      EffectArray.some(controls, (row, index) => row !== finalControls[index]) ||
+      EffectArray.join(metadata, '\n') !== finalMetadata
     )
       return yield* Effect.fail(unavailable('unstable'));
     return {
       state: 'complete' as const,
       revision: sha256HexSync(
-        ['live-worktree-v1', root, gitDir, commonDir, headCommit, status, staged, config, ...controls, ...first].join(
+        EffectArray.join(
+          ['live-worktree-v1', root, gitDir, commonDir, headCommit, status, staged, config, ...controls, ...first],
           '\0',
         ),
       ),

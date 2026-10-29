@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {readFileSync, readdirSync} from '@threadnote/testing/node-fs';
 import {join} from '@threadnote/testing/node-path';
@@ -13,6 +14,9 @@ import {
   expandRecallEvaluationFixtureV2,
   serializeRecallEvaluationFixtureV2Identity,
 } from '@threadnote/threadnote/evaluation/recall-fixture';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const HISTORICAL_BASELINE_ROOT = 'apps/threadnote/test/evaluation/baselines/threadnote-3.0.3';
 const THREADNOTE_427_REFERENCE_ROOT = 'apps/threadnote/test/evaluation/baselines/threadnote-4.2.7';
@@ -58,6 +62,103 @@ const CURRENT_RANK_BENCHMARKS = [
     warmups: 1,
   },
 ] as const;
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const MicroBaselineSchema = withRest(
+  Schema.Struct({
+    benchmarks: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+    environment: Schema.optionalKey(withRest(Schema.Struct({node: Schema.optionalKey(Schema.String)}))),
+    fixtures: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    runner: Schema.optionalKey(
+      withRest(Schema.Struct({name: Schema.optionalKey(Schema.String), version: Schema.optionalKey(Schema.String)})),
+    ),
+  }),
+);
+const IndexedRecallSchema = withRest(
+  Schema.Struct({
+    fixture: Schema.optionalKey(withRest(Schema.Struct({documents: Schema.optionalKey(Schema.Finite)}))),
+    scenarios: Schema.optionalKey(
+      Schema.Record(Schema.String, withRest(Schema.Struct({p95Milliseconds: Schema.optionalKey(Schema.Finite)}))),
+    ),
+  }),
+);
+const IndexedSqliteSchema = withRest(
+  Schema.Struct({
+    fixture: Schema.optionalKey(withRest(Schema.Struct({documents: Schema.optionalKey(Schema.Finite)}))),
+    scenarios: Schema.optionalKey(
+      Schema.Record(
+        Schema.String,
+        withRest(
+          Schema.Struct({
+            p95LimitMilliseconds: Schema.optionalKey(Schema.Finite),
+            p95Milliseconds: Schema.optionalKey(Schema.Finite),
+          }),
+        ),
+      ),
+    ),
+    source: Schema.optionalKey(withRest(Schema.Struct({index: Schema.optionalKey(Schema.String)}))),
+  }),
+);
+const VectorStorageSchema = withRest(
+  Schema.Struct({
+    scales: Schema.optionalKey(
+      Schema.Record(
+        Schema.String,
+        withRest(
+          Schema.Struct({
+            database: withRest(
+              Schema.Struct({
+                chunkMappings: Schema.Finite,
+                incrementalBytes: Schema.Finite,
+                vectorValues: Schema.Finite,
+              }),
+            ),
+            incrementalBuild: withRest(Schema.Struct({embeddedChunks: Schema.Finite, reusedChunks: Schema.Finite})),
+            semanticQuery: withRest(Schema.Struct({p95Milliseconds: Schema.Finite})),
+          }),
+        ),
+      ),
+    ),
+    suite: Schema.optionalKey(Schema.String),
+  }),
+);
+const GraphAuditSchema = withRest(
+  Schema.Struct({
+    scales: Schema.optionalKey(
+      Schema.Record(
+        Schema.String,
+        withRest(
+          Schema.Struct({
+            after: withRest(
+              Schema.Struct({coldIndexMilliseconds: Schema.Finite, oneFileIncrementalMilliseconds: Schema.Finite}),
+            ),
+            before: withRest(
+              Schema.Struct({coldIndexMilliseconds: Schema.Finite, oneFileIncrementalMilliseconds: Schema.Finite}),
+            ),
+          }),
+        ),
+      ),
+    ),
+    suite: Schema.optionalKey(Schema.String),
+  }),
+);
+const ModelCandidateSummarySchema = withRest(
+  Schema.Struct({
+    fixture: withRest(Schema.Struct({hash: Schema.String})),
+    gate: withRest(Schema.Struct({failures: Schema.Array(Schema.String), passed: Schema.Boolean})),
+    models: Schema.Array(withRest(Schema.Struct({sha256: Schema.String}))),
+    result: withRest(Schema.Struct({metrics: withRest(Schema.Struct({noAnswerRecall: Schema.Finite}))})),
+  }),
+);
+const decodeMicroBaseline = Schema.decodeUnknownSync(MicroBaselineSchema);
+const decodeIndexedRecall = Schema.decodeUnknownSync(IndexedRecallSchema);
+const decodeIndexedSqlite = Schema.decodeUnknownSync(IndexedSqliteSchema);
+const decodeVectorStorage = Schema.decodeUnknownSync(VectorStorageSchema);
+const decodeGraphAudit = Schema.decodeUnknownSync(GraphAuditSchema);
+const decodeModelCandidateSummary = Schema.decodeUnknownSync(ModelCandidateSummarySchema);
+
 const CURRENT_RANK_MEASUREMENTS = [
   'hybrid-rank-one-query',
   'hybrid-rank-throughput',
@@ -76,7 +177,11 @@ describe('frozen Threadnote 3.0.3 baselines', () => {
 
     expect(baseline.fixture).toMatchObject({documents: 200, queries: 250, version: 2});
     expect(baseline.fixture.hash).toBe(fixtureHash);
-    expect(fixture.documents.every(document => document.uri.startsWith('threadnote://'))).toBe(true);
+    expect(
+      EffectArray.every(fixture.documents, document =>
+        Effect.pipe(document.uri, EffectString.startsWith('threadnote://')),
+      ),
+    ).toBe(true);
     expect(baseline.knownContractFailures).toBe(205);
     expect(baseline.result.pipeline.name).toBe('threadnote-3.0.3-lexical-only');
     expect(baseline.source).toMatchObject({
@@ -88,39 +193,36 @@ describe('frozen Threadnote 3.0.3 baselines', () => {
   });
 
   it('validates every rank benchmark and preserves all scale points', () => {
-    const artifacts = readdirSync(BENCHMARK_ROOT)
-      .filter(name => /^recall-rank-\d+\.json$/.test(name))
-      .map(name => parseBenchmarkArtifactV1(readJson(join(BENCHMARK_ROOT, name))));
+    const artifacts = EffectArray.map(
+      EffectArray.filter(readdirSync(BENCHMARK_ROOT), name => /^recall-rank-\d+\.json$/.test(name)),
+      name => parseBenchmarkArtifactV1(readJson(join(BENCHMARK_ROOT, name))),
+    );
 
     expect(
-      artifacts.map(artifact => artifact.metadata.documents).sort((left, right) => Number(left) - Number(right)),
+      EffectArray.map(artifacts, artifact => artifact.metadata.documents).sort(
+        (left, right) => Number(left) - Number(right),
+      ),
     ).toEqual([200, 1_000, 10_000, 100_000]);
     for (const artifact of artifacts) {
       expect(artifact.environment.node).toBe('v22.22.0');
       expect(artifact.environment.fixtureHash).toMatch(/^[a-f0-9]{64}$/);
-      expect(artifact.measurements.some(measurement => measurement.name === 'hybrid-rank-one-query')).toBe(true);
-      expect(artifact.measurements.some(measurement => measurement.name === 'process-rss')).toBe(true);
+      expect(EffectArray.some(artifact.measurements, measurement => measurement.name === 'hybrid-rank-one-query')).toBe(
+        true,
+      );
+      expect(EffectArray.some(artifact.measurements, measurement => measurement.name === 'process-rss')).toBe(true);
     }
   });
 
   it('stores compact Mitata and indexed-recall summaries', () => {
-    const micro = readJson(join(BENCHMARK_ROOT, 'recall-micro.json')) as {
-      readonly benchmarks?: readonly unknown[];
-      readonly environment?: {readonly node?: string};
-      readonly fixtures?: Readonly<Record<string, string>>;
-      readonly runner?: {readonly name?: string; readonly version?: string};
-    };
-    const indexed = readJson(join(BENCHMARK_ROOT, 'recall-index-10000.json')) as {
-      readonly fixture?: {readonly documents?: number};
-      readonly scenarios?: Readonly<Record<string, {readonly p95Milliseconds?: number}>>;
-    };
+    const micro = decodeMicroBaseline(readJson(join(BENCHMARK_ROOT, 'recall-micro.json')));
+    const indexed = decodeIndexedRecall(readJson(join(BENCHMARK_ROOT, 'recall-index-10000.json')));
 
     expect(micro.environment?.node).toBe('v22.22.0');
     expect(micro.runner).toEqual({name: 'mitata', version: '1.0.34'});
-    expect(Object.keys(micro.fixtures ?? {}).sort()).toEqual(['1000', '10000', '200']);
+    expect(EffectRecord.keys(micro.fixtures ?? {}).sort()).toEqual(['1000', '10000', '200']);
     expect(micro.benchmarks).toHaveLength(3);
     expect(indexed.fixture?.documents).toBe(10_000);
-    expect(Object.keys(indexed.scenarios ?? {}).sort()).toEqual([
+    expect(EffectRecord.keys(indexed.scenarios ?? {}).sort()).toEqual([
       'coldDecode',
       'hotQuery',
       'incrementalUpdate',
@@ -129,19 +231,13 @@ describe('frozen Threadnote 3.0.3 baselines', () => {
   });
 
   it('stores the 4.0 SQLite indexed-recall benchmark within every release budget', () => {
-    const indexed = readJson(
-      join(CANDIDATE_ROOT, 'benchmarks', 'darwin-arm64-m1-max', 'recall-index-sqlite-10000.json'),
-    ) as {
-      readonly fixture?: {readonly documents?: number};
-      readonly scenarios?: Readonly<
-        Record<string, {readonly p95LimitMilliseconds?: number; readonly p95Milliseconds?: number}>
-      >;
-      readonly source?: {readonly index?: string};
-    };
+    const indexed = decodeIndexedSqlite(
+      readJson(join(CANDIDATE_ROOT, 'benchmarks', 'darwin-arm64-m1-max', 'recall-index-sqlite-10000.json')),
+    );
 
     expect(indexed.fixture?.documents).toBe(10_000);
     expect(indexed.source?.index).toContain('@effect/sql-sqlite-bun');
-    expect(Object.keys(indexed.scenarios ?? {}).sort()).toEqual([
+    expect(EffectRecord.keys(indexed.scenarios ?? {}).sort()).toEqual([
       'coldDecode',
       'exactNoHit',
       'exactSubstring',
@@ -149,38 +245,19 @@ describe('frozen Threadnote 3.0.3 baselines', () => {
       'incrementalUpdate',
       'sourceValidation',
     ]);
-    for (const scenario of Object.values(indexed.scenarios ?? {})) {
+    for (const scenario of EffectRecord.values(indexed.scenarios ?? {})) {
       expect(scenario.p95Milliseconds).toBeLessThanOrEqual(scenario.p95LimitMilliseconds ?? 0);
     }
   });
 
   it('stores bounded content-addressed vector results at 10k and 50k', () => {
-    const artifact = readJson(
-      join(CANDIDATE_ROOT, 'benchmarks', 'darwin-arm64-m1-max', 'recall-vector-storage-sqlite-v2.json'),
-    ) as {
-      readonly scales?: Readonly<
-        Record<
-          string,
-          {
-            readonly database: {
-              readonly chunkMappings: number;
-              readonly incrementalBytes: number;
-              readonly vectorValues: number;
-            };
-            readonly incrementalBuild: {
-              readonly embeddedChunks: number;
-              readonly reusedChunks: number;
-            };
-            readonly semanticQuery: {readonly p95Milliseconds: number};
-          }
-        >
-      >;
-      readonly suite?: string;
-    };
+    const artifact = decodeVectorStorage(
+      readJson(join(CANDIDATE_ROOT, 'benchmarks', 'darwin-arm64-m1-max', 'recall-vector-storage-sqlite-v2.json')),
+    );
 
     expect(artifact.suite).toBe('recall-vector-storage-v1');
-    expect(Object.keys(artifact.scales ?? {}).sort()).toEqual(['10000', '50000']);
-    for (const [documentsText, result] of Object.entries(artifact.scales ?? {})) {
+    expect(EffectRecord.keys(artifact.scales ?? {}).sort()).toEqual(['10000', '50000']);
+    for (const [documentsText, result] of EffectRecord.toEntries(artifact.scales ?? {})) {
       const documents = Number(documentsText);
       expect(result.database.chunkMappings).toBe(documents);
       expect(result.database.vectorValues).toBe(documents);
@@ -192,51 +269,51 @@ describe('frozen Threadnote 3.0.3 baselines', () => {
   });
 
   it('stores the audited code-graph improvements at 10k and 100k', () => {
-    const artifact = readJson(
-      join(CANDIDATE_ROOT, 'benchmarks', 'darwin-arm64-m1-max', 'code-graph-performance-audit-2026-07-30.json'),
-    ) as {
-      readonly scales?: Readonly<
-        Record<
-          string,
-          {
-            readonly after: {
-              readonly coldIndexMilliseconds: number;
-              readonly oneFileIncrementalMilliseconds: number;
-            };
-            readonly before: {
-              readonly coldIndexMilliseconds: number;
-              readonly oneFileIncrementalMilliseconds: number;
-            };
-          }
-        >
-      >;
-      readonly suite?: string;
-    };
+    const artifact = decodeGraphAudit(
+      readJson(
+        join(CANDIDATE_ROOT, 'benchmarks', 'darwin-arm64-m1-max', 'code-graph-performance-audit-2026-07-30.json'),
+      ),
+    );
 
     expect(artifact.suite).toBe('code-graph-performance-audit-v1');
-    expect(Object.keys(artifact.scales ?? {}).sort()).toEqual(['10000', '100000']);
-    for (const result of Object.values(artifact.scales ?? {})) {
+    expect(EffectRecord.keys(artifact.scales ?? {}).sort()).toEqual(['10000', '100000']);
+    for (const result of EffectRecord.values(artifact.scales ?? {})) {
       expect(result.after.coldIndexMilliseconds).toBeLessThan(result.before.coldIndexMilliseconds);
       expect(result.after.oneFileIncrementalMilliseconds).toBeLessThan(result.before.oneFileIncrementalMilliseconds);
     }
   });
 
   it('stores the passing 4.0 core embedding result and rejected reranker result', () => {
-    const candidates = readdirSync(CANDIDATE_ROOT)
-      .filter(name => name.endsWith('.json'))
-      .map(name => readJson(join(CANDIDATE_ROOT, name)) as ModelCandidateSummary);
+    const candidates = EffectArray.map(
+      EffectArray.filter(readdirSync(CANDIDATE_ROOT), name => Effect.pipe(name, EffectString.endsWith('.json'))),
+      name => decodeModelCandidateSummary(readJson(join(CANDIDATE_ROOT, name))),
+    );
 
     expect(candidates).toHaveLength(2);
     for (const candidate of candidates) {
       expect(candidate.fixture.hash).toBe('3967acf33893251f03126720ebf6fb55f6b6eed62f2c84f768963e9a352e9348');
-      expect(candidate.models.every(model => /^[0-9a-f]{64}$/.test(model.sha256))).toBe(true);
+      expect(EffectArray.every(candidate.models, model => /^[0-9a-f]{64}$/.test(model.sha256))).toBe(true);
     }
-    const coreEmbedding = candidates.find(candidate => candidate.models.length === 1);
-    const withReranker = candidates.find(candidate => candidate.models.length === 2);
+    const coreEmbedding = EffectOption.getOrUndefined(
+      EffectArray.findFirst(candidates, candidate => candidate.models.length === 1),
+    );
+    const withReranker = EffectOption.getOrUndefined(
+      EffectArray.findFirst(candidates, candidate => candidate.models.length === 2),
+    );
     expect(coreEmbedding?.gate).toEqual(expect.objectContaining({failures: [], passed: true}));
     expect(coreEmbedding?.result.metrics.noAnswerRecall).toBe(1);
     expect(withReranker?.gate.passed).toBe(false);
-    expect(withReranker?.gate.failures.some(failure => failure.includes('noAnswerRecall'))).toBe(true);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(withReranker?.gate.failures), __effectArrayReceiver =>
+          EffectArray.some(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(failure => Effect.pipe(failure, EffectString.includes('noAnswerRecall')))(__effectArrayValue),
+          ),
+        ),
+      ),
+    ).toBe(true);
     expect(withReranker?.result.metrics.noAnswerRecall).toBe(0);
   });
 });
@@ -296,10 +373,10 @@ describe('reviewed current recall quality baseline', () => {
 
 describe('reviewed Threadnote 4.2.7 performance baseline', () => {
   it('stores exactly the clean hybrid-v3 M1 Max rank captures at every reviewed scale', () => {
-    const names = readdirSync(CURRENT_BENCHMARK_ROOT)
-      .filter(name => /^recall-rank-\d+\.json$/u.test(name))
-      .sort();
-    expect(names).toEqual(CURRENT_RANK_BENCHMARKS.map(benchmark => benchmark.name).sort());
+    const names = EffectArray.filter(readdirSync(CURRENT_BENCHMARK_ROOT), name =>
+      /^recall-rank-\d+\.json$/u.test(name),
+    ).sort();
+    expect(names).toEqual(EffectArray.map(CURRENT_RANK_BENCHMARKS, benchmark => benchmark.name).sort());
 
     for (const expected of CURRENT_RANK_BENCHMARKS) {
       const artifact = parseBenchmarkArtifactV1(readJson(join(CURRENT_BENCHMARK_ROOT, expected.name)));
@@ -332,9 +409,11 @@ describe('reviewed Threadnote 4.2.7 performance baseline', () => {
         seed: 262_144,
         sourceVersion: 'threadnote-4.2.7',
       });
-      expect(artifact.measurements.map(measurement => measurement.name)).toEqual(CURRENT_RANK_MEASUREMENTS);
-      expect(artifact.measurements.map(measurement => measurement.samples)).toEqual(
-        CURRENT_RANK_MEASUREMENTS.map(() => expected.samples),
+      expect(EffectArray.map(artifact.measurements, measurement => measurement.name)).toEqual(
+        CURRENT_RANK_MEASUREMENTS,
+      );
+      expect(EffectArray.map(artifact.measurements, measurement => measurement.samples)).toEqual(
+        EffectArray.map(CURRENT_RANK_MEASUREMENTS, () => expected.samples),
       );
       expect(artifact.suite).toBe('recall-v2');
       expect(artifact.version).toBe(1);
@@ -345,10 +424,10 @@ describe('reviewed Threadnote 4.2.7 performance baseline', () => {
 
 describe('reviewed Threadnote 4.2.7 hybrid-v6 performance candidate', () => {
   it('matches the hybrid-v3 fixture and host contract at every reviewed scale', () => {
-    const names = readdirSync(CURRENT_RANK_CANDIDATE_ROOT)
-      .filter(name => /^recall-rank-\d+\.json$/u.test(name))
-      .sort();
-    expect(names).toEqual(CURRENT_RANK_BENCHMARKS.map(benchmark => benchmark.name).sort());
+    const names = EffectArray.filter(readdirSync(CURRENT_RANK_CANDIDATE_ROOT), name =>
+      /^recall-rank-\d+\.json$/u.test(name),
+    ).sort();
+    expect(names).toEqual(EffectArray.map(CURRENT_RANK_BENCHMARKS, benchmark => benchmark.name).sort());
 
     for (const expected of CURRENT_RANK_BENCHMARKS) {
       const artifact = parseBenchmarkArtifactV1(readJson(join(CURRENT_RANK_CANDIDATE_ROOT, expected.name)));
@@ -375,9 +454,11 @@ describe('reviewed Threadnote 4.2.7 hybrid-v6 performance candidate', () => {
         seed: 262_144,
         sourceVersion: 'threadnote-4.2.7',
       });
-      expect(artifact.measurements.map(measurement => measurement.name)).toEqual(CURRENT_RANK_MEASUREMENTS);
-      expect(artifact.measurements.map(measurement => measurement.samples)).toEqual(
-        CURRENT_RANK_MEASUREMENTS.map(() => expected.samples),
+      expect(EffectArray.map(artifact.measurements, measurement => measurement.name)).toEqual(
+        CURRENT_RANK_MEASUREMENTS,
+      );
+      expect(EffectArray.map(artifact.measurements, measurement => measurement.samples)).toEqual(
+        EffectArray.map(CURRENT_RANK_MEASUREMENTS, () => expected.samples),
       );
       expect(artifact.suite).toBe('recall-v2');
       expect(artifact.version).toBe(1);
@@ -385,13 +466,6 @@ describe('reviewed Threadnote 4.2.7 hybrid-v6 performance candidate', () => {
     }
   });
 });
-
-interface ModelCandidateSummary {
-  readonly fixture: {readonly hash: string};
-  readonly gate: {readonly failures: readonly string[]; readonly passed: boolean};
-  readonly models: readonly {readonly sha256: string}[];
-  readonly result: {readonly metrics: {readonly noAnswerRecall: number}};
-}
 
 function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf8'));

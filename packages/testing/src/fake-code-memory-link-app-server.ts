@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Schema} from 'effect';
 
 import {createInterface} from 'node:readline';
 
@@ -17,13 +18,20 @@ const turnId = 'turn_transport_canary';
 const preflightViolation = process.env.THREADNOTE_TEST_PREFLIGHT_VIOLATION;
 let pendingTurnParams: Record<string, unknown> | undefined;
 
+const AppServerRequestSchema = Schema.Struct({
+  id: Schema.optionalKey(Schema.Int),
+  method: Schema.optionalKey(Schema.String),
+  params: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+  result: Schema.optionalKey(Schema.Struct({decision: Schema.optionalKey(Schema.String)})),
+});
+
 lines.on('line', line => {
-  const request = JSON.parse(line) as {
-    id?: number;
-    method?: string;
-    params?: Record<string, unknown>;
-    result?: {decision?: string};
-  };
+  const request: unknown = JSON.parse(line);
+  if (!Schema.is(AppServerRequestSchema)(request)) {
+    process.stderr.write('expected a valid app-server request envelope\n');
+    process.exit(8);
+    return;
+  }
   if (request.id === 899 && request.method === undefined) {
     if (request.result?.decision !== 'decline' || !pendingTurnParams) {
       process.stderr.write('expected denied command cancellation\n');
@@ -366,7 +374,12 @@ function notify(method: string, params: unknown): void {
 }
 
 function writeMessages(messages: readonly Record<string, unknown>[]): void {
-  process.stdout.write(`${messages.map(message => JSON.stringify(message)).join('\n')}\n`);
+  process.stdout.write(
+    `${EffectArray.join(
+      EffectArray.map(messages, message => JSON.stringify(message)),
+      '\n',
+    )}\n`,
+  );
 }
 
 function respond(id: number | undefined, result: unknown): void {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -9,6 +10,8 @@ import {
   type CodeGraphWorksetQueryResult,
 } from '@threadnote/graph/workset/query';
 import type {CodeGraphQueryResult} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('bounded code graph workset queries', () => {
   fcProp(
@@ -23,9 +26,9 @@ describe('bounded code graph workset queries', () => {
       const allocation = allocateCodeGraphWorksetBudget(total, repositories);
 
       expect(allocation).toHaveLength(repositories);
-      expect(allocation.reduce((sum, value) => sum + value, 0)).toBe(total);
+      expect(EffectArray.reduce(allocation, 0, (sum, value) => sum + value)).toBe(total);
       expect(Math.max(...allocation) - Math.min(...allocation)).toBeLessThanOrEqual(1);
-      expect(allocation.every(value => value >= 1)).toBe(true);
+      expect(EffectArray.every(allocation, value => value >= 1)).toBe(true);
       expect(allocateCodeGraphWorksetBudget(total, repositories)).toEqual(allocation);
     },
     {fastCheck: {numRuns: 150}},
@@ -56,7 +59,7 @@ function worksetResult(graphs: readonly CodeGraphQueryResult[]): CodeGraphWorkse
       readyRepositories: graphs.length,
       requestedRepositories: graphs.length,
     },
-    repositories: graphs.map(graph => ({graph, project: graph.repository.displayName, state: 'ready'})),
+    repositories: EffectArray.map(graphs, graph => ({graph, project: graph.repository.displayName, state: 'ready'})),
     trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
     type: 'code-graph-workset-query',
     version: 1,
@@ -66,7 +69,7 @@ function worksetResult(graphs: readonly CodeGraphQueryResult[]): CodeGraphWorkse
 }
 
 function graphResult(displayName: string, repositoryId: string, commitCharacter: string): CodeGraphQueryResult {
-  const id = `cgs_${commitCharacter.repeat(32)}`;
+  const id = `cgs_${Effect.pipe(commitCharacter, EffectString.repeat(32))}`;
   return {
     edges: [],
     freshness: 'current',
@@ -87,9 +90,9 @@ function graphResult(displayName: string, repositoryId: string, commitCharacter:
     operation: 'query',
     repository: {displayName, repositoryId},
     snapshot: {
-      commit: commitCharacter.repeat(40),
+      commit: Effect.pipe(commitCharacter, EffectString.repeat(40)),
       dirty: false,
-      id: `cgsn_${commitCharacter.repeat(40)}`,
+      id: `cgsn_${Effect.pipe(commitCharacter, EffectString.repeat(40))}`,
       worktreeId: `worktree-${displayName}`,
     },
     trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},

@@ -17,6 +17,7 @@ import {
   readAnonymousTelemetryDiagnostic,
   readAnonymousTelemetryReportedOutcome,
 } from '@threadnote/threadnote/telemetry/diagnostic';
+import * as EffectRecord from 'effect/Record';
 
 describe('anonymous telemetry diagnostics', () => {
   it('keeps a stable tagged failure instead of traversing into a private generic cause', () => {
@@ -106,7 +107,7 @@ describe('anonymous telemetry diagnostics', () => {
       }),
     );
 
-    expect(Object.keys(result)).toEqual(['content', 'isError']);
+    expect(EffectRecord.keys(result)).toEqual(['content', 'isError']);
     expect(JSON.stringify(result)).toBe('{"content":[{"type":"text","text":"safe user-facing error"}],"isError":true}');
     expect(readAnonymousTelemetryDiagnostic(result)).toMatchObject({
       code: 'transient-io',
@@ -141,11 +142,14 @@ describe('anonymous telemetry diagnostics', () => {
   });
 
   it('fails closed for invalid outcome and refresh diagnostic fields', () => {
-    const result = attachAnonymousTelemetryReportedOutcome({content: []}, 'private-customer-outcome' as 'failure');
+    // @ts-expect-error -- preserve the negative fixture for an unsupported reported outcome.
+    const result = attachAnonymousTelemetryReportedOutcome({content: []}, 'private-customer-outcome');
     const diagnostic = anonymousTelemetryDiagnosticFromCodeGraphRefreshFailure({
-      code: 'private-code' as 'unknown',
+      // @ts-expect-error -- preserve malformed diagnostic code as a runtime fail-closed case.
+      code: 'private-code',
       operation: 'refresh code graph',
-      recovery: 'private-recovery' as 'diagnose',
+      // @ts-expect-error -- preserve malformed diagnostic recovery as a runtime fail-closed case.
+      recovery: 'private-recovery',
       retryable: true,
     });
 

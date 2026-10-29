@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   Clock,
   Context,
@@ -22,6 +23,8 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {guidanceHealthObservationPaths} from '../guidance/index.js';
 import {makeManagerLive, type ManagerLive, type ManagerLiveOptions} from './live.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const LIMITS = {
   projects: 8,
@@ -102,7 +105,7 @@ export const makeManagerHealthLiveRegistry = Effect.fn('manager.healthLive.regis
       yield* options.onAvailability(project, next);
     });
   const updateWatches = Effect.gen(function* () {
-    const desired = new Set([...projects.values()].flatMap(entry => entry.directories));
+    const desired = new Set(EffectArray.flatMap([...projects.values()], entry => entry.directories));
     if (desired.size > LIMITS.watches) {
       for (const [project, entry] of projects) yield* availability(project, entry, false);
       return;
@@ -160,7 +163,7 @@ export const makeManagerHealthLiveRegistry = Effect.fn('manager.healthLive.regis
             return;
           }
           entry.directories = result.directories;
-          const allDirectories = new Set([...projects.values()].flatMap(value => value.directories));
+          const allDirectories = new Set(EffectArray.flatMap([...projects.values()], value => value.directories));
           if (allDirectories.size > LIMITS.watches) {
             entry.directories = [];
             yield* availability(project, entry, false);
@@ -178,7 +181,10 @@ export const makeManagerHealthLiveRegistry = Effect.fn('manager.healthLive.regis
   yield* Effect.forever(
     Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
-      const nextDeadline = Math.min(nextReconcile, ...[...projects.values()].map(entry => entry.deadline ?? Infinity));
+      const nextDeadline = Math.min(
+        nextReconcile,
+        ...EffectArray.map([...projects.values()], entry => entry.deadline ?? Infinity),
+      );
       yield* Effect.race(Queue.take(wake), Effect.sleep(Math.max(1, nextDeadline - now)));
       yield* reconcile;
     }),
@@ -212,7 +218,7 @@ export const makeManagerHealthLiveRegistry = Effect.fn('manager.healthLive.regis
         connections.set(connection, [...new Set(requested)]);
         yield* prune;
         yield* signal;
-        return requested.filter(project => !projects.get(project)?.available);
+        return EffectArray.filter(requested, project => !projects.get(project)?.available);
       }),
     release: (connection: string) => Effect.sync(() => connections.delete(connection)).pipe(Effect.andThen(prune)),
     hints: {
@@ -222,9 +228,17 @@ export const makeManagerHealthLiveRegistry = Effect.fn('manager.healthLive.regis
           if (entry === undefined) return;
           const citations = [
             ...new Map(
-              input.citations.map(citation => [`${citation.repositoryId}:${citation.sourceCommit}`, citation]),
+              EffectArray.map(input.citations, citation => [
+                `${citation.repositoryId}:${citation.sourceCommit}`,
+                citation,
+              ]),
             ).values(),
-          ].sort((a, b) => `${a.repositoryId}:${a.sourceCommit}`.localeCompare(`${b.repositoryId}:${b.sourceCommit}`));
+          ].sort((a, b) =>
+            Effect2.pipe(
+              `${a.repositoryId}:${a.sourceCommit}`,
+              EffectString.localeCompare(`${b.repositoryId}:${b.sourceCommit}`),
+            ),
+          );
           const identity = JSON.stringify([input.cwd, citations]);
           entry.deadline = input.nextChangeAt;
           if (entry.identity !== identity) {
@@ -270,7 +284,8 @@ export const makeManagerHealthLiveSources = Effect.fn('manager.healthLive.source
       // labels global discovery incomplete. That one selected route is fully
       // observable here; incomplete discovery without it must use fallback.
       if (
-        routes.some(
+        EffectArray.some(
+          routes,
           route =>
             !route.complete &&
             !(route.routes.length === 1 && !route.ambiguous && route.routes[0].identity.repoRoot === canonicalCwd),
@@ -278,12 +293,18 @@ export const makeManagerHealthLiveSources = Effect.fn('manager.healthLive.source
       )
         return undefined;
       const roots = [
-        ...new Set([canonicalCwd, ...routes.flatMap(route => route.routes.map(value => value.identity.repoRoot))]),
+        ...new Set([
+          canonicalCwd,
+          ...EffectArray.flatMap(routes, route => EffectArray.map(route.routes, value => value.identity.repoRoot)),
+        ]),
       ].sort();
       if (roots.length > LIMITS.sources) return undefined;
       const directories = new Set<string>();
       const revisions: unknown[] = [
-        routes.map(route => [route.generation, route.routes.map(value => value.identity.repoRoot)]),
+        EffectArray.map(routes, route => [
+          route.generation,
+          EffectArray.map(route.routes, value => value.identity.repoRoot),
+        ]),
       ];
       for (const root of roots) {
         const worktree = yield* observeLiveWorktree(root);
@@ -314,7 +335,7 @@ export const makeManagerHealthLiveSources = Effect.fn('manager.healthLive.source
       const files = [
         ...new Set([
           ...candidates.files,
-          ...guidance.flatMap(row => [row.targetPath, ...row.receiptPaths]),
+          ...EffectArray.flatMap(guidance, row => [row.targetPath, ...row.receiptPaths]),
           path.join(
             config.agentContextHome,
             'context-maintenance',

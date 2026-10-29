@@ -1,35 +1,34 @@
+import {Array as EffectArray, Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import {TREE_SITTER_RUNTIME_CACHE_IDENTITY} from '@threadnote/graph/tree_sitter/runtime';
+import * as EffectRecord from 'effect/Record';
 
-interface GrammarManifestEntry {
-  readonly abi: number;
-  readonly license: string;
-  readonly licensePackagePath?: string;
-  readonly packagePath?: string;
-  readonly path: string;
-  readonly sha256: string;
-  readonly source: string;
-  readonly version: string;
-}
-
-interface RuntimeManifestEntry {
-  readonly id: string;
-  readonly path: string;
-  readonly sha256: string;
-  readonly source: string;
-  readonly version: string;
-}
+const grammarManifestEntrySchema = Schema.StructWithRest(
+  Schema.Struct({
+    abi: Schema.Finite,
+    license: Schema.String,
+    licensePackagePath: Schema.optional(Schema.String),
+    packagePath: Schema.optional(Schema.String),
+    path: Schema.String,
+    sha256: Schema.String,
+    source: Schema.String,
+    version: Schema.String,
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const grammarManifestSchema = Schema.StructWithRest(
+  Schema.Struct({grammars: Schema.Record(Schema.String, grammarManifestEntrySchema)}),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
 
 describe('code graph grammar assets', () => {
   it('keeps the parser package, lockfile, vendored runtime, and cache identity on one exact release', async () => {
     const [assetManifest, lockfile, packageManifest, installedManifest, thirdPartyNotices] = await Promise.all([
-      Bun.file('assets/code-graph/manifest.json').json() as Promise<{readonly runtime: RuntimeManifestEntry}>,
+      Bun.file('assets/code-graph/manifest.json').json(),
       Bun.file('bun.lock').text(),
-      Bun.file('package.json').json() as Promise<{
-        readonly dependencies?: Readonly<Record<string, string>>;
-      }>,
-      Bun.file('node_modules/web-tree-sitter/package.json').json() as Promise<{readonly version?: string}>,
+      Bun.file('package.json').json(),
+      Bun.file('node_modules/web-tree-sitter/package.json').json(),
       Bun.file('THIRD_PARTY.md').text(),
     ]);
     const expectedVersion = packageManifest.dependencies?.['web-tree-sitter'];
@@ -56,17 +55,19 @@ describe('code graph grammar assets', () => {
   });
 
   it('maps every runtime language asset to checksum-pinned release metadata', async () => {
-    const manifest = (await Bun.file('assets/code-graph/manifest.json').json()) as {
-      readonly grammars: Readonly<Record<string, GrammarManifestEntry>>;
-    };
-    const assets = BUILTIN_LANGUAGE_PACK_REGISTRY.packs.flatMap(pack => pack.assets);
-    const manifestByPath = new Map(Object.values(manifest.grammars).map(entry => [entry.path, entry]));
-
-    expect(new Set(assets.map(asset => asset.relativePath)).size).toBe(assets.length);
-    expect(new Set(Object.values(manifest.grammars).map(entry => entry.path)).size).toBe(
-      Object.keys(manifest.grammars).length,
+    const manifest = Schema.decodeUnknownSync(grammarManifestSchema)(
+      await Bun.file('assets/code-graph/manifest.json').json(),
     );
-    expect([...manifestByPath.keys()].sort()).toEqual(assets.map(asset => asset.relativePath).sort());
+    const assets = EffectArray.flatMap(BUILTIN_LANGUAGE_PACK_REGISTRY.packs, pack => pack.assets);
+    const manifestByPath = new Map(
+      EffectArray.map(EffectRecord.values(manifest.grammars), entry => [entry.path, entry]),
+    );
+
+    expect(new Set(EffectArray.map(assets, asset => asset.relativePath)).size).toBe(assets.length);
+    expect(new Set(EffectArray.map(EffectRecord.values(manifest.grammars), entry => entry.path)).size).toBe(
+      EffectRecord.keys(manifest.grammars).length,
+    );
+    expect([...manifestByPath.keys()].sort()).toEqual(EffectArray.map(assets, asset => asset.relativePath).sort());
 
     for (const asset of assets) {
       const metadata = manifestByPath.get(asset.relativePath);

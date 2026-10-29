@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {open, readFile, readlink, rm as nodeRm, symlink} from '@threadnote/testing/node-fs-promises';
 import {Deferred, Effect, Fiber, FileSystem, Path} from 'effect';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -13,19 +14,21 @@ import {CODE_GRAPH_SCHEMA_VERSION} from '@threadnote/graph/types';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {join, mkdir, mkdtemp, rm, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('obsolete code graph stores', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('reports exact sparse v2 bytes and purges only verified obsolete SQLite artifacts', async () => {
     expect(CODE_GRAPH_SCHEMA_VERSION).toBeGreaterThan(2);
     const home = await mkdtemp('threadnote-obsolete-graph-');
     homes.push(home);
-    const checkoutId = 'a'.repeat(64);
+    const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
     const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
     await mkdir(join(repositoryRoot, 'vectors'), {recursive: true});
     const databaseBytes = 25 * 1024 ** 3 + 123;
@@ -45,7 +48,7 @@ describe('obsolete code graph stores', () => {
     const inventory = await runEffect(inspectObsoleteCodeGraphStores(home));
     expect(inventory).toMatchObject({bytes: expectedBytes, fileCount: 3, unsafeEntryCount: 0});
     expect(inventory.checkouts).toEqual([expect.objectContaining({bytes: expectedBytes, checkoutId, versions: [2]})]);
-    expect(inventory.checkouts[0].files.map(file => [file.fileName, file.bytes])).toEqual([
+    expect(EffectArray.map(inventory.checkouts[0].files, file => [file.fileName, file.bytes])).toEqual([
       ['graph-v2.sqlite', databaseBytes],
       ['graph-v2.sqlite-shm', shmBytes],
       ['graph-v2.sqlite-wal', walBytes],
@@ -82,7 +85,7 @@ describe('obsolete code graph stores', () => {
     async () => {
       const home = await mkdtemp('threadnote-obsolete-graph-link-');
       homes.push(home);
-      const checkoutId = 'b'.repeat(64);
+      const checkoutId = Effect2.pipe('b', EffectString.repeat(64));
       const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
       const external = join(home, 'external.sqlite');
       await mkdir(repositoryRoot, {recursive: true});
@@ -103,7 +106,7 @@ describe('obsolete code graph stores', () => {
   it('fails immediately while an active build owns the checkout lock', async () => {
     const home = await mkdtemp('threadnote-obsolete-graph-lock-');
     homes.push(home);
-    const checkoutId = 'c'.repeat(64);
+    const checkoutId = Effect2.pipe('c', EffectString.repeat(64));
     const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
     await mkdir(repositoryRoot, {recursive: true});
     const obsolete = join(repositoryRoot, 'graph-v2.sqlite');
@@ -150,7 +153,7 @@ describe('obsolete code graph stores', () => {
   it.skipIf(process.platform === 'win32')('revalidates after planning and refuses a symlink race', async () => {
     const home = await mkdtemp('threadnote-obsolete-graph-race-');
     homes.push(home);
-    const checkoutId = 'd'.repeat(64);
+    const checkoutId = Effect2.pipe('d', EffectString.repeat(64));
     const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
     const candidate = join(repositoryRoot, 'graph-v2.sqlite');
     const external = join(home, 'external-race.sqlite');

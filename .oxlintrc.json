@@ -139,7 +139,8 @@
     "effecttsgo/process-env": "off",
     "effecttsgo/schema-sync": "off",
     "effecttsgo/strict-boolean-expressions": "off",
-    "effecttsgo/unstable-api-usage": "off"
+    "effecttsgo/unstable-api-usage": "off",
+    "typescript/no-unsafe-type-assertion": "error"
   },
   "overrides": [
     {
@@ -148,7 +149,12 @@
         "require": "readonly"
       },
       "rules": {
-        "typescript/no-require-imports": ["error", {"allow": ["^typescript-compiler$"]}]
+        "typescript/no-require-imports": [
+          "error",
+          {
+            "allow": ["^typescript-compiler$"]
+          }
+        ]
       }
     },
     {

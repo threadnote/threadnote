@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphActivationStage, type CodeGraphActivationProgressCallback} from '../models.js';
@@ -5,6 +6,7 @@ import {LEGACY_BUILDING_REFERENCES_V3_TABLE} from '../schema/contracts.js';
 import {persistedIncrementalFactCountsStatement} from '../incremental/plan.js';
 import {tableExists} from '../session.js';
 import {type CodeGraphSnapshot, CodeGraphStoreError} from '../../types.js';
+import * as EffectRecord from 'effect/Record';
 
 type ActivationProgressObserver = (
   stage: CodeGraphActivationStage,
@@ -294,15 +296,18 @@ const copyPersistentActivationRows = Effect.fn('codeGraph.copyPersistentActivati
           onSome: () =>
             spec.keyColumns.length === 1
               ? `WHERE ${spec.keyColumns[0]} > ?`
-              : `WHERE (${spec.keyColumns.join(', ')}) > (${spec.keyColumns.map(() => '?').join(', ')})`,
+              : `WHERE (${EffectArray.join(spec.keyColumns, ', ')}) > (${EffectArray.join(
+                  EffectArray.map(spec.keyColumns, () => '?'),
+                  ', ',
+                )})`,
         });
         const parameters = [snapshotId, ...Option.getOrElse(cursor, () => []), batchRows];
         yield* sql.unsafe(
-          `INSERT INTO ${spec.destinationTable} (snapshot_id, ${spec.columns.join(', ')})
-           SELECT ?, ${spec.columns.join(', ')}
+          `INSERT INTO ${spec.destinationTable} (snapshot_id, ${EffectArray.join(spec.columns, ', ')})
+           SELECT ?, ${EffectArray.join(spec.columns, ', ')}
            FROM ${spec.sourceTable}
            ${cursorPredicate}
-           ORDER BY ${spec.keyColumns.join(', ')}
+           ORDER BY ${EffectArray.join(spec.keyColumns, ', ')}
            LIMIT ?`,
           parameters,
         );
@@ -315,10 +320,13 @@ const copyPersistentActivationRows = Effect.fn('codeGraph.copyPersistentActivati
           return {cursor: Option.none<readonly string[]>(), inserted, tallied: 0};
         }
         const last = yield* sql.unsafe<Record<string, unknown>>(
-          `SELECT ${spec.keyColumns.join(', ')}
+          `SELECT ${EffectArray.join(spec.keyColumns, ', ')}
            FROM ${spec.destinationTable}
            WHERE snapshot_id = ?
-           ORDER BY ${spec.keyColumns.map(column => `${column} DESC`).join(', ')}
+           ORDER BY ${EffectArray.join(
+             EffectArray.map(spec.keyColumns, column => `${column} DESC`),
+             ', ',
+           )}
            LIMIT 1`,
           [snapshotId],
         );
@@ -326,8 +334,8 @@ const copyPersistentActivationRows = Effect.fn('codeGraph.copyPersistentActivati
         if (!row) {
           return yield* CodeGraphStoreError.of('Persistent activation lost its keyset cursor.');
         }
-        const nextCursor = spec.keyColumns.map(column => row[column]);
-        if (nextCursor.some(value => typeof value !== 'string')) {
+        const nextCursor = EffectArray.map(spec.keyColumns, column => row[column]);
+        if (EffectArray.some(nextCursor, value => typeof value !== 'string')) {
           return yield* CodeGraphStoreError.of('Persistent activation returned an invalid keyset cursor.');
         }
         const validatedCursor: string[] = [];
@@ -344,12 +352,18 @@ const copyPersistentActivationRows = Effect.fn('codeGraph.copyPersistentActivati
             onSome: () =>
               spec.keyColumns.length === 1
                 ? `${spec.keyColumns[0]} > ? AND `
-                : `(${spec.keyColumns.join(', ')}) > (${spec.keyColumns.map(() => '?').join(', ')}) AND `,
+                : `(${EffectArray.join(spec.keyColumns, ', ')}) > (${EffectArray.join(
+                    EffectArray.map(spec.keyColumns, () => '?'),
+                    ', ',
+                  )}) AND `,
           });
           const upperPredicate =
             spec.keyColumns.length === 1
               ? `${spec.keyColumns[0]} <= ?`
-              : `(${spec.keyColumns.join(', ')}) <= (${spec.keyColumns.map(() => '?').join(', ')})`;
+              : `(${EffectArray.join(spec.keyColumns, ', ')}) <= (${EffectArray.join(
+                  EffectArray.map(spec.keyColumns, () => '?'),
+                  ', ',
+                )})`;
           const tallyRows = yield* sql.unsafe<{readonly count: number}>(
             `SELECT COUNT(*) AS count
              FROM ${spec.sourceTable}
@@ -726,17 +740,23 @@ export function completedPersistentBuildDrainPageStatement(
   batchRows: number,
   snapshotId?: string,
 ) {
-  const key = `(${spec.keyColumns.join(', ')})`;
+  const key = `(${EffectArray.join(spec.keyColumns, ', ')})`;
   return {
     text: `DELETE FROM ${spec.table}
            WHERE ${key} IN (
-             SELECT ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
+             SELECT ${EffectArray.join(
+               EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+               ', ',
+             )}
              FROM ${spec.table} AS candidate
              WHERE candidate.snapshot_id IN (
                SELECT snapshot.id FROM snapshots AS snapshot
                WHERE snapshot.state <> 'building'${snapshotId === undefined ? '' : ' AND snapshot.id = ?'}
              )
-             ORDER BY ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
+             ORDER BY ${EffectArray.join(
+               EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+               ', ',
+             )}
              LIMIT ?
            )`,
     parameters: snapshotId === undefined ? [batchRows] : [snapshotId, batchRows],
@@ -812,7 +832,7 @@ const persistedIncrementalFactCounts = Effect.fn('codeGraph.persistedIncremental
     files: Number(row.files),
     symbols: Number(row.symbols),
   };
-  if (Object.values(counts).some(value => !Number.isSafeInteger(value) || value < 0)) {
+  if (EffectArray.some(EffectRecord.values(counts), value => !Number.isSafeInteger(value) || value < 0)) {
     return yield* CodeGraphStoreError.of('Persisted incremental graph counts are invalid.');
   }
   return counts;

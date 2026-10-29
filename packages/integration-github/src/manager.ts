@@ -1,5 +1,7 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {isGitHubSource} from './config.js';
-import {Cause, Data, Effect, Redacted, Schema} from 'effect';
+import {Cause, Effect, Redacted, Schema} from 'effect';
 import type {IntegrationResult} from '@threadnote/integration-core/manager-contracts';
 import type {GitHubSource} from './manager-contracts.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -25,18 +27,20 @@ import {
   GitHubSourceConflictError,
 } from './source.js';
 import type {ManagerIntegrationApiRequest} from '@threadnote/integration-core/manager-http';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class ManagerGitHubError extends Data.TaggedError('ManagerGitHubError')<{
-  readonly status: number;
-  readonly message: string;
-}> {}
+class ManagerGitHubError extends Schema.TaggedError<ManagerGitHubError, {readonly brand: unique symbol}>()(
+  'ManagerGitHubError',
+  {status: Schema.Int, message: Schema.String},
+) {}
 
 function invalid(message: string): never {
-  throw new ManagerGitHubError({status: 400, message});
+  throw ManagerGitHubError.make({status: 400, message});
 }
 
 function conflict(message: string): never {
-  throw new ManagerGitHubError({status: 409, message});
+  throw ManagerGitHubError.make({status: 409, message});
 }
 
 function sourceId(value: unknown): string {
@@ -67,8 +71,8 @@ function environmentToken(config: RuntimeConfig, name: string) {
     maxStaleHours: 24,
   };
   return resolveGitHubCredential(config, source).pipe(
-    Effect.mapError(
-      () => new ManagerGitHubError({status: 400, message: 'The selected environment credential is unavailable.'}),
+    Effect.mapError(() =>
+      ManagerGitHubError.make({status: 400, message: 'The selected environment credential is unavailable.'}),
     ),
   );
 }
@@ -77,7 +81,7 @@ function safeErrorResponse(error: unknown) {
   if (Schema.is(GitHubSourceConflictError)(error))
     return {status: 409, body: {error: 'This connection changed. Refresh connections before saving.'}};
   if (Schema.is(GitHubCredentialError)(error)) return {status: 409, body: {error: error.message}};
-  if (error instanceof ManagerGitHubError) return {status: error.status, body: {error: error.message}};
+  if (Schema.is(ManagerGitHubError)(error)) return {status: error.status, body: {error: error.message}};
   return {status: 409, body: {error: 'The GitHub connection could not complete this action.'}};
 }
 
@@ -89,19 +93,19 @@ export const listGitHubIntegrations = Effect.fn('manager.githubList')(function* 
     const credentialConfigured = yield* githubCredentialConfigured(config, source);
     const inventory = yield* runGitHubSourceInventory(config, source.id);
     const entries = inventory.entries;
-    const active = entries.filter(entry => entry.status === 'active');
+    const active = EffectArray.filter(entries, entry => entry.status === 'active');
     const attention =
-      entries.some(
+      EffectArray.some(
+        entries,
         entry => entry.status === 'quarantined' || entry.status === 'pending' || entry.nextAttemptAt !== undefined,
-      ) || inventory.repositories?.some(r => r.status === 'pending');
+      ) || EffectArray.some(inventory.repositories, r => r.status === 'pending');
     const receipt = yield* readExternalSourceReceipt(
       {account: config.account, home: config.agentContextHome, user: config.user},
       source.id,
       'github',
     );
-    const nextAttemptAt = entries.reduce<number | undefined>(
-      (time, entry) => (entry.nextAttemptAt === undefined ? time : Math.max(time ?? 0, entry.nextAttemptAt)),
-      inventory.nextAttemptAt,
+    const nextAttemptAt = EffectArray.reduce(entries, inventory.nextAttemptAt, (time, entry) =>
+      entry.nextAttemptAt === undefined ? time : Math.max(time ?? 0, entry.nextAttemptAt),
     );
     sources.push({
       id: source.id,
@@ -120,11 +124,12 @@ export const listGitHubIntegrations = Effect.fn('manager.githubList')(function* 
               !inventory.progress &&
               active.length === entries.length &&
               inventory.repositories?.length === source.repositories.length &&
-              inventory.repositories.every(r => r.status === 'active' && r.backfillComplete)
+              EffectArray.every(inventory.repositories, r => r.status === 'active' && r.backfillComplete)
             ? 'active'
             : 'needs-sync',
-      conversations: active.filter(entry => entry.documentId.startsWith('r-')).length,
-      chunks: active.reduce((count, entry) => count + entry.chunks, 0),
+      conversations: EffectArray.filter(active, entry => Effect2.pipe(entry.documentId, EffectString.startsWith('r-')))
+        .length,
+      chunks: EffectArray.reduce(active, 0, (count, entry) => count + entry.chunks),
       ...(receipt?.completedAt === undefined ? {} : {lastSyncedAt: receipt.completedAt}),
       ...(inventory.progress === undefined ? {} : {progress: inventory.progress}),
       ...(inventory.lastReconciledAt === undefined ? {} : {lastReconciledAt: inventory.lastReconciledAt}),
@@ -148,7 +153,9 @@ const route = Effect.fn('manager.githubRoute')(function* (request: ManagerIntegr
       switch (body.action) {
         case 'save-source': {
           const configuration = yield* readSourceConfiguration(request.config);
-          const existing = configuration.sources.find(source => source.id === id);
+          const existing = EffectOption.getOrUndefined(
+            EffectArray.findFirst(configuration.sources, source => source.id === id),
+          );
           if (existing && !isGitHubSource(existing)) conflict('Another connection already uses this name.');
           if (!!existing !== (body.editing === true))
             conflict(existing ? 'Open this source to edit it.' : 'This source no longer exists. Refresh connections.');
@@ -165,11 +172,11 @@ const route = Effect.fn('manager.githubRoute')(function* (request: ManagerIntegr
           if (env) yield* environmentToken(request.config, env);
           if (body.project !== null && typeof body.project !== 'string')
             invalid('Choose a project or projectless source.');
-          if (!Number.isSafeInteger(body.refreshIntervalMinutes) || !Number.isSafeInteger(body.maxStaleHours))
+          if (!checkedIsSafeInteger(body.refreshIntervalMinutes) || !checkedIsSafeInteger(body.maxStaleHours))
             invalid('Choose valid GitHub source settings.');
           if (
-            !Array.isArray(body.repositories) ||
-            !body.repositories.every((item: unknown) => typeof item === 'string')
+            !EffectArray.isArray(body.repositories) ||
+            !EffectArray.every(body.repositories, (item: unknown) => typeof item === 'string')
           )
             invalid('Choose valid GitHub repositories.');
           yield* runGitHubSourceAdd(request.config, {
@@ -178,8 +185,8 @@ const route = Effect.fn('manager.githubRoute')(function* (request: ManagerIntegr
             apply,
             project: body.project ?? undefined,
             projectless: body.project === null,
-            refreshIntervalMinutes: body.refreshIntervalMinutes as number,
-            maxStaleHours: body.maxStaleHours as number,
+            refreshIntervalMinutes: body.refreshIntervalMinutes,
+            maxStaleHours: body.maxStaleHours,
             credentialEnv:
               env ?? (existing !== undefined && isGitHubSource(existing) ? existing.credentialEnv : undefined),
             credentialStorage:
@@ -207,7 +214,7 @@ const route = Effect.fn('manager.githubRoute')(function* (request: ManagerIntegr
             };
           return {
             output: `GitHub connection saved. ${synced.syncedDocuments.length} conversation(s) refreshed.`,
-            warnings: synced.warnings.map(() => 'A conversation could not be refreshed.'),
+            warnings: EffectArray.map(synced.warnings, () => 'A conversation could not be refreshed.'),
           };
         }
         case 'sync-source': {
@@ -216,7 +223,7 @@ const route = Effect.fn('manager.githubRoute')(function* (request: ManagerIntegr
             output: apply
               ? `${synced.syncedDocuments.length} conversation(s) refreshed.`
               : 'GitHub source is ready to refresh.',
-            warnings: synced.warnings.map(() => 'A conversation could not be refreshed.'),
+            warnings: EffectArray.map(synced.warnings, () => 'A conversation could not be refreshed.'),
           };
         }
         case 'set-enabled': {

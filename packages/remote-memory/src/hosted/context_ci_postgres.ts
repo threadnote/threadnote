@@ -1,5 +1,6 @@
 import {assertHostedContextCiWorkerPrivileges} from '../runtime_privileges.js';
-import type {JSONValue, Sql, TransactionSql} from 'postgres';
+import {requireJsonValue} from '../json.js';
+import type {Sql, ISql} from 'postgres';
 import {
   admitHostedContextCiWebhookV1,
   ciIdentifier,
@@ -54,7 +55,7 @@ export async function registerHostedContextCiTarget(sql: Sql, input: HostedConte
       INSERT INTO remote_memory.context_ci_targets(
         tenant_id, repository_id, share_id, project_name, policy_digest, policy
       ) VALUES (${policy.tenantId}, ${policy.repositoryId}, ${policy.shareId}, ${policy.project},
-        ${policy.digest}, ${transaction.json(policy as unknown as JSONValue)})
+        ${policy.digest}, ${transaction.json(requireJsonValue(policy))})
       ON CONFLICT (tenant_id, repository_id) DO UPDATE SET
         share_id = EXCLUDED.share_id, project_name = EXCLUDED.project_name,
         policy_digest = EXCLUDED.policy_digest, policy = EXCLUDED.policy
@@ -176,7 +177,7 @@ export async function enqueueHostedContextCiWebhook(
     await transaction`
       INSERT INTO remote_memory.context_ci_jobs(tenant_id, repository_id, job_id, input_digest, job)
       VALUES (${input.tenantId}, ${input.repositoryId}, ${job.jobId}, ${job.inputDigest},
-        ${transaction.json(job as unknown as JSONValue)})
+        ${transaction.json(requireJsonValue(job))})
     `;
     return {status: 'accepted' as const, jobId: job.jobId};
   });
@@ -254,19 +255,19 @@ export async function runHostedContextCiOperator(
     await transaction`
       UPDATE remote_memory.context_ci_jobs SET stage = ${nextStage}, attempts = ${attempt},
         available_at = ${retryAt ?? clock.now.toISOString()},
-        diagnostics = ${transaction.json((result.status === 'evaluated' ? result.diagnostics : row.diagnostics) as unknown as JSONValue)}
+        diagnostics = ${transaction.json(requireJsonValue(result.status === 'evaluated' ? result.diagnostics : row.diagnostics))}
       WHERE tenant_id = ${input.tenantId} AND job_id = ${row.job.jobId}
     `;
     await transaction`
       INSERT INTO remote_memory.context_ci_receipts(tenant_id, job_id, attempt, receipt)
-      VALUES (${input.tenantId}, ${row.job.jobId}, ${attempt}, ${transaction.json(receipt as unknown as JSONValue)})
+      VALUES (${input.tenantId}, ${row.job.jobId}, ${attempt}, ${transaction.json(requireJsonValue(receipt))})
     `;
     return receipt;
   });
 }
 
 async function activePolicy(
-  transaction: TransactionSql,
+  transaction: ISql,
   tenantId: string,
   repositoryId: string,
 ): Promise<HostedContextCiPolicyV1 | undefined> {
@@ -283,7 +284,7 @@ async function activePolicy(
   return policy;
 }
 
-async function setTenant(transaction: TransactionSql, tenantId: string): Promise<void> {
+async function setTenant(transaction: ISql, tenantId: string): Promise<void> {
   await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
   await transaction`SELECT set_config('statement_timeout', '30000', true)`;
   await transaction`SELECT set_config('transaction_timeout', '60000', true)`;

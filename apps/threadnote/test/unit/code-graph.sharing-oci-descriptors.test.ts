@@ -33,6 +33,8 @@ import {
 } from '@threadnote/graph/sharing/descriptor';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {GRAPH_SHARE_HTTP_CAS_MAX_BYTES} from '@threadnote/graph/sharing/oci';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const sharingLayer = Layer.mergeAll(BunServices.layer, BunHttpClient.layer, TestSystemInfoLayer);
 const UTF8 = new TextEncoder();
@@ -40,23 +42,23 @@ const UTF8 = new TextEncoder();
 const MANIFEST: GraphShareFrontierManifestV1 = {
   branch: 'refs/heads/main',
   checkpoint: {
-    manifestDigest: `sha256:${'1'.repeat(64)}`,
-    metadataDigest: `sha256:${'4'.repeat(64)}`,
+    manifestDigest: `sha256:${Effect2.pipe('1', EffectString.repeat(64))}`,
+    metadataDigest: `sha256:${Effect2.pipe('4', EffectString.repeat(64))}`,
     snapshotId: 'cgsn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    sourceCommit: 'a'.repeat(40),
+    sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
   },
   deltas: [],
   generation: 1,
-  graphAbi: 'c'.repeat(64),
-  graphContentId: 'cgc_' + 'd'.repeat(40),
-  logicalGraphDigest: `sha256:${'2'.repeat(64)}`,
+  graphAbi: Effect2.pipe('c', EffectString.repeat(64)),
+  graphContentId: 'cgc_' + Effect2.pipe('d', EffectString.repeat(40)),
+  logicalGraphDigest: `sha256:${Effect2.pipe('2', EffectString.repeat(64))}`,
   previousManifestDigest: null,
-  profileDigest: `sha256:${'3'.repeat(64)}`,
+  profileDigest: `sha256:${Effect2.pipe('3', EffectString.repeat(64))}`,
   publisherFence: 1,
-  repositoryId: 'e'.repeat(64),
+  repositoryId: Effect2.pipe('e', EffectString.repeat(64)),
   schemaVersion: 1,
   snapshotId: 'cgsn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-  sourceCommit: 'a'.repeat(40),
+  sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
 };
 
 describe('graph share OCI descriptor documents', () => {
@@ -121,7 +123,9 @@ describe('graph share OCI descriptor documents', () => {
       expect(GRAPH_SHARE_TCG1_MEDIA_TYPE).not.toBe(GRAPH_SHARE_RECORDS_MEDIA_TYPE);
       expect(GRAPH_SHARE_OCTET_STREAM_MEDIA_TYPE).not.toBe(GRAPH_SHARE_RECORDS_MEDIA_TYPE);
       expect(() => parseGraphShareOciDescriptor({...descriptor, source: 'fn main() {}'})).toThrow(/source or Git/i);
-      expect(() => parseGraphShareOciDescriptor({...descriptor, gitTree: 'a'.repeat(40)})).toThrow(/source or Git/i);
+      expect(() =>
+        parseGraphShareOciDescriptor({...descriptor, gitTree: Effect2.pipe('a', EffectString.repeat(40))}),
+      ).toThrow(/source or Git/i);
       expect(() =>
         parseGraphShareOciDescriptor({
           ...descriptor,

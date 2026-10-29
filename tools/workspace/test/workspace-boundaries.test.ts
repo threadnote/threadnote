@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {
   moduleSpecifiers,
@@ -81,17 +82,17 @@ describe('private workspace boundaries', () => {
       [{path: 'packages/memory/src/document.ts', imports: ['@threadnote/platform/src/hash.ts']}],
     );
     expect(errors).toHaveLength(2);
-    expect(errors.join('\n')).toContain('undeclared dependency');
-    expect(errors.join('\n')).toContain('unexported entrypoint');
+    expect(EffectArray.join(errors, '\n')).toContain('undeclared dependency');
+    expect(EffectArray.join(errors, '\n')).toContain('unexported entrypoint');
   });
   it('rejects cycles, public packages, and reversed domain dependencies', () => {
     const errors = validateWorkspaceBoundaries(
       [{...platform, private: false, dependencies: {'@threadnote/memory': 'workspace:*'}}, memory],
       [],
     );
-    expect(errors.join('\n')).toContain('Workspace cycle:');
-    expect(errors.join('\n')).toContain('must be private');
-    expect(errors.join('\n')).toContain('forbidden dependency');
+    expect(EffectArray.join(errors, '\n')).toContain('Workspace cycle:');
+    expect(EffectArray.join(errors, '\n')).toContain('must be private');
+    expect(EffectArray.join(errors, '\n')).toContain('forbidden dependency');
   });
   it('keeps test dependencies out of production modules', () => {
     const pkg = {...memory, dependencies: {}, devDependencies: {'@threadnote/platform': 'workspace:*'}};
@@ -105,10 +106,13 @@ describe('private workspace boundaries', () => {
       ),
     ).toEqual([]);
     expect(
-      validateWorkspaceBoundaries(
-        [platform, pkg],
-        [{path: 'packages/memory/src/document.ts', imports: ['@threadnote/platform/hash']}],
-      ).join('\n'),
+      EffectArray.join(
+        validateWorkspaceBoundaries(
+          [platform, pkg],
+          [{path: 'packages/memory/src/document.ts', imports: ['@threadnote/platform/hash']}],
+        ),
+        '\n',
+      ),
     ).toContain('undeclared dependency');
   });
   it('finds static, dynamic, re-exported, and type-only imports', () => {
@@ -134,10 +138,10 @@ describe('private workspace boundaries', () => {
       ),
     ).toEqual([]);
     expect(
-      validateWorkspaceBoundaries(
-        [testing, {...memory, dependencies: {'@threadnote/testing': 'workspace:*'}}],
-        [],
-      ).join('\n'),
+      EffectArray.join(
+        validateWorkspaceBoundaries([testing, {...memory, dependencies: {'@threadnote/testing': 'workspace:*'}}], []),
+        '\n',
+      ),
     ).toContain('forbidden dependency');
   });
 

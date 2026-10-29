@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {isReadonlyArray} from '@threadnote/platform/readonly-array';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {compareCodeUnits} from '../ordering.js';
 import {CODE_GRAPH_WORKSET_CATALOG_LIMITS} from '../workset_catalog/types.js';
@@ -9,6 +11,8 @@ import {
   type CodeGraphCrossRepositoryBridgeV1,
 } from './resolver.js';
 import type {CodeGraphMonikerV1} from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_CROSS_REPOSITORY_TOPOLOGY_VERSION = 1 as const;
 
@@ -283,49 +287,68 @@ export function projectCodeGraphCrossRepositoryTopology(input: {
   }
 
   const allNodes: CodeGraphCrossRepositoryTopologyNodeV1[] = [
-    ...[...repositoryNodes.values()].map(finalizeRepositoryNode),
-    ...[...componentNodes.values()].map(finalizeComponentNode),
+    ...EffectArray.map([...repositoryNodes.values()], finalizeRepositoryNode),
+    ...EffectArray.map([...componentNodes.values()], finalizeComponentNode),
   ].sort(compareTopologyNodes);
   const selectedNodeIds = new Set(
-    [...allNodes]
-      .sort(compareNodeSelectionPriority)
-      .slice(0, prepared.budgets.maxNodes)
-      .map(node => node.id),
+    EffectArray.map(
+      [...allNodes].sort(compareNodeSelectionPriority).slice(0, prepared.budgets.maxNodes),
+      node => node.id,
+    ),
   );
-  const nodes = allNodes.filter(node => selectedNodeIds.has(node.id));
-  const nodeById = new Map(allNodes.map(node => [node.id, node] as const));
+  const nodes = EffectArray.filter(
+    allNodes,
+    (node, __effectArrayIndex) => __effectArrayIndex in allNodes && selectedNodeIds.has(node.id),
+  );
+  const nodeById = new Map(EffectArray.map(allNodes, node => [node.id, node] as const));
   const aggregates = buildAggregates(prepared.bridgeSet.generationId, prepared.bridgeSet.bridges, nodeById);
-  const nodeEligibleAggregates = aggregates.filter(
-    aggregate => selectedNodeIds.has(aggregate.source.id) && selectedNodeIds.has(aggregate.target.id),
+  const nodeEligibleAggregates = EffectArray.filter(
+    aggregates,
+    (aggregate, __effectArrayIndex) =>
+      __effectArrayIndex in aggregates &&
+      selectedNodeIds.has(aggregate.source.id) &&
+      selectedNodeIds.has(aggregate.target.id),
   );
   const selectedAggregates = [...nodeEligibleAggregates]
     .sort(compareAggregateSelectionPriority)
     .slice(0, prepared.budgets.maxEdges)
     .sort(compareAggregates);
   const evidenceAllocations = allocateEvidence(selectedAggregates, prepared.budgets);
-  const edges = selectedAggregates.map(aggregate =>
+  const edges = EffectArray.map(selectedAggregates, aggregate =>
     finalizeEdge(prepared.bridgeSet.generationId, aggregate, evidenceAllocations.get(aggregate.id) ?? []),
   );
 
-  const repositoryCandidateEdges = aggregates.filter(aggregate => aggregate.granularity === 'repository');
-  const componentCandidateEdges = aggregates.filter(aggregate => aggregate.granularity === 'component');
-  const selectedRepositoryEdges = selectedAggregates.filter(aggregate => aggregate.granularity === 'repository');
-  const selectedComponentEdges = selectedAggregates.filter(aggregate => aggregate.granularity === 'component');
+  const repositoryCandidateEdges = EffectArray.filter(aggregates, aggregate => aggregate.granularity === 'repository');
+  const componentCandidateEdges = EffectArray.filter(aggregates, aggregate => aggregate.granularity === 'component');
+  const selectedRepositoryEdges = EffectArray.filter(
+    selectedAggregates,
+    aggregate => aggregate.granularity === 'repository',
+  );
+  const selectedComponentEdges = EffectArray.filter(
+    selectedAggregates,
+    aggregate => aggregate.granularity === 'component',
+  );
   const componentEligible = sumBridgeCounts(componentCandidateEdges);
   const repositoryRepresented = sumBridgeCounts(selectedRepositoryEdges);
   const componentRepresented = sumBridgeCounts(selectedComponentEdges);
   const candidateEvidenceOccurrences = sumBridgeCounts(aggregates);
   const evidenceOnReturnedEdges = sumBridgeCounts(selectedAggregates);
-  const returnedEvidence = [...evidenceAllocations.values()].reduce((total, values) => total + values.length, 0);
+  const returnedEvidence = EffectArray.reduce(
+    [...evidenceAllocations.values()],
+    0,
+    (total, values) => total + values.length,
+  );
   const omittedNodes = allNodes.length - nodes.length;
   const omittedEdgesByNodes = aggregates.length - nodeEligibleAggregates.length;
   const omittedEdgesByLimit = nodeEligibleAggregates.length - selectedAggregates.length;
-  const evidencePerEdgeLimited = selectedAggregates.some(
+  const evidencePerEdgeLimited = EffectArray.some(
+    selectedAggregates,
     aggregate => aggregate.bridges.length > prepared.budgets.maxEvidencePerEdge,
   );
   const evidenceGloballyLimited =
     returnedEvidence < evidenceOnReturnedEdges &&
-    selectedAggregates.some(
+    EffectArray.some(
+      selectedAggregates,
       aggregate =>
         (evidenceAllocations.get(aggregate.id)?.length ?? 0) <
         Math.min(aggregate.bridges.length, prepared.budgets.maxEvidencePerEdge),
@@ -408,13 +431,13 @@ function prepareInput(input: {
   }
   const worksetName = canonicalBoundedText(bridgeSet.worksetName, 'workset name', MAX_WORKSET_NAME_BYTES);
   if (
-    !Array.isArray(input.repositories) ||
+    !isReadonlyArray(input.repositories) ||
     input.repositories.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.membersPerGeneration
   ) {
     throw invalid('Topology repository scope exceeds the supported generation bound.');
   }
   if (
-    !Array.isArray(bridgeSet.bridges) ||
+    !EffectArray.isArray(bridgeSet.bridges) ||
     bridgeSet.bridges.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.bridgesPerGeneration
   ) {
     throw invalid('Topology bridge set exceeds the supported generation bound.');
@@ -425,7 +448,9 @@ function prepareInput(input: {
 
   const repositoryIds = new Set<string>();
   const repositoryKeys = new Set<string>();
-  const repositories = input.repositories.map(repository => canonicalRepository(repository)).sort(compareRepositories);
+  const repositories = EffectArray.map(input.repositories, repository => canonicalRepository(repository)).sort(
+    compareRepositories,
+  );
   const repositoryBySnapshot = new Map<string, CodeGraphCrossRepositoryTopologyRepositoryV1>();
   for (const repository of repositories) {
     if (repositoryIds.has(repository.repositoryId) || repositoryKeys.has(repository.repositoryKey)) {
@@ -537,14 +562,17 @@ function validateEndpoint(endpoint: CodeGraphBridgeEndpointV1): void {
       endpoint.repositoryKey ||
     canonicalBoundedText(endpoint.snapshotId, 'snapshot identity', MAX_SNAPSHOT_ID_BYTES) !== endpoint.snapshotId ||
     !endpoint.evidence.path ||
-    endpoint.evidence.path.startsWith('/') ||
-    endpoint.evidence.path.split('/').some(segment => !segment || segment === '.' || segment === '..')
+    Effect.pipe(endpoint.evidence.path, EffectString.startsWith('/')) ||
+    EffectArray.some(
+      Effect.pipe(endpoint.evidence.path, EffectString.split('/')),
+      segment => !segment || segment === '.' || segment === '..',
+    )
   ) {
     throw invalid('Topology bridge endpoint is invalid.');
   }
   const span = endpoint.evidence.span;
   if (
-    ![span.line, span.column, span.endLine, span.endColumn].every(Number.isSafeInteger) ||
+    !EffectArray.every([span.line, span.column, span.endLine, span.endColumn], Number.isSafeInteger) ||
     span.line < 1 ||
     span.column < 1 ||
     span.endLine < span.line ||
@@ -678,7 +706,7 @@ function finalizeEdge(
     bridgeCount,
     edgeClass: 'declared-cross-repository-contract',
     evidence: {
-      items: evidenceBridges.map(topologyEvidence),
+      items: EffectArray.map(evidenceBridges, topologyEvidence),
       omittedCount: bridgeCount - evidenceBridges.length,
       returnedCount: evidenceBridges.length,
       totalCount: bridgeCount,
@@ -687,11 +715,11 @@ function finalizeEdge(
     generationId,
     granularity: aggregate.granularity,
     id: aggregate.id,
-    kinds: countValues(aggregate.bridges.map(bridge => bridge.kind)),
+    kinds: countValues(EffectArray.map(aggregate.bridges, bridge => bridge.kind)),
     provenance: {declared: bridgeCount, heuristic: 0, resolved: 0, syntactic: 0},
-    relations: countValues(aggregate.bridges.map(bridge => bridge.relation)),
-    resolutionDomains: countValues(aggregate.bridges.map(bridge => bridge.resolutionDomain)),
-    resolverReasons: countValues(aggregate.bridges.map(bridge => bridge.resolver.reason)),
+    relations: countValues(EffectArray.map(aggregate.bridges, bridge => bridge.relation)),
+    resolutionDomains: countValues(EffectArray.map(aggregate.bridges, bridge => bridge.resolutionDomain)),
+    resolverReasons: countValues(EffectArray.map(aggregate.bridges, bridge => bridge.resolver.reason)),
     sourceNodeId: aggregate.source.id,
     targetNodeId: aggregate.target.id,
   };
@@ -723,7 +751,10 @@ function evidenceEndpoint(endpoint: CodeGraphBridgeEndpointV1): CodeGraphCrossRe
 function countValues(values: readonly string[]): readonly CodeGraphCrossRepositoryTopologyCountV1[] {
   const counts = new Map<string, number>();
   for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-  return [...counts].sort(([left], [right]) => compareCodeUnits(left, right)).map(([value, count]) => ({count, value}));
+  return EffectArray.map(
+    [...counts].sort(([left], [right]) => compareCodeUnits(left, right)),
+    ([value, count]) => ({count, value}),
+  );
 }
 
 function compareNodeSelectionPriority(
@@ -789,14 +820,17 @@ function topologyNodeId(
   componentId = '',
 ): string {
   return `cgtn_${sha256HexSync(
-    [
-      'threadnote-cross-repository-topology-node-v1',
-      generationId,
-      kind,
-      repository.repositoryId,
-      repository.snapshotId,
-      componentId,
-    ].join('\0'),
+    EffectArray.join(
+      [
+        'threadnote-cross-repository-topology-node-v1',
+        generationId,
+        kind,
+        repository.repositoryId,
+        repository.snapshotId,
+        componentId,
+      ],
+      '\0',
+    ),
   )}`;
 }
 
@@ -807,7 +841,10 @@ function topologyEdgeId(
   targetNodeId: string,
 ): string {
   return `cgte_${sha256HexSync(
-    ['threadnote-cross-repository-topology-edge-v1', generationId, granularity, sourceNodeId, targetNodeId].join('\0'),
+    EffectArray.join(
+      ['threadnote-cross-repository-topology-edge-v1', generationId, granularity, sourceNodeId, targetNodeId],
+      '\0',
+    ),
   )}`;
 }
 
@@ -831,7 +868,7 @@ function granularityOrder(granularity: CodeGraphCrossRepositoryTopologyEdgeV1['g
 }
 
 function sumBridgeCounts(aggregates: readonly MutableAggregate[]): number {
-  return aggregates.reduce((total, aggregate) => total + aggregate.bridges.length, 0);
+  return EffectArray.reduce(aggregates, 0, (total, aggregate) => total + aggregate.bridges.length);
 }
 
 function budget(value: number | undefined, fallback: number, maximum: number, label: string): number {
@@ -844,7 +881,7 @@ function budget(value: number | undefined, fallback: number, maximum: number, la
 
 function canonicalBoundedText(value: string, label: string, maximumBytes: number): string {
   if (typeof value !== 'string') throw invalid(`Topology ${label} is invalid.`);
-  const canonical = value.normalize('NFC').trim();
+  const canonical = Effect.pipe(value, EffectString.normalize('NFC'), EffectString.trim);
   if (!canonical || Buffer.byteLength(canonical, 'utf8') > maximumBytes) {
     throw invalid(`Topology ${label} is invalid.`);
   }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -5,6 +6,8 @@ import {startManagerTestServer, type ManagerTestServer} from '../helpers/manager
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const mocks = vi.hoisted(() => ({
   prepareIsolated: vi.fn(),
@@ -37,18 +40,21 @@ describe('Manager workset process isolation over HTTP', () => {
     await mkdir(home, {recursive: true});
     await writeFile(
       manifestPath,
-      [
-        'version: 1',
-        'projects:',
-        '  - name: api',
-        `    path: ${join(activeRoot, 'api')}`,
-        '    uri: threadnote://resources/repos/api',
-        '    seed: []',
-        'worksets:',
-        '  - name: platform',
-        '    projects: [api]',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'version: 1',
+          'projects:',
+          '  - name: api',
+          `    path: ${join(activeRoot, 'api')}`,
+          '    uri: threadnote://resources/repos/api',
+          '    seed: []',
+          'worksets:',
+          '  - name: platform',
+          '    projects: [api]',
+          '',
+        ],
+        '\n',
+      ),
     );
     const config = {
       account: 'local',
@@ -66,13 +72,13 @@ describe('Manager workset process isolation over HTTP', () => {
         await release;
         return {
           coverage: {complete: true, excluded: 0, failed: 0, missing: 0, ready: 1, requested: 1},
-          manifestDigest: 'a'.repeat(64),
+          manifestDigest: Effect2.pipe('a', EffectString.repeat(64)),
           members: [
             {
               project: 'api',
-              projectionDigest: 'b'.repeat(64),
-              repositoryId: 'c'.repeat(64),
-              snapshotId: `cgsn_${'d'.repeat(40)}`,
+              projectionDigest: Effect2.pipe('b', EffectString.repeat(64)),
+              repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+              snapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
               state: 'ready' as const,
               symbolCount: 1,
             },
@@ -93,13 +99,25 @@ describe('Manager workset process isolation over HTTP', () => {
       signal: AbortSignal.timeout(2_000),
     });
     expect(prepare.status).toBe(202);
-    const id = ((await prepare.json()) as {readonly job: {readonly id: string}}).job.id;
+    const responseBody: unknown = await prepare.json();
+    if (
+      typeof responseBody !== 'object' ||
+      responseBody === null ||
+      !('job' in responseBody) ||
+      typeof responseBody.job !== 'object' ||
+      responseBody.job === null ||
+      !('id' in responseBody.job) ||
+      typeof responseBody.job.id !== 'string'
+    ) {
+      throw new Error('Expected the workset preparation response to contain a job id.');
+    }
+    const id = responseBody.job.id;
     await started;
     expect(mocks.prepareIsolated).toHaveBeenCalledOnce();
     expect(mocks.prepareIsolated.mock.calls[0]?.[2]).toMatchObject({concurrency: 2});
 
     const [job, jobs, graphStatus] = await Promise.all(
-      [`/api/worksets/jobs/${id}`, '/api/worksets/jobs', '/api/graphs/status'].map(path =>
+      EffectArray.map([`/api/worksets/jobs/${id}`, '/api/worksets/jobs', '/api/graphs/status'], path =>
         fetch(`${activeServer!.url}${path}`, {headers, signal: AbortSignal.timeout(2_000)}),
       ),
     );

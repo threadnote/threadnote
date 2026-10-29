@@ -1,8 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 
-export class SetupOperationError extends Schema.TaggedError<SetupOperationError>()('SetupOperationError', {
-  message: Schema.String,
-}) {}
+export class SetupOperationError extends Schema.TaggedError<SetupOperationError, {readonly brand: unique symbol}>()(
+  'SetupOperationError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export const SETUP_PLAN_VERSION = 1 as const;
 export const SETUP_RECEIPT_VERSION = 1 as const;
@@ -122,7 +126,7 @@ const STRICT_PARSE_OPTIONS = {errors: 'all', onExcessProperty: 'error'} as const
 
 export function parseSetupReceiptV1(value: unknown): SetupReceiptV1 {
   const receipt = Schema.decodeUnknownSync(SetupReceiptV1Schema, STRICT_PARSE_OPTIONS)(value);
-  const ids = new Set(receipt.operations.map(operation => operation.id));
+  const ids = new Set(EffectArray.map(receipt.operations, operation => operation.id));
   if (ids.size !== receipt.operations.length) throw new Error('Setup receipt operation IDs must be unique.');
   for (const operation of receipt.operations) {
     if (operation.status === 'failed' && operation.error === undefined)
@@ -155,7 +159,10 @@ export function parseSetupReceiptV1(value: unknown): SetupReceiptV1 {
   }
   if (
     receipt.verification !== undefined &&
-    !receipt.operations.some(operation => operation.kind === 'context-brief.verify' && operation.status === 'verified')
+    !EffectArray.some(
+      receipt.operations,
+      operation => operation.kind === 'context-brief.verify' && operation.status === 'verified',
+    )
   ) {
     throw new Error('Setup verification requires a verified Context Brief operation.');
   }
@@ -171,16 +178,21 @@ export function parseSetupReceiptV1(value: unknown): SetupReceiptV1 {
 export function setupRecovery(operations: readonly SetupReceiptOperationV1[]): SetupReceiptV1['recovery'] {
   const complete = new Set<SetupOperationStatus>(['applied', 'already-current', 'verified']);
   return {
-    resumeOperationIds: operations.filter(operation => !complete.has(operation.status)).map(operation => operation.id),
-    undoOperationIds: operations
-      .filter(
-        operation =>
+    resumeOperationIds: EffectArray.map(
+      EffectArray.filter(operations, operation => !complete.has(operation.status)),
+      operation => operation.id,
+    ),
+    undoOperationIds: EffectArray.map(
+      EffectArray.filter(
+        operations,
+        (operation, __effectArrayIndex) =>
+          __effectArrayIndex in operations &&
           operation.status !== 'rolled-back' &&
           operation.ownership === 'setup-created' &&
           operation.ownershipEvidence === 'successful-mutation' &&
           operation.reversible,
-      )
-      .map(operation => operation.id)
-      .reverse(),
+      ),
+      operation => operation.id,
+    ).reverse(),
   };
 }

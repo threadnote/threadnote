@@ -1,4 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const RESOURCE_ID_SCHEMES = ['threadnote', 'viking'] as const;
 export type ResourceIdScheme = (typeof RESOURCE_ID_SCHEMES)[number];
@@ -11,28 +14,34 @@ export interface ResourceId {
   readonly segments: readonly string[];
 }
 
-export class InvalidResourceId extends Schema.TaggedError<InvalidResourceId>()('InvalidResourceId', {
-  input: Schema.String,
-  message: Schema.String,
-  reason: Schema.String,
-}) {}
+export class InvalidResourceId extends Schema.TaggedError<InvalidResourceId, {readonly brand: unique symbol}>()(
+  'InvalidResourceId',
+  {
+    input: Schema.String,
+    message: Schema.String,
+    reason: Schema.String,
+  },
+) {}
 
 const WINDOWS_RESERVED_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 const PORTABLE_UNSAFE_CHARACTERS = /[<>:"|?*\\/]/;
 
 export function parseResourceId(input: string): ResourceId {
-  const trimmed = input.trim();
+  const trimmed = Effect.pipe(input, EffectString.trim);
   const parsed = splitResourceId(trimmed);
   if (!parsed) return invalid(input, 'expected threadnote:// URI syntax (legacy viking:// aliases are accepted)');
-  const inputScheme = resourceIdScheme(parsed.scheme.toLowerCase());
+  const inputScheme = resourceIdScheme(Effect.pipe(parsed.scheme, EffectString.toLowerCase));
   const namespace = decodeSegment(parsed.namespace, input, 'namespace');
   const rawPath = parsed.path;
   if (parsed.hasQuery) return invalid(input, 'query parameters are not supported');
-  if (rawPath && !rawPath.startsWith('/')) return invalid(input, 'resource path must start with /');
-  if (rawPath.includes('//')) return invalid(input, 'empty path segments are not allowed');
-  const rawSegments = rawPath.split('/').slice(1);
+  if (rawPath && !Effect.pipe(rawPath, EffectString.startsWith('/')))
+    return invalid(input, 'resource path must start with /');
+  if (Effect.pipe(rawPath, EffectString.includes('//'))) return invalid(input, 'empty path segments are not allowed');
+  const rawSegments = Effect.pipe(rawPath, EffectString.split('/')).slice(1);
   if (rawSegments.at(-1) === '') rawSegments.pop();
-  const segments = rawSegments.map((segment, index) => decodeSegment(segment, input, `path segment ${index + 1}`));
+  const segments = EffectArray.map(rawSegments, (segment, index) =>
+    decodeSegment(segment, input, `path segment ${index + 1}`),
+  );
   const anchor = parsed.anchor ? decodeAnchor(parsed.anchor, input) : undefined;
   return {
     ...(anchor ? {anchor} : {}),
@@ -52,23 +61,34 @@ function splitResourceId(value: string):
       readonly scheme: string;
     }
   | undefined {
-  const schemeEnd = value.indexOf('://');
+  const schemeEnd = Effect.pipe(
+    value,
+    EffectString.indexOf('://'),
+    Effect.Option.getOrElse(() => -1),
+  );
   if (schemeEnd <= 0) return undefined;
-  const scheme = value.slice(0, schemeEnd);
-  if (scheme.toLowerCase() !== 'threadnote' && scheme.toLowerCase() !== 'viking') return undefined;
+  const scheme = Effect.pipe(value, EffectString.slice(0, schemeEnd));
+  if (
+    Effect.pipe(scheme, EffectString.toLowerCase) !== 'threadnote' &&
+    Effect.pipe(scheme, EffectString.toLowerCase) !== 'viking'
+  )
+    return undefined;
   const remainderStart = schemeEnd + 3;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const fragment = value.indexOf('#', remainderStart);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const query = value.indexOf('?', remainderStart);
   const queryBeforeFragment = query >= 0 && (fragment < 0 || query < fragment);
   const pathEnd = queryBeforeFragment ? query : fragment >= 0 ? fragment : value.length;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const slash = value.indexOf('/', remainderStart);
   const namespaceEnd = slash >= 0 && slash < pathEnd ? slash : pathEnd;
   if (namespaceEnd === remainderStart) return undefined;
-  const path = namespaceEnd < pathEnd ? value.slice(namespaceEnd, pathEnd) : '';
+  const path = namespaceEnd < pathEnd ? Effect.pipe(value, EffectString.slice(namespaceEnd, pathEnd)) : '';
   return {
-    ...(fragment >= 0 ? {anchor: value.slice(fragment + 1)} : {}),
+    ...(fragment >= 0 ? {anchor: Effect.pipe(value, EffectString.slice(fragment + 1))} : {}),
     hasQuery: queryBeforeFragment,
-    namespace: value.slice(remainderStart, namespaceEnd),
+    namespace: Effect.pipe(value, EffectString.slice(remainderStart, namespaceEnd)),
     path,
     scheme,
   };
@@ -82,7 +102,7 @@ function resourceIdScheme(value: string): ResourceIdScheme {
 export function canonicalResourceUri(namespace: string, segments: readonly string[], anchor?: string): string {
   validatePortableSegment(namespace, namespace);
   for (const segment of segments) validatePortableSegment(segment, segment);
-  const path = segments.length > 0 ? `/${segments.map(encodeURIComponent).join('/')}` : '';
+  const path = segments.length > 0 ? `/${EffectArray.join(EffectArray.map(segments, encodeURIComponent), '/')}` : '';
   const fragment = anchor ? `#${encodeURIComponent(validateAnchor(anchor, anchor))}` : '';
   return `threadnote://${encodeURIComponent(namespace)}${path}${fragment}`;
 }
@@ -102,7 +122,7 @@ export function resourceIdIsWithin(candidateUri: string, rootUri: string): boole
   const root = resourceIdWithoutAnchor(parseResourceId(rootUri));
   return (
     candidate.namespace === root.namespace &&
-    root.segments.every((segment, index) => candidate.segments[index] === segment)
+    EffectArray.every(root.segments, (segment, index) => candidate.segments[index] === segment)
   );
 }
 
@@ -122,7 +142,7 @@ export function makeResourceIdScopeChecker() {
       input.length +
       result.canonicalUri.length +
       result.namespace.length +
-      result.segments.reduce((total, segment) => total + segment.length, 0) +
+      EffectArray.reduce(result.segments, 0, (total, segment) => total + segment.length) +
       (result.anchor?.length ?? 0);
     if (parsed.size < maximumEntries && characters <= maximumCharacters - retainedCharacters) {
       parsed.set(input, result);
@@ -135,7 +155,7 @@ export function makeResourceIdScopeChecker() {
     const root = resourceIdWithoutAnchor(parse(rootUri));
     return (
       candidate.namespace === root.namespace &&
-      root.segments.every((segment, index) => candidate.segments[index] === segment)
+      EffectArray.every(root.segments, (segment, index) => candidate.segments[index] === segment)
     );
   };
   return {parse, isWithin};
@@ -151,7 +171,8 @@ export function resourceIdIsManagedMemoryNamespace(uri: string): boolean {
 
 export function validatePortableSegment(value: string, input = value): string {
   if (!value) return invalid(input, 'empty path segments are not allowed');
-  if (value !== value.normalize('NFC')) return invalid(input, 'path segments must use NFC Unicode normalization');
+  if (value !== Effect.pipe(value, EffectString.normalize('NFC')))
+    return invalid(input, 'path segments must use NFC Unicode normalization');
   if (value === '.' || value === '..') return invalid(input, 'dot path segments are not allowed');
   if (hasControlCharacter(value) || PORTABLE_UNSAFE_CHARACTERS.test(value)) {
     return invalid(input, 'path segment contains a non-portable character');
@@ -197,7 +218,15 @@ function validateAnchor(value: string, input: string): string {
 }
 
 function hasControlCharacter(value: string): boolean {
-  return [...value].some(character => character.codePointAt(0)! <= 0x1f);
+  return EffectArray.some(
+    [...value],
+    character =>
+      Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      )! <= 0x1f,
+  );
 }
 
 function invalid(input: string, reason: string): never {

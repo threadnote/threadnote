@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -8,8 +9,11 @@ import {
   projectCodeGraphCrossRepositoryTopology,
   type CodeGraphCrossRepositoryTopologyRepositoryV1,
 } from '@threadnote/graph/cross_repository/topology';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const generationId = `cgwg_${sha256HexSync('topology-generation').slice(0, 40)}`;
+const generationId = `cgwg_${Effect.pipe(sha256HexSync('topology-generation'), EffectString.slice(0, 40))}`;
 const span = {column: 1, endColumn: 12, endLine: 1, line: 1} as const;
 
 describe('cross-repository topology projection', () => {
@@ -30,15 +34,19 @@ describe('cross-repository topology projection', () => {
       version: 1,
       worksetName: 'product-suite',
     });
-    expect(result.nodes.filter(node => node.kind === 'repository')).toHaveLength(4);
-    expect(result.nodes.filter(node => node.kind === 'component')).toHaveLength(2);
-    expect(result.nodes.find(node => node.repositoryKey === 'tools/isolated')).toMatchObject({
+    expect(EffectArray.filter(result.nodes, node => node.kind === 'repository')).toHaveLength(4);
+    expect(EffectArray.filter(result.nodes, node => node.kind === 'component')).toHaveLength(2);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(result.nodes, node => node.repositoryKey === 'tools/isolated')),
+    ).toMatchObject({
       incidentBridgeCount: 0,
       kind: 'repository',
     });
-    const repositoryEdges = result.edges.filter(edge => edge.granularity === 'repository');
-    const componentEdges = result.edges.filter(edge => edge.granularity === 'component');
-    expect(repositoryEdges.map(edge => edge.bridgeCount).sort((left, right) => right - left)).toEqual([2, 1]);
+    const repositoryEdges = EffectArray.filter(result.edges, edge => edge.granularity === 'repository');
+    const componentEdges = EffectArray.filter(result.edges, edge => edge.granularity === 'component');
+    expect(EffectArray.map(repositoryEdges, edge => edge.bridgeCount).sort((left, right) => right - left)).toEqual([
+      2, 1,
+    ]);
     expect(componentEdges).toHaveLength(1);
     expect(componentEdges[0]).toMatchObject({
       bridgeCount: 2,
@@ -55,7 +63,7 @@ describe('cross-repository topology projection', () => {
         target: expect.objectContaining({monikerId: expect.stringMatching(/^cgm_/u), path: expect.any(String), span}),
       }),
     );
-    expect(Object.keys(componentEdges[0].evidence.items[0].source).sort()).toEqual(['monikerId', 'path', 'span']);
+    expect(EffectRecord.keys(componentEdges[0].evidence.items[0].source).sort()).toEqual(['monikerId', 'path', 'span']);
     expect(result.coverage).toMatchObject({
       bridges: {
         componentEligible: 2,
@@ -70,8 +78,8 @@ describe('cross-repository topology projection', () => {
       structureComplete: true,
       truncation: {reasons: [], truncated: false},
     });
-    expect(result.nodes.every(node => /^cgtn_[0-9a-f]{64}$/u.test(node.id))).toBe(true);
-    expect(result.edges.every(edge => /^cgte_[0-9a-f]{64}$/u.test(edge.id))).toBe(true);
+    expect(EffectArray.every(result.nodes, node => /^cgtn_[0-9a-f]{64}$/u.test(node.id))).toBe(true);
+    expect(EffectArray.every(result.edges, edge => /^cgte_[0-9a-f]{64}$/u.test(edge.id))).toBe(true);
   });
 
   it('reports exactly what node and evidence truncation omitted', () => {
@@ -83,7 +91,7 @@ describe('cross-repository topology projection', () => {
       repositories: fixture.repositories,
     });
 
-    expect(result.nodes.map(node => node.repositoryKey)).toEqual(['apps/gateway', 'packages/shared']);
+    expect(EffectArray.map(result.nodes, node => node.repositoryKey)).toEqual(['apps/gateway', 'packages/shared']);
     expect(result.edges).toHaveLength(1);
     expect(result.edges[0]).toMatchObject({
       bridgeCount: 2,
@@ -127,7 +135,7 @@ describe('cross-repository topology projection', () => {
     expect(() =>
       projectCodeGraphCrossRepositoryTopology({
         bridgeSet: bridgeSet(fixture.bridges),
-        repositories: fixture.repositories.map((repository, index) =>
+        repositories: EffectArray.map(fixture.repositories, (repository, index) =>
           index === 0 ? {...repository, snapshotId: 'replacement-snapshot'} : repository,
         ),
       }),
@@ -148,8 +156,8 @@ describe('cross-repository topology projection', () => {
         budgets: {maxEdges: 16, maxEvidence: 32, maxEvidencePerEdge: 8, maxNodes: 16},
         repositories: fixture.repositories,
       });
-      const bridges = bridgeOrder.map(index => fixture.bridges[index]);
-      const repositories = repositoryOrder.map(index => fixture.repositories[index]);
+      const bridges = EffectArray.map(bridgeOrder, index => fixture.bridges[index]);
+      const repositories = EffectArray.map(repositoryOrder, index => fixture.repositories[index]);
 
       expect(
         projectCodeGraphCrossRepositoryTopology({
@@ -193,9 +201,11 @@ describe('cross-repository topology projection', () => {
       expect(repeated.nodes.length).toBeLessThanOrEqual(maxNodes);
       expect(repeated.edges.length).toBeLessThanOrEqual(maxEdges);
       expect(repeated.coverage.evidence.returned).toBeLessThanOrEqual(maxEvidence);
-      expect(repeated.edges.every(edge => edge.evidence.returnedCount <= maxEvidencePerEdge)).toBe(true);
-      const nodeIds = new Set(repeated.nodes.map(node => node.id));
-      expect(repeated.edges.every(edge => nodeIds.has(edge.sourceNodeId) && nodeIds.has(edge.targetNodeId))).toBe(true);
+      expect(EffectArray.every(repeated.edges, edge => edge.evidence.returnedCount <= maxEvidencePerEdge)).toBe(true);
+      const nodeIds = new Set(EffectArray.map(repeated.nodes, node => node.id));
+      expect(
+        EffectArray.every(repeated.edges, edge => nodeIds.has(edge.sourceNodeId) && nodeIds.has(edge.targetNodeId)),
+      ).toBe(true);
     },
     {fastCheck: {numRuns: 80}},
   );
@@ -222,17 +232,17 @@ describe('cross-repository topology projection', () => {
         budgets: {maxEdges: 8, maxEvidence: 128, maxEvidencePerEdge: 32, maxNodes: 8},
         repositories: [consumer, producer],
       });
-      const repositoryEdges = result.edges.filter(edge => edge.granularity === 'repository');
-      const componentEdges = result.edges.filter(edge => edge.granularity === 'component');
+      const repositoryEdges = EffectArray.filter(result.edges, edge => edge.granularity === 'repository');
+      const componentEdges = EffectArray.filter(result.edges, edge => edge.granularity === 'component');
 
-      expect(sum(repositoryEdges.map(edge => edge.bridgeCount))).toBe(bridges.length);
-      expect(sum(componentEdges.map(edge => edge.bridgeCount))).toBe(packageCount);
+      expect(sum(EffectArray.map(repositoryEdges, edge => edge.bridgeCount))).toBe(bridges.length);
+      expect(sum(EffectArray.map(componentEdges, edge => edge.bridgeCount))).toBe(packageCount);
       for (const edge of result.edges) {
-        expect(sum(edge.kinds.map(entry => entry.count))).toBe(edge.bridgeCount);
-        expect(sum(edge.relations.map(entry => entry.count))).toBe(edge.bridgeCount);
-        expect(sum(edge.resolutionDomains.map(entry => entry.count))).toBe(edge.bridgeCount);
-        expect(sum(edge.resolverReasons.map(entry => entry.count))).toBe(edge.bridgeCount);
-        expect(sum(Object.values(edge.provenance))).toBe(edge.bridgeCount);
+        expect(sum(EffectArray.map(edge.kinds, entry => entry.count))).toBe(edge.bridgeCount);
+        expect(sum(EffectArray.map(edge.relations, entry => entry.count))).toBe(edge.bridgeCount);
+        expect(sum(EffectArray.map(edge.resolutionDomains, entry => entry.count))).toBe(edge.bridgeCount);
+        expect(sum(EffectArray.map(edge.resolverReasons, entry => entry.count))).toBe(edge.bridgeCount);
+        expect(sum(EffectRecord.values(edge.provenance))).toBe(edge.bridgeCount);
       }
       expect(result.coverage.bridges).toEqual({
         componentEligible: packageCount,
@@ -268,7 +278,9 @@ function representativeFixture(): {
 
 function bridgeSet(bridges: readonly CodeGraphCrossRepositoryBridgeV1[]) {
   return {
-    bridgeSetDigest: sha256HexSync(['topology-bridge-set', ...[...bridges].map(bridge => bridge.id).sort()].join('\n')),
+    bridgeSetDigest: sha256HexSync(
+      EffectArray.join(['topology-bridge-set', ...EffectArray.map([...bridges], bridge => bridge.id).sort()], '\n'),
+    ),
     bridges,
     generationId,
     resolverVersion: 1 as const,
@@ -301,11 +313,11 @@ function packageBridge(
     resolutionDomain: 'package:npm',
     resolver: {name: 'threadnote-native-moniker', reason: 'declared-npm-package-compatible', version: 1},
     source: endpoint(seed, 'import', sourceRepository, identity, {
-      componentId: `cgp_${sha256HexSync(`component:${sourceRepository.repositoryId}`).slice(0, 32)}`,
+      componentId: `cgp_${Effect.pipe(sha256HexSync(`component:${sourceRepository.repositoryId}`), EffectString.slice(0, 32))}`,
       kind: 'component',
     }),
     target: endpoint(seed, 'export', targetRepository, identity, {
-      componentId: `cgp_${sha256HexSync(`component:${targetRepository.repositoryId}`).slice(0, 32)}`,
+      componentId: `cgp_${Effect.pipe(sha256HexSync(`component:${targetRepository.repositoryId}`), EffectString.slice(0, 32))}`,
       kind: 'component',
     }),
     version: 1,
@@ -330,11 +342,11 @@ function protobufBridge(
     resolver: {name: 'threadnote-native-moniker', reason: 'exact-protobuf-identity', version: 1},
     source: endpoint(seed, 'import', sourceRepository, identity, {
       kind: 'qualified-ref',
-      ref: `cgr_${sha256HexSync(`source-ref:${seed}`).slice(0, 40)}`,
+      ref: `cgr_${Effect.pipe(sha256HexSync(`source-ref:${seed}`), EffectString.slice(0, 40))}`,
     }),
     target: endpoint(seed, 'export', targetRepository, identity, {
       kind: 'qualified-ref',
-      ref: `cgr_${sha256HexSync(`target-ref:${seed}`).slice(0, 40)}`,
+      ref: `cgr_${Effect.pipe(sha256HexSync(`target-ref:${seed}`), EffectString.slice(0, 40))}`,
     }),
     version: 1,
   };
@@ -358,5 +370,5 @@ function endpoint(
 }
 
 function sum(values: readonly number[]): number {
-  return values.reduce((total, value) => total + value, 0);
+  return EffectArray.reduce(values, 0, (total, value) => total + value);
 }

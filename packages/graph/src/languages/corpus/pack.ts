@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
@@ -6,7 +7,7 @@ import {extractCorpusFile} from './extractor.js';
 import {OPAQUE_CORPUS_MEDIA_EXTENSIONS} from './policy.js';
 
 const extensions = (values: readonly string[], language: string): readonly CodeGraphFileMatcher[] =>
-  values.map(value => ({kind: 'extension', language, role: 'corpus', value}));
+  EffectArray.map(values, value => ({kind: 'extension', language, role: 'corpus', value}));
 
 export const codeGraphLanguagePack: CodeGraphLanguagePack = {
   assets: [],
@@ -53,22 +54,31 @@ export const codeGraphLanguagePack: CodeGraphLanguagePack = {
     ),
     ...extensions(['.docx', '.epub', '.odp', '.ods', '.odt', '.pdf', '.pptx', '.xlsx'], 'office-document'),
     ...extensions(
-      OPAQUE_CORPUS_MEDIA_EXTENSIONS.filter(extension =>
-        ['.avif', '.bmp', '.gif', '.heic', '.ico', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp'].includes(
-          extension,
-        ),
+      EffectArray.filter(
+        OPAQUE_CORPUS_MEDIA_EXTENSIONS,
+        (extension, __effectArrayIndex) =>
+          __effectArrayIndex in OPAQUE_CORPUS_MEDIA_EXTENSIONS &&
+          ['.avif', '.bmp', '.gif', '.heic', '.ico', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp'].includes(
+            extension,
+          ),
       ),
       'image',
     ),
     ...extensions(
-      OPAQUE_CORPUS_MEDIA_EXTENSIONS.filter(extension =>
-        ['.aac', '.flac', '.m4a', '.mp3', '.oga', '.ogg', '.opus', '.wav'].includes(extension),
+      EffectArray.filter(
+        OPAQUE_CORPUS_MEDIA_EXTENSIONS,
+        (extension, __effectArrayIndex) =>
+          __effectArrayIndex in OPAQUE_CORPUS_MEDIA_EXTENSIONS &&
+          ['.aac', '.flac', '.m4a', '.mp3', '.oga', '.ogg', '.opus', '.wav'].includes(extension),
       ),
       'audio',
     ),
     ...extensions(
-      OPAQUE_CORPUS_MEDIA_EXTENSIONS.filter(extension =>
-        ['.avi', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg', '.webm'].includes(extension),
+      EffectArray.filter(
+        OPAQUE_CORPUS_MEDIA_EXTENSIONS,
+        (extension, __effectArrayIndex) =>
+          __effectArrayIndex in OPAQUE_CORPUS_MEDIA_EXTENSIONS &&
+          ['.avi', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg', '.webm'].includes(extension),
       ),
       'video',
     ),

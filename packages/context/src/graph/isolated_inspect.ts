@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {
   CODE_GRAPH_ISOLATED_QUERY_TIMEOUT_MILLISECONDS,
@@ -77,7 +78,15 @@ function presentIsolatedBriefGraphRead(
 ): CodeGraphQueryResult {
   if (scope === undefined) return result;
   const outsidePaths = outsideCodeGraphProjectPaths(options, scope.scope);
-  const scopedSeedQueries = options.seedQueries?.filter(candidate => codeGraphScopeAdmitsPath(scope.scope, candidate));
+  const seedQueries = options.seedQueries;
+  const scopedSeedQueries =
+    seedQueries === undefined
+      ? undefined
+      : EffectArray.filter(
+          seedQueries,
+          (candidate, __effectArrayIndex) =>
+            __effectArrayIndex in seedQueries && codeGraphScopeAdmitsPath(scope.scope, candidate),
+        );
   const seedDrift =
     options.seedQueries === undefined ? undefined : options.seedQueries.length - (scopedSeedQueries?.length ?? 0);
   const coverage = codeGraphProjectCoverage(scope, identity, result.snapshot, result.freshness === 'current');

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_VECTOR_DATABASE_FILENAME} from './generation_schema.js';
 import {Crypto, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -42,6 +43,8 @@ import {
 } from './retirement.js';
 import {CodeGraphStoreBusyError} from '../types.js';
 import {codeGraphVectorViewId} from './identity.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {
   type CodeGraphVectorRetirementCapacityProtector,
@@ -76,13 +79,13 @@ export {
   selectCodeGraphVectorRetirementMarkerCandidate,
 } from './retirement.js';
 
-class CodeGraphVectorMaintenanceError extends Schema.TaggedError<CodeGraphVectorMaintenanceError>()(
-  'CodeGraphVectorMaintenanceError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphVectorMaintenanceError extends Schema.TaggedError<
+  CodeGraphVectorMaintenanceError,
+  {readonly brand: unique symbol}
+>()('CodeGraphVectorMaintenanceError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const VECTOR_DATABASE_NAME = CODE_GRAPH_VECTOR_DATABASE_FILENAME;
 const VECTOR_DIRECTORY_ENTRY_LIMIT = 66;
@@ -499,7 +502,7 @@ function runCodeGraphOrdinaryVectorMaintenanceWithCursor(
     const deferredHasLaterModel =
       persistedDeferred &&
       admittedCursor.nextModelName !== undefined &&
-      inventory.candidates.some(model => model.modelName > admittedCursor.nextModelName!);
+      EffectArray.some(inventory.candidates, model => model.modelName > admittedCursor.nextModelName!);
     const cursor = persistedDeferred
       ? deferredHasLaterModel
         ? clearOrdinaryVectorRoundFlags(admittedCursor)
@@ -519,8 +522,11 @@ function runCodeGraphOrdinaryVectorMaintenanceWithCursor(
         next,
         remainingSteps - 1,
       );
-    const candidate = inventory.candidates.find(
-      model => cursor.nextModelName === undefined || model.modelName > cursor.nextModelName,
+    const candidate = Option.getOrUndefined(
+      EffectArray.findFirst(
+        inventory.candidates,
+        model => cursor.nextModelName === undefined || model.modelName > cursor.nextModelName,
+      ),
     );
     if (candidate === undefined) {
       if (cursor.roundDeferred) return ordinaryVectorModelUnavailable();
@@ -569,7 +575,7 @@ function runCodeGraphOrdinaryVectorMaintenanceWithCursor(
         }
         const intentCursor = updateOrdinaryVectorCursor(cursor, candidate.modelName, modelCursor, false, true);
         const intentToken = encodeOrdinaryVectorPhaseCursor(intentCursor);
-        const possibleFinalTokens = possibleSuccessStates.map(state =>
+        const possibleFinalTokens = EffectArray.map(possibleSuccessStates, state =>
           encodeOrdinaryVectorPhaseCursor(updateOrdinaryVectorCursor(cursor, candidate.modelName, state, true, false)),
         );
         const combinedBoundary = codeGraphOrdinaryVectorMaintenanceBoundary(boundary, intentToken, possibleFinalTokens);
@@ -803,7 +809,7 @@ function runCodeGraphOrdinaryVectorMaintenanceWithCursor(
         phase: 'verified',
       };
       const next = updateOrdinaryVectorCursor(cursor, candidate.modelName, verified, true, false);
-      const allVerified = inventory.candidates.every(model => {
+      const allVerified = EffectArray.every(inventory.candidates, model => {
         if (model.modelName === candidate.modelName) return true;
         return next.models.get(model.modelName)?.phase === 'verified';
       });
@@ -895,7 +901,9 @@ export function codeGraphOrdinaryVectorMaintenanceBoundary(
   possibleFinalTokens: readonly string[],
 ): CodeGraphDirectPersistentCapacityBoundary {
   const intentBytes = new TextEncoder().encode(`${intentToken}\n`).byteLength;
-  const finalBytes = Math.max(...possibleFinalTokens.map(token => new TextEncoder().encode(`${token}\n`).byteLength));
+  const finalBytes = Math.max(
+    ...EffectArray.map(possibleFinalTokens, token => new TextEncoder().encode(`${token}\n`).byteLength),
+  );
   const finalFactBytes =
     databaseBoundary.finalFactBytes + intentBytes + finalBytes + ORDINARY_VECTOR_CURSOR_METADATA_BYTES * 2;
   const rowCount = databaseBoundary.rowCount + 4;
@@ -915,10 +923,10 @@ function ordinaryVectorCursorMatchesInventory(
   cursor: OrdinaryVectorPhaseCursor,
   inventory: VectorDatabaseInventory,
 ): boolean {
-  const models = new Set(inventory.candidates.map(candidate => candidate.modelName));
+  const models = new Set(EffectArray.map(inventory.candidates, candidate => candidate.modelName));
   return (
     (cursor.nextModelName === undefined || models.has(cursor.nextModelName)) &&
-    [...cursor.models.keys()].every(modelName => models.has(modelName))
+    EffectArray.every([...cursor.models.keys()], modelName => models.has(modelName))
   );
 }
 
@@ -928,7 +936,7 @@ function sameVectorDatabaseInventory(left: VectorDatabaseInventory, right: Vecto
     left.unsafeEntries === right.unsafeEntries &&
     left.vectorRoot === right.vectorRoot &&
     left.candidates.length === right.candidates.length &&
-    left.candidates.every((candidate, index) => {
+    EffectArray.every(left.candidates, (candidate, index) => {
       const observed = right.candidates[index];
       return (
         observed !== undefined &&
@@ -1056,12 +1064,16 @@ function readOrdinaryVectorCursor(
     const content = yield* fs.readFileString(cursorPath);
     if (
       new TextEncoder().encode(content).byteLength > ORDINARY_VECTOR_CURSOR_LIMIT + 1 ||
-      !content.endsWith('\n') ||
-      content.slice(0, -1).includes('\n')
+      !Effect2.pipe(content, EffectString.endsWith('\n')) ||
+      Effect2.pipe(content, __effectPipeInput => {
+        const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+        const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.includes('\n'));
+        return __effectPipeStage1;
+      })
     ) {
       return {state: 'invalid'} as const;
     }
-    const cursorToken = content.slice(0, -1);
+    const cursorToken = Effect2.pipe(content, EffectString.slice(0, -1));
     return parseOrdinaryVectorPhaseCursor(cursorToken) === undefined
       ? ({state: 'invalid'} as const)
       : ({cursorToken, state: 'cursor'} as const);
@@ -1287,7 +1299,10 @@ function unavailableVectorUnit(): CodeGraphRemovedViewVectorUnitResult {
 
 function vectorInventoryDigest(candidates: readonly VectorDatabaseCandidate[]): string {
   return sha256HexSync(
-    `code-graph-vector-inventory-v1\n${candidates.map(candidate => candidate.modelName).join('\n')}`,
+    `code-graph-vector-inventory-v1\n${EffectArray.join(
+      EffectArray.map(candidates, candidate => candidate.modelName),
+      '\n',
+    )}`,
   );
 }
 
@@ -1333,8 +1348,11 @@ function selectVectorUnitCandidate(
   cursor: VectorPhaseCursor | undefined,
 ): VectorDatabaseCandidate | undefined {
   if (cursor === undefined || cursor.mode === 'reset') return candidates[0];
-  if (cursor.mode === 'active') return candidates.find(candidate => candidate.modelName === cursor.modelName);
-  return candidates.find(candidate => candidate.modelName > cursor.modelName);
+  if (cursor.mode === 'active')
+    return Option.getOrUndefined(
+      EffectArray.findFirst(candidates, candidate => candidate.modelName === cursor.modelName),
+    );
+  return Option.getOrUndefined(EffectArray.findFirst(candidates, candidate => candidate.modelName > cursor.modelName));
 }
 
 function verifyVectorUnitInventory(
@@ -1528,19 +1546,21 @@ function snapshotVectorEvidence(
           : {modelKey: candidate.modelKey, state: 'ready', ...usage},
       );
     }
-    const activePointerCount = stores.reduce(
+    const activePointerCount = EffectArray.reduce(
+      stores,
+      0,
       (total, store) => total + (store.state === 'ready' ? store.activePointerCount : 0),
-      0,
     );
-    const generationCount = stores.reduce(
-      (total, store) => total + (store.state === 'ready' ? store.generationCount : 0),
+    const generationCount = EffectArray.reduce(
+      stores,
       0,
+      (total, store) => total + (store.state === 'ready' ? store.generationCount : 0),
     );
     const unverifiable =
       inventoryChanged ||
       inventory.truncated ||
       inventory.unsafeEntries > 0 ||
-      stores.some(store => store.state === 'unreadable');
+      EffectArray.some(stores, store => store.state === 'unreadable');
     const blockers: CodeGraphSnapshotVectorBlockerCode[] = [];
     if (activePointerCount > 0) blockers.push('vector-active');
     if (unverifiable) blockers.push('vector-unverifiable');
@@ -1552,7 +1572,7 @@ function snapshotVectorEvidence(
       generationCount,
       inventoryChanged,
       inventoryDigest,
-      stores: stores.map(store =>
+      stores: EffectArray.map(stores, store =>
         store.state === 'ready'
           ? [store.modelKey, store.state, store.evidenceDigest, store.activePointerCount, store.generationCount]
           : [store.modelKey, store.state],
@@ -1561,7 +1581,7 @@ function snapshotVectorEvidence(
     return {
       activePointerCount,
       blockers,
-      databasesInspected: stores.filter(store => store.state === 'ready').length,
+      databasesInspected: EffectArray.filter(stores, store => store.state === 'ready').length,
       generationCount,
       inventoryDigest,
       vectorEvidenceDigest: sha256HexSync(`code-graph-snapshot-purge-vector-v1\n${JSON.stringify(projection)}`),
@@ -1586,7 +1606,7 @@ function unavailableSnapshotVectorEvidence(reason: 'inventory-unavailable'): Cod
 function snapshotVectorInventoryDigest(inventory: VectorDatabaseInventory): string {
   return sha256HexSync(
     `code-graph-snapshot-purge-vector-inventory-v1\n${JSON.stringify({
-      candidates: inventory.candidates.map(candidate => [
+      candidates: EffectArray.map(inventory.candidates, candidate => [
         candidate.modelKey,
         candidate.fileIdentity.dev,
         candidate.fileIdentity.ino ?? null,
@@ -1875,14 +1895,15 @@ function vectorCleanupResult(
   pointersRemoved: number,
   warningCounts: ReadonlyMap<CodeGraphVectorCleanupWarningCode, number>,
 ): CodeGraphVectorPointerCleanupResult {
-  const warnings = [...warningCounts.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([code, occurrences]) => ({
+  const warnings = EffectArray.map(
+    [...warningCounts.entries()].sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right))),
+    ([code, occurrences]) => ({
       code,
       message: vectorCleanupWarningMessage(code),
       occurrences,
       retryable: code !== 'vector-inventory-truncated' && code !== 'vector-inventory-unsafe',
-    }));
+    }),
+  );
   return {databasesInspected, databasesProcessed, pointersRemoved, warnings};
 }
 
@@ -1910,5 +1931,5 @@ function vectorCleanupWarningMessage(code: CodeGraphVectorCleanupWarningCode): s
 }
 
 function validSnapshotId(snapshotId: string): boolean {
-  return snapshotId.length > 0 && snapshotId.length <= 1_024 && !snapshotId.includes('\0');
+  return snapshotId.length > 0 && snapshotId.length <= 1_024 && !Effect2.pipe(snapshotId, EffectString.includes('\0'));
 }

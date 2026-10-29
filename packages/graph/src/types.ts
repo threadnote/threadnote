@@ -796,21 +796,21 @@ export interface CodeGraphLanguagePackStatus {
   readonly workspaceDetection: boolean;
 }
 
-export class CodeGraphRepositoryError extends Schema.TaggedError<CodeGraphRepositoryError>()(
-  'CodeGraphRepositoryError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphRepositoryError extends Schema.TaggedError<
+  CodeGraphRepositoryError,
+  {readonly brand: unique symbol}
+>()('CodeGraphRepositoryError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
-export class CodeGraphSnapshotUnavailable extends Schema.TaggedError<CodeGraphSnapshotUnavailable>()(
-  'CodeGraphSnapshotUnavailable',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphSnapshotUnavailable extends Schema.TaggedError<
+  CodeGraphSnapshotUnavailable,
+  {readonly brand: unique symbol}
+>()('CodeGraphSnapshotUnavailable', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export type CodeGraphStoreFailureCode =
   | 'busy'
@@ -862,13 +862,16 @@ const CodeGraphStoreRecoverySchema = Schema.Literals([
   'retry-read-only',
 ]);
 
-export class CodeGraphStoreError extends Schema.TaggedError<CodeGraphStoreError>()('CodeGraphStoreError', {
-  code: CodeGraphStoreFailureCodeSchema,
-  message: Schema.String,
-  operation: Schema.String,
-  recovery: CodeGraphStoreRecoverySchema,
-  retryable: Schema.Boolean,
-}) {
+export class CodeGraphStoreError extends Schema.TaggedError<CodeGraphStoreError, {readonly brand: unique symbol}>()(
+  'CodeGraphStoreError',
+  {
+    code: CodeGraphStoreFailureCodeSchema,
+    message: Schema.String,
+    operation: Schema.String,
+    recovery: CodeGraphStoreRecoverySchema,
+    retryable: Schema.Boolean,
+  },
+) {
   static of(message: string, metadata: CodeGraphStoreErrorMetadata = {}): CodeGraphStoreError {
     return CodeGraphStoreError.make({
       code: metadata.code ?? 'unknown',
@@ -880,7 +883,10 @@ export class CodeGraphStoreError extends Schema.TaggedError<CodeGraphStoreError>
   }
 }
 
-export class CodeGraphStoreBusyError extends Schema.TaggedError<CodeGraphStoreBusyError>()('CodeGraphStoreBusyError', {
+export class CodeGraphStoreBusyError extends Schema.TaggedError<
+  CodeGraphStoreBusyError,
+  {readonly brand: unique symbol}
+>()('CodeGraphStoreBusyError', {
   message: Schema.String,
   operation: Schema.String,
 }) {
@@ -896,13 +902,13 @@ export class CodeGraphStoreBusyError extends Schema.TaggedError<CodeGraphStoreBu
   }
 }
 
-export class CodeGraphStoreSchemaAdditiveError extends Schema.TaggedError<CodeGraphStoreSchemaAdditiveError>()(
-  'CodeGraphStoreSchemaAdditiveError',
-  {
-    message: Schema.String,
-    operation: Schema.String,
-  },
-) {
+export class CodeGraphStoreSchemaAdditiveError extends Schema.TaggedError<
+  CodeGraphStoreSchemaAdditiveError,
+  {readonly brand: unique symbol}
+>()('CodeGraphStoreSchemaAdditiveError', {
+  message: Schema.String,
+  operation: Schema.String,
+}) {
   readonly code = 'schema-additive' as const;
   readonly recovery = 'migrate-additive' as const;
   readonly retryable = false as const;
@@ -918,13 +924,13 @@ export class CodeGraphStoreSchemaAdditiveError extends Schema.TaggedError<CodeGr
   }
 }
 
-export class CodeGraphStoreNoSpaceError extends Schema.TaggedError<CodeGraphStoreNoSpaceError>()(
-  'CodeGraphStoreNoSpaceError',
-  {
-    message: Schema.String,
-    operation: Schema.String,
-  },
-) {
+export class CodeGraphStoreNoSpaceError extends Schema.TaggedError<
+  CodeGraphStoreNoSpaceError,
+  {readonly brand: unique symbol}
+>()('CodeGraphStoreNoSpaceError', {
+  message: Schema.String,
+  operation: Schema.String,
+}) {
   readonly code = 'no-space' as const;
   readonly recovery = 'free-space' as const;
   readonly retryable = false as const;
@@ -940,13 +946,13 @@ export class CodeGraphStoreNoSpaceError extends Schema.TaggedError<CodeGraphStor
   }
 }
 
-export class CodeGraphStorePermissionError extends Schema.TaggedError<CodeGraphStorePermissionError>()(
-  'CodeGraphStorePermissionError',
-  {
-    message: Schema.String,
-    operation: Schema.String,
-  },
-) {
+export class CodeGraphStorePermissionError extends Schema.TaggedError<
+  CodeGraphStorePermissionError,
+  {readonly brand: unique symbol}
+>()('CodeGraphStorePermissionError', {
+  message: Schema.String,
+  operation: Schema.String,
+}) {
   readonly code = 'permission' as const;
   readonly recovery = 'fix-permissions' as const;
   readonly retryable = false as const;
@@ -962,13 +968,13 @@ export class CodeGraphStorePermissionError extends Schema.TaggedError<CodeGraphS
   }
 }
 
-export class CodeGraphStoreTransientIoError extends Schema.TaggedError<CodeGraphStoreTransientIoError>()(
-  'CodeGraphStoreTransientIoError',
-  {
-    message: Schema.String,
-    operation: Schema.String,
-  },
-) {
+export class CodeGraphStoreTransientIoError extends Schema.TaggedError<
+  CodeGraphStoreTransientIoError,
+  {readonly brand: unique symbol}
+>()('CodeGraphStoreTransientIoError', {
+  message: Schema.String,
+  operation: Schema.String,
+}) {
   readonly code = 'transient-io' as const;
   readonly recovery = 'retry-read-only' as const;
   readonly retryable = true as const;
@@ -984,13 +990,13 @@ export class CodeGraphStoreTransientIoError extends Schema.TaggedError<CodeGraph
   }
 }
 
-export class CodeGraphStoreCorruptionError extends Schema.TaggedError<CodeGraphStoreCorruptionError>()(
-  'CodeGraphStoreCorruptionError',
-  {
-    message: Schema.String,
-    operation: Schema.String,
-  },
-) {
+export class CodeGraphStoreCorruptionError extends Schema.TaggedError<
+  CodeGraphStoreCorruptionError,
+  {readonly brand: unique symbol}
+>()('CodeGraphStoreCorruptionError', {
+  message: Schema.String,
+  operation: Schema.String,
+}) {
   readonly code = 'confirmed-corruption' as const;
   readonly recovery = 'manual-rebuild' as const;
   readonly retryable = false as const;
@@ -1006,13 +1012,13 @@ export class CodeGraphStoreCorruptionError extends Schema.TaggedError<CodeGraphS
   }
 }
 
-export class CodeGraphStoreIncompatibleSchemaError extends Schema.TaggedError<CodeGraphStoreIncompatibleSchemaError>()(
-  'CodeGraphStoreIncompatibleSchemaError',
-  {
-    message: Schema.String,
-    operation: Schema.String,
-  },
-) {
+export class CodeGraphStoreIncompatibleSchemaError extends Schema.TaggedError<
+  CodeGraphStoreIncompatibleSchemaError,
+  {readonly brand: unique symbol}
+>()('CodeGraphStoreIncompatibleSchemaError', {
+  message: Schema.String,
+  operation: Schema.String,
+}) {
   readonly code = 'incompatible-schema' as const;
   readonly recovery = 'manual-migration' as const;
   readonly retryable = false as const;
@@ -1029,13 +1035,13 @@ export class CodeGraphStoreIncompatibleSchemaError extends Schema.TaggedError<Co
 }
 
 /** A long-lived process observed storage written by a newer Threadnote runtime. */
-export class CodeGraphRuntimeReconnectRequiredError extends Schema.TaggedError<CodeGraphRuntimeReconnectRequiredError>()(
-  'CodeGraphRuntimeReconnectRequiredError',
-  {
-    message: Schema.String,
-    operation: Schema.String,
-  },
-) {
+export class CodeGraphRuntimeReconnectRequiredError extends Schema.TaggedError<
+  CodeGraphRuntimeReconnectRequiredError,
+  {readonly brand: unique symbol}
+>()('CodeGraphRuntimeReconnectRequiredError', {
+  message: Schema.String,
+  operation: Schema.String,
+}) {
   readonly code = 'incompatible-schema' as const;
   readonly recovery = 'reconnect-runtime' as const;
   readonly retryable = false as const;
@@ -1048,13 +1054,13 @@ export class CodeGraphRuntimeReconnectRequiredError extends Schema.TaggedError<C
   }
 }
 
-export class CodeGraphMaintenanceActiveError extends Schema.TaggedError<CodeGraphMaintenanceActiveError>()(
-  'CodeGraphMaintenanceActiveError',
-  {
-    message: Schema.String,
-    operation: Schema.String,
-  },
-) {
+export class CodeGraphMaintenanceActiveError extends Schema.TaggedError<
+  CodeGraphMaintenanceActiveError,
+  {readonly brand: unique symbol}
+>()('CodeGraphMaintenanceActiveError', {
+  message: Schema.String,
+  operation: Schema.String,
+}) {
   readonly code = 'busy' as const;
   readonly recovery = 'defer' as const;
   readonly retryable = true as const;
@@ -1132,14 +1138,14 @@ const CodeGraphDiskCapacityFailureEvidenceSchema = Schema.Struct({
   ),
 });
 
-export class CodeGraphDiskCapacityObservationError extends Schema.TaggedError<CodeGraphDiskCapacityObservationError>()(
-  'CodeGraphDiskCapacityObservationError',
-  {
-    evidence: Schema.optionalKey(CodeGraphDiskCapacityFailureEvidenceSchema),
-    message: Schema.String,
-    operation: Schema.String,
-  },
-) {
+export class CodeGraphDiskCapacityObservationError extends Schema.TaggedError<
+  CodeGraphDiskCapacityObservationError,
+  {readonly brand: unique symbol}
+>()('CodeGraphDiskCapacityObservationError', {
+  evidence: Schema.optionalKey(CodeGraphDiskCapacityFailureEvidenceSchema),
+  message: Schema.String,
+  operation: Schema.String,
+}) {
   readonly code = 'transient-io' as const;
   readonly recovery = 'retry-read-only' as const;
   readonly retryable = true as const;
@@ -1153,14 +1159,14 @@ export class CodeGraphDiskCapacityObservationError extends Schema.TaggedError<Co
   }
 }
 
-export class CodeGraphDiskCapacityPressureError extends Schema.TaggedError<CodeGraphDiskCapacityPressureError>()(
-  'CodeGraphDiskCapacityPressureError',
-  {
-    evidence: Schema.optionalKey(CodeGraphDiskCapacityFailureEvidenceSchema),
-    message: Schema.String,
-    operation: Schema.String,
-  },
-) {
+export class CodeGraphDiskCapacityPressureError extends Schema.TaggedError<
+  CodeGraphDiskCapacityPressureError,
+  {readonly brand: unique symbol}
+>()('CodeGraphDiskCapacityPressureError', {
+  evidence: Schema.optionalKey(CodeGraphDiskCapacityFailureEvidenceSchema),
+  message: Schema.String,
+  operation: Schema.String,
+}) {
   readonly code = 'no-space' as const;
 
   get recovery(): 'defer' | 'free-space' {

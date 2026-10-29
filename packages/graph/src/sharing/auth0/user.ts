@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {dlopen} from 'bun:ffi';
 import {Clock, Console, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {createRemoteAccessTokenVerifier, type AccessTokenClaims} from '@threadnote/protocol/access-token';
@@ -12,6 +13,8 @@ import {configureRegistryReaderDockerHelper} from './user_registry_docker.js';
 import {sha256Digest} from '../digest.js';
 import {graphSharingFailure, graphSharingUnavailable} from '../errors.js';
 import {graphSharingLayout} from '../layout.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const Text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512));
 const Config = Schema.Struct({
@@ -84,7 +87,10 @@ export const configureGraphAuth0User = Effect.fn('codeGraph.sharing.configureAut
   if (!validUrl(validated.coordinatorUrl) || !validUrl(validated.audience) || !validIssuer(validated.issuer))
     return yield* graphSharingFailure('Graph Auth0 URLs must be exact canonical HTTPS URLs.');
   if (
-    (yield* readConfigs(config.agentContextHome, 'registry')).some(binding => binding.audience === validated.audience)
+    EffectArray.some(
+      yield* readConfigs(config.agentContextHome, 'registry'),
+      binding => binding.audience === validated.audience,
+    )
   )
     return yield* graphSharingFailure('Graph Auth0 audience must differ from the registry audience.');
   const fs = yield* FileSystem.FileSystem;
@@ -103,16 +109,21 @@ export const configureGraphAuth0User = Effect.fn('codeGraph.sharing.configureAut
     );
     bindings = existing.bindings;
   }
-  const match = bindings.find(
-    binding => binding.coordinatorUrl === validated.coordinatorUrl && binding.organization === validated.organization,
+  const match = Option.getOrUndefined(
+    EffectArray.findFirst(
+      bindings,
+      binding => binding.coordinatorUrl === validated.coordinatorUrl && binding.organization === validated.organization,
+    ),
   );
   if (match !== undefined && match.helper !== 'auth0')
     return yield* graphSharingFailure('The graph credential binding already uses another helper.');
-  const next = bindings.filter(
+  const next = EffectArray.filter(
+    bindings,
     binding => binding.coordinatorUrl !== validated.coordinatorUrl || binding.organization !== validated.organization,
   );
   if (next.length >= 32) return yield* graphSharingFailure('Graph credential binding capacity is full.');
-  const nextAuth0 = existingAuth0.filter(
+  const nextAuth0 = EffectArray.filter(
+    existingAuth0,
     binding => binding.coordinatorUrl !== validated.coordinatorUrl || binding.organization !== validated.organization,
   );
   if (nextAuth0.length >= 32) return yield* graphSharingFailure('Graph Auth0 configuration capacity is full.');
@@ -168,16 +179,17 @@ export const configureRegistryAuth0User = Effect.fn('codeGraph.sharing.configure
     !/^[A-Za-z0-9._|@:/+-]{1,512}$/u.test(validated.subject ?? '')
   )
     return yield* graphSharingFailure('Registry Auth0 authority must use an exact HTTPS origin and subject.');
-  if ((yield* readConfigs(config.agentContextHome)).some(binding => binding.audience === validated.audience))
+  if (EffectArray.some(yield* readConfigs(config.agentContextHome), binding => binding.audience === validated.audience))
     return yield* graphSharingFailure('Registry Auth0 audience must differ from graph control.');
   const existing = yield* readConfigs(config.agentContextHome, 'registry');
   if (
-    existing.some(
+    EffectArray.some(
+      existing,
       binding => binding.coordinatorUrl === validated.coordinatorUrl && binding.organization !== validated.organization,
     )
   )
     return yield* graphSharingFailure('Registry Auth0 origin is already bound to another organization.');
-  const next = existing.filter(binding => binding.coordinatorUrl !== validated.coordinatorUrl);
+  const next = EffectArray.filter(existing, binding => binding.coordinatorUrl !== validated.coordinatorUrl);
   if (next.length >= 32) return yield* graphSharingFailure('Registry Auth0 configuration capacity is full.');
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
@@ -232,7 +244,7 @@ export const loginGraphAuth0User = Effect.fn('codeGraph.sharing.loginAuth0User')
     .post(config, 'device', {
       audience: config.audience,
       client_id: config.clientId,
-      scope: `offline_access ${scopes.join(' ')}`,
+      scope: `offline_access ${EffectArray.join(scopes, ' ')}`,
     })
     .pipe(Effect.mapError(() => graphSharingUnavailable('Auth0 device authorization is unavailable.')));
   const device = parseDeviceResponse(response, config.issuer);
@@ -300,7 +312,9 @@ export const getRegistryAuth0UserCredential = Effect.fn('codeGraph.sharing.getRe
   backendOverride?: Auth0UserBackend,
 ) {
   const configs = yield* readConfigs(home, 'registry');
-  const config = configs.find(item => new URL(item.coordinatorUrl).host === server);
+  const config = Option.getOrUndefined(
+    EffectArray.findFirst(configs, item => new URL(item.coordinatorUrl).host === server),
+  );
   if (config === undefined || server !== new URL(config.coordinatorUrl).host)
     return yield* graphSharingFailure('Registry Auth0 helper request is outside configured authority.');
   return yield* getStoredAuth0UserCredential(home, config, 'registry:read', 'registry', backendOverride);
@@ -345,7 +359,11 @@ const getStoredAuth0UserCredential = Effect.fn('codeGraph.sharing.getStoredAuth0
         return yield* graphSharingFailure('Auth0 Keychain credentials have different authority.');
       if (
         !current.scopes.includes(scope) ||
-        (target === 'registry' && current.scopes.some(item => item.startsWith('registry:') && item !== scope))
+        (target === 'registry' &&
+          EffectArray.some(
+            current.scopes,
+            item => Effect2.pipe(item, EffectString.startsWith('registry:')) && item !== scope,
+          ))
       )
         return yield* graphSharingFailure('Auth0 token lacks the requested scope.');
       const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
@@ -408,9 +426,19 @@ const lockOptions = {
 } as const;
 
 function account(home: string, config: Auth0Config): string {
-  return sha256Digest(
-    JSON.stringify([home, config.issuer, config.audience, config.clientId, config.coordinatorUrl, config.organization]),
-  ).slice(7);
+  return Effect2.pipe(
+    sha256Digest(
+      JSON.stringify([
+        home,
+        config.issuer,
+        config.audience,
+        config.clientId,
+        config.coordinatorUrl,
+        config.organization,
+      ]),
+    ),
+    EffectString.slice(7),
+  );
 }
 
 function auth0LockPath(path: Path.Path, home: string, config: Auth0Config): string {
@@ -460,7 +488,8 @@ const readConfigs = Effect.fn('codeGraph.sharing.readAuth0UserConfigs')(function
     Effect.mapError(() => graphSharingFailure(`${label} configuration is invalid.`)),
   );
   if (
-    configs.bindings.some(
+    EffectArray.some(
+      configs.bindings,
       config =>
         !validUrl(config.coordinatorUrl) ||
         !validUrl(config.audience) ||
@@ -470,10 +499,10 @@ const readConfigs = Effect.fn('codeGraph.sharing.readAuth0UserConfigs')(function
             config.audience !== config.coordinatorUrl ||
             config.subject === undefined)),
     ) ||
-    new Set(configs.bindings.map(config => JSON.stringify([config.coordinatorUrl, config.organization]))).size !==
-      configs.bindings.length ||
+    new Set(EffectArray.map(configs.bindings, config => JSON.stringify([config.coordinatorUrl, config.organization])))
+      .size !== configs.bindings.length ||
     (target === 'registry' &&
-      new Set(configs.bindings.map(config => config.coordinatorUrl)).size !== configs.bindings.length)
+      new Set(EffectArray.map(configs.bindings, config => config.coordinatorUrl)).size !== configs.bindings.length)
   )
     return yield* graphSharingFailure(`${label} configuration has invalid URLs.`);
   return configs.bindings;
@@ -496,8 +525,11 @@ const readConfig = Effect.fn('codeGraph.sharing.readAuth0UserConfig')(function* 
       );
     return bindings[0];
   }
-  const selected = bindings.find(
-    config => config.coordinatorUrl === selector.coordinatorUrl && config.organization === selector.organization,
+  const selected = Option.getOrUndefined(
+    EffectArray.findFirst(
+      bindings,
+      config => config.coordinatorUrl === selector.coordinatorUrl && config.organization === selector.organization,
+    ),
   );
   if (selected === undefined) return yield* graphSharingFailure(`${label} organization is not configured.`);
   return selected;
@@ -553,9 +585,12 @@ const verifiedCredential = Effect.fn('codeGraph.sharing.verifyAuth0Credential')(
     claims.subject.length > 512 ||
     (previous !== undefined && claims.subject !== previous.subject) ||
     (config.subject !== undefined && claims.subject !== config.subject) ||
-    !(target === 'registry' ? REGISTRY_SCOPES : SCOPES).every(scope => claims.scopes.has(scope)) ||
+    !EffectArray.every(target === 'registry' ? REGISTRY_SCOPES : SCOPES, scope => claims.scopes.has(scope)) ||
     (target === 'registry' &&
-      [...claims.scopes].some(scope => scope.startsWith('registry:') && scope !== 'registry:read'))
+      EffectArray.some(
+        [...claims.scopes],
+        scope => Effect2.pipe(scope, EffectString.startsWith('registry:')) && scope !== 'registry:read',
+      ))
   )
     return yield* graphSharingFailure('Auth0 token lacks the configured identity or scopes.');
   const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
@@ -576,7 +611,7 @@ const verifiedCredential = Effect.fn('codeGraph.sharing.verifyAuth0Credential')(
 });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function boundedText(value: unknown, max: number): value is string {

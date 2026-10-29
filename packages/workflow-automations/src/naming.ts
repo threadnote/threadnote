@@ -1,4 +1,6 @@
 import {WorkflowAutomationError} from './contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const workflowNamingPolicyVersion = 1 as const;
 
@@ -22,9 +24,17 @@ const utf8Bytes = (value: string) => encoder.encode(value).byteLength;
 
 const assertWellFormed = (value: string, label: string) => {
   for (let index = 0; index < value.length; index++) {
-    const code = value.charCodeAt(index);
+    const code = Effect.pipe(
+      value,
+      EffectString.charCodeAt(index),
+      Effect.Option.getOrElse(() => NaN),
+    );
     if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
+      const next = Effect.pipe(
+        value,
+        EffectString.charCodeAt(index + 1),
+        Effect.Option.getOrElse(() => NaN),
+      );
       if (!(next >= 0xdc00 && next <= 0xdfff)) throw invalidName(`${label} contains an unpaired Unicode surrogate.`);
       index++;
     } else if (code >= 0xdc00 && code <= 0xdfff) {
@@ -42,45 +52,50 @@ const truncateUtf8 = (value: string, maximumBytes: number): string => {
     result += codePoint;
     bytes += size;
   }
-  return result.replace(/-+$/u, '');
+  return Effect.pipe(result, EffectString.replace(/-+$/u, ''));
 };
 
 /** Stable, readable title normalization. Collisions are resolved by family ordinals. */
 export function workflowTitleSlug(title: string): string {
   if (typeof title !== 'string') throw invalidName('Workflow title must be text.');
   assertWellFormed(title, 'Workflow title');
-  if (title.trim().length === 0) throw invalidName('Workflow title must not be blank.');
+  if (Effect.pipe(title, EffectString.trim).length === 0) throw invalidName('Workflow title must not be blank.');
   if (utf8Bytes(title) > MAX_TITLE_BYTES) throw invalidName('Workflow title exceeds 4096 UTF-8 bytes.');
   if (/\p{Cc}/u.test(title)) throw invalidName('Workflow title contains a control character.');
 
-  const normalized = title
-    .normalize('NFKD')
-    .toLowerCase()
-    .replace(/\p{M}+/gu, '')
-    // Native topics use the existing portable ASCII URI segment policy.
-    // Retain display titles in metadata; resolve lossy collisions by ordinal.
-    .replace(/[^a-z0-9]+/gu, '-')
-    .replace(/-+/gu, '-')
-    .replace(/^-|-$/gu, '');
+  const normalized = Effect.pipe(
+    title,
+    EffectString.normalize('NFKD'),
+    EffectString.toLowerCase,
+    EffectString.replace(/\p{M}+/gu, ''),
+    EffectString.replace(/[^a-z0-9]+/gu, '-'),
+    EffectString.replace(/-+/gu, '-'),
+    EffectString.replace(/^-|-$/gu, ''),
+  );
   const bounded = truncateUtf8(normalized, MAX_SLUG_BYTES);
   return bounded || 'untitled';
 }
 
-const assertOrdinal = (value: number, label: string) => {
-  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_ORDINAL)
+const assertOrdinal: (value: unknown, label: string) => asserts value is number = (value, label) => {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > MAX_ORDINAL)
     throw invalidName(`${label} must be a positive safe integer no greater than ${MAX_ORDINAL}.`);
 };
 
-function validateFamily(family: WorkflowNameFamily): WorkflowNameFamily {
-  if (typeof family !== 'object' || family === null || family.policyVersion !== workflowNamingPolicyVersion)
+function validateFamily(value: unknown): WorkflowNameFamily {
+  if (typeof value !== 'object' || value === null)
     throw invalidName('Workflow name family has an unsupported policy version.');
-  if (typeof family.slug !== 'string' || utf8Bytes(family.slug) > MAX_SLUG_BYTES)
+  const policyVersion = 'policyVersion' in value ? value.policyVersion : undefined;
+  if (policyVersion !== workflowNamingPolicyVersion)
+    throw invalidName('Workflow name family has an unsupported policy version.');
+  const slug = 'slug' in value ? value.slug : undefined;
+  if (typeof slug !== 'string' || utf8Bytes(slug) > MAX_SLUG_BYTES)
     throw invalidName(`Workflow family slug must be at most ${MAX_SLUG_BYTES} UTF-8 bytes.`);
-  assertWellFormed(family.slug, 'Workflow family slug');
-  if (family.slug.length === 0 || workflowTitleSlug(family.slug) !== family.slug)
+  assertWellFormed(slug, 'Workflow family slug');
+  if (slug.length === 0 || workflowTitleSlug(slug) !== slug)
     throw invalidName('Workflow family slug must already be in canonical title-slug form.');
-  assertOrdinal(family.ordinal, 'Workflow family ordinal');
-  return family;
+  const ordinal = 'ordinal' in value ? value.ordinal : undefined;
+  assertOrdinal(ordinal, 'Workflow family ordinal');
+  return {ordinal, policyVersion, slug};
 }
 
 const validateRole = (role: string) => {
@@ -94,7 +109,7 @@ const assertComponentLimit = (stem: string) => {
   return stem;
 };
 
-export function workflowFamilyStem(input: WorkflowNameFamily): string {
+export function workflowFamilyStem(input: unknown): string {
   const family = validateFamily(input);
   return assertComponentLimit(`workflow-${family.slug}${family.ordinal === 1 ? '' : `-${family.ordinal}`}`);
 }

@@ -1,3 +1,5 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
 import {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -15,21 +17,29 @@ import {
 } from '../lib/docsSearch';
 import {docsArticleIdForPathname} from '../lib/routes';
 import {docsArticleHref, setDocumentMeta, siteHref} from '../lib/site';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const articles = docsSections.flatMap(section => section.articles.map(article => ({article, section})));
+const articles = EffectArray.flatMap(docsSections, (section, __effectArrayIndex) =>
+  __effectArrayIndex in docsSections ? EffectArray.map(section.articles, article => ({article, section})) : [],
+);
 const docsSearchIndex = createDocsSearchIndex(docsSections);
-const focusableSelector = [
-  'a[href]',
-  'button:not(:disabled)',
-  'input:not(:disabled)',
-  'select:not(:disabled)',
-  'textarea:not(:disabled)',
-  '[tabindex]:not([tabindex="-1"])',
-].join(',');
+const focusableSelector = EffectArray.join(
+  [
+    'a[href]',
+    'button:not(:disabled)',
+    'input:not(:disabled)',
+    'select:not(:disabled)',
+    'textarea:not(:disabled)',
+    '[tabindex]:not([tabindex="-1"])',
+  ],
+  ',',
+);
 
 function trapFocus(event: KeyboardEvent, container: HTMLElement | null): void {
   if (event.key !== 'Tab' || !container) return;
-  const focusable = [...container.querySelectorAll<HTMLElement>(focusableSelector)].filter(
+  const focusable = EffectArray.filter(
+    [...container.querySelectorAll<HTMLElement>(focusableSelector)],
     element => element.getClientRects().length > 0 && element.tabIndex >= 0,
   );
   const first = focusable[0];
@@ -53,19 +63,23 @@ function trapFocus(event: KeyboardEvent, container: HTMLElement | null): void {
 }
 
 function HighlightedText({terms, text}: {terms: readonly string[]; text: string}) {
-  const escapedTerms = terms
-    .filter(term => term.length > 1)
-    .sort((left, right) => right.length - left.length)
-    .map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const escapedTerms = EffectArray.map(
+    EffectArray.filter(terms, (term, __effectArrayIndex) => __effectArrayIndex in terms && term.length > 1).sort(
+      (left, right) => right.length - left.length,
+    ),
+    term => Effect.pipe(term, EffectString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
   if (escapedTerms.length === 0) return text;
-  const matcher = new RegExp(`(${escapedTerms.join('|')})`, 'gi');
+  const matcher = new RegExp(`(${EffectArray.join(escapedTerms, '|')})`, 'gi');
   return (
     <>
-      {text
-        .split(matcher)
-        .map((part, index) =>
+      {EffectArray.map(
+        text
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+          .split(matcher),
+        (part, index) =>
           terms.includes(normalizeDocsSearchText(part)) ? <mark key={`${part}-${index}`}>{part}</mark> : part,
-        )}
+      )}
     </>
   );
 }
@@ -77,7 +91,10 @@ function InlineMarkdown({children}: {children: string}) {
       components={{
         a: ({href, children: linkChildren}) => {
           const resolvedHref =
-            href && !href.startsWith('/') && !href.startsWith('#') && !/^[a-z][a-z0-9+.-]*:/i.test(href)
+            href &&
+            !Effect.pipe(href, EffectString.startsWith('/')) &&
+            !Effect.pipe(href, EffectString.startsWith('#')) &&
+            !/^[a-z][a-z0-9+.-]*:/i.test(href)
               ? new URL(href, new URL(siteHref('docs/'), window.location.origin)).href
               : href;
           return <a href={resolvedHref}>{linkChildren}</a>;
@@ -118,7 +135,7 @@ function DocsBlockView({block}: {block: DocsBlock}) {
     case 'list':
       return (
         <ul className="docs-list">
-          {block.items.map(item => (
+          {EffectArray.map(block.items, item => (
             <li key={item}>
               <InlineMarkdown>{item}</InlineMarkdown>
             </li>
@@ -131,15 +148,15 @@ function DocsBlockView({block}: {block: DocsBlock}) {
           <table>
             <thead>
               <tr>
-                {block.headers.map(header => (
+                {EffectArray.map(block.headers, header => (
                   <th key={header}>{header}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {block.rows.map((row, index) => (
+              {EffectArray.map(block.rows, (row, index) => (
                 <tr key={`${row[0]}-${index}`}>
-                  {row.map((cell, cellIndex) => (
+                  {EffectArray.map(row, (cell, cellIndex) => (
                     <td key={`${cell}-${cellIndex}`}>
                       <InlineMarkdown>{cell}</InlineMarkdown>
                     </td>
@@ -157,9 +174,9 @@ function DocsBlockView({block}: {block: DocsBlock}) {
 
 function currentIdFromLocation(): string {
   const pathId = docsArticleIdForPathname(window.location.pathname, import.meta.env.BASE_URL);
-  if (pathId && articles.some(({article}) => article.id === pathId)) return pathId;
-  const hash = window.location.hash.replace(/^#/, '');
-  return articles.some(({article}) => article.id === hash) ? hash : defaultDocId;
+  if (pathId && EffectArray.some(articles, ({article}) => article.id === pathId)) return pathId;
+  const hash = Effect.pipe(window.location.hash, EffectString.replace(/^#/, ''));
+  return EffectArray.some(articles, ({article}) => article.id === hash) ? hash : defaultDocId;
 }
 
 export default function DocsPage() {
@@ -180,7 +197,10 @@ export default function DocsPage() {
   const shouldFocusArticleRef = useRef(false);
   const activeIndex = Math.max(
     0,
-    articles.findIndex(({article}) => article.id === activeId),
+    EffectOption.getOrElse(
+      EffectArray.findFirstIndex(articles, ({article}) => article.id === activeId),
+      () => -1,
+    ),
   );
   const activeEntry = articles[activeIndex] ?? articles[0];
 
@@ -225,7 +245,7 @@ export default function DocsPage() {
   useEffect(() => {
     const onLocationChange = () => setActiveId(currentIdFromLocation());
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      if ((event.metaKey || event.ctrlKey) && Effect.pipe(event.key, EffectString.toLowerCase) === 'k') {
         event.preventDefault();
         openSearch();
         return;
@@ -285,7 +305,7 @@ export default function DocsPage() {
 
   useEffect(() => {
     const pathId = docsArticleIdForPathname(window.location.pathname, import.meta.env.BASE_URL);
-    const hashId = window.location.hash.replace(/^#/, '');
+    const hashId = Effect.pipe(window.location.hash, EffectString.replace(/^#/, ''));
     if (!pathId && hashId === activeEntry.article.id) {
       window.history.replaceState({}, '', docsArticleHref(activeEntry.article.id));
     }
@@ -298,7 +318,7 @@ export default function DocsPage() {
   }, [activeEntry]);
 
   const results = useMemo(
-    () => searchDocs(docsSearchIndex, deferredQuery, deferredQuery.trim() ? 12 : 8),
+    () => searchDocs(docsSearchIndex, deferredQuery, Effect.pipe(deferredQuery, EffectString.trim) ? 12 : 8),
     [deferredQuery],
   );
   const selectedSearchResultIndex = Math.min(activeSearchResult, Math.max(0, results.length - 1));
@@ -364,10 +384,10 @@ export default function DocsPage() {
             <kbd>⌘ K</kbd>
           </button>
           <nav aria-label="Documentation">
-            {docsSections.map(section => (
+            {EffectArray.map(docsSections, section => (
               <div className="docs-nav-section" key={section.id}>
                 <h2>{section.title}</h2>
-                {section.articles.map(article => (
+                {EffectArray.map(section.articles, article => (
                   <a
                     key={article.id}
                     href={docsArticleHref(article.id)}
@@ -425,7 +445,7 @@ export default function DocsPage() {
             <p>{activeEntry.article.summary}</p>
           </header>
           <div className="docs-article__body">
-            {activeEntry.article.body.map((block, index) => (
+            {EffectArray.map(activeEntry.article.body, (block, index) => (
               <DocsBlockView block={block} key={`${block.type}-${'text' in block ? block.text : index}`} />
             ))}
           </div>
@@ -462,11 +482,18 @@ export default function DocsPage() {
         <aside className="docs-outline">
           <span>On this page</span>
           <strong>{activeEntry.article.title}</strong>
-          {activeEntry.article.body
-            .filter((block): block is Extract<DocsBlock, {type: 'heading'}> => block.type === 'heading')
-            .map(block => (
+          {EffectArray.map(
+            EffectArrayPipe(activeEntry.article.body, __body =>
+              EffectArray.filter(
+                __body,
+                (block, __effectArrayIndex): block is Extract<DocsBlock, {type: 'heading'}> =>
+                  __effectArrayIndex in __body && block.type === 'heading',
+              ),
+            ),
+            block => (
               <span key={block.text}>{block.text}</span>
-            ))}
+            ),
+          )}
           <div className="docs-outline__help">
             <span className="status-dot" />
             <strong>Something unclear?</strong>
@@ -508,7 +535,9 @@ export default function DocsPage() {
                     moveSearchSelection(event.key === 'ArrowDown' ? 1 : -1);
                   } else if (event.key === 'Enter') {
                     const currentResults =
-                      query === deferredQuery ? results : searchDocs(docsSearchIndex, query, query.trim() ? 12 : 8);
+                      query === deferredQuery
+                        ? results
+                        : searchDocs(docsSearchIndex, query, Effect.pipe(query, EffectString.trim) ? 12 : 8);
                     const currentResultIndex = Math.min(activeSearchResult, Math.max(0, currentResults.length - 1));
                     const result: DocsSearchResult | undefined = currentResults[currentResultIndex];
                     if (!result) return;
@@ -544,14 +573,14 @@ export default function DocsPage() {
             >
               <div className="search-dialog__results-meta" aria-live="polite">
                 <span>
-                  {query.trim()
+                  {Effect.pipe(query, EffectString.trim)
                     ? `${results.length} ranked result${results.length === 1 ? '' : 's'}`
                     : 'Suggested documentation'}
                 </span>
                 <span id="docs-search-help">↑↓ select · enter open</span>
               </div>
               {results.length ? (
-                results.map((result, index) => (
+                EffectArray.map(results, (result, index) => (
                   <button
                     type="button"
                     id={`docs-search-result-${index}`}

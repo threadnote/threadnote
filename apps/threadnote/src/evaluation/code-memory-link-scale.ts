@@ -1,4 +1,5 @@
-import {Clock, Data, Effect, FileSystem, Path} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
+import {Clock, Effect, FileSystem, Path} from 'effect';
 import {codeGraphSourceSpanFragment} from '@threadnote/graph/citation/primitives';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -20,11 +21,13 @@ import {
   type CodeMemoryLinkScaleScenarioCaptureV1,
   type CodeMemoryLinkScaleScenarioId,
 } from './code-memory-link-scale-contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const FIXED_INSTANT = '2026-08-29T00:00:00.000Z';
-const SOURCE_COMMIT = 'd'.repeat(40);
-const SOURCE_SNAPSHOT_ID = `cgsn_${'e'.repeat(40)}`;
-const SOURCE_GRAPH_CONTENT_ID = `cgc_${'f'.repeat(40)}`;
+const SOURCE_COMMIT = Effect2.pipe('d', EffectString.repeat(40));
+const SOURCE_SNAPSHOT_ID = `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`;
+const SOURCE_GRAPH_CONTENT_ID = `cgc_${Effect2.pipe('f', EffectString.repeat(40))}`;
 const EXTRACTOR_SET = 'code-memory-link-inverse-scale-v1';
 const DIRECT_BACKLINK_MEMORY_COUNT = 3;
 const ISOLATION_DECOY_MEMORY_COUNT = 1;
@@ -34,7 +37,10 @@ const MINIMUM_CORPUS_MEMORY_COUNT =
 const MEMORY_WRITE_BATCH_SIZE = 1_000;
 const MEMORY_WRITE_CONCURRENCY = 64;
 const encoder = new TextEncoder();
-const NOISE_SEED = Number.parseInt(sha256HexSync(CODE_MEMORY_LINK_SCALE_FIXTURE.seed).slice(0, 8), 16);
+const NOISE_SEED = Number.parseInt(
+  Effect2.pipe(sha256HexSync(CODE_MEMORY_LINK_SCALE_FIXTURE.seed), EffectString.slice(0, 8)),
+  16,
+);
 
 const FILE_BACKLINK_SOURCE = 'export const inverseScaleFileBacklinks = true;\n';
 const SYMBOL_BACKLINK_SOURCE = 'export function inverseScaleSymbol(): number { return 1; }\n';
@@ -47,9 +53,10 @@ export interface CodeMemoryLinkScaleWorkloadOptions {
   readonly warmups: number;
 }
 
-class CodeMemoryLinkScaleRuntimeError extends Data.TaggedError('CodeMemoryLinkScaleRuntimeError')<{
-  readonly message: string;
-}> {}
+class CodeMemoryLinkScaleRuntimeError extends Schema.TaggedError<
+  CodeMemoryLinkScaleRuntimeError,
+  {readonly brand: unique symbol}
+>()('CodeMemoryLinkScaleRuntimeError', {message: Schema.String}) {}
 
 interface ScaleScenarioDefinition {
   readonly anchors: readonly MemoryCodeCitationV1[];
@@ -97,7 +104,7 @@ export const runCodeMemoryLinkScaleWorkload = Effect.fn('evaluation.codeMemoryLi
         rss.observe();
         const status = yield* recallIndexStatus(materialized.config);
         if (!status.ready || status.documentCount !== options.memoryCandidates) {
-          return yield* new CodeMemoryLinkScaleRuntimeError({
+          return yield* CodeMemoryLinkScaleRuntimeError.make({
             message: `Production recall index contains ${status.documentCount}/${options.memoryCandidates} memories.`,
           });
         }
@@ -175,19 +182,19 @@ const materializeCorpus = Effect.fn('evaluation.codeMemoryLinkScaleWorkload.mate
   const noiseRoot = path.join(memoryRoot, 'noise');
   for (let offset = 0; offset < noiseMemoryCount; offset += MEMORY_WRITE_BATCH_SIZE) {
     const end = Math.min(noiseMemoryCount, offset + MEMORY_WRITE_BATCH_SIZE);
-    const shard = String(Math.floor(offset / MEMORY_WRITE_BATCH_SIZE)).padStart(3, '0');
+    const shard = Effect2.pipe(String(Math.floor(offset / MEMORY_WRITE_BATCH_SIZE)), EffectString.padStart(3, '0'));
     const shardRoot = path.join(noiseRoot, shard);
     yield* fs.makeDirectory(shardRoot, {recursive: true, mode: 0o700});
     const batchBytes = yield* Effect.forEach(
       Array.from({length: end - offset}, (_, index) => offset + index),
       index => {
         const content = noiseMemory(index, anchors.denseSymbol);
-        const target = path.join(shardRoot, `${String(index).padStart(6, '0')}.md`);
+        const target = path.join(shardRoot, `${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}.md`);
         return fs.writeFileString(target, content).pipe(Effect.as(encoder.encode(content).byteLength));
       },
       {concurrency: MEMORY_WRITE_CONCURRENCY},
     );
-    bytes += batchBytes.reduce((total, value) => total + value, 0);
+    bytes += EffectArray.reduce(batchBytes, 0, (total, value) => total + value);
     observeRss();
     yield* Effect.yieldNow;
   }
@@ -202,7 +209,7 @@ const materializeCorpus = Effect.fn('evaluation.codeMemoryLinkScaleWorkload.mate
     bytes,
     config,
     noiseMemoryCount,
-    scenarios: CODE_MEMORY_LINK_SCALE_SCENARIOS.map(id => ({
+    scenarios: EffectArray.map(CODE_MEMORY_LINK_SCALE_SCENARIOS, id => ({
       anchors: scenarioAnchors(anchors, id),
       expectedTruncatedSelectorCount: codeMemoryLinkScaleExpectedTruncatedSelectorCount(id),
       expectedUris: codeMemoryLinkScaleExpectedUris(id),
@@ -260,7 +267,7 @@ const runLookup = Effect.fn('evaluation.codeMemoryLinkScaleWorkload.lookup')(fun
   return {
     canonicalMismatchCount,
     milliseconds: elapsedMilliseconds(started, finished),
-    returnedUris: matches.map(match => match.uri),
+    returnedUris: EffectArray.map(matches, match => match.uri),
     truncatedSelectorCount,
   } satisfies CodeMemoryLinkScaleLookupObservationV1;
 });
@@ -315,7 +322,7 @@ function fileCitation(path: string, content: string, repositoryId: string): Memo
 }
 
 function symbolCitation(path: string, nodeId: string, content: string, name: string): MemoryCodeCitationV1 {
-  const span = {column: 1, endColumn: content.trimEnd().length + 1, endLine: 1, line: 1};
+  const span = {column: 1, endColumn: Effect2.pipe(content, EffectString.trimEnd).length + 1, endLine: 1, line: 1};
   const fragment = codeGraphSourceSpanFragment(content, span);
   if (!fragment.ok) throw new Error(`Invalid inverse scale symbol fixture: ${fragment.reason}.`);
   return createMemoryCodeCitation({
@@ -376,7 +383,7 @@ function noiseMemory(index: number, citation: MemoryCodeCitationV1): string {
       sourceAgentClient: 'benchmark',
       status: 'active',
       timestamp: FIXED_INSTANT,
-      topic: `inverse-selector-noise-${String(cohort).padStart(2, '0')}`,
+      topic: `inverse-selector-noise-${Effect2.pipe(String(cohort), EffectString.padStart(2, '0'))}`,
     },
     `Seeded dense-selector cohort ${cohort}: every noise memory cites the same governed source anchor.`,
   );
@@ -392,10 +399,15 @@ function seededNoiseCohort(index: number): number {
 function fixtureScenario<Id extends CodeMemoryLinkScaleScenarioId>(
   id: Id,
 ): Extract<(typeof CODE_MEMORY_LINK_SCALE_FIXTURE.scenarios)[number], {readonly id: Id}> {
-  return CODE_MEMORY_LINK_SCALE_FIXTURE.scenarios.find(scenario => scenario.id === id)! as Extract<
-    (typeof CODE_MEMORY_LINK_SCALE_FIXTURE.scenarios)[number],
-    {readonly id: Id}
-  >;
+  const scenario = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      CODE_MEMORY_LINK_SCALE_FIXTURE.scenarios,
+      (candidate): candidate is Extract<(typeof CODE_MEMORY_LINK_SCALE_FIXTURE.scenarios)[number], {readonly id: Id}> =>
+        candidate.id === id,
+    ),
+  );
+  if (scenario === undefined) throw new Error(`Missing code-memory-link scale scenario: ${id}`);
+  return scenario;
 }
 
 function scenarioAnchors(anchors: ReturnType<typeof scaleAnchors>, id: CodeMemoryLinkScaleScenarioId) {
@@ -441,7 +453,7 @@ function recallStorageBytes(fs: FileSystem.FileSystem, databasePath: string) {
         ),
       {concurrency: 4},
     );
-    return {database: sizes[0], total: sizes.reduce((total, size) => total + size, 0)};
+    return {database: sizes[0], total: EffectArray.reduce(sizes, 0, (total, size) => total + size)};
   });
 }
 
@@ -464,14 +476,14 @@ function elapsedMilliseconds(started: bigint, finished: bigint): number {
 
 function validateOptions(options: CodeMemoryLinkScaleWorkloadOptions): void {
   if (!Number.isSafeInteger(options.memoryCandidates) || options.memoryCandidates < MINIMUM_CORPUS_MEMORY_COUNT) {
-    throw new CodeMemoryLinkScaleRuntimeError({
+    throw CodeMemoryLinkScaleRuntimeError.make({
       message: `memoryCandidates must be a safe integer of at least ${MINIMUM_CORPUS_MEMORY_COUNT}.`,
     });
   }
   if (!Number.isSafeInteger(options.samples) || options.samples < 1) {
-    throw new CodeMemoryLinkScaleRuntimeError({message: 'samples must be a positive safe integer.'});
+    throw CodeMemoryLinkScaleRuntimeError.make({message: 'samples must be a positive safe integer.'});
   }
   if (!Number.isSafeInteger(options.warmups) || options.warmups < 0) {
-    throw new CodeMemoryLinkScaleRuntimeError({message: 'warmups must be a non-negative safe integer.'});
+    throw CodeMemoryLinkScaleRuntimeError.make({message: 'warmups must be a non-negative safe integer.'});
   }
 }

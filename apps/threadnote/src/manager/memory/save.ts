@@ -7,6 +7,9 @@ import {assertMemoryDocumentSchemaWritable, parseMemoryDocument} from '@threadno
 import {sharedMemoryUriParts} from '../../share/index.js';
 import {applyScrubber} from '@threadnote/platform/scrubber';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 /** Fail-closed validation for Manager's exact raw shared-memory editor. */
 export function assertManagerRawSharedMemorySave(
@@ -73,12 +76,19 @@ export function assertManagerRawPersonalMemorySave(
 
 function assertManagerObsidianEvidenceUnchanged(existingContent: string, content: string): void {
   const header = (value: string) =>
-    value
-      .replaceAll('\r\n', '\n')
-      .replaceAll('\r', '\n')
-      .split('\n\n', 1)[0]
-      ?.split('\n')
-      .filter(line => /^\s*obsidian_evidence\s*:/u.test(line)) ?? [];
+    EffectOption.getOrUndefined(
+      EffectOption.map(
+        EffectOption.fromNullishOr(
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Limited split and optional chaining preserve this header boundary.
+          value.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n\n', 1)[0]?.split('\n'),
+        ),
+        __effectOptionalArrayReceiver =>
+          EffectArray.filter(
+            __effectOptionalArrayReceiver,
+            __effectArrayValue => !!(line => /^\s*obsidian_evidence\s*:/u.test(line))(__effectArrayValue),
+          ),
+      ),
+    ) ?? [];
   if (JSON.stringify(header(existingContent)) !== JSON.stringify(header(content))) {
     throw new Error(
       'Raw Manager saves cannot change Obsidian evidence identity. Derive a new memory from the exact synced note revision.',
@@ -88,12 +98,19 @@ function assertManagerObsidianEvidenceUnchanged(existingContent: string, content
 
 function assertManagerSourceEvidenceUnchanged(existingContent: string, content: string): void {
   const header = (value: string) =>
-    value
-      .replaceAll('\r\n', '\n')
-      .replaceAll('\r', '\n')
-      .split('\n\n', 1)[0]
-      ?.split('\n')
-      .filter(line => /^\s*source_evidence\s*:/u.test(line)) ?? [];
+    EffectOption.getOrUndefined(
+      EffectOption.map(
+        EffectOption.fromNullishOr(
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Limited split and optional chaining preserve this header boundary.
+          value.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n\n', 1)[0]?.split('\n'),
+        ),
+        __effectOptionalArrayReceiver =>
+          EffectArray.filter(
+            __effectOptionalArrayReceiver,
+            __effectArrayValue => !!(line => /^\s*source_evidence\s*:/u.test(line))(__effectArrayValue),
+          ),
+      ),
+    ) ?? [];
   if (JSON.stringify(header(existingContent)) !== JSON.stringify(header(content))) {
     throw new Error(
       'Raw Manager saves cannot change source evidence identity. Derive a new memory from the exact synced source revision.',
@@ -120,9 +137,19 @@ function assertManagerMemoryIdentityUnchanged(uri: string, existingContent: stri
 }
 
 function relationHeaderLines(content: string): readonly string[] {
-  const lines = content.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
-  const headerEnd = lines.findIndex(line => line.trim() === '');
-  return lines.slice(0, headerEnd === -1 ? lines.length : headerEnd).filter(line => line.startsWith('relation:'));
+  const lines = Effect.pipe(
+    content,
+    EffectString.replaceAll('\r\n', '\n'),
+    EffectString.replaceAll('\r', '\n'),
+    EffectString.split('\n'),
+  );
+  const headerEnd = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(lines, line => Effect.pipe(line, EffectString.trim) === ''),
+    () => -1,
+  );
+  return EffectArray.filter(lines.slice(0, headerEnd === -1 ? lines.length : headerEnd), line =>
+    Effect.pipe(line, EffectString.startsWith('relation:')),
+  );
 }
 
 function assertManagerReviewedSupportUnchanged(uri: string, existingContent: string, content: string): void {

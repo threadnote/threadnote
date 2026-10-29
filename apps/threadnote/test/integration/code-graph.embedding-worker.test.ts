@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Path, PlatformError} from 'effect';
@@ -31,28 +32,39 @@ import {withCodeGraphDatabaseWriteLock} from '@threadnote/graph/maintenance/gate
 import {runCodeGraphEmbeddingWorkerUnit} from '@threadnote/graph/vector/worker';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const iso = (milliseconds: number) => new Date(milliseconds).toISOString();
 const childPath = new URL('../fixtures/code-graph-embedding-worker-child.ts', import.meta.url).pathname;
-interface Event {
-  event: string;
-  pid: number;
-  childPid?: number;
-  inputs?: number;
-  pool?: number;
-  limit?: number;
-  state?: string;
-  modelId?: string;
-}
 const events = (home: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const text = yield* fs.readFileString(`${home}/events.jsonl`).pipe(Effect.orElseSucceed(() => ''));
-    return text
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map(line => JSON.parse(line) as Event);
+    return EffectArray.map(
+      EffectArray.filter(Effect2.pipe(text, EffectString.trim, EffectString.split('\n')), Boolean),
+      line => {
+        const value: unknown = JSON.parse(line);
+        if (!Predicate.isObject(value) || typeof value.event !== 'string' || typeof value.pid !== 'number')
+          throw TestError.make({message: 'Embedding worker emitted a malformed event.'});
+        for (const key of ['childPid', 'inputs', 'pool', 'limit'])
+          if (value[key] !== undefined && typeof value[key] !== 'number')
+            throw TestError.make({message: 'Embedding worker event contained a malformed numeric field.'});
+        for (const key of ['state', 'modelId'])
+          if (value[key] !== undefined && typeof value[key] !== 'string')
+            throw TestError.make({message: 'Embedding worker event contained a malformed text field.'});
+        return {
+          event: value.event,
+          pid: value.pid,
+          ...(typeof value.childPid === 'number' ? {childPid: value.childPid} : {}),
+          ...(typeof value.inputs === 'number' ? {inputs: value.inputs} : {}),
+          ...(typeof value.pool === 'number' ? {pool: value.pool} : {}),
+          ...(typeof value.limit === 'number' ? {limit: value.limit} : {}),
+          ...(typeof value.state === 'string' ? {state: value.state} : {}),
+          ...(typeof value.modelId === 'string' ? {modelId: value.modelId} : {}),
+        };
+      },
+    );
   });
 const until = <R>(condition: Effect.Effect<boolean, unknown, R>, label = 'barrier', maximumAttempts = 400) =>
   Effect.gen(function* () {
@@ -99,7 +111,9 @@ const fixture = Effect.gen(function* () {
   yield* Effect.addFinalizer(() =>
     Effect.gen(function* () {
       const records = yield* events(home);
-      const ids = new Set(records.flatMap(record => (record.childPid ? [record.pid, record.childPid] : [record.pid])));
+      const ids = new Set(
+        EffectArray.flatMap(records, record => (record.childPid ? [record.pid, record.childPid] : [record.pid])),
+      );
       for (const pid of ids)
         if (pid !== process.pid)
           yield* Effect.sync(() => {
@@ -176,7 +190,12 @@ for (const fault of [
           let crossExpiryOnModelRead = false;
           let boundaryTime = 0;
           let inferenceCalls = 0;
-          const ready = () => observe()?.generations.some(row => row.state === 'ready') === true;
+          const ready = () =>
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(observe()?.generations), __effectArrayReceiver =>
+                EffectArray.some(__effectArrayReceiver, row => row.state === 'ready'),
+              ),
+            ) === true;
           const permissionDenied = (filename: string) =>
             PlatformError.systemError({
               _tag: 'PermissionDenied',
@@ -236,7 +255,7 @@ for (const fault of [
             embedMany: ({inputs}) =>
               Effect.sync(() => {
                 inferenceCalls += 1;
-                return inputs.map(() => [1, 0]);
+                return EffectArray.map(inputs, () => [1, 0]);
               }),
             generate: unexpected,
             rerank: unexpected,
@@ -481,8 +500,8 @@ effectIt.effect(
           }
         });
         const records = yield* events(home);
-        expect(records.filter(record => record.event === 'worker-ready')).toHaveLength(1);
-        const calls = records.filter(record => record.event === 'inference');
+        expect(EffectArray.filter(records, record => record.event === 'worker-ready')).toHaveLength(1);
+        const calls = EffectArray.filter(records, record => record.event === 'inference');
         expect(calls).toHaveLength(5);
         let activeBatches = 0;
         let maximumBatches = 0;
@@ -493,10 +512,13 @@ effectIt.effect(
         expect(maximumBatches).toBe(1);
         expect(activeBatches).toBe(0);
 
-        expect(calls.every(call => call.inputs! <= 32 && call.pool === 1)).toBe(true);
-        expect(records.filter(record => record.event === 'symbol-page').every(record => record.limit! <= 400)).toBe(
-          true,
-        );
+        expect(EffectArray.every(calls, call => call.inputs! <= 32 && call.pool === 1)).toBe(true);
+        expect(
+          EffectArray.every(
+            EffectArray.filter(records, record => record.event === 'symbol-page'),
+            record => record.limit! <= 400,
+          ),
+        ).toBe(true);
         yield* Effect.sync(() => {
           const db = new Database(`${layout.vectorRoot}/${manifest.id}/vectors-v2.sqlite`);
           try {
@@ -523,13 +545,17 @@ effectIt.effect(
         yield* seed(home, 2);
         yield* fs.writeFileString(`${home}/crash-after-attach`, '');
         expect((yield* host(home)).code).toBe(0);
-        yield* until(events(home).pipe(Effect.map(records => records.some(record => record.event === 'attached'))));
-        const callsBefore = (yield* events(home)).filter(record => record.event === 'inference').length;
+        yield* until(
+          events(home).pipe(Effect.map(records => EffectArray.some(records, record => record.event === 'attached'))),
+        );
+        const callsBefore = EffectArray.filter(yield* events(home), record => record.event === 'inference').length;
         expect((yield* lanes(home))[0]?.state).not.toBe('ready');
         yield* fs.remove(`${home}/crash-after-attach`);
         expect((yield* host(home)).code).toBe(0);
         yield* until(lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'ready')));
-        expect((yield* events(home)).filter(record => record.event === 'inference')).toHaveLength(callsBefore);
+        expect(EffectArray.filter(yield* events(home), record => record.event === 'inference')).toHaveLength(
+          callsBefore,
+        );
       }),
     ),
   30_000,
@@ -550,9 +576,9 @@ effectIt.effect(
         const [lane] = yield* lanes(home);
         expect(lane).toMatchObject({state: 'deferred', attempt: 1});
         expect(lane.notBefore).toBeGreaterThan(0);
-        const spawned = (yield* events(home)).filter(record => record.event === 'model-spawn');
+        const spawned = EffectArray.filter(yield* events(home), record => record.event === 'model-spawn');
         expect(spawned).toHaveLength(1);
-        yield* until(Effect.sync(() => spawned.every(child => !system.isProcessRunning(child.childPid!))));
+        yield* until(Effect.sync(() => EffectArray.every(spawned, child => !system.isProcessRunning(child.childPid!))));
       }),
     ),
   30_000,
@@ -572,7 +598,8 @@ for (const barrier of ['ready', 'claim', 'checkpoint'] as const) {
           yield* until(
             events(home).pipe(
               Effect.map(records =>
-                records.some(
+                EffectArray.some(
+                  records,
                   record =>
                     record.event ===
                     (barrier === 'ready' ? 'worker-ready' : barrier === 'claim' ? 'claimed' : 'checkpoint'),
@@ -583,9 +610,11 @@ for (const barrier of ['ready', 'claim', 'checkpoint'] as const) {
           yield* fs.remove(`${home}/crash-after-${barrier}`);
           expect((yield* host(home)).code).toBe(0);
           yield* until(lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'ready')));
-          const inputs = (yield* events(home))
-            .filter(record => record.event === 'inference')
-            .reduce((total, event) => total + event.inputs!, 0);
+          const inputs = EffectArray.reduce(
+            EffectArray.filter(yield* events(home), record => record.event === 'inference'),
+            0,
+            (total, event) => total + event.inputs!,
+          );
           expect(inputs).toBe(65);
         }),
       ),
@@ -604,14 +633,19 @@ effectIt.effect(
         yield* fs.writeFileString(`${home}/missing-model`, '');
         expect((yield* host(home)).code).toBe(0);
         yield* until(lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'blocked')));
-        const worker = (yield* events(home)).find(record => record.event === 'worker-ready')!;
+        const worker = EffectOption.getOrUndefined(
+          EffectArray.findFirst(yield* events(home), record => record.event === 'worker-ready'),
+        )!;
         const system = yield* SystemInfo;
         yield* until(
           Effect.sync(() => !system.isProcessRunning(worker.pid)),
           'blocked worker idle exit',
         );
         expect(
-          (yield* events(home)).filter(record => record.event === 'inference' || record.event === 'download'),
+          EffectArray.filter(
+            yield* events(home),
+            record => record.event === 'inference' || record.event === 'download',
+          ),
         ).toEqual([]);
         expect((yield* store.readySnapshot(layout.databasePath, worktreeId))?.id).toBe(snapshotId);
         expect(yield* fs.exists(`${layout.vectorRoot}/${manifest.id}/vectors-v2.sqlite`)).toBe(false);
@@ -625,7 +659,7 @@ effectIt.effect(
         const secondWake = yield* host(home);
         expect(secondWake.code).toBe(0);
         expect(JSON.parse(secondWake.output).ready).toBe(true);
-        const workers = (yield* events(home)).filter(record => record.event === 'worker-ready');
+        const workers = EffectArray.filter(yield* events(home), record => record.event === 'worker-ready');
         expect(workers).toHaveLength(2);
         const secondWorker = workers[1];
         expect(secondWorker.pid).not.toBe(worker.pid);
@@ -648,14 +682,14 @@ effectIt.effect(
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const store = yield* CodeGraphStore;
-        const healthyCheckout = 'd'.repeat(64);
+        const healthyCheckout = Effect2.pipe('d', EffectString.repeat(64));
         yield* seed(home, 2);
-        const healthy = yield* seed(home, 2, healthyCheckout, 'e'.repeat(64));
+        const healthy = yield* seed(home, 2, healthyCheckout, Effect2.pipe('e', EffectString.repeat(64)));
         yield* fs.writeFileString(`${home}/catalog.json`, JSON.stringify([checkoutId, healthyCheckout]));
         yield* fs.writeFileString(`${home}/pause-after-claim`, '');
         yield* fs.writeFileString(`${home}/skip-model-lock`, '');
         const child = yield* startScopedHost(home);
-        yield* until(events(home).pipe(Effect.map(rows => rows.some(row => row.event === 'claimed'))));
+        yield* until(events(home).pipe(Effect.map(rows => EffectArray.some(rows, row => row.event === 'claimed'))));
         yield* withCodeGraphDatabaseWriteLock(
           home,
           checkoutId,
@@ -675,7 +709,9 @@ effectIt.effect(
               'healthy second catalog while first writer gate is held',
             );
             const results = yield* events(home);
-            expect(results.some(row => row.event === 'unit-result' && row.state === 'deferred')).toBe(true);
+            expect(EffectArray.some(results, row => row.event === 'unit-result' && row.state === 'deferred')).toBe(
+              true,
+            );
           }),
           20_000,
         );
@@ -712,7 +748,7 @@ effectIt.effect(
         const child = yield* startScopedHost(home);
         yield* until(
           events(home).pipe(
-            Effect.map(rows => rows.some(row => row.event === 'inference' && row.modelId === manifest.id)),
+            Effect.map(rows => EffectArray.some(rows, row => row.event === 'inference' && row.modelId === manifest.id)),
           ),
           'model A inference barrier',
         );
@@ -743,10 +779,12 @@ effectIt.effect(
             db.close();
           }
         });
-        expect((yield* events(home)).filter(row => row.event === 'inference').map(row => row.modelId)).toEqual([
-          manifest.id,
-          alternateManifest.id,
-        ]);
+        expect(
+          EffectArray.map(
+            EffectArray.filter(yield* events(home), row => row.event === 'inference'),
+            row => row.modelId,
+          ),
+        ).toEqual([manifest.id, alternateManifest.id]);
       }),
     ),
   30_000,
@@ -763,7 +801,10 @@ effectIt.effect(
         expect((yield* host(home)).code).toBe(0);
         yield* until(lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'cancelled')));
         expect(
-          (yield* events(home)).filter(record => record.event === 'inference' || record.event === 'download'),
+          EffectArray.filter(
+            yield* events(home),
+            record => record.event === 'inference' || record.event === 'download',
+          ),
         ).toEqual([]);
         expect(yield* store.readySnapshot(layout.databasePath, worktreeId)).toBeUndefined();
       }),
@@ -782,7 +823,9 @@ effectIt.effect(
         const layout = yield* seed(home, 2);
         expect((yield* host(home)).code).toBe(0);
         yield* until(lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'ready')));
-        const readyWorker = (yield* events(home)).find(record => record.event === 'worker-ready')!;
+        const readyWorker = EffectOption.getOrUndefined(
+          EffectArray.findFirst(yield* events(home), record => record.event === 'worker-ready'),
+        )!;
         const system = yield* SystemInfo;
         yield* until(
           Effect.sync(() => !system.isProcessRunning(readyWorker.pid)),
@@ -813,16 +856,19 @@ effectIt.effect(
         );
         yield* fs.writeFileString(`${home}/disk-denied`, '');
         expect((yield* host(home)).code).toBe(0);
-        const deniedWorker = (yield* events(home)).filter(record => record.event === 'worker-ready').at(-1)!;
+        const deniedWorker = EffectArray.filter(yield* events(home), record => record.event === 'worker-ready').at(-1)!;
         yield* until(
           Effect.sync(() => !system.isProcessRunning(deniedWorker.pid)),
           'capacity-denied worker idle exit',
         );
         expect((yield* lanes(home))[0]).toMatchObject({state: 'queued', attempt: 0, notBefore: 0});
-        expect((yield* events(home)).some(record => record.event === 'unit-result' && record.state === 'blocked')).toBe(
-          true,
-        );
-        const callsBeforeRecovery = (yield* events(home)).filter(record => record.event === 'inference').length;
+        expect(
+          EffectArray.some(yield* events(home), record => record.event === 'unit-result' && record.state === 'blocked'),
+        ).toBe(true);
+        const callsBeforeRecovery = EffectArray.filter(
+          yield* events(home),
+          record => record.event === 'inference',
+        ).length;
         expect(callsBeforeRecovery).toBe(1);
         expect(yield* Effect.sync(payload)).toEqual(before);
         expect((yield* store.readySnapshot(layout.databasePath, worktreeId))?.id).toBe(snapshotId);
@@ -832,7 +878,9 @@ effectIt.effect(
           lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'ready')),
           'same recorded demand after capacity recovery',
         );
-        expect((yield* events(home)).filter(record => record.event === 'inference')).toHaveLength(callsBeforeRecovery);
+        expect(EffectArray.filter(yield* events(home), record => record.event === 'inference')).toHaveLength(
+          callsBeforeRecovery,
+        );
       }),
     ),
   30_000,
@@ -848,7 +896,7 @@ effectIt.effect(
         const store = yield* CodeGraphStore;
         const layout = yield* seed(home, 2);
         for (let n = 1; n <= 65; n++) {
-          const sibling = n.toString(16).padStart(64, '0');
+          const sibling = Effect2.pipe(n.toString(16), EffectString.padStart(64, '0'));
           yield* store.promote(
             layout.databasePath,
             {
@@ -857,7 +905,7 @@ effectIt.effect(
               worktreeId: sibling,
               displayName: 'sibling',
               gitCommonDirectory: home,
-              headCommit: 'c'.repeat(40),
+              headCommit: Effect2.pipe('c', EffectString.repeat(40)),
               objectFormat: 'sha1',
               repoRoot: home,
               repositoryId: checkoutId,
@@ -895,7 +943,7 @@ effectIt.effect(
           'all66 finite lanes ready',
           1200,
         );
-        expect((yield* events(home)).filter(record => record.event === 'inference')).toHaveLength(1);
+        expect(EffectArray.filter(yield* events(home), record => record.event === 'inference')).toHaveLength(1);
         yield* Effect.sync(() => {
           const root = codeGraphLayout(path, home, checkoutId, worktreeId).vectorRoot;
           const db = new Database(`${root}/${manifest.id}/vectors-v2.sqlite`);
@@ -918,7 +966,8 @@ effectIt.effect(
       Effect.gen(function* () {
         const home = yield* fixture;
         const fs = yield* FileSystem.FileSystem;
-        for (let n = 0; n < 130; n++) yield* fs.makeDirectory(`${home}/directory-${n.toString().padStart(3, '0')}`);
+        for (let n = 0; n < 130; n++)
+          yield* fs.makeDirectory(`${home}/directory-${Effect2.pipe(n.toString(), EffectString.padStart(3, '0'))}`);
         yield* fs.writeFileString(`${home}/ordinary-file`, '');
         const names = yield* Effect.acquireUseRelease(
           Effect.promise(() => runtimeOpenTextDirectoryNameReader(home)),
@@ -936,7 +985,9 @@ effectIt.effect(
           reader => Effect.promise(() => reader.close()),
         );
         expect(new Set(names).size).toBe(130);
-        expect(names.sort()).toEqual(Array.from({length: 130}, (_, n) => `directory-${n.toString().padStart(3, '0')}`));
+        expect(names.sort()).toEqual(
+          Array.from({length: 130}, (_, n) => `directory-${Effect2.pipe(n.toString(), EffectString.padStart(3, '0'))}`),
+        );
       }),
     ),
   10_000,
@@ -951,7 +1002,7 @@ effectIt.effect(
         const fs = yield* FileSystem.FileSystem;
         const store = yield* CodeGraphStore;
         const unsupported = yield* seed(home, 2);
-        const healthyId = 'd'.repeat(64);
+        const healthyId = Effect2.pipe('d', EffectString.repeat(64));
         const healthy = yield* seed(home, 2, healthyId);
         yield* fs.writeFileString(`${home}/catalog.json`, JSON.stringify([checkoutId, healthyId]));
         yield* Effect.sync(() => {

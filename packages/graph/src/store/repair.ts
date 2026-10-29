@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphDatabaseRepair} from './models.js';
@@ -40,7 +41,7 @@ const repairDatabase = Effect.fn('codeGraph.repairDatabase')(function* (
       )
     ORDER BY snapshot.id
   `;
-  const retainedIncompleteSnapshotIds = retainedIncompleteSnapshots.map(snapshot => snapshot.id);
+  const retainedIncompleteSnapshotIds = EffectArray.map(retainedIncompleteSnapshots, snapshot => snapshot.id);
   if (dryRun) {
     const candidates = yield* sql<{readonly count: number}>`
       SELECT COUNT(*) AS count

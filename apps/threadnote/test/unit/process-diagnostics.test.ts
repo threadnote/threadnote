@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -24,6 +25,8 @@ import {
   withThreadnoteProcessActivity,
   withThreadnoteProcessRegistration,
 } from '@threadnote/threadnote/process/diagnostics';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 let temporaryRoot: string | undefined;
 let installationTemporaryRoot: string | undefined;
@@ -89,7 +92,11 @@ describe('process diagnostics', () => {
         remove: (path, options) =>
           fs
             .remove(path, options)
-            .pipe(Effect.tap(() => (path.endsWith('.tmp') ? Queue.offer(attempts, undefined) : Effect.void))),
+            .pipe(
+              Effect.tap(() =>
+                Effect2.pipe(path, EffectString.endsWith('.tmp')) ? Queue.offer(attempts, undefined) : Effect.void,
+              ),
+            ),
       });
       yield* withThreadnoteProcessRegistration(
         home,
@@ -283,7 +290,7 @@ describe('process diagnostics', () => {
       });
       const outcome = yield* terminateThreadnoteProcess(
         {agentContextHome: '/unused'},
-        {processId, processRef: `tnp_${'a'.repeat(64)}`},
+        {processId, processRef: `tnp_${Effect2.pipe('a', EffectString.repeat(64))}`},
       ).pipe(
         Effect.provideService(SystemInfo, testSystem),
         Effect.match({onFailure: error => ({error}), onSuccess: value => ({value})}),
@@ -576,7 +583,7 @@ describe('process diagnostics', () => {
         ...fs,
         readFileString: (path, encoding) =>
           Effect.gen(function* () {
-            if (path.endsWith('.reclaim')) {
+            if (Effect2.pipe(path, EffectString.endsWith('.reclaim'))) {
               removedQuarantine = true;
               yield* fs.remove(path);
             }
@@ -795,11 +802,14 @@ describe('process diagnostics', () => {
         },
       ]),
     ).toBe(
-      [
-        'PID    PPID   ROLE  VERSION  AGE     RSS        OPERATION',
-        '79155  42478  mcp   4.0.3    12h55m  138.2 MiB  mcp-server',
-        '71873  1100   cli   4.0.3    44m23s  78.0 MiB   repair',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'PID    PPID   ROLE  VERSION  AGE     RSS        OPERATION',
+          '79155  42478  mcp   4.0.3    12h55m  138.2 MiB  mcp-server',
+          '71873  1100   cli   4.0.3    44m23s  78.0 MiB   repair',
+        ],
+        '\n',
+      ),
     );
   });
 
@@ -840,12 +850,15 @@ describe('process diagnostics', () => {
         },
       ]),
     ).toBe(
-      [
-        'PID    PPID   ROLE                 VERSION  AGE   RSS        OPERATION',
-        '27543  23265  cli (graph-builder)  4.0.6    5h3m  746.4 MiB  index-repository',
-        '37407  36027  mcp (graph-waiter)   4.0.6    12s   685.0 MiB  repository-lock',
-        '51730  27543  local-model-worker   4.0.6    30s   634.1 MiB  embed-many',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'PID    PPID   ROLE                 VERSION  AGE   RSS        OPERATION',
+          '27543  23265  cli (graph-builder)  4.0.6    5h3m  746.4 MiB  index-repository',
+          '37407  36027  mcp (graph-waiter)   4.0.6    12s   685.0 MiB  repository-lock',
+          '51730  27543  local-model-worker   4.0.6    30s   634.1 MiB  embed-many',
+        ],
+        '\n',
+      ),
     );
   });
 
@@ -884,16 +897,28 @@ describe('process diagnostics', () => {
       ),
     },
     ({processes}) => {
-      const lines = renderProcessDiagnosticsTable(processes).split('\n');
-      const operationColumn = lines[0].indexOf('OPERATION');
-      const roleColumn = lines[0].indexOf('ROLE');
+      const lines = Effect2.pipe(renderProcessDiagnosticsTable(processes), EffectString.split('\n'));
+      const operationColumn = Effect2.pipe(
+        lines[0],
+        EffectString.indexOf('OPERATION'),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      const roleColumn = Effect2.pipe(
+        lines[0],
+        EffectString.indexOf('ROLE'),
+        Effect2.Option.getOrElse(() => -1),
+      );
 
       expect(operationColumn).toBeGreaterThan(0);
       expect(lines).toHaveLength(processes.length + 1);
       for (const [index, process] of processes.entries()) {
-        expect(lines[index + 1].slice(operationColumn)).toBe(process.currentOperation ?? '-');
+        expect(Effect2.pipe(lines[index + 1], EffectString.slice(operationColumn))).toBe(
+          process.currentOperation ?? '-',
+        );
         // A nested activity qualifies the identity it runs under; it never replaces it.
-        expect(lines[index + 1].slice(roleColumn)).toMatch(new RegExp(`^${process.role}(?: \\(|\\s|$)`));
+        expect(Effect2.pipe(lines[index + 1], EffectString.slice(roleColumn))).toMatch(
+          new RegExp(`^${process.role}(?: \\(|\\s|$)`),
+        );
       }
     },
     {fastCheck: {numRuns: 200}},
@@ -1206,7 +1231,11 @@ describe('process diagnostics', () => {
       const countingFileSystem = FileSystem.FileSystem.of({
         ...fileSystem,
         writeFileString: (file, data, options) => {
-          if (file.startsWith(registryRoot) && file.endsWith('.tmp')) registryWrites += 1;
+          if (
+            Effect2.pipe(file, EffectString.startsWith(registryRoot)) &&
+            Effect2.pipe(file, EffectString.endsWith('.tmp'))
+          )
+            registryWrites += 1;
           return fileSystem.writeFileString(file, data, options);
         },
       });
@@ -1278,7 +1307,11 @@ describe('process diagnostics', () => {
           const countingFileSystem = FileSystem.FileSystem.of({
             ...fileSystem,
             writeFileString: (file, data, options) => {
-              if (file.startsWith(registryRoot) && file.endsWith('.tmp')) registryWrites += 1;
+              if (
+                Effect2.pipe(file, EffectString.startsWith(registryRoot)) &&
+                Effect2.pipe(file, EffectString.endsWith('.tmp'))
+              )
+                registryWrites += 1;
               return fileSystem.writeFileString(file, data, options);
             },
           });
@@ -1295,9 +1328,10 @@ describe('process diagnostics', () => {
               {concurrency: 1, discard: true},
             ).pipe(
               Effect.tap(() => {
-                const operationRuns = operations.reduce(
-                  (runs, operation, index) => runs + (index === 0 || operations[index - 1] !== operation ? 1 : 0),
+                const operationRuns = EffectArray.reduce(
+                  operations,
                   0,
+                  (runs, operation, index) => runs + (index === 0 || operations[index - 1] !== operation ? 1 : 0),
                 );
                 return Effect.sync(() => expect(registryWrites).toBe(1 + operationRuns));
               }),

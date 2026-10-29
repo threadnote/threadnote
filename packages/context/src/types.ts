@@ -1,9 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphProvenance, CodeGraphRelation, CodeGraphSpan} from '@threadnote/graph/types';
 import type {AgentToolResponseMeasurement} from '@threadnote/protocol/agent-response';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import type {MemoryAuthority, MemoryTrust} from '@threadnote/memory/document';
 import type {VerifiedProcedureEvidence} from './procedure/selection.js';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CONTEXT_BRIEF_LEGACY_VERSION = 2 as const;
 export const CONTEXT_BRIEF_VERSION = 3 as const;
@@ -36,7 +40,7 @@ export type ContextBriefDetail = (typeof CONTEXT_BRIEF_DETAILS)[number];
 export type ContextBriefResponseFormat = 'dual' | 'agent';
 
 export function isContextBriefMode(value: string): value is ContextBriefMode {
-  return CONTEXT_BRIEF_MODES.some(mode => mode === value);
+  return EffectArray.some(CONTEXT_BRIEF_MODES, mode => mode === value);
 }
 export type ContextBriefFreshness = 'fresh' | 'stale' | 'unknown';
 /** Coverage of retained evidence, never a claim that an eventual answer or patch is correct. */
@@ -802,45 +806,65 @@ function contextBriefResponseFormat(value: unknown): ContextBriefResponseFormat 
 /** Parse exact local Context Brief anchors without silently normalizing caller input. */
 export function parseContextBriefCodeRefs(value: unknown): readonly string[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) throw invalid('codeRefs must be an array.');
+  if (!EffectArray.isArray(value)) throw invalid('codeRefs must be an array.');
   if (value.length > CONTEXT_BRIEF_MAXIMUM_CODE_REFS) {
     throw invalid(`codeRefs may contain at most ${CONTEXT_BRIEF_MAXIMUM_CODE_REFS} entries.`);
   }
-  const refs = value.map((ref, index) => parseContextBriefCodeRef(ref, index));
+  const refs = EffectArray.map(value, (ref, index) => parseContextBriefCodeRef(ref, index));
   return [...new Set(refs)];
 }
 
 function parseContextBriefCodeRef(value: unknown, index: number): string {
   const label = `codeRefs[${index}]`;
   if (typeof value !== 'string') throw invalid(`${label} must be text.`);
-  if (value.length === 0 || value.trim() !== value) {
+  if (value.length === 0 || Effect.pipe(value, EffectString.trim) !== value) {
     throw invalid(`${label} must be an exact canonical code reference without surrounding whitespace.`);
   }
   if (UTF8.encode(value).byteLength > 4_096) throw invalid(`${label} exceeds 4096 UTF-8 bytes.`);
-  if ([...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) {
+  if (
+    EffectArray.some(
+      [...value],
+      character =>
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) < 32 ||
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) === 127,
+    )
+  ) {
     throw invalid(`${label} contains control characters.`);
   }
 
-  const lower = value.toLowerCase();
-  if (lower.startsWith('cgr_')) {
+  const lower = Effect.pipe(value, EffectString.toLowerCase);
+  if (Effect.pipe(lower, EffectString.startsWith('cgr_'))) {
     throw invalid(
       `${label} uses a cgr_ handle, which Context Brief does not support; use a canonical graph-indexed repository-relative path or exact cgs_<32 lowercase hex>.`,
     );
   }
-  if (lower.startsWith('cgs_')) {
+  if (Effect.pipe(lower, EffectString.startsWith('cgs_'))) {
     if (!LOCAL_CONTEXT_BRIEF_SYMBOL_REF.test(value)) {
       throw invalid(`${label} must use the exact cgs_<32 lowercase hex> form.`);
     }
     return value;
   }
 
-  if (value.startsWith('/') || WINDOWS_DRIVE_PATH.test(value)) {
+  if (Effect.pipe(value, EffectString.startsWith('/')) || WINDOWS_DRIVE_PATH.test(value)) {
     throw invalid(`${label} must be a repository-relative path, not an absolute or drive-qualified path.`);
   }
-  if (value.includes('\\')) {
+  if (Effect.pipe(value, EffectString.includes('\\'))) {
     throw invalid(`${label} must use canonical POSIX separators; backslashes are not supported.`);
   }
-  if (value.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
+  if (
+    EffectArray.some(
+      Effect.pipe(value, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
+  ) {
     throw invalid(`${label} must be canonical with no empty, ".", or ".." path segments.`);
   }
   return value;
@@ -851,7 +875,7 @@ function parseScope(value: unknown): ContextBriefScopeV1 {
   if (object.kind === 'repository') {
     exactKeys(object, REPOSITORY_SCOPE_KEYS, 'repository scope');
     const callerCwd = boundedText(object.callerCwd, 'callerCwd', 4_096, false);
-    if (!callerCwd.startsWith('/') && !/^[A-Za-z]:[\\/]/u.test(callerCwd)) {
+    if (!Effect.pipe(callerCwd, EffectString.startsWith('/')) && !/^[A-Za-z]:[\\/]/u.test(callerCwd)) {
       throw invalid('callerCwd must be an absolute path.');
     }
     return {
@@ -882,7 +906,7 @@ function contextBriefMode(value: unknown): ContextBriefMode {
   ) {
     return value;
   }
-  throw invalid(`mode must be one of ${CONTEXT_BRIEF_MODES.join(', ')}.`);
+  throw invalid(`mode must be one of ${EffectArray.join(CONTEXT_BRIEF_MODES, ', ')}.`);
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -891,13 +915,15 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>, label: string): void {
-  const unknown = Object.keys(value).filter(key => !allowed.has(key));
+  const unknown = EffectArray.filter(EffectRecord.keys(value), key => !allowed.has(key));
   if (unknown.length > 0) throw invalid(`${label} has unsupported field ${JSON.stringify(unknown.sort()[0])}.`);
 }
 
 function boundedText(value: unknown, label: string, maximumBytes: number, normalize = true): string {
   if (typeof value !== 'string') throw invalid(`${label} must be a string.`);
-  const text = normalize ? value.normalize('NFKC').replace(/\s+/gu, ' ').trim() : value.trim();
+  const text = normalize
+    ? Effect.pipe(value, EffectString.normalize('NFKC'), EffectString.replace(/\s+/gu, ' '), EffectString.trim)
+    : Effect.pipe(value, EffectString.trim);
   if (!text) throw invalid(`${label} must be non-empty.`);
   if (UTF8.encode(text).byteLength > maximumBytes) {
     throw invalid(`${label} exceeds ${maximumBytes} UTF-8 bytes.`);
@@ -907,8 +933,13 @@ function boundedText(value: unknown, label: string, maximumBytes: number, normal
 }
 
 function hasUnsupportedControlCharacter(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code <= 8 || code === 11 || code === 12 || (code >= 14 && code <= 31) || code === 127;
   });
 }

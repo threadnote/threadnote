@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Console, Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
@@ -16,11 +17,11 @@ export function captureIntegrationConsole<A, E, R>(effect: Effect.Effect<A, E, R
   return Console.consoleWith(parent => {
     const lines: string[] = [];
     const append = (...args: readonly unknown[]): void => {
-      lines.push(args.map(String).join(' '));
+      lines.push(EffectArray.join(EffectArray.map(args, String), ' '));
     };
     return effect.pipe(
       Effect.provideService(Console.Console, {...parent, error: append, log: append, warn: append}),
-      Effect.map(value => ({output: lines.join('\n'), value})),
+      Effect.map(value => ({output: EffectArray.join(lines, '\n'), value})),
     );
   });
 }

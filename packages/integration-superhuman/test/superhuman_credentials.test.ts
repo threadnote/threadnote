@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Redacted, Result, Schema} from 'effect';
 import {describe, expect} from 'vitest';
@@ -11,6 +12,8 @@ import {
   superhumanCredentialConfigured,
 } from '../src/credentials.js';
 import {provideSuperhumanTestLayer} from './layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const source: SuperhumanSourceConfig = {
   type: 'superhuman',
@@ -57,7 +60,7 @@ describe('protected Superhuman credentials', () => {
         yield* storeExternalCredential(config, '0', Redacted.make('synthetic-github'), 'github');
         const candidates = [
           {type: 'github', id: '0', credentialEnv: 'UNUSED', credentialStorage: 'local' as const},
-          ...selected.map(id => ({
+          ...EffectArray.map(selected, id => ({
             type: 'superhuman',
             id,
             credentialEnv: 'UNUSED',
@@ -222,7 +225,7 @@ describe('protected Superhuman credentials', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const agentContextHome = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-credential-bounds-'});
-      for (const value of ['', 'token\n', ' token', 'x'.repeat(4097), '\uD800']) {
+      for (const value of ['', 'token\n', ' token', Effect2.pipe('x', EffectString.repeat(4097)), '\uD800']) {
         const failed = yield* storeSuperhumanCredential({agentContextHome}, source.id, Redacted.make(value)).pipe(
           Effect.result,
         );
@@ -239,7 +242,11 @@ describe('protected Superhuman credentials', () => {
       const config = {agentContextHome};
       yield* storeSuperhumanCredential(config, source.id, Redacted.make('synthetic-local'));
       const filename = `${agentContextHome}/threadnote/credentials/superhuman/docs`;
-      for (const bytes of [new TextEncoder().encode('x'.repeat(4097)), new Uint8Array([0xff]), new Uint8Array()]) {
+      for (const bytes of [
+        new TextEncoder().encode(Effect2.pipe('x', EffectString.repeat(4097))),
+        new Uint8Array([0xff]),
+        new Uint8Array(),
+      ]) {
         yield* fs.writeFile(filename, bytes, {mode: 0o600});
         expect(yield* superhumanCredentialConfigured(config, source)).toBe(false);
         expect(Result.isFailure(yield* resolveSuperhumanCredential(config, source).pipe(Effect.result))).toBe(true);

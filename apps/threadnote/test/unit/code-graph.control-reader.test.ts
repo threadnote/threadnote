@@ -27,10 +27,14 @@ import {graphShareFrontierDiscoveryTag} from '@threadnote/graph/sharing/namespac
 import {defaultGraphShareProfile, graphShareProfileDigest} from '@threadnote/graph/sharing/profile';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const ISSUER = 'https://identity.example.test/';
 const AUDIENCE = 'https://graph.example.test';
-const REPOSITORY = 'a'.repeat(64);
+const REPOSITORY = Effect2.pipe('a', EffectString.repeat(64));
 
 const fixture = Effect.fn(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -61,21 +65,21 @@ const fixture = Effect.fn(function* () {
     branch: 'refs/heads/main',
     checkpoint: {
       manifestDigest: sha256Digest('checkpoint'),
-      snapshotId: `cgsn_${'a'.repeat(40)}`,
-      sourceCommit: 'b'.repeat(40),
+      snapshotId: `cgsn_${Effect2.pipe('a', EffectString.repeat(40))}`,
+      sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
     },
     deltas: [],
     generation: 1,
-    graphAbi: 'c'.repeat(64),
-    graphContentId: `cgc_${'d'.repeat(40)}`,
+    graphAbi: Effect2.pipe('c', EffectString.repeat(64)),
+    graphContentId: `cgc_${Effect2.pipe('d', EffectString.repeat(40))}`,
     logicalGraphDigest: sha256Digest('logical'),
     previousManifestDigest: null,
     profileDigest,
     publisherFence: 1,
     repositoryId: REPOSITORY,
     schemaVersion: 1,
-    snapshotId: `cgsn_${'a'.repeat(40)}`,
-    sourceCommit: 'b'.repeat(40),
+    snapshotId: `cgsn_${Effect2.pipe('a', EffectString.repeat(40))}`,
+    sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
   };
   const pointerFile = graphSharingFrontierPointerPath(
     path,
@@ -149,7 +153,7 @@ const fixture = Effect.fn(function* () {
       Effect.provideService(Console.Console, {
         ...inherited,
         log: (...values: readonly unknown[]) => {
-          audits.push(...values.map(String));
+          audits.push(...EffectArray.map(values, String));
         },
       }),
     ),
@@ -207,7 +211,7 @@ describe('authenticated metadata-only graph reads', () => {
     TestClock.withLive(
       Effect.gen(function* () {
         const f = yield* fixture();
-        const nextHead = 'e'.repeat(40);
+        const nextHead = Effect2.pipe('e', EffectString.repeat(40));
         expect((yield* f.request()).body).toMatchObject({
           generation: 1,
           observedHead: null,
@@ -233,7 +237,7 @@ describe('authenticated metadata-only graph reads', () => {
         yield* Ref.update(f.coordinatorStateRef, state => ({
           ...state,
           machine: observeCanonicalHead(state.machine, {
-            commit: 'f'.repeat(40),
+            commit: Effect2.pipe('f', EffectString.repeat(40)),
             isDescendantOfPublished: false,
             nowSeconds: 101,
           }),
@@ -246,7 +250,7 @@ describe('authenticated metadata-only graph reads', () => {
         expect((yield* f.request('/v1/status', '')).status).toBe(401);
         yield* Ref.update(f.coordinatorStateRef, state => ({
           ...state,
-          machine: {...state.machine, publishedFrontier: 'f'.repeat(40)},
+          machine: {...state.machine, publishedFrontier: Effect2.pipe('f', EffectString.repeat(40))},
         }));
         expect((yield* f.request()).body).toMatchObject({
           observedHead: null,
@@ -273,7 +277,10 @@ describe('authenticated metadata-only graph reads', () => {
             repositoryId: REPOSITORY,
           });
           expect(status.headers['cache-control']).toBe('no-store');
-          const branchHash = graphShareFrontierDiscoveryTag(REPOSITORY, 'refs/heads/main').slice('tn-frontier-'.length);
+          const branchHash = Effect2.pipe(
+            graphShareFrontierDiscoveryTag(REPOSITORY, 'refs/heads/main'),
+            EffectString.slice('tn-frontier-'.length),
+          );
           expect((yield* f.request(`/v1/frontiers/${branchHash}`)).body).toMatchObject({
             envelopeDigest: f.pointer.envelopeDigest,
             manifestDigest: f.pointer.manifestDigest,
@@ -284,9 +291,9 @@ describe('authenticated metadata-only graph reads', () => {
             protocolVersions: ['v1'],
           });
           for (const route of [
-            '/v1/cas/sha256/' + 'a'.repeat(64),
-            '/v1/tags/tn-action-' + 'a'.repeat(64),
-            '/v1/work/' + 'a'.repeat(40),
+            '/v1/cas/sha256/' + Effect2.pipe('a', EffectString.repeat(64)),
+            '/v1/tags/tn-action-' + Effect2.pipe('a', EffectString.repeat(64)),
+            '/v1/work/' + Effect2.pipe('a', EffectString.repeat(40)),
           ])
             expect((yield* f.request(route)).status).toBe(404);
           for (const route of ['/v1/enroll', '/v1/results', '/v1/claims', '/v1/assembly-leases'])
@@ -295,7 +302,7 @@ describe('authenticated metadata-only graph reads', () => {
           expect(f.audits.length).toBeGreaterThan(0);
           for (const event of f.audits) {
             const parsed = JSON.parse(event);
-            expect(Object.keys(parsed).sort()).toEqual(
+            expect(EffectRecord.keys(parsed).sort()).toEqual(
               parsed.principalId === undefined
                 ? ['event', 'operation', 'status']
                 : ['event', 'operation', 'principalId', 'status'],
@@ -332,7 +339,10 @@ describe('authenticated metadata-only graph reads', () => {
             .status,
         ).toBe(403);
         expect(
-          (yield* f.request('/v1/enroll', token, {}, 'POST', {...body, idempotencyKey: 'x'.repeat(65_536)})).status,
+          (yield* f.request('/v1/enroll', token, {}, 'POST', {
+            ...body,
+            idempotencyKey: Effect2.pipe('x', EffectString.repeat(65_536)),
+          })).status,
         ).toBe(413);
         const replay = yield* f.request('/v1/enroll', token, {}, 'POST', body);
         expect(replay.status).toBe(200);
@@ -362,7 +372,7 @@ describe('authenticated metadata-only graph reads', () => {
         for (const token of [
           '',
           'private-malformed-token',
-          yield* f.token({iss: ISSUER.slice(0, -1)}),
+          yield* f.token({iss: Effect2.pipe(ISSUER, EffectString.slice(0, -1))}),
           yield* f.token({aud: 'https://other.example.test'}),
         ]) {
           const result = yield* f.request('/v1/status', token);
@@ -373,7 +383,7 @@ describe('authenticated metadata-only graph reads', () => {
         for (const token of [yield* f.token({scope: 'memory:admin'}), yield* f.token({sub: 'other-reader'})])
           expect((yield* f.request('/v1/status', token)).status).toBe(403);
         for (const headers of [
-          {'x-threadnote-repository-id': 'b'.repeat(64)},
+          {'x-threadnote-repository-id': Effect2.pipe('b', EffectString.repeat(64))},
           {'x-threadnote-profile-digest': sha256Digest('wrong')},
         ] as Record<string, string>[])
           expect((yield* f.request('/v1/status', f.validToken, headers)).status).toBe(403);
@@ -407,7 +417,7 @@ describe('authenticated metadata-only graph reads', () => {
         const f = yield* fixture();
         for (const manifest of [
           {...f.manifest, profileDigest: sha256Digest('other')},
-          {...f.manifest, repositoryId: 'b'.repeat(64)},
+          {...f.manifest, repositoryId: Effect2.pipe('b', EffectString.repeat(64))},
           {...f.manifest, branch: 'refs/heads/other'},
         ]) {
           yield* f.publish(manifest);
@@ -424,7 +434,7 @@ describe('authenticated metadata-only graph reads', () => {
       const fs = yield* FileSystem.FileSystem;
       const directory = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-policy-bound-'});
       const file = `${directory}/policy.json`;
-      yield* fs.writeFileString(file, ' '.repeat(128 * 1024 + 1));
+      yield* fs.writeFileString(file, Effect2.pipe(' ', EffectString.repeat(128 * 1024 + 1)));
       expect((yield* readGraphControlPolicy(file).pipe(Effect.result))._tag).toBe('Failure');
     }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, BunHttpClient.layer, TestSystemInfoLayer))),
   );
@@ -435,7 +445,11 @@ describe('authenticated metadata-only graph reads', () => {
         const f = yield* fixture();
         const envelopeFile = yield* casBlobPath(f.options.casRoot, f.pointer.envelopeDigest);
         const envelope = JSON.parse(yield* f.fs.readFileString(envelopeFile));
-        for (const value of ['{', JSON.stringify({privateInvalidField: f.home}), ' '.repeat(64 * 1024 + 1)]) {
+        for (const value of [
+          '{',
+          JSON.stringify({privateInvalidField: f.home}),
+          Effect2.pipe(' ', EffectString.repeat(64 * 1024 + 1)),
+        ]) {
           const manifestDigest = yield* putCasBytes(f.options.casRoot, new TextEncoder().encode(value));
           yield* writePrivateJsonFile(f.pointerFile, {...f.pointer, manifestDigest});
           const response = yield* f.request();
@@ -444,7 +458,9 @@ describe('authenticated metadata-only graph reads', () => {
         }
         const envelopeDigest = yield* putCasBytes(
           f.options.casRoot,
-          new TextEncoder().encode(JSON.stringify({...envelope, signature: '0'.repeat(128)})),
+          new TextEncoder().encode(
+            JSON.stringify({...envelope, signature: Effect2.pipe('0', EffectString.repeat(128))}),
+          ),
         );
         yield* writePrivateJsonFile(f.pointerFile, {...f.pointer, envelopeDigest});
         expect((yield* f.request()).body).toEqual({error: 'unavailable'});

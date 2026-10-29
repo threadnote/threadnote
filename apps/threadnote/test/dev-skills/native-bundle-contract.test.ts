@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {generationRoot, renderEntrypoints} from '../../src/dev_skills/inspection.js';
 import {parseReceipt, receiptPath} from '../../src/dev_skills/registry.js';
 import {it as effectIt} from '@effect/vitest';
@@ -24,6 +25,9 @@ import {
 import {devSkillsCompatibility} from '../../src/dev_skills/manifest.js';
 import {devSkillsReleaseFixture, devSkillsTestLayer, fixture, snapshot} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 it('rejects every missing native feature and unknown capability field', () => {
   const complete = {
@@ -37,8 +41,10 @@ it('rejects every missing native feature and unknown capability field', () => {
   };
   expect(parseCapabilities(complete)).toEqual(complete);
   fc.assert(
-    fc.property(fc.constantFrom(...Object.keys(nativeRequirements)), key => {
-      const features = Object.fromEntries(Object.entries(nativeRequirements).filter(([name]) => name !== key));
+    fc.property(fc.constantFrom(...EffectRecord.keys(nativeRequirements)), key => {
+      const features = EffectRecord.fromEntries(
+        EffectArray.filter(EffectRecord.toEntries(nativeRequirements), ([name]) => name !== key),
+      );
       expect(() => parseCapabilities({...complete, nativeFeatures: features})).toThrow();
     }),
     {numRuns: 20},
@@ -75,7 +81,9 @@ effectIt.effect('ships only native payload and matches the builder canonical con
       expect(() => parseDevSkillsManifest(malformed)).toThrow();
 
     expect(bundle.manifest.prerequisites).not.toHaveProperty('python');
-    expect(Object.keys(bundle.files).some(file => file.endsWith('.py'))).toBe(false);
+    expect(
+      EffectArray.some(EffectRecord.keys(bundle.files), file => Effect2.pipe(file, EffectString.endsWith('.py'))),
+    ).toBe(false);
     expect(yield* buildDevSkillsManifest(process.cwd(), '5.3.0-beta.7')).toEqual(bundle.manifest);
     expect(installedSummary(bundle.manifest)).toMatchObject({manifestSchema: 2, nativeRequirements});
   }).pipe(provideTestLayer(devSkillsTestLayer)),
@@ -105,7 +113,7 @@ effectIt.effect('rejects incomplete same-version native candidates before any wr
   Effect.gen(function* () {
     const f = yield* fixture();
     const release = yield* devSkillsReleaseFixture(f, '5.3.0-beta.4');
-    for (const key of Object.keys(nativeRequirements)) {
+    for (const key of EffectRecord.keys(nativeRequirements)) {
       const capabilities = {...release.capabilities, nativeFeatures: {...nativeRequirements, [key]: 2}};
       const before = yield* snapshot(f.root);
       const preview = yield* previewDevSkillsRefresh(f.config, {...release, capabilities}).pipe(f.run);
@@ -149,7 +157,7 @@ effectIt.effect('updates recognized v1 ownership and preserves edited legacy pay
       generationRoot(f.path, installed.target.skillRoot, bundle.manifest.digest),
       generationRoot(f.path, installed.target.skillRoot, manifest.digest),
     );
-    for (const [relative, content] of Object.entries(entrypoints))
+    for (const [relative, content] of EffectRecord.toEntries(entrypoints))
       yield* f.fs.writeFileString(f.path.join(installed.target.skillRoot, relative), content);
     yield* f.fs.writeFileString(
       ownedPath,
@@ -160,7 +168,7 @@ effectIt.effect('updates recognized v1 ownership and preserves edited legacy pay
     expect(status.installationState).toBe('incompatible');
     expect(status.installed).toBeDefined();
     expect(status.installed).not.toHaveProperty('manifestSchema');
-    expect(status.issues.map(issue => issue.code)).toEqual(['legacy-workflow-update-required']);
+    expect(EffectArray.map(status.issues, issue => issue.code)).toEqual(['legacy-workflow-update-required']);
     expect(status.installedDigest).toBe(manifest.digest);
     for (const action of ['update', 'remove'] as const) {
       const preview = yield* f.run(previewDevSkills(f.config, action, selector));
@@ -170,7 +178,9 @@ effectIt.effect('updates recognized v1 ownership and preserves edited legacy pay
     const update = yield* f.run(previewDevSkills(f.config, 'update', selector));
     const untouched = yield* snapshot(f.root);
     expect(
-      yield* f.run(applyDevSkills(f.config, 'update', selector, {expectedDigest: '0'.repeat(64)})).pipe(Effect.result),
+      yield* f
+        .run(applyDevSkills(f.config, 'update', selector, {expectedDigest: Effect2.pipe('0', EffectString.repeat(64))}))
+        .pipe(Effect.result),
     ).toMatchObject({_tag: 'Failure'});
     expect(yield* snapshot(f.root)).toEqual(untouched);
     expect(

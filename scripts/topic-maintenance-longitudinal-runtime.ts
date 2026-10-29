@@ -4,6 +4,12 @@ import {createReadStream} from 'node:fs';
 import {chmod, copyFile, lstat, mkdir, readdir, readFile, realpath, stat} from 'node:fs/promises';
 import {join, relative, resolve} from 'node:path';
 import {topicStudyEnvironment} from './topic-maintenance-longitudinal-process.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+function errorHasCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === code;
+}
 
 export async function topicStudyFileHash(path: string): Promise<string> {
   const hash = createHash('sha256');
@@ -23,8 +29,8 @@ async function git(root: string, args: readonly string[]) {
     new Response(child.stderr).text(),
     child.exited,
   ]);
-  if (code !== 0) throw new Error(`Source Git provenance failed: ${stderr.slice(0, 512)}`);
-  return stdout.trim();
+  if (code !== 0) throw new Error(`Source Git provenance failed: ${Effect.pipe(stderr, EffectString.slice(0, 512))}`);
+  return Effect.pipe(stdout, EffectString.trim);
 }
 
 export interface TopicStudyRuntimeFingerprint {
@@ -164,7 +170,7 @@ export async function assertTopicStudyModel(model: TopicStudyVerifiedModel, hash
 
 export async function assertTopicStudySourceAdapter(root: string, adapter: string) {
   const path = relative(root, adapter);
-  if (!path || path.startsWith('..') || path.startsWith('/'))
+  if (!path || Effect.pipe(path, EffectString.startsWith('..')) || Effect.pipe(path, EffectString.startsWith('/')))
     throw new Error('Adapter must belong to the pinned source checkout.');
   await git(root, ['ls-files', '--error-unmatch', '--', path]);
 }
@@ -178,9 +184,9 @@ export async function applyTopicStudySourceChanges(
   for (const change of changes) {
     if (
       !/^[a-zA-Z0-9._/-]+$/u.test(change.path) ||
-      change.path.startsWith('/') ||
-      change.path.split('/').includes('..') ||
-      change.path.split('/').includes('.git')
+      Effect.pipe(change.path, EffectString.startsWith('/')) ||
+      Effect.pipe(change.path, EffectString.split('/')).includes('..') ||
+      Effect.pipe(change.path, EffectString.split('/')).includes('.git')
     )
       throw new Error('Unsafe authored source transition.');
     const target = join(repository, change.path);
@@ -188,7 +194,7 @@ export async function applyTopicStudySourceChanges(
     try {
       current = await readFile(target, 'utf8');
     } catch (error) {
-      if ((error as {code?: string}).code !== 'ENOENT') throw error;
+      if (!errorHasCode(error, 'ENOENT')) throw error;
     }
     if (current === change.content) continue;
     changed = true;

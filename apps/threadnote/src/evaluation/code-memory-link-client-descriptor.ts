@@ -1,5 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_CLIENT_DESCRIPTOR_VERSION = 2 as const;
 
@@ -28,14 +32,15 @@ const HASH = /^[0-9a-f]{64}$/u;
 const ROLE = /^[a-z][a-z0-9-]{0,63}$/u;
 
 export function codeMemoryLinkClientArgumentVectorHash(arguments_: readonly string[]): string {
-  if (!Array.isArray(arguments_) || arguments_.some(value => typeof value !== 'string')) {
+  if (!EffectArray.isArray(arguments_) || EffectArray.some(arguments_, value => typeof value !== 'string')) {
     invalid('client argument vector must contain only strings');
   }
   return digest(arguments_);
 }
 
 export function codeMemoryLinkClientPathDigest(path: string): string {
-  if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) invalid('client artifact path is invalid');
+  if (typeof path !== 'string' || path.length === 0 || Effect.pipe(path, EffectString.includes('\0')))
+    invalid('client artifact path is invalid');
   return digest({path});
 }
 
@@ -54,9 +59,11 @@ export function assertCodeMemoryLinkClientImplementationBinding(input: {
   readonly roster: readonly {readonly clientId: string; readonly implementationDescriptorHash: string}[];
 }): string {
   const descriptorHash = codeMemoryLinkClientImplementationDescriptorHash(input.descriptor);
-  const rosterHashes = input.roster.map(entry => matchingHash(entry.implementationDescriptorHash, 'roster descriptor'));
+  const rosterHashes = EffectArray.map(input.roster, entry =>
+    matchingHash(entry.implementationDescriptorHash, 'roster descriptor'),
+  );
   if (new Set(rosterHashes).size !== rosterHashes.length) invalid('roster descriptor hashes must be unique');
-  const matchingClients = input.roster.filter(entry => entry.clientId === input.clientId);
+  const matchingClients = EffectArray.filter(input.roster, entry => entry.clientId === input.clientId);
   if (matchingClients.length !== 1) invalid('client id must identify exactly one roster entry');
   if (matchingClients[0].implementationDescriptorHash !== descriptorHash) {
     invalid('invoked implementation descriptor does not match the selected client id');
@@ -81,8 +88,8 @@ export function parseCodeMemoryLinkClientImplementationDescriptorV1(
     'expectedClientProjectionHash',
     'version',
   ].sort();
-  const keys = Object.keys(descriptor).sort();
-  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+  const keys = EffectRecord.keys(descriptor).sort();
+  if (keys.length !== expected.length || EffectArray.some(keys, (key, index) => key !== expected[index])) {
     invalid('client descriptor has unsupported or missing fields');
   }
   if (descriptor.version !== CODE_MEMORY_LINK_CLIENT_DESCRIPTOR_VERSION) {
@@ -116,12 +123,12 @@ export function parseCodeMemoryLinkClientImplementationDescriptorV1(
 }
 
 function bindings(value: unknown, label: string): readonly CodeMemoryLinkClientArtifactBindingV2[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 64) {
+  if (!EffectArray.isArray(value) || value.length === 0 || value.length > 64) {
     invalid(`client ${label} bindings must be a bounded non-empty array`);
   }
-  const parsed = value.map((entry, index) => {
+  const parsed = EffectArray.map(value, (entry, index) => {
     const binding = record(entry);
-    const keys = Object.keys(binding).sort();
+    const keys = EffectRecord.keys(binding).sort();
     if (keys.length !== 3 || keys[0] !== 'pathDigest' || keys[1] !== 'role' || keys[2] !== 'sha256') {
       invalid(`client ${label} binding ${index + 1} has unsupported or missing fields`);
     }
@@ -131,10 +138,10 @@ function bindings(value: unknown, label: string): readonly CodeMemoryLinkClientA
       sha256: matchingHash(binding.sha256, `${label} binding`),
     };
   });
-  if (parsed.some((entry, index) => index > 0 && parsed[index - 1].role >= entry.role)) {
+  if (EffectArray.some(parsed, (entry, index) => index > 0 && parsed[index - 1].role >= entry.role)) {
     invalid(`client ${label} bindings must have unique roles in canonical order`);
   }
-  if (new Set(parsed.map(entry => entry.pathDigest)).size !== parsed.length) {
+  if (new Set(EffectArray.map(parsed, entry => entry.pathDigest)).size !== parsed.length) {
     invalid(`client ${label} binding paths must be unique`);
   }
   return parsed;
@@ -144,7 +151,7 @@ function exactlyOneRole(
   bindings: readonly CodeMemoryLinkClientArtifactBindingV2[],
   role: string,
 ): CodeMemoryLinkClientArtifactBindingV2 {
-  const matching = bindings.filter(binding => binding.role === role);
+  const matching = EffectArray.filter(bindings, binding => binding.role === role);
   if (matching.length !== 1) invalid(`client descriptor requires exactly one ${role} binding`);
   return matching[0];
 }

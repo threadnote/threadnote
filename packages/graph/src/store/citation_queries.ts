@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -21,6 +22,8 @@ import type {CodeGraphInventoryFile} from '../types.js';
 import {CodeGraphStoreError} from '../types.js';
 import type {CodeGraphSqlQueryStatement} from './visualization_sql.js';
 import {selectSymbolsByIdsWithSql} from './queries.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface EffectiveFileRow {
   readonly content_hash: string;
@@ -301,11 +304,14 @@ export const selectEffectiveSnapshotCitationEvidence = Effect.fn('codeGraph.sele
     );
     const eagerPaths = yield* validateCitationPaths(request.paths ?? []);
     const paths = yield* validateCitationPaths([
-      ...new Set([...eagerPaths, ...fileRelocationFallbacks.map(fallback => fallback.path)]),
+      ...new Set([...eagerPaths, ...EffectArray.map(fileRelocationFallbacks, fallback => fallback.path)]),
     ]);
     const eagerContentHashes = yield* validateCitationContentHashes(request.contentHashes ?? []);
     yield* validateCitationContentHashes([
-      ...new Set([...eagerContentHashes, ...fileRelocationFallbacks.map(fallback => fallback.contentHash)]),
+      ...new Set([
+        ...eagerContentHashes,
+        ...EffectArray.map(fileRelocationFallbacks, fallback => fallback.contentHash),
+      ]),
     ]);
     const symbolIds = yield* validateCitationSymbolIds(request.symbolIds ?? []);
     const semanticLocators = yield* validateSemanticLocators(request.semanticLocators ?? []);
@@ -344,7 +350,7 @@ export const selectEffectiveSnapshotCitationEvidence = Effect.fn('codeGraph.sele
     const contentHashes = selectCodeGraphCitationContentHashTargets(
       eagerContentHashes,
       fileRelocationFallbacks,
-      new Set(pathRows.flatMap(row => (row.path === null ? [] : [row.requested_path]))),
+      new Set(EffectArray.flatMap(pathRows, row => (row.path === null ? [] : [row.requested_path]))),
     );
     const hashRows =
       contentHashes.length === 0
@@ -377,7 +383,7 @@ export const selectEffectiveSnapshotCitationEvidence = Effect.fn('codeGraph.sele
       fileInventoryCoverage,
       filesByContentHashes: fileHashMatchesFromRows(contentHashes, hashRows, limitPerContentHash, logicalSource),
       filesByPaths: filePathObservationsFromRows(pathRows, logicalSource),
-      symbolsByIds: symbolRows.map(symbolFromRow),
+      symbolsByIds: EffectArray.map(symbolRows, symbolFromRow),
       symbolsBySemanticLocators: symbolLocatorMatchesFromRows(semanticLocators, semanticRows, limitPerSemanticLocator),
     } satisfies CodeGraphEffectiveSnapshotCitationEvidence;
   },
@@ -387,10 +393,30 @@ function filePathObservationsFromRows(
   rows: readonly EffectiveFilePathRow[],
   logicalSource?: CodeGraphInventoryFile['source'],
 ): readonly CodeGraphEffectiveFilePathObservation[] {
-  return rows.map(row => ({
-    ...(row.path === null ? {} : {file: inventoryFileFromRow(row as EffectiveFileRow, logicalSource)}),
-    path: row.requested_path,
-  }));
+  return EffectArray.map(rows, row => {
+    const fileRow =
+      row.path !== null &&
+      row.content_hash !== null &&
+      row.language !== null &&
+      row.mode !== null &&
+      row.size !== null &&
+      row.source !== null
+        ? {
+            content_hash: row.content_hash,
+            language: row.language,
+            mode: row.mode,
+            path: row.path,
+            raw_content_hash: row.raw_content_hash,
+            request_index: row.request_index,
+            size: row.size,
+            source: row.source,
+          }
+        : undefined;
+    return {
+      ...(fileRow === undefined ? {} : {file: inventoryFileFromRow(fileRow, logicalSource)}),
+      path: row.requested_path,
+    };
+  });
 }
 
 function fileHashMatchesFromRows(
@@ -399,7 +425,7 @@ function fileHashMatchesFromRows(
   limitPerHash: number,
   logicalSource?: CodeGraphInventoryFile['source'],
 ): readonly CodeGraphEffectiveFileHashMatches[] {
-  const pages = contentHashes.map(contentHash => ({
+  const pages = EffectArray.map(contentHashes, contentHash => ({
     contentHash,
     files: [] as CodeGraphInventoryFile[],
     truncated: false,
@@ -418,7 +444,7 @@ function symbolLocatorMatchesFromRows(
   rows: readonly EffectiveSemanticSymbolRow[],
   limitPerLocator: number,
 ): readonly CodeGraphEffectiveSymbolLocatorMatches[] {
-  const pages = locators.map(locator => ({
+  const pages = EffectArray.map(locators, locator => ({
     locator,
     symbols: [] as ReturnType<typeof symbolFromRow>[],
     truncated: false,
@@ -494,10 +520,13 @@ function validCitationPath(path: unknown): path is string {
     typeof path === 'string' &&
     path.length > 0 &&
     path.length <= 4_096 &&
-    !path.includes('\0') &&
-    !path.includes('\\') &&
-    !path.startsWith('/') &&
-    path.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..')
+    !Effect2.pipe(path, EffectString.includes('\0')) &&
+    !Effect2.pipe(path, EffectString.includes('\\')) &&
+    !Effect2.pipe(path, EffectString.startsWith('/')) &&
+    EffectArray.every(
+      Effect2.pipe(path, EffectString.split('/')),
+      segment => segment.length > 0 && segment !== '.' && segment !== '..',
+    )
   );
 }
 
@@ -510,7 +539,10 @@ function validateCitationSymbolIds(symbolIds: readonly string[]) {
     symbolIds,
     symbolId => symbolId,
     symbolId =>
-      typeof symbolId === 'string' && symbolId.length > 0 && symbolId.length <= 512 && !symbolId.includes('\0'),
+      typeof symbolId === 'string' &&
+      symbolId.length > 0 &&
+      symbolId.length <= 512 &&
+      !Effect2.pipe(symbolId, EffectString.includes('\0')),
     'code graph symbol ID',
   );
 }
@@ -532,7 +564,12 @@ function validateSemanticLocators(locators: readonly CodeGraphSymbolSemanticLoca
 }
 
 function validLocatorField(value: unknown, maximumBytes: number): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= maximumBytes && !value.includes('\0');
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= maximumBytes &&
+    !Effect2.pipe(value, EffectString.includes('\0'))
+  );
 }
 
 function validateUniqueTargets<T>(

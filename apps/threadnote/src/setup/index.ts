@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   setupWorkflowSelector,
   ensureSetupWorkflows,
@@ -32,6 +33,8 @@ import {createSetupPlan, renderSetupPlan} from './planner.js';
 import {withSetupMutationLock} from './lock.js';
 import {productionSetupDependencies, resolveSetupRuntimeConfig, setupRepositorySourceHash} from './runtime.js';
 import {isPersonalThreadnoteHome} from '../mcp/install.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {SetupOperationError} from './contract.js';
 
@@ -181,7 +184,7 @@ export const runSetupWith = Effect.fn('setup.runWith')(function* <R>(
     dependencies.workflowSetup &&
     previous &&
     !['rolled-back', 'rolling-back'].includes(previous.receipt.status) &&
-    !previous.receipt.operations.some(operation => operation.kind === 'dev-skills.ensure');
+    !EffectArray.some(previous.receipt.operations, operation => operation.kind === 'dev-skills.ensure');
   const selector = setupWorkflowSelector(adapter.catalog.id, scope, projectRoot);
   const identity = dependencies.workflowSetup
     ? yield* workflowSetupIdentity(config, selector, receiptId, options.noDevSkills === true)
@@ -202,7 +205,7 @@ export const runSetupWith = Effect.fn('setup.runWith')(function* <R>(
       ...plan,
       planHash: previous.receipt.planHash,
       threadnoteVersion: previous.receipt.threadnoteVersion,
-      operations: previous.receipt.operations.map(({id, kind, inputHash, reversible}) => ({
+      operations: EffectArray.map(previous.receipt.operations, ({id, kind, inputHash, reversible}) => ({
         id,
         kind,
         inputHash,
@@ -320,12 +323,14 @@ const applySetupUndo = Effect.fn('setup.applyUndo')(function* <R>(
         });
   if (read.receipt.status !== 'rolling-back') yield* writeSetupReceipt(receiptPath, receipt);
   for (const operationId of [...receipt.recovery.undoOperationIds]) {
-    const operation = receipt.operations.find(candidate => candidate.id === operationId);
+    const operation = Option.getOrUndefined(
+      EffectArray.findFirst(receipt.operations, candidate => candidate.id === operationId),
+    );
     if (operation === undefined)
       return yield* SetupOperationError.make({message: `Undo operation ${operationId} is absent from its receipt.`});
     yield* executeSetupUndoOperation(config, adapter, projectRoot, scope, operation, dependencies);
     const updatedAt = yield* nowIso();
-    const operations = receipt.operations.map(candidate =>
+    const operations = EffectArray.map(receipt.operations, candidate =>
       candidate.id === operation.id ? {...candidate, status: 'rolled-back' as const} : candidate,
     );
     receipt = parseSetupReceiptV1({
@@ -465,7 +470,8 @@ const applySetupPlan = Effect.fn('setup.applyPlan')(function* <R>(
     );
     if (currentEvidence !== undefined) {
       yield* Console.log(`Setup is already complete. Receipt: ${receiptPath}`);
-      if (currentEvidence.finalOutput !== undefined) yield* Console.log(`\n${currentEvidence.finalOutput.trimEnd()}`);
+      if (currentEvidence.finalOutput !== undefined)
+        yield* Console.log(`\n${Effect2.pipe(currentEvidence.finalOutput, EffectString.trimEnd)}`);
       return previous.receipt;
     }
   }
@@ -491,11 +497,16 @@ const applySetupPlan = Effect.fn('setup.applyPlan')(function* <R>(
     let finalVerification = receipt.verification;
     if (
       finalVerification !== undefined &&
-      receipt.operations.some(operation => operation.kind === 'context-brief.verify' && operation.status === 'verified')
+      EffectArray.some(
+        receipt.operations,
+        operation => operation.kind === 'context-brief.verify' && operation.status === 'verified',
+      )
     )
       timeToFirstEvidenceMilliseconds = 0;
     for (const operation of plan.operations) {
-      let existing = receipt.operations.find(candidate => candidate.id === operation.id)!;
+      let existing = Option.getOrUndefined(
+        EffectArray.findFirst(receipt.operations, candidate => candidate.id === operation.id),
+      )!;
       const replayVerifiedBrief = operation.kind === 'context-brief.verify' && existing.status === 'verified';
       if (['applied', 'already-current', 'verified'].includes(existing.status) && !replayVerifiedBrief) continue;
       if (operation.reversible) {
@@ -504,7 +515,9 @@ const applySetupPlan = Effect.fn('setup.applyPlan')(function* <R>(
             ? {status: 'already-current' as const, ownership: 'preexisting' as const}
             : yield* dependencies.inspectReversible(config, adapter, plan.projectRoot, operation.kind, plan.scope);
         receipt = yield* updatePreparedReceipt(receiptPath, receipt, operation, inspection);
-        existing = receipt.operations.find(candidate => candidate.id === operation.id)!;
+        existing = Option.getOrUndefined(
+          EffectArray.findFirst(receipt.operations, candidate => candidate.id === operation.id),
+        )!;
       }
       const attempt = existing.status === 'pending' ? existing.attempt : existing.attempt + 1;
       const outcome = yield* executeSetupOperation(config, adapter, plan, operation, dependencies, lease).pipe(
@@ -541,7 +554,9 @@ const applySetupPlan = Effect.fn('setup.applyPlan')(function* <R>(
         preservedOwnershipIds.has(operation.id),
       );
     }
-    const verification = receipt.operations.find(operation => operation.kind === 'context-brief.verify');
+    const verification = Option.getOrUndefined(
+      EffectArray.findFirst(receipt.operations, operation => operation.kind === 'context-brief.verify'),
+    );
     if (verification?.status !== 'verified' || finalVerification === undefined)
       return yield* SetupOperationError.make({message: 'Setup completed without final Context Brief verification.'});
     const completedAt = yield* nowIso();
@@ -559,7 +574,7 @@ const applySetupPlan = Effect.fn('setup.applyPlan')(function* <R>(
       timestamp: completedAt,
     }).pipe(Effect.ignore);
     yield* Console.log(`Setup complete. Receipt: ${receiptPath}`);
-    if (finalOutput !== undefined) yield* Console.log(`\n${finalOutput.trimEnd()}`);
+    if (finalOutput !== undefined) yield* Console.log(`\n${Effect2.pipe(finalOutput, EffectString.trimEnd)}`);
     return finalReceipt;
   }).pipe(
     Effect.onExit(exit =>
@@ -640,7 +655,9 @@ const revalidatedSetupOwnershipIds = Effect.fn('setup.revalidatedOwnership')(fun
   )
     return preserved;
   for (const operation of plan.operations) {
-    const prior = previous.receipt.operations.find(candidate => candidate.id === operation.id);
+    const prior = Option.getOrUndefined(
+      EffectArray.findFirst(previous.receipt.operations, candidate => candidate.id === operation.id),
+    );
     if (
       prior?.kind !== operation.kind ||
       prior.ownership !== 'setup-created' ||
@@ -680,9 +697,19 @@ const beginSetupReceipt = Effect.fn('setup.beginReceipt')(function* (
   const reuse =
     previous?.receipt.planHash === plan.planHash &&
     (previous.receipt.status === 'pending' || previous.receipt.status === 'failed');
-  const operations = plan.operations.map(operation => {
-    const prior = reuse ? previous?.receipt.operations.find(candidate => candidate.id === operation.id) : undefined;
-    const previousOperation = previous?.receipt.operations.find(candidate => candidate.id === operation.id);
+  const operations = EffectArray.map(plan.operations, operation => {
+    const prior = reuse
+      ? Option.getOrUndefined(
+          Option.flatMap(Option.fromNullishOr(previous?.receipt.operations), __effectOptionalArrayReceiver =>
+            EffectArray.findFirst(__effectOptionalArrayReceiver, candidate => candidate.id === operation.id),
+          ),
+        )
+      : undefined;
+    const previousOperation = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(previous?.receipt.operations), __effectArrayReceiver =>
+        Option.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, candidate => candidate.id === operation.id)),
+      ),
+    );
     const pending = {
       attempt: 1,
       id: operation.id,
@@ -746,7 +773,7 @@ const updateSuccessfulReceipt = Effect.fn('setup.updateSuccessfulReceipt')(funct
   preserveSetupOwnership: boolean,
 ) {
   const updatedAt = yield* nowIso();
-  const operations = receipt.operations.map(candidate => {
+  const operations = EffectArray.map(receipt.operations, candidate => {
     if (candidate.id !== operation.id) return candidate;
     const preservesEstablishedOwnership =
       preserveSetupOwnership &&
@@ -791,7 +818,7 @@ const updatePreparedReceipt = Effect.fn('setup.updatePreparedReceipt')(function*
   inspection: SetupOperationOutcome,
 ) {
   const updatedAt = yield* nowIso();
-  const operations = receipt.operations.map(candidate =>
+  const operations = EffectArray.map(receipt.operations, candidate =>
     candidate.id === operation.id
       ? {
           ...candidate,
@@ -819,12 +846,14 @@ const updateFailedReceipt = Effect.fn('setup.updateFailedReceipt')(function* (
   cause: unknown,
 ) {
   const updatedAt = yield* nowIso();
-  const operations = receipt.operations.map(candidate =>
+  const operations = EffectArray.map(receipt.operations, candidate =>
     candidate.id === operation.id
       ? {
           attempt,
           error: {
-            code: operation.kind.endsWith('.verify') ? ('verification-failed' as const) : ('operation-failed' as const),
+            code: Effect2.pipe(operation.kind, EffectString.endsWith('.verify'))
+              ? ('verification-failed' as const)
+              : ('operation-failed' as const),
             message: boundedFailureMessage(cause),
           },
           id: candidate.id,
@@ -883,7 +912,7 @@ const completedReceiptEvidenceIsCurrent = Effect.fn('setup.completedReceiptEvide
     return undefined;
   const surface = yield* dependencies.ensureSurface(config, adapter, plan.projectRoot, false, plan.scope);
   if (surface.status !== 'already-current') return undefined;
-  if (plan.operations.some(operation => operation.kind === 'surface.hooks')) {
+  if (EffectArray.some(plan.operations, operation => operation.kind === 'surface.hooks')) {
     const hooks = yield* dependencies.ensureHooks(config, adapter, false);
     if (hooks.status !== 'already-current') return undefined;
   }
@@ -927,7 +956,7 @@ const setupReceiptIdFor = Effect.fn('setup.receiptId')(function* (
 });
 
 function setupReceiptPath(path: Path.Path, home: string, surfaceId: string, receiptId: string): string {
-  return path.join(home, 'setup', `${surfaceId}-${receiptId.slice(0, 16)}.json`);
+  return path.join(home, 'setup', `${surfaceId}-${Effect2.pipe(receiptId, EffectString.slice(0, 16))}.json`);
 }
 
 function boundedFailureMessage(cause: unknown): string {
@@ -935,7 +964,10 @@ function boundedFailureMessage(cause: unknown): string {
     typeof cause === 'object' && cause !== null && '_tag' in cause && typeof cause._tag === 'string'
       ? cause._tag
       : 'operation';
-  return `${tag} failed; inspect the command output, then re-run the same setup plan.`.slice(0, 512);
+  return Effect2.pipe(
+    `${tag} failed; inspect the command output, then re-run the same setup plan.`,
+    EffectString.slice(0, 512),
+  );
 }
 
 const nowIso = Effect.fn('setup.nowIso')(function* () {

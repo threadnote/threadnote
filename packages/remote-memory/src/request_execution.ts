@@ -1,5 +1,5 @@
 import {remoteMemoryError} from './errors.js';
-import type {TransactionSql} from 'postgres';
+import type {ISql} from 'postgres';
 
 /**
  * Cooperative execution budget shared by one HTTP request and every storage
@@ -46,9 +46,9 @@ export function remoteMemoryDatabaseTimeoutMilliseconds(
  * PostgreSQL statement/transaction timeouts remain the authoritative fallback.
  */
 export async function withRemoteMemoryRequestCancellation<A>(
-  transaction: TransactionSql,
+  transaction: ISql,
   execution: RemoteMemoryRequestExecution | undefined,
-  use: (transaction: TransactionSql) => Promise<A>,
+  use: (transaction: ISql) => Promise<A>,
 ): Promise<A> {
   requireActiveRemoteMemoryRequest(execution);
   if (!execution) return use(transaction);
@@ -65,7 +65,7 @@ export async function withRemoteMemoryRequestCancellation<A>(
   };
   const proxied = new Proxy(transaction, {
     apply(target, thisArgument, argumentsList) {
-      const result = Reflect.apply(target, thisArgument, argumentsList) as unknown;
+      const result: unknown = Reflect.apply(target, thisArgument, argumentsList);
       if (isCancellablePendingQuery(result)) {
         active.add(result);
         void Promise.resolve(result).then(

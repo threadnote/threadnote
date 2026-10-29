@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {parseContextBriefV1, renderContextBriefText} from '@threadnote/context/projector';
 import {parseContextBriefRequestV1} from '@threadnote/context/types';
@@ -23,6 +24,7 @@ import {
   text,
   unique,
 } from './threadnote-5-release-readiness-validation.js';
+import * as EffectRecord from 'effect/Record';
 
 const MAX_ATTEMPTS = 64;
 
@@ -50,8 +52,8 @@ export function deriveThreadnote5ContextBriefClaims(
 ): Threadnote5ContextBriefDerivedClaimsV1 {
   const source = exactObject(value, ['attempts'], 'Context Brief capture');
   const attempts = boundedArray(source.attempts, 'Context Brief attempts', 1, MAX_ATTEMPTS);
-  const parsedAttempts = attempts.map(attempt => contextBriefAttempt(attempt, candidate, scenario));
-  if (!unique(parsedAttempts.map(attempt => attempt.attemptDigest))) {
+  const parsedAttempts = EffectArray.map(attempts, attempt => contextBriefAttempt(attempt, candidate, scenario));
+  if (!unique(EffectArray.map(parsedAttempts, attempt => attempt.attemptDigest))) {
     throw new Error('Context Brief attempts must be unique.');
   }
   if (scenario === 'output-budgets') {
@@ -59,19 +61,19 @@ export function deriveThreadnote5ContextBriefClaims(
   }
   if (
     authority?.type !== 'context-brief-plan-citation' ||
-    canonicalJson(authority.trials.map(trial => trial.attemptDigest).sort(compareText)) !==
-      canonicalJson(parsedAttempts.map(attempt => attempt.attemptDigest).sort(compareText))
+    canonicalJson(EffectArray.map(authority.trials, trial => trial.attemptDigest).sort(compareText)) !==
+      canonicalJson(EffectArray.map(parsedAttempts, attempt => attempt.attemptDigest).sort(compareText))
   ) {
     return {assertions: [], measurements: [], missingKinds: ['context-brief-plan-citation-authority']};
   }
   return {
     assertions: ['first-plan-source-cited', 'first-plan-correct'],
-    correlations: {firstBriefs: parsedAttempts.map(attempt => attempt.firstBriefLink!)},
+    correlations: {firstBriefs: EffectArray.map(parsedAttempts, attempt => attempt.firstBriefLink!)},
     measurements: [
       {
         id: 'estimated-tokens-to-first-cited-correct-plan',
         sampleCount: parsedAttempts.length,
-        total: parsedAttempts.reduce((sum, attempt) => sum + attempt.estimatedTokens, 0),
+        total: EffectArray.reduce(parsedAttempts, 0, (sum, attempt) => sum + attempt.estimatedTokens),
       },
     ],
   };
@@ -98,7 +100,7 @@ function contextBriefAttempt(
   const event = object(capture.event, 'Context Brief capture event');
   const eventKeys =
     scenario === 'solo' ? ['activationId', 'activationReceiptRevision', 'candidate', 'completedAt'] : ['candidate'];
-  if (canonicalJson(Object.keys(event).sort()) !== canonicalJson(eventKeys.sort())) {
+  if (canonicalJson(EffectRecord.keys(event).sort()) !== canonicalJson(eventKeys.sort())) {
     throw new Error('Context Brief capture event has unsupported or missing fields.');
   }
   if (

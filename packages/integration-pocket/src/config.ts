@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   requiredIdentifier,
@@ -10,6 +11,9 @@ import {
   type SourceConfig,
   type SourceConfiguration,
 } from '@threadnote/integration-core/config';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export {validateSourceIdentifier} from '@threadnote/integration-core/config';
 export interface PocketSourceConfig {
   readonly type: 'pocket';
@@ -27,18 +31,18 @@ export function upsertPocketSource(
   source: PocketSourceConfig,
 ): SourceConfiguration {
   const checked = validatePocketSourceConfig(source);
-  if (configuration.sources.some(item => item.id === checked.id && item.type !== checked.type))
+  if (EffectArray.some(configuration.sources, item => item.id === checked.id && item.type !== checked.type))
     throw SourceConfigurationError.make({message: `Source "${checked.id}" already has another type.`});
   return {
     version: 2,
     projections: configuration.projections,
-    sources: [...configuration.sources.filter(item => item.id !== checked.id), checked].sort((a, b) =>
-      a.id.localeCompare(b.id),
+    sources: [...EffectArray.filter(configuration.sources, item => item.id !== checked.id), checked].sort((a, b) =>
+      Effect.pipe(a.id, EffectString.localeCompare(b.id)),
     ),
   };
 }
 export function requirePocketSource(configuration: SourceConfiguration, id: string): PocketSourceConfig {
-  const source = configuration.sources.find(item => item.id === id);
+  const source = EffectOption.getOrUndefined(EffectArray.findFirst(configuration.sources, item => item.id === id));
   if (!source || !isPocketSource(source))
     throw SourceConfigurationError.make({message: `No Pocket source named "${id}".`});
   return source;

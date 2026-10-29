@@ -12,6 +12,8 @@ import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type ServicePath = 'session' | 'status' | 'legacy';
 const SOURCE = 'export const supported = true;\n';
@@ -28,7 +30,7 @@ const scenario = (options: {
     const root = yield* fs.makeTempDirectoryScoped({prefix: 'citation-routing-'});
     const manifestPath = path.join(root, options.manifest);
     const repositoryId = sha256HexSync(root);
-    const snapshotId = `cgsn_${repositoryId.slice(0, 40)}`;
+    const snapshotId = `cgsn_${Effect2.pipe(repositoryId, EffectString.slice(0, 40))}`;
     yield* fs.writeFileString(path.join(root, 'source.ts'), SOURCE);
     const citation = createMemoryCodeCitation({
       extractorSet: 'test',
@@ -36,7 +38,7 @@ const scenario = (options: {
       path: 'source.ts',
       repositoryId,
       repositoryIdentityKind: 'local',
-      sourceCommit: '1'.repeat(40),
+      sourceCommit: Effect2.pipe('1', EffectString.repeat(40)),
       sourceDirty: false,
       sourceSnapshotId: snapshotId,
       target: {kind: 'file'},
@@ -85,34 +87,29 @@ const scenario = (options: {
           return {...status, freshness: 'stale' as const, stale: true};
         if (evidenceRead && options.finalChange === 'stale') return {...status, stale: true};
         if (evidenceRead && options.finalChange === 'snapshot')
-          return {...status, readySnapshot: {...status.readySnapshot!, id: `cgsn_${'f'.repeat(40)}`}};
+          return {
+            ...status,
+            readySnapshot: {...status.readySnapshot!, id: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`},
+          };
         return status;
       });
     const query = CodeGraphQueryService.of({
-      status: (_home: string, _cwd: string, routing?: CodeGraphStatusOptions) => observe(routing),
-      ...(options.service === 'legacy'
-        ? {}
-        : {
-            statusForPublishedIdentity: (
-              _home: string,
-              _cwd: string,
-              _expected: unknown,
-              routing?: CodeGraphStatusOptions,
-            ) => observe(routing),
-          }),
+      attachSharedReadySnapshot: () => Effect.die('unused query operation'),
+      inspect: () => Effect.die('unused query operation'),
+      purge: () => Effect.die('unused query operation'),
+      status: (_home, _cwd, routing) => observe(routing),
+      statusForIdentity: () => Effect.die('unused query operation'),
+      statusForPublishedIdentity: (_home, _cwd, _expected, routing) => observe(routing),
       ...(options.service === 'session'
         ? {
-            withStatusSession: (
-              _home: string,
-              _cwd: string,
-              _expected: unknown,
-              routing: CodeGraphStatusOptions,
-              use: (status: CodeGraphStatus) => Effect.Effect<unknown>,
-            ) => observe(routing).pipe(Effect.flatMap(use)),
+            withStatusSession: (_home, _cwd, _expected, routing, use) => observe(routing).pipe(Effect.flatMap(use)),
           }
         : {}),
-    } as unknown as CodeGraphQueryService['Service']);
-    const store = CodeGraphStore.of({
+    });
+    if (options.service === 'legacy') {
+      expect(Reflect.deleteProperty(query, 'statusForPublishedIdentity')).toBe(true);
+    }
+    const store = Layer.mock(CodeGraphStore, {
       acquireSnapshotLease: () =>
         Effect.sync(() => {
           leased = true;
@@ -134,7 +131,7 @@ const scenario = (options: {
               {
                 path: citation.path,
                 file: {
-                  blobId: '2'.repeat(40),
+                  blobId: Effect2.pipe('2', EffectString.repeat(40)),
                   contentHash: citation.fileContentHash.value,
                   language: 'typescript',
                   mode: '100644',
@@ -146,7 +143,8 @@ const scenario = (options: {
             ],
           };
         }),
-    } as unknown as CodeGraphStore['Service']);
+    });
+    const services = yield* Layer.build(Layer.merge(Layer.succeed(CodeGraphQueryService, query), store));
     const candidates = [
       {
         uri: 'threadnote://memory/test',
@@ -163,7 +161,7 @@ const scenario = (options: {
       {account: 'test', agentContextHome: root, agentId: 'test', manifestPath, user: 'test'},
       {kind: 'repository', callerCwd: root, ...(options.project === undefined ? {} : {project: options.project})},
       candidates,
-    ).pipe(Effect.provideService(CodeGraphQueryService, query), Effect.provideService(CodeGraphStore, store));
+    ).pipe(Effect.provide(services));
     expect(validations[0]?.receipts[0]).toMatchObject(
       options.finalChange === undefined
         ? {status: 'exact', coverage: 'current-complete'}

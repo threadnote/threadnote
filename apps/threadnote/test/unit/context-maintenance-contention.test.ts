@@ -29,6 +29,8 @@ import {
 } from '../../src/memory/context/maintenance_contracts.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const TEST_LAYER = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 const NOW = '2026-10-03T15:00:00.000Z';
@@ -195,7 +197,7 @@ describe('maintenance-state contention boundary', () => {
           processStartIdentity: 'unverifiable-owner',
           token: 'synthetic-owner',
         });
-        for (const content of [token, 'x'.repeat(4_097)]) {
+        for (const content of [token, Effect2.pipe('x', EffectString.repeat(4_097))]) {
           yield* data.fs.writeFileString(data.lockPath, content);
           const old = DateTime.toDateUtc(DateTime.subtract(yield* DateTime.now, {seconds: 120}));
           yield* data.fs.utimes(data.lockPath, old, old);
@@ -265,16 +267,16 @@ describe('maintenance-state contention boundary', () => {
         const data = yield* fixture();
         const item = successor(left);
         const receipt = {
-          receiptId: `maintenance-${'a'.repeat(40)}`,
+          receiptId: `maintenance-${Effect2.pipe('a', EffectString.repeat(40))}`,
           project: 'fixture',
           subjectUri: 'threadnote://user/tester/memories/durable/projects/fixture/source.md',
-          postHash: 'a'.repeat(64),
+          postHash: Effect2.pipe('a', EffectString.repeat(64)),
           timestamp: NOW,
           state: 'applied' as const,
         };
         const checkpoint = {
-          targetHash: 'a'.repeat(64),
-          revision: 'b'.repeat(64),
+          targetHash: Effect2.pipe('a', EffectString.repeat(64)),
+          revision: Effect2.pipe('b', EffectString.repeat(64)),
           outcome: 'unavailable' as const,
           deferredAt: NOW,
           checkedAt: NOW,

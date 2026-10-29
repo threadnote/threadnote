@@ -120,6 +120,8 @@ Import another package through a declared entrypoint, such as `@threadnote/memor
 
 Effect 4 uses top-level module paths even for APIs marked `@stability unstable`, including the HTTP, SQL, AI, and test integrations Threadnote depends on. These packages are pinned and their upgrades are verified together; the linter's blanket `unstable-api-usage` warning is intentionally disabled rather than suppressing each required integration.
 
+Run `bun run lint` for the complete repository lint gate. All configured rules, including the Effect collection/style rules and unsafe type assertion checks, apply to existing code and new code alike. The gate does not depend on Git diffs or a target-branch checkout.
+
 ## Repository resources
 
 Some top-level directories remain stable because their paths are release or operator contracts:

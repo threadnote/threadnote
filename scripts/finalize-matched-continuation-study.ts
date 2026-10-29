@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This local finalizer owns sealed evidence-file boundaries. */
 
@@ -40,6 +41,9 @@ import {
   type MatchedEvaluationContinuationPilotPlanV3,
   type MatchedEvaluationContinuationPilotPlanV4,
 } from './run-matched-evaluation.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const MATCHED_CONTINUATION_FINALIZATION_VERSION = 1 as const;
 
@@ -167,14 +171,19 @@ export async function finalizeMatchedContinuationStudyFromFilesV1(options: Final
 
   const outcomes = projectMatchedContinuationOutcomesV1({reports, study});
   const report = evaluateMatchedContinuationStudyV1({outcomes, study});
-  const ledgerBytes = Buffer.from(`${outcomes.map(outcome => JSON.stringify(outcome)).join('\n')}\n`);
+  const ledgerBytes = Buffer.from(
+    `${EffectArray.join(
+      EffectArray.map(outcomes, outcome => JSON.stringify(outcome)),
+      '\n',
+    )}\n`,
+  );
   const reportBytes = jsonBytes(report);
   const articleBytes = Buffer.from(renderMatchedContinuationArticleEvidenceV1(report));
   const receiptWithoutHash = {
     articleEvidenceSha256: sha256(articleBytes),
     outcomeLedgerSha256: sha256(ledgerBytes),
     reportSha256: sha256(reportBytes),
-    sourceReports: study.tasks.map(task => ({
+    sourceReports: EffectArray.map(study.tasks, task => ({
       sourceReportSha256: required(reports.get(task.taskId), `task report ${task.taskId}`).sourceReportSha256,
       taskId: task.taskId,
     })),
@@ -203,14 +212,18 @@ export function projectMatchedContinuationOutcomesV1(input: {
 }): readonly MatchedContinuationOutcomeV1[] {
   const study = parseMatchedContinuationStudyV1(input.study);
   let previousOutcomeHash: string | null = null;
-  return study.schedule.map(scheduled => {
+  return EffectArray.map(study.schedule, scheduled => {
     const task = required(
-      study.tasks.find(candidate => candidate.taskId === scheduled.taskId),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(study.tasks, candidate => candidate.taskId === scheduled.taskId),
+      ),
       scheduled.taskId,
     );
     const report = required(input.reports.get(scheduled.taskId), `task report ${scheduled.taskId}`);
     const attempt = required(
-      report.attempts.find(candidate => candidate.runNonce === scheduled.runNonce),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(report.attempts, candidate => candidate.runNonce === scheduled.runNonce),
+      ),
       `scheduled attempt ${scheduled.runNonce}`,
     );
     if (
@@ -344,7 +357,7 @@ export async function parseAndVerifyMatchedContinuationTaskReportV1(input: {
   const identities = object(report.identities, 'task report identities');
   exactKeys(identities, ['manifestHash', 'planFileHash', 'runtimeVersion', 'studyHash', 'verificationPlanHash']);
   const sealedTask = required(
-    input.study.tasks.find(task => task.taskId === input.plan.taskId),
+    EffectOption.getOrUndefined(EffectArray.findFirst(input.study.tasks, task => task.taskId === input.plan.taskId)),
     input.plan.taskId,
   );
   if (
@@ -357,10 +370,10 @@ export async function parseAndVerifyMatchedContinuationTaskReportV1(input: {
     invalid('task report identities differ from the sealed study');
   }
   boundedString(report.completionMeaning, 1, 2_048, 'task report completion meaning');
-  array(report.limitations, 'task report limitations').forEach((entry, index) =>
+  EffectArray.forEach(array(report.limitations, 'task report limitations'), (entry, index) =>
     boundedString(entry, 1, 2_048, `task report limitation ${index}`),
   );
-  const expectedRows = input.plan.attempts.map(attempt => ({
+  const expectedRows = EffectArray.map(input.plan.attempts, attempt => ({
     arm: underlyingArm(attempt.variant),
     blindLabel: attempt.blindLabel,
     position: attempt.runOrder,
@@ -371,14 +384,16 @@ export async function parseAndVerifyMatchedContinuationTaskReportV1(input: {
     variant: attempt.variant,
   }));
   if (!sameJson(report.rows, expectedRows)) invalid('task report rows differ from its plan');
-  const attempts = array(report.attempts, 'task report attempts').map((attempt, index) =>
+  const attempts = EffectArray.map(array(report.attempts, 'task report attempts'), (attempt, index) =>
     parseAttempt(attempt, index, input.plan),
   );
   if (attempts.length !== input.plan.attempts.length) {
     invalid('task report is partial; every planned terminal attempt is required');
   }
   for (const planned of input.plan.attempts) {
-    const attempt = attempts.find(candidate => candidate.runNonce === planned.runNonce);
+    const attempt = EffectOption.getOrUndefined(
+      EffectArray.findFirst(attempts, candidate => candidate.runNonce === planned.runNonce),
+    );
     if (
       attempt === undefined ||
       attempt.taskId !== input.plan.taskId ||
@@ -397,17 +412,17 @@ export async function parseAndVerifyMatchedContinuationTaskReportV1(input: {
       invalid(`task report attempt ${planned.runNonce} verification differs from sealed evidence`);
     }
   }
-  if (new Set(attempts.map(attempt => attempt.runNonce)).size !== attempts.length) {
+  if (new Set(EffectArray.map(attempts, attempt => attempt.runNonce)).size !== attempts.length) {
     invalid('task report attempt nonces must be unique');
   }
-  if (report.completed !== attempts.every(attempt => attempt.status === 'completed')) {
+  if (report.completed !== EffectArray.every(attempts, attempt => attempt.status === 'completed')) {
     invalid('task report completion flag differs from its attempts');
   }
   const phaseOneProviderTokens = input.plan.checkpoint.phaseOneAccounting.providerTokens;
   if (phaseOneProviderTokens === null) {
     invalid('task report plan lacks required measured phase-one usage');
   }
-  await Promise.all(attempts.map(verifyAttemptEvidence));
+  await Promise.all(EffectArray.map(attempts, verifyAttemptEvidence));
   return {
     attempts,
     phaseOne: {
@@ -695,6 +710,7 @@ export async function publishMatchedContinuationFinalizationV1(
   path: string,
   artifacts: MatchedContinuationFinalizationArtifactsV1,
 ): Promise<void> {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   if (!path.split(sep).includes('.context'))
     throw new Error('Continuation output must be inside a .context directory.');
   const parent = dirname(path);
@@ -743,7 +759,7 @@ async function pathExists(path: string): Promise<boolean> {
     await lstat(path);
     return true;
   } catch (cause) {
-    if ((cause as {code?: string}).code === 'ENOENT') return false;
+    if (errorHasCode(cause, 'ENOENT')) return false;
     throw cause;
   }
 }
@@ -768,32 +784,41 @@ function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(sortJson(left)) === JSON.stringify(sortJson(right));
 }
 
+function errorHasCode(cause: unknown, code: string): boolean {
+  return typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === code;
+}
+
 function sortJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJson);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, entry]) => [key, sortJson(entry)]),
+  if (EffectArray.isArray(value)) return EffectArray.map(value, sortJson);
+  if (isJsonRecord(value)) {
+    return EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectRecord.toEntries(value).sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right))),
+        ([key, entry]) => [key, sortJson(entry)],
+      ),
     );
   }
   return value;
 }
 
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
   const expected = [...keys].sort();
-  const actual = Object.keys(value).sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  const actual = EffectRecord.keys(value).sort();
+  if (actual.length !== expected.length || EffectArray.some(actual, (key, index) => key !== expected[index])) {
     invalid('object contains unsupported or missing fields');
   }
 }
@@ -809,7 +834,12 @@ function matching(value: unknown, pattern: RegExp, label: string): string {
 }
 
 function boundedString(value: unknown, minimum: number, maximum: number, label: string): string {
-  if (typeof value !== 'string' || value.length < minimum || value.length > maximum || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.length < minimum ||
+    value.length > maximum ||
+    Effect2.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} is invalid`);
   }
   return value;

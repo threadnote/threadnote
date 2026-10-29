@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import {codeGraphScopeAuthorityInstalled} from './scope/schema.js';
 import {Effect, Option} from 'effect';
@@ -57,6 +58,8 @@ import {
   effectiveSymbolsCte,
   selectBaseSnapshotId,
 } from './query/core.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** @internal Bounded keyset page retained for admission query-plan and load regressions. */
 
@@ -150,9 +153,17 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
     ) > 0;
   if (metrics === 'deferred') {
     if (hasWorkspaceCatalog) {
-      const requestedComponentId = requestedProjectId?.startsWith('cgp_') ? requestedProjectId : undefined;
+      const requestedComponentId = Effect2.pipe(requestedProjectId, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.startsWith('cgp_')),
+      )
+        ? requestedProjectId
+        : undefined;
       const unscopedMatchesQuery =
-        projectQuery.length === 0 || 'unscoped code and documentation'.includes(projectQuery.toLocaleLowerCase());
+        projectQuery.length === 0 ||
+        Effect2.pipe(
+          'unscoped code and documentation',
+          EffectString.includes(Effect2.pipe(projectQuery, EffectString.toLocaleLowerCase())),
+        );
       const componentQuery = visualizationCatalogComponentQueryPredicate(projectQuery);
       const includeUnscoped =
         (requestedProjectId === undefined && projectOffset === 0 && unscopedMatchesQuery) ||
@@ -215,7 +226,7 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
         ],
         {concurrency: 1},
       );
-      const componentIds = components.map(component => component.id);
+      const componentIds = EffectArray.map(components, component => component.id);
       const dependencies =
         options.includeDependencies === true && componentIds.length > 0
           ? yield* sql.unsafe<{
@@ -226,8 +237,14 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
               `SELECT source_component_id, target_component_id, provenance
                FROM workspace_component_dependencies
                WHERE snapshot_id = ?
-                 AND source_component_id IN (${componentIds.map(() => '?').join(', ')})
-                 AND target_component_id IN (${componentIds.map(() => '?').join(', ')})
+                 AND source_component_id IN (${EffectArray.join(
+                   EffectArray.map(componentIds, () => '?'),
+                   ', ',
+                 )})
+                 AND target_component_id IN (${EffectArray.join(
+                   EffectArray.map(componentIds, () => '?'),
+                   ', ',
+                 )})
                ORDER BY source_component_id, target_component_id, provenance`,
               [row.id, ...componentIds, ...componentIds],
             )
@@ -238,9 +255,9 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
         if (current) current.push(dependency);
         else dependenciesBySource.set(dependency.source_component_id, [dependency]);
       }
-      const projects: CodeGraphVisualizationProject[] = components.map(component => ({
+      const projects: CodeGraphVisualizationProject[] = EffectArray.map(components, component => ({
         buildSystem: component.build_system,
-        dependencies: (dependenciesBySource.get(component.id) ?? []).map(dependency => ({
+        dependencies: EffectArray.map(dependenciesBySource.get(component.id) ?? [], dependency => ({
           provenance: dependency.provenance,
           targetId: dependency.target_component_id,
         })),
@@ -297,7 +314,7 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
           ? {viewScopeId: row.scope_id}
           : {}),
         workspaceCount,
-        workspaces: workspaces.map(workspace => ({
+        workspaces: EffectArray.map(workspaces, workspace => ({
           buildSystem: workspace.build_system,
           diagnostics: [],
           id: workspace.id,
@@ -445,9 +462,9 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
       if (current) current.push(dependency);
       else dependenciesBySource.set(dependency.source_component_id, [dependency]);
     }
-    const projects: CodeGraphVisualizationProject[] = components.map(component => ({
+    const projects: CodeGraphVisualizationProject[] = EffectArray.map(components, component => ({
       buildSystem: component.build_system,
-      dependencies: (dependenciesBySource.get(component.id) ?? []).map(dependency => ({
+      dependencies: EffectArray.map(dependenciesBySource.get(component.id) ?? [], dependency => ({
         ...(typeof dependency.evidence === 'string' ? {evidence: dependency.evidence} : {}),
         provenance: dependency.provenance,
         targetId: dependency.target_component_id,
@@ -468,7 +485,7 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
       workspaceRoots: parseStringArray(component.workspace_roots_json),
     }));
     projects.push(
-      ...unscopedGroups.map(group => ({
+      ...EffectArray.map(unscopedGroups, group => ({
         dependencies: [],
         diagnostics: [],
         fileCount: Number(group.file_count),
@@ -478,7 +495,7 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
             : `${group.scope_type}:${group.scope_value}`,
         kind: group.scope_type === 'documentation' ? ('documentation' as const) : ('legacy-group' as const),
         label: group.scope_type === 'documentation' ? 'Unscoped documentation' : group.scope_value,
-        languages: group.languages ? group.languages.split(',').sort(compareCodeUnits) : [],
+        languages: group.languages ? Effect2.pipe(group.languages, EffectString.split(',')).sort(compareCodeUnits) : [],
         model: 'facet' as const,
         provenance: 'inferred' as const,
         sourceRoots: [],
@@ -486,8 +503,12 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
         workspaceRoots: [],
       })),
     );
-    const componentSymbols = components.reduce((total, component) => total + Number(component.symbol_count), 0);
-    const fallbackSymbols = unscopedGroups.reduce((total, group) => total + Number(group.symbol_count), 0);
+    const componentSymbols = EffectArray.reduce(
+      components,
+      0,
+      (total, component) => total + Number(component.symbol_count),
+    );
+    const fallbackSymbols = EffectArray.reduce(unscopedGroups, 0, (total, group) => total + Number(group.symbol_count));
     const totalSymbols = Number(row.symbol_count);
     const attributedSymbols = componentSymbols + fallbackSymbols;
     return {
@@ -511,7 +532,7 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
         ? {viewScopeId: row.scope_id}
         : {}),
       workspaceCount: workspaces.length,
-      workspaces: workspaces.map(workspace => ({
+      workspaces: EffectArray.map(workspaces, workspace => ({
         buildSystem: workspace.build_system,
         diagnostics: parseStringArray(workspace.diagnostics_json),
         id: workspace.id,
@@ -555,7 +576,7 @@ const selectVisualizationCatalog = Effect.fn('codeGraph.selectVisualizationCatal
       totalSymbols: Number(row.symbol_count),
     },
     projectCount: projects.length,
-    projects: projects.map(project => ({
+    projects: EffectArray.map(projects, project => ({
       dependencies: [],
       diagnostics: [],
       fileCount: Number(project.file_count),
@@ -604,7 +625,12 @@ const selectVisualizationCatalogs = Effect.fn('codeGraph.selectVisualizationCata
   const scoped = yield* codeGraphScopeAuthorityInstalled(sql);
   if (!scoped && scopeIds.length > 0) return [];
   const scopePredicate =
-    scoped && scopeIds.length > 0 ? `active_snapshots.scope_id IN (${scopeIds.map(() => '?').join(', ')})` : '';
+    scoped && scopeIds.length > 0
+      ? `active_snapshots.scope_id IN (${EffectArray.join(
+          EffectArray.map(scopeIds, () => '?'),
+          ', ',
+        )})`
+      : '';
   const queryPredicate =
     viewQuery.length === 0
       ? ''
@@ -638,13 +664,16 @@ const selectVisualizationCatalogs = Effect.fn('codeGraph.selectVisualizationCata
      LIMIT ? OFFSET ?`,
     [...(scoped ? scopeIds : []), ...(viewQuery.length === 0 ? [] : [viewQuery]), viewLimit, viewOffset],
   );
-  return (yield* Effect.forEach(
-    worktrees,
-    row => selectVisualizationCatalog(row.worktree_id, metrics, {...options, scopeId: row.scope_id}),
-    {
-      concurrency: 1,
-    },
-  )).flatMap(catalog => (catalog ? [catalog] : []));
+  return EffectArray.flatMap(
+    yield* Effect.forEach(
+      worktrees,
+      row => selectVisualizationCatalog(row.worktree_id, metrics, {...options, scopeId: row.scope_id}),
+      {
+        concurrency: 1,
+      },
+    ),
+    catalog => (catalog ? [catalog] : []),
+  );
 });
 
 const selectVisualizationScopeEdges = Effect.fn('codeGraph.selectVisualizationScopeEdges')(function* (
@@ -696,7 +725,7 @@ const selectVisualizationScopeEdges = Effect.fn('codeGraph.selectVisualizationSc
          ORDER BY source.scope_id, target.scope_id, edge.provenance, edge.relation`,
         effectiveGraphParameters(snapshotId, baseSnapshotId),
       );
-      sourceRelationships = graphRows.map(row => ({
+      sourceRelationships = EffectArray.map(graphRows, row => ({
         confidence: Number(row.confidence),
         count: Number(row.count),
         provenance: row.provenance,
@@ -719,7 +748,8 @@ const selectVisualizationScopeEdges = Effect.fn('codeGraph.selectVisualizationSc
     ORDER BY source_component_id, target_component_id, provenance
   `;
   return [
-    ...dependencies.map(
+    ...EffectArray.map(
+      dependencies,
       dependency =>
         ({
           confidence: 1,
@@ -779,7 +809,7 @@ const selectVisualizationScopeEdgeSummary = Effect.fn('codeGraph.selectVisualiza
   for (const statement of codeGraphVisualizationScopeEdgeSampleStatements(
     snapshotId,
     baseSnapshotId,
-    [...seedsByScope].map(([scopeId, symbolIds]) => ({scopeId, symbolIds})),
+    EffectArray.map([...seedsByScope], ([scopeId, symbolIds]) => ({scopeId, symbolIds})),
     perScopeEdgeLimit + 1,
     MANAGER_SCOPE_SAMPLE_PROVENANCES,
   )) {
@@ -792,7 +822,8 @@ const selectVisualizationScopeEdgeSummary = Effect.fn('codeGraph.selectVisualiza
     else truncated = true;
     edgeCountsByScope.set(row.sampled_scope_id, edgeCount + 1);
   }
-  const endpointIds = [...new Set([...sampledEdges.values()].flatMap(edge => [edge.sourceId, edge.targetId]))].filter(
+  const endpointIds = EffectArray.filter(
+    [...new Set(EffectArray.flatMap([...sampledEdges.values()], edge => [edge.sourceId, edge.targetId]))],
     isDefinedString,
   );
   let endpointRows: readonly VisualizationScopeEndpointRow[] = [];
@@ -801,7 +832,7 @@ const selectVisualizationScopeEdgeSummary = Effect.fn('codeGraph.selectVisualiza
     endpointRows = yield* sql.unsafe<VisualizationScopeEndpointRow>(statement.text, statement.parameters);
   }
   const symbolsById = new Map(
-    endpointRows.map(row => [
+    EffectArray.map(endpointRows, row => [
       row.id,
       {
         id: row.id,
@@ -846,7 +877,7 @@ export function codeGraphVisualizationScopeSymbolSampleStatements(
   perScopeLimit: number,
 ): readonly CodeGraphSqlQueryStatement[] {
   const safeScopeIds = [...new Set(requestedScopeIds)].slice(0, MANAGER_SCOPE_SAMPLE_MAX_SCOPES).sort(compareCodeUnits);
-  return [...chunk(safeScopeIds, MANAGER_SCOPE_SAMPLE_BATCH_SIZE)].map(scopeBatch => {
+  return EffectArray.map([...chunk(safeScopeIds, MANAGER_SCOPE_SAMPLE_BATCH_SIZE)], scopeBatch => {
     const branches: string[] = [];
     const parameters: Array<number | string> = [];
     for (const scopeId of scopeBatch) {
@@ -859,7 +890,7 @@ export function codeGraphVisualizationScopeSymbolSampleStatements(
       branches.push(`SELECT ? AS sampled_scope_id, sampled.* FROM (${statement.text}) AS sampled`);
       parameters.push(scopeId, ...statement.parameters);
     }
-    return {parameters, text: branches.join('\nUNION ALL\n')};
+    return {parameters, text: EffectArray.join(branches, '\nUNION ALL\n')};
   });
 }
 
@@ -870,11 +901,10 @@ export function codeGraphVisualizationScopeEdgeSampleStatements(
   perScopeLimit: number,
   allowedProvenances: readonly CodeGraphProvenance[],
 ): readonly CodeGraphSqlQueryStatement[] {
-  const safeScopes = requestedScopes
-    .filter(scope => scope.symbolIds.length > 0)
+  const safeScopes = EffectArray.filter(requestedScopes, scope => scope.symbolIds.length > 0)
     .slice(0, MANAGER_SCOPE_SAMPLE_MAX_SCOPES)
     .sort((left, right) => compareCodeUnits(left.scopeId, right.scopeId));
-  return [...chunk(safeScopes, MANAGER_SCOPE_SAMPLE_BATCH_SIZE)].map(scopeBatch => {
+  return EffectArray.map([...chunk(safeScopes, MANAGER_SCOPE_SAMPLE_BATCH_SIZE)], scopeBatch => {
     const branches: string[] = [];
     const parameters: Array<number | string> = [];
     for (const scope of scopeBatch) {
@@ -889,7 +919,7 @@ export function codeGraphVisualizationScopeEdgeSampleStatements(
       branches.push(`SELECT ? AS sampled_scope_id, sampled.* FROM (${statement.text}) AS sampled`);
       parameters.push(scope.scopeId, ...statement.parameters);
     }
-    return {parameters, text: branches.join('\nUNION ALL\n')};
+    return {parameters, text: EffectArray.join(branches, '\nUNION ALL\n')};
   });
 }
 
@@ -903,7 +933,7 @@ const selectVisualizationSymbols = Effect.fn('codeGraph.selectVisualizationSymbo
   const baseSnapshotId = yield* selectBaseSnapshotId(sql, snapshotId);
   const statement = codeGraphVisualizationSymbolsQueryStatement(snapshotId, baseSnapshotId, scope, limit);
   const rows = yield* sql.unsafe<SymbolRow>(statement.text, statement.parameters);
-  return rows.map(symbolFromRow);
+  return EffectArray.map(rows, symbolFromRow);
 });
 
 export {

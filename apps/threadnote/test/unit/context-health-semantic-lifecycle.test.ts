@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Layer} from 'effect';
 import {StandaloneBrokerLayer} from '../../src/effect/runtime-bootstrap.js';
@@ -46,20 +47,27 @@ const records = [
 
 describe('semantic evidence application boundaries', () => {
   it('invalidates pre-upgrade completed semantic progress and retains current completed progress', () => {
-    const hashes = new Map(records.map(record => [record.uri, sha256HexSync(record.content)]));
-    const legacyGeneration = sha256HexSync(records.map(record => `${record.uri}:${hashes.get(record.uri)}`).join('|'));
+    const hashes = new Map(EffectArray.map(records, record => [record.uri, sha256HexSync(record.content)]));
+    const legacyGeneration = sha256HexSync(
+      EffectArray.join(
+        EffectArray.map(records, record => `${record.uri}:${hashes.get(record.uri)}`),
+        '|',
+      ),
+    );
     const old = {
       threadnote: {generation: legacyGeneration, cursor: 1, totalBatches: 1, eligibleRecords: 2, partial: false},
     };
-    const upgraded = prepareMaintenanceSemanticProgress(records, hashes, old as never);
+    const upgraded = prepareMaintenanceSemanticProgress(records, hashes, old);
     expect(upgraded.pending).toEqual(['threadnote']);
-    expect(upgraded.progress.threadnote.cursor).toBe(0);
+    const upgradedProgress = upgraded.progress.threadnote;
+    if (upgradedProgress.version !== 2) throw new Error('Expected regenerated current semantic progress.');
+    expect(upgradedProgress.cursor).toBe(0);
     expect(upgraded.generations.get('threadnote')).not.toBe(legacyGeneration);
     const completed = {
       threadnote: {
-        ...upgraded.progress.threadnote,
+        ...upgradedProgress,
         cursor: 1,
-        records: upgraded.progress.threadnote.records.map(record => ({
+        records: EffectArray.map(upgradedProgress.records, record => ({
           ...record,
           claims: 1,
           unsupportedClaims: 0,
@@ -75,14 +83,18 @@ describe('semantic evidence application boundaries', () => {
     };
     const rebuilt = prepareMaintenanceSemanticProgress(records, hashes, priorAnalyzer);
     expect(rebuilt.pending).toEqual(['threadnote']);
-    expect(rebuilt.progress.threadnote.records.every(record => record.claims === undefined)).toBe(true);
-    expect(rebuilt.progress.threadnote.comparison).toMatchObject({pairCursor: 0, claimCursor: 0});
+    const rebuiltProgress = rebuilt.progress.threadnote;
+    if (rebuiltProgress.version !== 2) throw new Error('Expected regenerated current semantic progress.');
+    expect(EffectArray.every(rebuiltProgress.records, record => record.claims === undefined)).toBe(true);
+    expect(rebuiltProgress.comparison).toMatchObject({pairCursor: 0, claimCursor: 0});
   });
   effectIt.effect('carries both exact source claims and policy reason into a revision-checked review-only packet', () =>
     Effect.gen(function* () {
       const original = structuredClone(records);
       const report = buildContextHealthReport({project: 'threadnote', records, now});
-      const finding = report.findings.find(finding => finding.category === 'semantic-contradiction')!;
+      const finding = EffectOption.getOrUndefined(
+        EffectArray.findFirst(report.findings, finding => finding.category === 'semantic-contradiction'),
+      )!;
       let revisionChecks = 0;
       const packet = yield* buildContextMaintenancePacket(
         {
@@ -104,7 +116,7 @@ describe('semantic evidence application boundaries', () => {
             lastChecked: now.toISOString(),
             attemptCount: 0,
             events: [],
-            subjectContentHashes: records.map(record => ({
+            subjectContentHashes: EffectArray.map(records, record => ({
               uri: record.uri,
               hash: sha256HexSync(canonicalMemoryDocumentContent(record.content)),
             })),
@@ -121,7 +133,7 @@ describe('semantic evidence application boundaries', () => {
       expect(packet.semanticEvidence).toEqual(finding.semanticEvidence);
       expect(packet.semanticEvidence?.reason).toBe('policy-conflict');
       expect(packet.semanticEvidence?.left.context.headings).toEqual(['Production']);
-      expect(packet.choices.join(' ')).not.toContain('Choose the current assertion');
+      expect(EffectArray.join(packet.choices, ' ')).not.toContain('Choose the current assertion');
       expect(renderContextHealth(report)).toContain('Timeout must be 30 seconds.');
       expect(renderContextHealth(report)).toContain('policy-conflict');
       const plan = previewContextHealthRepairPlanV1(report, records);
@@ -147,10 +159,16 @@ describe('semantic evidence application boundaries', () => {
     const first = report(records).findings[0];
     const changed = memory('a', '# Production\nTimeout is 60 seconds.\nAdditional source context.');
     expect(
-      report([changed, records[1]]).findings.find(item => item.category === 'semantic-contradiction')?.caseId,
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          report([changed, records[1]]).findings,
+          item => item.category === 'semantic-contradiction',
+        ),
+      )?.caseId,
     ).not.toBe(first.caseId);
     expect(
-      report([memory('a', '# Local\nTimeout is 60 seconds.'), records[1]]).findings.filter(
+      EffectArray.filter(
+        report([memory('a', '# Local\nTimeout is 60 seconds.'), records[1]]).findings,
         item => item.category === 'semantic-contradiction',
       ),
     ).toEqual([]);

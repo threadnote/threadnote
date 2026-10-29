@@ -1,8 +1,7 @@
 import {Command} from 'effect/cli';
-import type {Effect} from 'effect';
 import {boolean, optionalString, requiredChoice} from '../../effect/cli/flags.js';
 import {codeGraphCliBounds} from '../../effect/code_graph_cli_flags.js';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {CliRuntimeRunner} from '../../effect/cli.js';
 import {
   runGraphContributeSetCommand,
   runGraphContributeStatusCommand,
@@ -24,9 +23,7 @@ import {
 } from './commands.js';
 import {requiredString} from '../../effect/cli/flags.js';
 
-export function makeGraphSharingCommands(
-  withRuntimeEffect: <E, R>(effect: (config: RuntimeConfig) => Effect.Effect<void, E, R>) => Effect.Effect<void, E, R>,
-) {
+export function makeGraphSharingCommands(withRuntimeEffect: CliRuntimeRunner) {
   const graphShareInit = Command.make(
     'init',
     {

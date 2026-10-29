@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
 import {importCodeGraphCheckpointSnapshot} from '@threadnote/graph/checkpoint/operations';
 import {canonicalJson} from '../checkpoint/canonical_json.js';
@@ -38,11 +39,9 @@ import {
 import {promptGraphShareOciProfileAccess, promptGraphShareOciTrustRoot} from './profile/consent.js';
 import {ensureSharedGraphBlob as ensureSharedCasBlob, type GraphShareBlobSource} from './shared_blob.js';
 import {
-  GRAPH_SHARE_CONTRIBUTION_MODES,
   effectiveGraphShareContributionPolicy,
   effectiveGraphShareContributionMode,
   readGraphShareContributionQueue,
-  type GraphShareContributionMode,
 } from './contribution.js';
 import {readTrustedGraphShareContributionProfile} from './profile/storage.js';
 import {graphShareEnrollmentPath, graphSharingFrontierPointerPath, graphSharingLayout} from './layout.js';
@@ -87,6 +86,8 @@ import {
   readAuthenticatedGraphShareFrontier,
   type GraphShareFrontierScope,
 } from './frontier_acceptance.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface GraphShareJoinOptions {
   readonly approvalFile?: string;
@@ -553,7 +554,7 @@ const importVerifiedSharedCheckpoint = Effect.fn('codeGraph.sharing.importVerifi
   if (profileDigest !== input.trust.profileDigest) {
     return {imported: false as const, reason: 'trust-pin-mismatch' as const};
   }
-  const registry = profile.registry.canonical.startsWith('oci://')
+  const registry = Effect2.pipe(profile.registry.canonical, EffectString.startsWith('oci://'))
     ? yield* makeGraphShareRegistryReader(profile.registry.canonical)
     : undefined;
   const blobSource = registry?.readBlob;
@@ -633,7 +634,7 @@ const importVerifiedSharedCheckpoint = Effect.fn('codeGraph.sharing.importVerifi
   );
   yield* assertGraphShareCommitChain(input.request.identity.repoRoot, [
     selected.checkpoint.sourceCommit,
-    ...selected.deltas.map(delta => delta.targetCommit),
+    ...EffectArray.map(selected.deltas, delta => delta.targetCommit),
     selected.sourceCommit,
   ]);
   const existing = yield* readSharedGraphProvenance(
@@ -939,20 +940,22 @@ function commandCwd(value: string | undefined) {
   return Effect.gen(function* () {
     const system = yield* SystemInfo;
     const path = yield* Path.Path;
-    return path.resolve(value?.trim() || system.currentDirectory());
+    return path.resolve(
+      Effect2.pipe(value, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || system.currentDirectory(),
+    );
   });
 }
 
 function decodeContributionMode(value: string | undefined) {
   return Effect.try({
     try: () => {
-      if (value === undefined || value.trim().length === 0) {
+      if (value === undefined || Effect2.pipe(value, EffectString.trim).length === 0) {
         throw graphSharingFailure('Contribution mode must be off, passive, idle, or dedicated.');
       }
-      const mode = value.trim();
-      if ((GRAPH_SHARE_CONTRIBUTION_MODES as readonly string[]).includes(mode)) {
-        return mode as GraphShareContributionMode;
-      }
+      const mode = Effect2.pipe(value, EffectString.trim);
+      if (mode === 'off' || mode === 'passive' || mode === 'idle' || mode === 'dedicated') return mode;
       throw graphSharingFailure('Contribution mode must be off, passive, idle, or dedicated.');
     },
     catch: cause =>
@@ -1014,7 +1017,10 @@ const refreshFrontierPointerFromCoordinator = Effect.fn('codeGraph.sharing.refre
   const frontier =
     fromDescriptor._tag === 'Some'
       ? fromDescriptor.value
-      : yield* graphShareControlGetFrontier(input.coordinatorUrl, tagName.slice('tn-frontier-'.length));
+      : yield* graphShareControlGetFrontier(
+          input.coordinatorUrl,
+          Effect2.pipe(tagName, EffectString.slice('tn-frontier-'.length)),
+        );
   yield* ensureSharedCasBlob(input.casRoot, frontier.manifestDigest, input.coordinatorUrl);
   yield* ensureSharedCasBlob(input.casRoot, frontier.envelopeDigest, input.coordinatorUrl);
   return {

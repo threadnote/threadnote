@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {
   validateTopicDependencyExpansionJournal,
   type TopicDependencyExpansionJournal,
@@ -27,6 +29,9 @@ import {
   validateTopicMaintenanceSourceApprovalReceipt,
   type TopicMaintenanceApprovalReceipt,
 } from './topic-maintenance-acceptance.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export type CandidateCategory = 'decision' | 'handoff' | 'invariant' | 'preference';
 export type CandidateComparison = 'contradiction' | 'duplicate' | 'new' | 'possible_duplicate' | 'replacement';
@@ -94,6 +99,14 @@ export interface MemoryCandidate {
   readonly topic: string;
 }
 
+/** Preserved v1/v2 wire shape; older readers omitted optional candidate metadata. */
+export type LegacyMemoryCandidate = Omit<MemoryCandidate, 'evidence' | 'kind' | 'project' | 'topic'> & {
+  readonly evidence?: MemoryCandidate['evidence'];
+  readonly kind?: MemoryCandidate['kind'];
+  readonly project?: MemoryCandidate['project'];
+  readonly topic?: MemoryCandidate['topic'];
+};
+
 export interface ReplacementSafetyBaselineV1 {
   readonly bodyCharacters: number;
   readonly nonEmptyLines: number;
@@ -115,14 +128,16 @@ export interface ReplacementSafetyAssessmentV1 {
 
 export interface CandidateReview {
   readonly auditEvents: readonly CandidateAuditEvent[];
-  readonly candidates: readonly MemoryCandidate[];
+  readonly candidates: readonly (MemoryCandidate | LegacyMemoryCandidate)[];
   readonly codeCitations: readonly MemoryCodeCitationV1[];
   readonly createdAt: string;
-  readonly outcome: string;
+  /** Older v2 wire reviews omitted closeout-only outcome metadata. */
+  readonly outcome?: string;
   readonly project: string;
   readonly reviewId: string;
   readonly revision: number;
-  readonly sourceAgentClient: string;
+  /** Older v2 wire reviews may omit source attribution; they remain readable but cannot be applied. */
+  readonly sourceAgentClient?: string;
   readonly sourceCommit?: string;
   readonly sourceSessionId?: string;
   readonly structuredCloseout?: StructuredCloseoutV1;
@@ -153,14 +168,16 @@ function validTopicClosedConflict(review: CandidateReview): boolean {
     (!review.maintenance && !review.maintenanceCapture) ||
     typeof closed !== 'object' ||
     closed === null ||
-    Object.keys(closed).sort().join(',') !==
+    EffectArray.join(EffectRecord.keys(closed).sort(), ',') !==
       'approvalDigest,beforeContentHash,contentHash,reviewRevision,targetUri,version' ||
     closed.version !== 1 ||
     !Number.isSafeInteger(closed.reviewRevision) ||
     closed.reviewRevision < 1 ||
     closed.reviewRevision > review.revision ||
     closed.targetUri !== (review.maintenance?.basis.targetUri ?? review.maintenanceCapture?.targetUri) ||
-    ![closed.beforeContentHash, closed.contentHash, closed.approvalDigest].every(value => /^[a-f0-9]{64}$/u.test(value))
+    !EffectArray.every([closed.beforeContentHash, closed.contentHash, closed.approvalDigest], value =>
+      /^[a-f0-9]{64}$/u.test(value),
+    )
   )
     return false;
   const approval = review.maintenanceApproval;
@@ -200,10 +217,13 @@ interface CandidateAuditTransition {
   readonly memoryUri?: string;
 }
 
-class CandidateMemoryError extends Schema.TaggedError<CandidateMemoryError>()('CandidateMemoryError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class CandidateMemoryError extends Schema.TaggedError<CandidateMemoryError, {readonly brand: unique symbol}>()(
+  'CandidateMemoryError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const MEMORY_READ_CONCURRENCY = 16;
 const MAX_CANDIDATE_AUDIT_EVENTS = 5_000;
@@ -246,7 +266,7 @@ export const buildExactDurableCandidateReview = Effect.fn('candidate.buildExactD
 ) {
   const validationError = validateSessionCloseoutInput(input);
   if (validationError) return yield* CandidateMemoryError.make({message: validationError});
-  const text = proposedText.trim();
+  const text = Effect2.pipe(proposedText, EffectString.trim);
   if (!text) return yield* CandidateMemoryError.make({message: 'Exact durable candidate text is empty.'});
   if (new TextEncoder().encode(text).byteLength > MAX_EXACT_DURABLE_CANDIDATE_BYTES)
     return yield* CandidateMemoryError.make({
@@ -264,9 +284,12 @@ const buildCandidateReviewFromDrafts = Effect.fn('candidate.buildReviewFromDraft
   drafts: readonly CandidateDraft[],
 ) {
   const createdAt = now.toISOString();
-  const reviewId = `review-${(yield* sha256Hex(
-    [input.project, input.topic, input.sourceSessionId ?? '', input.task, createdAt].join('\n'),
-  )).slice(0, 16)}`;
+  const reviewId = `review-${Effect2.pipe(
+    yield* sha256Hex(
+      EffectArray.join([input.project, input.topic, input.sourceSessionId ?? '', input.task, createdAt], '\n'),
+    ),
+    EffectString.slice(0, 16),
+  )}`;
   const evidence = candidateEvidence(input);
   const candidates =
     evidence.length === 0
@@ -309,13 +332,16 @@ export function candidateReviewWithState(
   state: CandidateReviewState,
   audit?: CandidateAuditTransition,
 ): CandidateReview {
-  if (review.candidates.find(candidate => candidate.candidateId === candidateId)?.state === state) {
+  if (
+    Option.getOrUndefined(EffectArray.findFirst(review.candidates, candidate => candidate.candidateId === candidateId))
+      ?.state === state
+  ) {
     return review;
   }
   const revision = review.revision + 1;
   const updated = {
     ...review,
-    candidates: review.candidates.map(candidate =>
+    candidates: EffectArray.map(review.candidates, candidate =>
       candidate.candidateId === candidateId ? {...candidate, state} : candidate,
     ),
     revision,
@@ -337,7 +363,9 @@ export function candidateReviewWithReplacementSafety(
   targetContentHash: string,
   at: string,
 ): CandidateReview | undefined {
-  const candidate = review.candidates.find(item => item.candidateId === candidateId);
+  const candidate = Option.getOrUndefined(
+    EffectArray.findFirst(review.candidates, item => item.candidateId === candidateId),
+  );
   if (
     candidate?.state !== 'pending' ||
     candidate.comparison !== 'replacement' ||
@@ -350,7 +378,7 @@ export function candidateReviewWithReplacementSafety(
   return candidateReviewWithAuditEvent(
     {
       ...review,
-      candidates: review.candidates.map(item =>
+      candidates: EffectArray.map(review.candidates, item =>
         item.candidateId === candidateId
           ? {
               ...item,
@@ -387,7 +415,7 @@ export function candidateReviewWithApplying(
   return candidateReviewWithAuditEvent(
     {
       ...review,
-      candidates: review.candidates.map(candidate =>
+      candidates: EffectArray.map(review.candidates, candidate =>
         candidate.candidateId === candidateId
           ? {
               ...candidate,
@@ -422,8 +450,10 @@ function candidateReviewWithRecoveryApproval(
   allowDestructiveReplacement: boolean,
   at: string,
 ): {readonly candidate: MemoryCandidate; readonly review: CandidateReview} | undefined {
-  const candidate = review.candidates.find(item => item.candidateId === candidateId);
-  if (!candidate) return undefined;
+  const candidate = Option.getOrUndefined(
+    EffectArray.findFirst(review.candidates, item => item.candidateId === candidateId),
+  );
+  if (!candidate || !isMemoryCandidate(candidate)) return undefined;
   if (!allowDestructiveReplacement || candidate.applyAllowDestructiveReplacement === true) {
     return {candidate, review};
   }
@@ -448,10 +478,12 @@ function candidateReviewWithRecoveryApproval(
     },
     at,
   );
-  return {
-    candidate: updated.candidates.find(item => item.candidateId === candidateId) ?? candidate,
-    review: updated,
-  };
+  const updatedCandidate = Option.getOrUndefined(
+    EffectArray.findFirst(updated.candidates, item => item.candidateId === candidateId),
+  );
+  return updatedCandidate && isMemoryCandidate(updatedCandidate)
+    ? {candidate: updatedCandidate, review: updated}
+    : undefined;
 }
 
 export type CandidateReplacementRecoveryPreparation =
@@ -474,8 +506,10 @@ export function prepareCandidateReplacementRecovery(
   currentTargetBody: string | undefined,
   currentTargetHash: string | undefined,
 ): CandidateReplacementRecoveryPreparation {
-  const candidate = review.candidates.find(item => item.candidateId === candidateId);
-  if (!candidate) return {status: 'unavailable'};
+  const candidate = Option.getOrUndefined(
+    EffectArray.findFirst(review.candidates, item => item.candidateId === candidateId),
+  );
+  if (!candidate || !isMemoryCandidate(candidate)) return {status: 'unavailable'};
   if (allowDestructiveReplacement && candidate.applyOperation !== 'replace') return {status: 'unavailable'};
   const assessment = assessInterruptedReplacementSafety(candidate, currentTargetBody, currentTargetHash);
   if (assessment === 'unavailable') return {status: 'unavailable'};
@@ -497,7 +531,7 @@ export function candidateReviewWithApplyStage(
 ): CandidateReview {
   return {
     ...review,
-    candidates: review.candidates.map(candidate =>
+    candidates: EffectArray.map(review.candidates, candidate =>
       candidate.candidateId === candidateId ? {...candidate, applyStage} : candidate,
     ),
   };
@@ -534,7 +568,7 @@ export function validateSessionCloseoutInput(input: SessionCloseoutInput): strin
     if ((values?.length ?? 0) > maximumItems) {
       return `${name} exceeds ${maximumItems} items.`;
     }
-    if ((values ?? []).some(value => value.length > MAX_CLOSEOUT_ITEM_CHARACTERS)) {
+    if (EffectArray.some(values ?? [], value => value.length > MAX_CLOSEOUT_ITEM_CHARACTERS)) {
       return `${name} contains an item exceeding ${MAX_CLOSEOUT_ITEM_CHARACTERS} characters.`;
     }
   }
@@ -560,7 +594,7 @@ export function structuredCloseoutFromInput(input: SessionCloseoutInput): Struct
   const structured = {
     type: 'structured-closeout',
     version: 1,
-    rationale: (nested?.rationale ?? input.rationale ?? '').trim(),
+    rationale: Effect2.pipe(nested?.rationale ?? input.rationale ?? '', EffectString.trim),
     constraints: normalizedItems(nested?.constraints ?? input.constraints),
     verificationPerformed: normalizedItems(nested?.verificationPerformed ?? input.verificationPerformed),
     knowledgeInvalidated: normalizedItems(nested?.knowledgeInvalidated ?? input.knowledgeInvalidated),
@@ -590,7 +624,7 @@ function validateStructuredCloseout(value: StructuredCloseoutV1): string | undef
   ] as const;
   for (const [name, items] of lists) {
     if (items.length > MAX_STRUCTURED_CLOSEOUT_ITEMS) return `${name} exceeds ${MAX_STRUCTURED_CLOSEOUT_ITEMS} items.`;
-    if (items.some(item => item.length > MAX_CLOSEOUT_ITEM_CHARACTERS)) {
+    if (EffectArray.some(items, item => item.length > MAX_CLOSEOUT_ITEM_CHARACTERS)) {
       return `${name} contains an item exceeding ${MAX_CLOSEOUT_ITEM_CHARACTERS} characters.`;
     }
   }
@@ -598,7 +632,8 @@ function validateStructuredCloseout(value: StructuredCloseoutV1): string | undef
 }
 
 export function candidateReviewWithAuditEvent(review: CandidateReview, event: CandidateAuditEvent): CandidateReview {
-  const duplicate = review.auditEvents.some(
+  const duplicate = EffectArray.some(
+    review.auditEvents,
     item =>
       item.action === event.action &&
       item.allowDestructiveReplacement === event.allowDestructiveReplacement &&
@@ -610,10 +645,10 @@ export function candidateReviewWithAuditEvent(review: CandidateReview, event: Ca
     return review;
   }
   const appended = [...review.auditEvents, event];
-  const creationEvent = appended.find(item => item.action === 'create_review');
-  const recentEvents = appended
-    .filter(item => item !== creationEvent)
-    .slice(-(MAX_CANDIDATE_REVIEW_AUDIT_EVENTS - (creationEvent ? 1 : 0)));
+  const creationEvent = Option.getOrUndefined(EffectArray.findFirst(appended, item => item.action === 'create_review'));
+  const recentEvents = EffectArray.filter(appended, item => item !== creationEvent).slice(
+    -(MAX_CANDIDATE_REVIEW_AUDIT_EVENTS - (creationEvent ? 1 : 0)),
+  );
   return {
     ...review,
     auditEvents: creationEvent ? [creationEvent, ...recentEvents] : recentEvents,
@@ -659,7 +694,10 @@ export const readActiveProjectMemories = Effect.fn('candidate.readActiveProjectM
     path =>
       Effect.gen(function* () {
         const content = yield* fs.readFileString(path);
-        const relative = pathService.relative(root, path).split(pathService.sep).join('/');
+        const relative = EffectArray.join(
+          Effect2.pipe(pathService.relative(root, path), EffectString.split(pathService.sep)),
+          '/',
+        );
         const record = parseMemoryDocument(
           `threadnote://user/${uriSegment(config.user)}/memories/${relative}`,
           content,
@@ -671,7 +709,10 @@ export const readActiveProjectMemories = Effect.fn('candidate.readActiveProjectM
       }),
     {concurrency: MEMORY_READ_CONCURRENCY},
   );
-  return records.filter((record): record is MemoryRecord => record !== undefined);
+  return EffectArray.filter(
+    records,
+    (record, __effectArrayIndex2): record is MemoryRecord => __effectArrayIndex2 in records && record !== undefined,
+  );
 });
 
 export const saveCandidateReview = Effect.fn('candidate.saveReview')(function* (
@@ -820,11 +861,14 @@ export const listCandidateReviews = Effect.fn('candidate.listReviews')(function*
       }),
     {concurrency: MEMORY_READ_CONCURRENCY},
   );
-  return reviews
-    .filter((review): review is CandidateReview => review !== undefined)
-    .sort(
-      (left, right) => left.createdAt.localeCompare(right.createdAt) || left.reviewId.localeCompare(right.reviewId),
-    );
+  return EffectArray.filter(
+    reviews,
+    (review, __effectArrayIndex2): review is CandidateReview => __effectArrayIndex2 in reviews && review !== undefined,
+  ).sort(
+    (left, right) =>
+      Effect2.pipe(left.createdAt, EffectString.localeCompare(right.createdAt)) ||
+      Effect2.pipe(left.reviewId, EffectString.localeCompare(right.reviewId)),
+  );
 });
 
 /**
@@ -849,13 +893,20 @@ export const candidateReviewObservationPaths = Effect.fn('candidate.reviewObserv
   return {
     state: 'ready' as const,
     directory,
-    files: selectedCandidateReviewNames(entries.success.names).map(name => pathService.join(directory, name)),
+    files: EffectArray.map(selectedCandidateReviewNames(entries.success.names), name =>
+      pathService.join(directory, name),
+    ),
   };
 });
 
 function selectedCandidateReviewNames(entries: readonly string[]): readonly string[] {
-  return entries
-    .filter(name => name.endsWith('.json') && !name.startsWith('.'))
+  return EffectArray.filter(
+    entries,
+    (name, __effectArrayIndex3) =>
+      __effectArrayIndex3 in entries &&
+      Effect2.pipe(name, EffectString.endsWith('.json')) &&
+      !Effect2.pipe(name, EffectString.startsWith('.')),
+  )
     .sort()
     .slice(-MAX_CANDIDATE_REVIEWS);
 }
@@ -884,8 +935,9 @@ const syncCandidateAudit = Effect.fn('candidate.syncAudit')(function* (
     CANDIDATE_LOCK_OPTIONS,
     Effect.gen(function* () {
       const existing = yield* readCandidateAudit(fs, path);
-      const eventKeys = new Set(existing.map(candidateAuditEventKey));
-      const additions = events.filter(event => {
+      const eventKeys = new Set(EffectArray.map(existing, candidateAuditEventKey));
+      const additions = EffectArray.filter(events, (event, __effectArrayIndex) => {
+        if (!(__effectArrayIndex in events)) return false;
         const key = candidateAuditEventKey(event);
         if (eventKeys.has(key)) {
           return false;
@@ -897,8 +949,18 @@ const syncCandidateAudit = Effect.fn('candidate.syncAudit')(function* (
         const bounded = [...existing, ...additions]
           .sort((left, right) => candidateAuditTimestamp(left) - candidateAuditTimestamp(right))
           .slice(-MAX_CANDIDATE_AUDIT_EVENTS);
-        if (bounded.map(candidateAuditEventKey).join('\n') !== existing.map(candidateAuditEventKey).join('\n')) {
-          yield* writePrivateFileAtomically(fs, path, `${bounded.map(item => JSON.stringify(item)).join('\n')}\n`);
+        if (
+          EffectArray.join(EffectArray.map(bounded, candidateAuditEventKey), '\n') !==
+          EffectArray.join(EffectArray.map(existing, candidateAuditEventKey), '\n')
+        ) {
+          yield* writePrivateFileAtomically(
+            fs,
+            path,
+            `${EffectArray.join(
+              EffectArray.map(bounded, item => JSON.stringify(item)),
+              '\n',
+            )}\n`,
+          );
         }
       }
     }),
@@ -907,13 +969,19 @@ const syncCandidateAudit = Effect.fn('candidate.syncAudit')(function* (
 });
 
 function candidateAuditEventKey(event: CandidateAuditEvent): string {
-  return [
-    event.action,
-    event.allowDestructiveReplacement === true ? 'destructive-approved' : '',
-    event.candidateId ?? '',
-    event.reviewId,
-    event.revision,
-  ].join('\n');
+  return EffectArray.join(
+    EffectArray.map(
+      [
+        event.action,
+        event.allowDestructiveReplacement === true ? 'destructive-approved' : '',
+        event.candidateId ?? '',
+        event.reviewId,
+        event.revision,
+      ],
+      item => (item === null || item === undefined ? '' : String(item)),
+    ),
+    '\n',
+  );
 }
 
 function candidateAuditTimestamp(event: CandidateAuditEvent): number {
@@ -930,7 +998,10 @@ export function withCandidateReviewLock<A, E, R>(
     const fs = yield* FileSystem.FileSystem;
     const pathService = yield* Path.Path;
     const lockDirectory = pathService.join(agentContextHome, 'threadnote', 'candidates', 'v1', 'locks');
-    const lockPath = pathService.join(lockDirectory, `${reviewId.replace(/[^a-zA-Z0-9._-]/g, '')}.lock`);
+    const lockPath = pathService.join(
+      lockDirectory,
+      `${Effect2.pipe(reviewId, EffectString.replace(/[^a-zA-Z0-9._-]/g, ''))}.lock`,
+    );
     return yield* withExclusiveFileLock(fs, lockPath, CANDIDATE_LOCK_OPTIONS, effect);
   });
 }
@@ -981,14 +1052,16 @@ const compareCandidate = Effect.fn('candidate.compare')(function* (
   existing: readonly MemoryRecord[],
   evidence: readonly string[],
 ) {
-  const sameTarget = existing
-    .filter(
-      record =>
-        record.metadata.kind === draft.kind &&
-        (draft.kind === 'preference' || record.metadata.project === input.project) &&
-        record.metadata.topic === input.topic,
-    )
-    .sort((left, right) => right.metadata.timestamp.localeCompare(left.metadata.timestamp))[0];
+  const sameTarget = EffectArray.filter(
+    existing,
+    (record, __effectArrayIndex) =>
+      __effectArrayIndex in existing &&
+      record.metadata.kind === draft.kind &&
+      (draft.kind === 'preference' || record.metadata.project === input.project) &&
+      record.metadata.topic === input.topic,
+  ).sort((left, right) =>
+    Effect2.pipe(right.metadata.timestamp, EffectString.localeCompare(left.metadata.timestamp)),
+  )[0];
   const mostSimilar = bestSimilarRecord(draft.proposedText, existing, input.project, draft.kind);
   const comparison = classifyComparison(draft.proposedText, sameTarget, mostSimilar);
   const target = sameTarget ?? (comparison === 'possible_duplicate' ? mostSimilar?.record : undefined);
@@ -1021,7 +1094,7 @@ const compareCandidate = Effect.fn('candidate.compare')(function* (
 });
 
 export function replacementSafetyBaseline(body: string): ReplacementSafetyBaselineV1 {
-  const normalizedBody = body.trim();
+  const normalizedBody = Effect2.pipe(body, EffectString.trim);
   const sections = sectionHeadings(normalizedBody);
   return {
     bodyCharacters: normalizedBody.length,
@@ -1032,7 +1105,7 @@ export function replacementSafetyBaseline(body: string): ReplacementSafetyBaseli
   };
 }
 
-export function replacementSafetyReviewRequiredWarning(candidate: MemoryCandidate): string {
+export function replacementSafetyReviewRequiredWarning(candidate: Pick<MemoryCandidate, 'candidateId'>): string {
   return (
     `Replacement safety is unavailable for legacy candidate ${candidate.candidateId}. ` +
     'Run review_session_context again before replacing the current target.'
@@ -1040,16 +1113,20 @@ export function replacementSafetyReviewRequiredWarning(candidate: MemoryCandidat
 }
 
 export function assessReplacementSafety(
-  kind: MemoryCandidate['kind'],
+  kind: MemoryCandidate['kind'] | undefined,
   target: ReplacementSafetyBaselineV1,
   proposedBody: string,
 ): ReplacementSafetyAssessmentV1 {
   const proposed = replacementSafetyBaseline(proposedBody);
   const retainedCharacterRatio = retainedRatio(proposed.bodyCharacters, target.bodyCharacters);
   const retainedLineRatio = retainedRatio(proposed.nonEmptyLines, target.nonEmptyLines);
-  const proposedSections = new Set(proposed.sectionHeadings.map(normalizedSectionKey));
-  const missingSections = target.sectionHeadings.filter(
-    section => !proposedSections.has(normalizedSectionKey(section)),
+  const proposedSections = new Set(EffectArray.map(proposed.sectionHeadings, normalizedSectionKey));
+  const missingSections = EffectArrayPipe(target.sectionHeadings, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (section, __effectArrayIndex3) =>
+        __effectArrayIndex3 in __effectArrayValues && !proposedSections.has(normalizedSectionKey(section)),
+    ),
   );
   const ratioThreshold = kind === 'handoff' ? 0.7 : 0.5;
   const removedCharacters = Math.max(0, target.bodyCharacters - proposed.bodyCharacters);
@@ -1099,11 +1176,17 @@ function retainedRatio(proposed: number, target: number): number {
 function sectionHeadings(body: string): readonly string[] {
   const seen = new Set<string>();
   const sections: string[] = [];
-  for (const line of body.split(/\r?\n/u)) {
-    const trimmed = line.trim();
+  for (const line of Effect2.pipe(body, EffectString.split(/\r?\n/u))) {
+    const trimmed = Effect2.pipe(line, EffectString.trim);
     const section =
       parseMarkdownHeadingLine(trimmed)?.title ??
-      (/^[^\s].{0,118}:$/u.test(trimmed) && !/^[-*+]\s/u.test(trimmed) ? trimmed.slice(0, -1).trim() : undefined);
+      (/^[^\s].{0,118}:$/u.test(trimmed) && !/^[-*+]\s/u.test(trimmed)
+        ? Effect2.pipe(trimmed, __effectPipeInput => {
+            const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+            const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.trim);
+            return __effectPipeStage1;
+          })
+        : undefined);
     if (!section) continue;
     const key = normalizedSectionKey(section);
     if (seen.has(key)) continue;
@@ -1114,11 +1197,19 @@ function sectionHeadings(body: string): readonly string[] {
 }
 
 function normalizedSectionKey(section: string): string {
-  return section.replace(/\s+/gu, ' ').trim().toLocaleLowerCase('en-US');
+  return Effect2.pipe(
+    section,
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+    EffectString.toLocaleLowerCase('en-US'),
+  );
 }
 
 function nonEmptyLineCount(body: string): number {
-  return body.split(/\r?\n/u).filter(line => line.trim().length > 0).length;
+  return EffectArray.filter(
+    Effect2.pipe(body, EffectString.split(/\r?\n/u)),
+    line => Effect2.pipe(line, EffectString.trim).length > 0,
+  ).length;
 }
 
 function classifyComparison(
@@ -1144,10 +1235,16 @@ function bestSimilarRecord(
   project: string,
   kind: MemoryCandidate['kind'],
 ): {readonly record: MemoryRecord; readonly similarity: number} | undefined {
-  return existing
-    .filter(record => record.metadata.kind === kind && (kind === 'preference' || record.metadata.project === project))
-    .map(record => ({record, similarity: textSimilarity(proposedText, record.body)}))
-    .sort((left, right) => right.similarity - left.similarity)[0];
+  return EffectArray.map(
+    EffectArray.filter(
+      existing,
+      (record, __effectArrayIndex) =>
+        __effectArrayIndex in existing &&
+        record.metadata.kind === kind &&
+        (kind === 'preference' || record.metadata.project === project),
+    ),
+    record => ({record, similarity: textSimilarity(proposedText, record.body)}),
+  ).sort((left, right) => right.similarity - left.similarity)[0];
 }
 
 function textSimilarity(left: string, right: string): number {
@@ -1156,7 +1253,7 @@ function textSimilarity(left: string, right: string): number {
   if (leftTokens.size === 0 || rightTokens.size === 0) {
     return 0;
   }
-  const intersection = [...leftTokens].filter(token => rightTokens.has(token)).length;
+  const intersection = EffectArray.filter([...leftTokens], token => rightTokens.has(token)).length;
   const union = new Set([...leftTokens, ...rightTokens]).size;
   return intersection / union;
 }
@@ -1169,7 +1266,7 @@ function looksContradictory(left: string, right: string): boolean {
     return false;
   }
   const withoutNegation = (value: string) =>
-    value.replace(/\b(?:cannot|disabled|doesn't|do not|must not|never|no|not)\b/gi, '');
+    Effect2.pipe(value, EffectString.replace(/\b(?:cannot|disabled|doesn't|do not|must not|never|no|not)\b/gi, ''));
   return textSimilarity(withoutNegation(left), withoutNegation(right)) >= 0.55;
 }
 
@@ -1192,8 +1289,8 @@ function normalizedItems(items: readonly string[] | undefined): readonly string[
   const seen = new Set<string>();
   const result: string[] = [];
   for (const item of items ?? []) {
-    const normalized = item.replace(/\s+/g, ' ').trim();
-    const key = normalized.toLowerCase();
+    const normalized = Effect2.pipe(item, EffectString.replace(/\s+/g, ' '), EffectString.trim);
+    const key = Effect2.pipe(normalized, EffectString.toLowerCase);
     if (normalized && !seen.has(key)) {
       seen.add(key);
       result.push(normalized);
@@ -1205,17 +1302,26 @@ function normalizedItems(items: readonly string[] | undefined): readonly string[
 function candidateEvidence(input: SessionCloseoutInput): readonly string[] {
   return normalizedItems([
     ...(input.evidence ?? []),
-    ...(input.codeCitations ?? []).map(citation => `code-citation:${citation.id}`),
+    ...EffectArray.map(input.codeCitations ?? [], citation => `code-citation:${citation.id}`),
     ...(input.sourceSessionId ? [`session:${input.sourceSessionId}`] : []),
     ...(input.sourceCommit ? [`commit:${input.sourceCommit}`] : []),
   ]);
 }
 
 function formatSections(sections: ReadonlyArray<readonly [string, readonly string[]]>): string {
-  return sections
-    .filter(([, items]) => items.length > 0)
-    .flatMap(([title, items]) => [`## ${title}`, ...items.map(item => `- ${item}`)])
-    .join('\n');
+  return EffectArray.join(
+    EffectArray.flatMap(
+      EffectArrayPipe(sections, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (__effectArrayTuple, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && __effectArrayTuple[1].length > 0,
+        ),
+      ),
+      ([title, items]) => [`## ${title}`, ...EffectArray.map(items, item => `- ${item}`)],
+    ),
+    '\n',
+  );
 }
 
 function structuredCloseoutSections(value: StructuredCloseoutV1): ReadonlyArray<readonly [string, readonly string[]]> {
@@ -1229,11 +1335,14 @@ function structuredCloseoutSections(value: StructuredCloseoutV1): ReadonlyArray<
 }
 
 function tokens(value: string): readonly string[] {
-  return [...value.toLowerCase().matchAll(/[a-z0-9][a-z0-9_.-]{2,}/g)].map(match => match[0]);
+  return EffectArray.map(
+    [...Effect2.pipe(value, EffectString.toLowerCase, EffectString.matchAll(/[a-z0-9][a-z0-9_.-]{2,}/g))],
+    match => match[0],
+  );
 }
 
 function candidateReviewPath(pathService: Path.Path, agentContextHome: string, reviewId: string): string {
-  const safeReviewId = reviewId.replace(/[^a-zA-Z0-9._-]/g, '');
+  const safeReviewId = Effect2.pipe(reviewId, EffectString.replace(/[^a-zA-Z0-9._-]/g, ''));
   return pathService.join(agentContextHome, 'threadnote', 'candidates', 'v1', 'reviews', `${safeReviewId}.json`);
 }
 
@@ -1261,9 +1370,10 @@ function markdownFiles(
   recursive = true,
 ): Effect.Effect<readonly string[], unknown, Path.Path> {
   return scanFilesWithinBoundary(fs, root, boundaryRoot, {
-    includeFile: (_path, name) => name.endsWith('.md') && !name.startsWith('.'),
+    includeFile: (_path, name) =>
+      Effect2.pipe(name, EffectString.endsWith('.md')) && !Effect2.pipe(name, EffectString.startsWith('.')),
     recursive,
-  }).pipe(Effect.map(files => files.map(file => file.path)));
+  }).pipe(Effect.map(files => EffectArray.map(files, file => file.path)));
 }
 
 function readCandidateAudit(
@@ -1275,15 +1385,14 @@ function readCandidateAudit(
       return [];
     }
     const raw = yield* fs.readFileString(path);
-    return raw
-      .split('\n')
-      .map(line =>
-        line.trim()
+    return EffectArray.filter(
+      EffectArray.map(Effect2.pipe(raw, EffectString.split('\n')), line =>
+        Effect2.pipe(line, EffectString.trim)
           ? Option.getOrUndefined(Option.liftThrowable((content: string): unknown => JSON.parse(content))(line))
           : undefined,
-      )
-      .filter((event): event is CandidateAuditEvent => event !== undefined && candidateAuditEventIsValid(event))
-      .slice(-MAX_CANDIDATE_AUDIT_EVENTS);
+      ),
+      (event): event is CandidateAuditEvent => event !== undefined && candidateAuditEventIsValid(event),
+    ).slice(-MAX_CANDIDATE_AUDIT_EVENTS);
   });
 }
 
@@ -1296,7 +1405,13 @@ function pruneCandidateReviews(
     const pathService = yield* Path.Path;
     const now = yield* Clock.currentTimeMillis;
     const reviews = yield* Effect.forEach(
-      (yield* fs.readDirectory(reviewDirectory)).filter(name => name.endsWith('.json')),
+      EffectArrayPipe(yield* fs.readDirectory(reviewDirectory), __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (name, __effectArrayIndex3) =>
+            __effectArrayIndex3 in __effectArrayValues && Effect2.pipe(name, EffectString.endsWith('.json')),
+        ),
+      ),
       name =>
         Effect.gen(function* () {
           const path = pathService.join(reviewDirectory, name);
@@ -1311,13 +1426,14 @@ function pruneCandidateReviews(
         }),
       {concurrency: MEMORY_READ_CONCURRENCY},
     );
-    const removable = reviews
-      .filter(item => item.review?.reviewId !== currentReviewId)
-      .sort(
-        (left, right) =>
-          candidateReviewRetentionPriority(left.review) - candidateReviewRetentionPriority(right.review) ||
-          left.modifiedAt - right.modifiedAt,
-      );
+    const removable = EffectArray.filter(
+      reviews,
+      (item, __effectArrayIndex) => __effectArrayIndex in reviews && item.review?.reviewId !== currentReviewId,
+    ).sort(
+      (left, right) =>
+        candidateReviewRetentionPriority(left.review) - candidateReviewRetentionPriority(right.review) ||
+        left.modifiedAt - right.modifiedAt,
+    );
     let remaining = reviews.length;
     for (const item of removable) {
       const expired =
@@ -1331,12 +1447,188 @@ function pruneCandidateReviews(
   });
 }
 
+function parseMaintenanceApprovalReceipt(
+  approval: unknown,
+  maintenance: TopicMaintenanceReviewPayload | undefined,
+  reviewId: string,
+  revision: number,
+): TopicMaintenanceApprovalReceipt | undefined {
+  if (approval === undefined) return undefined;
+  if (maintenance === undefined)
+    throw CandidateMemoryError.make({message: 'maintenance approval requires a review payload'});
+  return validateTopicMaintenanceSourceApprovalReceipt(approval, maintenance, reviewId, revision);
+}
+
+function isCandidateReviewParseInput(value: unknown): value is CandidateReviewParseInput {
+  if (
+    !isRecord(value) ||
+    (value.version !== 1 && value.version !== 2 && value.version !== 3 && value.version !== 4 && value.version !== 5) ||
+    typeof value.reviewId !== 'string' ||
+    typeof value.revision !== 'number' ||
+    !EffectArray.isArray(value.candidates) ||
+    !EffectArray.every(
+      value.candidates,
+      candidate =>
+        isMemoryCandidate(candidate) ||
+        ((value.version === 1 || value.version === 2) && isLegacyMemoryCandidate(candidate)),
+    ) ||
+    typeof value.createdAt !== 'string' ||
+    (value.version <= 2
+      ? value.outcome !== undefined && typeof value.outcome !== 'string'
+      : typeof value.outcome !== 'string') ||
+    typeof value.project !== 'string' ||
+    (value.version <= 2
+      ? value.sourceAgentClient !== undefined && typeof value.sourceAgentClient !== 'string'
+      : typeof value.sourceAgentClient !== 'string') ||
+    typeof value.task !== 'string' ||
+    typeof value.topic !== 'string' ||
+    (value.sourceCommit !== undefined && typeof value.sourceCommit !== 'string') ||
+    (value.sourceSessionId !== undefined && typeof value.sourceSessionId !== 'string') ||
+    (value.maintenanceClosedConflict !== undefined &&
+      !isTopicMaintenanceClosedConflict(value.maintenanceClosedConflict))
+  )
+    return false;
+  if (value.dependencyExpansion !== undefined) {
+    try {
+      validateTopicDependencyExpansionJournal(value.dependencyExpansion);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
+function isStringList(value: unknown): value is readonly string[] {
+  return EffectArray.isArray(value) && EffectArray.every(value, item => typeof item === 'string');
+}
+
+export function isMemoryCandidate(value: unknown): value is MemoryCandidate {
+  if (
+    !isRecord(value) ||
+    typeof value.candidateId !== 'string' ||
+    !isStringList(value.categories) ||
+    !EffectArray.every(value.categories, category =>
+      ['decision', 'handoff', 'invariant', 'preference'].includes(category),
+    ) ||
+    typeof value.comparison !== 'string' ||
+    !['contradiction', 'duplicate', 'new', 'possible_duplicate', 'replacement'].includes(value.comparison) ||
+    typeof value.confidence !== 'number' ||
+    !isStringList(value.evidence) ||
+    typeof value.kind !== 'string' ||
+    !['durable', 'handoff', 'incident', 'preference', 'smoke'].includes(value.kind) ||
+    typeof value.project !== 'string' ||
+    typeof value.proposedText !== 'string' ||
+    typeof value.reason !== 'string' ||
+    typeof value.recommendation !== 'string' ||
+    !['create', 'manual_review', 'no_action', 'replace'].includes(value.recommendation) ||
+    typeof value.state !== 'string' ||
+    !['applied', 'applying', 'conflict', 'deferred', 'pending', 'rejected'].includes(value.state) ||
+    typeof value.topic !== 'string' ||
+    (value.applyAllowDestructiveReplacement !== undefined &&
+      typeof value.applyAllowDestructiveReplacement !== 'boolean') ||
+    (value.applyApprovedAt !== undefined && typeof value.applyApprovedAt !== 'string') ||
+    (value.applyBodyText !== undefined && typeof value.applyBodyText !== 'string') ||
+    (value.applyContentHash !== undefined && typeof value.applyContentHash !== 'string') ||
+    (value.applyOperation !== undefined && value.applyOperation !== 'create' && value.applyOperation !== 'replace') ||
+    (value.applyReplaceUri !== undefined && typeof value.applyReplaceUri !== 'string') ||
+    (value.applyStage !== undefined &&
+      (typeof value.applyStage !== 'string' ||
+        !['cleanup_pending', 'conflict', 'prepared', 'written'].includes(value.applyStage))) ||
+    (value.applyTargetUri !== undefined && typeof value.applyTargetUri !== 'string') ||
+    (value.targetContentHash !== undefined && typeof value.targetContentHash !== 'string') ||
+    (value.targetUri !== undefined && typeof value.targetUri !== 'string')
+  )
+    return false;
+  const baseline = value.replacementSafetyBaseline;
+  return (
+    baseline === undefined ||
+    (isRecord(baseline) &&
+      typeof baseline.bodyCharacters === 'number' &&
+      typeof baseline.nonEmptyLines === 'number' &&
+      isStringList(baseline.sectionHeadings) &&
+      typeof baseline.sectionListTruncated === 'boolean' &&
+      baseline.version === 1)
+  );
+}
+
+function isLegacyMemoryCandidate(value: unknown): value is LegacyMemoryCandidate {
+  if (
+    !isRecord(value) ||
+    (value.kind !== undefined &&
+      (typeof value.kind !== 'string' ||
+        !['durable', 'handoff', 'incident', 'preference', 'smoke'].includes(value.kind))) ||
+    typeof value.candidateId !== 'string' ||
+    !isStringList(value.categories) ||
+    !EffectArray.every(value.categories, category =>
+      ['decision', 'handoff', 'invariant', 'preference'].includes(category),
+    ) ||
+    typeof value.comparison !== 'string' ||
+    !['contradiction', 'duplicate', 'new', 'possible_duplicate', 'replacement'].includes(value.comparison) ||
+    typeof value.confidence !== 'number' ||
+    (value.evidence !== undefined && !isStringList(value.evidence)) ||
+    (value.project !== undefined && typeof value.project !== 'string') ||
+    typeof value.proposedText !== 'string' ||
+    typeof value.reason !== 'string' ||
+    typeof value.recommendation !== 'string' ||
+    !['create', 'manual_review', 'no_action', 'replace'].includes(value.recommendation) ||
+    typeof value.state !== 'string' ||
+    !['applied', 'applying', 'conflict', 'deferred', 'pending', 'rejected'].includes(value.state) ||
+    (value.topic !== undefined && typeof value.topic !== 'string') ||
+    (value.applyAllowDestructiveReplacement !== undefined &&
+      typeof value.applyAllowDestructiveReplacement !== 'boolean') ||
+    (value.applyApprovedAt !== undefined && typeof value.applyApprovedAt !== 'string') ||
+    (value.applyBodyText !== undefined && typeof value.applyBodyText !== 'string') ||
+    (value.applyContentHash !== undefined && typeof value.applyContentHash !== 'string') ||
+    (value.applyOperation !== undefined && value.applyOperation !== 'create' && value.applyOperation !== 'replace') ||
+    (value.applyReplaceUri !== undefined && typeof value.applyReplaceUri !== 'string') ||
+    (value.applyStage !== undefined &&
+      (typeof value.applyStage !== 'string' ||
+        !['cleanup_pending', 'conflict', 'prepared', 'written'].includes(value.applyStage))) ||
+    (value.applyTargetUri !== undefined && typeof value.applyTargetUri !== 'string') ||
+    (value.targetContentHash !== undefined && typeof value.targetContentHash !== 'string') ||
+    (value.targetUri !== undefined && typeof value.targetUri !== 'string')
+  )
+    return false;
+  const baseline = value.replacementSafetyBaseline;
+  return (
+    baseline === undefined ||
+    (isRecord(baseline) &&
+      typeof baseline.bodyCharacters === 'number' &&
+      typeof baseline.nonEmptyLines === 'number' &&
+      isStringList(baseline.sectionHeadings) &&
+      typeof baseline.sectionListTruncated === 'boolean' &&
+      baseline.version === 1)
+  );
+}
+
+function isTopicMaintenanceClosedConflict(value: unknown): value is TopicMaintenanceClosedConflictV1 {
+  return (
+    isRecord(value) &&
+    value.version === 1 &&
+    typeof value.reviewRevision === 'number' &&
+    typeof value.targetUri === 'string' &&
+    typeof value.beforeContentHash === 'string' &&
+    typeof value.contentHash === 'string' &&
+    typeof value.approvalDigest === 'string'
+  );
+}
+
 function candidateReviewIsTerminal(review: CandidateReview | undefined): boolean {
   if (review?.dependencyExpansion)
     return review.dependencyExpansion.stage === 'written' || review.dependencyExpansion.stage === 'conflict';
   return (
-    review?.candidates.every(
-      candidate => candidate.state === 'applied' || candidate.state === 'conflict' || candidate.state === 'rejected',
+    Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(review?.candidates), __effectOptionalArray =>
+        EffectArray.every(
+          __effectOptionalArray,
+          candidate =>
+            candidate.state === 'applied' || candidate.state === 'conflict' || candidate.state === 'rejected',
+        ),
+      ),
     ) === true
   );
 }
@@ -1346,38 +1638,66 @@ function candidateReviewRetentionPriority(review: CandidateReview | undefined): 
   if (!review || candidateReviewIsTerminal(review)) {
     return 0;
   }
-  if (review.candidates.every(candidate => candidate.state === 'deferred')) {
+  if (EffectArray.every(review.candidates, candidate => candidate.state === 'deferred')) {
     return 1;
   }
-  if (review.candidates.some(candidate => candidate.state === 'applying')) {
+  if (EffectArray.some(review.candidates, candidate => candidate.state === 'applying')) {
     return 3;
   }
   return 2;
 }
 
+type CandidateReviewParseInput = Omit<
+  CandidateReview,
+  | 'version'
+  | 'codeCitations'
+  | 'auditEvents'
+  | 'structuredCloseout'
+  | 'maintenance'
+  | 'maintenanceCapture'
+  | 'maintenanceApproval'
+  | 'outcome'
+  | 'sourceAgentClient'
+> & {
+  readonly outcome?: string;
+  readonly sourceAgentClient?: string;
+  readonly version: 1 | 2 | 3 | 4 | 5;
+  readonly codeCitations?: unknown;
+  readonly auditEvents?: unknown;
+  readonly structuredCloseout?: unknown;
+  readonly maintenance?: unknown;
+  readonly maintenanceCapture?: unknown;
+  readonly maintenanceApproval?: unknown;
+};
+
 export function parseCandidateReview(value: unknown): CandidateReview {
   if (
-    typeof value !== 'object' ||
-    value === null ||
-    !('version' in value) ||
-    (value.version !== 1 && value.version !== 2 && value.version !== 3 && value.version !== 4 && value.version !== 5) ||
-    !('reviewId' in value) ||
-    typeof value.reviewId !== 'string' ||
-    !('revision' in value) ||
-    typeof value.revision !== 'number' ||
-    !('candidates' in value) ||
-    !Array.isArray(value.candidates)
-  ) {
+    isRecord(value) &&
+    value.version !== 2 &&
+    value.version !== 3 &&
+    value.version !== 5 &&
+    (value.maintenance !== undefined ||
+      value.maintenanceApproval !== undefined ||
+      value.maintenanceCapture !== undefined)
+  )
+    throw CandidateMemoryError.make({message: 'maintenance payload requires a v2 candidate review'});
+  if (
+    isRecord(value) &&
+    (value.version === 1 || value.version === 2) &&
+    EffectArray.isArray(value.candidates) &&
+    EffectArray.some(
+      value.candidates,
+      candidate =>
+        isRecord(candidate) &&
+        candidate.kind !== undefined &&
+        (typeof candidate.kind !== 'string' || !['durable', 'handoff', 'preference'].includes(candidate.kind)),
+    )
+  )
+    throw CandidateMemoryError.make({message: 'Generic candidates cannot select ordinary maintenance-only kinds.'});
+  if (!isCandidateReviewParseInput(value)) {
     throw CandidateMemoryError.make({message: 'unsupported review document'});
   }
-  const review = value as Omit<CandidateReview, 'codeCitations' | 'version'> & {
-    readonly codeCitations?: readonly MemoryCodeCitationV1[];
-    readonly maintenance?: unknown;
-    readonly maintenanceApproval?: unknown;
-    readonly maintenanceClosedConflict?: unknown;
-    readonly structuredCloseout?: unknown;
-    readonly version: 1 | 2 | 3 | 4 | 5;
-  };
+  const review = value;
   let codeCitations: readonly MemoryCodeCitationV1[] = [];
   if (
     review.version !== 2 &&
@@ -1388,40 +1708,57 @@ export function parseCandidateReview(value: unknown): CandidateReview {
       review.maintenanceCapture !== undefined)
   )
     throw CandidateMemoryError.make({message: 'maintenance payload requires a v2 candidate review'});
-  if (review.maintenanceApproval !== undefined && review.maintenance === undefined)
+  const maintenance = review.maintenance;
+  const maintenanceApproval = review.maintenanceApproval;
+  if (maintenanceApproval !== undefined && maintenance === undefined)
     throw CandidateMemoryError.make({message: 'maintenance approval requires a review payload'});
   if (review.version === 2 || review.version === 3 || review.version === 4 || review.version === 5) {
-    if (!Array.isArray(review.codeCitations)) throw CandidateMemoryError.make({message: 'invalid v2 code citations'});
+    if (!EffectArray.isArray(review.codeCitations))
+      throw CandidateMemoryError.make({message: 'invalid v2 code citations'});
     try {
-      codeCitations = review.codeCitations.map(assertMemoryCodeCitation);
+      codeCitations = EffectArray.map(review.codeCitations, assertMemoryCodeCitation);
       formatMemoryCodeCitationLines(codeCitations);
     } catch {
       throw CandidateMemoryError.make({message: 'invalid v2 code citations'});
     }
   }
+  const {
+    auditEvents: rawAuditEvents,
+    codeCitations: _rawCodeCitations,
+    structuredCloseout: rawStructuredCloseout,
+    maintenanceCapture: rawMaintenanceCapture,
+    maintenance: rawMaintenance,
+    maintenanceApproval: rawMaintenanceApproval,
+    ...reviewFields
+  } = review;
+  const validatedMaintenance =
+    rawMaintenance === undefined ? undefined : validateTopicMaintenanceReview(rawMaintenance);
+  const maintenanceApprovalReceipt = parseMaintenanceApprovalReceipt(
+    rawMaintenanceApproval,
+    validatedMaintenance,
+    review.reviewId,
+    review.revision,
+  );
   const parsed: CandidateReview = {
-    ...review,
-    auditEvents: Array.isArray(review.auditEvents)
-      ? review.auditEvents.filter(event => candidateAuditEventIsValid(event))
+    ...reviewFields,
+    auditEvents: EffectArray.isArray(rawAuditEvents)
+      ? EffectArrayPipe(rawAuditEvents, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (event, __effectArrayIndex3): event is CandidateAuditEvent =>
+              __effectArrayIndex3 in __effectArrayValues && candidateAuditEventIsValid(event),
+          ),
+        )
       : [],
     codeCitations,
-    ...(review.structuredCloseout === undefined
+    ...(rawStructuredCloseout === undefined
       ? {}
-      : {structuredCloseout: parseStructuredCloseout(review.structuredCloseout)}),
-    ...(review.maintenanceCapture === undefined
+      : {structuredCloseout: parseStructuredCloseout(rawStructuredCloseout)}),
+    ...(rawMaintenanceCapture === undefined
       ? {}
-      : {maintenanceCapture: validateTopicMaintenanceObsidianCaptureIntent(review.maintenanceCapture)}),
-    ...(review.maintenance === undefined ? {} : {maintenance: validateTopicMaintenanceReview(review.maintenance)}),
-    ...(review.maintenanceApproval === undefined
-      ? {}
-      : {
-          maintenanceApproval: validateTopicMaintenanceSourceApprovalReceipt(
-            review.maintenanceApproval,
-            review.maintenance!,
-            review.reviewId,
-            review.revision,
-          ),
-        }),
+      : {maintenanceCapture: validateTopicMaintenanceObsidianCaptureIntent(rawMaintenanceCapture)}),
+    ...(validatedMaintenance === undefined ? {} : {maintenance: validatedMaintenance}),
+    ...(maintenanceApprovalReceipt === undefined ? {} : {maintenanceApproval: maintenanceApprovalReceipt}),
     version: review.version === 5 ? 5 : review.version === 4 ? 4 : review.version === 3 ? 3 : 2,
   };
   if (!validTopicClosedConflict(parsed))
@@ -1464,7 +1801,8 @@ function assertExpansionReview(review: CandidateReview): void {
     'codeCitations',
     'dependencyExpansion',
   ];
-  if (Object.keys(review).some(key => !allowed.includes(key)))
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+  if (EffectArray.some(Object.keys(review), key => !allowed.includes(key)))
     throw CandidateMemoryError.make({message: 'Unknown expansion journal field.'});
   validateTopicDependencyExpansionJournal(review.dependencyExpansion);
   if (
@@ -1473,7 +1811,11 @@ function assertExpansionReview(review: CandidateReview): void {
     new Date(review.createdAt).toISOString() !== review.createdAt
   )
     throw CandidateMemoryError.make({message: 'Expansion capture reservation needs a canonical fixed timestamp.'});
-  if (review.reviewId !== `review-${review.dependencyExpansion.preview.revision.slice(0, 24)}` || review.revision !== 1)
+  if (
+    review.reviewId !==
+      `review-${Effect2.pipe(review.dependencyExpansion.preview.revision, EffectString.slice(0, 24))}` ||
+    review.revision !== 1
+  )
     throw CandidateMemoryError.make({message: 'Expansion journal approval identity changed.'});
 }
 
@@ -1502,34 +1844,37 @@ function assertImportedReviewCapture(review: CandidateReview): void {
 }
 
 function parseStructuredCloseout(value: unknown): StructuredCloseoutV1 {
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    !('type' in value) ||
-    value.type !== 'structured-closeout' ||
-    !('version' in value) ||
-    value.version !== 1 ||
-    !('rationale' in value) ||
-    typeof value.rationale !== 'string' ||
-    !('constraints' in value) ||
-    !Array.isArray(value.constraints) ||
-    !value.constraints.every(item => typeof item === 'string') ||
-    !('verificationPerformed' in value) ||
-    !Array.isArray(value.verificationPerformed) ||
-    !value.verificationPerformed.every(item => typeof item === 'string') ||
-    !('knowledgeInvalidated' in value) ||
-    !Array.isArray(value.knowledgeInvalidated) ||
-    !value.knowledgeInvalidated.every(item => typeof item === 'string') ||
-    !('unresolvedRisks' in value) ||
-    !Array.isArray(value.unresolvedRisks) ||
-    !value.unresolvedRisks.every(item => typeof item === 'string')
-  ) {
+  if (!isStructuredCloseout(value)) {
     throw CandidateMemoryError.make({message: 'invalid structured closeout'});
   }
-  const structured = value as StructuredCloseoutV1;
-  const error = validateStructuredCloseout(structured);
+  const error = validateStructuredCloseout(value);
   if (error) throw CandidateMemoryError.make({message: error});
-  return structured;
+  return value;
+}
+
+function isStructuredCloseout(value: unknown): value is StructuredCloseoutV1 {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'type' in value &&
+    value.type === 'structured-closeout' &&
+    'version' in value &&
+    value.version === 1 &&
+    'rationale' in value &&
+    typeof value.rationale === 'string' &&
+    'constraints' in value &&
+    isStringArray(value.constraints) &&
+    'verificationPerformed' in value &&
+    isStringArray(value.verificationPerformed) &&
+    'knowledgeInvalidated' in value &&
+    isStringArray(value.knowledgeInvalidated) &&
+    'unresolvedRisks' in value &&
+    isStringArray(value.unresolvedRisks)
+  );
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return EffectArray.isArray(value) && EffectArray.every(value, item => typeof item === 'string');
 }
 
 function candidateAuditEventIsValid(value: unknown): value is CandidateAuditEvent {
@@ -1565,7 +1910,8 @@ function assertAutomaticReviewEnvelope(review: CandidateReview): void {
     throw CandidateMemoryError.make({message: 'Automatic maintenance requires its closed v5 journal.'});
   if (review.version !== 5) {
     if (
-      review.candidates.some(
+      EffectArray.some(
+        review.candidates,
         candidate => candidate.kind !== undefined && !['durable', 'handoff', 'preference'].includes(candidate.kind),
       )
     )

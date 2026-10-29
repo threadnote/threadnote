@@ -1,3 +1,5 @@
+import {isJsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray} from 'effect';
 import {createHash} from './helpers/node-crypto.js';
 import {execFileSync} from './helpers/node-child-process.js';
 import {access, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile} from './helpers/node-fs-promises.js';
@@ -22,6 +24,9 @@ import {
   parsePreparedWebsiteMetadata,
   preparedWebsiteMetadataSchemaVersion,
 } from '../tools/site-prepared-metadata.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const root = process.cwd();
 
@@ -110,7 +115,10 @@ describe('website and standalone release boundary', () => {
     expect(canonical).not.toMatch(
       /<\?(?:xml)|<!DOCTYPE|<(?:circle|filter|foreignObject|image|rect|script|text)\b|(?:href|xlink:href)=/,
     );
-    const markPaths = [...canonical.matchAll(/<path\b[^>]*\bd="([^"]+)"[^>]*\/>/g)].map(match => match[1]);
+    const markPaths = EffectArray.map(
+      [...Effect.pipe(canonical, EffectString.matchAll(/<path\b[^>]*\bd="([^"]+)"[^>]*\/>/g))],
+      match => match[1],
+    );
     expect(markPaths).toHaveLength(1);
     expect(markPaths[0]).toContain('H238M30 96H110');
     expect(
@@ -146,16 +154,18 @@ describe('website and standalone release boundary', () => {
   });
 
   it('does not invoke the public website from the CLI build', async () => {
-    const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
-      devDependencies: Record<string, string>;
-      scripts: Record<string, string>;
-    };
+    const manifestValue: unknown = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+    if (!isJsonObject(manifestValue)) throw new Error('Expected the root package manifest structure.');
+    const scripts = manifestValue.scripts;
+    const devDependencies = manifestValue.devDependencies;
+    if (!isJsonObject(scripts) || !isJsonObject(devDependencies))
+      throw new Error('Expected root package scripts and development dependencies.');
 
-    expect(manifest.scripts.build).not.toContain('site:');
-    expect(manifest.scripts['site:build']).toBeDefined();
-    expect(manifest.scripts['site:build']).toContain('apps/website/tools/site-articles.ts');
-    expect(manifest.scripts['site:check']).toContain('site:test');
-    expect(manifest.devDependencies).toMatchObject({
+    expect(scripts.build).not.toContain('site:');
+    expect(scripts['site:build']).toBeDefined();
+    expect(scripts['site:build']).toContain('apps/website/tools/site-articles.ts');
+    expect(scripts['site:check']).toContain('site:test');
+    expect(devDependencies).toMatchObject({
       '@expo-google-fonts/spline-sans': '0.4.2',
       '@resvg/resvg-js': '2.6.2',
     });
@@ -185,7 +195,7 @@ describe('website and standalone release boundary', () => {
     expect(evidenceBuild).toContain("'scripts/site-release-social-image.ts'");
     expect(evidenceBuild).toContain("'scripts/site-performance-evidence.ts'");
     expect(evidenceBuild).toContain("'apps/website/tools/site-performance-evidence.ts'");
-    expect(evidenceBuild).toContain("!name.startsWith('site:')");
+    expect(evidenceBuild).toContain("!Effect.pipe(name, EffectString.startsWith('site:'))");
     expect(measuredPerformanceSourcePathspecs).toContain('bun.lock');
     expect(measuredPerformanceSourcePathspecs).toContain(':(glob)packages/*/src/**');
     expect(measuredPerformanceSourcePathspecs).toContain(':(glob)packages/*/package.json');
@@ -211,8 +221,8 @@ describe('website and standalone release boundary', () => {
 
     fc.assert(
       fc.property(fc.dictionary(fc.string({maxLength: 32, minLength: 1}), fc.string({maxLength: 120})), siteScripts => {
-        const additions = Object.fromEntries(
-          Object.entries(siteScripts).map(([name, command]) => [`site:${name}`, command]),
+        const additions = EffectRecord.fromEntries(
+          EffectArray.map(EffectRecord.toEntries(siteScripts), ([name, command]) => [`site:${name}`, command]),
         );
         expect(
           canonicalPerformanceRuntimePackageManifest(
@@ -275,7 +285,10 @@ describe('website and standalone release boundary', () => {
   it('accepts byte-identical governed sources after a squash merge and rejects source drift', async () => {
     const repository = await mkdtemp(join(tmpdir(), 'threadnote-performance-squash-'));
     const git = (...arguments_: string[]) =>
-      execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}).trim();
+      Effect.pipe(
+        execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}),
+        EffectString.trim,
+      );
     const commit = (...arguments_: string[]) =>
       git('-c', 'user.name=Threadnote Test', '-c', 'user.email=threadnote@example.invalid', ...arguments_);
     try {
@@ -309,7 +322,10 @@ describe('website and standalone release boundary', () => {
   it('detects package source and manifest drift in cleanliness, commit comparison, and source digests', async () => {
     const repository = await mkdtemp(join(tmpdir(), 'threadnote-performance-packages-'));
     const git = (...arguments_: string[]) =>
-      execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}).trim();
+      Effect.pipe(
+        execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}),
+        EffectString.trim,
+      );
     const commit = (...arguments_: string[]) =>
       git('-c', 'user.name=Threadnote Test', '-c', 'user.email=threadnote@example.invalid', ...arguments_);
     try {
@@ -355,7 +371,10 @@ describe('website and standalone release boundary', () => {
   it('accepts committed site generators while rejecting post-benchmark dependency drift', async () => {
     const repository = await mkdtemp(join(tmpdir(), 'threadnote-performance-site-only-'));
     const git = (...arguments_: string[]) =>
-      execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}).trim();
+      Effect.pipe(
+        execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}),
+        EffectString.trim,
+      );
     const commit = (...arguments_: string[]) =>
       git('-c', 'user.name=Threadnote Test', '-c', 'user.email=threadnote@example.invalid', ...arguments_);
     try {
@@ -443,7 +462,10 @@ describe('website and standalone release boundary', () => {
   it('keeps retained source identity bound to the measured commit after later runtime changes', async () => {
     const repository = await mkdtemp(join(tmpdir(), 'threadnote-performance-history-'));
     const git = (...arguments_: string[]) =>
-      execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}).trim();
+      Effect.pipe(
+        execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}),
+        EffectString.trim,
+      );
     const commit = (...arguments_: string[]) =>
       git('-c', 'user.name=Threadnote Test', '-c', 'user.email=threadnote@example.invalid', ...arguments_);
     try {
@@ -478,9 +500,9 @@ describe('website and standalone release boundary', () => {
       expect(() => assertPerformanceSourcesMatchCommit(repository, sourceCommit)).toThrow(
         'runtime sources changed after the retained performance run',
       );
-      expect(() => computePerformanceSourceTreeSha256AtCommit(repository, '0'.repeat(40))).toThrow(
-        'source commit 0000000000000000000000000000000000000000 is unavailable',
-      );
+      expect(() =>
+        computePerformanceSourceTreeSha256AtCommit(repository, Effect.pipe('0', EffectString.repeat(40))),
+      ).toThrow('source commit 0000000000000000000000000000000000000000 is unavailable');
     } finally {
       await rm(repository, {force: true, recursive: true});
     }
@@ -490,12 +512,18 @@ describe('website and standalone release boundary', () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), 'threadnote-performance-load-history-'));
     const repository = join(temporaryRoot, 'repository');
     try {
-      const sourceHead = execFileSync('git', ['rev-parse', 'HEAD'], {cwd: root, encoding: 'utf8'}).trim();
+      const sourceHead = Effect.pipe(
+        execFileSync('git', ['rev-parse', 'HEAD'], {cwd: root, encoding: 'utf8'}),
+        EffectString.trim,
+      );
       execFileSync('git', ['clone', '--shared', '--no-checkout', root, repository], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       const git = (...arguments_: string[]) =>
-        execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}).trim();
+        Effect.pipe(
+          execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}),
+          EffectString.trim,
+        );
       const commit = (...arguments_: string[]) =>
         git('-c', 'user.name=Threadnote Test', '-c', 'user.email=threadnote@example.invalid', ...arguments_);
       git('checkout', '--detach', sourceHead);
@@ -505,7 +533,11 @@ describe('website and standalone release boundary', () => {
       await cp(join(root, 'apps', 'website', 'performance'), join(repository, 'apps', 'website', 'performance'), {
         recursive: true,
       });
-      const manifest = JSON.parse(await readFile(join(repository, 'package.json'), 'utf8')) as Record<string, unknown>;
+      const manifestValue: unknown = JSON.parse(await readFile(join(repository, 'package.json'), 'utf8'));
+      if (!isJsonObject(manifestValue)) throw new Error('Expected the copied package manifest.');
+      const dependencies = manifestValue.dependencies;
+      if (!isJsonObject(dependencies)) throw new Error('Expected copied package dependencies.');
+      const manifest = manifestValue;
       await writeFile(
         join(repository, 'apps', 'threadnote', 'src', 'later-runtime.ts'),
         'export const laterRuntime = true;\n',
@@ -513,7 +545,7 @@ describe('website and standalone release boundary', () => {
       await writeFile(join(repository, 'bun.lock'), 'later dependency lock\n');
       await writeFile(
         join(repository, 'package.json'),
-        `${JSON.stringify({...manifest, dependencies: {...(manifest.dependencies as object), effect: 'later'}})}\n`,
+        `${JSON.stringify({...manifest, dependencies: {...dependencies, effect: 'later'}})}\n`,
       );
       git('add', '.');
       commit('commit', '-m', 'later runtime and dependencies');
@@ -539,7 +571,10 @@ describe('website and standalone release boundary', () => {
   it('keeps measured hashes invariant across arbitrary subsequent runtime commits', async () => {
     const repository = await mkdtemp(join(tmpdir(), 'threadnote-performance-history-property-'));
     const git = (...arguments_: string[]) =>
-      execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}).trim();
+      Effect.pipe(
+        execFileSync('git', arguments_, {cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}),
+        EffectString.trim,
+      );
     const commit = (...arguments_: string[]) =>
       git('-c', 'user.name=Threadnote Test', '-c', 'user.email=threadnote@example.invalid', ...arguments_);
     try {
@@ -611,7 +646,21 @@ describe('website and standalone release boundary', () => {
     expect(workflow).toContain('THREADNOTE_SITE_PUBLISHED_RELEASES=');
     expect(workflow).toContain('EXPECTED_RELEASE_TAG: ${{ inputs.release_tag }}');
     expect(workflow).toContain('fetch-depth: 0');
-    const pushTrigger = workflow.slice(workflow.indexOf('  push:'), workflow.indexOf('  workflow_dispatch:'));
+    const pushTrigger = Effect.pipe(
+      workflow,
+      EffectString.slice(
+        Effect.pipe(
+          workflow,
+          EffectString.indexOf('  push:'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+        Effect.pipe(
+          workflow,
+          EffectString.indexOf('  workflow_dispatch:'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      ),
+    );
     expect(pushTrigger).toContain('paths:');
     expect(pushTrigger).toContain('branches: [main]');
     expect(pushTrigger).not.toContain('tags:');
@@ -691,7 +740,7 @@ describe('website and standalone release boundary', () => {
       );
 
       const prepared = loadLatestMajorWebsiteReleases(repository);
-      expect(prepared.map(release => release.version)).toEqual(['v4.0.0']);
+      expect(EffectArray.map(prepared, release => release.version)).toEqual(['v4.0.0']);
 
       gitAt(
         '2026-08-12T12:00:00Z',
@@ -706,17 +755,17 @@ describe('website and standalone release boundary', () => {
         'v4.1.1',
       );
       const tagged = loadLatestMajorWebsiteReleases(repository);
-      expect(tagged.map(release => release.version)).toEqual(['v4.1.1', 'v4.0.0']);
+      expect(EffectArray.map(tagged, release => release.version)).toEqual(['v4.1.1', 'v4.0.0']);
       expect(new Date(tagged[0].publishedAt).toISOString()).toBe('2026-08-12T12:00:00.000Z');
 
       const earlierPublished = {tagName: 'v4.0.0', publishedAt: '2026-08-10T12:00:00Z'};
       const unpublished = loadLatestMajorWebsiteReleases(repository, JSON.stringify([earlierPublished]));
-      expect(unpublished.map(release => release.version)).toEqual(['v4.0.0']);
+      expect(EffectArray.map(unpublished, release => release.version)).toEqual(['v4.0.0']);
       const released = loadLatestMajorWebsiteReleases(
         repository,
         JSON.stringify([earlierPublished, {tagName: 'v4.1.1', publishedAt: '2026-08-13T09:00:00Z'}]),
       );
-      expect(released.map(release => release.version)).toEqual(['v4.1.1', 'v4.0.0']);
+      expect(EffectArray.map(released, release => release.version)).toEqual(['v4.1.1', 'v4.0.0']);
       expect(released[0]).toMatchObject({
         releaseUrl: 'https://github.com/threadnote/threadnote/releases/tag/v4.1.1',
         summary: 'Threadnote 4.1.1 is ready.',
@@ -737,7 +786,7 @@ describe('website and standalone release boundary', () => {
           selector: entry => entry.patch,
         }),
         entries => {
-          const tagged = entries.map(({patch}) => ({
+          const tagged = EffectArray.map(entries, ({patch}) => ({
             major: 4,
             minor: 1,
             patch,
@@ -746,13 +795,19 @@ describe('website and standalone release boundary', () => {
           }));
           const original = structuredClone(tagged);
           const publishedAtByTag = new Map(
-            entries.filter(entry => entry.published).map(entry => [`v4.1.${entry.patch}`, 'release-date']),
+            EffectArray.map(
+              EffectArray.filter(entries, entry => entry.published),
+              entry => [`v4.1.${entry.patch}`, 'release-date'],
+            ),
           );
           const selected = selectPublishedReleaseRefs(tagged, publishedAtByTag);
-          expect(selected.map(release => release.version)).toEqual(
-            tagged.filter(release => publishedAtByTag.has(release.version)).map(release => release.version),
+          expect(EffectArray.map(selected, release => release.version)).toEqual(
+            EffectArray.map(
+              EffectArray.filter(tagged, release => publishedAtByTag.has(release.version)),
+              release => release.version,
+            ),
           );
-          expect(selected.every(release => release.publishedAt === 'release-date')).toBe(true);
+          expect(EffectArray.every(selected, release => release.publishedAt === 'release-date')).toBe(true);
           expect(tagged).toEqual(original);
         },
       ),
@@ -791,7 +846,7 @@ describe('website and standalone release boundary', () => {
       ['faq/index.html', '/faq/', 'og.png'],
     ] as const;
     const htmlDocuments = await Promise.all(
-      entries.map(async ([entry, route, socialImage]) => ({
+      EffectArray.map(entries, async ([entry, route, socialImage]) => ({
         route,
         socialImage,
         html: await readFile(join(root, 'apps', 'website', entry), 'utf8'),
@@ -808,8 +863,14 @@ describe('website and standalone release boundary', () => {
 
     await expect(access(join(root, 'apps', 'website', 'public', 'whats-new-og.png'))).rejects.toThrow();
 
-    const structuredDataSource = htmlDocuments[0]?.html.match(
-      /<script type="application\/ld\+json">([\s\S]*?)<\/script>/,
+    const structuredDataSource = Effect.pipe(htmlDocuments[0]?.html, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect.pipe(
+            effectOptionalString,
+            EffectString.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/),
+            Effect.Option.getOrElse(() => null),
+          ),
     )?.[1];
     expect(structuredDataSource).toBeDefined();
     expect(JSON.parse(structuredDataSource ?? '{}')).toMatchObject({
@@ -829,9 +890,12 @@ describe('website and standalone release boundary', () => {
       readFile(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'),
       readFile(join(root, 'tools', 'bazel', 'target-specs.mjs'), 'utf8'),
     ]);
-    const sitemapLocations = [...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)].map(match => match[1]);
+    const sitemapLocations = EffectArray.map(
+      [...Effect.pipe(sitemap, EffectString.matchAll(/<loc>([^<]+)<\/loc>/g))],
+      match => match[1],
+    );
 
-    expect(sitemapLocations).toEqual(entries.map(([, route]) => `${origin}${route}`));
+    expect(sitemapLocations).toEqual(EffectArray.map(entries, ([, route]) => `${origin}${route}`));
     expect(robots).toContain(`Sitemap: ${origin}/sitemap.xml`);
     expect(readme).toContain(`**Website:** ${origin}/`);
     expect(readme).toContain(`**Documentation:** ${origin}/docs/`);

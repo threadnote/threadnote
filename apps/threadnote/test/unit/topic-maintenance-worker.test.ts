@@ -1,9 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
 import {refreshContextMaintenanceCase} from '../../src/memory/context/maintenance_refresh.js';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, FileSystem, Fiber, Layer, Option, Path, Result} from 'effect';
+import {Deferred, Effect, FileSystem, Fiber, Layer, Option, Path, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -53,6 +54,9 @@ import {
   prepareTopicMaintenanceReview,
 } from '../../src/memory/context/maintenance_review.js';
 import {saveCandidateReview} from '@threadnote/memory/candidate';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const at = '2026-10-16T00:00:00.000Z';
 function topicCase(id: number, disposition: ContextMaintenanceCaseV2['disposition']): ContextMaintenanceCaseV2 {
@@ -62,7 +66,7 @@ function topicCase(id: number, disposition: ContextMaintenanceCaseV2['dispositio
     memoryId: `tn_topic_${id}`,
     family: 'topic-maintenance',
     slot: 'declared-support',
-    evidenceRevision: 'a'.repeat(64),
+    evidenceRevision: Effect2.pipe('a', EffectString.repeat(64)),
     disposition,
     reason: 'topic-unchanged',
     firstSeen: at,
@@ -75,14 +79,14 @@ function topicCase(id: number, disposition: ContextMaintenanceCaseV2['dispositio
 
 const citation = createMemoryCodeCitation({
   version: 1,
-  repositoryId: '1'.repeat(64),
+  repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
   repositoryIdentityKind: 'remote',
-  sourceCommit: '2'.repeat(40),
+  sourceCommit: Effect2.pipe('2', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceSnapshotId: `cgsn_${'4'.repeat(40)}`,
+  sourceSnapshotId: `cgsn_${Effect2.pipe('4', EffectString.repeat(40))}`,
   extractorSet: 'native-code-graph-13',
   path: 'source.ts',
-  fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+  fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
   target: {kind: 'file'},
   evidenceRetention: 'capsule-retained',
 });
@@ -226,15 +230,16 @@ const noTextReviewFixture = Effect.gen(function* () {
       removedClaims: [],
       paragraphDispositions: {
         version: 1,
-        entries: basis.paragraphs
-          .filter(item => item.role === 'descriptive' && item.support === 'direct')
-          .map(item => ({
+        entries: EffectArray.map(
+          EffectArray.filter(basis.paragraphs, item => item.role === 'descriptive' && item.support === 'direct'),
+          item => ({
             ordinal: item.ordinal,
             beforeHash: item.hash,
             disposition: 'revalidate',
             supportHandles: [`current:${fixture.citation.id}`],
             rationale: 'The cited value remains three.',
-          })),
+          }),
+        ),
       },
     }),
   );
@@ -290,8 +295,8 @@ describe('topic maintenance worker scheduling', () => {
   it('rotates stable IDs fairly without mutating inventory order', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 0, max: 24}), {minLength: 1, maxLength: 12}), ids => {
-        const records = ids.map(topic);
-        const order = records.map(record => record.uri);
+        const records = EffectArray.map(ids, topic);
+        const order = EffectArray.map(records, record => record.uri);
         let last: string | undefined;
         const seen = new Set<string>();
         for (let tick = 0; tick < records.length; tick++) {
@@ -301,7 +306,7 @@ describe('topic maintenance worker scheduling', () => {
           last = selected.metadata.memoryId;
         }
         expect(seen.size).toBe(records.length);
-        expect(records.map(record => record.uri)).toEqual(order);
+        expect(EffectArray.map(records, record => record.uri)).toEqual(order);
       }),
       {numRuns: 25},
     );
@@ -325,15 +330,17 @@ describe('topic maintenance worker scheduling', () => {
         ),
         (ids, choice, dispositions, initialState) => {
           const selected = ids[choice % ids.length];
-          const beforeCases = ids.map((id, index) => topicCase(id, dispositions[index % dispositions.length]));
+          const beforeCases = EffectArray.map(ids, (id, index) =>
+            topicCase(id, dispositions[index % dispositions.length]),
+          );
           const prior = {
-            targetHash: 'a'.repeat(64),
-            revision: 'a'.repeat(64),
+            targetHash: Effect2.pipe('a', EffectString.repeat(64)),
+            revision: Effect2.pipe('a', EffectString.repeat(64)),
             outcome: 'review-required' as const,
             checkedAt: at,
             coverage: 'declared-only' as const,
           };
-          const checkpoints = Object.fromEntries(beforeCases.map(item => [item.caseId, prior]));
+          const checkpoints = EffectRecord.fromEntries(EffectArray.map(beforeCases, item => [item.caseId, prior]));
           const state: MaintenanceState = {
             version: 2,
             paused: false,
@@ -346,12 +353,18 @@ describe('topic maintenance worker scheduling', () => {
             topicCheckpoints: checkpoints,
           };
           const original = JSON.stringify(state);
-          const chosen = beforeCases.find(item => item.memoryId === `tn_topic_${selected}`)!;
-          const accepted = {...chosen, disposition: 'resolved' as const, evidenceRevision: 'b'.repeat(64)};
+          const chosen = Option.getOrUndefined(
+            EffectArray.findFirst(beforeCases, item => item.memoryId === `tn_topic_${selected}`),
+          )!;
+          const accepted = {
+            ...chosen,
+            disposition: 'resolved' as const,
+            evidenceRevision: Effect2.pipe('b', EffectString.repeat(64)),
+          };
           const checkpoint = {
             ...prior,
-            targetHash: 'b'.repeat(64),
-            revision: 'b'.repeat(64),
+            targetHash: Effect2.pipe('b', EffectString.repeat(64)),
+            revision: Effect2.pipe('b', EffectString.repeat(64)),
             outcome: 'unchanged' as const,
           };
           const observed = {caseId: chosen.caseId, item: accepted, checkpoint};
@@ -359,17 +372,24 @@ describe('topic maintenance worker scheduling', () => {
           const twice = stateWithAcceptedTopicObservation(once, observed);
           expect(twice).toEqual(once);
           expect(JSON.stringify(state)).toBe(original);
-          expect(once.cases.map(item => item.caseId)).toEqual(beforeCases.map(item => item.caseId));
-          expect(once.cases.filter(item => item.caseId !== chosen.caseId)).toEqual(
-            beforeCases.filter(item => item.caseId !== chosen.caseId),
+          expect(EffectArray.map(once.cases, item => item.caseId)).toEqual(
+            EffectArray.map(beforeCases, item => item.caseId),
           );
-          expect(Object.entries(once.topicCheckpoints ?? {}).filter(([id]) => id !== chosen.caseId)).toEqual(
-            Object.entries(checkpoints).filter(([id]) => id !== chosen.caseId),
+          expect(EffectArray.filter(once.cases, item => item.caseId !== chosen.caseId)).toEqual(
+            EffectArray.filter(beforeCases, item => item.caseId !== chosen.caseId),
           );
-          expect(once.cases.find(item => item.caseId === chosen.caseId)).toEqual(accepted);
+          expect(
+            EffectArray.filter(EffectRecord.toEntries(once.topicCheckpoints ?? {}), ([id]) => id !== chosen.caseId),
+          ).toEqual(EffectArray.filter(EffectRecord.toEntries(checkpoints), ([id]) => id !== chosen.caseId));
+          expect(
+            Option.getOrUndefined(EffectArray.findFirst(once.cases, item => item.caseId === chosen.caseId)),
+          ).toEqual(accepted);
           expect(once.topicCheckpoints?.[chosen.caseId]).toEqual(checkpoint);
           const remainingDispositions = new Set(
-            beforeCases.filter(item => item.caseId !== chosen.caseId).map(item => item.disposition),
+            EffectArray.map(
+              EffectArray.filter(beforeCases, item => item.caseId !== chosen.caseId),
+              item => item.disposition,
+            ),
           );
           const expectedState = remainingDispositions.has('needs-decision')
             ? 'needs-decision'
@@ -414,7 +434,7 @@ describe('topic maintenance worker scheduling', () => {
     const retained = selectRetainedMaintenanceCases(cases, activeIds, true, false);
     expect(retained).toHaveLength(201);
     expect(retained).toContain(active);
-    expect(retained.filter(item => item.disposition === 'resolved')).toHaveLength(200);
+    expect(EffectArray.filter(retained, item => item.disposition === 'resolved')).toHaveLength(200);
     expect(selectRetainedMaintenanceCases(cases, activeIds, false, false)).toHaveLength(206);
   });
 
@@ -433,16 +453,16 @@ describe('topic maintenance worker scheduling', () => {
       checkpoints: {},
       topicCheckpoints: {
         [selected.caseId]: {
-          targetHash: 'a'.repeat(64),
-          revision: 'b'.repeat(64),
+          targetHash: Effect2.pipe('a', EffectString.repeat(64)),
+          revision: Effect2.pipe('b', EffectString.repeat(64)),
           outcome: 'unavailable',
           checkedAt: at,
           coverage: 'declared-only',
           deferredAt: at,
         },
         [other.caseId]: {
-          targetHash: 'a'.repeat(64),
-          revision: 'b'.repeat(64),
+          targetHash: Effect2.pipe('a', EffectString.repeat(64)),
+          revision: Effect2.pipe('b', EffectString.repeat(64)),
           outcome: 'unavailable',
           checkedAt: at,
           coverage: 'declared-only',
@@ -464,15 +484,15 @@ describe('topic maintenance worker scheduling', () => {
   it('keeps topic checkpoints on incomplete inventory and rejects malformed recovery state', () => {
     const id = topicMaintenanceCaseId(topic(1));
     const checkpoint = {
-      targetHash: 'a'.repeat(64),
-      revision: 'b'.repeat(64),
+      targetHash: Effect2.pipe('a', EffectString.repeat(64)),
+      revision: Effect2.pipe('b', EffectString.repeat(64)),
       outcome: 'review-required' as const,
       checkedAt: '2026-10-16T00:00:00.000Z',
       coverage: 'declared-only' as const,
       observation: {
         version: 1 as const,
-        targetHash: 'a'.repeat(64),
-        revision: 'b'.repeat(64),
+        targetHash: Effect2.pipe('a', EffectString.repeat(64)),
+        revision: Effect2.pipe('b', EffectString.repeat(64)),
         coverage: 'declared-only' as const,
         outcome: 'review-required' as const,
         canDraft: true,
@@ -505,7 +525,7 @@ describe('topic maintenance worker scheduling', () => {
           const other = topicCase(2, 'needs-decision');
           const observation = {
             version: 1 as const,
-            targetHash: 'b'.repeat(64),
+            targetHash: Effect2.pipe('b', EffectString.repeat(64)),
             revision: selected.evidenceRevision,
             outcome: 'review-required' as const,
             coverage: 'declared-only' as const,
@@ -529,11 +549,13 @@ describe('topic maintenance worker scheduling', () => {
           yield* fs.writeFileString(file, JSON.stringify(state));
           const decide = (action: 'reject' | 'defer' | 'resume', observationRevision = selected.evidenceRevision) =>
             recordTopicMaintenanceReviewDecision(config, {caseId: selected.caseId, observationRevision, action});
-          expect((yield* Effect.result(decide('reject', 'f'.repeat(64))))._tag).toBe('Failure');
+          expect((yield* Effect.result(decide('reject', Effect2.pipe('f', EffectString.repeat(64)))))._tag).toBe(
+            'Failure',
+          );
           expect(
             yield* recordTopicMaintenanceReviewDecision(config, {
               caseId: selected.caseId,
-              observationRevision: 'f'.repeat(64),
+              observationRevision: Effect2.pipe('f', EffectString.repeat(64)),
               action: 'reject',
               onStale: 'ignore',
             }),
@@ -566,7 +588,7 @@ describe('topic maintenance worker scheduling', () => {
           });
           expect(rejected.cases.find((item: ContextMaintenanceCaseV2) => item.caseId === other.caseId)).toEqual(other);
           const afterMaterialChange = boundedTopicMaintenanceCheckpoint(
-            {...observation, revision: 'c'.repeat(64)},
+            {...observation, revision: Effect2.pipe('c', EffectString.repeat(64))},
             at,
             rejected.topicCheckpoints[selected.caseId],
           );
@@ -597,13 +619,19 @@ describe('topic maintenance worker scheduling', () => {
 
   it('records a bounded budget deferral and preserves prior observation on retry', () => {
     const record = topic(2);
-    const pending = deferTopicMaintenanceCase(record, 'a'.repeat(64), at, undefined, undefined);
+    const pending = deferTopicMaintenanceCase(
+      record,
+      Effect2.pipe('a', EffectString.repeat(64)),
+      at,
+      undefined,
+      undefined,
+    );
     expect(pending.item).toMatchObject({disposition: 'waiting-evidence', reason: 'topic-observation-budget-deferred'});
     expect(pending.checkpoint).toMatchObject({deferredAt: at, coverage: 'declared-only'});
     expect(validTopicMaintenanceCheckpoints({[pending.caseId]: pending.checkpoint})).toBe(true);
     const retained = deferTopicMaintenanceCase(
       record,
-      'a'.repeat(64),
+      Effect2.pipe('a', EffectString.repeat(64)),
       at,
       {
         ...pending.checkpoint,
@@ -657,14 +685,14 @@ describe('topic maintenance worker scheduling', () => {
         const sources = Array.from({length: 8}, (_, index) => {
           const current = createMemoryCodeCitation({
             version: 1,
-            repositoryId: '1'.repeat(64),
+            repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
             repositoryIdentityKind: 'remote',
-            sourceCommit: '2'.repeat(40),
+            sourceCommit: Effect2.pipe('2', EffectString.repeat(40)),
             sourceDirty: false,
-            sourceSnapshotId: `cgsn_${'4'.repeat(40)}`,
+            sourceSnapshotId: `cgsn_${Effect2.pipe('4', EffectString.repeat(40))}`,
             extractorSet: 'native-code-graph-13',
-            path: `source-${index}/${'part/'.repeat(790)}file.ts`,
-            fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+            path: `source-${index}/${Effect2.pipe('part/', EffectString.repeat(790))}file.ts`,
+            fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
             target: {kind: 'file'},
             evidenceRetention: 'capsule-retained',
           });
@@ -675,13 +703,13 @@ describe('topic maintenance worker scheduling', () => {
             historicalAvailable: true,
             current,
             observedPath: current.path,
-            currentFileBytesHash: 'b'.repeat(64),
+            currentFileBytesHash: Effect2.pipe('b', EffectString.repeat(64)),
           };
         });
         const previousObservation = {
           version: 1 as const,
-          targetHash: 'a'.repeat(64),
-          revision: 'b'.repeat(64),
+          targetHash: Effect2.pipe('a', EffectString.repeat(64)),
+          revision: Effect2.pipe('b', EffectString.repeat(64)),
           outcome: 'unchanged' as const,
           coverage: 'declared-only' as const,
           canDraft: false,
@@ -690,7 +718,7 @@ describe('topic maintenance worker scheduling', () => {
         const previous = boundedTopicMaintenanceCheckpoint(previousObservation, at);
         const observation = {
           ...previousObservation,
-          revision: 'c'.repeat(64),
+          revision: Effect2.pipe('c', EffectString.repeat(64)),
           outcome: 'review-required' as const,
           canDraft: true,
           sources,
@@ -807,7 +835,7 @@ describe('topic maintenance worker scheduling', () => {
           const priorState = JSON.parse(yield* fs.readFileString(stateFile));
           const deferred = deferTopicMaintenanceCase(
             parseMemoryDocument(uri, accepted)!,
-            before.subjectContentHashes?.[0]?.hash ?? 'a'.repeat(64),
+            before.subjectContentHashes?.[0]?.hash ?? Effect2.pipe('a', EffectString.repeat(64)),
             at,
             priorState.topicCheckpoints[caseId],
             {...before, disposition: 'resolved', reason: 'topic-unchanged'},
@@ -965,12 +993,17 @@ describe('topic maintenance worker scheduling', () => {
         expect(yield* Fiber.join(completing)).toBe('completed');
         const decision = yield* Fiber.join(deciding).pipe(Effect.result);
         const state: MaintenanceState = JSON.parse(yield* fs.readFileString(stateFile));
-        expect(state.cases.find(item => item.caseId === caseId)?.evidenceRevision).toBe(
-          state.topicCheckpoints?.[caseId]?.revision,
-        );
+        expect(
+          Option.getOrUndefined(EffectArray.findFirst(state.cases, item => item.caseId === caseId))?.evidenceRevision,
+        ).toBe(state.topicCheckpoints?.[caseId]?.revision);
         if (Result.isFailure(decision))
-          expect(state.cases.find(item => item.caseId === caseId)?.disposition).toBe('resolved');
-        else expect(state.cases.find(item => item.caseId === caseId)?.disposition).toBe('deferred-policy');
+          expect(
+            Option.getOrUndefined(EffectArray.findFirst(state.cases, item => item.caseId === caseId))?.disposition,
+          ).toBe('resolved');
+        else
+          expect(
+            Option.getOrUndefined(EffectArray.findFirst(state.cases, item => item.caseId === caseId))?.disposition,
+          ).toBe('deferred-policy');
       }),
     ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
@@ -1011,17 +1044,24 @@ describe('topic maintenance worker scheduling', () => {
           } else {
             yield* fs.writeFileString(
               memory,
-              preview.content.replace('The retry limit is three.', 'The retry limit is four.'),
+              Effect2.pipe(
+                preview.content,
+                EffectString.replace('The retry limit is three.', 'The retry limit is four.'),
+              ),
             );
           }
           yield* Deferred.succeed(resume, undefined);
           const result = yield* Fiber.join(fiber).pipe(Effect.result);
           expect(Result.isFailure(result)).toBe(true);
           const after: MaintenanceState = JSON.parse(yield* fs.readFileString(stateFile));
-          expect(after.cases.find(item => item.caseId === caseId)?.disposition).toBe('needs-decision');
+          expect(
+            Option.getOrUndefined(EffectArray.findFirst(after.cases, item => item.caseId === caseId))?.disposition,
+          ).toBe('needs-decision');
           expect(after.topicCheckpoints?.[caseId]).toEqual(state.topicCheckpoints?.[caseId]);
           if (drift === 'source') {
-            const priorRevision = after.cases.find(item => item.caseId === caseId)?.evidenceRevision;
+            const priorRevision = Option.getOrUndefined(
+              EffectArray.findFirst(after.cases, item => item.caseId === caseId),
+            )?.evidenceRevision;
             let reopened = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
             for (let tick = 0; tick < 12 && reopened?.evidenceRevision === priorRevision; tick++) {
               yield* runContextMaintenance(config, {cwd: repository});
@@ -1051,7 +1091,13 @@ effectIt.effect('refreshes a selected stale topic observation without changing i
       body: Effect.succeed({action: 'refresh-case', project: 'fixture', caseId, memoryUri: fixture.uri}),
     });
     expect(route?.status).toBe(200);
-    const refreshed = route?.body as Effect.Success<ReturnType<typeof refreshContextMaintenanceCase>>;
+    const refreshedSchema = Schema.Struct({
+      item: Schema.Struct({caseId: Schema.String, evidenceRevision: Schema.String}),
+      outcome: Schema.Literal('ready'),
+      packet: Schema.Struct({topicEvidence: Schema.Struct({outcome: Schema.String})}),
+    });
+    if (!Schema.is(refreshedSchema)(route?.body)) throw new Error('Expected a ready topic-maintenance refresh result.');
+    const refreshed = route.body;
     expect(refreshed.outcome).toBe('ready');
     if (refreshed.outcome !== 'ready') throw new Error(JSON.stringify(refreshed));
     expect(refreshed.item.caseId).toBe(caseId);

@@ -1,4 +1,8 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {Schema} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const LEGACY_PROCEDURE_MANIFEST_VERSION = 1;
 const PROCEDURE_MANIFEST_VERSION = 2;
@@ -25,7 +29,10 @@ const SEMANTIC_VERSION_PATTERN =
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
-export class ProcedureContractError extends Schema.TaggedError<ProcedureContractError>()('ProcedureContractError', {
+export class ProcedureContractError extends Schema.TaggedError<
+  ProcedureContractError,
+  {readonly brand: unique symbol}
+>()('ProcedureContractError', {
   message: Schema.String,
 }) {}
 
@@ -174,7 +181,7 @@ export function parseProcedureManifest(value: unknown): ProcedureManifest {
   const rollout = object(source.rollout, 'rollout');
   exactKeys(rollout, ['channel', 'percentage'], 'rollout');
   const channel = rolloutChannel(rollout.channel);
-  if (channel === 'stable' && artifact.semanticVersion.includes('-')) {
+  if (channel === 'stable' && Effect.pipe(artifact.semanticVersion, EffectString.includes('-'))) {
     fail('stable procedure rollout requires a stable semantic version');
   }
   return {
@@ -258,7 +265,7 @@ export function createProcedureVerificationReceipt(
   const parsed = parseProcedureManifest(manifest);
   return parseProcedureVerificationReceipt({
     artifact: parsed.artifact,
-    commandIds: parsed.verification.commands.map(command => command.id),
+    commandIds: EffectArray.map(parsed.verification.commands, command => command.id),
     fixtureDigests: parsed.verification.fixtures,
     hostVersion: input.hostVersion,
     manifestSha256: procedureManifestSha256(parsed),
@@ -299,7 +306,7 @@ function parseArtifact(value: unknown, label: string): ProcedureArtifactIdentity
 
 function sortedDependencies(values: readonly unknown[]): readonly ProcedureDependency[] {
   bounded(values, MAX_DEPENDENCIES, 'dependencies');
-  const dependencies = values.map((value, index) => {
+  const dependencies = EffectArray.map(values, (value, index) => {
     const source = object(value, `dependencies[${index}]`);
     exactKeys(source, ['artifactId', 'semanticVersion'], `dependencies[${index}]`);
     return {
@@ -316,7 +323,7 @@ function sortedDependencies(values: readonly unknown[]): readonly ProcedureDepen
 
 function sortedFixtures(values: readonly unknown[]): readonly ProcedureFixtureDescriptor[] {
   bounded(values, MAX_FIXTURES, 'verification.fixtures');
-  const fixtures = values.map((value, index) => {
+  const fixtures = EffectArray.map(values, (value, index) => {
     const source = object(value, `verification.fixtures[${index}]`);
     exactKeys(source, ['id', 'sha256'], `verification.fixtures[${index}]`);
     return {
@@ -329,14 +336,14 @@ function sortedFixtures(values: readonly unknown[]): readonly ProcedureFixtureDe
 
 function orderedCommands(values: readonly unknown[]): readonly ProcedureCommandDescriptor[] {
   bounded(values, MAX_COMMANDS, 'verification.commands');
-  const commands = values.map((value, index) => {
+  const commands = EffectArray.map(values, (value, index) => {
     const source = object(value, `verification.commands[${index}]`);
     exactKeys(source, ['argv', 'id'], `verification.commands[${index}]`);
     const argv = sourceArray(source.argv, `verification.commands[${index}].argv`);
     if (argv.length === 0 || argv.length > MAX_ARGUMENTS)
       fail(`verification.commands[${index}].argv must contain 1 to ${MAX_ARGUMENTS} arguments`);
     return {
-      argv: argv.map((argument, argumentIndex) =>
+      argv: EffectArray.map(argv, (argument, argumentIndex) =>
         commandArgument(argument, `verification.commands[${index}].argv[${argumentIndex}]`),
       ),
       id: identifier(source.id, `verification.commands[${index}].id`),
@@ -352,7 +359,7 @@ function orderedCommands(values: readonly unknown[]): readonly ProcedureCommandD
 
 function orderedIdentifiers(values: readonly unknown[], maximum: number, label: string): readonly string[] {
   bounded(values, maximum, label);
-  const identifiers = values.map((value, index) => identifier(value, `${label}[${index}]`));
+  const identifiers = EffectArray.map(values, (value, index) => identifier(value, `${label}[${index}]`));
   if (new Set(identifiers).size !== identifiers.length) fail(`${label} must not contain duplicate entries`);
   return identifiers;
 }
@@ -360,7 +367,7 @@ function orderedIdentifiers(values: readonly unknown[], maximum: number, label: 
 function sortedIdentifiers(values: readonly unknown[], maximum: number, label: string): readonly string[] {
   bounded(values, maximum, label);
   return sortedUnique(
-    values.map((value, index) => identifier(value, `${label}[${index}]`)),
+    EffectArray.map(values, (value, index) => identifier(value, `${label}[${index}]`)),
     value => value,
     label,
   );
@@ -369,7 +376,7 @@ function sortedIdentifiers(values: readonly unknown[], maximum: number, label: s
 function sortedMemoryIds(values: readonly unknown[]): readonly string[] {
   bounded(values, MAX_DURABLE_MEMORY_IDS, 'relatedDurableMemoryIds');
   return sortedUnique(
-    values.map((value, index) => {
+    EffectArray.map(values, (value, index) => {
       if (typeof value !== 'string' || !MEMORY_ID_PATTERN.test(value))
         fail(`relatedDurableMemoryIds[${index}] must be a stable tn_ memory ID`);
       return value;
@@ -384,12 +391,12 @@ function receiptMatches(manifest: ProcedureManifest, receipt: ProcedureVerificat
     artifactEquals(manifest.artifact, receipt.artifact) &&
     receipt.manifestSha256 === procedureManifestSha256(manifest) &&
     arraysEqual(
-      manifest.verification.commands.map(command => command.id),
+      EffectArray.map(manifest.verification.commands, command => command.id),
       receipt.commandIds,
     ) &&
     arraysEqual(
-      manifest.verification.fixtures.map(fixture => `${fixture.id}\u0000${fixture.sha256}`),
-      receipt.fixtureDigests.map(fixture => `${fixture.id}\u0000${fixture.sha256}`),
+      EffectArray.map(manifest.verification.fixtures, fixture => `${fixture.id}\u0000${fixture.sha256}`),
+      EffectArray.map(receipt.fixtureDigests, fixture => `${fixture.id}\u0000${fixture.sha256}`),
     )
   );
 }
@@ -398,8 +405,8 @@ function requirementsSatisfied(manifest: ProcedureManifest, input: ProcedureStat
   const capabilities = new Set(input.capabilities);
   const surfaceIds = new Set(input.surfaceIds);
   return (
-    manifest.compatible.capabilities.every(capability => capabilities.has(capability)) &&
-    manifest.compatible.surfaceIds.every(surfaceId => surfaceIds.has(surfaceId))
+    EffectArray.every(manifest.compatible.capabilities, capability => capabilities.has(capability)) &&
+    EffectArray.every(manifest.compatible.surfaceIds, surfaceId => surfaceIds.has(surfaceId))
   );
 }
 
@@ -416,8 +423,8 @@ export function compareSemanticVersions(left: string, right: string): number {
   }
   if (parsedLeft.prerelease === undefined) return parsedRight.prerelease === undefined ? 0 : 1;
   if (parsedRight.prerelease === undefined) return -1;
-  const leftParts = parsedLeft.prerelease.split('.');
-  const rightParts = parsedRight.prerelease.split('.');
+  const leftParts = Effect.pipe(parsedLeft.prerelease, EffectString.split('.'));
+  const rightParts = Effect.pipe(parsedRight.prerelease, EffectString.split('.'));
   for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
     const leftPart = leftParts[index];
     const rightPart = rightParts[index];
@@ -457,7 +464,7 @@ function artifactEquals(left: ProcedureArtifactIdentity, right: ProcedureArtifac
 }
 
 function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
+  return left.length === right.length && EffectArray.every(left, (value, index) => value === right[index]);
 }
 
 function sortedUnique<A>(values: readonly A[], key: (value: A) => string, label: string): readonly A[] {
@@ -469,17 +476,17 @@ function sortedUnique<A>(values: readonly A[], key: (value: A) => string, label:
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) fail(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) fail(`${label} must be an object`);
+  return value;
 }
 
 function sourceArray(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) fail(`${label} must be an array`);
+  if (!EffectArray.isArray(value)) fail(`${label} must be an array`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort(compareStrings);
+  const actual = EffectRecord.keys(value).sort(compareStrings);
   const orderedExpected = [...expected].sort(compareStrings);
   if (!arraysEqual(actual, orderedExpected)) fail(`${label} has unknown or missing fields`);
 }
@@ -505,7 +512,7 @@ function opaque(value: unknown, label: string): string {
     typeof value !== 'string' ||
     value.length === 0 ||
     value.length > MAX_OPAQUE_VALUE_LENGTH ||
-    value.trim() !== value ||
+    Effect.pipe(value, EffectString.trim) !== value ||
     containsControlCharacter(value)
   ) {
     fail(`${label} must be a non-empty opaque value`);
@@ -518,7 +525,7 @@ function boundedText(value: unknown, label: string, maximum: number): string {
     typeof value !== 'string' ||
     value.length === 0 ||
     value.length > maximum ||
-    value.trim() !== value ||
+    Effect.pipe(value, EffectString.trim) !== value ||
     containsControlCharacter(value)
   ) {
     fail(`${label} must be non-empty bounded text`);
@@ -557,7 +564,7 @@ function semanticVersion(value: unknown, label: string): string {
 function calendarDate(value: unknown, label: string): string {
   if (typeof value !== 'string') fail(`${label} must be an ISO calendar date`);
   const match = DATE_PATTERN.exec(value);
-  if (!match || new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) !== value) {
+  if (!match || Effect.pipe(new Date(`${value}T00:00:00.000Z`).toISOString(), EffectString.slice(0, 10)) !== value) {
     fail(`${label} must be an ISO calendar date`);
   }
   return value;
@@ -568,7 +575,8 @@ function instant(value: unknown, label: string): string {
     fail(`${label} must be an ISO UTC instant`);
   }
   const canonical = new Date(value).toISOString();
-  if (value !== canonical && value !== canonical.replace('.000Z', 'Z')) fail(`${label} must be an ISO UTC instant`);
+  if (value !== canonical && value !== Effect.pipe(canonical, EffectString.replace('.000Z', 'Z')))
+    fail(`${label} must be an ISO UTC instant`);
   return value;
 }
 
@@ -582,7 +590,11 @@ function compareStrings(left: string, right: string): number {
 
 function containsControlCharacter(value: string): boolean {
   for (const character of value) {
-    const code = character.charCodeAt(0);
+    const code = Effect.pipe(
+      character,
+      EffectString.charCodeAt(0),
+      Effect.Option.getOrElse(() => NaN),
+    );
     if (code < 0x20 || code === 0x7f) return true;
   }
   return false;

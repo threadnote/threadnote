@@ -1,8 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphBuildStatus} from '../build_status.js';
 import type {CodeGraphBuildResource} from '../build/resources.js';
 import type {CodeGraphBuilderAdmissionQueue} from '../builder/admission_scheduler.js';
 import {isBuildStatusRecord, isBuildStatusTimestamp} from './validation.js';
 import type {CodeGraphProgress} from '../types.js';
+import * as EffectRecord from 'effect/Record';
 
 export const CODE_GRAPH_BUILD_PHASES = [
   'activating',
@@ -143,7 +145,7 @@ export function parseCodeGraphBuildScheduling(value: unknown): CodeGraphBuildSch
 }
 
 function isWaitReason(value: unknown): value is WaitReason {
-  return typeof value === 'string' && CODE_GRAPH_BUILD_WAIT_REASONS.some(reason => reason === value);
+  return typeof value === 'string' && EffectArray.some(CODE_GRAPH_BUILD_WAIT_REASONS, reason => reason === value);
 }
 
 function isBuildResource(value: unknown): value is CodeGraphBuildResource {
@@ -162,8 +164,8 @@ function isCount(value: unknown, maximum = Number.MAX_SAFE_INTEGER): value is nu
 function parseDurations<K extends string>(value: unknown, keys: readonly K[]): Partial<Record<K, number>> | undefined {
   if (!isBuildStatusRecord(value)) return undefined;
   const output: Partial<Record<K, number>> = {};
-  for (const key of Object.keys(value)) {
-    if (!keys.some(known => known === key) || !isCount(value[key])) return undefined;
+  for (const key of EffectRecord.keys(value)) {
+    if (!EffectArray.some(keys, known => known === key) || !isCount(value[key])) return undefined;
   }
   for (const key of keys) if (typeof value[key] === 'number') output[key] = value[key];
   return output;

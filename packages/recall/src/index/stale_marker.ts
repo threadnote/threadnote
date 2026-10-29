@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Option, Predicate} from 'effect';
 import type {CanonicalMutationGenerationTransition} from '@threadnote/store/resource/mutation_generation';
 import {SystemInfo} from '@threadnote/platform/system';
 import {mergeRecallIndexCanonicalMutationContinuity} from './freshness.js';
 import {stripRecallAnchor} from './lexical.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const RECALL_STALE_MARKER_VERSION = 1;
 const MAX_RECALL_INVALIDATED_URIS = 1_024;
@@ -27,7 +30,7 @@ export function readRecallStaleMarker(
       return undefined;
     }
     const raw = yield* fs.readFileString(stalePath).pipe(Effect.orElseSucceed(() => 'present'));
-    const legacyGeneration = raw.trim() || 'present';
+    const legacyGeneration = Effect2.pipe(raw, EffectString.trim) || 'present';
     const value = Option.getOrUndefined(Option.liftThrowable((content: string): unknown => JSON.parse(content))(raw));
     const marker = toRecallStaleMarker(value);
     if (marker !== undefined) {
@@ -37,7 +40,7 @@ export function readRecallStaleMarker(
           : {canonicalMutationGeneration: marker.canonicalMutationGeneration}),
         forceRefresh: marker.forceRefresh,
         generation: marker.generation,
-        invalidatedUris: [...new Set(marker.invalidatedUris.map(stripRecallAnchor))],
+        invalidatedUris: [...new Set(EffectArray.map(marker.invalidatedUris, stripRecallAnchor))],
         ...(marker.previousCanonicalMutationGeneration === undefined
           ? {}
           : {previousCanonicalMutationGeneration: marker.previousCanonicalMutationGeneration}),
@@ -61,8 +64,8 @@ function toRecallStaleMarker(value: unknown): RecallStaleMarker | undefined {
     typeof record.generation !== 'string' ||
     record.generation.length === 0 ||
     typeof record.forceRefresh !== 'boolean' ||
-    !Array.isArray(record.invalidatedUris) ||
-    !record.invalidatedUris.every(uri => typeof uri === 'string') ||
+    !EffectArray.isArray(record.invalidatedUris) ||
+    !EffectArray.every(record.invalidatedUris, uri => typeof uri === 'string') ||
     (record.canonicalMutationGeneration !== undefined && typeof record.canonicalMutationGeneration !== 'string') ||
     (record.previousCanonicalMutationGeneration !== undefined &&
       typeof record.previousCanonicalMutationGeneration !== 'string')
@@ -96,10 +99,13 @@ export const writeRecallStaleGeneration = Effect.fn('recall.writeStaleGeneration
   const previous = yield* readRecallStaleMarker(fs, path);
   const mergedInvalidatedUris = [
     ...new Set(
-      [...(previous?.invalidatedUris ?? []), ...(invalidatedUris ?? [])]
-        .map(stripRecallAnchor)
-        .map(uri => uri.replace(/\/+$/, ''))
-        .filter(Boolean),
+      EffectArray.filter(
+        EffectArray.map(
+          EffectArray.map([...(previous?.invalidatedUris ?? []), ...(invalidatedUris ?? [])], stripRecallAnchor),
+          uri => Effect2.pipe(uri, EffectString.replace(/\/+$/, '')),
+        ),
+        Boolean,
+      ),
     ),
   ];
   const previousHasPendingInvalidations =

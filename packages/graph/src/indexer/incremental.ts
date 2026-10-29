@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import {createRepositoryFactAttributor} from '../extractor.js';
 import {finalCodeGraphFactBatches} from '../fact/budget.js';
@@ -141,8 +143,13 @@ export const assessIncrementalOverlay = Effect.fn('codeGraph.assessIncrementalOv
   let reusableFacts = preassessment.facts;
   if (reuse === 'persisted-base' && preassessment.resolutionClosure !== 'full') {
     const affectedPaths =
-      preassessment.resolutionClosure === 'project' ? new Set(preassessment.files.map(file => file.path)) : undefined;
-    const seeds = reusableReexportSeeds(preassessment.facts).filter(seed => !affectedPaths?.has(seed.path));
+      preassessment.resolutionClosure === 'project'
+        ? new Set(EffectArray.map(preassessment.files, file => file.path))
+        : undefined;
+    const seeds = EffectArray.filter(
+      reusableReexportSeeds(preassessment.facts),
+      seed => !affectedPaths?.has(seed.path),
+    );
     if (seeds.length > 0) {
       const reexports = yield* input.store.reusableReexports(
         input.layout.databasePath,
@@ -158,7 +165,10 @@ export const assessIncrementalOverlay = Effect.fn('codeGraph.assessIncrementalOv
       }
       if (preassessment.resolutionClosure === 'project') {
         if (
-          reexports.some(reexport => affectedPaths!.has(reexport.sourcePath) || affectedPaths!.has(reexport.targetPath))
+          EffectArray.some(
+            reexports,
+            reexport => affectedPaths!.has(reexport.sourcePath) || affectedPaths!.has(reexport.targetPath),
+          )
         ) {
           return {mode: 'fallback', reason: 'project-closure-incomplete'} satisfies IncrementalOverlayAssessment;
         }
@@ -178,7 +188,7 @@ export const assessIncrementalOverlay = Effect.fn('codeGraph.assessIncrementalOv
   if (!deletionOnlyProjectClosure && !codeGraphIncrementalFactBatchesFitBudget(finalBatches)) {
     return {mode: 'fallback', reason: 'fact-budget-expanded'} satisfies IncrementalOverlayAssessment;
   }
-  const facts = finalBatches.flatMap(batch => batch.map(value => value.facts));
+  const facts = EffectArray.flatMap(finalBatches, batch => EffectArray.map(batch, value => value.facts));
   const work = measureCodeGraphIncrementalWork({
     deletedPaths: preassessment.deletedPaths,
     facts,
@@ -192,7 +202,7 @@ export const assessIncrementalOverlay = Effect.fn('codeGraph.assessIncrementalOv
   if (input.committedBase.foldForward) {
     const foldForwardPathPlan = planCodeGraphIncrementalFoldForwardPaths(
       input.committedBase.foldForward.priorDeltaPaths,
-      [...preassessment.files.map(file => file.path), ...(preassessment.deletedPaths ?? [])],
+      [...EffectArray.map(preassessment.files, file => file.path), ...(preassessment.deletedPaths ?? [])],
     );
     if (
       !foldForwardPathPlan ||
@@ -233,11 +243,11 @@ export const assessIncrementalOverlayCompatibility = Effect.fn('codeGraph.assess
     }
     const committedWorkspace =
       input.inventory.workspace ?? (yield* input.languagePacks.discoverWorkspace(input.inventory.committedFiles));
-    const committedByPath = new Map(input.inventory.committedFiles.map(file => [file.path, file]));
-    const effectiveByPath = new Map(input.inventory.files.map(file => [file.path, file]));
-    const deletedFiles = input.inventory.committedFiles.filter(file => !effectiveByPath.has(file.path));
-    const deletedPaths = deletedFiles.map(file => file.path);
-    const modifiedFiles = input.inventory.files.filter(file => {
+    const committedByPath = new Map(EffectArray.map(input.inventory.committedFiles, file => [file.path, file]));
+    const effectiveByPath = new Map(EffectArray.map(input.inventory.files, file => [file.path, file]));
+    const deletedFiles = EffectArray.filter(input.inventory.committedFiles, file => !effectiveByPath.has(file.path));
+    const deletedPaths = EffectArray.map(deletedFiles, file => file.path);
+    const modifiedFiles = EffectArray.filter(input.inventory.files, file => {
       const committed = committedByPath.get(file.path);
       return (
         committed === undefined ||
@@ -265,7 +275,7 @@ export const assessIncrementalOverlayCompatibility = Effect.fn('codeGraph.assess
         store: input.store,
       });
     }
-    if (deletedPaths.length > 0 || modifiedFiles.some(file => !committedByPath.has(file.path))) {
+    if (deletedPaths.length > 0 || EffectArray.some(modifiedFiles, file => !committedByPath.has(file.path))) {
       return yield* assessProjectFileSetIncrementalClosureCompatibility({
         baseFiles: input.inventory.committedFiles,
         baseFileSetFingerprint: reusableBaseFileSetFingerprint(input.inventory.committedFiles),
@@ -281,7 +291,7 @@ export const assessIncrementalOverlayCompatibility = Effect.fn('codeGraph.assess
           workspaceCompatibility.mode === 'project-closure' ? workspaceCompatibility.seedProjectIds : [],
       });
     }
-    const committedFiles = modifiedFiles.map(file => committedByPath.get(file.path)!);
+    const committedFiles = EffectArray.map(modifiedFiles, file => committedByPath.get(file.path)!);
     const changedDecodeBudget = yield* assessProjectClosureChangedDecodeBudget({
       baseFiles: committedFiles,
       currentFiles: modifiedFiles,
@@ -298,15 +308,15 @@ export const assessIncrementalOverlayCompatibility = Effect.fn('codeGraph.assess
       {concurrency: 1},
     );
     if (
-      committedFiles.some(file => !committedCache.facts.has(file.path)) ||
-      modifiedFiles.some(file => !effectiveCache.facts.has(file.path))
+      EffectArray.some(committedFiles, file => !committedCache.facts.has(file.path)) ||
+      EffectArray.some(modifiedFiles, file => !effectiveCache.facts.has(file.path))
     ) {
       return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
     }
-    const committedRawFacts = committedFiles.map(file =>
+    const committedRawFacts = EffectArray.map(committedFiles, file =>
       input.languagePacks.postprocessFile(file, committedCache.facts.get(file.path)!),
     );
-    const effectiveRawFacts = modifiedFiles.map(file =>
+    const effectiveRawFacts = EffectArray.map(modifiedFiles, file =>
       input.languagePacks.postprocessFile(file, effectiveCache.facts.get(file.path)!),
     );
     const committedFacts = attributeInventoryFacts(
@@ -315,8 +325,8 @@ export const assessIncrementalOverlayCompatibility = Effect.fn('codeGraph.assess
       committedRawFacts,
     );
     const effectiveFacts = attributeInventoryFacts(input.inventory.files, workspace, effectiveRawFacts);
-    const committedFactsByPath = new Map(committedFacts.map(file => [file.path, file]));
-    const resolutionSurfaceChanged = effectiveFacts.some(file => {
+    const committedFactsByPath = new Map(EffectArray.map(committedFacts, file => [file.path, file]));
+    const resolutionSurfaceChanged = EffectArray.some(effectiveFacts, file => {
       const committed = committedFactsByPath.get(file.path);
       return !committed || !hasSameCodeGraphResolutionSurface(committed.symbols, file.symbols);
     });
@@ -325,8 +335,8 @@ export const assessIncrementalOverlayCompatibility = Effect.fn('codeGraph.assess
         firstResolutionPublicationAssessment(effectiveFacts))
       : firstResolutionPublicationAssessment(effectiveFacts);
     const reexportResolutionSurfaceChanged = !hasSameCodeGraphReexportResolutionSurface(
-      committedFacts.flatMap(file => file.references ?? []),
-      effectiveFacts.flatMap(file => file.references ?? []),
+      EffectArray.flatMap(committedFacts, file => file.references ?? []),
+      EffectArray.flatMap(effectiveFacts, file => file.references ?? []),
     );
     if (!reexportResolutionSurfaceChanged && !resolutionSurfaceChanged && workspaceCompatibility.mode === 'unchanged') {
       if (!codeGraphIncrementalFactBatchesFitBudget(finalCodeGraphFactBatches(effectiveFacts))) {
@@ -377,7 +387,7 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
     const packDelta = extractorTransition
       ? assessCodeGraphLanguagePackDelta(
           input.candidate.receipt.packProvenance,
-          input.languagePacks.activePackProvenance(input.inventory.files.map(file => file.path)),
+          input.languagePacks.activePackProvenance(EffectArray.map(input.inventory.files, file => file.path)),
         )
       : ({changedPackIds: [], mode: 'compatible'} as const);
     if (
@@ -403,11 +413,11 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
         return workspaceCompatibility;
       const contexts = input.candidate.receipt.inventory?.attributionFiles;
       if (contexts === undefined) return workspaceCompatibility;
-      const contextByPath = new Map(contexts.map(file => [file.path, file]));
-      const baseByPath = new Map(input.candidate.files.map(file => [file.path, file]));
+      const contextByPath = new Map(EffectArray.map(contexts, file => [file.path, file]));
+      const baseByPath = new Map(EffectArray.map(input.candidate.files, file => [file.path, file]));
       if (
         contextByPath.size !== contexts.length ||
-        contexts.some(file => {
+        EffectArray.some(contexts, file => {
           const base = baseByPath.get(file.path);
           return (
             !base ||
@@ -429,10 +439,15 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
         return workspaceCompatibility;
       // Receipt bodies are compact resolver inputs; retain original source sizes
       // and source hashes instead of mistaking compact bytes for the Git blob.
-      const baseFiles = input.candidate.files.map(file =>
+      const baseFiles = EffectArray.map(input.candidate.files, file =>
         contextByPath.has(file.path) ? {...file, content: contextByPath.get(file.path)!.content} : file,
       );
-      if (baseFiles.some(file => isRepositoryFactAttributionContextPath(file.path) && file.content === undefined))
+      if (
+        EffectArray.some(
+          baseFiles,
+          file => isRepositoryFactAttributionContextPath(file.path) && file.content === undefined,
+        )
+      )
         return workspaceCompatibility;
       return yield* assessWorkspaceTransitionIncrementalClosure({
         baseFiles,
@@ -448,14 +463,14 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
     }
     const workspaceSeedProjectIds =
       workspaceCompatibility.mode === 'project-closure' ? workspaceCompatibility.seedProjectIds : [];
-    const currentPaths = new Set(input.inventory.files.map(file => file.path));
-    const deletedFiles = input.candidate.files.filter(file => !currentPaths.has(file.path));
-    const deletedPaths = deletedFiles.map(file => file.path);
+    const currentPaths = new Set(EffectArray.map(input.inventory.files, file => file.path));
+    const deletedFiles = EffectArray.filter(input.candidate.files, file => !currentPaths.has(file.path));
+    const deletedPaths = EffectArray.map(deletedFiles, file => file.path);
     if (modifiedFiles.length === 0 && deletedPaths.length === 0) {
       return {mode: 'fallback', reason: 'no-materialized-changes'} satisfies IncrementalOverlayPreassessment;
     }
-    const baseByPath = new Map(input.candidate.files.map(file => [file.path, file]));
-    if (deletedPaths.length > 0 || modifiedFiles.some(file => !baseByPath.has(file.path))) {
+    const baseByPath = new Map(EffectArray.map(input.candidate.files, file => [file.path, file]));
+    if (deletedPaths.length > 0 || EffectArray.some(modifiedFiles, file => !baseByPath.has(file.path))) {
       if (extractorTransition) {
         return {mode: 'fallback', reason: 'extractor-context-changed'} satisfies IncrementalOverlayPreassessment;
       }
@@ -475,7 +490,7 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
     }
     const baseFiles = inventoryFilesForPaths(
       input.candidate.files,
-      modifiedFiles.map(file => file.path),
+      EffectArray.map(modifiedFiles, file => file.path),
     );
     if (!baseFiles) {
       return {mode: 'fallback', reason: 'file-set-changed'} satisfies IncrementalOverlayPreassessment;
@@ -508,8 +523,8 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
       {concurrency: 1},
     );
     if (
-      baseFiles.some(file => !baseCache.facts.has(file.path)) ||
-      modifiedFiles.some(file => !currentCache.facts.has(file.path))
+      EffectArray.some(baseFiles, file => !baseCache.facts.has(file.path)) ||
+      EffectArray.some(modifiedFiles, file => !currentCache.facts.has(file.path))
     ) {
       return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
     }
@@ -519,16 +534,16 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
       const currentBudget = projectClosureCachedFactBudgetFallback(currentCache, modifiedFiles.length);
       if (currentBudget !== undefined) return currentBudget;
     }
-    const baseRawFacts = baseFiles.map(file =>
+    const baseRawFacts = EffectArray.map(baseFiles, file =>
       input.languagePacks.postprocessFile(file, baseCache.facts.get(file.path)!),
     );
-    const currentRawFacts = modifiedFiles.map(file =>
+    const currentRawFacts = EffectArray.map(modifiedFiles, file =>
       input.languagePacks.postprocessFile(file, currentCache.facts.get(file.path)!),
     );
     const baseFacts = attributeInventoryFacts(input.candidate.files, committedWorkspace, baseRawFacts);
     const currentFacts = attributeInventoryFacts(input.inventory.files, workspace, currentRawFacts);
-    const baseFactsByPath = new Map(baseFacts.map(file => [file.path, file]));
-    const resolutionSurfaceChanged = currentFacts.some(file => {
+    const baseFactsByPath = new Map(EffectArray.map(baseFacts, file => [file.path, file]));
+    const resolutionSurfaceChanged = EffectArray.some(currentFacts, file => {
       const base = baseFactsByPath.get(file.path);
       return !base || !hasSameCodeGraphResolutionSurface(base.symbols, file.symbols);
     });
@@ -537,8 +552,8 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
         firstResolutionPublicationAssessment(currentFacts))
       : firstResolutionPublicationAssessment(currentFacts);
     const reexportResolutionSurfaceChanged = !hasSameCodeGraphReexportResolutionSurface(
-      baseFacts.flatMap(file => file.references ?? []),
-      currentFacts.flatMap(file => file.references ?? []),
+      EffectArray.flatMap(baseFacts, file => file.references ?? []),
+      EffectArray.flatMap(currentFacts, file => file.references ?? []),
     );
     if (reexportResolutionSurfaceChanged || resolutionSurfaceChanged || workspaceSeedProjectIds.length > 0) {
       const closure = yield* assessProjectIncrementalClosureCompatibility({
@@ -678,15 +693,20 @@ const assessProjectFileSetIncrementalClosureCompatibility = Effect.fn(
   if (input.baseWorkspace.projects.length === 0 || input.currentWorkspace.projects.length === 0) {
     return {mode: 'fallback', reason: 'file-set-changed'} satisfies IncrementalOverlayPreassessment;
   }
-  const baseByPath = new Map(input.baseFiles.map(file => [file.path, file]));
-  const addedFiles = input.currentChangedFiles.filter(file => !baseByPath.has(file.path));
-  const existingModifiedFiles = input.currentChangedFiles.filter(file => baseByPath.has(file.path));
+  const baseByPath = new Map(EffectArray.map(input.baseFiles, file => [file.path, file]));
+  const addedFiles = EffectArray.filter(input.currentChangedFiles, file => !baseByPath.has(file.path));
+  const existingModifiedFiles = EffectArrayPipe(input.currentChangedFiles, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (file, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && baseByPath.has(file.path),
+    ),
+  );
   const seeds = assessProjectFileSetClosureSeeds({
     baseProjects: input.baseWorkspace.projects,
-    currentChangedPaths: addedFiles.map(file => file.path),
+    currentChangedPaths: EffectArray.map(addedFiles, file => file.path),
     currentProjects: input.currentWorkspace.projects,
     currentResolutionDomainByPath: projectClosureResolutionDomainByPath(addedFiles, input.languagePacks),
-    deletedPaths: input.deletedFiles.map(file => file.path),
+    deletedPaths: EffectArray.map(input.deletedFiles, file => file.path),
     deletedResolutionDomainByPath: projectClosureResolutionDomainByPath(input.deletedFiles, input.languagePacks),
   });
   if (seeds.mode === 'fallback') {
@@ -722,14 +742,19 @@ const assessProjectFileSetIncrementalClosureCompatibility = Effect.fn(
     unownedResolutionDomains.length === 0
       ? undefined
       : yield* assessAddedProjectResolutionSeeds({
-          addedFiles: addedFiles.filter(file =>
+          addedFiles: EffectArray.filter(addedFiles, file =>
             unownedResolutionDomains.includes(
               projectClosureResolutionDomainByPath([file], input.languagePacks).get(file.path) ?? '',
             ),
           ),
-          deletedFiles: input.deletedFiles.filter(file =>
-            unownedResolutionDomains.includes(
-              projectClosureResolutionDomainByPath([file], input.languagePacks).get(file.path) ?? '',
+          deletedFiles: EffectArrayPipe(input.deletedFiles, __effectArrayValues2 =>
+            EffectArray.filter(
+              __effectArrayValues2,
+              (file, __effectArrayIndex2) =>
+                __effectArrayIndex2 in __effectArrayValues2 &&
+                unownedResolutionDomains.includes(
+                  projectClosureResolutionDomainByPath([file], input.languagePacks).get(file.path) ?? '',
+                ),
             ),
           ),
           currentFiles: input.currentFiles,
@@ -748,7 +773,7 @@ const assessProjectFileSetIncrementalClosureCompatibility = Effect.fn(
     currentChangedFiles: input.currentChangedFiles,
     currentFiles: input.currentFiles,
     currentWorkspace: input.currentWorkspace,
-    deletedPaths: input.deletedFiles.map(file => file.path),
+    deletedPaths: EffectArray.map(input.deletedFiles, file => file.path),
     languagePacks: input.languagePacks,
     layout: input.layout,
     seedProjectIds,
@@ -780,7 +805,7 @@ const assessProjectFileSetIncrementalClosureCompatibility = Effect.fn(
         addedFiles,
         baseFileSetFingerprint: input.baseFileSetFingerprint,
         committedWorkspace: input.baseWorkspace,
-        deletedPaths: input.deletedFiles.map(file => file.path),
+        deletedPaths: EffectArray.map(input.deletedFiles, file => file.path),
         facts: fileSetResolutionSeeds.currentFacts,
       });
     }
@@ -799,7 +824,7 @@ const assessProjectFileSetIncrementalClosureCompatibility = Effect.fn(
         layout: input.layout,
         projectCount: planned.mode === 'compatible' ? (planned.closureProjects ?? 0) : 0,
         ...(planned.mode === 'compatible' ? {requiredFiles: planned.files} : {}),
-        deletedPaths: input.deletedFiles.map(file => file.path),
+        deletedPaths: EffectArray.map(input.deletedFiles, file => file.path),
         store: input.store,
       });
       if (candidate.mode === 'compatible') return candidate;
@@ -815,14 +840,24 @@ const assessProjectFileSetIncrementalClosureCompatibility = Effect.fn(
           detail: 'resolution-domain-unowned',
           stage: 'file-set-seed-assessment',
           unownedResolutionDomainFiles:
-            input.currentChangedFiles.filter(file =>
-              unownedResolutionDomains.includes(
-                projectClosureResolutionDomainByPath([file], input.languagePacks).get(file.path) ?? '',
+            EffectArrayPipe(input.currentChangedFiles, __effectArrayValues2 =>
+              EffectArray.filter(
+                __effectArrayValues2,
+                (file, __effectArrayIndex2) =>
+                  __effectArrayIndex2 in __effectArrayValues2 &&
+                  unownedResolutionDomains.includes(
+                    projectClosureResolutionDomainByPath([file], input.languagePacks).get(file.path) ?? '',
+                  ),
               ),
             ).length +
-            input.deletedFiles.filter(file =>
-              unownedResolutionDomains.includes(
-                projectClosureResolutionDomainByPath([file], input.languagePacks).get(file.path) ?? '',
+            EffectArrayPipe(input.deletedFiles, __effectArrayValues2 =>
+              EffectArray.filter(
+                __effectArrayValues2,
+                (file, __effectArrayIndex2) =>
+                  __effectArrayIndex2 in __effectArrayValues2 &&
+                  unownedResolutionDomains.includes(
+                    projectClosureResolutionDomainByPath([file], input.languagePacks).get(file.path) ?? '',
+                  ),
               ),
             ).length,
           unownedResolutionDomains,
@@ -909,21 +944,21 @@ const assessAddedProjectResolutionSeeds = Effect.fn('codeGraph.assessAddedProjec
     {concurrency: 1},
   );
   if (
-    input.addedFiles.some(file => !currentCache.facts.has(file.path)) ||
-    deletedFiles.some(file => !deletedCache.facts.has(file.path))
+    EffectArray.some(input.addedFiles, file => !currentCache.facts.has(file.path)) ||
+    EffectArray.some(deletedFiles, file => !deletedCache.facts.has(file.path))
   ) {
     return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
   }
-  const currentRawFacts = input.addedFiles.map(file =>
+  const currentRawFacts = EffectArray.map(input.addedFiles, file =>
     input.languagePacks.postprocessFile(file, currentCache.facts.get(file.path)!),
   );
   const currentFacts = attributeInventoryFacts(input.currentFiles, input.currentWorkspace, currentRawFacts);
-  const deletedRawFacts = deletedFiles.map(file =>
+  const deletedRawFacts = EffectArray.map(deletedFiles, file =>
     input.languagePacks.postprocessFile(file, deletedCache.facts.get(file.path)!),
   );
   const deletedFacts = attributeInventoryFacts(input.currentFiles, input.currentWorkspace, deletedRawFacts);
   const emptyFacts = (facts: readonly CodeGraphFileFacts[]) =>
-    facts.map((facts): CodeGraphFileFacts => ({
+    EffectArray.map(facts, (facts): CodeGraphFileFacts => ({
       diagnostics: [],
       edges: [],
       path: facts.path,
@@ -983,7 +1018,7 @@ const assessExistingProjectModificationSeeds = Effect.fn('codeGraph.assessExisti
     }
     const baseModifiedFiles = inventoryFilesForPaths(
       input.baseFiles,
-      input.currentModifiedFiles.map(file => file.path),
+      EffectArray.map(input.currentModifiedFiles, file => file.path),
     );
     if (!baseModifiedFiles) {
       return {mode: 'fallback', reason: 'file-set-changed'} satisfies IncrementalOverlayPreassessment;
@@ -1004,15 +1039,15 @@ const assessExistingProjectModificationSeeds = Effect.fn('codeGraph.assessExisti
       {concurrency: 1},
     );
     if (
-      baseModifiedFiles.some(file => !baseCache.facts.has(file.path)) ||
-      input.currentModifiedFiles.some(file => !currentCache.facts.has(file.path))
+      EffectArray.some(baseModifiedFiles, file => !baseCache.facts.has(file.path)) ||
+      EffectArray.some(input.currentModifiedFiles, file => !currentCache.facts.has(file.path))
     ) {
       return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
     }
-    const baseRawFacts = baseModifiedFiles.map(file =>
+    const baseRawFacts = EffectArray.map(baseModifiedFiles, file =>
       input.languagePacks.postprocessFile(file, baseCache.facts.get(file.path)!),
     );
-    const currentRawFacts = input.currentModifiedFiles.map(file =>
+    const currentRawFacts = EffectArray.map(input.currentModifiedFiles, file =>
       input.languagePacks.postprocessFile(file, currentCache.facts.get(file.path)!),
     );
     // Compare both sides in the current repository file context. Persisted
@@ -1070,7 +1105,7 @@ const assessPlannedProjectIncrementalClosure = Effect.fn('codeGraph.assessPlanne
   }) {
     const selection = selectProjectIncrementalClosure({
       files: input.currentFiles,
-      modifiedPaths: input.currentChangedFiles.map(file => file.path),
+      modifiedPaths: EffectArray.map(input.currentChangedFiles, file => file.path),
       projects: input.currentWorkspace.projects,
       seedProjectIds: input.seedProjectIds,
       workspaceDiagnostics: input.currentWorkspace.diagnostics,
@@ -1078,8 +1113,8 @@ const assessPlannedProjectIncrementalClosure = Effect.fn('codeGraph.assessPlanne
     if (selection.mode === 'fallback') {
       return selection satisfies IncrementalOverlayPreassessment;
     }
-    const currentByPath = new Map(input.currentFiles.map(file => [file.path, file]));
-    const affectedFiles = selection.affectedPaths.map(path => currentByPath.get(path)!);
+    const currentByPath = new Map(EffectArray.map(input.currentFiles, file => [file.path, file]));
+    const affectedFiles = EffectArray.map(selection.affectedPaths, path => currentByPath.get(path)!);
     const metadata = yield* cachedFactsMetadata(
       input.store,
       input.layout.databasePath,
@@ -1089,7 +1124,7 @@ const assessPlannedProjectIncrementalClosure = Effect.fn('codeGraph.assessPlanne
     const plan = planProjectIncrementalClosure({
       cachedFactBytesByPath: metadata.bytesByPath,
       files: input.currentFiles,
-      modifiedPaths: input.currentChangedFiles.map(file => file.path),
+      modifiedPaths: EffectArray.map(input.currentChangedFiles, file => file.path),
       projects: input.currentWorkspace.projects,
       seedProjectIds: input.seedProjectIds,
       workspaceDiagnostics: input.currentWorkspace.diagnostics,
@@ -1106,10 +1141,10 @@ const assessPlannedProjectIncrementalClosure = Effect.fn('codeGraph.assessPlanne
       affectedFiles,
       input.languagePacks,
     );
-    if (affectedFiles.some(file => !currentCache.facts.has(file.path))) {
+    if (EffectArray.some(affectedFiles, file => !currentCache.facts.has(file.path))) {
       return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
     }
-    const currentRawFacts = affectedFiles.map(file =>
+    const currentRawFacts = EffectArray.map(affectedFiles, file =>
       input.languagePacks.postprocessFile(file, currentCache.facts.get(file.path)!),
     );
     const currentFacts = attributeInventoryFacts(input.currentFiles, input.currentWorkspace, currentRawFacts);
@@ -1288,7 +1323,7 @@ export function createCachedCodeGraphFactsAttributor(
 function firstResolutionPublicationAssessment(
   facts: readonly CodeGraphFileFacts[],
 ): CodeGraphResolutionPublicationAssessment | undefined {
-  for (const symbol of facts.flatMap(file => file.symbols)) {
+  for (const symbol of EffectArray.flatMap(facts, file => file.symbols)) {
     if (symbol.exported || symbol.resolutionDomain !== 'typescript') continue;
     return assessCodeGraphResolutionSymbolPublication(symbol);
   }
@@ -1299,8 +1334,18 @@ function firstChangedResolutionPublicationAssessment(
   committedFacts: readonly CodeGraphFileFacts[],
   effectiveFacts: readonly CodeGraphFileFacts[],
 ): CodeGraphResolutionPublicationAssessment | undefined {
-  const committedById = new Map(committedFacts.flatMap(file => file.symbols).map(symbol => [symbol.id, symbol]));
-  const effectiveById = new Map(effectiveFacts.flatMap(file => file.symbols).map(symbol => [symbol.id, symbol]));
+  const committedById = new Map(
+    EffectArray.map(
+      EffectArray.flatMap(committedFacts, file => file.symbols),
+      symbol => [symbol.id, symbol],
+    ),
+  );
+  const effectiveById = new Map(
+    EffectArray.map(
+      EffectArray.flatMap(effectiveFacts, file => file.symbols),
+      symbol => [symbol.id, symbol],
+    ),
+  );
   for (const symbol of effectiveById.values()) {
     const committed = committedById.get(symbol.id);
     if (committed && hasSameCodeGraphResolutionSurface([committed], [symbol])) continue;

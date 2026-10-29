@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Database} from 'bun:sqlite';
@@ -25,6 +26,8 @@ import {CODE_GRAPH_WAL_JOURNAL_SIZE_LIMIT_BYTES, configureConnection} from '@thr
 import {compactCodeGraphStorage, inspectCodeGraphStorage} from '@threadnote/graph/storage';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import * as SqlClient from 'effect/sql/SqlClient';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph schema initialization receipt', () => {
   effectIt.effect('sets the WAL retention limit on each writable connection', () =>
@@ -42,7 +45,7 @@ describe('code graph schema initialization receipt', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-dormant-wal-'});
-        const checkoutId = 'f'.repeat(64);
+        const checkoutId = Effect2.pipe('f', EffectString.repeat(64));
         const databasePath = path.join(
           home,
           'indexes',
@@ -239,7 +242,10 @@ describe('code graph schema initialization receipt', () => {
         const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-scoped-cursor-receipt-'});
         const databasePath = path.join(root, 'graph.sqlite');
         const writerLockPath = path.join(root, 'writer.lock');
-        const cursor = codeGraphScopeCursor('a'.repeat(64), `code-graph-scope:${'b'.repeat(64)}`);
+        const cursor = codeGraphScopeCursor(
+          Effect2.pipe('a', EffectString.repeat(64)),
+          `code-graph-scope:${Effect2.pipe('b', EffectString.repeat(64))}`,
+        );
 
         yield* store.initialize(databasePath);
         yield* useWritableDatabase(databasePath, database => {
@@ -277,8 +283,8 @@ describe('code graph schema initialization receipt', () => {
           const databasePath = path.join(root, 'graph.sqlite');
           const writerLockPath = path.join(root, 'writer.lock');
           const cursor = codeGraphScopeCursor(
-            worktreeSeed.toString(16).padStart(64, '0'),
-            `code-graph-scope:${scopeSeed.toString(16).padStart(64, '0')}`,
+            Effect2.pipe(worktreeSeed.toString(16), EffectString.padStart(64, '0')),
+            `code-graph-scope:${Effect2.pipe(scopeSeed.toString(16), EffectString.padStart(64, '0'))}`,
           );
 
           yield* store.initialize(databasePath);
@@ -377,14 +383,16 @@ describe('code graph schema initialization receipt', () => {
         });
 
         yield* useReadonlyDatabase(databasePath, database => {
-          const tables = database
-            .query<{readonly name: string}, []>(
-              `SELECT name FROM sqlite_master
+          const tables = EffectArray.map(
+            database
+              .query<{readonly name: string}, []>(
+                `SELECT name FROM sqlite_master
                WHERE type = 'table' AND name LIKE 'snapshot_fold_forward_%'
                ORDER BY name`,
-            )
-            .all()
-            .map(row => row.name);
+              )
+              .all(),
+            row => row.name,
+          );
           const receipt = database
             .query<{readonly contract_revision: number}, []>(
               `SELECT contract_revision FROM ${CODE_GRAPH_SCHEMA_INITIALIZATION_RECEIPT_TABLE}`,

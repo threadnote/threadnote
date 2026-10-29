@@ -1,3 +1,5 @@
+import * as EffectRecord from 'effect/Record';
+import {Array as EffectArray} from 'effect';
 export const CI_STANDARD_TEST_TIMEOUT_MILLISECONDS = 30_000;
 
 export const ciLongRunningTestGroups = {
@@ -63,7 +65,7 @@ export const ciLongRunningTestGroups = {
 
 export type CiLongRunningTestGroupName = keyof typeof ciLongRunningTestGroups;
 
-export const ciLongRunningTestGroupNames = Object.keys(ciLongRunningTestGroups) as CiLongRunningTestGroupName[];
+export const ciLongRunningTestGroupNames = EffectRecord.keys(ciLongRunningTestGroups);
 
 export const ciScheduledLongRunningTestGroupNames = [
   'load-evidence',
@@ -71,7 +73,8 @@ export const ciScheduledLongRunningTestGroupNames = [
 
 const ciScheduledLongRunningTestGroups = new Set<CiLongRunningTestGroupName>(ciScheduledLongRunningTestGroupNames);
 
-export const ciRequiredLongRunningTestGroupNames = ciLongRunningTestGroupNames.filter(
+export const ciRequiredLongRunningTestGroupNames = EffectArray.filter(
+  ciLongRunningTestGroupNames,
   group => !ciScheduledLongRunningTestGroups.has(group),
 );
 

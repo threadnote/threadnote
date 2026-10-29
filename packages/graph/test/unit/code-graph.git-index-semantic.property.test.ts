@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {codeGraphGitIndexSemanticSha256} from '@threadnote/graph/git/index_semantic';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const SHA1_BYTES = 20;
 const REGULAR_FILE_MODE = 0o100644;
@@ -52,7 +55,7 @@ describe('Git index semantic fingerprint', () => {
     const v4 = buildGitIndex(4, [
       entry(stat, objectId, new TextEncoder().encode('src/a.ts'), 0),
       entry(stat, objectId, new TextEncoder().encode('src/b.ts'), 0),
-      entry(stat, objectId, new TextEncoder().encode(`other/${'x'.repeat(180)}.ts`), 0),
+      entry(stat, objectId, new TextEncoder().encode(`other/${Effect.pipe('x', EffectString.repeat(180))}.ts`), 0),
     ]);
     expect(codeGraphGitIndexSemanticSha256(v4, 'sha1')).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -64,10 +67,13 @@ describe('Git index semantic fingerprint', () => {
         fc.array(fc.constantFrom('scope', 'scope with spaces', 'line\nbreak', 'é'), {maxLength: 4}),
         fc.array(fc.boolean(), {minLength: 10, maxLength: 10}),
         (version, directories, uppercase) => {
-          const name = [...'.gitignore']
-            .map((letter, index) => (uppercase[index] ? letter.toUpperCase() : letter))
-            .join('');
-          const prefix = directories.length ? directories.join('/') + '/' : '';
+          const name = EffectArray.join(
+            EffectArray.map([...'.gitignore'], (letter, index) =>
+              uppercase[index] ? Effect.pipe(letter, EffectString.toUpperCase) : letter,
+            ),
+            '',
+          );
+          const prefix = directories.length ? EffectArray.join(directories, '/') + '/' : '';
           const stat = Array.from({length: 9}, () => 0);
           const objectId = new Uint8Array(SHA1_BYTES).fill(7);
           const bytes = (path: string) =>
@@ -159,7 +165,7 @@ function buildGitIndex(
     const encoded = new Uint8Array(entryBytes);
     const view = new DataView(encoded.buffer);
     const statOffsets = [0, 4, 8, 12, 16, 20, 28, 32, 36] as const;
-    statOffsets.forEach((offset, index) => view.setUint32(offset, current.stat[index] ?? 0, false));
+    EffectArray.forEach(statOffsets, (offset, index) => view.setUint32(offset, current.stat[index] ?? 0, false));
     view.setUint32(24, current.mode, false);
     encoded.set(current.objectId, 40);
     let offset = 40 + SHA1_BYTES;
@@ -181,7 +187,8 @@ function buildGitIndex(
   }
 
   const extensionBytes = extension === undefined ? 0 : 8 + extension.data.byteLength;
-  const contentBytes = 12 + encodedEntries.reduce((sum, value) => sum + value.byteLength, 0) + extensionBytes;
+  const contentBytes =
+    12 + EffectArray.reduce(encodedEntries, 0, (sum, value) => sum + value.byteLength) + extensionBytes;
   const index = new Uint8Array(contentBytes + SHA1_BYTES);
   index.set(new TextEncoder().encode('DIRC'));
   const view = new DataView(index.buffer);

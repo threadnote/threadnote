@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import fc from 'fast-check';
 import {Effect, Schema} from 'effect';
 import {it as effectIt} from '@effect/vitest';
@@ -13,10 +14,12 @@ import {
   type ContextBriefLogicalMemoryEvidenceV1,
   type ContextBriefLogicalResultV1,
 } from '../../src/types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const COMMIT = 'a'.repeat(40);
-const REPOSITORY_ID = 'b'.repeat(64);
-const REF = `cgs_${'c'.repeat(32)}`;
+const COMMIT = Effect2.pipe('a', EffectString.repeat(40));
+const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
+const REF = `cgs_${Effect2.pipe('c', EffectString.repeat(32))}`;
 
 describe('Context Brief continuation contracts', () => {
   it('accepts resume as a public mode without changing the compact request shape', () => {
@@ -131,7 +134,7 @@ describe('Context Brief continuation contracts', () => {
     Effect.gen(function* () {
       const citedPath = 'packages/context/src/planner.ts';
       const staleAligned = {
-        ...handoff('d'.repeat(40)),
+        ...handoff(Effect2.pipe('d', EffectString.repeat(40))),
         continuationCard: {
           nextStep: 'continue the two-arm canary',
           task: 'Continue the automated-context two-arm canary.',
@@ -196,7 +199,7 @@ describe('Context Brief continuation contracts', () => {
     ([staleRank, citedPath]) =>
       Effect.gen(function* () {
         const stale = {
-          ...handoff('d'.repeat(40)),
+          ...handoff(Effect2.pipe('d', EffectString.repeat(40))),
           continuationCard: {
             nextStep: 'continue the two-arm canary',
             task: 'Continue the automated-context two-arm canary.',
@@ -257,7 +260,7 @@ describe('Context Brief continuation contracts', () => {
     Effect.gen(function* () {
       const citedPath = 'packages/context/src/planner.ts';
       const stale = {
-        ...handoff('d'.repeat(40)),
+        ...handoff(Effect2.pipe('d', EffectString.repeat(40))),
         continuationCard: {
           nextStep: 'continue the two-arm canary',
           task: 'Continue the automated-context two-arm canary.',
@@ -336,7 +339,7 @@ describe('Context Brief continuation contracts', () => {
         filler => {
           const task = 'Continue the automated-context two-arm canary';
           const candidate = {
-            continuationCard: {task: filler.join(' ')},
+            continuationCard: {task: EffectArray.join(filler, ' ')},
             topic: 'continuation-handoff',
           };
           expect(
@@ -406,7 +409,7 @@ describe('Context Brief continuation contracts', () => {
         uri: 'threadnote://user/test/memories/handoffs/active/threadnote/fresh.md',
       };
       const staleAligned = {
-        ...handoff('d'.repeat(40)),
+        ...handoff(Effect2.pipe('d', EffectString.repeat(40))),
         continuationCard: {
           nextStep: 'continue automated-context two-arm validation',
           task: 'Continue the automated-context two-arm canary.',
@@ -442,27 +445,30 @@ describe('Context Brief continuation contracts', () => {
   it('projects labeled handoff fields, ignores fenced labels, and omits absolute paths', () => {
     expect(
       parseContextBriefContinuationCard(
-        [
-          'task: implement the card',
-          'decisions: keep stable selectors',
-          'graph question: which caller owns the state transition',
-          'graph_query: Parser.advance callers and state transitions',
-          'observed: the focused check fails only in the new regression',
-          'anchors: packages/context/src/projector.ts:10-20',
-          'tried: inspected the regression and ran the focused check',
-          'untested invariant: verify real request behavior after the correction',
-          'unresolved: root cause is not established',
-          'avoid repeat: do not reread the cited regression unless source changed',
-          'constraints: preserve source evidence',
-          'rationale: bounded evidence is easier to resume',
-          'verification: focused tests pass',
-          'blockers: none',
-          'risks: stale graph',
-          'next_step: update projector at /Users/example/private.ts',
-          '```md',
-          'task: ignored code label',
-          '```',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'task: implement the card',
+            'decisions: keep stable selectors',
+            'graph question: which caller owns the state transition',
+            'graph_query: Parser.advance callers and state transitions',
+            'observed: the focused check fails only in the new regression',
+            'anchors: packages/context/src/projector.ts:10-20',
+            'tried: inspected the regression and ran the focused check',
+            'untested invariant: verify real request behavior after the correction',
+            'unresolved: root cause is not established',
+            'avoid repeat: do not reread the cited regression unless source changed',
+            'constraints: preserve source evidence',
+            'rationale: bounded evidence is easier to resume',
+            'verification: focused tests pass',
+            'blockers: none',
+            'risks: stale graph',
+            'next_step: update projector at /Users/example/private.ts',
+            '```md',
+            'task: ignored code label',
+            '```',
+          ],
+          '\n',
+        ),
       ),
     ).toEqual({
       anchors: 'packages/context/src/projector.ts:10-20',
@@ -486,19 +492,22 @@ describe('Context Brief continuation contracts', () => {
   it('keeps tilde fences and shorter or mismatched closing fences from leaking example labels', () => {
     expect(
       parseContextBriefContinuationCard(
-        [
-          '````md',
-          'task: ignored before a short backtick fence',
-          '```',
-          'decisions: also ignored',
-          '~~~~',
-          'verification: still ignored after a mismatched marker',
-          '````',
-          '~~~md',
-          'blockers: ignored inside a tilde fence',
-          '~~~',
-          'task: retained outside examples',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            '````md',
+            'task: ignored before a short backtick fence',
+            '```',
+            'decisions: also ignored',
+            '~~~~',
+            'verification: still ignored after a mismatched marker',
+            '````',
+            '~~~md',
+            'blockers: ignored inside a tilde fence',
+            '~~~',
+            'task: retained outside examples',
+          ],
+          '\n',
+        ),
       ),
     ).toEqual({task: 'retained outside examples'});
   });
@@ -509,10 +518,17 @@ describe('Context Brief continuation contracts', () => {
         fc.constantFrom('untested invariant', 'untested_invariant', 'UNTESTED INVARIANT'),
         fc
           .string({minLength: 1, maxLength: 128})
-          .filter(value => value.trim().length > 0 && !value.includes('/') && !/[\r\n]/u.test(value)),
+          .filter(
+            value =>
+              Effect2.pipe(value, EffectString.trim).length > 0 &&
+              !Effect2.pipe(value, EffectString.includes('/')) &&
+              !/[\r\n]/u.test(value),
+          ),
         (label, value) => {
           const card = parseContextBriefContinuationCard(`${label}: ${value}`);
-          expect(card).toEqual({unresolved: value.replace(/\s+/gu, ' ').trim()});
+          expect(card).toEqual({
+            unresolved: Effect2.pipe(value, EffectString.replace(/\s+/gu, ' '), EffectString.trim),
+          });
           expect(card).not.toHaveProperty('observations');
         },
       ),
@@ -521,19 +537,26 @@ describe('Context Brief continuation contracts', () => {
   });
 
   it('caps repeated continuation text per field without changing its UTF-8 boundary', () => {
-    const card = parseContextBriefContinuationCard(['task: 東京🙂', ...Array(1_000).fill('- 東京🙂')].join('\n'));
-    expect(card?.task).toBe(utf8PrefixForTest(['東京🙂', ...Array(1_000).fill('東京🙂')].join(' '), 192));
+    const card = parseContextBriefContinuationCard(
+      EffectArray.join(['task: 東京🙂', ...Array<string>(1_000).fill('- 東京🙂')], '\n'),
+    );
+    expect(card?.task).toBe(
+      utf8PrefixForTest(EffectArray.join(['東京🙂', ...Array<string>(1_000).fill('東京🙂')], ' '), 192),
+    );
     expect(new TextEncoder().encode(card?.task).byteLength).toBeLessThanOrEqual(192);
   });
 
   it('keeps arbitrary repeated continuation values bounded and deterministic', () => {
     fc.assert(
-      fc.property(fc.array(fc.constantFrom('ascii', '東京', '🙂', 'a'.repeat(512)), {maxLength: 80}), values => {
-        const body = ['task: start', ...values.map(value => `- ${value}`)].join('\n');
-        const card = parseContextBriefContinuationCard(body);
-        expect(card).toEqual(parseContextBriefContinuationCard(body));
-        expect(new TextEncoder().encode(card?.task).byteLength).toBeLessThanOrEqual(192);
-      }),
+      fc.property(
+        fc.array(fc.constantFrom('ascii', '東京', '🙂', Effect2.pipe('a', EffectString.repeat(512))), {maxLength: 80}),
+        values => {
+          const body = EffectArray.join(['task: start', ...EffectArray.map(values, value => `- ${value}`)], '\n');
+          const card = parseContextBriefContinuationCard(body);
+          expect(card).toEqual(parseContextBriefContinuationCard(body));
+          expect(new TextEncoder().encode(card?.task).byteLength).toBeLessThanOrEqual(192);
+        },
+      ),
       {numRuns: 50},
     );
   });
@@ -541,7 +564,7 @@ describe('Context Brief continuation contracts', () => {
   it('keeps arbitrary graph queries UTF-8 bounded and deterministic', () => {
     fc.assert(
       fc.property(fc.array(fc.constantFrom('symbol', '東京', '🙂', '.member', ':scope'), {maxLength: 80}), parts => {
-        const body = `graph query: ${parts.join(' ')}`;
+        const body = `graph query: ${EffectArray.join(parts, ' ')}`;
         const first = parseContextBriefContinuationCard(body);
         const second = parseContextBriefContinuationCard(body);
         expect(first).toEqual(second);
@@ -594,7 +617,9 @@ describe('Context Brief continuation contracts', () => {
 
   it('reports an explicit partial resume gap and degrades stale continuation evidence', () => {
     expect(project('resume').structuredContent.evidenceState).toBe('partial');
-    expect(project('resume', handoff('d'.repeat(40))).structuredContent.evidenceState).toBe('degraded');
+    expect(project('resume', handoff(Effect2.pipe('d', EffectString.repeat(40)))).structuredContent.evidenceState).toBe(
+      'degraded',
+    );
   });
 
   it('returns executable bounded follow-ups and uses a stable node selector', () => {
@@ -623,10 +648,14 @@ describe('Context Brief continuation contracts', () => {
 
   it('keeps the required graph card when optional handoffs are added at every public budget', () => {
     for (const budgetTokens of [800, 900, 1_000, 1_250, 1_500]) {
-      const withoutMemory = project('brief', undefined, budgetTokens).structuredContent.graph.cards.map(
+      const withoutMemory = EffectArray.map(
+        project('brief', undefined, budgetTokens).structuredContent.graph.cards,
         card => card.id,
       );
-      const withMemory = project('brief', handoff(), budgetTokens).structuredContent.graph.cards.map(card => card.id);
+      const withMemory = EffectArray.map(
+        project('brief', handoff(), budgetTokens).structuredContent.graph.cards,
+        card => card.id,
+      );
       expect(withMemory).toEqual(withoutMemory);
     }
   });
@@ -661,7 +690,8 @@ describe('Context Brief continuation contracts', () => {
       expect(projected.coverage.gaps).toContain('graph-evidence-partial');
     }
     expect(
-      project('brief', realisticHandoff(), 1_500, noisyDetachedWorktreeGraph()).structuredContent.activeHandoffs.some(
+      EffectArray.some(
+        project('brief', realisticHandoff(), 1_500, noisyDetachedWorktreeGraph()).structuredContent.activeHandoffs,
         memory => memory.continuationCard !== undefined,
       ),
     ).toBe(false);
@@ -772,11 +802,13 @@ describe('Context Brief continuation contracts', () => {
     expect(projected.structuredContent.graph.cards[0]?.id).toBe('card-1');
     expect(projected.text).toContain('"continuationCard"');
     expect(projected.text).toContain('h11/_abnf.py');
-    const compatibleAgentView = JSON.parse(projected.text) as {
-      activeHandoffs: Array<{continuationCard?: Record<string, string>}>;
-    };
-    const continuationCard = compatibleAgentView.activeHandoffs[0]?.continuationCard;
-    if (continuationCard === undefined) throw new Error('expected dual continuation card');
+    const compatibleAgentView: unknown = JSON.parse(projected.text);
+    if (!Predicate.isObject(compatibleAgentView) || !EffectArray.isArray(compatibleAgentView.activeHandoffs))
+      throw new Error('expected dual continuation handoffs');
+    const firstHandoff = compatibleAgentView.activeHandoffs[0];
+    if (!Predicate.isObject(firstHandoff) || !Predicate.isObject(firstHandoff.continuationCard))
+      throw new Error('expected dual continuation card');
+    const continuationCard = firstHandoff.continuationCard;
     continuationCard.graphQuery = graphQuery;
     continuationCard.graphQuestion = 'Which callers depend on the chunk-size state transition?';
     const parsed = parseContextBriefJsonText(JSON.stringify(compatibleAgentView));
@@ -944,8 +976,8 @@ describe('Context Brief continuation contracts', () => {
           {minLength: 1},
         ),
         lines => {
-          const first = parseContextBriefContinuationCard(lines.join('\n'));
-          const second = parseContextBriefContinuationCard([...lines].reverse().join('\n'));
+          const first = parseContextBriefContinuationCard(EffectArray.join(lines, '\n'));
+          const second = parseContextBriefContinuationCard(EffectArray.join([...lines].reverse(), '\n'));
           expect(first).toEqual(second);
           expect(JSON.stringify(first)).not.toContain('\ud800');
         },
@@ -996,7 +1028,7 @@ function validatedResumeLogical(status: 'exact' | 'relocated' = 'exact', budgetT
   const uri = 'threadnote://user/test/memories/handoffs/active/h11/resume.md';
   const citation = {
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256' as const, value: 'd'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256' as const, value: Effect2.pipe('d', EffectString.repeat(64))},
     id: 'citation-h11-abnf',
     path: 'h11/_abnf.py',
     repositoryId: REPOSITORY_ID,
@@ -1123,8 +1155,12 @@ function graph(withSource: boolean): ContextBriefGraphEvidenceV1 {
 
 function graphForPath(path: string): ContextBriefGraphEvidenceV1 {
   const base = graph(true);
-  const discriminator = path.includes('planner') ? '2' : path.includes('release/check') ? '3' : '1';
-  const ref = `cgs_${discriminator.repeat(32)}`;
+  const discriminator = Effect2.pipe(path, EffectString.includes('planner'))
+    ? '2'
+    : Effect2.pipe(path, EffectString.includes('release/check'))
+      ? '3'
+      : '1';
+  const ref = `cgs_${Effect2.pipe(discriminator, EffectString.repeat(32))}`;
   return {
     ...base,
     cards: [
@@ -1192,7 +1228,7 @@ function denseGraph(): ContextBriefGraphEvidenceV1 {
       ...base.cards[0],
       id: `card-${index + 1}`,
       rank: index,
-      ref: index === 0 ? REF : `cgs_${index.toString(16).padStart(32, '0')}`,
+      ref: index === 0 ? REF : `cgs_${Effect2.pipe(index.toString(16), EffectString.padStart(32, '0'))}`,
       symbol: {
         ...base.cards[0].symbol,
         line: index + 1,
@@ -1205,10 +1241,10 @@ function denseGraph(): ContextBriefGraphEvidenceV1 {
 
 function noisyDetachedWorktreeGraph(): ContextBriefGraphEvidenceV1 {
   const base = denseGraph();
-  const refs = base.cards.map(card => card.ref);
+  const refs = EffectArray.map(base.cards, card => card.ref);
   return {
     ...base,
-    continuation: {cursor: `cgwc_${'1'.repeat(40)}`, remainingEstimate: 13},
+    continuation: {cursor: `cgwc_${Effect2.pipe('1', EffectString.repeat(40))}`, remainingEstimate: 13},
     contracts: Array.from({length: 32}, (_, rank) => ({
       authority: 'authoritative' as const,
       evidence: {
@@ -1274,7 +1310,7 @@ function realisticHandoff(sourceCommit = COMMIT) {
 function fileCitation(path: string) {
   return {
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256' as const, value: 'd'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256' as const, value: Effect2.pipe('d', EffectString.repeat(64))},
     id: `citation-${path}`,
     path,
     repositoryId: REPOSITORY_ID,

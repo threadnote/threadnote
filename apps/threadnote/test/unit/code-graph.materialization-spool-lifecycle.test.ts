@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -17,6 +18,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {claimPersistentBuildForTest} from '@threadnote/graph/test/helpers/code-graph-build';
 import {materializationStorageFiles} from '@threadnote/graph/indexer/materialization';
 import {codeGraphSqliteGet} from '@threadnote/graph/sqlite_statement';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 effectIt.effect('materializes a full build through the sorted sidecar and removes it after finalization', () =>
   Effect.gen(function* () {
@@ -28,8 +31,8 @@ effectIt.effect('materializes a full build through the sorted sidecar and remove
     yield* fs.makeDirectory(repositoryRoot, {recursive: true});
     const databasePath = path.join(repositoryRoot, 'graph-v3.sqlite');
     const file: CodeGraphInventoryFile = {
-      blobId: '1'.repeat(40),
-      contentHash: '2'.repeat(64),
+      blobId: Effect2.pipe('1', EffectString.repeat(40)),
+      contentHash: Effect2.pipe('2', EffectString.repeat(64)),
       language: 'typescript',
       mode: '100644',
       path: 'src/main.ts',
@@ -42,8 +45,8 @@ effectIt.effect('materializes a full build through the sorted sidecar and remove
       edgeCount: 0,
       extractorSet: 'materialization-spool-test',
       fileCount: 1,
-      graphContentId: `cgc_${'3'.repeat(40)}`,
-      id: `cgsn_${'0'.repeat(40)}-direct`,
+      graphContentId: `cgc_${Effect2.pipe('3', EffectString.repeat(40))}`,
+      id: `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}-direct`,
       repositoryId: identity.repositoryId,
       state: 'building',
       symbolCount: 0,
@@ -170,8 +173,8 @@ effectIt.effect('rejects a replaced ready sidecar before registering or applying
     yield* fs.makeDirectory(repositoryRoot, {recursive: true});
     const databasePath = path.join(repositoryRoot, 'graph-v3.sqlite');
     const file: CodeGraphInventoryFile = {
-      blobId: '1'.repeat(40),
-      contentHash: '2'.repeat(64),
+      blobId: Effect2.pipe('1', EffectString.repeat(40)),
+      contentHash: Effect2.pipe('2', EffectString.repeat(64)),
       language: 'typescript',
       mode: '100644',
       path: 'src/replaced.ts',
@@ -184,8 +187,8 @@ effectIt.effect('rejects a replaced ready sidecar before registering or applying
       edgeCount: 0,
       extractorSet: 'materialization-spool-replaced-test',
       fileCount: 1,
-      graphContentId: `cgc_${'3'.repeat(40)}`,
-      id: `cgsn_${'0'.repeat(40)}-direct`,
+      graphContentId: `cgc_${Effect2.pipe('3', EffectString.repeat(40))}`,
+      id: `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}-direct`,
       repositoryId: identity.repositoryId,
       state: 'building',
       symbolCount: 0,
@@ -240,7 +243,7 @@ effectIt.effect('rejects a replaced ready sidecar before registering or applying
           try {
             database
               .query('UPDATE materialization_spool_header SET graph_content_id = ? WHERE singleton = 1')
-              .run(`cgc_${'9'.repeat(40)}`);
+              .run(`cgc_${Effect2.pipe('9', EffectString.repeat(40))}`);
           } finally {
             database.close(true);
           }
@@ -279,8 +282,8 @@ effectIt.effect('seals raw spool surfaces before a refused sort and resumes with
     yield* fs.makeDirectory(repositoryRoot, {recursive: true});
     const databasePath = path.join(repositoryRoot, 'graph-v3.sqlite');
     const file: CodeGraphInventoryFile = {
-      blobId: '1'.repeat(40),
-      contentHash: '2'.repeat(64),
+      blobId: Effect2.pipe('1', EffectString.repeat(40)),
+      contentHash: Effect2.pipe('2', EffectString.repeat(64)),
       language: 'typescript',
       mode: '100644',
       path: 'src/capacity.ts',
@@ -293,14 +296,14 @@ effectIt.effect('seals raw spool surfaces before a refused sort and resumes with
       edgeCount: 0,
       extractorSet: 'materialization-spool-capacity-test',
       fileCount: 1,
-      graphContentId: `cgc_${'3'.repeat(40)}`,
-      id: `cgsn_${'0'.repeat(40)}-direct`,
+      graphContentId: `cgc_${Effect2.pipe('3', EffectString.repeat(40))}`,
+      id: `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}-direct`,
       repositoryId: identity.repositoryId,
       state: 'building',
       symbolCount: 2,
       worktreeId: identity.worktreeId,
     };
-    const symbols: readonly CodeGraphSymbol[] = ['alpha', 'beta'].map((name, index) => ({
+    const symbols: readonly CodeGraphSymbol[] = EffectArray.map(['alpha', 'beta'], (name, index) => ({
       contentHash: file.contentHash,
       exported: true,
       id: `symbol-${name}`,
@@ -390,7 +393,7 @@ effectIt.effect('seals raw spool surfaces before a refused sort and resumes with
           preparation => preparation,
         );
         expect(boundaries).toHaveLength(2);
-        expect(prepared.surfaces.map(surface => surface.name)).toEqual([
+        expect(EffectArray.map(prepared.surfaces, surface => surface.name)).toEqual([
           'symbols',
           'lookup',
           'edges',
@@ -402,7 +405,7 @@ effectIt.effect('seals raw spool surfaces before a refused sort and resumes with
           'lexical_terms',
           'symbol_terms',
         ]);
-        expect(prepared.surfaces.filter(surface => surface.name === 'symbols')).toEqual([
+        expect(EffectArray.filter(prepared.surfaces, surface => surface.name === 'symbols')).toEqual([
           {name: 'symbols', rowCount: 2},
         ]);
         yield* store.finalizePersistentMaterializationPlan(databasePath, 1, undefined, undefined, context, prepared);
@@ -449,13 +452,13 @@ effectIt.effect('accounts for the sidecar and every journal family in durable hi
 function repositoryIdentity(root: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'materialization-spool-fixture',
     gitCommonDirectory: root,
-    headCommit: '4'.repeat(40),
+    headCommit: Effect2.pipe('4', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'a'.repeat(64),
-    worktreeId: 'd'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
   };
 }

@@ -1,5 +1,9 @@
 import {Schema} from 'effect';
-import type {MaintenanceSemanticProgress, MaintenanceWorkSchedule} from './maintenance_decisions.js';
+import type {
+  LegacyMaintenanceSemanticProgress,
+  MaintenanceSemanticProgress,
+  MaintenanceWorkSchedule,
+} from './maintenance_decisions.js';
 import type {TopicMaintenanceCheckpoint} from './maintenance_topic.js';
 import type {
   ContextHealthCaseDispositionV2,
@@ -10,12 +14,15 @@ import type {MemoryRelation} from '@threadnote/memory/document';
 import type {ContextHealthRepairProposalV1} from './health_repair.js';
 
 /** Only acquisition failed; the publication callback has not started. */
-export class MaintenancePauseFenceBusy extends Schema.TaggedError<MaintenancePauseFenceBusy>()(
-  'MaintenancePauseFenceBusy',
-  {},
-) {}
+export class MaintenancePauseFenceBusy extends Schema.TaggedError<
+  MaintenancePauseFenceBusy,
+  {readonly brand: unique symbol}
+>()('MaintenancePauseFenceBusy', {}) {}
 
-export class ContextMaintenanceBusy extends Schema.TaggedError<ContextMaintenanceBusy>()('ContextMaintenanceBusy', {}) {
+export class ContextMaintenanceBusy extends Schema.TaggedError<
+  ContextMaintenanceBusy,
+  {readonly brand: unique symbol}
+>()('ContextMaintenanceBusy', {}) {
   override readonly message =
     'Context maintenance is busy. No protected operation started. Retry shortly; if busy persists, let current Threadnote work finish before retrying.';
 }
@@ -37,7 +44,7 @@ export interface MaintenanceState extends ContextMaintenanceStatusV2 {
   readonly lastWakeAt?: string;
   readonly policyOverrides?: Readonly<Record<string, string>>;
   readonly decisionCheckpoints?: Readonly<Record<string, string>>;
-  readonly semanticProgress?: Readonly<Record<string, MaintenanceSemanticProgress>>;
+  readonly semanticProgress?: Readonly<Record<string, MaintenanceSemanticProgress | LegacyMaintenanceSemanticProgress>>;
   readonly workSchedule?: MaintenanceWorkSchedule;
   readonly topicCheckpoints?: Readonly<Record<string, TopicMaintenanceCheckpoint>>;
 }

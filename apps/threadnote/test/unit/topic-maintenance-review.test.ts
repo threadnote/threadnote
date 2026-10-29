@@ -1,14 +1,15 @@
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import {makeTopicDraftWireFixture, topicDraftEvidenceFromPrompt} from '../helpers/topic-draft-wire.js';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
-import {Effect, FileSystem, Path, Result} from 'effect';
+import {Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
-import type {EffectMcpServerAdapter} from '@threadnote/threadnote/effect/ai/mcp';
-import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -20,7 +21,7 @@ import {
   candidateReviewWithState,
   loadCandidateReview,
   saveCandidateReview,
-  type CandidateReview,
+  parseCandidateReview,
 } from '@threadnote/memory/candidate';
 import {
   runContextMaintenance,
@@ -43,8 +44,25 @@ import {
 import type {runSelectedDraft} from '../../src/manager/selected_draft.js';
 import {projectManagerTopicReview} from '../../src/manager/topic_review.js';
 import {handleManagerTopicReview} from '../../src/manager/topic_review.js';
-import {registerContextMaintenanceTools} from '../../src/mcp/server/context/maintenance.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const decodeManagerTopicReviewCase = Schema.decodeUnknownSync(
+  Schema.StructWithRest(Schema.Struct({caseId: Schema.String}), [JsonRecordSchema]),
+);
+const decodeReviewToolView = Schema.decodeUnknownSync(
+  Schema.StructWithRest(
+    Schema.Struct({
+      revision: Schema.optionalKey(Schema.Finite),
+      approval: Schema.optionalKey(
+        Schema.StructWithRest(Schema.Struct({stage: Schema.optionalKey(Schema.String)}), [JsonRecordSchema]),
+      ),
+    }),
+    [JsonRecordSchema],
+  ),
+);
 
 describe('reviewed personal topic acceptance', () => {
   effectIt.effect(
@@ -151,15 +169,24 @@ describe('reviewed personal topic acceptance', () => {
               outcome: 'propose-update',
               paragraphDispositions: {
                 version: 1,
-                entries: basis.paragraphs
-                  .filter(item => item.role === 'descriptive' && item.support === 'direct')
-                  .map(item => ({
+                entries: EffectArray.map(
+                  EffectArrayPipe(basis.paragraphs, __effectFilterValues =>
+                    EffectArray.filter(
+                      __effectFilterValues,
+                      (item, __effectFilterIndex) =>
+                        __effectFilterIndex in __effectFilterValues &&
+                        item.role === 'descriptive' &&
+                        item.support === 'direct',
+                    ),
+                  ),
+                  item => ({
                     ordinal: item.ordinal,
                     beforeHash: item.hash,
                     disposition: 'update',
                     supportHandles: [`current:${citation.id}`],
                     rationale: 'Current source declares 60 seconds.',
-                  })),
+                  }),
+                ),
               },
               operations: [
                 {
@@ -250,38 +277,40 @@ describe('reviewed personal topic acceptance', () => {
               ),
             );
           const publicReview = (args: readonly string[]) =>
-            cli(args).pipe(Effect.map(result => JSON.parse(result.stdout) as CandidateReview));
+            cli(args).pipe(Effect.map(result => parseCandidateReview(JSON.parse(result.stdout))));
           const editedDraftFile = path.join(home, 'edited-draft.json');
           yield* fs.writeFileString(
             editedDraftFile,
             JSON.stringify({
               ...proposal.draft,
-              operations: proposal.draft.operations.map((operation, index) =>
+              operations: EffectArray.map(proposal.draft.operations, (operation, index) =>
                 index === 0 ? {...operation, text: 'The request timeout is 60 seconds.'} : operation,
               ),
               rationale: 'Reviewed the same evidence and approved this exact replacement.',
             }),
           );
-          let previewReview = JSON.parse(
-            (yield* cli([
-              '--action',
-              'draft-preview',
-              '--review-id',
-              review.reviewId,
-              '--revision',
-              String(review.revision),
-              '--source-cwd',
-              repository,
-              '--edited-draft-file',
-              editedDraftFile,
-              '--json',
-            ])).stdout,
-          ) as CandidateReview;
+          let previewReview = parseCandidateReview(
+            JSON.parse(
+              (yield* cli([
+                '--action',
+                'draft-preview',
+                '--review-id',
+                review.reviewId,
+                '--revision',
+                String(review.revision),
+                '--source-cwd',
+                repository,
+                '--edited-draft-file',
+                editedDraftFile,
+                '--json',
+              ])).stdout,
+            ),
+          );
           const firstProjected = projectManagerTopicReview(previewReview)!;
           expect(firstProjected.draft.operations[0]?.text).toBe('The request timeout is 60 seconds.');
           const secondEditedDraft = {
             ...firstProjected.draft,
-            operations: firstProjected.draft.operations.map((operation, index) =>
+            operations: EffectArray.map(firstProjected.draft.operations, (operation, index) =>
               index === 1 ? {...operation, text: 'Requests time out after 60 seconds.'} : operation,
             ),
           };
@@ -300,7 +329,7 @@ describe('reviewed personal topic acceptance', () => {
             '--json',
           ]);
           const secondProjected = projectManagerTopicReview(previewReview)!;
-          expect(secondProjected.draft.operations.map(operation => operation.text)).toEqual([
+          expect(EffectArray.map(secondProjected.draft.operations, operation => operation.text)).toEqual([
             'The request timeout is 60 seconds.',
             'Requests time out after 60 seconds.',
           ]);
@@ -419,18 +448,24 @@ describe('reviewed personal topic acceptance', () => {
             'Reviewed the same evidence and approved this exact replacement.',
           );
           expect(previewReview.maintenance?.proposal.draft.rationale).toBe(proposal.draft.rationale);
-          type ToolResult = {readonly isError?: boolean; readonly structuredContent?: ManagerTopicReviewV1};
-          const handlers = new Map<string, (input: Record<string, unknown>) => Effect.Effect<ToolResult>>();
-          const server = {
-            registerTool: (name: string, _definition: unknown, handle: unknown) => {
-              handlers.set(name, handle as (input: Record<string, unknown>) => Effect.Effect<ToolResult>);
-            },
-          } as unknown as EffectMcpServerAdapter;
-          registerContextMaintenanceTools(server, config);
-          const reviewTool = (input: Record<string, unknown>) => handlers.get('context_maintenance_review')!(input);
-          expect((yield* reviewTool({action: 'view', reviewId: review.reviewId})).structuredContent?.revision).toBe(
-            previewReview.revision,
+          const reviewTool = (input: Record<string, unknown>) =>
+            handleManagerTopicReview({
+              config,
+              method: input.action === 'view' ? 'GET' : 'POST',
+              url:
+                input.action === 'view'
+                  ? new URL(`http://manager.test/api/attention/topic-review?project=fixture&reviewId=${input.reviewId}`)
+                  : new URL('http://manager.test/api/attention/topic-review'),
+              body: Effect.succeed({...input, project: 'fixture'}),
+            }).pipe(
+              Effect.map(response =>
+                response ? {isError: response.status !== 200, structuredContent: response.body} : {isError: true},
+              ),
+            );
+          const firstView = decodeReviewToolView(
+            (yield* reviewTool({action: 'view', reviewId: review.reviewId})).structuredContent,
           );
+          expect(firstView.revision).toBe(previewReview.revision);
           expect(preview.beforeContent).toBe(accepted);
           expect(preview.content).toContain('The request timeout is 60 seconds.');
           expect(preview.content).toContain('Requests time out after 60 seconds.');
@@ -472,11 +507,14 @@ describe('reviewed personal topic acceptance', () => {
             reviewId: review.reviewId,
             revision: previewReview.revision,
             sourceCwd: repository,
-            approvalDigest: 'f'.repeat(64),
+            approvalDigest: Effect2.pipe('f', EffectString.repeat(64)),
             approved: true,
           });
           expect(wrongDigest.isError).toBe(true);
-          yield* fs.writeFileString(memory, accepted.replace('topic: timeout', 'topic: renamed-timeout'));
+          yield* fs.writeFileString(
+            memory,
+            Effect2.pipe(accepted, EffectString.replace('topic: timeout', 'topic: renamed-timeout')),
+          );
           expect(Result.isFailure(yield* apply().pipe(Effect.result))).toBe(true);
           expect(yield* fs.readFileString(memory)).toContain('topic: renamed-timeout');
           yield* fs.writeFileString(memory, accepted);
@@ -572,27 +610,30 @@ describe('reviewed personal topic acceptance', () => {
           const managerBeforeWrite = yield* managerApply();
           expect(managerBeforeWrite?.status).toBe(200);
           expect(managerBeforeWrite?.body).toMatchObject({state: 'applied', approval: {stage: 'written'}});
-          const applied = JSON.parse(
-            (yield* cli([
-              '--action',
-              'draft-apply',
-              '--review-id',
-              review.reviewId,
-              '--revision',
-              String(previewReview.revision),
-              '--approval-digest',
-              preview.approvalDigest,
-              '--source-cwd',
-              repository,
-              '--approved',
-              '--json',
-            ])).stdout,
-          ) as CandidateReview;
+          const applied = parseCandidateReview(
+            JSON.parse(
+              (yield* cli([
+                '--action',
+                'draft-apply',
+                '--review-id',
+                review.reviewId,
+                '--revision',
+                String(previewReview.revision),
+                '--approval-digest',
+                preview.approvalDigest,
+                '--source-cwd',
+                repository,
+                '--approved',
+                '--json',
+              ])).stdout,
+            ),
+          );
           expect(applied.candidates[0].state).toBe('applied');
           expect(applied.maintenanceApproval?.stage).toBe('written');
-          expect(
-            (yield* reviewTool({action: 'view', reviewId: review.reviewId})).structuredContent?.approval?.stage,
-          ).toBe('written');
+          const writtenView = decodeReviewToolView(
+            (yield* reviewTool({action: 'view', reviewId: review.reviewId})).structuredContent,
+          );
+          expect(writtenView.approval?.stage).toBe('written');
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
           yield* fs.writeFileString(stateFile, savedState);
           expect((yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0]?.disposition).toBe(
@@ -666,7 +707,8 @@ describe('reviewed personal topic acceptance', () => {
             caseObservationMatches: false,
             canApply: false,
           });
-          const projectedCaseId = (conflictView!.body as ManagerTopicReviewV1).caseId;
+          if (!conflictView) throw new Error('Expected a conflicted review response.');
+          const projectedCaseId = decodeManagerTopicReviewCase(conflictView.body).caseId;
           if (!projectedCaseId) throw new Error('Conflicted review must retain its projected case.');
           const closedResponse = yield* handleManagerTopicReview({
             config,
@@ -692,7 +734,7 @@ describe('reviewed personal topic acceptance', () => {
             contentHash: preview.contentHash,
             approvalDigest: preview.approvalDigest,
           });
-          expect(closed.auditEvents.slice(-2).map(event => event.action)).toEqual(['conflict', 'reject']);
+          expect(EffectArray.map(closed.auditEvents.slice(-2), event => event.action)).toEqual(['conflict', 'reject']);
           const replayedReject = yield* publicReview([
             '--action',
             'draft-reject',
@@ -741,7 +783,7 @@ describe('reviewed personal topic acceptance', () => {
                 ...identity,
               };
               draft.decision.removedClaims = ['Request timeout is 60 seconds.'];
-              draft.facts.entries = eligible.map(item => ({
+              draft.facts.entries = EffectArray.map(eligible, item => ({
                 ordinal: item.ordinal,
                 currentBehavior: 'Current supported behavior.',
                 rationale: 'Checked current source.',
@@ -767,7 +809,7 @@ describe('reviewed personal topic acceptance', () => {
           expect(fresh.candidates[0].state).toBe('pending');
           expect(fresh.maintenanceApproval).toBeUndefined();
           expect(fresh.maintenanceClosedConflict).toEqual(closed.maintenanceClosedConflict);
-          expect(fresh.auditEvents.map(event => event.action)).toContain('conflict');
+          expect(EffectArray.map(fresh.auditEvents, event => event.action)).toContain('conflict');
           expect((yield* loadCandidateReview(home, review.reviewId)).maintenanceClosedConflict).toEqual(
             closed.maintenanceClosedConflict,
           );

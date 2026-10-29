@@ -1,3 +1,6 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {describe, expect, it} from '@effect/vitest';
@@ -19,8 +22,8 @@ const barrelScenarioArbitrary = FC.record({
   revision: FC.integer({max: 10_000, min: 1}),
 }).map(({barrelDepth, cleanTwo, cleanZero, dirtyTwo, dirtyZero, revision}) => ({
   barrelDepth,
-  cleanArities: [cleanZero ? 0 : -1, cleanTwo ? 2 : -1].filter(arity => arity >= 0),
-  dirtyArities: [dirtyZero ? 0 : -1, dirtyTwo ? 2 : -1].filter(arity => arity >= 0),
+  cleanArities: EffectArray.filter([cleanZero ? 0 : -1, cleanTwo ? 2 : -1], arity => arity >= 0),
+  dirtyArities: EffectArray.filter([dirtyZero ? 0 : -1, dirtyTwo ? 2 : -1], arity => arity >= 0),
   revision,
 }));
 
@@ -43,33 +46,45 @@ describe('code graph incremental barrel differential properties', () => {
           const incrementalHome = path.join(homesRoot, 'incremental');
           const fullHome = path.join(homesRoot, 'full');
           const writeConsumer = (arities: readonly number[], revision: number) => {
-            const calls = arities.map(arity => (arity === 0 ? 'decode()' : 'decode("a", "b")'));
+            const calls = EffectArray.map(arities, arity => (arity === 0 ? 'decode()' : 'decode("a", "b")'));
             return fs.writeFileString(
               path.join(sourceRoot, 'use.ts'),
-              [
-                `import {decode} from './barrel-${scenario.barrelDepth - 1}.js';`,
-                'export function useDecode(): string {',
-                `  const revision = ${revision};`,
-                `  return [String(revision)${calls.map(call => `, ${call}`).join('')}].join(":");`,
-                '}',
-                '',
-              ].join('\n'),
+              EffectArray.join(
+                [
+                  `import {decode} from './barrel-${scenario.barrelDepth - 1}.js';`,
+                  'export function useDecode(): string {',
+                  `  const revision = ${revision};`,
+                  `  return [String(revision)${EffectArray.join(
+                    EffectArray.map(calls, call => `, ${call}`),
+                    '',
+                  )}].join(":");`,
+                  '}',
+                  '',
+                ],
+                '\n',
+              ),
             );
           };
 
           yield* fs.makeDirectory(sourceRoot, {recursive: true});
           yield* fs.writeFileString(
             path.join(sourceRoot, 'declarations.ts'),
-            [
-              'export declare function decode(): string;',
-              'export declare function decode(a: string, b: string): string;',
-              '',
-            ].join('\n'),
+            EffectArray.join(
+              [
+                'export declare function decode(): string;',
+                'export declare function decode(a: string, b: string): string;',
+                '',
+              ],
+              '\n',
+            ),
           );
           yield* fs.writeFileString(path.join(sourceRoot, 'cycle-a.ts'), 'export {decode} from "./cycle-b.js";\n');
           yield* fs.writeFileString(
             path.join(sourceRoot, 'cycle-b.ts'),
-            ['export {decode} from "./cycle-a.js";', 'export {decode} from "./declarations.js";', ''].join('\n'),
+            EffectArray.join(
+              ['export {decode} from "./cycle-a.js";', 'export {decode} from "./declarations.js";', ''],
+              '\n',
+            ),
           );
           for (let index = 0; index < scenario.barrelDepth; index += 1) {
             const target = index === 0 ? 'cycle-a' : `barrel-${index - 1}`;
@@ -118,12 +133,24 @@ describe('code graph incremental barrel differential properties', () => {
           });
           expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
           const resolvedArities = new Set(
-            incrementalGraph.edges
-              .filter(edge => edge.relation === 'calls' && edge.targetName === 'decode' && edge.targetId !== undefined)
-              .flatMap(edge => {
-                const target = incrementalGraph.symbols.find(symbol => symbol.id === edge.targetId);
+            EffectArray.flatMap(
+              EffectArrayPipe(incrementalGraph.edges, __effectFilterValues =>
+                EffectArray.filter(
+                  __effectFilterValues,
+                  (edge, __effectFilterIndex) =>
+                    __effectFilterIndex in __effectFilterValues &&
+                    edge.relation === 'calls' &&
+                    edge.targetName === 'decode' &&
+                    edge.targetId !== undefined,
+                ),
+              ),
+              edge => {
+                const target = EffectOption.getOrUndefined(
+                  EffectArray.findFirst(incrementalGraph.symbols, symbol => symbol.id === edge.targetId),
+                );
                 return target?.arity === undefined ? [] : [target.arity];
-              }),
+              },
+            ),
           );
           expect(resolvedArities).toEqual(new Set(scenario.dirtyArities));
         }),

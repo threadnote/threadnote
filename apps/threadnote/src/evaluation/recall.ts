@@ -1,7 +1,9 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import type {RecallCandidate, RecallRankContext} from '@threadnote/recall/rank';
 import {rankRecallCandidates} from '@threadnote/recall/rank';
+import * as EffectRecord from 'effect/Record';
 
 export const RECALL_EVALUATION_VERSION = 2 as const;
 export const RECALL_EVALUATION_RUN_VERSION = 1 as const;
@@ -285,13 +287,19 @@ export function validateRecallEvaluationFixtureV2(fixture: RecallEvaluationFixtu
       throw new Error(`Duplicate recall evaluation query ID: ${query.id}`);
     }
     queryIds.add(query.id);
-    if (query.expectedAnswerability === 'answerable' && !Object.values(query.relevance).some(grade => grade > 0)) {
+    if (
+      query.expectedAnswerability === 'answerable' &&
+      !EffectArray.some(EffectRecord.values(query.relevance), grade => grade > 0)
+    ) {
       throw new Error(`Answerable recall evaluation query has no relevant document: ${query.id}`);
     }
-    if (query.expectedAnswerability === 'no_answer' && Object.values(query.relevance).some(grade => grade > 0)) {
+    if (
+      query.expectedAnswerability === 'no_answer' &&
+      EffectArray.some(EffectRecord.values(query.relevance), grade => grade > 0)
+    ) {
       throw new Error(`No-answer recall evaluation query has relevant documents: ${query.id}`);
     }
-    for (const [uri, grade] of Object.entries(query.relevance)) {
+    for (const [uri, grade] of EffectRecord.toEntries(query.relevance)) {
       if (!documentUris.has(uri)) {
         throw new Error(`Recall evaluation query ${query.id} references missing document: ${uri}`);
       }
@@ -330,7 +338,7 @@ export function runLexicalRecallEvaluationV2(
     createdAt: options.createdAt ?? new Date().toISOString(),
     fixtureHash: options.fixtureHash,
     pipeline: {name: options.pipelineName ?? 'threadnote-lexical-only'},
-    queries: fixture.queries.map(query => {
+    queries: EffectArray.map(fixture.queries, query => {
       const context: RecallRankContext = {
         eligibility: deriveRecallEligibilityPolicy({
           explicitProject: options.projectEligibility === 'global' ? undefined : query.project,
@@ -342,22 +350,27 @@ export function runLexicalRecallEvaluationV2(
       };
       const ranked = rankRecallCandidates(
         query.query,
-        fixture.documents.map(document => ({...document, semantic: 0})),
+        EffectArray.map(fixture.documents, document => ({...document, semantic: 0})),
         context,
       );
-      const hits = ranked.results.slice(0, limit).map(result => ({
-        reasonCodes: result.reasons.map(reason => reason.code),
+      const hits = EffectArray.map(ranked.results.slice(0, limit), result => ({
+        reasonCodes: EffectArray.map(result.reasons, reason => reason.code),
         score: result.finalScore,
         uri: result.candidate.uri,
       }));
       return {
         candidatesRead: fixture.documents.length,
-        contextCharacters: ranked.results
-          .slice(0, limit)
-          .reduce((characters, result) => characters + result.candidate.text.length, 0),
+        contextCharacters: EffectArray.reduce(
+          ranked.results.slice(0, limit),
+          0,
+          (characters, result) => characters + result.candidate.text.length,
+        ),
         contextTokens: Math.ceil(
-          ranked.results.slice(0, limit).reduce((characters, result) => characters + result.candidate.text.length, 0) /
-            4,
+          EffectArray.reduce(
+            ranked.results.slice(0, limit),
+            0,
+            (characters, result) => characters + result.candidate.text.length,
+          ) / 4,
         ),
         expansion: 'not_invoked',
         id: query.id,
@@ -397,11 +410,11 @@ export function runScoredRecallEvaluationV2(
       name: options.pipelineName,
       revision: options.revision,
     },
-    queries: fixture.queries.map(query => {
+    queries: EffectArray.map(fixture.queries, query => {
       const scores = scoresByQuery.get(query.id);
       const ranked = rankRecallCandidates(
         query.query,
-        fixture.documents.map(document => ({
+        EffectArray.map(fixture.documents, document => ({
           ...document,
           reranker: scores?.reranker?.get(document.uri) ?? 0,
           semantic: scores?.semantic?.get(document.uri) ?? 0,
@@ -417,7 +430,11 @@ export function runScoredRecallEvaluationV2(
         },
       );
       const selected = ranked.results.slice(0, limit);
-      const contextCharacters = selected.reduce((characters, result) => characters + result.candidate.text.length, 0);
+      const contextCharacters = EffectArray.reduce(
+        selected,
+        0,
+        (characters, result) => characters + result.candidate.text.length,
+      );
       return {
         candidatesRead: fixture.documents.length,
         contextCharacters,
@@ -425,8 +442,8 @@ export function runScoredRecallEvaluationV2(
         expansion: 'not_invoked',
         id: query.id,
         predictedAnswerability: ranked.confidence.level === 'no_answer' ? 'no_answer' : 'answerable',
-        ranked: selected.map(result => ({
-          reasonCodes: result.reasons.map(reason => reason.code),
+        ranked: EffectArray.map(selected, result => ({
+          reasonCodes: EffectArray.map(result.reasons, reason => reason.code),
           score: result.finalScore,
           uri: result.candidate.uri,
         })),
@@ -446,13 +463,16 @@ export function evaluateRecallRunV2(
   run: RecallEvaluationRunV1,
 ): RecallEvaluationResultV1 {
   validateRecallEvaluationFixtureV2(fixture);
-  const queryById = new Map(fixture.queries.map(query => [query.id, query]));
-  const duplicateRunIds = duplicates(run.queries.map(query => query.id));
-  const failures = duplicateRunIds.map(id => `duplicate run query: ${id}`);
-  const unknownRunIds = run.queries.map(query => query.id).filter(id => !queryById.has(id));
-  failures.push(...unknownRunIds.map(id => `unknown run query: ${id}`));
+  const queryById = new Map(EffectArray.map(fixture.queries, query => [query.id, query]));
+  const duplicateRunIds = duplicates(EffectArray.map(run.queries, query => query.id));
+  const failures = EffectArray.map(duplicateRunIds, id => `duplicate run query: ${id}`);
+  const unknownRunIds = EffectArray.filter(
+    EffectArray.map(run.queries, query => query.id),
+    id => !queryById.has(id),
+  );
+  failures.push(...EffectArray.map(unknownRunIds, id => `unknown run query: ${id}`));
 
-  const runById = new Map(run.queries.map(query => [query.id, query]));
+  const runById = new Map(EffectArray.map(run.queries, query => [query.id, query]));
   const observations: QueryObservation[] = [];
   for (const query of fixture.queries) {
     const queryRun = runById.get(query.id);
@@ -461,9 +481,12 @@ export function evaluateRecallRunV2(
       observations.push(missingObservation(query));
       continue;
     }
-    const rankedUris = queryRun.ranked.map(hit => hit.uri);
-    const unknownUris = rankedUris.filter(uri => !fixture.documents.some(document => document.uri === uri));
-    failures.push(...unknownUris.map(uri => `${query.id}: run returned unknown URI ${uri}`));
+    const rankedUris = EffectArray.map(queryRun.ranked, hit => hit.uri);
+    const unknownUris = EffectArray.filter(
+      rankedUris,
+      uri => !EffectArray.some(fixture.documents, document => document.uri === uri),
+    );
+    failures.push(...EffectArray.map(unknownUris, uri => `${query.id}: run returned unknown URI ${uri}`));
     const expectedNoAnswer = query.expectedAnswerability === 'no_answer';
     const predictedNoAnswer = queryRun.predictedAnswerability === 'no_answer';
     if (expectedNoAnswer !== predictedNoAnswer) {
@@ -471,20 +494,22 @@ export function evaluateRecallRunV2(
     }
 
     const topReasonCodes = new Set(queryRun.ranked[0]?.reasonCodes ?? []);
-    const missingReasonCodes = (query.requiredReasonCodes ?? []).filter(code => !topReasonCodes.has(code));
-    failures.push(...missingReasonCodes.map(code => `${query.id}: top result is missing required reason ${code}`));
-    const missingStages = query.expectedStages.filter(stage => !queryRun.stages.includes(stage));
-    failures.push(...missingStages.map(stage => `${query.id}: run is missing expected stage ${stage}`));
+    const missingReasonCodes = EffectArray.filter(query.requiredReasonCodes ?? [], code => !topReasonCodes.has(code));
+    failures.push(
+      ...EffectArray.map(missingReasonCodes, code => `${query.id}: top result is missing required reason ${code}`),
+    );
+    const missingStages = EffectArray.filter(query.expectedStages, stage => !queryRun.stages.includes(stage));
+    failures.push(...EffectArray.map(missingStages, stage => `${query.id}: run is missing expected stage ${stage}`));
 
-    const forbiddenHits = rankedUris.filter(uri => query.forbiddenUris?.includes(uri) === true);
-    failures.push(...forbiddenHits.map(uri => `${query.id}: forbidden result surfaced: ${uri}`));
+    const forbiddenHits = EffectArray.filter(rankedUris, uri => query.forbiddenUris?.includes(uri) === true);
+    failures.push(...EffectArray.map(forbiddenHits, uri => `${query.id}: forbidden result surfaced: ${uri}`));
 
     observations.push(observeQuery(query, queryRun, fixture.documents));
   }
 
   const categories: Partial<Record<RecallEvaluationCategory, RecallEvaluationMetricSetV1>> = {};
   for (const category of RECALL_EVALUATION_CATEGORIES) {
-    const matching = observations.filter(observation => observation.query.category === category);
+    const matching = EffectArray.filter(observations, observation => observation.query.category === category);
     if (matching.length > 0) {
       categories[category] = aggregateObservations(matching);
     }
@@ -495,7 +520,7 @@ export function evaluateRecallRunV2(
     failures,
     metrics: aggregateObservations(observations),
     pipeline: run.pipeline,
-    queryResults: observations.map(observation => ({
+    queryResults: EffectArray.map(observations, observation => ({
       category: observation.query.category,
       expectedAnswerability: observation.query.expectedAnswerability,
       id: observation.query.id,
@@ -551,8 +576,8 @@ function observeQuery(
   run: RecallEvaluationQueryRunV1,
   documents: readonly RecallEvaluationDocumentV2[],
 ): QueryObservation {
-  const rankedUris = run.ranked.map(hit => hit.uri);
-  const documentsByUri = new Map(documents.map(document => [document.uri, document]));
+  const rankedUris = EffectArray.map(run.ranked, hit => hit.uri);
+  const documentsByUri = new Map(EffectArray.map(documents, document => [document.uri, document]));
   let authorityInversions = 0;
   for (const pair of query.authorityPairs ?? []) {
     const preferredRank = rankedUris.indexOf(pair.preferredUri);
@@ -571,14 +596,14 @@ function observeQuery(
     expectedNoAnswer: query.expectedAnswerability === 'no_answer',
     expansionFallback: run.expansion === 'fallback',
     expansionInvoked: run.expansion === 'fallback' || run.expansion === 'succeeded',
-    explanationSatisfied: (query.requiredReasonCodes ?? []).every(code => topReasonCodes.has(code)),
-    forbiddenHits: rankedUris.filter(uri => query.forbiddenUris?.includes(uri) === true).length,
+    explanationSatisfied: EffectArray.every(query.requiredReasonCodes ?? [], code => topReasonCodes.has(code)),
+    forbiddenHits: EffectArray.filter(rankedUris, uri => query.forbiddenUris?.includes(uri) === true).length,
     predictedNoAnswer: run.predictedAnswerability === 'no_answer',
     query,
     rankedCount: rankedUris.length,
     rankedUris,
     run,
-    staleHits: rankedUris.filter(uri => {
+    staleHits: EffectArray.filter(rankedUris, uri => {
       const document = documentsByUri.get(uri);
       return document?.status === 'archived' || document?.status === 'superseded';
     }).length,
@@ -613,10 +638,11 @@ function missingObservation(query: RecallEvaluationQueryV2): QueryObservation {
 }
 
 function aggregateObservations(observations: readonly QueryObservation[]): RecallEvaluationMetricSetV1 {
-  const answerable = observations.filter(observation => !observation.expectedNoAnswer);
-  const expectedNoAnswer = observations.filter(observation => observation.expectedNoAnswer).length;
-  const predictedNoAnswer = observations.filter(observation => observation.predictedNoAnswer).length;
-  const correctNoAnswer = observations.filter(
+  const answerable = EffectArray.filter(observations, observation => !observation.expectedNoAnswer);
+  const expectedNoAnswer = EffectArray.filter(observations, observation => observation.expectedNoAnswer).length;
+  const predictedNoAnswer = EffectArray.filter(observations, observation => observation.predictedNoAnswer).length;
+  const correctNoAnswer = EffectArray.filter(
+    observations,
     observation => observation.expectedNoAnswer && observation.predictedNoAnswer,
   ).length;
   const noAnswerPrecision = predictedNoAnswer === 0 ? 1 : correctNoAnswer / predictedNoAnswer;
@@ -625,52 +651,60 @@ function aggregateObservations(observations: readonly QueryObservation[]): Recal
     noAnswerPrecision + noAnswerRecall === 0
       ? 0
       : (2 * noAnswerPrecision * noAnswerRecall) / (noAnswerPrecision + noAnswerRecall);
-  const authorityPairs = sum(observations.map(observation => observation.authorityPairs));
-  const rankedCount = sum(observations.map(observation => observation.rankedCount));
+  const authorityPairs = sum(EffectArray.map(observations, observation => observation.authorityPairs));
+  const rankedCount = sum(EffectArray.map(observations, observation => observation.rankedCount));
   return {
     answerableQueries: answerable.length,
     averageCandidatesRead:
       observations.length === 0
         ? 0
-        : sum(observations.map(observation => observation.candidatesRead)) / observations.length,
+        : sum(EffectArray.map(observations, observation => observation.candidatesRead)) / observations.length,
     authorityInversionRate:
-      authorityPairs === 0 ? 0 : sum(observations.map(observation => observation.authorityInversions)) / authorityPairs,
+      authorityPairs === 0
+        ? 0
+        : sum(EffectArray.map(observations, observation => observation.authorityInversions)) / authorityPairs,
     averageContextCharacters:
       observations.length === 0
         ? 0
-        : sum(observations.map(observation => observation.contextCharacters)) / observations.length,
+        : sum(EffectArray.map(observations, observation => observation.contextCharacters)) / observations.length,
     averageContextTokens:
       observations.length === 0
         ? 0
-        : sum(observations.map(observation => observation.contextTokens)) / observations.length,
+        : sum(EffectArray.map(observations, observation => observation.contextTokens)) / observations.length,
     expansionFallbackRate:
-      observations.filter(observation => observation.expansionInvoked).length === 0
+      EffectArray.filter(observations, observation => observation.expansionInvoked).length === 0
         ? 0
-        : observations.filter(observation => observation.expansionFallback).length /
-          observations.filter(observation => observation.expansionInvoked).length,
+        : EffectArray.filter(observations, observation => observation.expansionFallback).length /
+          EffectArray.filter(observations, observation => observation.expansionInvoked).length,
     expansionInvocationRate:
       observations.length === 0
         ? 0
-        : observations.filter(observation => observation.expansionInvoked).length / observations.length,
+        : EffectArray.filter(observations, observation => observation.expansionInvoked).length / observations.length,
     explanationCoverage:
       observations.length === 0
         ? 1
-        : observations.filter(observation => observation.explanationSatisfied).length / observations.length,
+        : EffectArray.filter(observations, observation => observation.explanationSatisfied).length /
+          observations.length,
     forbiddenHitRate:
-      rankedCount === 0 ? 0 : sum(observations.map(observation => observation.forbiddenHits)) / rankedCount,
+      rankedCount === 0
+        ? 0
+        : sum(EffectArray.map(observations, observation => observation.forbiddenHits)) / rankedCount,
     meanNdcgAt10: mean(
-      answerable.map(observation =>
+      EffectArray.map(answerable, observation =>
         ndcgAtCutoff(observation.rankedUris, observation.query.relevance, RECALL_EVALUATION_CUTOFFS[2]),
       ),
     ),
     meanNdcgAt5: mean(
-      answerable.map(observation =>
+      EffectArray.map(answerable, observation =>
         ndcgAtCutoff(observation.rankedUris, observation.query.relevance, RECALL_EVALUATION_CUTOFFS[1]),
       ),
     ),
     meanReciprocalRank: mean(
-      answerable.map(observation => {
-        const rank = observation.rankedUris.findIndex(uri => (observation.query.relevance[uri] ?? 0) > 0);
+      EffectArray.map(answerable, observation => {
+        const rank = EffectOption.getOrElse(
+          EffectArray.findFirstIndex(observation.rankedUris, uri => (observation.query.relevance[uri] ?? 0) > 0),
+          () => -1,
+        );
         return rank === -1 ? 0 : 1 / (rank + 1);
       }),
     ),
@@ -678,20 +712,22 @@ function aggregateObservations(observations: readonly QueryObservation[]): Recal
     noAnswerPrecision,
     noAnswerRecall,
     queryCount: observations.length,
-    recallAt1: mean(answerable.map(observation => recallAtCutoff(observation, 1))),
-    recallAt10: mean(answerable.map(observation => recallAtCutoff(observation, 10))),
-    recallAt5: mean(answerable.map(observation => recallAtCutoff(observation, 5))),
-    staleHitRate: rankedCount === 0 ? 0 : sum(observations.map(observation => observation.staleHits)) / rankedCount,
+    recallAt1: mean(EffectArray.map(answerable, observation => recallAtCutoff(observation, 1))),
+    recallAt10: mean(EffectArray.map(answerable, observation => recallAtCutoff(observation, 10))),
+    recallAt5: mean(EffectArray.map(answerable, observation => recallAtCutoff(observation, 5))),
+    staleHitRate:
+      rankedCount === 0 ? 0 : sum(EffectArray.map(observations, observation => observation.staleHits)) / rankedCount,
   };
 }
 
 function recallAtCutoff(observation: QueryObservation, cutoff: number): number {
-  const relevantUris = Object.entries(observation.query.relevance)
-    .filter(([, grade]) => grade > 0)
-    .map(([uri]) => uri);
+  const relevantUris = EffectArray.map(
+    EffectArray.filter(EffectRecord.toEntries(observation.query.relevance), ([, grade]) => grade > 0),
+    ([uri]) => uri,
+  );
   if (relevantUris.length === 0) return 1;
   const ranked = new Set(observation.rankedUris.slice(0, cutoff));
-  return relevantUris.filter(uri => ranked.has(uri)).length / relevantUris.length;
+  return EffectArray.filter(relevantUris, uri => ranked.has(uri)).length / relevantUris.length;
 }
 
 function ndcgAtCutoff(
@@ -699,9 +735,9 @@ function ndcgAtCutoff(
   relevance: Readonly<Record<string, number>>,
   cutoff: number,
 ): number {
-  const actual = discountedCumulativeGain(rankedUris.slice(0, cutoff).map(uri => relevance[uri] ?? 0));
+  const actual = discountedCumulativeGain(EffectArray.map(rankedUris.slice(0, cutoff), uri => relevance[uri] ?? 0));
   const ideal = discountedCumulativeGain(
-    Object.values(relevance)
+    EffectRecord.values(relevance)
       .sort((left, right) => right - left)
       .slice(0, cutoff),
   );
@@ -709,7 +745,7 @@ function ndcgAtCutoff(
 }
 
 function discountedCumulativeGain(grades: readonly number[]): number {
-  return grades.reduce((total, grade, index) => total + (2 ** grade - 1) / Math.log2(index + 2), 0);
+  return EffectArray.reduce(grades, 0, (total, grade, index) => total + (2 ** grade - 1) / Math.log2(index + 2));
 }
 
 function metricDelta(
@@ -755,5 +791,5 @@ function mean(values: readonly number[]): number {
 }
 
 function sum(values: readonly number[]): number {
-  return values.reduce((total, value) => total + value, 0);
+  return EffectArray.reduce(values, 0, (total, value) => total + value);
 }

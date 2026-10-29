@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {runtimeStat} from '@threadnote/platform/system';
 import {fromPromise} from '@threadnote/platform/errors';
@@ -13,8 +14,8 @@ export interface ModelArtifactFileIdentity {
 
 export function validModelArtifactFileIdentity(identity: ModelArtifactFileIdentity): boolean {
   return (
-    [identity.size, identity.device, identity.inode].every(value => /^(0|[1-9][0-9]*)$/.test(value)) &&
-    [identity.modifiedAtNs, identity.changedAtNs].every(value => /^-?(0|[1-9][0-9]*)$/.test(value))
+    EffectArray.every([identity.size, identity.device, identity.inode], value => /^(0|[1-9][0-9]*)$/.test(value)) &&
+    EffectArray.every([identity.modifiedAtNs, identity.changedAtNs], value => /^-?(0|[1-9][0-9]*)$/.test(value))
   );
 }
 

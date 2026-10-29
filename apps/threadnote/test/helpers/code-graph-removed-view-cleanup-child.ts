@@ -1,12 +1,16 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from './system-layer.js';
 import {provideTestLayer} from './effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Effect, FileSystem, Layer, Schema} from 'effect';
 import {type CodeGraphRemovedViewCleanupEntry, CodeGraphStore, type CodeGraphStoreShape} from '@threadnote/graph/store';
 import {CodeGraphStoreBusyError, isCodeGraphStoreError} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const [databasePath, nowText, markerPath, contentionMarkerPath] = process.argv.slice(2);
-const validPath = (value: string | undefined) => value !== undefined && value.length > 0 && !value.includes('\0');
+const validPath = (value: string | undefined) =>
+  value !== undefined && value.length > 0 && !Effect2.pipe(value, EffectString.includes('\0'));
 if (
   !validPath(databasePath) ||
   !validPath(markerPath) ||
@@ -34,8 +38,8 @@ const program = Effect.gen(function* () {
   const marker = JSON.stringify({
     event: 'claim-committed',
     processId: process.pid,
-    revisions: claimed.map(entry => entry.revision),
-    worktreeIds: claimed.map(entry => entry.worktreeId),
+    revisions: EffectArray.map(claimed, entry => entry.revision),
+    worktreeIds: EffectArray.map(claimed, entry => entry.worktreeId),
   });
   yield* fs.writeFileString(markerPath, marker, {flag: 'wx', mode: 0o600});
   process.stdout.write(`${marker}\n`);

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -60,16 +61,18 @@ const permutedFiles = FC.array(FC.integer({max: 10_000, min: -10_000}), {
   maxLength: files.length,
   minLength: files.length,
 }).map(priorities =>
-  files
-    .map((file, index) => ({file, index, priority: priorities[index]}))
-    .sort((left, right) => left.priority - right.priority || left.index - right.index)
-    .map(item => item.file),
+  EffectArray.map(
+    EffectArray.map(files, (file, index) => ({file, index, priority: priorities[index]})).sort(
+      (left, right) => left.priority - right.priority || left.index - right.index,
+    ),
+    item => item.file,
+  ),
 );
 
 const shortText = FC.array(FC.constantFrom('a', 'Z', '0', '-', '_', 'é', '漢', '🙂'), {
   maxLength: 8,
   minLength: 1,
-}).map(characters => characters.join(''));
+}).map(characters => EffectArray.join(characters, ''));
 
 const dependencyArbitrary = FC.record({
   evidence: FC.oneof(FC.constant(undefined), shortText),
@@ -172,8 +175,12 @@ describe('code graph workspace properties', () => {
         ),
       ]);
 
-      const rootProject = workspace.projects.find(project => project.root === '');
-      const rootWorkspace = workspace.workspaces.find(candidate => candidate.root === '');
+      const rootProject = EffectOption.getOrUndefined(
+        EffectArray.findFirst(workspace.projects, project => project.root === ''),
+      );
+      const rootWorkspace = EffectOption.getOrUndefined(
+        EffectArray.findFirst(workspace.workspaces, candidate => candidate.root === ''),
+      );
       expect(rootProject).toBeDefined();
       expect(rootWorkspace).toBeDefined();
       expect(rootProject!.name).not.toBe('');
@@ -219,15 +226,22 @@ describe('code graph workspace properties', () => {
       workspaceFile('apps/web/settings.gradle.kts', 'rootProject.name = "mobile"'),
       workspaceFile('apps/web/src/main/kotlin/App.kt', 'class App', 'kotlin'),
     ]);
-    const packageProjects = workspace.projects.filter(
+    const packageProjects = EffectArray.filter(
+      workspace.projects,
       project => project.kind === 'package' && (project.buildSystem === 'node' || project.buildSystem === 'pnpm'),
     );
-    const root = packageProjects.find(project => project.root === '')!;
-    const core = packageProjects.find(project => project.root === 'packages/core')!;
-    const web = packageProjects.find(project => project.root === 'apps/web')!;
-    const release = packageProjects.find(project => project.root === 'tools/release')!;
+    const root = EffectOption.getOrUndefined(EffectArray.findFirst(packageProjects, project => project.root === ''))!;
+    const core = EffectOption.getOrUndefined(
+      EffectArray.findFirst(packageProjects, project => project.root === 'packages/core'),
+    )!;
+    const web = EffectOption.getOrUndefined(
+      EffectArray.findFirst(packageProjects, project => project.root === 'apps/web'),
+    )!;
+    const release = EffectOption.getOrUndefined(
+      EffectArray.findFirst(packageProjects, project => project.root === 'tools/release'),
+    )!;
 
-    expect(packageProjects.map(project => project.name)).toEqual([
+    expect(EffectArray.map(packageProjects, project => project.name)).toEqual([
       'threadnote-root',
       '@acme/web',
       '@acme/core',
@@ -267,13 +281,33 @@ describe('code graph workspace properties', () => {
         workspaceSymbol('web-jvm', 'apps/web/src/main/kotlin/App.kt', 'App', 'jvm', 'kotlin'),
       ]),
     ]);
-    const attributedSymbols = attributed.flatMap(file => file.symbols);
-    expect(attributedSymbols.find(symbol => symbol.id === 'root-package')?.packageName).toBe('threadnote-root');
-    expect(attributedSymbols.find(symbol => symbol.id === 'web-package')?.packageName).toBe('@acme/web');
-    expect(attributedSymbols.find(symbol => symbol.id === 'root-ts')?.resolutionScopeId).toBe(root.id);
-    expect(attributedSymbols.find(symbol => symbol.id === 'web-ts')?.resolutionScopeId).toBe(web.id);
-    expect(attributedSymbols.find(symbol => symbol.id === 'web-jvm')?.resolutionScopeId).toBe(
-      workspace.projects.find(project => project.buildSystem === 'gradle' && project.root === 'apps/web')?.id,
+    const attributedSymbols = EffectArray.flatMap(attributed, file => file.symbols);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(attributedSymbols, symbol => symbol.id === 'root-package'))
+        ?.packageName,
+    ).toBe('threadnote-root');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(attributedSymbols, symbol => symbol.id === 'web-package'))
+        ?.packageName,
+    ).toBe('@acme/web');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(attributedSymbols, symbol => symbol.id === 'root-ts'))
+        ?.resolutionScopeId,
+    ).toBe(root.id);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(attributedSymbols, symbol => symbol.id === 'web-ts'))
+        ?.resolutionScopeId,
+    ).toBe(web.id);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(attributedSymbols, symbol => symbol.id === 'web-jvm'))
+        ?.resolutionScopeId,
+    ).toBe(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          workspace.projects,
+          project => project.buildSystem === 'gradle' && project.root === 'apps/web',
+        ),
+      )?.id,
     );
   });
 
@@ -299,10 +333,14 @@ describe('code graph workspace properties', () => {
       ),
       workspaceFile('modules/shared/accounts/index.ts', 'export const account = true', 'typescript'),
     ]);
-    const root = workspace.projects.find(project => project.root === '')!;
-    const accounts = workspace.projects.find(project => project.root === 'modules/shared/accounts')!;
+    const root = EffectOption.getOrUndefined(
+      EffectArray.findFirst(workspace.projects, project => project.root === ''),
+    )!;
+    const accounts = EffectOption.getOrUndefined(
+      EffectArray.findFirst(workspace.projects, project => project.root === 'modules/shared/accounts'),
+    )!;
 
-    expect(workspace.projects.filter(project => project.root === '')).toHaveLength(1);
+    expect(EffectArray.filter(workspace.projects, project => project.root === '')).toHaveLength(1);
     expect(root.dependencies).toContain(accounts.id);
     expect(root.dependencyDetails).toContainEqual(
       expect.objectContaining({evidence: 'tsconfig.json', provenance: 'declared', targetId: accounts.id}),
@@ -322,11 +360,13 @@ describe('code graph workspace properties', () => {
       workspaceFile('packages/core/BUILD', 'ts_project(name = "core")', 'bazel-build'),
     ];
     const workspace = mergeCodeGraphWorkspaces([discoverManifestWorkspace(contexts), discoverBazelWorkspace(contexts)]);
-    const app = workspace.projects.find(project => project.root === '')!;
-    const core = workspace.projects.find(project => project.root === 'packages/core')!;
+    const app = EffectOption.getOrUndefined(EffectArray.findFirst(workspace.projects, project => project.root === ''))!;
+    const core = EffectOption.getOrUndefined(
+      EffectArray.findFirst(workspace.projects, project => project.root === 'packages/core'),
+    )!;
 
-    expect(workspace.projects.filter(project => project.root === '')).toHaveLength(1);
-    expect(workspace.projects.filter(project => project.root === 'packages/core')).toHaveLength(1);
+    expect(EffectArray.filter(workspace.projects, project => project.root === '')).toHaveLength(1);
+    expect(EffectArray.filter(workspace.projects, project => project.root === 'packages/core')).toHaveLength(1);
     expect(app).toMatchObject({buildSystem: 'node', name: '@acme/app', resolutionDomain: 'typescript'});
     expect(app.languages).toEqual(expect.arrayContaining(['bazel', 'starlark', 'typescript']));
     expect(app.dependencies).toContain(core.id);
@@ -381,8 +421,12 @@ describe('code graph workspace properties', () => {
           ),
         ),
       ]);
-      const app = workspace.projects.find(project => project.root === '')!;
-      const core = workspace.projects.find(project => project.root === 'packages/core')!;
+      const app = EffectOption.getOrUndefined(
+        EffectArray.findFirst(workspace.projects, project => project.root === ''),
+      )!;
+      const core = EffectOption.getOrUndefined(
+        EffectArray.findFirst(workspace.projects, project => project.root === 'packages/core'),
+      )!;
 
       expect(app.dependencies).toContain(core.id);
       expect(app.dependencyDetails).toContainEqual(
@@ -408,8 +452,12 @@ describe('code graph workspace properties', () => {
       ),
       workspaceFile('packages/private-tools/src/index.ts', 'export const internal = true', 'typescript'),
     ]);
-    const core = workspace.projects.find(project => project.name === '@acme/core')!;
-    const privateTools = workspace.projects.find(project => project.name === '@acme/private-tools')!;
+    const core = EffectOption.getOrUndefined(
+      EffectArray.findFirst(workspace.projects, project => project.name === '@acme/core'),
+    )!;
+    const privateTools = EffectOption.getOrUndefined(
+      EffectArray.findFirst(workspace.projects, project => project.name === '@acme/private-tools'),
+    )!;
 
     expect(core.workspaceRoots).toEqual(['']);
     expect(privateTools.workspaceRoots).toEqual(['packages/private-tools']);
@@ -440,17 +488,22 @@ describe('code graph workspace properties', () => {
       ];
       const forward = discoverManifestWorkspace(ambiguous);
       const permuted = discoverManifestWorkspace(
-        ambiguous
-          .map((file, index) => ({file, index, priority: priorities[index]}))
-          .sort((left, right) => left.priority - right.priority || left.index - right.index)
-          .map(value => value.file),
+        EffectArray.map(
+          EffectArray.map(ambiguous, (file, index) => ({file, index, priority: priorities[index]})).sort(
+            (left, right) => left.priority - right.priority || left.index - right.index,
+          ),
+          value => value.file,
+        ),
       );
 
       expect(permuted).toEqual(forward);
       expect(forward.diagnostics).toContain(
         'packages/app/package.json: local dependency alias @acme/shared matched multiple declared projects',
       );
-      expect(forward.projects.find(project => project.name === '@acme/app')?.dependencies).toEqual([]);
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(forward.projects, project => project.name === '@acme/app'))
+          ?.dependencies,
+      ).toEqual([]);
     },
     {fastCheck: {numRuns: 100}},
   );
@@ -494,26 +547,38 @@ describe('code graph workspace properties', () => {
       ];
       const workspace = discoverManifestWorkspace(nxFiles);
       const permuted = discoverManifestWorkspace(
-        nxFiles
-          .map((file, index) => ({file, index, priority: priorities[index]}))
-          .sort((left, right) => left.priority - right.priority || left.index - right.index)
-          .map(value => value.file),
+        EffectArray.map(
+          EffectArray.map(nxFiles, (file, index) => ({file, index, priority: priorities[index]})).sort(
+            (left, right) => left.priority - right.priority || left.index - right.index,
+          ),
+          value => value.file,
+        ),
       );
       const nxProject = (name: string) =>
-        workspace.projects.find(
-          project => project.buildSystem === 'nx' && project.kind === 'project' && project.name === name,
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            workspace.projects,
+            project => project.buildSystem === 'nx' && project.kind === 'project' && project.name === name,
+          ),
         )!;
       const nxTarget = (name: string) =>
-        workspace.projects.find(
-          project => project.buildSystem === 'nx' && project.kind === 'target' && project.name === name,
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            workspace.projects,
+            project => project.buildSystem === 'nx' && project.kind === 'target' && project.name === name,
+          ),
         )!;
       const core = nxProject('core');
       const web = nxProject('web');
       const coreBuild = nxTarget('core:build');
       const webBuild = nxTarget('web:build');
       const webTest = nxTarget('web:test');
-      const corePackage = workspace.projects.find(project => project.name === '@acme/core')!;
-      const webPackage = workspace.projects.find(project => project.name === '@acme/web')!;
+      const corePackage = EffectOption.getOrUndefined(
+        EffectArray.findFirst(workspace.projects, project => project.name === '@acme/core'),
+      )!;
+      const webPackage = EffectOption.getOrUndefined(
+        EffectArray.findFirst(workspace.projects, project => project.name === '@acme/web'),
+      )!;
 
       expect(permuted).toEqual(workspace);
       expect(core.sourceRoots).toEqual(['apps/core/src']);
@@ -523,14 +588,17 @@ describe('code graph workspace properties', () => {
       expect(webTest.dependencies).toEqual(expect.arrayContaining([web.id, webBuild.id]));
       expect(webPackage.dependencies).toContain(corePackage.id);
       expect(
-        workspace.projects.filter(project => project.root === 'apps/core' && project.kind !== 'target'),
+        EffectArray.filter(workspace.projects, project => project.root === 'apps/core' && project.kind !== 'target'),
       ).toHaveLength(2);
       expect(
-        workspace.projects.filter(project => project.root === 'apps/web' && project.kind !== 'target'),
+        EffectArray.filter(workspace.projects, project => project.root === 'apps/web' && project.kind !== 'target'),
       ).toHaveLength(2);
-      expect(workspace.projects.filter(project => project.buildSystem === 'pnpm').map(project => project.name)).toEqual(
-        ['root', '@acme/core', '@acme/web'],
-      );
+      expect(
+        EffectArray.map(
+          EffectArray.filter(workspace.projects, project => project.buildSystem === 'pnpm'),
+          project => project.name,
+        ),
+      ).toEqual(['root', '@acme/core', '@acme/web']);
     },
     {fastCheck: {numRuns: 100}},
   );

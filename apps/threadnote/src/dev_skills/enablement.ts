@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Path} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {DevSkillsConsumer} from './contract.js';
@@ -14,6 +15,7 @@ import {
   readReceipt,
   runtimeIndexPath,
 } from './registry.js';
+import * as EffectRecord from 'effect/Record';
 
 interface EnablementJournal {
   readonly schemaVersion: 1;
@@ -48,12 +50,14 @@ function parse(value: unknown, home: string, root: string): EnablementJournal {
   const beforeRuntime = value.runtimeBefore === null ? undefined : parseRuntimeIndex(JSON.parse(value.runtimeBefore));
   const afterRuntime = parseRuntimeIndex(JSON.parse(value.runtimeAfter));
   requireValue(
-    [beforeHome, afterHome].every(index => !index || (index.home === home && index.installationRoot === root)) &&
-      [beforeRuntime, afterRuntime].every(index => !index || index.installationRoot === root),
+    EffectArray.every(
+      [beforeHome, afterHome],
+      index => !index || (index.home === home && index.installationRoot === root),
+    ) && EffectArray.every([beforeRuntime, afterRuntime], index => !index || index.installationRoot === root),
     'Opt-out index identities differ.',
   );
   const others = (entries: Readonly<Record<string, unknown>>) =>
-    Object.fromEntries(Object.entries(entries).filter(([key]) => key !== id));
+    EffectRecord.fromEntries(EffectArray.filter(EffectRecord.toEntries(entries), ([key]) => key !== id));
   const previous = beforeHome?.targets[id];
   requireValue(
     stableJson(previous) === stableJson(beforeRuntime?.enrollments[id]),

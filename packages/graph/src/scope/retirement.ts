@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -22,6 +23,8 @@ import {
 import {resolveRepositoryIdentity} from '../repository.js';
 import {CodeGraphStore, type CodeGraphWorktreeReconciliationCandidate} from '../store.js';
 import {inspectCodeGraphViewDatabaseTarget} from '../view_removal.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAXIMUM_REQUESTS = 64;
 const MAXIMUM_INTENT_FILES = MAXIMUM_REQUESTS;
@@ -47,10 +50,10 @@ export interface CodeGraphScopeRetirementTarget {
   readonly threadnoteHome: string;
 }
 
-class CodeGraphScopeRetirementError extends Schema.TaggedError<CodeGraphScopeRetirementError>()(
-  'CodeGraphScopeRetirementError',
-  {message: Schema.String},
-) {}
+class CodeGraphScopeRetirementError extends Schema.TaggedError<
+  CodeGraphScopeRetirementError,
+  {readonly brand: unique symbol}
+>()('CodeGraphScopeRetirementError', {message: Schema.String}) {}
 
 /** Persist before manifest publication so absent checkouts can retire on a later bounded maintenance tick. */
 export const queueCodeGraphScopeRetirements = Effect.fn('codeGraph.queueScopeRetirements')(function* (
@@ -65,12 +68,15 @@ export const queueCodeGraphScopeRetirements = Effect.fn('codeGraph.queueScopeRet
   for (const project of before.projects) {
     if (
       project.graph === undefined ||
-      after.projects.some(next => next.graph !== undefined && next.uri === project.uri && next.path === project.path)
+      EffectArray.some(
+        after.projects,
+        next => next.graph !== undefined && next.uri === project.uri && next.path === project.path,
+      )
     )
       continue;
     if (
       (system.platform !== 'win32' && /^[A-Za-z]:[\\/]/u.test(project.path)) ||
-      (system.platform === 'win32' && project.path.startsWith('/'))
+      (system.platform === 'win32' && Effect2.pipe(project.path, EffectString.startsWith('/')))
     )
       continue;
     const expanded = yield* expandPath(project.path);
@@ -84,7 +90,7 @@ export const queueCodeGraphScopeRetirements = Effect.fn('codeGraph.queueScopeRet
     };
     const scopeId = scopeForProject(project);
     yield* mutateIntent(config.agentContextHome, scopeId, requests => {
-      if (requests.some(existing => requestKey(existing) === requestKey(request))) return requests;
+      if (EffectArray.some(requests, existing => requestKey(existing) === requestKey(request))) return requests;
       if (requests.length >= MAXIMUM_REQUESTS) throw new Error('Pending scoped graph retirement capacity is full.');
       return [...requests, request];
     });
@@ -117,7 +123,7 @@ export const reconcileCodeGraphScopeRetirements = Effect.fn('codeGraph.reconcile
     (inspected.state === 'ready'
       ? yield* store.claimWorktreeReconciliationCandidates(input.databasePath, 32, {waitTimeoutMilliseconds: 0})
       : []);
-  const intentsByScope = new Map(intents.map(intent => [intent.scopeId, intent]));
+  const intentsByScope = new Map(EffectArray.map(intents, intent => [intent.scopeId, intent]));
   if (inspected.state === 'ready') {
     for (const candidate of candidates) {
       if (candidate.scopeId === undefined) continue;
@@ -209,7 +215,7 @@ const retireCandidate = Effect.fn('codeGraph.retireConfiguredScopeCandidate')(fu
               });
               if (result.state !== 'removed' && result.state !== 'already-removed') return undefined;
               yield* mutateIntent(input.threadnoteHome, scopeId, requests =>
-                requests.filter(existing => requestKey(existing) !== requestKey(request)),
+                EffectArray.filter(requests, existing => requestKey(existing) !== requestKey(request)),
               );
               return result;
             }),
@@ -268,7 +274,7 @@ const clearAuthoritativeNoop = Effect.fn('codeGraph.clearAuthoritativeScopeRetir
               )
                 return false;
               yield* mutateIntent(input.threadnoteHome, scopeId, requests =>
-                requests.filter(existing => requestKey(existing) !== requestKey(request)),
+                EffectArray.filter(requests, existing => requestKey(existing) !== requestKey(request)),
               );
               return true;
             }),
@@ -310,7 +316,12 @@ function requestKey(request: ScopeRetirementRequest): string {
 
 function withinRoot(path: Path.Path, root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
-  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
+  return (
+    relative === '' ||
+    (!path.isAbsolute(relative) &&
+      relative !== '..' &&
+      !Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)))
+  );
 }
 
 const intentRoot = Effect.fn('codeGraph.scopeRetirementIntentRoot')(function* (home: string, create: boolean) {
@@ -362,8 +373,8 @@ const readIntentFile = Effect.fn('codeGraph.readScopeRetirementIntentFile')(func
     catch: () => CodeGraphScopeRetirementError.make({message: 'Scoped retirement intent is invalid.'}),
   });
   const scopeId =
-    typeof value === 'object' && value !== null && typeof (value as ScopeRetirementIntent).scopeId === 'string'
-      ? (value as ScopeRetirementIntent).scopeId
+    typeof value === 'object' && value !== null && 'scopeId' in value && typeof value.scopeId === 'string'
+      ? value.scopeId
       : undefined;
   if (
     scopeId === undefined ||
@@ -383,7 +394,10 @@ const intentFilePage = Effect.fn('codeGraph.scopeRetirementIntentFilePage')(func
   const fs = yield* FileSystem.FileSystem;
   const root = yield* intentRoot(home, false);
   if (root === undefined) return {fileNames: [], truncated: false} as const;
-  const fileNames = (yield* fs.readDirectory(root)).filter(name => /^[0-9a-f]{64}\.json$/u.test(name)).sort();
+  const fileNames = EffectArray.filter(
+    yield* fs.readDirectory(root),
+    __effectArrayValue => !!(name => /^[0-9a-f]{64}\.json$/u.test(name))(__effectArrayValue),
+  ).sort();
   return {
     fileNames: fileNames.slice(0, MAXIMUM_INTENT_FILES),
     truncated: fileNames.length > MAXIMUM_INTENT_FILES,
@@ -397,35 +411,51 @@ const readIntentPage = Effect.fn('codeGraph.readScopeRetirementIntentPage')(func
     fileName => readIntentFile(home, fileName).pipe(Effect.option),
     {concurrency: 1},
   );
-  return intents.flatMap(intent => (Option.isSome(intent) && intent.value !== undefined ? [intent.value] : []));
+  return EffectArray.flatMap(intents, intent =>
+    Option.isSome(intent) && intent.value !== undefined ? [intent.value] : [],
+  );
 });
 
 function validIntent(path: Path.Path, value: unknown, scopeId: string): value is ScopeRetirementIntent {
-  if (typeof value !== 'object' || value === null) return false;
-  const intent = value as ScopeRetirementIntent;
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('version' in value) ||
+    !('scopeId' in value) ||
+    !('requests' in value)
+  )
+    return false;
   return (
-    intent.version === 1 &&
-    intent.scopeId === scopeId &&
+    value.version === 1 &&
+    value.scopeId === scopeId &&
     /^code-graph-scope:[0-9a-f]{64}$/u.test(scopeId) &&
-    Array.isArray(intent.requests) &&
-    intent.requests.length <= MAXIMUM_REQUESTS &&
-    intent.requests.every(
-      request =>
-        typeof request === 'object' &&
-        request !== null &&
-        [request.manifestPath, request.projectPath].every(
-          value =>
-            typeof value === 'string' &&
-            value.length <= 4096 &&
-            path.isAbsolute(value) &&
-            path.normalize(value) === value,
-        ) &&
-        ((request.checkoutId === undefined && request.worktreeId === undefined) ||
-          (typeof request.checkoutId === 'string' &&
-            /^[0-9a-f]{64}$/u.test(request.checkoutId) &&
-            typeof request.worktreeId === 'string' &&
-            /^[0-9a-f]{64}$/u.test(request.worktreeId))),
+    EffectArray.isArray(value.requests) &&
+    value.requests.length <= MAXIMUM_REQUESTS &&
+    EffectArray.every(value.requests, (request): request is ScopeRetirementRequest =>
+      isScopeRetirementRequest(path, request),
     )
+  );
+}
+
+function isScopeRetirementRequest(path: Path.Path, request: unknown): request is ScopeRetirementRequest {
+  return (
+    typeof request === 'object' &&
+    request !== null &&
+    'manifestPath' in request &&
+    'projectPath' in request &&
+    EffectArray.every(
+      [request.manifestPath, request.projectPath],
+      value =>
+        typeof value === 'string' && value.length <= 4096 && path.isAbsolute(value) && path.normalize(value) === value,
+    ) &&
+    (((!('checkoutId' in request) || request.checkoutId === undefined) &&
+      (!('worktreeId' in request) || request.worktreeId === undefined)) ||
+      ('checkoutId' in request &&
+        typeof request.checkoutId === 'string' &&
+        /^[0-9a-f]{64}$/u.test(request.checkoutId) &&
+        'worktreeId' in request &&
+        typeof request.worktreeId === 'string' &&
+        /^[0-9a-f]{64}$/u.test(request.worktreeId)))
   );
 }
 
@@ -452,9 +482,13 @@ const mutateIntent = Effect.fn('codeGraph.mutateScopeRetirementIntent')(function
         try: () => update(current?.requests ?? []),
         catch: () => CodeGraphScopeRetirementError.make({message: 'Scoped retirement intent capacity is unavailable.'}),
       });
-      const currentKeys = (current?.requests ?? []).map(requestKey);
-      const nextKeys = next.map(requestKey);
-      if (currentKeys.length === nextKeys.length && currentKeys.every((key, index) => key === nextKeys[index])) return;
+      const currentKeys = EffectArray.map(current?.requests ?? [], requestKey);
+      const nextKeys = EffectArray.map(next, requestKey);
+      if (
+        currentKeys.length === nextKeys.length &&
+        EffectArray.every(currentKeys, (key, index) => key === nextKeys[index])
+      )
+        return;
       if (next.length === 0) {
         yield* fs.remove(file, {force: true});
         return;
@@ -472,7 +506,7 @@ const mutateIntent = Effect.fn('codeGraph.mutateScopeRetirementIntent')(function
         const intents = yield* Effect.forEach(page.fileNames, fileName => readIntentFile(home, fileName), {
           concurrency: 1,
         });
-        const requestCount = intents.reduce((total, value) => total + (value?.requests.length ?? 0), 0);
+        const requestCount = EffectArray.reduce(intents, 0, (total, value) => total + (value?.requests.length ?? 0));
         const projected = requestCount - currentKeys.length + next.length;
         if (projected > MAXIMUM_REQUESTS)
           return yield* CodeGraphScopeRetirementError.make({

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path, Result, Schema} from 'effect';
@@ -14,6 +15,8 @@ import {runNativeAiConsolidation} from '../../src/effect/ai/consolidator.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as utils from '../../src/utils.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function manifest(id: string, role: LocalModelRole = 'generation'): LocalModelManifest {
   return {
@@ -25,10 +28,10 @@ function manifest(id: string, role: LocalModelRole = 'generation'): LocalModelMa
     minimumRamBytes: 1,
     quantization: 'q4',
     repository: 'test/model',
-    revision: 'a'.repeat(40),
+    revision: Effect2.pipe('a', EffectString.repeat(40)),
     role,
     runtime: {nodeLlamaCpp: '3.21.1'},
-    sha256: 'b'.repeat(64),
+    sha256: Effect2.pipe('b', EffectString.repeat(64)),
     size: 1,
     version: 1,
   };
@@ -43,12 +46,12 @@ function services(
     TestSystemInfoLayer,
     Layer.succeed(LocalModelCatalog, {
       get: id => {
-        const model = manifests.find(model => model.id === id);
+        const model = EffectOption.getOrUndefined(EffectArray.findFirst(manifests, model => model.id === id));
         return model
           ? Effect.succeed(model)
           : Effect.fail(ModelManifestInvalid.make({message: `Unknown local model: ${id}.`, modelId: id}));
       },
-      list: role => Effect.succeed(manifests.filter(model => role === undefined || model.role === role)),
+      list: role => Effect.succeed(EffectArray.filter(manifests, model => role === undefined || model.role === role)),
       selected: () => Effect.die('Catalog defaults must not select a consolidation model.'),
     }),
     Layer.succeed(LocalModelStore, {
@@ -126,8 +129,11 @@ describe('Manager local AI consolidation', () => {
       selected: Schema.Int.check(Schema.isBetween({minimum: -1, maximum: 20})),
     },
     ({entries, selected}) => {
-      const manifests = entries.map((entry, index) => manifest(`model-${index}`, entry.role));
-      const installed = manifests.filter((_model, index) => entries[index].installed).map(model => model.id);
+      const manifests = EffectArray.map(entries, (entry, index) => manifest(`model-${index}`, entry.role));
+      const installed = EffectArray.map(
+        EffectArray.filter(manifests, (_model, index) => index in manifests && entries[index].installed),
+        model => model.id,
+      );
       return Effect.gen(function* () {
         const home = yield* temporaryHome();
         const fs = yield* FileSystem.FileSystem;
@@ -137,13 +143,25 @@ describe('Manager local AI consolidation', () => {
         const raw = JSON.stringify(selection);
         yield* fs.writeFileString(path.join(home, 'models/selection.json'), raw);
         const models = yield* discoverLocalConsolidationModels(home);
-        expect(models.map(model => model.id)).toEqual(
-          manifests
-            .filter((model, index) => model.role === 'generation' && entries[index].installed)
-            .map(model => model.id),
+        expect(EffectArray.map(models, model => model.id)).toEqual(
+          EffectArray.map(
+            EffectArray.filter(
+              manifests,
+              (model, index) => index in manifests && model.role === 'generation' && entries[index].installed,
+            ),
+            model => model.id,
+          ),
         );
-        expect(models.filter(model => model.isDefault).map(model => model.id)).toEqual(
-          models.filter(model => model.id === selection.roles.generation).map(model => model.id),
+        expect(
+          EffectArray.map(
+            EffectArray.filter(models, (model, __effectArrayIndex) => __effectArrayIndex in models && model.isDefault),
+            model => model.id,
+          ),
+        ).toEqual(
+          EffectArray.map(
+            EffectArray.filter(models, model => model.id === selection.roles.generation),
+            model => model.id,
+          ),
         );
         expect(yield* fs.readFileString(path.join(home, 'models/selection.json'))).toBe(raw);
       }).pipe(provideTestLayer(services(manifests, installed)));
@@ -157,11 +175,15 @@ describe('Manager local AI consolidation', () => {
       const agents = yield* detectConsolidationAgents({agentContextHome: home}).pipe(
         Effect.ensuring(Effect.sync(() => find.mockRestore())),
       );
-      expect(agents.find(agent => agent.id === 'local-ai')).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(agents, agent => agent.id === 'local-ai')),
+      ).toMatchObject({
         available: true,
         label: 'Threadnote local AI',
       });
-      expect(agents.find(agent => agent.id === 'effect-ai')).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(agents, agent => agent.id === 'effect-ai')),
+      ).toMatchObject({
         label: 'Configured remote AI',
       });
     }).pipe(provideTestLayer(services([manifest('installed')], ['installed']))),
@@ -180,12 +202,16 @@ describe('Manager local AI consolidation', () => {
           }),
           Effect.ensuring(Effect.sync(() => find.mockRestore())),
         );
-        expect(agents.find(agent => agent.id === 'local-ai')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(agents, agent => agent.id === 'local-ai')),
+        ).toMatchObject({
           available: false,
           command: undefined,
           label: 'Threadnote local AI',
         });
-        expect(agents.find(agent => agent.id === 'effect-ai')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(agents, agent => agent.id === 'effect-ai')),
+        ).toMatchObject({
           available: true,
           command: 'remote-model',
           label: 'Configured remote AI',

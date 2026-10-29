@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   parseNativeRequirements,
   parseDevSkillsManifest,
@@ -8,16 +9,19 @@ import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {runBunBuild} from './effect/bun-build.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Console, Effect, FileSystem, Path} from 'effect';
+import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {javascriptStringLiteral, optionalNativePackageFallbackModule} from './effect/javascript.js';
 import {isDevelopmentBuildVersion} from './development-runtime.js';
 import {sha256Hex} from '@threadnote/platform/digest';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-interface PackageManifest {
-  readonly dependencies?: Readonly<Record<string, string>>;
-  readonly packageManager?: string;
-  readonly version?: string;
-}
+const PackageManifestSchema = Schema.Struct({
+  dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  packageManager: Schema.optional(Schema.String),
+  version: Schema.optional(Schema.String),
+});
 
 const ROOT_URL = new URL('..', import.meta.url);
 const RELEASE_DIRECTORIES = ['assets', 'config', 'cursor-plugin'] as const;
@@ -40,7 +44,11 @@ const build = Effect.gen(function* () {
       message: `Standalone builds require ${manifest.packageManager ?? 'an exact Bun packageManager pin'}; running bun@${Bun.version}.`,
     });
   }
-  const configuredDevelopmentVersion = Bun.env.THREADNOTE_DEVELOPMENT_BUILD_VERSION?.trim();
+  const configuredDevelopmentVersion = Effect2.pipe(
+    Bun.env.THREADNOTE_DEVELOPMENT_BUILD_VERSION,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (configuredDevelopmentVersion && !isDevelopmentBuildVersion(configuredDevelopmentVersion)) {
     return yield* ScriptError.make({
       message: 'THREADNOTE_DEVELOPMENT_BUILD_VERSION must be a SHA-bound local development version.',
@@ -56,7 +64,7 @@ const build = Effect.gen(function* () {
 
   const target = buildTarget();
   assertNativeTargetMatchesHost(target);
-  const executableName = target.includes('windows') ? 'threadnote.exe' : 'threadnote';
+  const executableName = Effect2.pipe(target, EffectString.includes('windows')) ? 'threadnote.exe' : 'threadnote';
   const executablePath = path.join(outputRoot, executableName);
   const devSkills = yield* buildDevSkillsManifest(root, version);
 
@@ -84,7 +92,7 @@ const build = Effect.gen(function* () {
   yield* fs.copy(path.join(root, 'packages', 'manager', 'static'), path.join(outputRoot, 'manager'), {
     overwrite: true,
   });
-  for (const file of Object.values(integrationStaticFiles)) {
+  for (const file of EffectRecord.values(integrationStaticFiles)) {
     const destination = path.join(outputRoot, 'manager', file.path);
     yield* fs.makeDirectory(path.dirname(destination), {recursive: true});
     yield* fs.copyFile(path.join(root, file.sourceDirectory, file.path), destination);
@@ -120,7 +128,7 @@ const build = Effect.gen(function* () {
     sourcemap: 'linked',
     target: 'bun',
   });
-  if (!target.includes('windows')) {
+  if (!Effect2.pipe(target, EffectString.includes('windows'))) {
     yield* fs.chmod(executablePath, 0o755);
   }
 
@@ -149,7 +157,7 @@ const build = Effect.gen(function* () {
   );
 
   const nativeRuntimeRoot = path.join(outputRoot, 'runtime');
-  if (target.includes('darwin')) {
+  if (Effect2.pipe(target, EffectString.includes('darwin'))) {
     yield* fs.makeDirectory(nativeRuntimeRoot, {recursive: true});
     const keychainLibrary = path.join(nativeRuntimeRoot, 'graph-keychain.dylib');
     const compilation = yield* Effect.sync(() =>
@@ -180,7 +188,7 @@ const build = Effect.gen(function* () {
     yield* fs.chmod(keychainLibrary, 0o755);
   }
   const nativePackage = nativePackageForTarget(target);
-  const nativePackageRoot = path.join(root, 'node_modules', ...nativePackage.split('/'));
+  const nativePackageRoot = path.join(root, 'node_modules', ...Effect2.pipe(nativePackage, EffectString.split('/')));
   if (!(yield* fs.exists(nativePackageRoot))) {
     return yield* ScriptError.make({
       message: `${nativePackage} is not installed on this target build host. Run bun install before building.`,
@@ -208,7 +216,11 @@ const build = Effect.gen(function* () {
           manifest: 'assets/code-graph/manifest.json',
           version: 1,
         },
-        codeSignature: target.includes('windows') ? 'unsigned' : target.includes('darwin') ? 'developer-id' : 'none',
+        codeSignature: Effect2.pipe(target, EffectString.includes('windows'))
+          ? 'unsigned'
+          : Effect2.pipe(target, EffectString.includes('darwin'))
+            ? 'developer-id'
+            : 'none',
         executable: executableName,
         devSkills: {digest: devSkills.digest, manifest: 'config/dev-skills.json', protocol: devSkills.workflowProtocol},
         nativeRuntime: `runtime/${NATIVE_RUNTIME_PACKAGE}.js`,
@@ -228,9 +240,15 @@ function readPackageManifest(fs: FileSystem.FileSystem, path: string) {
   return fs.readFileString(path).pipe(
     Effect.flatMap(content =>
       Effect.try({
-        try: () => JSON.parse(content) as PackageManifest,
+        try: (): unknown => JSON.parse(content),
         catch: cause => ScriptError.make({message: 'Could not parse package.json.', cause}),
-      }),
+      }).pipe(
+        Effect.flatMap(value =>
+          Schema.decodeUnknownEffect(PackageManifestSchema)(value).pipe(
+            Effect.mapError(cause => ScriptError.make({message: 'Could not parse package.json.', cause})),
+          ),
+        ),
+      ),
     ),
   );
 }
@@ -253,18 +271,20 @@ const stageCodeGraphPackageAssets = Effect.fn('build.stageCodeGraphPackageAssets
   if (!isRecord(manifest) || !isRecord(manifest.grammars)) {
     return yield* ScriptError.make({message: 'Code graph asset manifest does not declare grammars.'});
   }
-  for (const [id, value] of Object.entries(manifest.grammars).sort(([left], [right]) => left.localeCompare(right))) {
+  for (const [id, value] of EffectRecord.toEntries(manifest.grammars).sort(([left], [right]) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
+  )) {
     if (!isRecord(value) || typeof value.path !== 'string') {
       return yield* ScriptError.make({message: `Code graph grammar metadata is invalid for ${id}.`});
     }
-    const target = path.join(outputRoot, 'assets', 'code-graph', ...value.path.split('/'));
+    const target = path.join(outputRoot, 'assets', 'code-graph', ...Effect2.pipe(value.path, EffectString.split('/')));
     if (!(yield* fs.exists(target))) {
       if (typeof value.packagePath !== 'string') {
         return yield* ScriptError.make({
           message: `Code graph grammar ${id} is not vendored and has no package source.`,
         });
       }
-      const source = path.join(root, ...value.packagePath.split('/'));
+      const source = path.join(root, ...Effect2.pipe(value.packagePath, EffectString.split('/')));
       if (!(yield* fs.exists(source))) {
         return yield* ScriptError.make({
           message: `Code graph grammar package source is missing for ${id}: ${value.packagePath}`,
@@ -274,9 +294,14 @@ const stageCodeGraphPackageAssets = Effect.fn('build.stageCodeGraphPackageAssets
       yield* fs.copyFile(source, target);
     }
     if (typeof value.license === 'string') {
-      const licenseTarget = path.join(outputRoot, 'assets', 'code-graph', ...value.license.split('/'));
+      const licenseTarget = path.join(
+        outputRoot,
+        'assets',
+        'code-graph',
+        ...Effect2.pipe(value.license, EffectString.split('/')),
+      );
       if (!(yield* fs.exists(licenseTarget)) && typeof value.licensePackagePath === 'string') {
-        const licenseSource = path.join(root, ...value.licensePackagePath.split('/'));
+        const licenseSource = path.join(root, ...Effect2.pipe(value.licensePackagePath, EffectString.split('/')));
         if (!(yield* fs.exists(licenseSource))) {
           return yield* ScriptError.make({
             message: `Code graph grammar license package source is missing for ${id}: ${value.licensePackagePath}`,
@@ -290,15 +315,15 @@ const stageCodeGraphPackageAssets = Effect.fn('build.stageCodeGraphPackageAssets
 });
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function bundleNativeRuntime(entrypoint: string, outfile: string, nativePackage: string, nativeRuntimeVersion: string) {
   return runBunBuild({
     entrypoints: [entrypoint],
     minify: true,
-    naming: outfile.replaceAll('\\', '/').split('/').at(-1),
-    outdir: outfile.replace(/[\\/][^\\/]+$/, ''),
+    naming: Effect2.pipe(outfile, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    outdir: Effect2.pipe(outfile, EffectString.replace(/[\\/][^\\/]+$/, '')),
     plugins: [
       {
         name: 'threadnote-native-runtime',
@@ -318,10 +343,13 @@ function bundleNativeRuntime(entrypoint: string, outfile: string, nativePackage:
           builder.onLoad({filter: /.*/, namespace: 'threadnote-native-runtime'}, args => ({
             contents:
               args.path === nativePackage
-                ? [
-                    `const binsDir = Bun.fileURLToPath(new URL('./native', import.meta.url));`,
-                    `export const getBinsDir = () => ({binsDir, packageVersion: ${javascriptStringLiteral(nativeRuntimeVersion)}});`,
-                  ].join('\n')
+                ? EffectArray.join(
+                    [
+                      `const binsDir = Bun.fileURLToPath(new URL('./native', import.meta.url));`,
+                      `export const getBinsDir = () => ({binsDir, packageVersion: ${javascriptStringLiteral(nativeRuntimeVersion)}});`,
+                    ],
+                    '\n',
+                  )
                 : optionalNativePackageFallbackModule(),
             loader: 'js',
           }));
@@ -332,13 +360,28 @@ function bundleNativeRuntime(entrypoint: string, outfile: string, nativePackage:
   });
 }
 
+function isCompileTarget(value: string): value is Bun.Build.CompileTarget {
+  return /^bun-(?:darwin-(?:x64|arm64|aarch64)(?:-(?:baseline|modern))?|linux-(?:x64|arm64|aarch64)(?:-(?:glibc|musl)|-(?:baseline|modern)(?:-(?:glibc|musl))?)?|windows-(?:x64(?:-(?:baseline|modern))?|arm64|aarch64))$/u.test(
+    value,
+  );
+}
+
 function buildTarget(): Bun.Build.CompileTarget {
-  const configured = Bun.env.THREADNOTE_BUILD_TARGET?.trim();
-  if (configured) {
-    return configured as Bun.Build.CompileTarget;
+  const configured = Effect2.pipe(Bun.env.THREADNOTE_BUILD_TARGET, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
+  if (configured !== undefined) {
+    if (!isCompileTarget(configured)) {
+      throw ScriptError.make({message: `Unsupported Bun compile target: ${configured}.`});
+    }
+    return configured;
   }
   const platform = process.platform === 'win32' ? 'windows' : process.platform;
-  return `bun-${platform}-${process.arch}` as Bun.Build.CompileTarget;
+  const inferred = `bun-${platform}-${process.arch}`;
+  if (!isCompileTarget(inferred)) {
+    throw ScriptError.make({message: `Unsupported Bun compile target for this host: ${inferred}.`});
+  }
+  return inferred;
 }
 
 function assertNativeTargetMatchesHost(target: Bun.Build.CompileTarget): void {
@@ -355,22 +398,31 @@ function assertNativeTargetMatchesHost(target: Bun.Build.CompileTarget): void {
 }
 
 function nativePackageForTarget(target: Bun.Build.CompileTarget): string {
-  if (target.startsWith('bun-darwin-arm64') || target.startsWith('bun-darwin-aarch64')) {
+  if (
+    Effect2.pipe(target, EffectString.startsWith('bun-darwin-arm64')) ||
+    Effect2.pipe(target, EffectString.startsWith('bun-darwin-aarch64'))
+  ) {
     return '@node-llama-cpp/mac-arm64-metal';
   }
-  if (target.startsWith('bun-darwin-x64')) {
+  if (Effect2.pipe(target, EffectString.startsWith('bun-darwin-x64'))) {
     return '@node-llama-cpp/mac-x64';
   }
-  if (target.startsWith('bun-linux-arm64') || target.startsWith('bun-linux-aarch64')) {
+  if (
+    Effect2.pipe(target, EffectString.startsWith('bun-linux-arm64')) ||
+    Effect2.pipe(target, EffectString.startsWith('bun-linux-aarch64'))
+  ) {
     return '@node-llama-cpp/linux-arm64';
   }
-  if (target.startsWith('bun-linux-x64')) {
+  if (Effect2.pipe(target, EffectString.startsWith('bun-linux-x64'))) {
     return '@node-llama-cpp/linux-x64';
   }
-  if (target.startsWith('bun-windows-arm64') || target.startsWith('bun-windows-aarch64')) {
+  if (
+    Effect2.pipe(target, EffectString.startsWith('bun-windows-arm64')) ||
+    Effect2.pipe(target, EffectString.startsWith('bun-windows-aarch64'))
+  ) {
     return '@node-llama-cpp/win-arm64';
   }
-  if (target.startsWith('bun-windows-x64')) {
+  if (Effect2.pipe(target, EffectString.startsWith('bun-windows-x64'))) {
     return '@node-llama-cpp/win-x64';
   }
   throw ScriptError.make({message: `No prebuilt native local-AI package is mapped for ${target}.`});
@@ -387,13 +439,17 @@ export function validDevSkillPath(value: unknown): value is string {
   return (
     typeof value === 'string' &&
     /^[A-Za-z0-9_./-]+$/u.test(value) &&
-    value
-      .split('/')
-      .every(
-        part => part !== '' && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part),
-      ) &&
-    !value.split('/').some(part => ['__pycache__', '.DS_Store', '.context', '.git'].includes(part)) &&
-    !value.endsWith('.pyc')
+    EffectArray.every(
+      Effect2.pipe(value, EffectString.split('/')),
+      part =>
+        part !== '' &&
+        !Effect2.pipe(part, EffectString.endsWith('.')) &&
+        !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part),
+    ) &&
+    !EffectArray.some(Effect2.pipe(value, EffectString.split('/')), part =>
+      ['__pycache__', '.DS_Store', '.context', '.git'].includes(part),
+    ) &&
+    !Effect2.pipe(value, EffectString.endsWith('.pyc'))
   );
 }
 
@@ -425,7 +481,7 @@ export const buildDevSkillsManifest = Effect.fn('build.devSkillsManifest')(funct
     value.stateSchema !== 1 ||
     typeof value.minimumRuntime !== 'string' ||
     !EXACT_PACKAGE_VERSION.test(value.minimumRuntime) ||
-    !Array.isArray(value.skills)
+    !EffectArray.isArray(value.skills)
   ) {
     return yield* ScriptError.make({message: 'Unsupported development workflow manifest contract.'});
   }
@@ -436,19 +492,23 @@ export const buildDevSkillsManifest = Effect.fn('build.devSkillsManifest')(funct
       typeof skill.id !== 'string' ||
       !/^[a-z][a-z-]+$/u.test(skill.id) ||
       (skill.role !== 'primary' && skill.role !== 'support') ||
-      !Array.isArray(skill.files) ||
-      !skill.files.every(validDevSkillPath) ||
-      new Set(skill.files.map(file => file.toLowerCase())).size !== skill.files.length ||
+      !EffectArray.isArray(skill.files) ||
+      !EffectArray.every(skill.files, validDevSkillPath) ||
+      new Set(EffectArray.map(skill.files, file => Effect2.pipe(file, EffectString.toLowerCase))).size !==
+        skill.files.length ||
       !skill.files.includes('SKILL.md')
     ) {
       return yield* ScriptError.make({message: 'Invalid development skill member or escaping payload path.'});
     }
     members.push({id: skill.id, role: skill.role, files: [...skill.files].sort()});
   }
-  members.sort((left, right) => left.id.localeCompare(right.id));
+  members.sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id)));
   if (
-    members.map(member => member.id).join(',') !== 'dev-cycle,dev-plan,dev-spec,watch-pr' ||
-    members.some(member => member.role !== (member.id === 'watch-pr' ? 'support' : 'primary'))
+    EffectArray.join(
+      EffectArray.map(members, member => member.id),
+      ',',
+    ) !== 'dev-cycle,dev-plan,dev-spec,watch-pr' ||
+    EffectArray.some(members, member => member.role !== (member.id === 'watch-pr' ? 'support' : 'primary'))
   ) {
     return yield* ScriptError.make({
       message: 'The development bundle must contain all three workflows and watch-pr exactly once.',

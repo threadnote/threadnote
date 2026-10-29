@@ -12,11 +12,19 @@ import {join} from '@threadnote/testing/node-path';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {Clock, Effect, FileSystem, Layer} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const [action, home] = process.argv.slice(2);
 if (!home) throw new Error('A temporary coordinator home is required.');
-const credentialMode = action?.includes('credential') === true;
-const raceMode = action?.includes('race') === true;
+const credentialMode =
+  Effect2.pipe(action, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.includes('credential')),
+  ) === true;
+const raceMode =
+  Effect2.pipe(action, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.includes('race')),
+  ) === true;
 const credentialEnv = 'THREADNOTE_SYNTHETIC_CREDENTIAL';
 const config: RuntimeConfig = {
   account: 'local',
@@ -113,7 +121,11 @@ const filesystem = Layer.effect(
     return {
       ...fs,
       exists: (path: string) => {
-        if (action === 'credential-cold-refresh' && !hidden && path.replaceAll('\\', '/').endsWith('/endpoint.json')) {
+        if (
+          action === 'credential-cold-refresh' &&
+          !hidden &&
+          Effect2.pipe(path, EffectString.replaceAll('\\', '/'), EffectString.endsWith('/endpoint.json'))
+        ) {
           hidden = true;
           return record('hidden-endpoint').pipe(Effect.as(false), Effect.orDie);
         }
@@ -124,7 +136,11 @@ const filesystem = Layer.effect(
 ).pipe(Layer.provide(BunServices.layer));
 const base = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, filesystem);
 
-if (action?.startsWith('worker')) {
+if (
+  Effect2.pipe(action, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.startsWith('worker')),
+  )
+) {
   await Effect.runPromise(
     Effect.scoped(
       Layer.build(base).pipe(
@@ -172,7 +188,11 @@ if (action?.startsWith('worker')) {
           Effect.gen(function* () {
             const coordinator = yield* SourceCoordinator;
             const started = yield* Clock.currentTimeMillis;
-            const result = action?.endsWith('refresh')
+            const result = Effect2.pipe(action, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect2.pipe(effectOptionalString, EffectString.endsWith('refresh')),
+            )
               ? yield* coordinator.requestRefresh(config)
               : yield* coordinator.sync(config, credentialMode ? 'credential' : 'slow');
             const elapsedMs = (yield* Clock.currentTimeMillis) - started;

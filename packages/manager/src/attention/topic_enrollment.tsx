@@ -1,3 +1,5 @@
+import {isInspection, isPreview, isTopicEnrollmentApplied} from '../api/response_guards.js';
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
 import type {TopicMaintenanceParagraphInput} from '@threadnote/memory/topic-maintenance';
 import {api, errorMessage} from '../ui/support.js';
@@ -13,6 +15,10 @@ interface Inspection {
   readonly paragraphs: readonly string[];
   readonly citation: {readonly id: string; readonly relativePath: string};
 }
+interface Applied {
+  readonly status: 'enrolled' | 'already-enrolled';
+  readonly targetUri: string;
+}
 interface Preview {
   readonly expectedContentHash: string;
   readonly revision: string;
@@ -21,6 +27,13 @@ interface Preview {
 interface Decision {
   readonly role: TopicMaintenanceParagraphInput['role'] | '';
   readonly support: TopicMaintenanceParagraphInput['support'] | '';
+}
+function isDecisionRole(value: string): value is Decision['role'] {
+  return value === '' || value === 'descriptive' || value === 'normative' || value === 'historical';
+}
+
+function isDecisionSupport(value: string): value is Decision['support'] {
+  return value === '' || value === 'direct' || value === 'contextual' || value === 'unresolved';
 }
 
 /** Explicit author annotations; no inferred claim roles or automatic enrollment. */
@@ -56,12 +69,17 @@ export function TopicEnrollmentPanel({
     setPreview(undefined);
     setDecisions([]);
     try {
-      const result = await api<Inspection>(`/api/attention/topic-enrollment?uri=${encodeURIComponent(uri)}`);
+      const result = await api<Inspection>(
+        `/api/attention/topic-enrollment?uri=${encodeURIComponent(uri)}`,
+        undefined,
+        undefined,
+        isInspection,
+      );
       if (epoch.current !== token) return;
       if (result.targetUri !== uri || result.sourceKind !== 'obsidian')
         throw new Error('The selected memory changed. Refresh it.');
       setInspection(result);
-      setDecisions(result.paragraphs.map(() => ({role: '', support: ''})));
+      setDecisions(EffectArray.map(result.paragraphs, () => ({role: '', support: ''})));
       setEnrolled(result.status === 'enrolled');
     } catch (cause) {
       if (epoch.current === token) setError(errorMessage(cause));
@@ -73,21 +91,26 @@ export function TopicEnrollmentPanel({
     }
   }
   async function submit(apply: boolean) {
-    if (!inspection || inFlight.current || (apply && !preview) || decisions.some(item => !item.role || !item.support))
+    if (
+      !inspection ||
+      inFlight.current ||
+      (apply && !preview) ||
+      EffectArray.some(decisions, item => !item.role || !item.support)
+    )
       return;
     const token = ++epoch.current;
     inFlight.current = true;
     setBusy(true);
     setError('');
     const input = {
-      paragraphs: decisions.map(item => ({
+      paragraphs: EffectArray.map(decisions, item => ({
         role: item.role,
         support: item.support,
         citationIds: item.support === 'unresolved' ? [] : [inspection.citation.id],
       })),
     };
     try {
-      const result = await api<Preview>('/api/attention/topic-enrollment', {
+      const request = {
         action: apply ? 'apply' : 'preview',
         uri: inspection.targetUri,
         project: inspection.project,
@@ -95,13 +118,18 @@ export function TopicEnrollmentPanel({
         ...(apply
           ? {approved: true, expectedContentHash: preview!.expectedContentHash, revision: preview!.revision}
           : {}),
-      });
-      if (epoch.current !== token) return;
+      };
       if (apply) {
+        await api<Applied>('/api/attention/topic-enrollment', request, undefined, isTopicEnrollmentApplied);
+        if (epoch.current !== token) return;
         setEnrolled(true);
         setPreview(undefined);
         onChanged?.();
-      } else setPreview(result);
+      } else {
+        const result = await api<Preview>('/api/attention/topic-enrollment', request, undefined, isPreview);
+        if (epoch.current !== token) return;
+        setPreview(result);
+      }
     } catch (cause) {
       if (epoch.current === token) {
         setInspection(undefined);
@@ -148,7 +176,7 @@ export function TopicEnrollmentPanel({
       ) : inspection ? (
         <>
           <ReviewBadge tone="protected">Private Obsidian note · {inspection.citation.relativePath}</ReviewBadge>
-          {inspection.paragraphs.map((text, ordinal) => (
+          {EffectArray.map(inspection.paragraphs, (text, ordinal) => (
             <section key={ordinal}>
               <MemoryExcerpt label={`Paragraph ${ordinal + 1}`}>{text}</MemoryExcerpt>
               <label>
@@ -158,12 +186,11 @@ export function TopicEnrollmentPanel({
                   disabled={busy}
                   value={decisions[ordinal]?.role ?? ''}
                   onChange={event => {
-                    if (busy || inFlight.current) return;
+                    const role = event.target.value;
+                    if (busy || inFlight.current || !isDecisionRole(role)) return;
                     setPreview(undefined);
                     setDecisions(items =>
-                      items.map((item, index) =>
-                        index === ordinal ? {...item, role: event.target.value as Decision['role']} : item,
-                      ),
+                      EffectArray.map(items, (item, index) => (index === ordinal ? {...item, role} : item)),
                     );
                   }}
                 >
@@ -180,12 +207,11 @@ export function TopicEnrollmentPanel({
                   disabled={busy}
                   value={decisions[ordinal]?.support ?? ''}
                   onChange={event => {
-                    if (busy || inFlight.current) return;
+                    const support = event.target.value;
+                    if (busy || inFlight.current || !isDecisionSupport(support)) return;
                     setPreview(undefined);
                     setDecisions(items =>
-                      items.map((item, index) =>
-                        index === ordinal ? {...item, support: event.target.value as Decision['support']} : item,
-                      ),
+                      EffectArray.map(items, (item, index) => (index === ordinal ? {...item, support} : item)),
                     );
                   }}
                 >
@@ -210,7 +236,7 @@ export function TopicEnrollmentPanel({
           ) : (
             <button
               type="button"
-              disabled={busy || !decisions.length || decisions.some(item => !item.role || !item.support)}
+              disabled={busy || !decisions.length || EffectArray.some(decisions, item => !item.role || !item.support)}
               onClick={() => void submit(false)}
             >
               Preview topic enrollment

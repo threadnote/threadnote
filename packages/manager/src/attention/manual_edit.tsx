@@ -1,3 +1,4 @@
+import {isManagerAutomaticReview} from '../api/response_guards.js';
 import React, {useRef, useState} from 'react';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalMemoryDocumentContent, declaresReviewedSupportHeader} from '@threadnote/memory/document';
@@ -37,16 +38,21 @@ export function useManualSupportEdit(props: {
       const projectName = memory.record?.metadata.project ?? (project || 'unscoped');
       const expectedContentHash = sha256HexSync(canonicalMemoryDocumentContent(memory.content));
       try {
-        const result = await api<ManagerAutomaticReview>('/api/attention/automatic-review', {
-          action: 'manual-preview',
-          project: projectName,
-          uri,
-          expectedContentHash,
-          desiredContent: content,
-          ...(lastRead.current?.targetUri === uri
-            ? {reviewId: lastRead.current.reviewId, revision: lastRead.current.revision}
-            : {}),
-        });
+        const result = await api<ManagerAutomaticReview>(
+          '/api/attention/automatic-review',
+          {
+            action: 'manual-preview',
+            project: projectName,
+            uri,
+            expectedContentHash,
+            desiredContent: content,
+            ...(lastRead.current?.targetUri === uri
+              ? {reviewId: lastRead.current.reviewId, revision: lastRead.current.revision}
+              : {}),
+          },
+          undefined,
+          isManagerAutomaticReview,
+        );
         if (
           result.kind !== 'automatic-memory-review' ||
           result.project !== projectName ||

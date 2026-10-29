@@ -1,6 +1,7 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {appendFileSync, existsSync, readFileSync} from '@threadnote/testing/node-fs';
-import {Crypto, Effect, FileSystem, Layer, Path} from 'effect';
+import {Crypto, Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -28,16 +29,23 @@ import {
   localModelWorkerServer,
   type LocalModelWorkerProcess,
 } from '../../src/effect/ai/isolated-local-model-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export const checkoutId = 'a'.repeat(64);
-export const worktreeId = 'b'.repeat(64);
-export const manifest = {...BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!, dimensions: 2};
+export const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
+export const worktreeId = Effect2.pipe('b', EffectString.repeat(64));
+export const manifest = {
+  ...EffectOption.getOrUndefined(
+    EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+  )!,
+  dimensions: 2,
+};
 export const alternateManifest = {
   ...manifest,
   id: 'fixture-embedding-b',
-  sha256: 'b'.repeat(64),
+  sha256: Effect2.pipe('b', EffectString.repeat(64)),
 };
-export const snapshotId = `cgsn_${'1'.repeat(40)}`;
+export const snapshotId = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
 export function record(home: string, event: Record<string, unknown>) {
   appendFileSync(`${home}/events.jsonl`, `${JSON.stringify({...event, pid: process.pid})}\n`);
 }
@@ -99,7 +107,7 @@ export const seed = (home: string, count = 65, catalogId = checkoutId, viewId = 
       worktreeId,
       displayName: 'worker-test',
       gitCommonDirectory: home,
-      headCommit: 'c'.repeat(40),
+      headCommit: Effect2.pipe('c', EffectString.repeat(40)),
       objectFormat: 'sha1',
       repoRoot: home,
       repositoryId: checkoutId,
@@ -123,13 +131,13 @@ export const seed = (home: string, count = 65, catalogId = checkoutId, viewId = 
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         for (let n = 0; n < count; n++) {
-          const id = `symbol-${n.toString().padStart(4, '0')}`;
+          const id = `symbol-${Effect2.pipe(n.toString(), EffectString.padStart(4, '0'))}`;
           yield* sql.unsafe(
             'INSERT INTO symbols (snapshot_id, id, content_hash, kind, name, qualified_name, path, language, lookup_keys_json, exported, span_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
               snapshotId,
               id,
-              'a'.repeat(64),
+              Effect2.pipe('a', EffectString.repeat(64)),
               'function',
               `Alpha${n}`,
               `Alpha${n}`,
@@ -224,7 +232,7 @@ const main = Effect.gen(function* () {
               withCodeGraphDatabaseWriteLock(home, checkoutId, Effect.void, 0),
             ).pipe(Effect.provide(context), Effect.orDie);
           record(home, {event: 'inference-finished'});
-          return inputs.map(() => [1, 0]);
+          return EffectArray.map(inputs, () => [1, 0]);
         }),
       generate: () => Effect.die('unexpected'),
       rerank: () => Effect.die('unexpected'),
@@ -251,7 +259,13 @@ const main = Effect.gen(function* () {
     catalogPage: () =>
       Effect.succeed({
         checkoutIds: existsSync(`${home}/catalog.json`)
-          ? (JSON.parse(readFileSync(`${home}/catalog.json`, 'utf8')) as string[])
+          ? (() => {
+              const parsed: unknown = JSON.parse(readFileSync(`${home}/catalog.json`, 'utf8'));
+              if (!Schema.is(Schema.Array(Schema.String))(parsed)) {
+                throw new TypeError('Embedding worker catalog must contain checkout IDs.');
+              }
+              return parsed;
+            })()
           : [checkoutId],
       }),
     onUnitResult: result => Effect.sync(() => record(home, {event: 'unit-result', state: result.state})),

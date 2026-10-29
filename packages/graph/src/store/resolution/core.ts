@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -92,7 +93,7 @@ export function partitionPersistedReferenceEdges(
   edges: readonly CodeGraphEdge[],
   references: readonly CodeGraphReference[],
 ): PersistedReferenceEdgePartition {
-  const edgesById = new Map(edges.map(edge => [edge.id, edge]));
+  const edgesById = new Map(EffectArray.map(edges, edge => [edge.id, edge]));
   if (edgesById.size !== edges.length) {
     throw CodeGraphStoreError.of('Persistent edge identities are duplicated.');
   }
@@ -105,7 +106,7 @@ export function partitionPersistedReferenceEdges(
     referenceEdges.set(reference.edgeId, edge);
   }
   return {
-    directEdges: edges.filter(edge => !referenceEdges.has(edge.id)),
+    directEdges: EffectArray.filter(edges, edge => !referenceEdges.has(edge.id)),
     referenceEdges,
   };
 }
@@ -126,7 +127,13 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
   if (!Number.isSafeInteger(batchIndex) || batchIndex < 0) {
     return yield* CodeGraphStoreError.of('Persistent materialization batch identity is invalid.');
   }
-  const boundedReferences = prepared?.boundedReferences ?? references.filter(isCodeGraphReferenceWithinCandidateBudget);
+  const boundedReferences =
+    prepared?.boundedReferences ??
+    EffectArray.filter(
+      references,
+      (__effectFilterValue: (typeof references)[number], __effectFilterIndex: number) =>
+        __effectFilterIndex in references && isCodeGraphReferenceWithinCandidateBudget(__effectFilterValue),
+    );
   const batchFingerprint = yield* persistedFullBatchFingerprint(symbols, edges, boundedReferences, monikers);
 
   let lookupCount = 0;
@@ -171,8 +178,11 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
             snapshot_id, id, content_hash, kind, name, qualified_name, path, language,
             arity, lookup_keys_json, resolution_domain, resolution_scope_id, package_name,
             exported, signature, documentation, span_json
-          ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-          batch.flatMap(symbol => [
+          ) VALUES ${EffectArray.join(
+            EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+            ', ',
+          )}`,
+          EffectArray.flatMap(batch, symbol => [
             snapshotId,
             symbol.id,
             symbol.contentHash,
@@ -195,8 +205,9 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
         yield* observer('symbols', batch.length);
         const lookupRows = [
           ...uniqueBy(
-            batch.flatMap(symbol =>
-              (symbol.lookupKeys ?? []).map(
+            EffectArray.flatMap(batch, symbol =>
+              EffectArray.map(
+                symbol.lookupKeys ?? [],
                 key =>
                   [
                     snapshotId,
@@ -219,7 +230,10 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
             `INSERT INTO snapshot_symbol_lookup (
               snapshot_id, lookup_key, symbol_id, resolution_domain, exported,
               provenance, evidence_edge_id, evidence_path
-            ) VALUES ${lookupBatch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
+            ) VALUES ${EffectArray.join(
+              EffectArray.map(lookupBatch, () => '(?, ?, ?, ?, ?, ?, ?, ?)'),
+              ', ',
+            )}`,
             lookupBatch.flat(),
           );
           lookupCount += lookupBatch.length;
@@ -253,8 +267,11 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
           `INSERT INTO edges (
             snapshot_id, id, source_id, source_name, relation, target_id, target_name,
             provenance, confidence, evidence_path, evidence_span_json
-          ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-          batch.flatMap(edge => [
+          ) VALUES ${EffectArray.join(
+            EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+            ', ',
+          )}`,
+          EffectArray.flatMap(batch, edge => [
             snapshotId,
             edge.id,
             edge.sourceId ?? null,
@@ -282,7 +299,7 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
       ];
       for (let referenceBatchIndex = 0; referenceBatchIndex < referenceBatches.length; referenceBatchIndex += 1) {
         const batch = referenceBatches[referenceBatchIndex];
-        const compacted = batch.map(reference => ({
+        const compacted = EffectArray.map(batch, reference => ({
           candidates: compactReferenceLookupTiers(reference.lookupTiers),
           edge: persistedReferenceEdges.get(reference.edgeId)!,
           reference,
@@ -293,8 +310,11 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
             lookup_tiers_json, candidate_count, candidate_payload_bytes,
             source_id, source_name, relation, target_name, provenance, confidence,
             evidence_path, evidence_span_json
-          ) VALUES ${compacted.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-          compacted.flatMap(({candidates, edge, reference}) => [
+          ) VALUES ${EffectArray.join(
+            EffectArray.map(compacted, () => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+            ', ',
+          )}`,
+          EffectArray.flatMap(compacted, ({candidates, edge, reference}) => [
             snapshotId,
             reference.edgeId,
             reference.resolutionDomain,
@@ -314,15 +334,22 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
           ]),
         );
         yield* observer('references', batch.length);
-        const candidates = compacted.reduce((total, entry) => total + entry.candidates.candidateCount, 0);
+        const candidates = EffectArray.reduce(compacted, 0, (total, entry) => total + entry.candidates.candidateCount);
         yield* observer('reference-candidates', 0, true);
         candidateCount += candidates;
         yield* observer('reference-candidates', candidates);
         const reexports =
           prepared?.reexportsByReferenceBatch[referenceBatchIndex] ??
           [
-            ...uniqueBy(batch.flatMap(normalizedReexportProvenance), reexport =>
-              [reexport.sourcePath, reexport.localName, reexport.targetPath, reexport.importedName].join('\0'),
+            ...uniqueBy(
+              EffectArray.flatMap(batch, (__effectFlatMapValue, __effectFlatMapIndex) =>
+                __effectFlatMapIndex in batch ? normalizedReexportProvenance(__effectFlatMapValue) : [],
+              ),
+              reexport =>
+                EffectArray.join(
+                  [reexport.sourcePath, reexport.localName, reexport.targetPath, reexport.importedName],
+                  '\0',
+                ),
             ),
           ].sort(
             (left, right) =>
@@ -336,8 +363,11 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
           yield* sql.unsafe(
             `INSERT OR IGNORE INTO snapshot_reexport_provenance (
               snapshot_id, source_path, local_name, target_path, imported_name
-            ) VALUES ${reexportBatch.map(() => '(?, ?, ?, ?, ?)').join(', ')}`,
-            reexportBatch.flatMap(reexport => [
+            ) VALUES ${EffectArray.join(
+              EffectArray.map(reexportBatch, () => '(?, ?, ?, ?, ?)'),
+              ', ',
+            )}`,
+            EffectArray.flatMap(reexportBatch, reexport => [
               snapshotId,
               reexport.sourcePath,
               reexport.localName,
@@ -527,7 +557,7 @@ export function planPersistentReferenceResolutionPages<const Value>(
     transactionPageLimit <= PERSISTENT_FULL_RESOLUTION_MAXIMUM_TRANSACTION_PAGES
       ? transactionPageLimit
       : PERSISTENT_FULL_RESOLUTION_TRANSACTION_PAGES;
-  return [...chunk(pages, PERSISTENT_FULL_RESOLUTION_RESERVATION_PAGES)].map(reservationPages => ({
+  return EffectArray.map([...chunk(pages, PERSISTENT_FULL_RESOLUTION_RESERVATION_PAGES)], reservationPages => ({
     pages: reservationPages,
     transactions: [...chunk(reservationPages, boundedTransactionPageLimit)],
   }));
@@ -861,7 +891,8 @@ function aggregatePersistentReferenceResolutionCapacityBoundaries(
   if (first === undefined) {
     return {finalFactBytes: Number.NaN, operation: 'resolve persistent code graph references', rowCount: Number.NaN};
   }
-  const compatible = boundaries.every(
+  const compatible = EffectArray.every(
+    boundaries,
     boundary =>
       (boundary.operation === 'resolve persistent code graph references' ||
         boundary.operation === 'resolve temporary code graph references') &&
@@ -875,9 +906,9 @@ function aggregatePersistentReferenceResolutionCapacityBoundaries(
   );
   if (!compatible) return {...first, finalFactBytes: Number.NaN, rowCount: Number.NaN};
   return {
-    finalFactBytes: saturatingCapacityAdd(...boundaries.map(boundary => boundary.finalFactBytes)),
+    finalFactBytes: saturatingCapacityAdd(...EffectArray.map(boundaries, boundary => boundary.finalFactBytes)),
     operation: first.operation,
-    rowCount: saturatingCapacityAdd(...boundaries.map(boundary => boundary.rowCount)),
+    rowCount: saturatingCapacityAdd(...EffectArray.map(boundaries, boundary => boundary.rowCount)),
     ...(first.mainFilesystem === undefined ? {} : {mainFilesystem: first.mainFilesystem}),
     ...(first.transientFilesystem === undefined ? {} : {transientFilesystem: first.transientFilesystem}),
   };

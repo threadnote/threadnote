@@ -1,5 +1,7 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
 import {parseCodeGraphWorksetBenchmarkArguments} from '../../../../scripts/benchmark-code-graph-workset.js';
 import {
   codeGraphWorksetEvaluationSafetyFailures,
@@ -10,6 +12,7 @@ import {
   codeGraphWorksetBenchmarkBudgetFailures,
   codeGraphWorksetBenchmarkMeasurements,
   codeGraphWorksetCoverage,
+  type CodeGraphWorksetCoverageResult,
   codeGraphWorksetDeliveryMeasurement,
   codeGraphWorksetObservationFromQuery,
   buildCodeGraphWorksetEvaluationFixture,
@@ -18,6 +21,13 @@ import {
 } from '../../../../scripts/support/code-graph-workset-harness.js';
 import {createCodeGraphWorksetFixturePlan} from '../../../../scripts/support/code-graph-workset-fixture.js';
 import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
+import {
+  codeGraphEvidenceCardId,
+  projectCodeGraphWorksetEvidence,
+  type CodeGraphEvidenceCardV1,
+  type CompactEvidenceRelationshipV1,
+} from '@threadnote/graph/workset/evidence';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 
 describe('code graph workset runner arguments', () => {
   it('defaults evaluation to the required matrix and supports a bounded smoke subset', () => {
@@ -192,11 +202,16 @@ describe('code graph workset delivery measurement', () => {
 describe('code graph workset ranked-sequence observation mapping', () => {
   it('scores the materialized sequence while measuring only the compact transport', () => {
     const fixture = buildCodeGraphWorksetEvaluationFixture(createCodeGraphWorksetFixturePlan(1), [1]);
+    const sourceRef = `cgr_${EffectString.repeat(40)('1')}`;
+    const targetRef = `cgr_${EffectString.repeat(40)('2')}`;
+    const repositoryId = sha256HexSync('repository-000');
+    const snapshotId = `cgsn_${EffectString.slice(0, 40)(sha256HexSync('snapshot-000'))}`;
+    const worktreeId = sha256HexSync('worktree-000');
     const source = {
-      id: 'cgec_source',
+      id: codeGraphEvidenceCardId(sourceRef, snapshotId, worktreeId),
       reason: {score: 1, signals: ['exact'], summary: 'Exact match.'},
-      ref: 'cgr_source',
-      relationships: [] as unknown[],
+      ref: sourceRef,
+      relationships: [],
       repositoryKey: 'workset-repo-000',
       symbol: {
         kind: 'function',
@@ -206,13 +221,13 @@ describe('code graph workset ranked-sequence observation mapping', () => {
         qualifiedName: 'sourceSymbol',
         span: {column: 0, endColumn: 1, endLine: 1, line: 1},
       },
-    };
+    } satisfies CodeGraphEvidenceCardV1;
     const target = {
       ...source,
-      id: 'cgec_target',
-      ref: 'cgr_target',
+      id: codeGraphEvidenceCardId(targetRef, snapshotId, worktreeId),
+      ref: targetRef,
       symbol: {...source.symbol, name: 'targetSymbol', path: 'src/target.ts', qualifiedName: 'targetSymbol'},
-    };
+    } satisfies CodeGraphEvidenceCardV1;
     const relationship = {
       authority: 'authoritative',
       confidence: 1,
@@ -225,15 +240,49 @@ describe('code graph workset ranked-sequence observation mapping', () => {
       relation: 'calls',
       source: {ref: source.ref, repositoryKey: 'workset-repo-000'},
       target: {ref: target.ref, repositoryKey: 'workset-repo-000'},
-    };
+    } satisfies CompactEvidenceRelationshipV1;
     const deliveredSource = {...source, relationships: [relationship]};
-    const response = {
-      structuredContent: {
-        cards: [deliveredSource],
-        output: {returnedCards: 1},
+    const generationDigest = sha256HexSync('generation');
+    const result = {
+      cards: [deliveredSource, target],
+      coverage: {
+        cataloguedRepositories: 1,
+        complete: true,
+        consideredRepositories: 1,
+        deepQueriedRepositories: 1,
+        requestedRepositories: 1,
+        states: {current: 1, deferred: 0, excluded: 0, failed: 0, missing: 0, stale: 0},
+        stopReason: 'exhaustion',
       },
-      text: 'one delivered symbol and edge',
-    } as unknown as MeasuredCodeGraphWorksetQuery['response'];
+      repositories: {
+        'workset-repo-000': {
+          considered: true,
+          deepQueried: true,
+          repositoryId,
+          snapshot: {
+            checkoutId: sha256HexSync('checkout-000'),
+            commit: EffectString.slice(0, 40)(sha256HexSync('commit-000')),
+            digest: sha256HexSync('snapshot-digest-000'),
+            dirty: false,
+            freshness: 'current',
+            id: snapshotId,
+            projectionDigest: sha256HexSync('projection-000'),
+            provenance: 'ready-snapshot',
+            worktreeId,
+          },
+          state: 'current',
+        },
+      },
+      trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
+      type: 'code-graph-workset-query',
+      version: 2,
+      warnings: [],
+      workset: {
+        generation: {digest: generationDigest, id: 'cgwg_e661f4c935e8a5a83349afb5e347695c2e972e96'},
+        name: 'code-graph-workset-1',
+      },
+    } satisfies MeasuredCodeGraphWorksetQuery['result'];
+    const response = projectCodeGraphWorksetEvidence(result);
     const measured = {
       measurement: codeGraphWorksetDeliveryMeasurement({
         completionMilliseconds: 5,
@@ -244,32 +293,8 @@ describe('code graph workset ranked-sequence observation mapping', () => {
         response,
       }),
       response,
-      result: {
-        cards: [deliveredSource, target],
-        coverage: {
-          cataloguedRepositories: 1,
-          complete: true,
-          consideredRepositories: 1,
-          deepQueriedRepositories: 1,
-          requestedRepositories: 1,
-          states: {current: 1, deferred: 0, excluded: 0, failed: 0, missing: 0, stale: 0},
-          stopReason: 'exhaustion',
-        },
-        repositories: {
-          'workset-repo-000': {
-            considered: true,
-            deepQueried: true,
-            repositoryId: 'repo-000',
-            state: 'current',
-          },
-        },
-        trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
-        type: 'code-graph-workset-query',
-        version: 2,
-        warnings: [],
-        workset: {generation: {digest: 'digest', id: 'generation'}, name: 'code-graph-workset-1'},
-      },
-    } as unknown as MeasuredCodeGraphWorksetQuery;
+      result,
+    } satisfies MeasuredCodeGraphWorksetQuery;
 
     const observation = codeGraphWorksetObservationFromQuery(fixture, 1, 'sample-1', fixture.queries[0].id, measured);
 
@@ -295,25 +320,50 @@ describe('code graph workset ranked-sequence observation mapping', () => {
     );
     const result = {
       repositories: {
-        'workset-repo-000': {state: 'current'},
-        'workset-repo-006': {state: 'deferred'},
+        'workset-repo-000': {
+          considered: true,
+          deepQueried: true,
+          repositoryId: sha256HexSync('repo-000'),
+          state: 'current',
+        },
+        'workset-repo-006': {
+          considered: true,
+          deepQueried: false,
+          repositoryId: sha256HexSync('repo-006'),
+          state: 'deferred',
+        },
       },
-    } as unknown as MeasuredCodeGraphWorksetQuery['result'];
+    } satisfies CodeGraphWorksetCoverageResult;
 
     expect(codeGraphWorksetCoverage(fixture, 32, result)).toEqual([
       {repositoryId: 'repo-000', state: 'current'},
       {repositoryId: 'repo-006', state: 'deferred'},
     ]);
-    expect(fixture.members.find(member => member.id === 'repo-014')?.expectedState).toBe('deferred');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(fixture.members, member => member.id === 'repo-014'))
+        ?.expectedState,
+    ).toBe('deferred');
   });
 
   it('retains the exact Protobuf bridge expectation in the mixed size-eight evaluator', () => {
     const plan = createCodeGraphWorksetFixturePlan(8, {stateProfile: 'mixed'});
     const fixture = buildCodeGraphWorksetEvaluationFixture(plan, [1, 8]);
 
-    expect(plan.repositories.find(repository => repository.repositoryKey === 'repo-002')?.state).toBe('missing');
-    expect(plan.repositories.find(repository => repository.repositoryKey === 'repo-003')?.state).toBe('stale');
-    expect(fixture.queries.find(query => query.id === 'protobuf-session-directory')?.expectedEdges).toEqual([
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(plan.repositories, repository => repository.repositoryKey === 'repo-002'),
+      )?.state,
+    ).toBe('missing');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(plan.repositories, repository => repository.repositoryKey === 'repo-003'),
+      )?.state,
+    ).toBe('stale');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(fixture.queries, query => query.id === 'protobuf-session-directory'),
+      )?.expectedEdges,
+    ).toEqual([
       {
         provenance: 'declared',
         relation: 'imports',
@@ -332,15 +382,28 @@ describe('code graph workset benchmark mapping', () => {
       benchmarkSample(128, {completionMilliseconds: 5_100, timeToFirstEvidenceMilliseconds: 5_100}),
     ];
     const measurements = codeGraphWorksetBenchmarkMeasurements(samples);
-    expect(measurements.find(measurement => measurement.name === 'workset-current-repository-cap')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(measurements, measurement => measurement.name === 'workset-current-repository-cap'),
+      ),
+    ).toMatchObject({
       maximum: 0,
       minimum: 0,
       unit: 'count',
     });
     expect(
-      measurements.find(measurement => measurement.name === 'workset-50-delivered-time-to-first-evidence-buffered'),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          measurements,
+          measurement => measurement.name === 'workset-50-delivered-time-to-first-evidence-buffered',
+        ),
+      ),
     ).toMatchObject({p95: 1_100, samples: 2, unit: 'milliseconds'});
-    expect(measurements.find(measurement => measurement.name === 'workset-50-total-agent-output')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(measurements, measurement => measurement.name === 'workset-50-total-agent-output'),
+      ),
+    ).toMatchObject({
       maximum: 300,
       unit: 'bytes',
     });

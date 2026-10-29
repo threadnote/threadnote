@@ -10,6 +10,8 @@ import {
   observedOperationsEvidence,
   operationsDraft,
 } from '@threadnote/remote-memory/test/helpers/operations-fixtures';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const testLayer = provideTestLayer(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer));
 const noDatabase = {
@@ -48,9 +50,9 @@ describe('operations file commands', () => {
                 '--manifest',
                 manifestPath,
                 '--drill',
-                'b'.repeat(32),
+                Effect2.pipe('b', EffectString.repeat(32)),
                 '--target',
-                'c'.repeat(32),
+                Effect2.pipe('c', EffectString.repeat(32)),
                 '--output',
                 evidencePath,
               ],
@@ -58,7 +60,11 @@ describe('operations file commands', () => {
               noDatabase,
             ),
           ).toBe(2);
-          const pending = operationsEvidenceTemplate(manifest, 'b'.repeat(32), 'c'.repeat(32));
+          const pending = operationsEvidenceTemplate(
+            manifest,
+            Effect2.pipe('b', EffectString.repeat(32)),
+            Effect2.pipe('c', EffectString.repeat(32)),
+          );
           expect(JSON.parse(yield* fs.readFileString(evidencePath))).toEqual(pending);
           const args = [
             '--manifest',
@@ -99,7 +105,7 @@ describe('operations file commands', () => {
         for (const content of [
           '{"private-secret":',
           JSON.stringify({...operationsDraft(), rawLog: 'private-secret'}),
-          'x'.repeat(4 * 1024 * 1024 + 1),
+          Effect2.pipe('x', EffectString.repeat(4 * 1024 * 1024 + 1)),
         ]) {
           yield* fs.writeFileString(input, content);
           expect(yield* runRemoteMemoryOperator(args, {}, noDatabase)).toBe(1);

@@ -1,12 +1,15 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphWorkspaceProject} from '../languages/types.js';
 import {uniqueStrings} from './primitives.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_WORKSPACE_DIAGNOSTIC_LIMIT = 100;
 export const CODE_GRAPH_WORKSPACE_DIAGNOSTIC_OVERFLOW =
   'Workspace discovery omitted unattributed diagnostics after its deterministic bound.';
 
 export function codeGraphWorkspaceDiagnosticBlocksCompleteness(diagnostic: string): boolean {
-  return !diagnostic.includes('cannot form a package moniker');
+  return !Effect.pipe(diagnostic, EffectString.includes('cannot form a package moniker'));
 }
 
 export function collapseCodeGraphWorkspaceDiagnosticClasses(
@@ -15,15 +18,19 @@ export function collapseCodeGraphWorkspaceDiagnosticClasses(
 ): readonly string[] {
   const groups = new Map<string, string[]>();
   for (const diagnostic of uniqueStrings(diagnostics)) {
-    const separator = diagnostic.indexOf(': ');
-    const diagnosticClass = separator < 0 ? diagnostic : diagnostic.slice(separator + 2);
+    const separator = Effect.pipe(
+      diagnostic,
+      EffectString.indexOf(': '),
+      Effect.Option.getOrElse(() => -1),
+    );
+    const diagnosticClass = separator < 0 ? diagnostic : Effect.pipe(diagnostic, EffectString.slice(separator + 2));
     const group = groups.get(diagnosticClass);
     if (group === undefined) groups.set(diagnosticClass, [diagnostic]);
     else group.push(diagnostic);
   }
-  return [...groups.values()]
-    .map(group => (group.length === 1 ? group[0] : `${group[0]} (${group.length} occurrences)`))
-    .slice(0, limit);
+  return EffectArray.map([...groups.values()], group =>
+    group.length === 1 ? group[0] : `${group[0]} (${group.length} occurrences)`,
+  ).slice(0, limit);
 }
 
 export interface CodeGraphWorkspaceDiagnosticIndex {
@@ -59,9 +66,13 @@ export function codeGraphWorkspaceProjectsForDiagnostic(
   for (let prefix = evidencePath; ;) {
     const matches = index.projectsByPrefix.get(prefix);
     if (matches !== undefined) return matches;
-    const separator = prefix.lastIndexOf('/');
+    const separator = Effect.pipe(
+      prefix,
+      EffectString.lastIndexOf('/'),
+      Effect.Option.getOrElse(() => -1),
+    );
     if (separator < 0) return index.projectsByPrefix.get('') ?? [];
-    prefix = prefix.slice(0, separator);
+    prefix = Effect.pipe(prefix, EffectString.slice(0, separator));
   }
 }
 
@@ -84,7 +95,7 @@ export function resolveCodeGraphWorkspaceDiagnostics(
   }
   return {
     diagnostics: orderedDiagnostics,
-    projects: projects.map(project => ({
+    projects: EffectArray.map(projects, project => ({
       ...project,
       diagnostics: uniqueStrings([...project.diagnostics, ...(attributed.get(project.id) ?? [])]),
     })),
@@ -97,9 +108,10 @@ export function boundedCodeGraphWorkspaceDiagnostics(
 ): readonly string[] {
   const collapsed = collapseCodeGraphWorkspaceDiagnosticClasses(resolution.diagnostics);
   const retained = collapsed.slice(0, CODE_GRAPH_WORKSPACE_DIAGNOSTIC_LIMIT);
-  const omittedUnattributed = resolution.diagnostics
-    .slice(CODE_GRAPH_WORKSPACE_DIAGNOSTIC_LIMIT)
-    .some(diagnostic => resolution.projectsByDiagnostic.get(diagnostic)?.length === 0);
+  const omittedUnattributed = EffectArray.some(
+    resolution.diagnostics.slice(CODE_GRAPH_WORKSPACE_DIAGNOSTIC_LIMIT),
+    diagnostic => resolution.projectsByDiagnostic.get(diagnostic)?.length === 0,
+  );
   if (!omittedUnattributed) return retained;
   return uniqueStrings([
     ...retained.slice(0, CODE_GRAPH_WORKSPACE_DIAGNOSTIC_LIMIT - 1),
@@ -108,13 +120,20 @@ export function boundedCodeGraphWorkspaceDiagnostics(
 }
 
 function codeGraphWorkspaceDiagnosticEvidencePath(diagnostic: string): string | undefined {
-  const separator = diagnostic.indexOf(':');
+  const separator = Effect.pipe(
+    diagnostic,
+    EffectString.indexOf(':'),
+    Effect.Option.getOrElse(() => -1),
+  );
   if (separator <= 0) return undefined;
-  const evidencePath = diagnostic.slice(0, separator);
+  const evidencePath = Effect.pipe(diagnostic, EffectString.slice(0, separator));
   if (
-    evidencePath.startsWith('/') ||
-    evidencePath.includes('\\') ||
-    evidencePath.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect.pipe(evidencePath, EffectString.startsWith('/')) ||
+    Effect.pipe(evidencePath, EffectString.includes('\\')) ||
+    EffectArray.some(
+      Effect.pipe(evidencePath, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   )
     return undefined;
   return evidencePath;

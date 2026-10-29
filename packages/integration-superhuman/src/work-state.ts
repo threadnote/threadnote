@@ -1,4 +1,5 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Path, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
@@ -8,9 +9,28 @@ interface DocumentCursor {
   readonly requestId: string;
   readonly offset: number;
 }
-class SuperhumanCursorError extends Schema.TaggedError<SuperhumanCursorError>()('SuperhumanCursorError', {
-  message: Schema.String,
-}) {}
+class SuperhumanCursorError extends Schema.TaggedError<SuperhumanCursorError, {readonly brand: unique symbol}>()(
+  'SuperhumanCursorError',
+  {
+    message: Schema.String,
+  },
+) {}
+
+function isDocumentCursor(value: unknown): value is DocumentCursor {
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
+  return (
+    'version' in value &&
+    value.version === 1 &&
+    'fingerprint' in value &&
+    typeof value.fingerprint === 'string' &&
+    'requestId' in value &&
+    typeof value.requestId === 'string' &&
+    'offset' in value &&
+    typeof value.offset === 'number' &&
+    Number.isSafeInteger(value.offset) &&
+    value.offset >= 0
+  );
+}
 const cursorPath = Effect.fn('superhuman.cursorPath')(function* (config: RuntimeConfig, sourceId: string) {
   const path = yield* Path.Path;
   return path.join(
@@ -34,19 +54,12 @@ export const readDocumentCursor = Effect.fn('superhuman.readDocumentCursor')(fun
   const path = yield* cursorPath(config, sourceId);
   if (!(yield* fs.exists(path))) return 0;
   const raw = yield* fs.readFileString(path);
-  const cursor = yield* Effect.try({
-    try: () => JSON.parse(raw) as DocumentCursor,
+  const value = yield* Effect.try({
+    try: (): unknown => JSON.parse(raw),
     catch: () => SuperhumanCursorError.make({message: 'Invalid Superhuman work cursor.'}),
   });
-  if (
-    !cursor ||
-    cursor.version !== 1 ||
-    typeof cursor.fingerprint !== 'string' ||
-    typeof cursor.requestId !== 'string' ||
-    !Number.isSafeInteger(cursor.offset) ||
-    cursor.offset < 0
-  )
-    return yield* SuperhumanCursorError.make({message: 'Invalid Superhuman work cursor.'});
+  if (!isDocumentCursor(value)) return yield* SuperhumanCursorError.make({message: 'Invalid Superhuman work cursor.'});
+  const cursor = value;
   return cursor.fingerprint === fingerprint && (!explicit || cursor.requestId === requestId) ? cursor.offset : 0;
 });
 export const writeDocumentCursor = Effect.fn('superhuman.writeDocumentCursor')(function* (

@@ -9,6 +9,8 @@ import {readSharedGraphProvenance} from '@threadnote/graph/sharing/provenance';
 import {runGraphPublisherBootstrap, runGraphShareInit} from '@threadnote/threadnote/code_graph/sharing/publisher';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('graph share ensure-commit import', () => {
   effectIt.effect(
@@ -67,7 +69,10 @@ describe('graph share ensure-commit import', () => {
           });
           const published = yield* runGraphPublisherBootstrap(config(publisherHome), {cas, cwd: repository});
           yield* runGraphShareJoin(config(clientHome), {cas, cwd: repository, readOnly: true});
-          const head = (yield* runCommandEffect('git', ['-C', repository, 'rev-parse', 'HEAD'])).stdout.trim();
+          const head = Effect2.pipe(
+            (yield* runCommandEffect('git', ['-C', repository, 'rev-parse', 'HEAD'])).stdout,
+            EffectString.trim,
+          );
           const lease = yield* indexer.ensureCommit({
             commit: head,
             cwd: repository,

@@ -11,6 +11,8 @@ import {
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const namespace = 'oci://registry.example.test/acme/profile';
 const publisherKeyFingerprint = sha256Digest('publisher key');
@@ -18,7 +20,7 @@ const enrollment: GraphShareEnrollmentV2 = {
   profile: `${namespace}@${sha256Digest('manifest')}`,
   profileDigest: sha256Digest('profile body'),
   publisherKeyFingerprint,
-  repositoryId: 'a'.repeat(64),
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
   schemaVersion: 2,
 };
 const baseProfile = defaultGraphShareProfile({
@@ -248,7 +250,7 @@ describe('interactive OCI graph first-use approval', () => {
     ({field, index}) =>
       Effect.gen(function* () {
         const original = field === 'namespace' ? namespace : publisherKeyFingerprint;
-        const changed = `${original.slice(0, index)}${original[index] === 'x' ? 'y' : 'x'}${original.slice(index + 1)}`;
+        const changed = `${Effect2.pipe(original, EffectString.slice(0, index))}${original[index] === 'x' ? 'y' : 'x'}${Effect2.pipe(original, EffectString.slice(index + 1))}`;
         const prompts: string[] = [];
         const answers = field === 'namespace' ? [changed, publisherKeyFingerprint] : [namespace, changed];
         const denied = yield* withSystem(promptGraphShareOciTrustRoot({enrollment}), answers, prompts).pipe(

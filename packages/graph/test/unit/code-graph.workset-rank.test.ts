@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -8,6 +9,8 @@ import {
 } from '@threadnote/graph/workset/router';
 import type {CodeGraphQueryNode, CodeGraphQueryResult} from '@threadnote/graph/types';
 import type {CodeGraphWorksetCatalogRoutingSymbolRecordV1} from '@threadnote/graph/workset_catalog/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph workset global evidence ranking', () => {
   it('keeps same-name symbols distinct across repository identities and qualifies local relationships', () => {
@@ -20,9 +23,12 @@ describe('code graph workset global evidence ranking', () => {
     });
 
     expect(cards).toHaveLength(2);
-    expect(new Set(cards.map(card => card.ref)).size).toBe(2);
-    expect(cards.map(card => card.repositoryKey).sort()).toEqual(['repository-0', 'repository-1']);
-    expect(cards.find(card => card.repositoryKey === 'repository-0')?.relationships[0]).toMatchObject({
+    expect(new Set(EffectArray.map(cards, card => card.ref)).size).toBe(2);
+    expect(EffectArray.map(cards, card => card.repositoryKey).sort()).toEqual(['repository-0', 'repository-1']);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(cards, card => card.repositoryKey === 'repository-0'))
+        ?.relationships[0],
+    ).toMatchObject({
       authority: 'authoritative',
       evidence: {repositoryKey: 'repository-0'},
     });
@@ -31,17 +37,20 @@ describe('code graph workset global evidence ranking', () => {
   it('is invariant to repository completion order and duplicate local-node order', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 0, max: 15}), {minLength: 1, maxLength: 12}), seeds => {
-        const repositories = [...new Set(seeds.map(seed => seed % 4))];
+        const repositories = [...new Set(EffectArray.map(seeds, seed => seed % 4))];
         const fixture = routerFixture(repositories);
-        const deep = repositories.map(repository => {
-          const nodes = seeds.filter(seed => seed % 4 === repository).map(seed => node(seed, `Service${seed}`));
+        const deep = EffectArray.map(repositories, repository => {
+          const nodes = EffectArray.map(
+            EffectArray.filter(seeds, seed => seed % 4 === repository),
+            seed => node(seed, `Service${seed}`),
+          );
           return graph(`repository-${repository}`, repository, [...nodes, ...nodes].reverse());
         });
         const forward = rankCodeGraphWorksetEvidenceCards({repositories: deep, router: fixture});
         const reversed = rankCodeGraphWorksetEvidenceCards({repositories: [...deep].reverse(), router: fixture});
 
         expect(reversed).toEqual(forward);
-        expect(new Set(forward.map(card => card.id)).size).toBe(forward.length);
+        expect(new Set(EffectArray.map(forward, card => card.id)).size).toBe(forward.length);
       }),
       {numRuns: 100},
     );
@@ -58,8 +67,12 @@ describe('code graph workset global evidence ranking', () => {
       router: fixture,
     });
 
-    expect(cards.slice(0, 3).map(card => card.repositoryKey)).toEqual(['repository-0', 'repository-1', 'repository-2']);
-    expect(cards.slice(3).map(card => card.repositoryKey)).toContain('repository-0');
+    expect(EffectArray.map(cards.slice(0, 3), card => card.repositoryKey)).toEqual([
+      'repository-0',
+      'repository-1',
+      'repository-2',
+    ]);
+    expect(EffectArray.map(cards.slice(3), card => card.repositoryKey)).toContain('repository-0');
   });
 
   it('bounds the diversity prefix to the initial four-repository batch before global score fill', () => {
@@ -81,7 +94,7 @@ describe('code graph workset global evidence ranking', () => {
         {catalogRank: 1, symbol: exactFirst},
         {catalogRank: 2, symbol: exactSecond},
       ],
-      lexicalHits: [1, 2, 3, 4, 5].map((repository, index) => ({
+      lexicalHits: EffectArray.map([1, 2, 3, 4, 5], (repository, index) => ({
         catalogRank: index + 3,
         symbol: routingSymbol(repository, repository),
       })),
@@ -91,21 +104,21 @@ describe('code graph workset global evidence ranking', () => {
     const cards = rankCodeGraphWorksetEvidenceCards({
       repositories: [
         graph('repository-0', 0, [node(0, 'FirstA'), node(4, 'SecondA')]),
-        ...[1, 2, 3, 4, 5].map(repository =>
+        ...EffectArray.map([1, 2, 3, 4, 5], repository =>
           graph(`repository-${repository}`, repository, [node(repository, `Service${repository}`)]),
         ),
       ],
       router: fixture,
     });
 
-    expect(cards.slice(0, 4).map(card => card.repositoryKey)).toEqual([
+    expect(EffectArray.map(cards.slice(0, 4), card => card.repositoryKey)).toEqual([
       'repository-0',
       'repository-1',
       'repository-2',
       'repository-3',
     ]);
     expect(cards[4]?.repositoryKey).toBe('repository-0');
-    expect(cards.slice(0, 5).map(card => card.repositoryKey)).not.toContain('repository-4');
+    expect(EffectArray.map(cards.slice(0, 5), card => card.repositoryKey)).not.toContain('repository-4');
   });
 
   it('rejects a deep result from a different routed snapshot', () => {
@@ -124,7 +137,7 @@ function routerFixture(repositories: readonly number[]) {
   const query = normalizeCodeGraphWorksetRouterQuery('service');
   return rankCodeGraphWorksetRouterCandidates({
     exactHits: [],
-    lexicalHits: repositories.map((repository, index) => ({
+    lexicalHits: EffectArray.map(repositories, (repository, index) => ({
       catalogRank: index + 1,
       symbol: routingSymbol(repository, repository),
     })),
@@ -141,7 +154,7 @@ function graph(
 ) {
   const repositoryId = digest(`repository-${repository}`);
   const source = nodes[0];
-  const targetId = `cgs_${digest(`target-${repository}`).slice(0, 32)}`;
+  const targetId = `cgs_${Effect.pipe(digest(`target-${repository}`), EffectString.slice(0, 32))}`;
   const graph: CodeGraphQueryResult = {
     edges: withRelationship
       ? [
@@ -149,7 +162,7 @@ function graph(
             confidence: 1,
             evidencePath: source.path,
             evidenceSpan: source.span,
-            id: `cge_${digest(`edge-${repository}`).slice(0, 32)}`,
+            id: `cge_${Effect.pipe(digest(`edge-${repository}`), EffectString.slice(0, 32))}`,
             provenance: 'resolved',
             relation: 'calls',
             sourceId: source.id,
@@ -164,9 +177,9 @@ function graph(
     operation: 'query',
     repository: {displayName: repositoryKey, repositoryId},
     snapshot: {
-      commit: digest(`commit-${repository}`).slice(0, 40),
+      commit: Effect.pipe(digest(`commit-${repository}`), EffectString.slice(0, 40)),
       dirty: false,
-      id: `cgsn_${digest(`snapshot-${repository}`).slice(0, 40)}`,
+      id: `cgsn_${Effect.pipe(digest(`snapshot-${repository}`), EffectString.slice(0, 40))}`,
       worktreeId: digest(`worktree-${repository}`),
     },
     trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
@@ -180,7 +193,7 @@ function node(seed: number, name: string): CodeGraphQueryNode {
   return {
     contentHash: digest(`content-${seed}`),
     exported: true,
-    id: `cgs_${digest(`node-${seed}`).slice(0, 32)}`,
+    id: `cgs_${Effect.pipe(digest(`node-${seed}`), EffectString.slice(0, 32))}`,
     kind: 'function',
     language: 'typescript',
     name,
@@ -208,7 +221,7 @@ function routingSymbol(seed: number, repository: number): CodeGraphWorksetCatalo
     qualifiedName: value.qualifiedName,
     repositoryId: digest(`repository-${repository}`),
     repositoryKey: `repository-${repository}`,
-    snapshotId: `cgsn_${digest(`snapshot-${repository}`).slice(0, 40)}`,
+    snapshotId: `cgsn_${Effect.pipe(digest(`snapshot-${repository}`), EffectString.slice(0, 40))}`,
     span: value.span,
     terms: [{term: 'service', weight: 1}],
   };

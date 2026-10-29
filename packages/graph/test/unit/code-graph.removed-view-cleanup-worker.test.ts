@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {DateTime, Deferred, Effect, Fiber} from 'effect';
 import {describe, expect} from 'vitest';
@@ -14,17 +15,19 @@ import type {
   CodeGraphRemovedViewCleanupUpdateResult,
 } from '@threadnote/graph/store';
 import {CodeGraphStoreBusyError} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const INPUT: CodeGraphRemovedViewCleanupWorkerInput = {
-  checkoutId: 'a'.repeat(64),
+  checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
   databasePath: '/private/graph-v3.sqlite',
   threadnoteHome: '/private/threadnote',
 };
-const SNAPSHOT_ID = `cgsn_${'1'.repeat(40)}`;
-const WORKTREE_ID = 'b'.repeat(64);
-const REPOSITORY_ID = 'c'.repeat(64);
-const RECORD_DIGEST = 'd'.repeat(64);
-const RECORD_IDENTITY = 'e'.repeat(64);
+const SNAPSHOT_ID = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+const WORKTREE_ID = Effect2.pipe('b', EffectString.repeat(64));
+const REPOSITORY_ID = Effect2.pipe('c', EffectString.repeat(64));
+const RECORD_DIGEST = Effect2.pipe('d', EffectString.repeat(64));
+const RECORD_IDENTITY = Effect2.pipe('e', EffectString.repeat(64));
 
 describe('removed view cleanup worker', () => {
   effectIt.effect('holds the vector receipt outside target authorization, commit, and the full-entry update', () =>
@@ -61,7 +64,7 @@ describe('removed view cleanup worker', () => {
                           Effect.sync(() => {
                             events.push('vector');
                             return {
-                              cursorToken: `vp1:a:${'f'.repeat(64)}:model-000:1`,
+                              cursorToken: `vp1:a:${Effect2.pipe('f', EffectString.repeat(64))}:model-000:1`,
                               state: 'progress',
                             } as const;
                           }),
@@ -105,7 +108,7 @@ describe('removed view cleanup worker', () => {
       expect(updates).toEqual([
         {
           attempts: entry.attempts,
-          cursorToken: `vp1:a:${'f'.repeat(64)}:model-000:1`,
+          cursorToken: `vp1:a:${Effect2.pipe('f', EffectString.repeat(64))}:model-000:1`,
           nextAttemptAt: 501,
           phase: 'vector-pointers',
           updatedAt: DateTime.formatIso(DateTime.makeUnsafe(500)),
@@ -266,8 +269,10 @@ describe('removed view cleanup worker', () => {
         yield* worker.tick(INPUT);
         yield* worker.tick(INPUT);
 
-        expect(updates.map(update => update.phase)).toEqual(['provenance', 'complete']);
-        expect(updates.every(update => update.attempts === 0 && update.cursorToken === undefined)).toBe(true);
+        expect(EffectArray.map(updates, update => update.phase)).toEqual(['provenance', 'complete']);
+        expect(EffectArray.every(updates, update => update.attempts === 0 && update.cursorToken === undefined)).toBe(
+          true,
+        );
         expect(provenanceCalls).toBe(1);
 
         const unboundUpdates: CodeGraphRemovedViewCleanupUpdate[] = [];
@@ -304,7 +309,7 @@ describe('removed view cleanup worker', () => {
     Effect.gen(function* () {
       const malformed = {
         'build-status': 'bs1:x:not-a-sealed-build-cursor',
-        'vector-pointers': `vp1:a:${'f'.repeat(64)}:model-000:01`,
+        'vector-pointers': `vp1:a:${Effect2.pipe('f', EffectString.repeat(64))}:model-000:01`,
       } as const;
 
       for (const phase of ['vector-pointers', 'build-status'] as const) {
@@ -365,7 +370,7 @@ describe('removed view cleanup worker', () => {
       const updates: CodeGraphRemovedViewCleanupUpdate[] = [];
       const entry = cleanupEntry({
         attempts: 2,
-        cursorToken: `vp1:a:${'a'.repeat(64)}:model-000:7`,
+        cursorToken: `vp1:a:${Effect2.pipe('a', EffectString.repeat(64))}:model-000:7`,
         nextAttemptAt: 30_500,
         updatedAt: DateTime.formatIso(DateTime.makeUnsafe(1_000)),
       });
@@ -405,7 +410,7 @@ describe('removed view cleanup worker', () => {
       const entries = [cleanupEntry(), cleanupEntry({revision: 2})];
       const authorizations: CodeGraphRemovedViewCleanupAuthorizationResult[] = [
         {state: 'stale'},
-        {observedSnapshotId: `cgsn_${'2'.repeat(40)}`, state: 'active-pointer-changed'},
+        {observedSnapshotId: `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`, state: 'active-pointer-changed'},
       ];
       const worker = yield* makeCodeGraphRemovedViewCleanupWorker(
         dependencies({
@@ -439,7 +444,10 @@ describe('removed view cleanup worker', () => {
   effectIt.effect('isolates a busy peer and never claims more than the eight-unit burst budget', () =>
     Effect.gen(function* () {
       const entries = Array.from({length: 10}, (_, index) =>
-        cleanupEntry({revision: index + 1, worktreeId: index.toString(16).padStart(64, '0')}),
+        cleanupEntry({
+          revision: index + 1,
+          worktreeId: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+        }),
       );
       let claims = 0;
       const processed: string[] = [];
@@ -461,7 +469,9 @@ describe('removed view cleanup worker', () => {
               }),
             ),
           withTargetLock: (_input, worktreeId, effect) =>
-            worktreeId.endsWith('0') ? Effect.fail(CodeGraphStoreBusyError.of('busy')) : effect,
+            Effect2.pipe(worktreeId, EffectString.endsWith('0'))
+              ? Effect.fail(CodeGraphStoreBusyError.of('busy'))
+              : effect,
         }),
       );
 
@@ -478,20 +488,19 @@ describe('removed view cleanup worker', () => {
     Effect.gen(function* () {
       let monotonic = 0;
       let wall = 100;
-      let queue: CodeGraphRemovedViewCleanupEntry[] = ['0', '1', '2'].map(prefix =>
-        cleanupEntry({worktreeId: prefix.repeat(64)}),
+      let queue: CodeGraphRemovedViewCleanupEntry[] = EffectArray.map(['0', '1', '2'], prefix =>
+        cleanupEntry({worktreeId: Effect2.pipe(prefix, EffectString.repeat(64))}),
       );
       const order: string[] = [];
       const worker = yield* makeCodeGraphRemovedViewCleanupWorker(
         dependencies({
           claim: (_input, now) =>
             Effect.sync(() => {
-              const candidate = queue
-                .filter(entry => entry.nextAttemptAt <= now)
-                .sort(
-                  (left, right) =>
-                    left.nextAttemptAt - right.nextAttemptAt || left.worktreeId.localeCompare(right.worktreeId),
-                )[0];
+              const candidate = EffectArray.filter(queue, entry => entry.nextAttemptAt <= now).sort(
+                (left, right) =>
+                  left.nextAttemptAt - right.nextAttemptAt ||
+                  Effect2.pipe(left.worktreeId, EffectString.localeCompare(right.worktreeId)),
+              )[0];
               if (candidate === undefined) return [];
               const claimed = {
                 ...candidate,
@@ -499,7 +508,7 @@ describe('removed view cleanup worker', () => {
                 revision: candidate.revision + 1,
                 updatedAt: DateTime.formatIso(DateTime.makeUnsafe(Math.max(now, Date.parse(candidate.updatedAt)))),
               };
-              queue = queue.map(entry => (entry.worktreeId === claimed.worktreeId ? claimed : entry));
+              queue = EffectArray.map(queue, entry => (entry.worktreeId === claimed.worktreeId ? claimed : entry));
               return [claimed];
             }),
           withPreparedVectorUnit: (_input, entry, _deadline, use) =>
@@ -523,7 +532,7 @@ describe('removed view cleanup worker', () => {
             Effect.sync(() => {
               const result = updated(entry, update);
               if (result.state === 'updated') {
-                queue = queue.map(candidate =>
+                queue = EffectArray.map(queue, candidate =>
                   candidate.worktreeId === result.entry.worktreeId ? result.entry : candidate,
                 );
               }
@@ -549,7 +558,12 @@ describe('removed view cleanup worker', () => {
       const worker = yield* makeCodeGraphRemovedViewCleanupWorker(
         dependencies({
           claim: () =>
-            Effect.sync(() => [cleanupEntry({revision: ++claims, worktreeId: claims.toString(16).padStart(64, '0')})]),
+            Effect.sync(() => [
+              cleanupEntry({
+                revision: ++claims,
+                worktreeId: Effect2.pipe(claims.toString(16), EffectString.padStart(64, '0')),
+              }),
+            ]),
           withPreparedVectorUnit: (_input, entry, _deadline, use) =>
             use(
               Effect.sync(() => {

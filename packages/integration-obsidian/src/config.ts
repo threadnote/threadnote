@@ -1,13 +1,14 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import * as configuration from '@threadnote/integration-core/config';
 import type {SourceConfig, SourceConfiguration, ProjectionConfig} from '@threadnote/integration-core/config';
-export class ObsidianConfigurationError extends Schema.TaggedError<ObsidianConfigurationError>()(
-  'ObsidianConfigurationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class ObsidianConfigurationError extends Schema.TaggedError<
+  ObsidianConfigurationError,
+  {readonly brand: unique symbol}
+>()('ObsidianConfigurationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 function checked<A>(operation: () => A): A {
   try {
     return operation();
@@ -30,6 +31,9 @@ const optionalBoolean = (value: unknown, fallback: boolean, label: string) =>
 const isJsonObject = configuration.isJsonObject;
 import {parseResourceId, resourceIdWithoutAnchor} from '@threadnote/store/resource-id';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export type ObsidianConfiguration = SourceConfiguration;
 export interface ObsidianSourceConfig {
   readonly enabled: boolean;
@@ -55,59 +59,66 @@ export interface ObsidianProjectionConfig {
 export const DEFAULT_OBSIDIAN_EXCLUDES = ['.obsidian/**', '.trash/**'] as const;
 export const DEFAULT_PROJECTION_KINDS = ['durable', 'handoff'] as const;
 export const DEFAULT_PROJECTION_STATUSES = ['active'] as const;
-export function upsertObsidianSource(
-  configuration: ObsidianConfiguration,
+export function upsertObsidianSource<S extends SourceConfig, P extends ProjectionConfig>(
+  configuration: SourceConfiguration<S, P>,
   source: ObsidianSourceConfig,
-): ObsidianConfiguration {
-  if (configuration.sources.some(item => item.id === source.id && item.type !== source.type)) {
+): SourceConfiguration<S | ObsidianSourceConfig, P> {
+  if (EffectArray.some(configuration.sources, item => item.id === source.id && item.type !== source.type)) {
     throw ObsidianConfigurationError.make({message: `Source "${source.id}" already has another type.`});
   }
-  const sources = [...configuration.sources.filter(item => item.id !== source.id), source].sort((left, right) =>
-    left.id.localeCompare(right.id),
+  const sources = [...EffectArray.filter(configuration.sources, item => item.id !== source.id), source].sort(
+    (left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id)),
   );
   return configuration.version === 1
-    ? {version: 1, sources: sources.filter(isObsidianSource), projections: configuration.projections}
+    ? {version: 1, sources: EffectArray.filter(sources, isObsidianSource), projections: configuration.projections}
     : {version: 2, sources, projections: configuration.projections};
 }
-export function upsertObsidianProjection(
-  configuration: ObsidianConfiguration,
+export function upsertObsidianProjection<S extends SourceConfig, P extends ProjectionConfig>(
+  configuration: SourceConfiguration<S, P>,
   projection: ObsidianProjectionConfig,
-): ObsidianConfiguration {
-  const projections = [...configuration.projections.filter(item => item.id !== projection.id), projection].sort(
-    (left, right) => left.id.localeCompare(right.id),
-  );
+): SourceConfiguration<S, P | ObsidianProjectionConfig> {
+  const projections = [
+    ...EffectArray.filter(configuration.projections, item => item.id !== projection.id),
+    projection,
+  ].sort((left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id)));
   return configuration.version === 1
     ? {version: 1, sources: configuration.sources, projections}
     : {version: 2, sources: configuration.sources, projections};
 }
-export function removeObsidianSource(configuration: ObsidianConfiguration, id: string): ObsidianConfiguration {
+export function removeObsidianSource<S extends SourceConfig, P extends ProjectionConfig>(
+  configuration: SourceConfiguration<S, P>,
+  id: string,
+): SourceConfiguration<S, P> {
   return configuration.version === 1
     ? {
         version: 1,
         projections: configuration.projections,
-        sources: configuration.sources.filter(source => source.id !== id),
+        sources: EffectArray.filter(configuration.sources, source => source.id !== id),
       }
     : {
         version: 2,
         projections: configuration.projections,
-        sources: configuration.sources.filter(source => source.id !== id || !isObsidianSource(source)),
+        sources: EffectArray.filter(configuration.sources, source => source.id !== id || !isObsidianSource(source)),
       };
 }
-export function removeObsidianProjection(configuration: ObsidianConfiguration, id: string): ObsidianConfiguration {
+export function removeObsidianProjection<S extends SourceConfig, P extends ProjectionConfig>(
+  configuration: SourceConfiguration<S, P>,
+  id: string,
+): SourceConfiguration<S, P> {
   return configuration.version === 1
     ? {
         version: 1,
         sources: configuration.sources,
-        projections: configuration.projections.filter(item => item.id !== id),
+        projections: EffectArray.filter(configuration.projections, item => item.id !== id),
       }
     : {
         version: 2,
         sources: configuration.sources,
-        projections: configuration.projections.filter(item => item.id !== id),
+        projections: EffectArray.filter(configuration.projections, item => item.id !== id),
       };
 }
 export function requireObsidianSource(configuration: ObsidianConfiguration, id: string): ObsidianSourceConfig {
-  const source = configuration.sources.find(item => item.id === id);
+  const source = EffectOption.getOrUndefined(EffectArray.findFirst(configuration.sources, item => item.id === id));
   if (!source || !isObsidianSource(source)) {
     throw ObsidianConfigurationError.make({message: `No Obsidian source named "${id}".`});
   }
@@ -117,7 +128,9 @@ export function isObsidianSource(source: SourceConfig): source is ObsidianSource
   return source.type === 'obsidian';
 }
 export function requireObsidianProjection(configuration: ObsidianConfiguration, id: string): ObsidianProjectionConfig {
-  const projection = configuration.projections.find(item => item.id === id);
+  const projection = EffectOption.getOrUndefined(
+    EffectArray.findFirst(configuration.projections, item => item.id === id),
+  );
   if (projection && !isObsidianProjection(projection))
     throw ObsidianConfigurationError.make({message: `No Obsidian projection named "${id}".`});
   if (!projection) {
@@ -127,27 +140,35 @@ export function requireObsidianProjection(configuration: ObsidianConfiguration, 
 }
 function requiredAbsoluteVaultPath(value: unknown, label: string): string {
   const path = requiredString(value, label);
-  if (!path.startsWith('/') && !/^[a-zA-Z]:[\\/]/.test(path) && !/^\\\\/.test(path)) {
+  if (!Effect.pipe(path, EffectString.startsWith('/')) && !/^[a-zA-Z]:[\\/]/.test(path) && !/^\\\\/.test(path)) {
     throw ObsidianConfigurationError.make({message: `${label} must be an absolute path.`});
   }
   return path;
 }
 function requiredRelativeFolder(value: unknown, label: string): string {
-  const folder = requiredString(value, label)
-    .replaceAll('\\', '/')
-    .replace(/^\/+|\/+$/g, '');
-  if (folder.length === 0 || folder.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
+  const folder = Effect.pipe(
+    requiredString(value, label),
+    EffectString.replaceAll('\\', '/'),
+    EffectString.replace(/^\/+|\/+$/g, ''),
+  );
+  if (
+    folder.length === 0 ||
+    EffectArray.some(
+      Effect.pipe(folder, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
+  ) {
     throw ObsidianConfigurationError.make({message: `${label} must be a safe vault-relative folder.`});
   }
   return folder;
 }
 function sourcePatterns(value: unknown, label: string): readonly string[] {
-  return requiredStringArray(value, label).map(pattern => {
-    const normalized = pattern.replaceAll('\\', '/');
+  return EffectArray.map(requiredStringArray(value, label), pattern => {
+    const normalized = Effect.pipe(pattern, EffectString.replaceAll('\\', '/'));
     if (
-      normalized.startsWith('/') ||
+      Effect.pipe(normalized, EffectString.startsWith('/')) ||
       /^[a-zA-Z]:\//.test(normalized) ||
-      normalized.split('/').some(segment => segment === '..')
+      EffectArray.some(Effect.pipe(normalized, EffectString.split('/')), segment => segment === '..')
     ) {
       throw ObsidianConfigurationError.make({
         message: `${label} must contain only vault-relative patterns without parent traversal.`,
@@ -159,7 +180,8 @@ function sourcePatterns(value: unknown, label: string): readonly string[] {
 function memoryKinds(value: unknown, label: string): readonly MemoryKind[] {
   const values = value === undefined ? DEFAULT_PROJECTION_KINDS : requiredStringArray(value, label);
   if (
-    !values.every(
+    !EffectArray.every(
+      values,
       item =>
         item === 'durable' || item === 'handoff' || item === 'incident' || item === 'preference' || item === 'smoke',
     )
@@ -170,26 +192,35 @@ function memoryKinds(value: unknown, label: string): readonly MemoryKind[] {
 }
 function memoryStatuses(value: unknown, label: string): readonly MemoryStatus[] {
   const values = value === undefined ? DEFAULT_PROJECTION_STATUSES : requiredStringArray(value, label);
-  if (!values.every(item => item === 'active' || item === 'archived' || item === 'expired' || item === 'superseded')) {
+  if (
+    !EffectArray.every(
+      values,
+      item => item === 'active' || item === 'archived' || item === 'expired' || item === 'superseded',
+    )
+  ) {
     throw ObsidianConfigurationError.make({message: `${label} contains an unsupported memory status.`});
   }
   return values;
 }
 function selectedMemoryUris(value: unknown, label: string): readonly string[] {
-  return requiredStringArray(value, label)
-    .map(uri => {
-      const parsed = resourceIdWithoutAnchor(parseResourceId(uri));
-      if (
-        parsed.namespace !== 'user' ||
-        parsed.segments.length < 3 ||
-        parsed.segments[1] !== 'memories' ||
-        !parsed.segments.at(-1)?.toLowerCase().endsWith('.md')
-      ) {
-        throw ObsidianConfigurationError.make({message: `${label} may contain only canonical Threadnote memory URIs.`});
-      }
-      return parsed.canonicalUri;
-    })
-    .sort((left, right) => left.localeCompare(right));
+  return EffectArray.map(requiredStringArray(value, label), uri => {
+    const parsed = resourceIdWithoutAnchor(parseResourceId(uri));
+    if (
+      parsed.namespace !== 'user' ||
+      parsed.segments.length < 3 ||
+      parsed.segments[1] !== 'memories' ||
+      !Effect.pipe(
+        parsed.segments.at(-1),
+        effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+        effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.endsWith('.md')),
+      )
+    ) {
+      throw ObsidianConfigurationError.make({message: `${label} may contain only canonical Threadnote memory URIs.`});
+    }
+    return parsed.canonicalUri;
+  }).sort((left, right) => Effect.pipe(left, EffectString.localeCompare(right)));
 }
 export function parseProjection(value: unknown, label: string): ObsidianProjectionConfig {
   if (!isJsonObject(value)) {

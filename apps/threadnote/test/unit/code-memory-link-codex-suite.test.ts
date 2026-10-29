@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {link, mkdir, mkdtemp, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -20,12 +21,14 @@ import {
   type CodeMemoryLinkRubricV1,
   type CodeMemoryLinkTaskPacketV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('Code Memory Link Codex sealed-suite loader', () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('loads one selected task only after verifying the complete content-addressed roster', async () => {
@@ -87,14 +90,26 @@ describe('Code Memory Link Codex sealed-suite loader', () => {
   it('requires an exact sorted selected-memory identity/content roster', () => {
     const value = minimalLayout();
     value.tasks[0].preflightExpectedSelectedMemories = [
-      {contentSha256: '2'.repeat(64), memoryIdDigest: '1'.repeat(64)},
-      {contentSha256: '4'.repeat(64), memoryIdDigest: '3'.repeat(64)},
+      {
+        contentSha256: Effect.pipe('2', EffectString.repeat(64)),
+        memoryIdDigest: Effect.pipe('1', EffectString.repeat(64)),
+      },
+      {
+        contentSha256: Effect.pipe('4', EffectString.repeat(64)),
+        memoryIdDigest: Effect.pipe('3', EffectString.repeat(64)),
+      },
     ];
     expect(parseCodeMemoryLinkCodexSuiteLayoutV1(value).tasks[0].preflightExpectedSelectedMemories).toHaveLength(2);
 
     value.tasks[0].preflightExpectedSelectedMemories = [
-      {contentSha256: '4'.repeat(64), memoryIdDigest: '3'.repeat(64)},
-      {contentSha256: '2'.repeat(64), memoryIdDigest: '1'.repeat(64)},
+      {
+        contentSha256: Effect.pipe('4', EffectString.repeat(64)),
+        memoryIdDigest: Effect.pipe('3', EffectString.repeat(64)),
+      },
+      {
+        contentSha256: Effect.pipe('2', EffectString.repeat(64)),
+        memoryIdDigest: Effect.pipe('1', EffectString.repeat(64)),
+      },
     ];
     expect(() => parseCodeMemoryLinkCodexSuiteLayoutV1(value)).toThrow('unique and sorted');
   });
@@ -115,33 +130,42 @@ async function writeCorpus(root: string): Promise<WrittenCorpus> {
     mkdir(join(root, 'packets')),
     mkdir(join(root, 'rubrics')),
   ]);
-  const taskIds = Array.from({length: 28}, (_, index) => `tsk_${(index + 1).toString(16).padStart(16, '0')}`);
-  const fixtureArtifacts = taskIds.map((taskId, index) => {
+  const taskIds = Array.from(
+    {length: 28},
+    (_, index) => `tsk_${Effect.pipe((index + 1).toString(16), EffectString.padStart(16, '0'))}`,
+  );
+  const fixtureArtifacts = EffectArray.map(taskIds, (taskId, index) => {
     const content = `export const task = '${taskId}';\n`;
     return {
-      artifactId: `art_${(index + 1).toString(16).padStart(16, '0')}`,
+      artifactId: `art_${Effect.pipe((index + 1).toString(16), EffectString.padStart(16, '0'))}`,
       content,
       sha256: sha256(content),
-      source: `fixture/${(index + 1).toString(16).padStart(16, '0')}.ts`,
+      source: `fixture/${Effect.pipe((index + 1).toString(16), EffectString.padStart(16, '0'))}.ts`,
       taskId,
     };
   });
   const fixtureWithoutHash = {
-    artifacts: fixtureArtifacts.map(({artifactId, sha256}) => ({artifactId, sha256})),
+    artifacts: EffectArray.map(fixtureArtifacts, ({artifactId, sha256}) => ({artifactId, sha256})),
     version: 1 as const,
   };
   const fixture = {...fixtureWithoutHash, fixtureHash: codeMemoryLinkFixtureHashV1(fixtureWithoutHash)};
-  const packets = taskIds.map((taskId, index) => packet(taskId, index < 12, fixture.fixtureHash));
-  const rubrics = packets.map(packet => rubric(packet, packet.taskKind === 'hidden-constraint'));
+  const packets = EffectArray.map(taskIds, (taskId, index) => packet(taskId, index < 12, fixture.fixtureHash));
+  const rubrics = EffectArray.map(packets, packet => rubric(packet, packet.taskKind === 'hidden-constraint'));
   for (const artifact of fixtureArtifacts) await writeFile(join(root, artifact.source), artifact.content);
   for (let index = 0; index < packets.length; index += 1) {
-    await writeFile(join(root, `packets/${index.toString().padStart(2, '0')}.json`), JSON.stringify(packets[index]));
-    await writeFile(join(root, `rubrics/${index.toString().padStart(2, '0')}.json`), JSON.stringify(rubrics[index]));
+    await writeFile(
+      join(root, `packets/${Effect.pipe(index.toString(), EffectString.padStart(2, '0'))}.json`),
+      JSON.stringify(packets[index]),
+    );
+    await writeFile(
+      join(root, `rubrics/${Effect.pipe(index.toString(), EffectString.padStart(2, '0'))}.json`),
+      JSON.stringify(rubrics[index]),
+    );
   }
 
-  const layoutArtifactId = `art_${'a'.repeat(16)}`;
-  const commandArtifactId = `art_${'b'.repeat(16)}`;
-  const programArtifactId = `art_${'c'.repeat(16)}`;
+  const layoutArtifactId = `art_${Effect.pipe('a', EffectString.repeat(16))}`;
+  const commandArtifactId = `art_${Effect.pipe('b', EffectString.repeat(16))}`;
+  const programArtifactId = `art_${Effect.pipe('c', EffectString.repeat(16))}`;
   const command = `${JSON.stringify({
     maxOutputBytes: 65_536,
     programArtifactId,
@@ -153,7 +177,7 @@ async function writeCorpus(root: string): Promise<WrittenCorpus> {
   await writeFile(join(root, 'judge/command.json'), command);
   await writeFile(join(root, 'judge/program.ts'), program);
   const layout = {
-    fixtureFiles: fixtureArtifacts.map(artifact => ({
+    fixtureFiles: EffectArray.map(fixtureArtifacts, artifact => ({
       artifactId: artifact.artifactId,
       destination: 'src/task.ts',
       scope: 'repository',
@@ -169,16 +193,16 @@ async function writeCorpus(root: string): Promise<WrittenCorpus> {
       ],
     },
     layoutArtifactId,
-    tasks: packets.map((packet, index) => ({
+    tasks: EffectArray.map(packets, (packet, index) => ({
       packetHash: packet.packetHash,
-      packetSource: `packets/${index.toString().padStart(2, '0')}.json`,
+      packetSource: `packets/${Effect.pipe(index.toString(), EffectString.padStart(2, '0'))}.json`,
       preflightCodeRefs: ['src/task.ts'],
       preflightExpectedCitationDigests: rubrics[index].goldCitationDigests,
       preflightExpectedResponses: responseProjections(),
       preflightExpectedSelectedMemories: [],
       project: 'code-memory-link',
       rubricHash: rubrics[index].rubricHash,
-      rubricSource: `rubrics/${index.toString().padStart(2, '0')}.json`,
+      rubricSource: `rubrics/${Effect.pipe(index.toString(), EffectString.padStart(2, '0'))}.json`,
       taskId: packet.taskId,
       taskKind: packet.taskKind,
     })),
@@ -192,15 +216,15 @@ async function writeCorpus(root: string): Promise<WrittenCorpus> {
       {artifactId: commandArtifactId, sha256: sha256(command)},
       {artifactId: programArtifactId, sha256: sha256(program)},
     ],
-    judgeVersion: `ver_${'1'.repeat(16)}`,
+    judgeVersion: `ver_${Effect.pipe('1', EffectString.repeat(16))}`,
     version: 1 as const,
   };
   const judge = {...judgeWithoutHash, judgeHash: codeMemoryLinkJudgeHashV1(judgeWithoutHash)};
   const suiteWithoutHash = {
     fixture,
     judge,
-    suiteId: `sui_${'1'.repeat(16)}`,
-    tasks: packets.map((packet, index) => ({
+    suiteId: `sui_${Effect.pipe('1', EffectString.repeat(16))}`,
+    tasks: EffectArray.map(packets, (packet, index) => ({
       packetHash: packet.packetHash,
       rubricHash: rubrics[index].rubricHash,
       taskId: packet.taskId,
@@ -232,35 +256,37 @@ function packet(taskId: string, hidden: boolean, fixtureHash: string): CodeMemor
 }
 
 function rubric(packet: CodeMemoryLinkTaskPacketV1, hidden: boolean): CodeMemoryLinkRubricV1 {
-  const textArtifact = `art_${'d'.repeat(16)}`;
-  const jsonArtifact = `art_${'e'.repeat(16)}`;
+  const textArtifact = `art_${Effect.pipe('d', EffectString.repeat(16))}`;
+  const jsonArtifact = `art_${Effect.pipe('e', EffectString.repeat(16))}`;
   const withoutHash = {
     fixtureHash: packet.fixtureHash,
-    goldCitationDigests: hidden ? [codeMemoryLinkGoldCitationDigest(`tncc_${packet.taskId.slice(4)}`)] : [],
+    goldCitationDigests: hidden
+      ? [codeMemoryLinkGoldCitationDigest(`tncc_${Effect.pipe(packet.taskId, EffectString.slice(4))}`)]
+      : [],
     predicates: hidden
       ? [
           {
             assertion: {artifactId: textArtifact, expected: 'required=true', kind: 'utf8-contains' as const},
             expected: true,
-            predicateId: `prd_${'1'.repeat(16)}`,
+            predicateId: `prd_${Effect.pipe('1', EffectString.repeat(16))}`,
             roles: ['constraint', 'task-pass'] as const,
           },
           {
             assertion: {artifactId: textArtifact, expected: 'harmful=true', kind: 'utf8-not-contains' as const},
             expected: true,
-            predicateId: `prd_${'2'.repeat(16)}`,
+            predicateId: `prd_${Effect.pipe('2', EffectString.repeat(16))}`,
             roles: ['harmful-acceptance'] as const,
           },
           {
             assertion: {artifactId: jsonArtifact, expected: {memoryExclusive: true}, kind: 'json-equals' as const},
             expected: true,
-            predicateId: `prd_${'3'.repeat(16)}`,
+            predicateId: `prd_${Effect.pipe('3', EffectString.repeat(16))}`,
             roles: ['constraint', 'memory-exclusive', 'task-pass'] as const,
           },
           {
             assertion: {artifactId: textArtifact, expected: 'action=true', kind: 'utf8-contains' as const},
             expected: true,
-            predicateId: `prd_${'4'.repeat(16)}`,
+            predicateId: `prd_${Effect.pipe('4', EffectString.repeat(16))}`,
             roles: ['qualifying-action'] as const,
           },
         ]
@@ -268,7 +294,7 @@ function rubric(packet: CodeMemoryLinkTaskPacketV1, hidden: boolean): CodeMemory
           {
             assertion: {artifactId: textArtifact, expected: 'control=true', kind: 'utf8-contains' as const},
             expected: true,
-            predicateId: `prd_${'1'.repeat(16)}`,
+            predicateId: `prd_${Effect.pipe('1', EffectString.repeat(16))}`,
             roles: ['task-pass'] as const,
           },
         ],
@@ -290,27 +316,27 @@ function minimalLayout(): {
   return {
     fixtureFiles: [
       {
-        artifactId: `art_${'1'.repeat(16)}`,
+        artifactId: `art_${Effect.pipe('1', EffectString.repeat(16))}`,
         destination: 'src/task.ts',
         scope: 'repository',
         source: 'fixture/task.ts',
-        taskId: `tsk_${'1'.repeat(16)}`,
+        taskId: `tsk_${Effect.pipe('1', EffectString.repeat(16))}`,
       },
     ],
-    judge: {commandArtifactId: `art_${'2'.repeat(16)}`, files: []},
-    layoutArtifactId: `art_${'3'.repeat(16)}`,
+    judge: {commandArtifactId: `art_${Effect.pipe('2', EffectString.repeat(16))}`, files: []},
+    layoutArtifactId: `art_${Effect.pipe('3', EffectString.repeat(16))}`,
     tasks: [
       {
-        packetHash: '4'.repeat(64),
+        packetHash: Effect.pipe('4', EffectString.repeat(64)),
         packetSource: 'packets/task.json',
         preflightCodeRefs: ['src/task.ts'],
         preflightExpectedCitationDigests: [],
         preflightExpectedResponses: responseProjections(),
         preflightExpectedSelectedMemories: [],
         project: 'code-memory-link',
-        rubricHash: '5'.repeat(64),
+        rubricHash: Effect.pipe('5', EffectString.repeat(64)),
         rubricSource: 'rubrics/task.json',
-        taskId: `tsk_${'1'.repeat(16)}`,
+        taskId: `tsk_${Effect.pipe('1', EffectString.repeat(16))}`,
         taskKind: 'hidden-constraint',
       },
     ],

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {describe, expect} from 'vitest';
@@ -9,9 +10,11 @@ import {
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const COMMIT = 'a'.repeat(40);
-const REPOSITORY_ID = 'b'.repeat(64);
+const COMMIT = Effect2.pipe('a', EffectString.repeat(40));
+const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
 
 describe('Context Brief schema-v1 memory compatibility', () => {
   effectIt.effect('keeps LF, CRLF, and CR v1 memory bodies nonempty in the projected brief', () =>
@@ -68,8 +71,11 @@ describe('Context Brief schema-v1 memory compatibility', () => {
               },
             );
 
-            const projected = result.structuredContent.durableDecisions.find(
-              candidate => candidate.topic === testCase.topic,
+            const projected = EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                result.structuredContent.durableDecisions,
+                candidate => candidate.topic === testCase.topic,
+              ),
             );
             expect(projected).toMatchObject({freshness: testCase.expectedFreshness});
             expect(projected?.excerpt).toContain('Legacy compatibility sentinel');
@@ -81,23 +87,26 @@ describe('Context Brief schema-v1 memory compatibility', () => {
 });
 
 function legacyMemory(topic: string, body: string, sourceCommit?: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    `topic: ${topic}`,
-    'source_agent_client: codex',
-    'timestamp: 2025-01-01T00:00:00.000Z',
-    'schema_version: 1',
-    ...(sourceCommit === undefined ? [] : [`source_commit: ${sourceCommit}`]),
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      `topic: ${topic}`,
+      'source_agent_client: codex',
+      'timestamp: 2025-01-01T00:00:00.000Z',
+      'schema_version: 1',
+      ...(sourceCommit === undefined ? [] : [`source_commit: ${sourceCommit}`]),
+      '',
+      body,
+    ],
+    '\n',
+  );
 }
 
 function withLineEnding(content: string, lineEnding: '\r\n' | '\r'): string {
-  return content.replaceAll('\n', lineEnding);
+  return Effect2.pipe(content, EffectString.replaceAll('\n', lineEnding));
 }
 
 function graphEvidence(): ContextBriefGraphEvidenceV1 {
@@ -119,7 +128,7 @@ function graphEvidence(): ContextBriefGraphEvidenceV1 {
         freshness: 'fresh',
         repositoryId: REPOSITORY_ID,
         repositoryKey: 'threadnote',
-        snapshotId: `cgsn_${'c'.repeat(40)}`,
+        snapshotId: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
       },
     ],
     trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},

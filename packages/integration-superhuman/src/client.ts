@@ -1,6 +1,13 @@
-import {Data, Redacted} from 'effect';
+import {
+  isFiniteNumber as checkedIsFiniteNumber,
+  isSafeInteger as checkedIsSafeInteger,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray, Schema} from 'effect';
+import {Redacted} from 'effect';
 import {applyScrubber} from '@threadnote/platform/scrubber';
 import {normalizeSuperhumanDisplayText, normalizeSuperhumanTitle} from './render.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const SUPERHUMAN_API_ORIGIN = 'https://docs.superhuman.com';
 const API_ROOT = `${SUPERHUMAN_API_ORIGIN}/apis/v1`;
@@ -9,23 +16,25 @@ const RESPONSE_LIMIT = 256 * 1024;
 const TOTAL_LIMIT = 2 * 1024 * 1024;
 const CURSOR_LIMIT = 512;
 
-export type SuperhumanClientErrorCode =
-  | 'authentication-rejected'
-  | 'access-rejected'
-  | 'not-found'
-  | 'quota-rejected'
-  | 'transport-rejected'
-  | 'response-too-large'
-  | 'contract-invalid'
-  | 'contract-incomplete'
-  | 'contract-unsupported'
-  | 'credential-reflected'
-  | 'deadline-exceeded';
+export const SuperhumanClientErrorCodeSchema = Schema.Literals([
+  'authentication-rejected',
+  'access-rejected',
+  'not-found',
+  'quota-rejected',
+  'transport-rejected',
+  'response-too-large',
+  'contract-invalid',
+  'contract-incomplete',
+  'contract-unsupported',
+  'credential-reflected',
+  'deadline-exceeded',
+]);
+export type SuperhumanClientErrorCode = typeof SuperhumanClientErrorCodeSchema.Type;
 
-export class SuperhumanClientError extends Data.TaggedError('SuperhumanClientError')<{
-  readonly code: SuperhumanClientErrorCode;
-  readonly retryAfterMilliseconds?: number;
-}> {}
+export class SuperhumanClientError extends Schema.TaggedError<SuperhumanClientError, {readonly brand: unique symbol}>()(
+  'SuperhumanClientError',
+  {code: SuperhumanClientErrorCodeSchema, retryAfterMilliseconds: Schema.optional(Schema.Finite)},
+) {}
 
 export interface SuperhumanPage {
   readonly id: string;
@@ -88,11 +97,11 @@ export function makeSuperhumanClientBudget(
 }
 
 function fail(code: SuperhumanClientErrorCode, retryAfterMilliseconds?: number): never {
-  throw new SuperhumanClientError({code, ...(retryAfterMilliseconds === undefined ? {} : {retryAfterMilliseconds})});
+  throw SuperhumanClientError.make({code, ...(retryAfterMilliseconds === undefined ? {} : {retryAfterMilliseconds})});
 }
 
 function object(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return value !== null && typeof value === 'object' && !EffectArray.isArray(value);
 }
 
 function identifier(value: unknown): value is string {
@@ -115,7 +124,7 @@ function pageFrom(value: unknown): SuperhumanPage {
     (typeof value.updatedAt !== 'string' ||
       value.updatedAt.length > 64 ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value.updatedAt) ||
-      !Number.isFinite(Date.parse(value.updatedAt)))
+      !checkedIsFiniteNumber(Date.parse(value.updatedAt)))
   )
     fail('contract-invalid');
   return {
@@ -139,17 +148,17 @@ function lineFrom(value: unknown): SuperhumanLine {
   )
     fail('contract-unsupported');
   const level = value.itemContent.lineLevel;
-  if (level !== undefined && (!Number.isSafeInteger(level) || (level as number) < 0)) fail('contract-invalid');
+  if (level !== undefined && (!checkedIsSafeInteger(level) || level < 0)) fail('contract-invalid');
   return {
     id: value.id,
     style: value.itemContent.style,
     content: value.itemContent.content,
-    ...(level === undefined ? {} : {lineLevel: level as number}),
+    ...(level === undefined ? {} : {lineLevel: level}),
   };
 }
 
 function pageResult(value: unknown): {items: unknown[]; next?: string} {
-  if (!object(value) || !Array.isArray(value.items)) fail('contract-invalid');
+  if (!object(value) || !EffectArray.isArray(value.items)) fail('contract-invalid');
   const token = value.nextPageToken;
   if (
     token !== undefined &&
@@ -172,8 +181,8 @@ function allowedUrl(value: string, exactPath?: string, exactSearch?: string): UR
     url.password ||
     url.port ||
     url.hash ||
-    !url.pathname.startsWith('/apis/v1/') ||
-    (exactPath !== undefined && url.pathname.replace(/\/$/, '') !== exactPath) ||
+    !Effect.pipe(url.pathname, EffectString.startsWith('/apis/v1/')) ||
+    (exactPath !== undefined && Effect.pipe(url.pathname, EffectString.replace(/\/$/, '')) !== exactPath) ||
     (exactSearch !== undefined && url.search !== exactSearch)
   )
     fail('transport-rejected');
@@ -185,9 +194,9 @@ function retryAfter(value: string | null): number | undefined {
   const now = Date.now();
   const maximumDelay = Math.max(0, 8_640_000_000_000_000 - now - 1);
   const seconds = Number(value);
-  if (/^\d+$/.test(value.trim())) return Math.min(seconds * 1000, maximumDelay);
+  if (/^\d+$/.test(Effect.pipe(value, EffectString.trim))) return Math.min(seconds * 1000, maximumDelay);
   const delay = Date.parse(value) - now;
-  return Number.isFinite(delay) && delay >= 0 ? Math.min(delay, maximumDelay) : undefined;
+  return checkedIsFiniteNumber(delay) && delay >= 0 ? Math.min(delay, maximumDelay) : undefined;
 }
 
 function assertNoCredentialReflection(
@@ -199,31 +208,46 @@ function assertNoCredentialReflection(
   const cleaned = (value: string): string =>
     normalizeSuperhumanDisplayText(applyScrubber(value, {redact: true}).cleaned);
   const reflects = (value: string): boolean =>
-    value.includes(secret) || normalizeSuperhumanDisplayText(value).includes(secret) || cleaned(value).includes(secret);
+    Effect.pipe(value, EffectString.includes(secret)) ||
+    Effect.pipe(normalizeSuperhumanDisplayText(value), EffectString.includes(secret)) ||
+    Effect.pipe(cleaned(value), EffectString.includes(secret));
   if (reflects(documentId)) fail('credential-reflected');
-  const content = pages.flatMap(({lines}) => lines.map(line => line.content ?? '')).join('');
-  const normalizedContent = pages
-    .flatMap(({lines}) => lines.map(line => normalizeSuperhumanDisplayText(line.content ?? '')))
-    .join('');
-  const cleanedContent = pages.flatMap(({lines}) => lines.map(line => cleaned(line.content ?? ''))).join('');
-  if (reflects(content) || normalizedContent.includes(secret) || cleanedContent.includes(secret))
+  const content = EffectArray.join(
+    EffectArray.flatMap(pages, ({lines}) => EffectArray.map(lines, line => line.content ?? '')),
+    '',
+  );
+  const normalizedContent = EffectArray.join(
+    EffectArray.flatMap(pages, ({lines}) =>
+      EffectArray.map(lines, line => normalizeSuperhumanDisplayText(line.content ?? '')),
+    ),
+    '',
+  );
+  const cleanedContent = EffectArray.join(
+    EffectArray.flatMap(pages, ({lines}) => EffectArray.map(lines, line => cleaned(line.content ?? ''))),
+    '',
+  );
+  if (
+    reflects(content) ||
+    Effect.pipe(normalizedContent, EffectString.includes(secret)) ||
+    Effect.pipe(cleanedContent, EffectString.includes(secret))
+  )
     fail('credential-reflected');
   for (const {page, lines} of pages) {
     if (
-      [page.id, page.name, page.updatedAt ?? ''].some(reflects) ||
-      normalizeSuperhumanTitle(page.name).includes(secret) ||
-      normalizeSuperhumanTitle(cleaned(page.name)).includes(secret)
+      EffectArray.some([page.id, page.name, page.updatedAt ?? ''], reflects) ||
+      Effect.pipe(normalizeSuperhumanTitle(page.name), EffectString.includes(secret)) ||
+      Effect.pipe(normalizeSuperhumanTitle(cleaned(page.name)), EffectString.includes(secret))
     )
       fail('credential-reflected');
     for (const line of lines) {
-      if ([line.id, line.style ?? '', line.content ?? '', String(line.lineLevel ?? '')].some(reflects))
+      if (EffectArray.some([line.id, line.style ?? '', line.content ?? '', String(line.lineLevel ?? '')], reflects))
         fail('credential-reflected');
     }
   }
 }
 
 function bounded(value: number | undefined, maximum: number): number {
-  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? Math.min(value, maximum) : maximum;
+  return value !== undefined && checkedIsSafeInteger(value) && value > 0 ? Math.min(value, maximum) : maximum;
 }
 
 export function createSuperhumanRestSession(token: Redacted.Redacted<string>, options: SuperhumanClientOptions = {}) {
@@ -246,7 +270,7 @@ export function createSuperhumanRestSession(token: Redacted.Redacted<string>, op
   const maxRequests = bounded(options.maxRequests ?? 16, 64);
   const get = async (href: string): Promise<unknown> => {
     let url = allowedUrl(href);
-    const path = url.pathname.replace(/\/$/, '');
+    const path = Effect.pipe(url.pathname, EffectString.replace(/\/$/, ''));
     const search = url.search;
     const seen = new Set<string>();
     for (let redirects = 0; redirects <= 2; redirects++) {
@@ -264,10 +288,10 @@ export function createSuperhumanRestSession(token: Redacted.Redacted<string>, op
       const deadline = Promise.withResolvers<never>();
       controller.signal.addEventListener(
         'abort',
-        () => deadline.reject(new SuperhumanClientError({code: 'deadline-exceeded'})),
+        () => deadline.reject(SuperhumanClientError.make({code: 'deadline-exceeded'})),
         {once: true},
       );
-      if (controller.signal.aborted) deadline.reject(new SuperhumanClientError({code: 'deadline-exceeded'}));
+      if (controller.signal.aborted) deadline.reject(SuperhumanClientError.make({code: 'deadline-exceeded'}));
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
         const pending = fetchImpl(url, {
@@ -298,7 +322,17 @@ export function createSuperhumanRestSession(token: Redacted.Redacted<string>, op
           if (response.status === 429) fail('quota-rejected', retryAfter(response.headers.get('retry-after')));
           fail('transport-rejected');
         }
-        if (!response.headers.get('content-type')?.toLowerCase().startsWith('application/json'))
+        if (
+          !Effect.pipe(
+            response.headers.get('content-type'),
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith('application/json')),
+          )
+        )
           fail('transport-rejected');
         if (Number(response.headers.get('content-length')) > RESPONSE_LIMIT) fail('response-too-large');
         if (!response.body) fail('transport-rejected');
@@ -331,7 +365,7 @@ export function createSuperhumanRestSession(token: Redacted.Redacted<string>, op
           return fail('contract-invalid');
         }
       } catch (error) {
-        if (error instanceof SuperhumanClientError) throw error;
+        if (Schema.is(SuperhumanClientError)(error)) throw error;
         if (controller.signal.aborted || total.signal.aborted) fail('deadline-exceeded');
         fail('transport-rejected');
       } finally {
@@ -441,7 +475,9 @@ export async function readSuperhumanDocument(
       documentId,
       pages,
       excluded,
-      missingSelectedPageIds: selected ? [...selected].filter(id => !inventory.some(page => page.id === id)) : [],
+      missingSelectedPageIds: selected
+        ? EffectArray.filter([...selected], id => !EffectArray.some(inventory, page => page.id === id))
+        : [],
       requests: session.requests,
       responseBytes: session.responseBytes,
     };

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {describe, expect, it} from '@effect/vitest';
@@ -23,6 +25,7 @@ import {
   telemetryDashboardUid,
   telemetryDashboardUnexpectedFullBuildExpression,
   validateGrafanaCloudNamespace,
+  validateDashboardArtifact,
   validateDashboardArtifactBytes,
   validateReaderPermissions,
   validateWriterPermissions,
@@ -30,51 +33,59 @@ import {
   type DashboardArtifact,
   type JsonValue,
 } from '../../../scripts/telemetry-dashboard.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const testGrafanaNamespace = 'stacks-123456';
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number')
+    return true;
+  if (EffectArray.isArray(value)) return EffectArray.every(value, isJsonValue);
+  return isJsonObject(value);
+}
+
+function isJsonObject(value: unknown): value is Record<string, JsonValue> {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !EffectArray.isArray(value) &&
+    EffectArray.every(EffectRecord.toEntries(value), ([, member]) => isJsonValue(member))
+  );
+}
+
+function requireJsonObject(value: unknown): Record<string, JsonValue> {
+  if (!isJsonObject(value)) throw new Error('expected a JSON object fixture');
+  return value;
+}
+
+function requireJsonObjectArray(value: unknown): Record<string, JsonValue>[] {
+  if (!EffectArray.isArray(value)) throw new Error('expected an array of JSON object fixtures');
+  const records: Record<string, JsonValue>[] = [];
+  for (const item of value) records.push(requireJsonObject(item));
+  return records;
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('expected a string fixture');
+  return value;
+}
+
 const testGrafanaUrl = 'https://threadnote-test.grafana.net';
-const currentSha = 'a'.repeat(40);
+const currentSha = Effect.pipe('a', EffectString.repeat(40));
 const grafanaSharedWithMeFolderScope = 'folders:uid:sharedwithme';
 const grafanaDefaultRefreshIntervals = ['5s', '10s', '30s', '1m', '5m', '15m', '30m', '1h', '2h', '1d'];
-
-type WorkflowJob = Readonly<{
-  environment?: string | Readonly<{deployment?: boolean; name: string}>;
-  if?: string;
-  needs?: string | readonly string[];
-  outputs?: Readonly<Record<string, string>>;
-  steps?: readonly Readonly<{
-    env?: Readonly<Record<string, string>>;
-    id?: string;
-    if?: string;
-    name?: string;
-    run?: string;
-    uses?: string;
-    with?: Readonly<Record<string, unknown>>;
-  }>[];
-}>;
-
-type DashboardWorkflow = Readonly<{
-  concurrency: Readonly<{'cancel-in-progress': boolean; group: string; queue: string}>;
-  jobs: Readonly<Record<string, WorkflowJob>>;
-  on: Readonly<{
-    pull_request: Readonly<{branches: readonly string[]; paths: readonly string[]}>;
-    push: Readonly<{branches: readonly string[]; paths: readonly string[]}>;
-    schedule: readonly Readonly<{cron: string}>[];
-    workflow_dispatch: unknown;
-  }>;
-  permissions: Readonly<Record<string, string>>;
-}>;
 
 function readDashboardSource(): unknown {
   return JSON.parse(readFileSync(telemetryDashboardSourcePath, 'utf8'));
 }
 
 function readDashboardArtifact(): DashboardArtifact {
-  return JSON.parse(readFileSync(telemetryDashboardArtifactPath, 'utf8')) as DashboardArtifact;
+  return validateDashboardArtifact(JSON.parse(readFileSync(telemetryDashboardArtifactPath, 'utf8')));
 }
 
 function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  return structuredClone(value);
 }
 
 function evaluateUnexpectedFullBuildPercentage(numerator: number, denominator: number): number {
@@ -82,18 +93,18 @@ function evaluateUnexpectedFullBuildPercentage(numerator: number, denominator: n
 }
 
 function grafanaV42DashboardSpec(spec: Readonly<Record<string, JsonValue>>): Record<string, JsonValue> {
-  const migrated = clone(spec) as Record<string, JsonValue>;
+  const migrated = requireJsonObject(clone(spec));
   migrated.schemaVersion = 42;
   migrated.preload = false;
   delete migrated.templating;
   migrated.timepicker = {refresh_intervals: grafanaDefaultRefreshIntervals};
   delete migrated.weekStart;
-  const panels = migrated.panels as Record<string, JsonValue>[];
+  const panels = requireJsonObjectArray(migrated.panels);
   for (const panel of panels) {
     panel.pluginVersion = '';
     if (typeof panel.id !== 'number') continue;
-    const fieldConfig = panel.fieldConfig as Record<string, JsonValue>;
-    const defaults = fieldConfig.defaults as Record<string, JsonValue>;
+    const fieldConfig = requireJsonObject(panel.fieldConfig);
+    const defaults = requireJsonObject(fieldConfig.defaults);
     if ((panel.id >= 1 && panel.id <= 12) || (panel.id >= 21 && panel.id <= 25)) delete defaults.mappings;
     if ((panel.id >= 1 && panel.id <= 11) || panel.id === 13 || (panel.id >= 21 && panel.id <= 25)) {
       delete fieldConfig.overrides;
@@ -110,35 +121,43 @@ function artifactWithTitle(resource: DashboardArtifact, title: string): Dashboar
 }
 
 function permuteObjectKeys(value: unknown, choices: readonly number[], offset = {value: 0}): unknown {
-  if (Array.isArray(value)) return value.map(item => permuteObjectKeys(item, choices, offset));
+  if (EffectArray.isArray(value)) return EffectArray.map(value, item => permuteObjectKeys(item, choices, offset));
   if (value === null || typeof value !== 'object') return value;
-  const entries = Object.entries(value);
+  const entries = EffectRecord.toEntries(value);
   const choice = choices[offset.value % choices.length] ?? 0;
   offset.value += 1;
   const pivot = entries.length === 0 ? 0 : Math.abs(choice) % entries.length;
   const rotated = [...entries.slice(pivot), ...entries.slice(0, pivot)].reverse();
-  return Object.fromEntries(rotated.map(([key, item]) => [key, permuteObjectKeys(item, choices, offset)]));
+  return EffectRecord.fromEntries(
+    EffectArray.map(rotated, ([key, item]) => [key, permuteObjectKeys(item, choices, offset)]),
+  );
 }
 
 function grafanaQueryResponse(request: Readonly<Record<string, JsonValue>>): unknown {
-  const queries = request.queries as readonly Readonly<Record<string, JsonValue>>[];
+  const queries = requireJsonObjectArray(request.queries);
   // Grafana executes hidden operands but omits their result entries from the server-side expression response.
   return {
-    results: Object.fromEntries(queries.filter(query => query.hide !== true).map(query => [query.refId, {frames: []}])),
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    results: Object.fromEntries(
+      EffectArray.map(
+        EffectArray.filter(queries, query => query.hide !== true),
+        query => [query.refId, {frames: []}],
+      ),
+    ),
   };
 }
 
 function queryRequests(resource: DashboardArtifact, now = Date.now()): readonly Readonly<Record<string, JsonValue>>[] {
-  return buildTempoQueryRequests(resource, now) as readonly Readonly<Record<string, JsonValue>>[];
+  return requireJsonObjectArray(buildTempoQueryRequests(resource, now));
 }
 
 function requestQueries(request: Readonly<Record<string, JsonValue>>): readonly Readonly<Record<string, JsonValue>>[] {
-  return request.queries as readonly Readonly<Record<string, JsonValue>>[];
+  return requireJsonObjectArray(request.queries);
 }
 
 function queryRequestFromBody(body: BodyInit | null | undefined): Readonly<Record<string, JsonValue>> {
   if (typeof body !== 'string') throw new Error('expected JSON query request body');
-  return JSON.parse(body) as Readonly<Record<string, JsonValue>>;
+  return requireJsonObject(JSON.parse(body));
 }
 
 function liveDashboard(
@@ -228,14 +247,15 @@ function deploymentFetcher(
     fetcher: async (input, init) => {
       const url = String(input);
       requests.push(`${init?.method ?? 'GET'} ${url}`);
-      if (url.endsWith('/api/access-control/user/permissions')) {
+      if (Effect.pipe(url, EffectString.endsWith('/api/access-control/user/permissions'))) {
         return Response.json(options.permissions ?? writerPermissions());
       }
-      if (url.includes('/apis/folder.grafana.app/')) return Response.json(liveFolder());
-      if (url.endsWith(`/api/folders/${telemetryDashboardFolderUid}/permissions`)) return Response.json([]);
-      if (url.includes('/apis/dashboard.grafana.app/')) {
+      if (Effect.pipe(url, EffectString.includes('/apis/folder.grafana.app/'))) return Response.json(liveFolder());
+      if (Effect.pipe(url, EffectString.endsWith(`/api/folders/${telemetryDashboardFolderUid}/permissions`)))
+        return Response.json([]);
+      if (Effect.pipe(url, EffectString.includes('/apis/dashboard.grafana.app/'))) {
         if (init?.method === 'PUT') {
-          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          const body = requireJsonObject(JSON.parse(String(init.body)));
           options.onPut?.(body);
           if (options.putResponse === 'transport-error') throw new Error('private transport failure');
           return options.putResponse ?? Response.json({}, {status: 200});
@@ -276,7 +296,9 @@ describe('direct Grafana dashboard provisioning', () => {
 
     const queries = collectTempoQueries(checkedIn);
     expect(queries.length).toBeGreaterThan(20);
-    expect(new Set(queries.map(query => `${query.panelId}:${query.targetIndex}`)).size).toBe(queries.length);
+    expect(new Set(EffectArray.map(queries, query => `${query.panelId}:${query.targetIndex}`)).size).toBe(
+      queries.length,
+    );
     for (const {query, target} of queries) {
       expect(query.length).toBeLessThanOrEqual(telemetryDashboardQueryLengthLimit);
       expect(query).toContain(telemetryDashboardSyntheticCanaryExclusion);
@@ -298,8 +320,8 @@ describe('direct Grafana dashboard provisioning', () => {
     const [tempoRequest, expressionRequest] = requests;
     const tempoRequestQueries = requestQueries(tempoRequest);
     const expressionRequestQueries = requestQueries(expressionRequest);
-    const expressionQueries = expressionRequestQueries.filter(query => {
-      const datasource = query.datasource as Readonly<Record<string, JsonValue>>;
+    const expressionQueries = EffectArray.filter(expressionRequestQueries, query => {
+      const datasource = requireJsonObject(query.datasource);
       return datasource.type === '__expr__';
     });
     expect(tempoRequestQueries).toContainEqual(expect.objectContaining({tableType: 'spans'}));
@@ -319,16 +341,21 @@ describe('direct Grafana dashboard provisioning', () => {
     ]);
     expect(expressionRequestQueries).not.toContainEqual(expect.objectContaining({tableType: 'spans'}));
 
-    const allTempoQueries = [...tempoRequestQueries, ...expressionRequestQueries].filter(query => {
-      const datasource = query.datasource as Readonly<Record<string, JsonValue>>;
+    const allTempoQueries = EffectArray.filter([...tempoRequestQueries, ...expressionRequestQueries], query => {
+      const datasource = requireJsonObject(query.datasource);
       return datasource.type === 'tempo';
     });
-    const expectedTempoReferences = collected.map(({panelId, targetIndex}) => `P${panelId}T${targetIndex}`);
-    const actualTempoReferences = allTempoQueries.map(query => query.refId as string);
+    const expectedTempoReferences = EffectArray.map(
+      collected,
+      ({panelId, targetIndex}) => `P${panelId}T${targetIndex}`,
+    );
+    const actualTempoReferences = EffectArray.map(allTempoQueries, query => requireString(query.refId));
     expect(actualTempoReferences).toHaveLength(expectedTempoReferences.length);
     expect(new Set(actualTempoReferences).size).toBe(expectedTempoReferences.length);
     expect([...actualTempoReferences].sort()).toEqual([...expectedTempoReferences].sort());
-    const actualReferences = requests.flatMap(request => requestQueries(request).map(query => query.refId as string));
+    const actualReferences = EffectArray.flatMap(requests, request =>
+      EffectArray.map(requestQueries(request), query => requireString(query.refId)),
+    );
     expect(actualReferences).toHaveLength(collected.length + 1);
     expect(new Set(actualReferences).size).toBe(actualReferences.length);
     for (const query of allTempoQueries) {
@@ -343,9 +370,11 @@ describe('direct Grafana dashboard provisioning', () => {
   });
 
   it('rejects an unguarded unexpected-full percentage expression', () => {
-    const source = clone(readDashboardSource()) as Record<string, JsonValue>;
-    const panel = (source.panels as Record<string, JsonValue>[]).find(candidate => candidate.id === 13)!;
-    const expression = (panel.targets as Record<string, JsonValue>[])[2];
+    const source = requireJsonObject(clone(readDashboardSource()));
+    const panel = EffectOption.getOrUndefined(
+      EffectArray.findFirst(requireJsonObjectArray(source.panels), candidate => candidate.id === 13),
+    )!;
+    const expression = requireJsonObjectArray(panel.targets)[2];
     expression.expression = '$A / $B * 100';
 
     expect(() => renderDashboardArtifact(source)).toThrow(/guarded executable A\/B percentage expression/u);
@@ -391,13 +420,13 @@ describe('direct Grafana dashboard provisioning', () => {
     expect(canonicalDashboardSemantics(migrated)).toBe(canonicalDashboardSemantics(resource.spec));
 
     const queryDrift = clone(migrated);
-    const firstPanel = (queryDrift.panels as Record<string, JsonValue>[])[0];
-    const firstTarget = (firstPanel.targets as Record<string, JsonValue>[])[0];
+    const firstPanel = requireJsonObjectArray(queryDrift.panels)[0];
+    const firstTarget = requireJsonObjectArray(firstPanel.targets)[0];
     firstTarget.query = '{}';
     expect(canonicalDashboardSemantics(queryDrift)).not.toBe(canonicalDashboardSemantics(resource.spec));
 
     const unapprovedEmptyRemoval = clone(resource.spec);
-    delete (unapprovedEmptyRemoval.panels as Record<string, JsonValue>[])[19].fieldConfig;
+    delete requireJsonObjectArray(unapprovedEmptyRemoval.panels)[19].fieldConfig;
     expect(canonicalDashboardSemantics(unapprovedEmptyRemoval)).not.toBe(canonicalDashboardSemantics(resource.spec));
 
     const wrongRefreshIntervals = clone(migrated);
@@ -405,17 +434,16 @@ describe('direct Grafana dashboard provisioning', () => {
     expect(canonicalDashboardSemantics(wrongRefreshIntervals)).not.toBe(canonicalDashboardSemantics(resource.spec));
 
     const wrongMixedDatasource = clone(migrated);
-    (wrongMixedDatasource.panels as Record<string, JsonValue>[])[12].datasource = {
+    requireJsonObjectArray(wrongMixedDatasource.panels)[12].datasource = {
       type: 'mixed',
       uid: 'other',
     };
     expect(canonicalDashboardSemantics(wrongMixedDatasource)).not.toBe(canonicalDashboardSemantics(resource.spec));
 
     const mismatchedTargetDatasources = clone(migrated);
-    const expressionTargets = (mismatchedTargetDatasources.panels as Record<string, JsonValue>[])[12].targets as Record<
-      string,
-      JsonValue
-    >[];
+    const expressionTargets = requireJsonObjectArray(
+      requireJsonObjectArray(mismatchedTargetDatasources.panels)[12].targets,
+    );
     expressionTargets[1].datasource = {type: 'tempo', uid: 'other'};
     expect(canonicalDashboardSemantics(mismatchedTargetDatasources)).not.toBe(
       canonicalDashboardSemantics(resource.spec),
@@ -428,9 +456,9 @@ describe('direct Grafana dashboard provisioning', () => {
     {datasourceUid: FC.string({maxLength: 32, minLength: 1})},
     ({datasourceUid}) => {
       const historical = clone(readDashboardArtifact().spec);
-      const panel = (historical.panels as Record<string, JsonValue>[])[12];
+      const panel = requireJsonObjectArray(historical.panels)[12];
       panel.datasource = {type: 'tempo', uid: datasourceUid};
-      const targets = panel.targets as Record<string, JsonValue>[];
+      const targets = requireJsonObjectArray(panel.targets);
       targets[0].datasource = {type: 'tempo', uid: datasourceUid};
       targets[1].datasource = {type: 'tempo', uid: datasourceUid};
 
@@ -447,8 +475,8 @@ describe('direct Grafana dashboard provisioning', () => {
     {pluginVersion: FC.string({maxLength: 32, minLength: 1})},
     ({pluginVersion}) => {
       const resource = readDashboardArtifact();
-      const drift = clone(resource.spec) as Record<string, JsonValue>;
-      (drift.panels as Record<string, JsonValue>[])[0].pluginVersion = pluginVersion;
+      const drift = requireJsonObject(clone(resource.spec));
+      requireJsonObjectArray(drift.panels)[0].pluginVersion = pluginVersion;
       expect(canonicalDashboardSemantics(drift)).not.toBe(canonicalDashboardSemantics(resource.spec));
     },
     {fastCheck: {numRuns: 40}},
@@ -500,8 +528,8 @@ describe('direct Grafana dashboard provisioning', () => {
       }),
     ).resolves.toBe('update');
 
-    const metadata = requestBody?.metadata as Record<string, unknown>;
-    const spec = requestBody?.spec as Record<string, unknown>;
+    const metadata = requireJsonObject(requestBody?.metadata);
+    const spec = requireJsonObject(requestBody?.spec);
     expect(metadata.name).toBe(telemetryDashboardUid);
     expect(metadata.resourceVersion).toBe('opaque-rv');
     expect(metadata.uid).toBe('immutable-dashboard-uid');
@@ -509,7 +537,15 @@ describe('direct Grafana dashboard provisioning', () => {
     expect(spec.schemaVersion).toBe(43);
     expect(spec.title).toBe('Updated telemetry title');
     expect(requestBody).not.toHaveProperty('access');
-    expect(harness.requests.filter(request => request.startsWith('PUT '))).toHaveLength(1);
+    expect(
+      EffectArrayPipe(harness.requests, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (request, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && Effect.pipe(request, EffectString.startsWith('PUT ')),
+        ),
+      ),
+    ).toHaveLength(1);
     expect(harness.requests.at(-1)).toMatch(/^GET .*\/dashboards\/threadnote-telemetry$/u);
   });
 
@@ -527,7 +563,9 @@ describe('direct Grafana dashboard provisioning', () => {
         token: 'narrow-writer-token',
       }),
     ).resolves.toBe('noop');
-    expect(harness.requests.some(request => request.startsWith('PUT '))).toBe(false);
+    expect(EffectArray.some(harness.requests, request => Effect.pipe(request, EffectString.startsWith('PUT ')))).toBe(
+      false,
+    );
   });
 
   it('allows the first direct artifact commit to adopt only an already-current dashboard without history', async () => {
@@ -544,7 +582,9 @@ describe('direct Grafana dashboard provisioning', () => {
         token: 'narrow-writer-token',
       }),
     ).resolves.toBe('noop');
-    expect(harness.requests.some(request => request.startsWith('PUT '))).toBe(false);
+    expect(EffectArray.some(harness.requests, request => Effect.pipe(request, EffectString.startsWith('PUT ')))).toBe(
+      false,
+    );
 
     const drifted = deploymentFetcher({
       current,
@@ -561,29 +601,32 @@ describe('direct Grafana dashboard provisioning', () => {
         token: 'narrow-writer-token',
       }),
     ).rejects.toThrow(/trusted historical/u);
-    expect(drifted.requests.some(request => request.startsWith('PUT '))).toBe(false);
+    expect(EffectArray.some(drifted.requests, request => Effect.pipe(request, EffectString.startsWith('PUT ')))).toBe(
+      false,
+    );
   });
 
   it('skips source-history commits from before the direct artifact existed', async () => {
-    const oldSourceCommit = 'b'.repeat(40);
+    const oldSourceCommit = Effect.pipe('b', EffectString.repeat(40));
     const artifacts = await loadHistoricalArtifacts('/unused-in-injected-test', currentSha, async args => {
       if (args[0] === 'log') return `${currentSha}\n${oldSourceCommit}`;
-      if (args[0] === 'show' && String(args[1]).startsWith(oldSourceCommit)) return undefined;
+      if (args[0] === 'show' && Effect.pipe(String(args[1]), EffectString.startsWith(oldSourceCommit)))
+        return undefined;
       throw new Error('unexpected Git command');
     });
     expect(artifacts).toEqual([]);
   });
 
   it('loads reviewed historical artifacts without applying the current renderer contract', async () => {
-    const historicalCommit = 'b'.repeat(40);
+    const historicalCommit = Effect.pipe('b', EffectString.repeat(40));
     const historical = clone(readDashboardArtifact());
-    const firstPanel = (historical.spec.panels as Record<string, JsonValue>[])[0];
-    const firstTarget = (firstPanel.targets as Record<string, JsonValue>[])[0];
+    const firstPanel = requireJsonObjectArray(historical.spec.panels)[0];
+    const firstTarget = requireJsonObjectArray(firstPanel.targets)[0];
     firstPanel.datasource = {type: 'tempo', uid: 'previous-traces-datasource'};
     firstTarget.datasource = {type: 'tempo', uid: 'previous-traces-datasource'};
-    const expressionPanel = (historical.spec.panels as Record<string, JsonValue>[])[12];
+    const expressionPanel = requireJsonObjectArray(historical.spec.panels)[12];
     expressionPanel.datasource = {type: 'tempo', uid: 'previous-traces-datasource'};
-    const expressionTargets = expressionPanel.targets as Record<string, JsonValue>[];
+    const expressionTargets = requireJsonObjectArray(expressionPanel.targets);
     expressionTargets[0].datasource = {type: 'tempo', uid: 'previous-traces-datasource'};
     expressionTargets[1].datasource = {type: 'tempo', uid: 'previous-traces-datasource'};
     const reader = async (args: readonly string[]): Promise<string | undefined> => {
@@ -599,7 +642,10 @@ describe('direct Grafana dashboard provisioning', () => {
         ]);
         return historicalCommit;
       }
-      if (args[0] === 'show' && String(args[1]).endsWith(`:${telemetryDashboardArtifactPath}`)) {
+      if (
+        args[0] === 'show' &&
+        Effect.pipe(String(args[1]), EffectString.endsWith(`:${telemetryDashboardArtifactPath}`))
+      ) {
         return JSON.stringify(historical);
       }
       throw new Error('historical loading must not re-run current source rendering');
@@ -652,7 +698,15 @@ describe('direct Grafana dashboard provisioning', () => {
         token: 'narrow-writer-token',
       }),
     ).rejects.toThrow(`HTTP ${status}`);
-    expect(harness.requests.filter(request => request.startsWith('PUT '))).toHaveLength(1);
+    expect(
+      EffectArrayPipe(harness.requests, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (request, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && Effect.pipe(request, EffectString.startsWith('PUT ')),
+        ),
+      ),
+    ).toHaveLength(1);
   });
 
   it('classifies an ambiguous transport outcome by one re-read without retrying the write', async () => {
@@ -675,7 +729,15 @@ describe('direct Grafana dashboard provisioning', () => {
         token: 'narrow-writer-token',
       }),
     ).resolves.toBe('update');
-    expect(applied.requests.filter(request => request.startsWith('PUT '))).toHaveLength(1);
+    expect(
+      EffectArrayPipe(applied.requests, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (request, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && Effect.pipe(request, EffectString.startsWith('PUT ')),
+        ),
+      ),
+    ).toHaveLength(1);
 
     const unchanged = deploymentFetcher({
       current,
@@ -694,7 +756,15 @@ describe('direct Grafana dashboard provisioning', () => {
         token: 'narrow-writer-token',
       }),
     ).rejects.toThrow(/indeterminate/u);
-    expect(unchanged.requests.filter(request => request.startsWith('PUT '))).toHaveLength(1);
+    expect(
+      EffectArrayPipe(unchanged.requests, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (request, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && Effect.pipe(request, EffectString.startsWith('PUT ')),
+        ),
+      ),
+    ).toHaveLength(1);
   });
 
   it('rejects drift, Git Sync provenance, stale folders, and broad ACLs before any PUT', async () => {
@@ -715,7 +785,9 @@ describe('direct Grafana dashboard provisioning', () => {
     ] as const;
     const cases: readonly Readonly<{folder?: unknown; live?: unknown; permissions?: unknown}>[] = [
       {live: liveDashboard(artifactWithTitle(previous, 'Out-of-band title'))},
-      ...managedMetadataKeys.map(key => ({live: liveDashboard(previous, {annotations: {[key]: 'reserved'}})})),
+      ...EffectArray.map(managedMetadataKeys, key => ({
+        live: liveDashboard(previous, {annotations: {[key]: 'reserved'}}),
+      })),
       {live: liveDashboard(previous, {labels: {'provisioning.grafana.app/repository': 'other-manager'}})},
       {live: liveDashboard(previous, {labels: {'grafana.app/managedBy': 'other-manager'}})},
       {folder: liveFolder({title: 'Wrong folder'})},
@@ -729,9 +801,11 @@ describe('direct Grafana dashboard provisioning', () => {
       const fetcher = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
         const url = String(input);
         if (init?.method === 'PUT') putAttempted = true;
-        if (url.endsWith('/api/access-control/user/permissions')) return Response.json(writerPermissions());
-        if (url.includes('/apis/folder.grafana.app/')) return Response.json(testCase.folder ?? liveFolder());
-        if (url.endsWith('/permissions')) return Response.json(testCase.permissions ?? []);
+        if (Effect.pipe(url, EffectString.endsWith('/api/access-control/user/permissions')))
+          return Response.json(writerPermissions());
+        if (Effect.pipe(url, EffectString.includes('/apis/folder.grafana.app/')))
+          return Response.json(testCase.folder ?? liveFolder());
+        if (Effect.pipe(url, EffectString.endsWith('/permissions'))) return Response.json(testCase.permissions ?? []);
         return Response.json(testCase.live ?? liveDashboard(previous));
       };
       await expect(
@@ -835,22 +909,30 @@ describe('direct Grafana dashboard provisioning', () => {
       fetcher: async (input, init) => {
         const url = String(input);
         requests.push({method: init?.method, url});
-        if (url.endsWith('/api/access-control/user/permissions')) return Response.json(readerPermissions());
-        if (url.includes('/apis/dashboard.grafana.app/')) {
+        if (Effect.pipe(url, EffectString.endsWith('/api/access-control/user/permissions')))
+          return Response.json(readerPermissions());
+        if (Effect.pipe(url, EffectString.includes('/apis/dashboard.grafana.app/'))) {
           return Response.json(liveDashboard(resource, {spec: grafanaV42DashboardSpec(resource.spec)}));
         }
-        if (url.includes('/apis/folder.grafana.app/')) return Response.json(liveFolder());
-        if (url.endsWith('/permissions')) return Response.json([]);
+        if (Effect.pipe(url, EffectString.includes('/apis/folder.grafana.app/'))) return Response.json(liveFolder());
+        if (Effect.pipe(url, EffectString.endsWith('/permissions'))) return Response.json([]);
         return Response.json(grafanaQueryResponse(queryRequestFromBody(init?.body)));
       },
       namespace: testGrafanaNamespace,
       resource,
       token: 'read-only-token',
     });
-    expect(requests.map(request => request.method ?? 'GET')).toEqual(['GET', 'GET', 'GET', 'GET', 'POST', 'POST']);
-    const queryPosts = requests.filter(request => request.method === 'POST');
+    expect(EffectArray.map(requests, request => request.method ?? 'GET')).toEqual([
+      'GET',
+      'GET',
+      'GET',
+      'GET',
+      'POST',
+      'POST',
+    ]);
+    const queryPosts = EffectArray.filter(requests, request => request.method === 'POST');
     expect(queryPosts).toHaveLength(2);
-    expect(queryPosts.every(request => request.url === `${testGrafanaUrl}/api/ds/query`)).toBe(true);
+    expect(EffectArray.every(queryPosts, request => request.url === `${testGrafanaUrl}/api/ds/query`)).toBe(true);
   });
 
   it.each([
@@ -864,27 +946,30 @@ describe('direct Grafana dashboard provisioning', () => {
     'fails closed on a %s result in query request %i',
     async (failure, failedRequestIndex, failedReferenceIndex) => {
       const resource = readDashboardArtifact();
-      const failedReference = requestQueries(queryRequests(resource)[failedRequestIndex])[failedReferenceIndex]
-        .refId as string;
+      const failedReference = requireString(
+        requestQueries(queryRequests(resource)[failedRequestIndex])[failedReferenceIndex].refId,
+      );
       let queryRequestIndex = 0;
       await expect(
         verifyLiveDashboard({
           baseUrl: testGrafanaUrl,
           fetcher: async (input, init) => {
             const url = String(input);
-            if (url.endsWith('/api/access-control/user/permissions')) return Response.json(readerPermissions());
-            if (url.includes('/apis/dashboard.grafana.app/')) return Response.json(liveDashboard(resource));
-            if (url.includes('/apis/folder.grafana.app/')) return Response.json(liveFolder());
-            if (url.endsWith('/permissions')) return Response.json([]);
+            if (Effect.pipe(url, EffectString.endsWith('/api/access-control/user/permissions')))
+              return Response.json(readerPermissions());
+            if (Effect.pipe(url, EffectString.includes('/apis/dashboard.grafana.app/')))
+              return Response.json(liveDashboard(resource));
+            if (Effect.pipe(url, EffectString.includes('/apis/folder.grafana.app/')))
+              return Response.json(liveFolder());
+            if (Effect.pipe(url, EffectString.endsWith('/permissions'))) return Response.json([]);
             const request = queryRequestFromBody(init?.body);
-            const response = grafanaQueryResponse(request) as {
-              results: Record<string, {error?: string; frames?: unknown[]}>;
-            };
+            const response = requireJsonObject(grafanaQueryResponse(request));
+            const results = requireJsonObject(response.results);
             const requestIndex = queryRequestIndex;
             queryRequestIndex += 1;
             if (requestIndex === failedRequestIndex) {
-              if (failure === 'missing') delete response.results[failedReference];
-              else response.results[failedReference] = {error: 'rejected'};
+              if (failure === 'missing') delete results[failedReference];
+              else results[failedReference] = {error: 'rejected'};
             }
             return Response.json(response);
           },
@@ -932,9 +1017,19 @@ describe('direct Grafana dashboard provisioning', () => {
   });
 
   it('keeps PR validation secretless and isolates serialized push deployment from read-only daily verification', () => {
-    const workflow = load(readFileSync('.github/workflows/telemetry-dashboard.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as DashboardWorkflow;
+    const workflow = requireJsonObject(
+      load(readFileSync('.github/workflows/telemetry-dashboard.yml', 'utf8'), {
+        schema: JSON_SCHEMA,
+      }),
+    );
+    const workflowOn = requireJsonObject(workflow.on);
+    const workflowConcurrency = requireJsonObject(workflow.concurrency);
+    const workflowJobs = requireJsonObject(workflow.jobs);
+    const validation = requireJsonObject(workflowJobs.validate);
+    const deployment = requireJsonObject(workflowJobs.deploy);
+    const verification = requireJsonObject(workflowJobs['verify-live']);
+    const completion = requireJsonObject(workflowJobs.complete);
+    const completionSteps = requireJsonObjectArray(completion.steps);
     const expectedPaths = [
       '.github/workflows/telemetry-dashboard.yml',
       'infra/telemetry-dashboard/**',
@@ -944,19 +1039,15 @@ describe('direct Grafana dashboard provisioning', () => {
       'infra/telemetry-gateway/test/telemetry-gateway-dashboard.test.ts',
     ];
 
-    expect(workflow.permissions).toEqual({contents: 'read'});
-    expect(workflow.on.push).toEqual({branches: ['main'], paths: expectedPaths});
-    expect(workflow.on.pull_request).toEqual({branches: ['main'], paths: expectedPaths});
-    expect(workflow.on.schedule).toEqual([{cron: '17 3 * * *'}]);
-    expect(workflow.concurrency['cancel-in-progress']).toBe(false);
-    expect(workflow.concurrency.queue).toBe('max');
-    expect(workflow.concurrency.group).toContain("github.event_name != 'pull_request'");
-    expect(workflow.concurrency.group).toContain("'production' || github.run_id");
+    expect(requireJsonObject(workflow.permissions)).toEqual({contents: 'read'});
+    expect(requireJsonObject(workflowOn.push)).toEqual({branches: ['main'], paths: expectedPaths});
+    expect(requireJsonObject(workflowOn.pull_request)).toEqual({branches: ['main'], paths: expectedPaths});
+    expect(requireJsonObjectArray(workflowOn.schedule)).toEqual([{cron: '17 3 * * *'}]);
+    expect(workflowConcurrency['cancel-in-progress']).toBe(false);
+    expect(workflowConcurrency.queue).toBe('max');
+    expect(workflowConcurrency.group).toContain("github.event_name != 'pull_request'");
+    expect(workflowConcurrency.group).toContain("'production' || github.run_id");
 
-    const validation = workflow.jobs.validate;
-    const deployment = workflow.jobs.deploy;
-    const verification = workflow.jobs['verify-live'];
-    const completion = workflow.jobs.complete;
     const validationText = JSON.stringify(validation);
     const deploymentText = JSON.stringify(deployment);
     const verificationText = JSON.stringify(verification);
@@ -981,7 +1072,13 @@ describe('direct Grafana dashboard provisioning', () => {
     expect(deploymentText).toContain('git merge-base --is-ancestor');
     expect(deploymentText).toContain('git diff --quiet --no-ext-diff --no-textconv');
     expect(deploymentText).toContain(telemetryDashboardArtifactPath);
-    expect(deploymentText.match(/git fetch --no-tags origin/gu)).toHaveLength(2);
+    expect(
+      Effect.pipe(
+        deploymentText,
+        EffectString.match(/git fetch --no-tags origin/gu),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(2);
     expect(deploymentText).not.toContain('github.event.before');
     expect(deploymentText).toContain(
       'bun --config=/dev/null --no-env-file --no-install scripts/telemetry-dashboard.ts deploy',
@@ -1005,14 +1102,20 @@ describe('direct Grafana dashboard provisioning', () => {
 
     expect(completion.if).toBe('always()');
     expect(completion.needs).toEqual(['validate', 'deploy', 'verify-live']);
-    expect(completion.steps?.at(-1)?.run).toContain("$EVENT_NAME\" != 'pull_request'");
+    expect(requireJsonObject(completionSteps.at(-1)).run).toContain("$EVENT_NAME\" != 'pull_request'");
     expect(
-      `${validationText}\n${deploymentText}\n${verificationText}`.match(
-        /oven-sh\/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6/gu,
+      Effect.pipe(
+        `${validationText}\n${deploymentText}\n${verificationText}`,
+        EffectString.match(/oven-sh\/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6/gu),
+        Effect.Option.getOrElse(() => null),
       ),
     ).toHaveLength(3);
     expect(
-      `${validationText}\n${deploymentText}\n${verificationText}`.match(/bun install --frozen-lockfile/gu),
+      Effect.pipe(
+        `${validationText}\n${deploymentText}\n${verificationText}`,
+        EffectString.match(/bun install --frozen-lockfile/gu),
+        Effect.Option.getOrElse(() => null),
+      ),
     ).toHaveLength(3);
 
     const codeowners = readFileSync('.github/CODEOWNERS', 'utf8');

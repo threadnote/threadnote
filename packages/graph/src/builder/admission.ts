@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -14,6 +15,9 @@ import {
   type CodeGraphBuilderAdmissionIdentity,
   type CodeGraphBuilderAdmissionQueue,
 } from './admission_scheduler.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {CODE_GRAPH_BUILDER_HOME_CAPACITY, orderCodeGraphBuilderAdmissionTickets} from './admission_scheduler.js';
 export type {CodeGraphBuilderAdmissionClass} from './admission_scheduler.js';
@@ -40,13 +44,13 @@ const ADMISSION_RETRY_MILLISECONDS = 25;
 const LEDGER_LOCK_WAIT_MILLISECONDS = 5_000;
 const SLOT_STALE_MILLISECONDS = 15_000;
 
-class CodeGraphBuilderAdmissionError extends Schema.TaggedError<CodeGraphBuilderAdmissionError>()(
-  'CodeGraphBuilderAdmissionError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphBuilderAdmissionError extends Schema.TaggedError<
+  CodeGraphBuilderAdmissionError,
+  {readonly brand: unique symbol}
+>()('CodeGraphBuilderAdmissionError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 /**
  * Home-global admission. Selection and slot ownership publication share the
@@ -157,7 +161,7 @@ const createTicket = Effect.fn('codeGraph.builderAdmission.createTicket')(functi
     return yield* CodeGraphBuilderAdmissionError.make({message: 'Builder admission identity is invalid.'});
   }
   const owned = {...ticket, serialized};
-  const temporaryPath = `${owned.path}.${token.slice(0, 16)}.tmp`;
+  const temporaryPath = `${owned.path}.${Effect2.pipe(token, EffectString.slice(0, 16))}.tmp`;
   yield* withLedgerLock(
     fs,
     codeGraphBuilderAdmissionLockPath(path, threadnoteHome),
@@ -193,11 +197,15 @@ const ticketSelection = Effect.fn('codeGraph.builderAdmission.select')(function*
       const selected = selectCodeGraphBuilderAdmissionTickets(tickets, active, now);
       const ordered = orderCodeGraphBuilderAdmissionQueue(tickets, active, now);
       return {
-        selected: selected.some(ticket => ticket.token === owned.token),
+        selected: EffectArray.some(selected, ticket => ticket.token === owned.token),
         queue: {
           admissionClass: owned.admissionClass,
           enqueuedAt: DateTime.formatIso(DateTime.makeUnsafe(owned.createdAt)),
-          position: ordered.findIndex(ticket => ticket.token === owned.token) + 1,
+          position:
+            Option.getOrElse(
+              EffectArray.findFirstIndex(ordered, ticket => ticket.token === owned.token),
+              () => -1,
+            ) + 1,
           size: tickets.length,
         },
       };
@@ -257,7 +265,7 @@ function parseTicket(serialized: string, token: string): BuilderAdmissionTicket 
       typeof value.processId !== 'number' ||
       !Number.isSafeInteger(value.processId) ||
       value.processId <= 0 ||
-      ((value.processStartIdentity !== undefined || Object.hasOwn(value, 'processStartIdentity')) &&
+      ((value.processStartIdentity !== undefined || EffectRecord.has(value, 'processStartIdentity')) &&
         (typeof value.processStartIdentity !== 'string' || value.processStartIdentity.length > 256)) ||
       (value.version === 2 && (!isDigest(value.checkoutId) || !isDigest(value.worktreeId))) ||
       (value.requestKey !== undefined && !isDigest(value.requestKey)) ||
@@ -384,12 +392,17 @@ const claimSlot = Effect.fn('codeGraph.builderAdmission.claimSlot')(function* (
     codeGraphBuilderAdmissionLockPath(path, threadnoteHome),
     Effect.gen(function* () {
       const tickets = yield* scanTickets(fs, path, system, threadnoteHome);
-      if (!tickets.some(candidate => candidate.token === ticket.token && candidate.serialized === ticket.serialized)) {
+      if (
+        !EffectArray.some(
+          tickets,
+          candidate => candidate.token === ticket.token && candidate.serialized === ticket.serialized,
+        )
+      ) {
         return yield* CodeGraphBuilderAdmissionError.make({message: 'Builder admission ticket changed.'});
       }
       const active = yield* activeCheckouts(fs, path, system, threadnoteHome, slot);
       const selected = selectCodeGraphBuilderAdmissionTickets(tickets, active, yield* Clock.currentTimeMillis);
-      if (!selected.some(candidate => candidate.token === ticket.token)) return false;
+      if (!EffectArray.some(selected, candidate => candidate.token === ticket.token)) return false;
       const slotPath = codeGraphBuilderAdmissionSlotPath(path, threadnoteHome, slot);
       const owner = yield* readExclusiveFileLockOwner(fs, slotPath);
       if (Option.isNone(owner)) return false;

@@ -1,7 +1,6 @@
-import {Effect} from 'effect';
 import {Command} from 'effect/cli';
 import {runActivationProductionCommandV1, type ActivationProductionCommandV1} from '../activation/production.js';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {CliRuntimeRunner} from './cli.js';
 import {boolean, optionalString, requiredString} from './cli/flags.js';
 
 const apply = boolean('apply', 'Apply work until the next explicit review boundary');
@@ -9,9 +8,7 @@ const approved = boolean('approved', 'Confirm explicit approval of the exact cur
 const approval = optionalString('approval', 'Exact SHA-256 approval token emitted by the current preview');
 const request = requiredString('request', 'Bounded activation request JSON re-observed on every continuation');
 
-export function makeActivationCommand(
-  withRuntime: <E, R>(body: (config: RuntimeConfig) => Effect.Effect<void, E, R>) => Effect.Effect<void, E, R>,
-) {
+export function makeActivationCommand(withRuntime: CliRuntimeRunner) {
   const run = (command: ActivationProductionCommandV1) =>
     withRuntime(config => runActivationProductionCommandV1(config, command));
   const start = Command.make('start', {apply, request}, ({apply, request}) =>

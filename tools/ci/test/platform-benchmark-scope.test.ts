@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {classifyPlatformBenchmarkScope} from '../platform-benchmark-scope.js';
 import {privateReleaseEvidenceFamilies} from '../private-release-evidence-family.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const productCaptureFamily = privateReleaseEvidenceFamilies[0];
 const releaseCollectionFamily = privateReleaseEvidenceFamilies[1];
@@ -109,8 +112,8 @@ describe('Platform benchmark PR scope', () => {
       expect(scope(paths)).toMatchObject({runRecallPr: true, runCodeGraphPr: true});
     }
     for (const paths of [
-      productCaptureFamily.paths.map(path => path.replaceAll('/', '\\')),
-      releaseCollectionFamily.paths.map(path => `./${path}`),
+      EffectArray.map(productCaptureFamily.paths, path => Effect.pipe(path, EffectString.replaceAll('/', '\\'))),
+      EffectArray.map(releaseCollectionFamily.paths, path => `./${path}`),
     ]) {
       expect(scope(paths)).toMatchObject({invalidPath: true, runRecallPr: true, runCodeGraphPr: true});
     }
@@ -140,7 +143,7 @@ describe('Platform benchmark PR scope', () => {
     });
     expect(
       classifyPlatformBenchmarkScope({
-        changedPaths: ['packages/recall/src/index.ts', undefined] as unknown as Iterable<string>,
+        changedPaths: ['packages/recall/src/index.ts', undefined],
       }),
     ).toMatchObject({invalidPath: true, runRecallPr: true, runCodeGraphPr: true});
     expect(classifyPlatformBenchmarkScope({changedPaths: []})).toMatchObject({runRecallPr: true, runCodeGraphPr: true});

@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtempSync, rmSync, symlinkSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {approveCodeMemoryLinkAppServerRequest} from '../../../../scripts/code-memory-link-app-server-policy.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const ROOT = '/sealed/public-repository';
 const SCOPE = {repositoryRoot: ROOT, threadId: 'thr_gate', turnId: 'turn_gate'};
@@ -235,9 +238,7 @@ describe('Code Memory Link pre-execution app-server policy', () => {
     ).toMatchObject({itemType: 'commandExecution'});
 
     const escapedRegexProjected = 'rg -n "@overload|def application\\\\(" src tests | head -80';
-    const escapedRegexCommand = `/bin/zsh -c "${escapedRegexProjected
-      .replaceAll('\\\\', '\\\\\\\\')
-      .replaceAll('"', '\\"')}"`;
+    const escapedRegexCommand = `/bin/zsh -c "${Effect.pipe(escapedRegexProjected, EffectString.replaceAll('\\\\', '\\\\\\\\'), EffectString.replaceAll('"', '\\"'))}"`;
     const escapedRegexActions = [
       {
         command: 'rg -n "@overload|def application\\\\(" src tests',
@@ -327,7 +328,7 @@ describe('Code Memory Link pre-execution app-server policy', () => {
       'test_marker_str_roundtrip_preserves_nested_group_precedence',
     ] as const;
     const policy = {approvedCommandTokens: [approved]};
-    const exact = shellCommandApproval(approved.join(' '));
+    const exact = shellCommandApproval(EffectArray.join(approved, ' '));
 
     expect(() =>
       approveCodeMemoryLinkAppServerRequest({
@@ -356,7 +357,7 @@ describe('Code Memory Link pre-execution app-server policy', () => {
         (index, replacement) => {
           const mutated: string[] = [...approved];
           mutated[index] = replacement;
-          const attempt = shellCommandApproval(mutated.join(' '));
+          const attempt = shellCommandApproval(EffectArray.join(mutated, ' '));
           expect(() =>
             approveCodeMemoryLinkAppServerRequest(
               {
@@ -374,10 +375,10 @@ describe('Code Memory Link pre-execution app-server policy', () => {
     );
 
     for (const command of [
-      `${approved.join(' ')} --collect-only`,
-      `PYTHONPATH=other ${approved.slice(1).join(' ')}`,
+      `${EffectArray.join(approved, ' ')} --collect-only`,
+      `PYTHONPATH=other ${EffectArray.join(approved.slice(1), ' ')}`,
       `PYTHONPATH=src pytest -q ../outside/test_markers.py -k ${approved.at(-1)}`,
-      `${approved.join(' ')}; pwd`,
+      `${EffectArray.join(approved, ' ')}; pwd`,
     ]) {
       const attempt = shellCommandApproval(command);
       expect(() =>
@@ -397,7 +398,7 @@ describe('Code Memory Link pre-execution app-server policy', () => {
     const duplicatedWorkingDirectory =
       '/private/tmp/matched-evaluation-codex-abc/matched-evaluation-codex-abc/repository';
     const rootBoundScope = {...SCOPE, repositoryRoot};
-    const wrongCwd = shellCommandApproval(approved.join(' '), duplicatedWorkingDirectory);
+    const wrongCwd = shellCommandApproval(EffectArray.join(approved, ' '), duplicatedWorkingDirectory);
     expect(() =>
       approveCodeMemoryLinkAppServerRequest(
         {
@@ -561,7 +562,9 @@ describe('Code Memory Link pre-execution app-server policy', () => {
 });
 
 function commandApproval(command: string, path: string, repositoryRoot = ROOT) {
-  const commandActions = [{command, name: path.split('/').at(-1), path: `${repositoryRoot}/${path}`, type: 'read'}];
+  const commandActions = [
+    {command, name: Effect.pipe(path, EffectString.split('/')).at(-1), path: `${repositoryRoot}/${path}`, type: 'read'},
+  ];
   const item = {
     command,
     commandActions,
@@ -624,5 +627,5 @@ function shellCommandApproval(projected: string, repositoryRoot = ROOT) {
 }
 
 function shellWord(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
+  return `'${Effect.pipe(value, EffectString.replaceAll("'", `'"'"'`))}'`;
 }

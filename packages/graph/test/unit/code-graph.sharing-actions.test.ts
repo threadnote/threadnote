@@ -13,6 +13,9 @@ import {
   isGraphShareCanonicalRegistry,
   isGraphShareWorkerRegistry,
 } from '@threadnote/graph/sharing/namespace';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const HEX = '0123456789abcdef';
 
@@ -22,8 +25,15 @@ describe('graph share action keys and namespaces', () => {
     expect(isGraphShareCanonicalRegistry(GRAPH_SHARE_CAS_CANONICAL)).toBe(true);
     expect(isGraphShareWorkerRegistry(GRAPH_SHARE_CAS_WORKER)).toBe(true);
     expect(isGraphShareWorkerRegistry(GRAPH_SHARE_CAS_CANONICAL)).toBe(false);
-    expect(graphShareActionDiscoveryTag('a'.repeat(64))).toBe(`tn-action-${'a'.repeat(64)}`);
-    expect(graphShareFrontierDiscoveryTag('b'.repeat(64), 'refs/heads/main').startsWith('tn-frontier-')).toBe(true);
+    expect(graphShareActionDiscoveryTag(Effect.pipe('a', EffectString.repeat(64)))).toBe(
+      `tn-action-${Effect.pipe('a', EffectString.repeat(64))}`,
+    );
+    expect(
+      Effect.pipe(
+        graphShareFrontierDiscoveryTag(Effect.pipe('b', EffectString.repeat(64)), 'refs/heads/main'),
+        EffectString.startsWith('tn-frontier-'),
+      ),
+    ).toBe(true);
   });
 
   it('is deterministic and changes when any parse-action input changes', () => {
@@ -61,20 +71,20 @@ describe('graph share action keys and namespaces', () => {
 
   it('separates parse keys from materialized keys', () => {
     const parseKey = graphShareParseActionKey({
-      contentHash: 'c'.repeat(64),
-      extractorSet: 'e'.repeat(64),
+      contentHash: Effect.pipe('c', EffectString.repeat(64)),
+      extractorSet: Effect.pipe('e', EffectString.repeat(64)),
       languageAndRole: graphShareLanguageAndRole('typescript', 'source'),
       normalizedPath: 'src/index.ts',
-      repositoryId: 'r'.repeat(64),
+      repositoryId: Effect.pipe('r', EffectString.repeat(64)),
     });
     const materialized = graphShareMaterializedActionKey({
-      contentHash: 'c'.repeat(64),
-      graphAbi: 'a'.repeat(64),
-      graphContentId: 'cgc_' + 'd'.repeat(40),
+      contentHash: Effect.pipe('c', EffectString.repeat(64)),
+      graphAbi: Effect.pipe('a', EffectString.repeat(64)),
+      graphContentId: 'cgc_' + Effect.pipe('d', EffectString.repeat(40)),
       normalizedPath: 'src/index.ts',
-      parseResultDigest: 'p'.repeat(64),
-      repositoryId: 'r'.repeat(64),
-      workspaceFingerprint: 'w'.repeat(64),
+      parseResultDigest: Effect.pipe('p', EffectString.repeat(64)),
+      repositoryId: Effect.pipe('r', EffectString.repeat(64)),
+      workspaceFingerprint: Effect.pipe('w', EffectString.repeat(64)),
     });
     expect(parseKey).toMatch(/^[0-9a-f]{64}$/u);
     expect(materialized).toMatch(/^[0-9a-f]{64}$/u);
@@ -84,6 +94,6 @@ describe('graph share action keys and namespaces', () => {
 
 function hexString(length: number) {
   return FC.array(FC.constantFrom(...HEX), {maxLength: length, minLength: length}).map(characters =>
-    characters.join(''),
+    EffectArray.join(characters, ''),
   );
 }

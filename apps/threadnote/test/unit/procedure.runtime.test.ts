@@ -8,9 +8,11 @@ import {
   procedureRuntimeStatus,
   verifyLocalProcedure,
 } from '@threadnote/threadnote/procedure/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const manifest = {
-  artifact: {id: 'team.example/review', semanticVersion: '1.2.3', sha256: 'a'.repeat(64)},
+  artifact: {id: 'team.example/review', semanticVersion: '1.2.3', sha256: Effect2.pipe('a', EffectString.repeat(64))},
   compatible: {capabilities: ['filesystem.read'], surfaceIds: ['terminal']},
   dependencies: [],
   owner: 'owner',
@@ -24,7 +26,7 @@ const manifest = {
       {argv: ['setup', '--prepare'], id: 'z-setup'},
       {argv: ['check'], id: 'a-check'},
     ],
-    fixtures: [{id: 'fixture', sha256: 'b'.repeat(64)}],
+    fixtures: [{id: 'fixture', sha256: Effect2.pipe('b', EffectString.repeat(64))}],
   },
 } as const;
 
@@ -120,7 +122,7 @@ describe('verified procedure runtime', () => {
       commandIds: ['z-setup', 'a-check'],
       fixtureDigests: manifest.verification.fixtures,
       ...metadata,
-      manifestSha256: 'c'.repeat(64),
+      manifestSha256: Effect2.pipe('c', EffectString.repeat(64)),
       schemaVersion: 1,
     };
     expect(

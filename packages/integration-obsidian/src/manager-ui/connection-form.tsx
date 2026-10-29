@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useState} from 'react';
 import type {ObsidianProjection, ObsidianSource} from '../manager-contracts.js';
 import {DetailModal} from '@threadnote/manager/detail-modal';
@@ -5,6 +6,9 @@ import {useManagerDialogs} from '@threadnote/manager/dialog';
 import {IntegrationLogo} from '@threadnote/manager/integration-catalog';
 import {product} from './catalog.js';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export function ObsidianConnectionForm({
   connection,
@@ -24,15 +28,33 @@ export function ObsidianConnectionForm({
   const dialogs = useManagerDialogs();
   const [id, setId] = useState(existing?.id ?? '');
   const [vault, setVault] = useState(existing?.vault ?? '');
-  const [include, setInclude] = useState(source?.include.join('\n') ?? '**/*.md');
-  const [exclude, setExclude] = useState(source?.exclude.join('\n') ?? '.obsidian/**\n.trash/**');
+  const [include, setInclude] = useState(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(source?.include), __effectArrayJoinReceiver =>
+        EffectArray.join(__effectArrayJoinReceiver, '\n'),
+      ),
+    ) ?? '**/*.md',
+  );
+  const [exclude, setExclude] = useState(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(source?.exclude), __effectArrayJoinReceiver =>
+        EffectArray.join(__effectArrayJoinReceiver, '\n'),
+      ),
+    ) ?? '.obsidian/**\n.trash/**',
+  );
   const [inbox, setInbox] = useState(source?.inbox ?? '');
   const [folder, setFolder] = useState(projection?.folder ?? 'Threadnote');
   const [kinds, setKinds] = useState<readonly string[]>(projection?.kinds ?? ['durable', 'handoff']);
   const [statuses, setStatuses] = useState<readonly string[]>(projection?.statuses ?? ['active']);
   const [includeShared, setIncludeShared] = useState(projection?.includeShared ?? false);
   const [selection, setSelection] = useState(projection?.selectedUris === undefined ? 'all' : 'selected');
-  const [uris, setUris] = useState(projection?.selectedUris?.join('\n') ?? '');
+  const [uris, setUris] = useState(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(projection?.selectedUris), __effectArrayJoinReceiver =>
+        EffectArray.join(__effectArrayJoinReceiver, '\n'),
+      ),
+    ) ?? '',
+  );
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -219,10 +241,10 @@ export function ObsidianConnectionForm({
   );
 }
 function lines(value: string): readonly string[] {
-  return value
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean);
+  return EffectArray.filter(
+    EffectArray.map(Effect.pipe(value, EffectString.split('\n')), line => Effect.pipe(line, EffectString.trim)),
+    Boolean,
+  );
 }
 function Choices({
   title,
@@ -238,13 +260,15 @@ function Choices({
   return (
     <fieldset className="integration-checks">
       <legend>{title}</legend>
-      {values.map(value => (
+      {EffectArray.map(values, value => (
         <label key={value} className="integration-checkbox">
           <input
             type="checkbox"
             checked={selected.includes(value)}
             onChange={event =>
-              onChange(event.target.checked ? [...selected, value] : selected.filter(item => item !== value))
+              onChange(
+                event.target.checked ? [...selected, value] : EffectArray.filter(selected, item => item !== value),
+              )
             }
           />
           {value}

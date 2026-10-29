@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -102,7 +103,7 @@ it('aborts the previous agent catalog and never exposes its models after switchi
   await ui.render('codex');
   expect(ui.generate().disabled).toBe(true);
   await ui.render('claude');
-  expect(ui.requests.map(request => request.agent)).toEqual(['codex', 'claude']);
+  expect(EffectArray.map(ui.requests, request => request.agent)).toEqual(['codex', 'claude']);
   expect(ui.requests[0].signal?.aborted).toBe(true);
   await ui.respond(1, [option('sonnet')]);
   expect(ui.select().value).toBe('sonnet');
@@ -172,7 +173,7 @@ it('keeps explicit choices through temporarily empty catalogs and provider switc
   await ui.respond(4, [option('chosen', false), option('replacement')]);
   expect(ui.select().value).toBe('chosen');
   expect(ui.generate().disabled).toBe(false);
-  expect(ui.methods.every(method => method === 'GET')).toBe(true);
+  expect(EffectArray.every(ui.methods, method => method === 'GET')).toBe(true);
 });
 
 it('preserves every explicit identity across arbitrary catalog changes without mutating inputs', () => {
@@ -182,10 +183,10 @@ it('preserves every explicit identity across arbitrary catalog changes without m
       fc.uniqueArray(fc.string({minLength: 1, maxLength: 60}), {maxLength: 20}),
       (id, ids) => {
         const preferred = Object.freeze({id, explicit: true});
-        const models = Object.freeze(ids.map(value => Object.freeze(option(value))));
+        const models = Object.freeze(EffectArray.map(ids, value => Object.freeze(option(value))));
         expect(reconcileConsolidationModelChoice(preferred, models)).toBe(preferred);
         expect(preferred.id).toBe(id);
-        expect(models.map(model => model.id)).toEqual(ids);
+        expect(EffectArray.map(models, model => model.id)).toEqual(ids);
       },
     ),
     {numRuns: 75},
@@ -223,10 +224,10 @@ it('refreshes local choices on readiness without replacing an explicit model or 
   expect(ui.container.textContent).toContain('unavailable');
   expect(ui.generate().disabled).toBe(true);
   expect(localStorage.getItem('threadnote.manager.consolidationModel.local-ai')).toBe('chosen-local');
-  expect(ui.methods.every(method => method === 'GET')).toBe(true);
+  expect(EffectArray.every(ui.methods, method => method === 'GET')).toBe(true);
   await ui.choose('gemma-fixture');
   expect(ui.generate().disabled).toBe(false);
-  expect(ui.methods.every(method => method === 'GET')).toBe(true);
+  expect(EffectArray.every(ui.methods, method => method === 'GET')).toBe(true);
 });
 
 it('adopts the arriving recommendation only when never chosen, and rejects superseded catalog responses', async () => {
@@ -247,5 +248,5 @@ it('adopts the arriving recommendation only when never chosen, and rejects super
   await ui.respond(1, [option('stale-local')]);
   expect(ui.select().value).toBe('gemma-fixture');
   expect(ui.container.textContent).not.toContain('stale-local');
-  expect(ui.methods.every(method => method === 'GET')).toBe(true);
+  expect(EffectArray.every(ui.methods, method => method === 'GET')).toBe(true);
 });

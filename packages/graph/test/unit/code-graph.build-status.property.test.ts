@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -11,6 +12,9 @@ import {
   parseCodeGraphBuildStatus,
 } from '@threadnote/graph/build_status';
 import {CodeGraphDiskCapacityPressureError} from '@threadnote/graph/types';
+
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const heartbeatAt = Date.parse('2026-07-31T12:00:00.000Z');
 
@@ -79,7 +83,7 @@ describe('code graph build-status properties', () => {
       modelVersion: 2,
       recovery: 'free-space' as const,
       retryable: false,
-      scope: {checkoutId: 'b'.repeat(64)},
+      scope: {checkoutId: Effect.pipe('b', EffectString.repeat(64))},
     };
     const error = codeGraphBuildStatusError(
       CodeGraphDiskCapacityPressureError.of('stage persistent code graph facts', evidence),
@@ -238,7 +242,10 @@ describe('code graph build-status properties', () => {
       expect(parsed.owner.runtimeVersion.length).toBeLessThanOrEqual(64);
       expect(parsed.subphase?.length ?? 0).toBeLessThanOrEqual(64);
       expect(parsed.error?.summary.length ?? 0).toBeLessThanOrEqual(300);
-      expect(Object.values(parsed.counters).every(value => typeof value === 'string' || value >= 0)).toBe(true);
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+      expect(EffectArray.every(Object.values(parsed.counters), value => typeof value === 'string' || value >= 0)).toBe(
+        true,
+      );
     },
     {fastCheck: {numRuns: 500}},
   );
@@ -487,13 +494,13 @@ describe('code graph build-status properties', () => {
 function buildStatus(state: CodeGraphBuildState, hasStartIdentity: boolean): CodeGraphBuildStatus {
   const timestamp = new Date(heartbeatAt).toISOString();
   return {
-    buildId: 'a'.repeat(32),
+    buildId: Effect.pipe('a', EffectString.repeat(32)),
     counters: {},
     identity: {
-      checkoutId: 'b'.repeat(64),
-      commit: 'c'.repeat(40),
-      repositoryId: 'd'.repeat(64),
-      worktreeId: 'e'.repeat(64),
+      checkoutId: Effect.pipe('b', EffectString.repeat(64)),
+      commit: Effect.pipe('c', EffectString.repeat(40)),
+      repositoryId: Effect.pipe('d', EffectString.repeat(64)),
+      worktreeId: Effect.pipe('e', EffectString.repeat(64)),
     },
     owner: {
       processId: 42,

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -8,31 +9,37 @@ import {
   recoverCodeGraphRefreshDemand,
   resumeCodeGraphRefreshDemand,
 } from '@threadnote/graph/refresh/demand_scheduler';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const checkout = 'a'.repeat(64);
-const worktree = 'b'.repeat(64);
-const zeroTarget = '0'.repeat(64);
-const oneTarget = '1'.padEnd(64, '0');
+const checkout = Effect.pipe('a', EffectString.repeat(64));
+const worktree = Effect.pipe('b', EffectString.repeat(64));
+const zeroTarget = Effect.pipe('0', EffectString.repeat(64));
+const oneTarget = Effect.pipe('1', EffectString.padEnd(64, '0'));
 const target = fc.array(fc.integer({min: 0, max: 15}), {minLength: 1, maxLength: 8}).map(value =>
-  value
-    .map(part => part.toString(16))
-    .join('')
-    .padEnd(64, '0')
-    .slice(0, 64),
+  Effect.pipe(
+    EffectArray.join(
+      EffectArray.map(value, part => part.toString(16)),
+      '',
+    ),
+    EffectString.padEnd(64, '0'),
+    EffectString.slice(0, 64),
+  ),
 );
 
 describe('code graph refresh demand properties', () => {
   it('coalesces every preflight sequence to one latest desired target without claiming ownership', () => {
     fc.assert(
       fc.property(fc.array(target, {maxLength: 40}), targets => {
-        const state = targets.reduce(
+        const state = EffectArray.reduce(
+          targets,
+          emptyCodeGraphRefreshDemand(checkout, worktree),
           (current, targetKey, index) =>
             enqueueCodeGraphRefreshDemand(current, {
               now: index,
               targetKey,
-              token: `cgdq_${index.toString(16).padStart(32, '0')}`,
+              token: `cgdq_${Effect.pipe(index.toString(16), EffectString.padStart(32, '0'))}`,
             }).state,
-          emptyCodeGraphRefreshDemand(checkout, worktree),
         );
 
         expect(state.active).toBeUndefined();
@@ -50,21 +57,22 @@ describe('code graph refresh demand properties', () => {
           state = registerCodeGraphRefreshDemand(state, {
             now: index,
             targetKey,
-            token: `cgdq_${index.toString(16).padStart(32, '0')}`,
+            token: `cgdq_${Effect.pipe(index.toString(16), EffectString.padStart(32, '0'))}`,
           }).state;
         }
         if (targets.length === 0) return;
         expect(state.active?.targetKey).toBe(targets[0]);
         const latest = targets.at(-1)!;
         expect(state.desired?.targetKey).toBe(latest === targets[0] ? undefined : latest);
-        const replay = targets.reduce(
+        const replay = EffectArray.reduce(
+          targets,
+          emptyCodeGraphRefreshDemand(checkout, worktree),
           (current, targetKey, index) =>
             registerCodeGraphRefreshDemand(current, {
               now: index,
               targetKey,
-              token: `cgdq_${index.toString(16).padStart(32, '0')}`,
+              token: `cgdq_${Effect.pipe(index.toString(16), EffectString.padStart(32, '0'))}`,
             }).state,
-          emptyCodeGraphRefreshDemand(checkout, worktree),
         );
         expect(replay).toEqual(state);
       }),
@@ -75,17 +83,18 @@ describe('code graph refresh demand properties', () => {
   it('never creates an idle lane and uses only persisted or caller-provided demand tokens', () => {
     fc.assert(
       fc.property(fc.array(target, {maxLength: 40}), target, fc.boolean(), (targets, requested, ownerLive) => {
-        const state = targets.reduce(
+        const state = EffectArray.reduce(
+          targets,
+          emptyCodeGraphRefreshDemand(checkout, worktree),
           (current, targetKey, index) =>
             registerCodeGraphRefreshDemand(current, {
               now: index,
               targetKey,
-              token: `cgdq_${index.toString(16).padStart(32, '0')}`,
+              token: `cgdq_${Effect.pipe(index.toString(16), EffectString.padStart(32, '0'))}`,
             }).state,
-          emptyCodeGraphRefreshDemand(checkout, worktree),
         );
         const admitted = state.desired ?? state.active;
-        const replacementToken = `cgdq_${'f'.repeat(32)}`;
+        const replacementToken = `cgdq_${Effect.pipe('f', EffectString.repeat(32))}`;
         const resumed = resumeCodeGraphRefreshDemand(state, {
           now: targets.length + 1,
           owner: {processId: 1},
@@ -99,13 +108,19 @@ describe('code graph refresh demand properties', () => {
         expect(resumed.target.targetKey).toBe(requested);
         const admittedTokens = new Set([
           replacementToken,
-          ...[state.active, state.desired]
-            .filter(candidate => candidate?.targetKey === requested)
-            .map(candidate => candidate!.targetToken),
+          ...EffectArray.map(
+            EffectArray.filter([state.active, state.desired], candidate => candidate?.targetKey === requested),
+            candidate => candidate!.targetToken,
+          ),
         ]);
         expect(admittedTokens.has(resumed.target.targetToken)).toBe(true);
-        const admittedKeys = new Set([state.active?.targetKey, state.desired?.targetKey, requested].filter(Boolean));
-        for (const key of [resumed.state.active?.targetKey, resumed.state.desired?.targetKey].filter(Boolean))
+        const admittedKeys = new Set(
+          EffectArray.filter([state.active?.targetKey, state.desired?.targetKey, requested], Boolean),
+        );
+        for (const key of EffectArray.filter(
+          [resumed.state.active?.targetKey, resumed.state.desired?.targetKey],
+          Boolean,
+        ))
           expect(admittedKeys.has(key)).toBe(true);
       }),
       {examples: [[[oneTarget, zeroTarget], oneTarget, false]], numRuns: 200},
@@ -115,7 +130,7 @@ describe('code graph refresh demand properties', () => {
   it('carries a capped monotonic retry attempt through every reclaimed target', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 12}), failures => {
-        const targetKey = '1'.repeat(64);
+        const targetKey = Effect.pipe('1', EffectString.repeat(64));
         const targetToken = 'cgdq_11111111111111111111111111111111';
         let now = 0;
         let state = registerCodeGraphRefreshDemand(emptyCodeGraphRefreshDemand(checkout, worktree), {
@@ -142,7 +157,7 @@ describe('code graph refresh demand properties', () => {
   it('preserves one deferred target and its backoff under repeated equivalent demand', () => {
     fc.assert(
       fc.property(fc.array(fc.boolean(), {maxLength: 100}), operations => {
-        const targetKey = '1'.repeat(64);
+        const targetKey = Effect.pipe('1', EffectString.repeat(64));
         const targetToken = 'cgdq_11111111111111111111111111111111';
         const claimed = registerCodeGraphRefreshDemand(emptyCodeGraphRefreshDemand(checkout, worktree), {
           now: 0,
@@ -156,12 +171,12 @@ describe('code graph refresh demand properties', () => {
             ? enqueueCodeGraphRefreshDemand(state, {
                 now: index + 1,
                 targetKey,
-                token: `cgdq_${(index + 2).toString(16).padStart(32, '0')}`,
+                token: `cgdq_${Effect.pipe((index + 2).toString(16), EffectString.padStart(32, '0'))}`,
               })
             : registerCodeGraphRefreshDemand(state, {
                 now: index + 1,
                 targetKey,
-                token: `cgdq_${(index + 2).toString(16).padStart(32, '0')}`,
+                token: `cgdq_${Effect.pipe((index + 2).toString(16), EffectString.padStart(32, '0'))}`,
               });
           expect(observed.type).toBe('deferred');
           state = observed.state;
@@ -181,7 +196,12 @@ describe('code graph refresh demand properties', () => {
   it('suppresses invalid targets across repeated requests and resumes after a changed recovery fingerprint', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 40}), fc.boolean(), (repeats, enqueue) => {
-        const input = {now: 0, targetKey: zeroTarget, token: `cgdq_${'1'.repeat(32)}`, recoveryKey: 'c'.repeat(64)};
+        const input = {
+          now: 0,
+          targetKey: zeroTarget,
+          token: `cgdq_${Effect.pipe('1', EffectString.repeat(32))}`,
+          recoveryKey: Effect.pipe('c', EffectString.repeat(64)),
+        };
         const claimed = registerCodeGraphRefreshDemand(emptyCodeGraphRefreshDemand(checkout, worktree), input);
         let state = deferCodeGraphRefreshDemand(claimed.state, input.token, input.targetKey, 0, true);
         for (let index = 1; index <= repeats; index++) {
@@ -197,11 +217,11 @@ describe('code graph refresh demand properties', () => {
           ...input,
           now: 1_000_000,
           ownerLive: false,
-          recoveryKey: 'd'.repeat(64),
+          recoveryKey: Effect.pipe('d', EffectString.repeat(64)),
         });
         expect(resumed?.type).toBe('claimed');
         expect(resumed?.target.retry).toBeUndefined();
-        expect(resumed?.target.recoveryKey).toBe('d'.repeat(64));
+        expect(resumed?.target.recoveryKey).toBe(Effect.pipe('d', EffectString.repeat(64)));
       }),
       {numRuns: 50},
     );
@@ -210,7 +230,7 @@ describe('code graph refresh demand properties', () => {
   it('preserves failed-attempt history when a reclaimed retry owner dies before publication', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 8}), attempts => {
-        const input = {now: 0, targetKey: zeroTarget, token: `cgdq_${'1'.repeat(32)}`};
+        const input = {now: 0, targetKey: zeroTarget, token: `cgdq_${Effect.pipe('1', EffectString.repeat(32))}`};
         let state = registerCodeGraphRefreshDemand(emptyCodeGraphRefreshDemand(checkout, worktree), input).state;
         for (let attempt = 0; attempt < attempts; attempt++) {
           state = deferCodeGraphRefreshDemand(state, input.token, input.targetKey, input.now);

@@ -10,9 +10,11 @@ import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/c
 import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {migrateMemoryDocumentToCurrent} from '@threadnote/memory/migrations';
 import type {SourceEvidenceCitationV1} from '@threadnote/store/source-evidence';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/evidence.md';
-const hash = 'a'.repeat(64);
+const hash = Effect.pipe('a', EffectString.repeat(64));
 
 const evidence: SourceEvidenceCitationV1 = {
   version: 1,
@@ -59,7 +61,9 @@ describe('source evidence memory boundary', () => {
   it('migrates schema 8 source evidence to the current schema without changing its bytes', () => {
     const original = document();
     const migrated = migrateMemoryDocumentToCurrent(original);
-    expect(migrated).toBe(original.replace('schema_version: 8', `schema_version: ${MEMORY_SCHEMA_VERSION}`));
+    expect(migrated).toBe(
+      Effect.pipe(original, EffectString.replace('schema_version: 8', `schema_version: ${MEMORY_SCHEMA_VERSION}`)),
+    );
     expect(parseMemoryDocument(uri, migrated)?.metadata.sourceEvidence).toEqual(evidence);
     expect(memoryCodeCitationContentSharingBlocker(uri, migrated)).toBe('private-source-evidence');
   });
@@ -85,7 +89,7 @@ describe('source evidence memory boundary', () => {
   it('keeps the exact private citation immutable across safe body edits (property)', () => {
     fc.assert(
       fc.property(
-        fc.string({minLength: 1, maxLength: 100}).filter(value => value.trim().length > 0),
+        fc.string({minLength: 1, maxLength: 100}).filter(value => Effect.pipe(value, EffectString.trim).length > 0),
         body => {
           const formatted = formatMemoryDocument(
             'MEMORY',

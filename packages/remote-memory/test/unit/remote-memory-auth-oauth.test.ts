@@ -1,6 +1,8 @@
 import {exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK, type JWTPayload} from 'jose';
 import {afterAll, beforeAll, describe, expect, it} from 'vitest';
 import {createOAuthTokenVerifier} from '@threadnote/remote-memory/oauth';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const ISSUER = 'https://identity.example.test/tenant';
 const AUDIENCE = 'https://memory.example.test/mcp';
@@ -149,12 +151,14 @@ describe('remote memory OAuth access tokens', () => {
     await expectUnauthorized(await accessToken({}, ec));
   });
 
-  it.each(['not-a-jwt', 'a.b.c', '', `${'x'.repeat(32)}.${'y'.repeat(32)}.${'z'.repeat(32)}`])(
-    'maps malformed JWT input to one bounded public error %#',
-    async token => {
-      await expectUnauthorized(token);
-    },
-  );
+  it.each([
+    'not-a-jwt',
+    'a.b.c',
+    '',
+    `${Effect.pipe('x', EffectString.repeat(32))}.${Effect.pipe('y', EffectString.repeat(32))}.${Effect.pipe('z', EffectString.repeat(32))}`,
+  ])('maps malformed JWT input to one bounded public error %#', async token => {
+    await expectUnauthorized(token);
+  });
 
   it('does not disclose token or JWKS detail when signature verification fails', async () => {
     const unrelated = await signingKey('RS256', 'rsa-1');

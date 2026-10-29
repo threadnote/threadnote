@@ -11,6 +11,8 @@ import {
 } from '@threadnote/recall/feedback';
 import {join, mkdir, mkdtemp, readFile, rm, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect as run} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('recall feedback', () => {
   let directory: string;
@@ -204,14 +206,14 @@ describe('recall feedback', () => {
     );
 
     const stored = await readFile(join(directory, 'feedback', 'recall-events-v1.jsonl'), 'utf8');
-    expect(stored.trim().split('\n')).toHaveLength(2);
+    expect(Effect2.pipe(stored, EffectString.trim, EffectString.split('\n'))).toHaveLength(2);
   });
 
   it('treats projectless non-pin feedback as global for project-filtered reports', () => {
     const events: RecallFeedbackEvent[] = [
       {
         action: 'applied',
-        queryFingerprint: 'a'.repeat(64),
+        queryFingerprint: Effect2.pipe('a', EffectString.repeat(64)),
         rankerVersion: 'test',
         timestamp: '2026-07-23T00:00:00.000Z',
         uri: 'threadnote://user/me/global.md',
@@ -219,7 +221,7 @@ describe('recall feedback', () => {
       },
       {
         action: 'pin',
-        queryFingerprint: 'a'.repeat(64),
+        queryFingerprint: Effect2.pipe('a', EffectString.repeat(64)),
         rankerVersion: 'test',
         timestamp: '2026-07-23T00:00:00.000Z',
         uri: 'threadnote://user/me/global-pin.md',
@@ -228,7 +230,7 @@ describe('recall feedback', () => {
       {
         action: 'useful',
         project: 'other',
-        queryFingerprint: 'a'.repeat(64),
+        queryFingerprint: Effect2.pipe('a', EffectString.repeat(64)),
         rankerVersion: 'test',
         timestamp: '2026-07-23T00:00:00.000Z',
         uri: 'threadnote://user/me/other.md',
@@ -250,7 +252,7 @@ describe('recall feedback', () => {
       {
         action: 'applied',
         project: 'threadnote',
-        queryFingerprint: 'a'.repeat(64),
+        queryFingerprint: Effect2.pipe('a', EffectString.repeat(64)),
         rankerVersion: 'test',
         timestamp: '2026-07-23T00:00:00.000Z',
         uri: 'threadnote://user/me/scoped.md',
@@ -259,7 +261,7 @@ describe('recall feedback', () => {
       {
         action: 'pin',
         project: 'threadnote',
-        queryFingerprint: 'a'.repeat(64),
+        queryFingerprint: Effect2.pipe('a', EffectString.repeat(64)),
         rankerVersion: 'test',
         timestamp: '2026-07-23T00:00:00.000Z',
         uri: 'threadnote://user/me/pinned.md',

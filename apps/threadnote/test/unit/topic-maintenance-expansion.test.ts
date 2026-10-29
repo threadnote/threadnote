@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
 import {Clock, Effect, FileSystem, Path} from 'effect';
@@ -30,6 +31,10 @@ import {
 } from '../../src/memory/maintenance/topic_expansion.js';
 import {makeTopicExpansionFixture} from '../helpers/topic-expansion.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const approval = (f: Effect.Success<ReturnType<typeof makeTopicExpansionFixture>>) => ({
   preview: f.preview,
@@ -37,7 +42,7 @@ const approval = (f: Effect.Success<ReturnType<typeof makeTopicExpansionFixture>
   approvalDigest: f.preview.approvalDigest,
   approved: true,
 });
-const reviewId = (revision: string) => `review-${revision.slice(0, 24)}`;
+const reviewId = (revision: string) => `review-${Effect2.pipe(revision, EffectString.slice(0, 24))}`;
 const capsuleBytes = Effect.fn('test.expansionCapsuleBytes')(function* (home: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -46,11 +51,18 @@ const capsuleBytes = Effect.fn('test.expansionCapsuleBytes')(function* (home: st
     Effect.gen(function* () {
       for (const name of yield* fs.readDirectory(directory)) {
         // SQLite sidecars can disappear during a checkpoint and are not citation capsules.
-        if (name.endsWith('.sqlite-shm') || name.endsWith('.sqlite-wal')) continue;
+        if (
+          Effect2.pipe(name, EffectString.endsWith('.sqlite-shm')) ||
+          Effect2.pipe(name, EffectString.endsWith('.sqlite-wal'))
+        )
+          continue;
         const file = path.join(directory, name);
         const stat = yield* fs.stat(file);
         if (stat.type === 'Directory') yield* visit(file);
-        else if (file.includes(`${path.sep}citation-evidence${path.sep}`) && file.endsWith('.json'))
+        else if (
+          Effect2.pipe(file, EffectString.includes(`${path.sep}citation-evidence${path.sep}`)) &&
+          Effect2.pipe(file, EffectString.endsWith('.json'))
+        )
           values[path.relative(home, file)] = yield* fs.readFileString(file);
       }
     });
@@ -69,7 +81,13 @@ describe('reviewed bounded dependency expansion runtime', () => {
         const before = yield* fs.readFileString(f.memoryPath);
         const originalCapsules = yield* capsuleBytes(f.home);
         expect(f.inspected.status).toBe('ready');
-        expect(f.choices.coverage?.every(read => read.status === 'exhaustive')).toBe(true);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(f.choices.coverage), __effectArrayReceiver =>
+              EffectArray.every(__effectArrayReceiver, read => read.status === 'exhaustive'),
+            ),
+          ),
+        ).toBe(true);
 
         const settings = path.join(f.repository, 'settings.json');
         const settingsBefore = yield* fs.readFileString(settings);
@@ -152,7 +170,7 @@ describe('reviewed bounded dependency expansion runtime', () => {
             'Failure',
           );
           yield* fs.writeFileString(f.config.manifestPath, manifest);
-          const wrong = {...approval(f), approvalDigest: '0'.repeat(64)};
+          const wrong = {...approval(f), approvalDigest: Effect2.pipe('0', EffectString.repeat(64))};
           expect((yield* restartTopicDependencyExpansion(f.config, wrong).pipe(Effect.result))._tag).toBe('Failure');
           expect(
             (yield* restartTopicDependencyExpansion(f.config, approval(f), {
@@ -185,7 +203,7 @@ describe('reviewed bounded dependency expansion runtime', () => {
             ],
             {concurrency: 2},
           );
-          expect(same.map(value => value.preview)).toEqual([first.preview, first.preview]);
+          expect(EffectArray.map(same, value => value.preview)).toEqual([first.preview, first.preview]);
           expect((yield* applyTopicDependencyExpansion(f.config, approval(f)).pipe(Effect.result))._tag).toBe(
             'Failure',
           );
@@ -220,8 +238,12 @@ describe('reviewed bounded dependency expansion runtime', () => {
           expect((yield* restartTopicDependencyExpansion(f.config, exact).pipe(Effect.result))._tag).toBe('Failure');
           const reserved = yield* loadCandidateReview(f.home, reviewId(second.preview.revision));
           const writtenCapsules = yield* capsuleBytes(f.home);
-          for (const [name, bytes] of Object.entries(originalCapsules)) expect(writtenCapsules[name]).toBe(bytes);
-          const added = Object.entries(writtenCapsules).filter(([name]) => !(name in originalCapsules));
+          for (const [name, bytes] of EffectRecord.toEntries(originalCapsules))
+            expect(writtenCapsules[name]).toBe(bytes);
+          const added = EffectArray.filter(
+            EffectRecord.toEntries(writtenCapsules),
+            ([name]) => !(name in originalCapsules),
+          );
           expect(added.length).toBeGreaterThan(0);
           for (const [, bytes] of added) expect(JSON.parse(bytes).retainedAt).toBe(reserved.createdAt);
           expect((yield* applyTopicDependencyExpansion(f.config, exact)).status).toBe('already-expanded');
@@ -289,7 +311,7 @@ describe('reviewed bounded dependency expansion runtime', () => {
             reviewedHandles: [handle],
             rationale: 'Update descriptive claim.',
             unresolvedQuestions: [],
-            removedClaims: [basis.body.split('\n\n')[0]],
+            removedClaims: [Effect2.pipe(basis.body, EffectString.split('\n\n'))[0]],
           }),
         );
         const review = privateReview(
@@ -330,7 +352,8 @@ describe('reviewed bounded dependency expansion runtime', () => {
         const accepted = parseMemoryDocument(f.uri, yield* fs.readFileString(f.memoryPath))!;
         expect(accepted.metadata.topicMaintenanceError).toBeUndefined();
         expect(accepted.body).toBe(
-          'The implementation uses the reviewed 48 limit.\n\n' + f.body.split('\n\n').slice(1).join('\n\n'),
+          'The implementation uses the reviewed 48 limit.\n\n' +
+            EffectArray.join(Effect2.pipe(f.body, EffectString.split('\n\n')).slice(1), '\n\n'),
         );
         expect(accepted.metadata.topicMaintenance).toMatchObject({
           version: 3,
@@ -476,7 +499,15 @@ describe('reviewed bounded dependency expansion runtime', () => {
         }).pipe(Effect.result);
         expect(captured._tag).toBe('Failure');
         const retained = yield* capsuleBytes(f.home);
-        const selectedCapsule = Object.values(retained).find(content => content.includes('"path":"src/dependency.ts"'));
+        const selectedCapsule = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            EffectRecord.values(retained),
+            __effectArrayValue =>
+              !!(content => Effect2.pipe(content, EffectString.includes('"path":"src/dependency.ts"')))(
+                __effectArrayValue,
+              ),
+          ),
+        );
         expect(selectedCapsule).toBeDefined();
         expect(JSON.parse(selectedCapsule ?? 'null')).toMatchObject({retainedAt: intent.createdAt});
         expect(yield* fs.readFileString(f.memoryPath)).toBe(before);
@@ -523,7 +554,10 @@ describe('reviewed bounded dependency expansion runtime', () => {
         expect(yield* fs.readFileString(f.memoryPath)).toBe(before);
         yield* fs.writeFileString(
           f.config.manifestPath,
-          (yield* fs.readFileString(f.config.manifestPath)).replace('# configuration changed at the same commit\n', ''),
+          Effect2.pipe(
+            yield* fs.readFileString(f.config.manifestPath),
+            EffectString.replace('# configuration changed at the same commit\n', ''),
+          ),
         );
         const sourceRace = yield* applyTopicDependencyExpansion(f.config, approval(f), {
           afterEvidenceRetained: () =>

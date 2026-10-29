@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Cause, Effect, Exit, FileSystem, Layer, Path} from 'effect';
@@ -45,6 +46,63 @@ import {
   parseDiagnosticArguments,
   type ObservationMarker,
 } from './citation-phase-contract.js';
+
+function isContextBriefCitationScaleObservation(value: unknown): value is ContextBriefCitationScaleObservationV2 {
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
+  return (
+    'boundaryAddedRssBytes' in value &&
+    typeof value.boundaryAddedRssBytes === 'number' &&
+    'contextBriefMilliseconds' in value &&
+    typeof value.contextBriefMilliseconds === 'number' &&
+    'counters' in value &&
+    isContextBriefCitationScaleCounters(value.counters) &&
+    'estimatedTokens' in value &&
+    typeof value.estimatedTokens === 'number' &&
+    'exactValidationReceipts' in value &&
+    typeof value.exactValidationReceipts === 'number' &&
+    'memoryRetrievalMilliseconds' in value &&
+    typeof value.memoryRetrievalMilliseconds === 'number' &&
+    'profile' in value &&
+    typeof value.profile === 'string' &&
+    EffectArray.some(CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS, profile => profile === value.profile) &&
+    'selectedMemories' in value &&
+    typeof value.selectedMemories === 'number' &&
+    'validationMilliseconds' in value &&
+    typeof value.validationMilliseconds === 'number' &&
+    'validationReceipts' in value &&
+    typeof value.validationReceipts === 'number'
+  );
+}
+
+function isContextBriefCitationScaleCounters(
+  value: unknown,
+): value is ContextBriefCitationScaleObservationV2['counters'] {
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
+  return (
+    'activeViewFenceObservations' in value &&
+    typeof value.activeViewFenceObservations === 'number' &&
+    'coldGraphBuilds' in value &&
+    typeof value.coldGraphBuilds === 'number' &&
+    'distinctGraphDatabasePaths' in value &&
+    typeof value.distinctGraphDatabasePaths === 'number' &&
+    'effectiveEvidenceBatches' in value &&
+    typeof value.effectiveEvidenceBatches === 'number' &&
+    'leaseBalance' in value &&
+    typeof value.leaseBalance === 'number' &&
+    'maintenanceRequests' in value &&
+    typeof value.maintenanceRequests === 'number' &&
+    'peakLeaseBalance' in value &&
+    typeof value.peakLeaseBalance === 'number' &&
+    'productionStoreSessionCalls' in value &&
+    typeof value.productionStoreSessionCalls === 'number' &&
+    'snapshotLeaseAcquisitions' in value &&
+    typeof value.snapshotLeaseAcquisitions === 'number' &&
+    'snapshotLeaseReleases' in value &&
+    typeof value.snapshotLeaseReleases === 'number' &&
+    'statusObservations' in value &&
+    typeof value.statusObservations === 'number'
+  );
+}
 
 const collector = new Collector();
 const fixtureRoots: string[] = [];
@@ -194,8 +252,8 @@ const makeObservationWrapper =
       const measured = observation.pipe(
         Effect.tap(value =>
           Effect.sync(() => {
-            if (typeof value === 'object' && value !== null && 'counters' in value) {
-              const result = value as unknown as ContextBriefCitationScaleObservationV2;
+            if (isContextBriefCitationScaleObservation(value)) {
+              const result = value;
               counters = result.counters;
               resultCounts = {
                 exactValidationReceipts: result.exactValidationReceipts,
@@ -277,7 +335,8 @@ const program = Effect.scoped(
     )
       issues.push('incomplete-diagnostic-coverage');
     if (
-      markers.some(
+      EffectArray.some(
+        markers,
         marker =>
           marker.counters?.coldGraphBuilds !== 0 ||
           marker.counters?.maintenanceRequests !== 0 ||
@@ -286,8 +345,10 @@ const program = Effect.scoped(
     )
       issues.push('unexpected-production-counters');
     if (
-      markers.some(marker => {
-        const profile = budget.profiles.find(profile => profile.id === marker.profileId)!;
+      EffectArray.some(markers, marker => {
+        const profile = EffectOption.getOrUndefined(
+          EffectArray.findFirst(budget.profiles, profile => profile.id === marker.profileId),
+        )!;
         return (
           marker.validationReceipts !== profile.citationCount ||
           marker.exactValidationReceipts !== profile.citationCount ||
@@ -297,8 +358,8 @@ const program = Effect.scoped(
     )
       issues.push('unexpected-receipt-coverage');
     if (
-      !collector.events.some(event => event.kind === 'spawn') ||
-      !collector.events.some(event => event.kind === 'child-exit')
+      !EffectArray.some(collector.events, event => event.kind === 'spawn') ||
+      !EffectArray.some(collector.events, event => event.kind === 'child-exit')
     )
       issues.push('missing-process-boundaries');
     if (sys.platform !== 'darwin' || artifact.environment.architecture !== 'arm64')
@@ -313,7 +374,7 @@ const writeReport = (exit: Exit.Exit<unknown, unknown>) =>
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const removed = yield* Effect.forEach(fixtureRoots, root => fs.exists(root).pipe(Effect.map(exists => !exists)));
-    const cleanupPassed = fixtureRoots.length === 1 && removed.every(Boolean);
+    const cleanupPassed = fixtureRoots.length === 1 && EffectArray.every(removed, Boolean);
     if (!cleanupPassed) issues.push('fixture-cleanup-incomplete');
     if (collector.lateInvocationEvents !== 0) issues.push('observed-child-outlived-invocation');
     const coverage = observationCoverage(markers, DIAGNOSTIC_SAMPLES, DIAGNOSTIC_WARMUPS);
@@ -337,10 +398,10 @@ const writeReport = (exit: Exit.Exit<unknown, unknown>) =>
         fixtureCleanupPassed: cleanupPassed,
         issues,
       },
-      observations: markers.map(marker => ({
+      observations: EffectArray.map(markers, marker => ({
         ...marker,
         ...(marker.details === 'collected'
-          ? {summary: summarize(collector.events.filter(event => event.sample === marker.id))}
+          ? {summary: summarize(EffectArray.filter(collector.events, event => event.sample === marker.id))}
           : {}),
       })),
       events: collector.events,

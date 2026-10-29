@@ -1,4 +1,7 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
+import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
 import type {MemoryMetadata, MemoryRecord} from '@threadnote/memory/document';
 import {
@@ -18,6 +21,8 @@ import {
   extractContextHealthSemanticClaims,
   findContextHealthSemanticContradiction,
 } from '@threadnote/context/health_semantic';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const now = new Date('2026-09-17T12:00:00.000Z');
 
@@ -33,17 +38,20 @@ function record(uri: string, body: string, metadata: Partial<MemoryMetadata> = {
   };
   return {
     body,
-    content: [
-      'MEMORY',
-      `kind: ${complete.kind}`,
-      `status: ${complete.status}`,
-      `project: ${complete.project}`,
-      `topic: ${complete.topic}`,
-      `source_agent_client: ${complete.sourceAgentClient}`,
-      `timestamp: ${complete.timestamp}`,
-      '',
-      body,
-    ].join('\n'),
+    content: EffectArray.join(
+      [
+        'MEMORY',
+        `kind: ${complete.kind}`,
+        `status: ${complete.status}`,
+        `project: ${complete.project}`,
+        `topic: ${complete.topic}`,
+        `source_agent_client: ${complete.sourceAgentClient}`,
+        `timestamp: ${complete.timestamp}`,
+        '',
+        body,
+      ],
+      '\n',
+    ),
     headerTitle: complete.kind === 'handoff' ? 'HANDOFF' : 'MEMORY',
     metadata: complete,
     uri,
@@ -61,13 +69,28 @@ describe('buildContextHealthReport', () => {
       (_, index) =>
         `Deployment policy${String.fromCharCode(97 + Math.floor(index / 26))}${String.fromCharCode(97 + (index % 26))}`,
     );
-    const subject = candidates.find(candidate => {
-      const source = record('threadnote://memory/a', [...filler, `${candidate} must use signed artifacts.`].join('\n'));
-      return (
-        extractContextHealthSemanticClaims(source).claims.findIndex(claim => claim.text.startsWith(candidate)) >= 16
-      );
-    })!;
-    const left = record('threadnote://memory/a', [...filler, `${subject} must use signed artifacts.`].join('\n'));
+    const subject = EffectOption.getOrUndefined(
+      EffectArray.findFirst(candidates, candidate => {
+        const source = record(
+          'threadnote://memory/a',
+          EffectArray.join([...filler, `${candidate} must use signed artifacts.`], '\n'),
+        );
+        return (
+          EffectOption.getOrElse(
+            EffectArray.findFirstIndex(
+              extractContextHealthSemanticClaims(source).claims,
+              __effectArrayValue =>
+                !!(claim => Effect.pipe(claim.text, EffectString.startsWith(candidate)))(__effectArrayValue),
+            ),
+            () => -1,
+          ) >= 16
+        );
+      }),
+    )!;
+    const left = record(
+      'threadnote://memory/a',
+      EffectArray.join([...filler, `${subject} must use signed artifacts.`], '\n'),
+    );
     const right = record('threadnote://memory/z', `${subject} must not use signed artifacts.`);
     const before = [left.content, right.content];
     expect(analyzeContextHealthSemantics({project: 'threadnote', records: [left, right]}).contradictions).toHaveLength(
@@ -77,7 +100,13 @@ describe('buildContextHealthReport', () => {
     expect(extracted.claims).toHaveLength(18);
     expect(extracted.reasons).not.toContain('claim-limit');
     const evidence = compareContextHealthSemanticClaims(
-      extracted.claims.find(claim => claim.text.startsWith(subject))!,
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          extracted.claims,
+          __effectArrayValue =>
+            !!(claim => Effect.pipe(claim.text, EffectString.startsWith(subject)))(__effectArrayValue),
+        ),
+      )!,
       extractContextHealthSemanticClaims(right).claims[0],
     )!;
     expect(
@@ -97,21 +126,29 @@ describe('buildContextHealthReport', () => {
         fc.integer({min: 1, max: 7}),
         (leftPolarity, rightPolarity, limit) => {
           const make = (uri: string, denied: readonly boolean[]) =>
-            record(uri, denied.map(value => `Agents must ${value ? 'not ' : ''}load verified context.`).join('\n'));
+            record(
+              uri,
+              EffectArray.join(
+                EffectArray.map(denied, value => `Agents must ${value ? 'not ' : ''}load verified context.`),
+                '\n',
+              ),
+            );
           const left = make('threadnote://memory/a', leftPolarity);
           const right = make('threadnote://memory/b', rightPolarity);
           const before = [left.content, right.content];
           const a = extractContextHealthSemanticClaims(left).claims;
           const b = extractContextHealthSemanticClaims(right).claims;
           const expected =
-            leftPolarity.filter(Boolean).length * rightPolarity.filter(value => !value).length +
-            leftPolarity.filter(value => !value).length * rightPolarity.filter(Boolean).length;
+            EffectArray.filter(leftPolarity, Boolean).length *
+              EffectArray.filter(rightPolarity, value => !value).length +
+            EffectArray.filter(leftPolarity, value => !value).length *
+              EffectArray.filter(rightPolarity, Boolean).length;
           const found = new Set<string>();
           let cursor = 0;
           while (cursor < a.length * b.length) {
             const page = compareContextHealthSemanticClaimWindow(a, b, cursor, limit);
             for (const evidence of page.contradictions) found.add(evidence.contradictionId);
-            cursor = JSON.parse(JSON.stringify(page.nextCursor)) as number;
+            cursor = Schema.decodeUnknownSync(Schema.Finite)(JSON.parse(JSON.stringify(page.nextCursor)));
           }
           expect(found.size).toBe(expected);
           expect([left.content, right.content]).toEqual(before);
@@ -136,9 +173,20 @@ describe('buildContextHealthReport', () => {
           now,
           project: 'threadnote',
           records: [source],
-          relationEvidence: [artifact, ordinary].map(targetUri => ({sourceUri: source.uri, targetUri, status})),
+          relationEvidence: EffectArray.map([artifact, ordinary], targetUri => ({
+            sourceUri: source.uri,
+            targetUri,
+            status,
+          })),
         });
-        const findings = report.findings.filter(item => item.category.startsWith('relation-target-'));
+        const findings = EffectArrayPipe(report.findings, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (item, __effectArrayIndex2) =>
+              __effectArrayIndex2 in __effectArrayValues &&
+              Effect.pipe(item.category, EffectString.startsWith('relation-target-')),
+          ),
+        );
         expect(findings).toHaveLength(1);
         expect(findings[0]?.repair.targetUri).toBe(ordinary);
         expect(
@@ -157,7 +205,7 @@ describe('buildContextHealthReport', () => {
       now,
       project: 'threadnote',
       records,
-      citationValidations: records.map((item, index) => ({
+      citationValidations: EffectArray.map(records, (item, index) => ({
         uri: item.uri,
         receipts: [
           {
@@ -194,7 +242,7 @@ describe('buildContextHealthReport', () => {
           now,
           project: 'threadnote',
           records,
-          citationValidations: records.map((item, index) => ({
+          citationValidations: EffectArray.map(records, (item, index) => ({
             uri: item.uri,
             receipts: [
               {
@@ -283,15 +331,40 @@ describe('buildContextHealthReport', () => {
         citationValidations: [
           {
             uri: source.uri,
-            receipts: citations.map(item => ({...receipt('changed', 'source-changed'), citationId: item.id})),
+            receipts: EffectArray.map(citations, item => ({
+              ...receipt('changed', 'source-changed'),
+              citationId: item.id,
+            })),
           },
         ],
       }).findings;
     };
     const before = cases([a, b]);
     const after = cases([b]);
-    const bCase = before.find(item => item.repair.targetUri?.endsWith(`#${b.id}`));
-    const aCase = before.find(item => item.repair.targetUri?.endsWith(`#${a.id}`));
+    const bCase = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        before,
+        __effectArrayValue =>
+          !!(item =>
+            Effect.pipe(item.repair.targetUri, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.endsWith(`#${b.id}`)),
+            ))(__effectArrayValue),
+      ),
+    );
+    const aCase = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        before,
+        __effectArrayValue =>
+          !!(item =>
+            Effect.pipe(item.repair.targetUri, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.endsWith(`#${a.id}`)),
+            ))(__effectArrayValue),
+      ),
+    );
     expect(after[0]?.caseId).toBe(bCase?.caseId);
     expect(after[0]?.caseId).not.toBe(aCase?.caseId);
   });
@@ -309,7 +382,7 @@ describe('buildContextHealthReport', () => {
           {minLength: 1, maxLength: 6, selector: item => item.label},
         ),
         entries => {
-          const original = entries.map(item => ({...item, citation: citation(`original-${item.label}`)}));
+          const original = EffectArray.map(entries, item => ({...item, citation: citation(`original-${item.label}`)}));
           const report = (citations: readonly ReturnType<typeof citation>[]) => {
             const source = record('threadnote://memory/source', 'claim', {
               memoryId: 'tn_source',
@@ -322,35 +395,60 @@ describe('buildContextHealthReport', () => {
               citationValidations: [
                 {
                   uri: source.uri,
-                  receipts: citations.map(item => ({...receipt('changed', 'source-changed'), citationId: item.id})),
+                  receipts: EffectArray.map(citations, item => ({
+                    ...receipt('changed', 'source-changed'),
+                    citationId: item.id,
+                  })),
                 },
               ],
             }).findings;
           };
-          const before = report(original.map(item => item.citation));
+          const before = report(EffectArray.map(original, item => item.citation));
           const expected = new Map(
-            original.map(item => [
+            EffectArray.map(original, item => [
               item.label,
-              before.find(finding => finding.repair.targetUri?.endsWith(`#${item.citation.id}`))!.caseId,
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(
+                  before,
+                  __effectArrayValue =>
+                    !!(finding =>
+                      Effect.pipe(finding.repair.targetUri, effectOptionalString =>
+                        effectOptionalString == null
+                          ? undefined
+                          : Effect.pipe(effectOptionalString, EffectString.endsWith(`#${item.citation.id}`)),
+                      ))(__effectArrayValue),
+                ),
+              )!.caseId,
             ]),
           );
-          const survivors = original
-            .filter(item => item.keep)
-            .map(item => {
+          const survivors = EffectArray.map(
+            EffectArray.filter(original, (item, __effectArrayIndex) => __effectArrayIndex in original && item.keep),
+            item => {
               let next = item.citation;
               for (let generation = 0; generation < item.replacements; generation += 1) {
                 next = preserveMemoryCodeCitationAnchor(next, citation(`replacement-${item.label}-${generation}`));
               }
               return {...item, citation: next};
-            })
-            .sort((left, right) => left.rank - right.rank || left.label - right.label);
-          const after = report([citation('unrelated-insertion'), ...survivors.map(item => item.citation)]);
+            },
+          ).sort((left, right) => left.rank - right.rank || left.label - right.label);
+          const after = report([citation('unrelated-insertion'), ...EffectArray.map(survivors, item => item.citation)]);
           for (const item of survivors) {
-            expect(after.find(finding => finding.repair.targetUri?.endsWith(`#${item.citation.id}`))?.caseId).toBe(
-              expected.get(item.label),
-            );
+            expect(
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(
+                  after,
+                  __effectArrayValue =>
+                    !!(finding =>
+                      Effect.pipe(finding.repair.targetUri, effectOptionalString =>
+                        effectOptionalString == null
+                          ? undefined
+                          : Effect.pipe(effectOptionalString, EffectString.endsWith(`#${item.citation.id}`)),
+                      ))(__effectArrayValue),
+                ),
+              )?.caseId,
+            ).toBe(expected.get(item.label));
           }
-          expect(new Set(after.map(item => item.caseId)).size).toBe(after.length);
+          expect(new Set(EffectArray.map(after, item => item.caseId)).size).toBe(after.length);
         },
       ),
       {numRuns: 80},
@@ -426,18 +524,17 @@ describe('buildContextHealthReport', () => {
       unverified: 3,
       state: 'partial',
     });
-    expect(report.findings.map(item => item.category)).toEqual(['citation-changed', 'citation-missing']);
+    expect(EffectArray.map(report.findings, item => item.category)).toEqual(['citation-changed', 'citation-missing']);
     expect(report.status).toBe('unknown');
   });
 
   it('counts missing and admission-deferred citations as pending and source failures as unavailable', () => {
+    const missing = citation('missing');
+    const queued = citation('queued');
+    const limited = citation('limited');
+    const blocked = citation('blocked');
     const source = record('threadnote://memory/coverage-buckets', 'source', {
-      codeCitations: [
-        {id: 'missing'} as never,
-        {id: 'queued'} as never,
-        {id: 'limited'} as never,
-        {id: 'blocked'} as never,
-      ],
+      codeCitations: [missing, queued, limited, blocked],
     });
     const coverage = contextHealthCitationCoverageV2({
       records: [source],
@@ -445,9 +542,9 @@ describe('buildContextHealthReport', () => {
         {
           uri: source.uri,
           receipts: [
-            {...receipt('unknown', 'source-changed'), citationId: 'queued', reason: 'citation-limit'},
-            {...receipt('unknown', 'source-changed'), citationId: 'limited', reason: 'citation-limit'},
-            {...receipt('unknown', 'repository-unavailable'), citationId: 'blocked'},
+            {...receipt('unknown', 'source-changed'), citationId: queued.id, reason: 'citation-limit'},
+            {...receipt('unknown', 'source-changed'), citationId: limited.id, reason: 'citation-limit'},
+            {...receipt('unknown', 'repository-unavailable'), citationId: blocked.id},
           ],
         },
       ],
@@ -466,16 +563,17 @@ describe('buildContextHealthReport', () => {
     );
     fc.assert(
       fc.property(scenarios, cases => {
+        const citations = EffectArray.map(cases, (_, index) => citation(`c${index}`));
         const source = record('threadnote://memory/coverage-property', 'source', {
-          codeCitations: cases.map((_, index) => ({id: `c${index}`}) as never),
+          codeCitations: citations,
         });
-        const receipts = cases.flatMap((item, index) =>
+        const receipts = EffectArray.flatMap(EffectArray.zip(cases, citations), ([item, codeCitation]) =>
           item.status === 'missing'
             ? []
             : [
                 {
                   ...receipt(item.status === 'unknown' ? 'unknown' : item.status, 'source-changed'),
-                  citationId: `c${index}`,
+                  citationId: codeCitation.id,
                   reason: item.reason,
                   ...(item.historical ? {provenance: 'historical-verified' as const} : {}),
                 },
@@ -485,7 +583,9 @@ describe('buildContextHealthReport', () => {
           records: [source],
           validations: [{uri: source.uri, receipts}],
         });
-        const expected = cases.reduce(
+        const expected = EffectArray.reduce(
+          cases,
+          {checked: 0, historical: 0, pending: 0, unavailable: 0},
           (counts, item) => {
             if (item.historical && item.status !== 'missing') counts.historical += 1;
             else if (item.status === 'missing') counts.pending += 1;
@@ -494,7 +594,6 @@ describe('buildContextHealthReport', () => {
             else counts.unavailable += 1;
             return counts;
           },
-          {checked: 0, historical: 0, pending: 0, unavailable: 0},
         );
         expect(coverage.checked).toBe(expected.checked);
         expect(coverage.historicalVerified).toBe(expected.historical);
@@ -591,22 +690,26 @@ describe('buildContextHealthReport', () => {
     const selectors = [target.uri, target.metadata.archivedFrom!, 'threadnote://memory/tn_target'];
     const source = record('threadnote://user/me/memories/source.md', 'source', {
       memoryId: 'tn_source',
-      relations: selectors.map(uri => ({type: 'references' as const, uri})),
+      relations: EffectArray.map(selectors, uri => ({type: 'references' as const, uri})),
     });
     const corpus = [source, target];
     const report = buildContextHealthReport({
       now,
       project: 'threadnote',
       records: corpus,
-      relationEvidence: selectors.map(targetUri => ({sourceUri: source.uri, targetUri, status: 'inactive' as const})),
+      relationEvidence: EffectArray.map(selectors, targetUri => ({
+        sourceUri: source.uri,
+        targetUri,
+        status: 'inactive' as const,
+      })),
     });
-    expect(new Set(report.findings.map(finding => finding.caseId)).size).toBe(1);
+    expect(new Set(EffectArray.map(report.findings, finding => finding.caseId)).size).toBe(1);
     for (const selector of selectors)
       expect(resolveContextHealthRelationTargetV2(corpus, selector)).toMatchObject({
         state: 'inactive',
         record: {metadata: {memoryId: 'tn_target'}},
       });
-    expect(report.findings.every(finding => finding.caseIdentity?.slot === 'tn_target')).toBe(true);
+    expect(EffectArray.every(report.findings, finding => finding.caseIdentity?.slot === 'tn_target')).toBe(true);
     const conflicting = {...target, uri: 'threadnote://user/me/archive/other-target.md'};
     expect(resolveContextHealthRelationTargetV2([...corpus, conflicting], 'threadnote://memory/tn_target')).toEqual({
       state: 'conflicted',
@@ -669,7 +772,9 @@ describe('buildContextHealthReport', () => {
             record('threadnote://memory/tn_right', `The ${environment}request timeout is 60 seconds.`, metadata),
           ],
         });
-        const finding = report.findings.find(item => item.category === 'semantic-contradiction');
+        const finding = EffectOption.getOrUndefined(
+          EffectArray.findFirst(report.findings, item => item.category === 'semantic-contradiction'),
+        );
         expect(report.semanticCompleteness).toMatchObject({state: 'complete', supportedClaims: 2});
         expect(finding).toMatchObject({
           confidence: knownEnvironment && knownValidity ? 'medium' : 'low',
@@ -694,16 +799,18 @@ describe('buildContextHealthReport', () => {
         const before = structuredClone(records);
         const input = {now, project: 'threadnote', records};
         const report = buildContextHealthReport(input);
-        const selected = report.findings.find(item => item.category === 'semantic-contradiction')!;
+        const selected = EffectOption.getOrUndefined(
+          EffectArray.findFirst(report.findings, item => item.category === 'semantic-contradiction'),
+        )!;
         const contradictionId = selected.semanticEvidence!.contradictionId;
         const reviewed = buildContextHealthReport({
           ...input,
           reviewedSemanticContradictionIds: [contradictionId, contradictionId, 'unrelated-id'],
         });
-        expect(reviewed.findings).toEqual(report.findings.filter(item => item.id !== selected.id));
+        expect(reviewed.findings).toEqual(EffectArray.filter(report.findings, item => item.id !== selected.id));
         expect(reviewed.semanticCompleteness).toEqual(report.semanticCompleteness);
         const changedUri = selected.semanticEvidence!.left.recordUri;
-        const changed = records.map(item =>
+        const changed = EffectArray.map(records, item =>
           item.uri === changedUri ? record(item.uri, `${item.body}\nAdditional source context.`, item.metadata) : item,
         );
         const fresh = buildContextHealthReport({now, project: 'threadnote', records: changed});
@@ -763,11 +870,11 @@ describe('buildContextHealthReport', () => {
       project: 'threadnote',
       records: [source],
     });
-    expect(report.findings.map(finding => finding.category)).toEqual([
+    expect(EffectArray.map(report.findings, finding => finding.category)).toEqual([
       'guidance-unavailable',
       'guidance-stale-sources',
     ]);
-    expect(report.findings.every(finding => finding.uris.includes(source.uri))).toBe(true);
+    expect(EffectArray.every(report.findings, finding => finding.uris.includes(source.uri))).toBe(true);
   });
 
   it('reports independently actionable health findings from supplied evidence', () => {
@@ -821,7 +928,7 @@ describe('buildContextHealthReport', () => {
       ],
     });
 
-    expect(report.findings.map(finding => finding.category)).toEqual([
+    expect(EffectArray.map(report.findings, finding => finding.category)).toEqual([
       'validity-expired',
       'citation-changed',
       'citation-missing',
@@ -834,8 +941,12 @@ describe('buildContextHealthReport', () => {
       'candidate-possible-duplicate',
       'citation-unknown',
     ]);
-    expect(report.findings.every(finding => finding.repair !== undefined)).toBe(true);
-    expect(report.findings.find(finding => finding.category === 'citation-unknown')).toMatchObject({
+    expect(EffectArray.every(report.findings, finding => finding.repair !== undefined)).toBe(true);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(report.findings, finding => finding.category === 'citation-unknown'),
+      ),
+    ).toMatchObject({
       confidence: 'low',
       repairability: 'requires-evidence',
     });
@@ -845,7 +956,7 @@ describe('buildContextHealthReport', () => {
   it('is deterministic, bounded, and does not mutate inputs', () => {
     fc.assert(
       fc.property(fc.array(fc.stringMatching(/^[a-z]{1,12}$/u), {maxLength: 40}), values => {
-        const records = values.map((body, index) =>
+        const records = EffectArray.map(values, (body, index) =>
           record(`threadnote://user/me/memories/durable/projects/threadnote/${index}.md`, body, {
             validTo: index % 2 === 0 ? '2026-09-16T00:00:00.000Z' : undefined,
           }),
@@ -880,8 +991,12 @@ describe('buildContextHealthReport', () => {
           project: 'threadnote',
           records: [duplicate, affected],
         });
-        const duplicateFinding = broad.findings.find(finding => finding.category === 'exact-duplicate');
-        const selected = [duplicate, affected].find(item => item.uri === duplicateFinding?.repair.subjectUri);
+        const duplicateFinding = EffectOption.getOrUndefined(
+          EffectArray.findFirst(broad.findings, finding => finding.category === 'exact-duplicate'),
+        );
+        const selected = EffectOption.getOrUndefined(
+          EffectArray.findFirst([duplicate, affected], item => item.uri === duplicateFinding?.repair.subjectUri),
+        );
         if (selected === undefined) throw new Error('expected exact duplicate subject');
         const report = buildContextHealthReport({
           duplicateCorpus,
@@ -902,11 +1017,17 @@ describe('buildContextHealthReport', () => {
     const first = record('threadnote://user/me/memories/durable/projects/threadnote/first.md', 'same body');
     const second = record('threadnote://user/me/memories/durable/projects/threadnote/second.md', 'same body');
     const broad = buildContextHealthReport({now, project: 'threadnote', records: [first, second]});
-    const duplicate = broad.findings.find(finding => finding.category === 'exact-duplicate');
+    const duplicate = EffectOption.getOrUndefined(
+      EffectArray.findFirst(broad.findings, finding => finding.category === 'exact-duplicate'),
+    );
     expect(duplicate?.repair.subjectUri).toBeDefined();
     expect(duplicate?.repair.targetUri).toBeDefined();
-    const subject = [first, second].find(item => item.uri === duplicate?.repair.subjectUri);
-    const survivor = [first, second].find(item => item.uri === duplicate?.repair.targetUri);
+    const subject = EffectOption.getOrUndefined(
+      EffectArray.findFirst([first, second], item => item.uri === duplicate?.repair.subjectUri),
+    );
+    const survivor = EffectOption.getOrUndefined(
+      EffectArray.findFirst([first, second], item => item.uri === duplicate?.repair.targetUri),
+    );
     if (subject === undefined || survivor === undefined) throw new Error('expected duplicate subject and survivor');
 
     const selectedSubject = buildContextHealthReport({
@@ -949,7 +1070,10 @@ describe('buildContextHealthReport', () => {
       ],
     });
 
-    expect(report.findings.map(finding => finding.category)).toEqual(['relation-target-conflicted', 'review-overdue']);
+    expect(EffectArray.map(report.findings, finding => finding.category)).toEqual([
+      'relation-target-conflicted',
+      'review-overdue',
+    ]);
   });
 
   it('intersects normalized user selectors across category and URI filters', () => {
@@ -994,13 +1118,13 @@ function receipt(
 function citation(name: string) {
   return createMemoryCodeCitation({
     extractorSet: 'fixture',
-    fileContentHash: {algorithm: 'sha256' as const, value: '1'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256' as const, value: Effect.pipe('1', EffectString.repeat(64))},
     path: `src/${name}.ts`,
-    repositoryId: '3'.repeat(64),
+    repositoryId: Effect.pipe('3', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote' as const,
-    sourceCommit: '2'.repeat(40),
+    sourceCommit: Effect.pipe('2', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'4'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect.pipe('4', EffectString.repeat(40))}`,
     target: {kind: 'file' as const},
     version: 1 as const,
   });

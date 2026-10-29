@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Predicate} from 'effect';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed MCP proxy owns one bounded candidate child-process boundary. */
 
@@ -28,6 +30,9 @@ import {
   CODE_MEMORY_LINK_PROXY_CAPABILITY_ENV,
   CODE_MEMORY_LINK_PROXY_SERVER_NAME,
 } from './code-memory-link-codex-isolation.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_CONTEXT_PROXY_VERSION = 1 as const;
 export const CODE_MEMORY_LINK_CONTEXT_PROXY_ARMS = ['anchored', 'task-only', 'no-memory'] as const;
@@ -116,7 +121,7 @@ export async function handleCodeMemoryLinkContextBriefRequest(
   const budgetTokens = maximumBudgetTokens;
   const requestedCodeRefs =
     request.codeRefs === undefined ? [] : typeof request.codeRefs === 'string' ? [request.codeRefs] : request.codeRefs;
-  const codeRefs = requestedCodeRefs.map(reference => validatedCodeRef(reference, packet.callerCwd));
+  const codeRefs = EffectArray.map(requestedCodeRefs, reference => validatedCodeRef(reference, packet.callerCwd));
   const normalized = {
     budgetTokens,
     callerCwd: packet.callerCwd,
@@ -177,7 +182,7 @@ export async function runCodeMemoryLinkContextBriefCandidate(
     request.mode,
     '--budget-tokens',
     String(request.budgetTokens),
-    ...request.codeRefs.flatMap(reference => ['--code-ref', reference]),
+    ...EffectArray.flatMap(request.codeRefs, reference => ['--code-ref', reference]),
   ];
   const result = await captureCandidate(packet.candidateExecutable, args, {
     CI: '1',
@@ -341,14 +346,22 @@ async function captureCandidate(
 }
 
 function validatedCodeRef(value: string, callerCwd: string): string {
-  const reference = value.trim();
+  const reference = Effect.pipe(value, EffectString.trim);
   if (CGS.test(reference)) return reference;
-  const normalizedReference = reference.replaceAll('\\', '/');
-  if (!normalizedReference || normalizedReference.includes('\0') || isAbsolute(normalizedReference))
+  const normalizedReference = Effect.pipe(reference, EffectString.replaceAll('\\', '/'));
+  if (
+    !normalizedReference ||
+    Effect.pipe(normalizedReference, EffectString.includes('\0')) ||
+    isAbsolute(normalizedReference)
+  )
     throw new Error('codeRefs must be repo-relative or cgs_.');
   const resolved = resolve(callerCwd, normalizedReference);
   const relativeToFixture = relative(callerCwd, resolved);
-  if (relativeToFixture === '..' || relativeToFixture.startsWith(`..${sep}`) || isAbsolute(relativeToFixture)) {
+  if (
+    relativeToFixture === '..' ||
+    Effect.pipe(relativeToFixture, EffectString.startsWith(`..${sep}`)) ||
+    isAbsolute(relativeToFixture)
+  ) {
     throw new Error('codeRef escaped the fixture repo.');
   }
   return normalizedReference;
@@ -358,13 +371,18 @@ function candidateRequest(
   value: Readonly<Record<string, unknown>>,
 ): Parameters<CodeMemoryLinkContextProxyCandidateRunner>[1] {
   const codeRefs = value.codeRefs;
-  if (codeRefs !== undefined && (!Array.isArray(codeRefs) || codeRefs.some(entry => typeof entry !== 'string'))) {
-    throw new Error('Projected Context Brief codeRefs are invalid.');
+  const parsedCodeRefs: string[] = [];
+  if (codeRefs !== undefined) {
+    if (!EffectArray.isArray(codeRefs)) throw new Error('Projected Context Brief codeRefs are invalid.');
+    for (const entry of codeRefs) {
+      if (typeof entry !== 'string') throw new Error('Projected Context Brief codeRefs are invalid.');
+      parsedCodeRefs.push(entry);
+    }
   }
   return {
     budgetTokens: integer(value.budgetTokens, 'projected budgetTokens', 1, 1_500),
     callerCwd: nonEmptyText(value.callerCwd, 'projected callerCwd', 4_096),
-    codeRefs: (codeRefs ?? []) as readonly string[],
+    codeRefs: parsedCodeRefs,
     mode: oneOf(value.mode, MODES, 'projected mode'),
     project: portable(value.project, 'projected project'),
     task: nonEmptyText(value.task, 'projected task', 8_192),
@@ -372,25 +390,30 @@ function candidateRequest(
 }
 
 function absolutePath(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !isAbsolute(value) || resolve(value) !== value || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    !isAbsolute(value) ||
+    resolve(value) !== value ||
+    Effect.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} must be a normalized absolute path`);
   }
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid('object has unsupported or missing fields');
   }
 }
 
 function integer(value: unknown, label: string, minimum: number, maximum: number): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+  if (!checkedIsSafeInteger(value) || value < minimum || value > maximum) {
     invalid(`${label} is out of range`);
   }
-  return value as number;
+  return value;
 }
 
 function matchingText(value: unknown, pattern: RegExp, label: string): string {
@@ -400,20 +423,26 @@ function matchingText(value: unknown, pattern: RegExp, label: string): string {
 }
 
 function nonEmptyText(value: unknown, label: string, maximum: number): string {
-  if (typeof value !== 'string' || value.trim() !== value || value.length === 0 || value.length > maximum) {
+  if (
+    typeof value !== 'string' ||
+    Effect.pipe(value, EffectString.trim) !== value ||
+    value.length === 0 ||
+    value.length > maximum
+  ) {
     invalid(`${label} must be bounded non-empty text`);
   }
   return value;
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
-function oneOf<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
-  if (typeof value !== 'string' || !allowed.includes(value as T)) invalid(`${label} is invalid`);
-  return value as T;
+function oneOf<const T extends readonly string[]>(value: unknown, allowed: T, label: string): T[number] {
+  if (typeof value !== 'string') invalid(`${label} is invalid`);
+  for (const candidate of allowed) if (candidate === value) return candidate;
+  invalid(`${label} is invalid`);
 }
 
 function portable(value: unknown, label: string): string {

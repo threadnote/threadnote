@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Predicate} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -15,6 +16,8 @@ import type {
 import {CodeGraphStoreError} from '../../types.js';
 import {tableExists} from '../session.js';
 import {codeGraphWorktreeReconciliationSchemaCompatible} from '../reconciliation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function decodeEvidence(value: string): unknown {
   try {
@@ -50,7 +53,10 @@ function validEvidence(value: unknown): value is CodeGraphScopeApplicabilityEvid
     'catalogFingerprint',
   ] as const;
   return (
-    fields.every(field => typeof value[field] === 'string' && value[field].length > 0 && value[field].length <= 1024) &&
+    EffectArray.every(
+      fields,
+      field => typeof value[field] === 'string' && value[field].length > 0 && value[field].length <= 1024,
+    ) &&
     /^[0-9a-f]{64}$/u.test(String(value.repositoryId)) &&
     /^[0-9a-f]{64}$/u.test(String(value.worktreeId)) &&
     (value.scopeKey === CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY ||
@@ -229,7 +235,7 @@ export const recordScopeApplicability = Effect.fn('codeGraph.recordScopeApplicab
       included_root_ids_json, included_component_ids_json, completeness, diagnostics_json)
       VALUES (${snapshotId}, ${scope.scopeKey}, ${scope.definitionDigest}, ${scope.closureDigest},
         ${rootProjectIdsJson}, ${includedProjectIdsJson},
-        ${scope.completeness}, ${JSON.stringify(scope.diagnostics.slice(0, 32).map(diagnostic => diagnostic.slice(0, 512)))})
+        ${scope.completeness}, ${JSON.stringify(EffectArray.map(scope.diagnostics.slice(0, 32), diagnostic => Effect2.pipe(diagnostic, EffectString.slice(0, 512))))})
       ON CONFLICT(snapshot_id) DO UPDATE SET definition_digest = excluded.definition_digest,
         closure_digest = excluded.closure_digest, included_root_ids_json = excluded.included_root_ids_json,
         included_component_ids_json = excluded.included_component_ids_json, completeness = excluded.completeness,

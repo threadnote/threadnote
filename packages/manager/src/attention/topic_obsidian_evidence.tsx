@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import React, {useState} from 'react';
 import {FileText, History, LockKeyhole} from 'lucide-react';
 import type {TopicMaintenanceObsidianEvidencePacketV2} from '@threadnote/context/topic_maintenance';
 import {ReviewBadge} from '../review_presentation.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface TopicCaptureControls {
   readonly disabled: boolean;
@@ -27,41 +30,44 @@ export function TopicObsidianEvidence({
           <LockKeyhole size={13} aria-hidden="true" /> Private Obsidian note
         </ReviewBadge>
       </header>
-      {[
-        {label: 'Original supporting excerpt', source: topic.obsidian.origin},
-        {label: 'Accepted supporting excerpt', source: topic.obsidian.active},
-      ].map(({label, source}) => (
-        <details key={label} className="review-source-card">
-          <summary>
-            <History size={14} aria-hidden="true" />
-            {label}
-            <ReviewBadge tone={source?.historical === 'available' ? 'info' : 'warning'}>
-              {source?.historical === 'available' ? 'Retained excerpt available' : 'Retained excerpt unavailable'}
-            </ReviewBadge>
-          </summary>
-          {source ? (
-            <>
-              <p>{source.citation.relativePath}</p>
-              <p>
-                Current note:{' '}
-                {source.currentRevision === 'same'
-                  ? 'matches this excerpt'
-                  : source.currentRevision === 'changed'
-                    ? 'has changed'
-                    : source.currentRevision === 'removed'
-                      ? 'removed'
-                      : 'could not be verified'}
-                .
-              </p>
-            </>
-          ) : null}
-          {source?.historical === 'available' && source.fragment !== undefined ? (
-            <pre>{source.fragment}</pre>
-          ) : (
-            <p>No authorized retained excerpt is available.</p>
-          )}
-        </details>
-      ))}
+      {EffectArray.map(
+        [
+          {label: 'Original supporting excerpt', source: topic.obsidian.origin},
+          {label: 'Accepted supporting excerpt', source: topic.obsidian.active},
+        ],
+        ({label, source}) => (
+          <details key={label} className="review-source-card">
+            <summary>
+              <History size={14} aria-hidden="true" />
+              {label}
+              <ReviewBadge tone={source?.historical === 'available' ? 'info' : 'warning'}>
+                {source?.historical === 'available' ? 'Retained excerpt available' : 'Retained excerpt unavailable'}
+              </ReviewBadge>
+            </summary>
+            {source ? (
+              <>
+                <p>{source.citation.relativePath}</p>
+                <p>
+                  Current note:{' '}
+                  {source.currentRevision === 'same'
+                    ? 'matches this excerpt'
+                    : source.currentRevision === 'changed'
+                      ? 'has changed'
+                      : source.currentRevision === 'removed'
+                        ? 'removed'
+                        : 'could not be verified'}
+                  .
+                </p>
+              </>
+            ) : null}
+            {source?.historical === 'available' && source.fragment !== undefined ? (
+              <pre>{source.fragment}</pre>
+            ) : (
+              <p>No authorized retained excerpt is available.</p>
+            )}
+          </details>
+        ),
+      )}
       {current ? (
         <section aria-label="Current note source" className="review-source-card">
           <h5>
@@ -88,7 +94,9 @@ export function TopicObsidianEvidence({
                 }}
               />
               {selection && selection.end > selection.start ? (
-                <pre aria-label="Selected note excerpt">{current.content.slice(selection.start, selection.end)}</pre>
+                <pre aria-label="Selected note excerpt">
+                  {Effect.pipe(current.content, EffectString.slice(selection.start, selection.end))}
+                </pre>
               ) : (
                 <p>No source text selected.</p>
               )}

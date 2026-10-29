@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {readFile} from '@threadnote/testing/node-fs-promises';
 import {dirname, join} from '@threadnote/testing/node-path';
 import {fileURLToPath} from '@threadnote/testing/node-url';
@@ -44,9 +45,9 @@ const historicalProfiles = [
 
 describe('code graph schema revision entity', () => {
   it('pins every released persistent revision to its named upgrade route', () => {
-    expect(CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS.map(value => [value.value, value.key, value.upgradeRoute])).toEqual(
-      historicalProfiles,
-    );
+    expect(
+      EffectArray.map(CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS, value => [value.value, value.key, value.upgradeRoute]),
+    ).toEqual(historicalProfiles);
     expect(CODE_GRAPH_PERSISTENT_SCHEMA_CITATION_PREDECESSOR.value).toBe(15);
     expect(CODE_GRAPH_PERSISTENT_SCHEMA_CHECKPOINT_PREDECESSOR.value).toBe(16);
     expect(CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT.value).toBe(19);

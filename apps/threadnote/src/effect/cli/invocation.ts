@@ -1,4 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {cliAnonymousTelemetryOperation} from '../../telemetry/operations.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type ProductionLogMode = 'always' | 'never' | 'requires-apply' | 'skips-on-preview';
 type CliValueFlagKind = 'other' | 'string';
@@ -42,18 +45,20 @@ export function registerCliBooleanFlag(name: string): void {
 }
 
 export function decodeCliStringFlagValue(value: string): string {
-  return value.startsWith(encodedStringPrefix) ? value.slice(encodedStringPrefix.length) : value;
+  return Effect.pipe(value, EffectString.startsWith(encodedStringPrefix))
+    ? Effect.pipe(value, EffectString.slice(encodedStringPrefix.length))
+    : value;
 }
 
 export function makeCliInvocationInspector(registrations: readonly CliCommandRegistration[]) {
   const operationByName = new Map(
-    registrations.flatMap(registration => [
+    EffectArray.flatMap(registrations, registration => [
       [registration.canonicalName, registration.canonicalName] as const,
-      ...registration.aliases.map(alias => [alias, registration.canonicalName] as const),
+      ...EffectArray.map(registration.aliases, alias => [alias, registration.canonicalName] as const),
     ]),
   );
   const registrationByName = new Map(
-    registrations.map(registration => [registration.canonicalName, registration] as const),
+    EffectArray.map(registrations, registration => [registration.canonicalName, registration] as const),
   );
 
   return (arguments_: readonly string[]): CliInvocationInspection => {
@@ -114,13 +119,18 @@ function scanCliArguments(arguments_: readonly string[]) {
   let invalidBooleanValue = false;
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index] ?? '';
-    const equalsIndex = argument.indexOf('=');
-    const flagName = equalsIndex > 0 ? argument.slice(0, equalsIndex) : argument;
+    const equalsIndex = Effect.pipe(
+      argument,
+      EffectString.indexOf('='),
+      Effect.Option.getOrElse(() => -1),
+    );
+    const flagName = equalsIndex > 0 ? Effect.pipe(argument, EffectString.slice(0, equalsIndex)) : argument;
     const valueKind = booleanFlagNames.has(flagName)
       ? undefined
       : (valueFlagKinds.get(flagName) ?? cliRuntimeValueFlagKinds.get(flagName));
     if (valueKind !== undefined) {
-      const value = equalsIndex > 0 ? argument.slice(equalsIndex + 1) : arguments_[index + 1];
+      const value =
+        equalsIndex > 0 ? Effect.pipe(argument, EffectString.slice(equalsIndex + 1)) : arguments_[index + 1];
       if (flagName === '--home') {
         homeOverride = value;
       }
@@ -130,7 +140,8 @@ function scanCliArguments(arguments_: readonly string[]) {
       continue;
     }
     if (booleanFlagNames.has(flagName)) {
-      const inlineValue = equalsIndex > 0 ? parseCliBoolean(argument.slice(equalsIndex + 1)) : undefined;
+      const inlineValue =
+        equalsIndex > 0 ? parseCliBoolean(Effect.pipe(argument, EffectString.slice(equalsIndex + 1))) : undefined;
       const followingValue = equalsIndex < 0 ? parseCliBoolean(arguments_[index + 1]) : undefined;
       if (equalsIndex > 0 && inlineValue === undefined) invalidBooleanValue = true;
       booleanValues.set(flagName, inlineValue ?? followingValue ?? true);
@@ -139,7 +150,7 @@ function scanCliArguments(arguments_: readonly string[]) {
       }
       continue;
     }
-    if (argument.startsWith('-')) {
+    if (Effect.pipe(argument, EffectString.startsWith('-'))) {
       flags.add(flagName);
     } else {
       positionals.push(argument);
@@ -152,7 +163,7 @@ function parseCliBoolean(value: string | undefined): boolean | undefined {
   if (value === undefined) {
     return undefined;
   }
-  switch (value.toLowerCase()) {
+  switch (Effect.pipe(value, EffectString.toLowerCase)) {
     case '1':
     case 'on':
     case 'true':
@@ -178,8 +189,12 @@ export function normalizeCliArguments(args: readonly string[]): readonly string[
   const normalized: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const current = args[index] ?? '';
-    const equalsIndex = current.indexOf('=');
-    const inlineName = equalsIndex > 0 ? current.slice(0, equalsIndex) : current;
+    const equalsIndex = Effect.pipe(
+      current,
+      EffectString.indexOf('='),
+      Effect.Option.getOrElse(() => -1),
+    );
+    const inlineName = equalsIndex > 0 ? Effect.pipe(current, EffectString.slice(0, equalsIndex)) : current;
     // A spelling can be boolean in one command and valued in another (for
     // example, `init-manifest --replace` versus `remember --replace <uri>`).
     // Effect's selected command can disambiguate those flags. Rewriting them
@@ -191,7 +206,7 @@ export function normalizeCliArguments(args: readonly string[]): readonly string[
     }
 
     if (equalsIndex > 0) {
-      const value = current.slice(equalsIndex + 1);
+      const value = Effect.pipe(current, EffectString.slice(equalsIndex + 1));
       if (kind === 'string') {
         normalized.push(inlineName, encodeStringArgument(value));
       } else {
@@ -201,7 +216,12 @@ export function normalizeCliArguments(args: readonly string[]): readonly string[
     }
 
     const next = args[index + 1];
-    if (next?.startsWith('-') && next !== '-') {
+    if (
+      Effect.pipe(next, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.startsWith('-')),
+      ) &&
+      next !== '-'
+    ) {
       normalized.push(kind === 'string' ? current : `${current}=${next}`);
       if (kind === 'string') {
         normalized.push(encodeStringArgument(next));
@@ -215,5 +235,5 @@ export function normalizeCliArguments(args: readonly string[]): readonly string[
 }
 
 function encodeStringArgument(value: string): string {
-  return value.startsWith('-') ? `${encodedStringPrefix}${value}` : value;
+  return Effect.pipe(value, EffectString.startsWith('-')) ? `${encodedStringPrefix}${value}` : value;
 }

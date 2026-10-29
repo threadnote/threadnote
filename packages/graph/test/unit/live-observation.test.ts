@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -60,8 +61,10 @@ describe('passive live worktree observation', () => {
           yield* fs.remove(path.join(root, 'renamed.ts'));
           const deleted = yield* observeLiveWorktree(root);
           const states = [first, added, renamed, staged, deleted];
-          expect(states.every(state => state.state === 'complete')).toBe(true);
-          expect(new Set(states.map(state => (state.state === 'complete' ? state.revision : ''))).size).toBe(5);
+          expect(EffectArray.every(states, state => state.state === 'complete')).toBe(true);
+          expect(
+            new Set(EffectArray.map(states, state => (state.state === 'complete' ? state.revision : ''))).size,
+          ).toBe(5);
           expect((yield* git(root, ['status', '--porcelain=v1'])).stdout).toBe('AD renamed.ts\n');
           yield* git(root, ['restore', 'renamed.ts']);
           yield* git(root, ['commit', '--quiet', '-m', 'added']);
@@ -138,9 +141,11 @@ describe('passive live worktree observation', () => {
           const second = yield* observeLiveWorktree(root);
           yield* fs.writeFileString(path.join(root, '.threadnoteignore.local'), 'build/\n');
           const third = yield* observeLiveWorktree(root);
-          expect([first, second, third].every(state => state.state === 'complete')).toBe(true);
+          expect(EffectArray.every([first, second, third], state => state.state === 'complete')).toBe(true);
           expect(
-            new Set([first, second, third].map(state => (state.state === 'complete' ? state.revision : ''))).size,
+            new Set(
+              EffectArray.map([first, second, third], state => (state.state === 'complete' ? state.revision : '')),
+            ).size,
           ).toBe(3);
         }),
       ),

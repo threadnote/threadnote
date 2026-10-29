@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtemp, mkdir, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {basename, join} from '@threadnote/testing/node-path';
@@ -19,7 +20,7 @@ describe('resolveRepoName', () => {
   beforeEach(async () => {
     workspace = await mkdtemp(join(tmpdir(), 'threadnote-reponame-'));
     previousCallerCwd = process.env.THREADNOTE_CALLER_CWD;
-    previousGitEnv = new Map(GIT_ENV_KEYS.map(key => [key, process.env[key]]));
+    previousGitEnv = new Map(EffectArray.map(GIT_ENV_KEYS, key => [key, process.env[key]]));
     delete process.env.THREADNOTE_CALLER_CWD;
     for (const key of GIT_ENV_KEYS) {
       delete process.env[key];

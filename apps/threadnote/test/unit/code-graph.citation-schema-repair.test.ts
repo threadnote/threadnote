@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Exit, FileSystem, Path} from 'effect';
@@ -29,6 +30,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {join} from '../helpers/effect-filesystem.js';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const LIVE_LEASE_EXPIRY_MILLISECONDS = Number.MAX_SAFE_INTEGER;
 
@@ -40,11 +43,11 @@ describe('code graph snapshot-file citation schema repair', () => {
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-repair-migration-lease-'});
       const identity = legacyRepositoryIdentity(home, 'a');
       const snapshot = repairBuildingSnapshot(identity, '1');
-      const citationIdentity = {...identity, worktreeId: 'b'.repeat(64)};
+      const citationIdentity = {...identity, worktreeId: Effect2.pipe('b', EffectString.repeat(64))};
       const citationSnapshot = {...legacyReadySnapshot(citationIdentity, '2'), fileCount: 1};
       const citationFile = {
-        blobId: '3'.repeat(40),
-        contentHash: 'f'.repeat(64),
+        blobId: Effect2.pipe('3', EffectString.repeat(40)),
+        contentHash: Effect2.pipe('f', EffectString.repeat(64)),
         language: 'typescript',
         mode: '100644',
         path: 'src/citation.ts',
@@ -59,7 +62,7 @@ describe('code graph snapshot-file citation schema repair', () => {
       yield* store.activate(databasePath, citationIdentity, citationSnapshot, [citationFile], [], []);
       yield* store.promote(databasePath, citationIdentity, citationSnapshot.id);
       yield* store.claimPersistentBuild(databasePath, identity, snapshot, {
-        logicalSnapshotId: `cgsn_${'1'.repeat(40)}`,
+        logicalSnapshotId: `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`,
         owner: {buildId: '11111111-1111-1111', processId: process.pid},
       });
       yield* Effect.sync(() => {
@@ -119,15 +122,17 @@ describe('code graph snapshot-file citation schema repair', () => {
         [citationFile.contentHash],
         1,
       );
-      expect(citationMatches.map(match => match.files.map(file => file.path))).toEqual([[citationFile.path]]);
-      const migratedIdentity = {...identity, worktreeId: 'c'.repeat(64)};
+      expect(EffectArray.map(citationMatches, match => EffectArray.map(match.files, file => file.path))).toEqual([
+        [citationFile.path],
+      ]);
+      const migratedIdentity = {...identity, worktreeId: Effect2.pipe('c', EffectString.repeat(64))};
       const migratedSnapshot = {...legacyReadySnapshot(migratedIdentity, '3'), fileCount: 1};
       const migratedFile = {
         ...citationFile,
-        blobId: '4'.repeat(40),
-        contentHash: 'd'.repeat(64),
+        blobId: Effect2.pipe('4', EffectString.repeat(40)),
+        contentHash: Effect2.pipe('d', EffectString.repeat(64)),
         path: 'src/migrated-citation.ts',
-        rawContentHash: 'e'.repeat(64),
+        rawContentHash: Effect2.pipe('e', EffectString.repeat(64)),
       } as const satisfies CodeGraphInventoryFile;
       yield* store.activate(databasePath, migratedIdentity, migratedSnapshot, [migratedFile], [], []);
       yield* store.promote(databasePath, migratedIdentity, migratedSnapshot.id);
@@ -137,7 +142,7 @@ describe('code graph snapshot-file citation schema repair', () => {
         [migratedFile.contentHash, migratedFile.rawContentHash],
         1,
       );
-      expect(migratedMatches.map(match => match.files.map(file => file.path))).toEqual([
+      expect(EffectArray.map(migratedMatches, match => EffectArray.map(match.files, file => file.path))).toEqual([
         [migratedFile.path],
         [migratedFile.path],
       ]);
@@ -215,8 +220,8 @@ describe('code graph snapshot-file citation schema repair', () => {
       const identity = legacyRepositoryIdentity(home, 'd');
       const ready = {...legacyReadySnapshot(identity, '4'), fileCount: 1};
       const file = {
-        blobId: '5'.repeat(40),
-        contentHash: '6'.repeat(64),
+        blobId: Effect2.pipe('5', EffectString.repeat(40)),
+        contentHash: Effect2.pipe('6', EffectString.repeat(64)),
         language: 'typescript',
         mode: '100644',
         path: 'src/revision-6-citation.ts',
@@ -268,7 +273,9 @@ describe('code graph snapshot-file citation schema repair', () => {
         [file.contentHash],
         1,
       );
-      expect(citationMatches.map(match => match.files.map(candidate => candidate.path))).toEqual([[file.path]]);
+      expect(
+        EffectArray.map(citationMatches, match => EffectArray.map(match.files, candidate => candidate.path)),
+      ).toEqual([[file.path]]);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
@@ -288,7 +295,7 @@ describe('code graph snapshot-file citation schema repair', () => {
         const spool = path.join(repositoryRoot, `materialization-spool-v2-${snapshot.id}.sqlite`);
         yield* store.initialize(databasePath);
         yield* store.claimPersistentBuild(databasePath, identity, snapshot, {
-          logicalSnapshotId: `cgsn_${index === 0 ? '1'.repeat(40) : '2'.repeat(40)}`,
+          logicalSnapshotId: `cgsn_${index === 0 ? Effect2.pipe('1', EffectString.repeat(40)) : Effect2.pipe('2', EffectString.repeat(40))}`,
           owner: {
             buildId: index === 0 ? '11111111-1111-1111' : '22222222-2222-2222',
             processId: process.pid,
@@ -401,9 +408,10 @@ describe('code graph snapshot-file citation schema repair', () => {
       });
       expect(applied).toEqual(preview);
       expect(checkpointTableNames(databasePath)).toEqual(
-        PERSISTENT_EXTENSION_TABLES.filter(table => table.group === 'checkpoint')
-          .map(table => table.name)
-          .sort(),
+        EffectArray.map(
+          EffectArray.filter(PERSISTENT_EXTENSION_TABLES, table => table.group === 'checkpoint'),
+          table => table.name,
+        ).sort(),
       );
       expect(yield* store.diagnose(databasePath)).toMatchObject({
         activeSnapshots: 1,
@@ -481,7 +489,7 @@ describe('code graph snapshot-file citation schema repair', () => {
       const store = yield* CodeGraphStore;
       yield* store.initialize(databasePath);
       yield* store.claimPersistentBuild(databasePath, identity, snapshot, {
-        logicalSnapshotId: `cgsn_${'1'.repeat(40)}`,
+        logicalSnapshotId: `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`,
         owner: {buildId: '11111111-1111-1111', processId: process.pid},
       });
       yield* Effect.sync(() => {
@@ -763,12 +771,14 @@ describe('code graph snapshot-file citation schema repair', () => {
         const identity = legacyRepositoryIdentity(home, index === 0 ? 'c' : 'd');
         const snapshot = {...legacyReadySnapshot(identity, index === 0 ? '4' : '5'), fileCount: 1};
         const file = {
-          blobId: index === 0 ? '6'.repeat(40) : '7'.repeat(40),
-          contentHash: index === 0 ? '8'.repeat(64) : '9'.repeat(64),
+          blobId: index === 0 ? Effect2.pipe('6', EffectString.repeat(40)) : Effect2.pipe('7', EffectString.repeat(40)),
+          contentHash:
+            index === 0 ? Effect2.pipe('8', EffectString.repeat(64)) : Effect2.pipe('9', EffectString.repeat(64)),
           language: 'typescript',
           mode: '100644',
           path: `src/${aliasState}.ts`,
-          rawContentHash: index === 0 ? 'a'.repeat(64) : 'b'.repeat(64),
+          rawContentHash:
+            index === 0 ? Effect2.pipe('a', EffectString.repeat(64)) : Effect2.pipe('b', EffectString.repeat(64)),
           size: 32,
           source: 'commit',
         } as const satisfies CodeGraphInventoryFile;
@@ -857,9 +867,9 @@ describe('code graph snapshot-file citation schema repair', () => {
           mutate: database =>
             rebuildSnapshotFiles(
               database,
-              CODE_GRAPH_SNAPSHOT_FILES_CURRENT_TABLE_SQL.replace(
-                'raw_content_hash TEXT,',
-                'raw_content_hash TEXT COLLATE NOCASE,',
+              Effect2.pipe(
+                CODE_GRAPH_SNAPSHOT_FILES_CURRENT_TABLE_SQL,
+                EffectString.replace('raw_content_hash TEXT,', 'raw_content_hash TEXT COLLATE NOCASE,'),
               ),
             ),
         },
@@ -868,9 +878,12 @@ describe('code graph snapshot-file citation schema repair', () => {
           mutate: database =>
             rebuildSnapshotFiles(
               database,
-              CODE_GRAPH_SNAPSHOT_FILES_CURRENT_TABLE_SQL.replace(
-                'raw_content_hash TEXT,',
-                'raw_content_hash TEXT CHECK(raw_content_hash IS NULL),',
+              Effect2.pipe(
+                CODE_GRAPH_SNAPSHOT_FILES_CURRENT_TABLE_SQL,
+                EffectString.replace(
+                  'raw_content_hash TEXT,',
+                  'raw_content_hash TEXT CHECK(raw_content_hash IS NULL),',
+                ),
               ),
             ),
         },
@@ -1071,7 +1084,16 @@ describe('code graph snapshot-file citation schema repair', () => {
                  snapshot_id, path, content_hash, raw_content_hash, language, mode, size, source
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             )
-            .run('cgsn_orphan', 'src/orphan.ts', '1'.repeat(64), null, 'typescript', '100644', 1, 'commit');
+            .run(
+              'cgsn_orphan',
+              'src/orphan.ts',
+              Effect2.pipe('1', EffectString.repeat(64)),
+              null,
+              'typescript',
+              '100644',
+              1,
+              'commit',
+            );
           database.exec('DROP INDEX snapshot_files_content_hash');
         } finally {
           database.close(false);
@@ -1103,14 +1125,14 @@ describe('code graph snapshot-file citation schema repair', () => {
 function legacyRepositoryIdentity(home: string, seed: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: seed.repeat(64),
+    checkoutId: Effect2.pipe(seed, EffectString.repeat(64)),
     displayName: 'acme/legacy-graph',
     gitCommonDirectory: join(home, '.git'),
-    headCommit: seed.repeat(40),
+    headCommit: Effect2.pipe(seed, EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: home,
-    repositoryId: seed.repeat(64),
-    worktreeId: seed.repeat(64),
+    repositoryId: Effect2.pipe(seed, EffectString.repeat(64)),
+    worktreeId: Effect2.pipe(seed, EffectString.repeat(64)),
   };
 }
 
@@ -1122,7 +1144,7 @@ function legacyReadySnapshot(identity: RepositoryIdentity, seed: string): CodeGr
     edgeCount: 0,
     extractorSet: 'citation-schema-regression',
     fileCount: 0,
-    id: `cgsn_${seed.repeat(40)}`,
+    id: `cgsn_${Effect2.pipe(seed, EffectString.repeat(40))}`,
     repositoryId: identity.repositoryId,
     state: 'ready',
     symbolCount: 0,
@@ -1137,7 +1159,7 @@ function repairBuildingSnapshot(identity: RepositoryIdentity, seed: string): Cod
     edgeCount: 0,
     extractorSet: 'citation-schema-regression',
     fileCount: 0,
-    id: `cgsn_${seed.repeat(40)}-direct`,
+    id: `cgsn_${Effect2.pipe(seed, EffectString.repeat(40))}-direct`,
     repositoryId: identity.repositoryId,
     state: 'building',
     symbolCount: 0,
@@ -1235,15 +1257,17 @@ function downgradeToRevision16CheckpointPredecessor(databasePath: string): void 
 function checkpointTableNames(databasePath: string): string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database
-      .query<{readonly name: string}, []>(
-        `SELECT name
+    return EffectArray.map(
+      database
+        .query<{readonly name: string}, []>(
+          `SELECT name
          FROM sqlite_master
          WHERE type = 'table' AND name LIKE 'checkpoint_import_%'
          ORDER BY name`,
-      )
-      .all()
-      .map(row => row.name);
+        )
+        .all(),
+      row => row.name,
+    );
   } finally {
     database.close(false);
   }
@@ -1350,7 +1374,7 @@ function readAliasPublicationState(databasePath: string, snapshotId: string) {
       .get(snapshotId);
     return {
       activeSnapshotId: active?.snapshot_id,
-      rawColumnPresent: columns.some(column => column.name === 'raw_content_hash'),
+      rawColumnPresent: EffectArray.some(columns, column => column.name === 'raw_content_hash'),
       rawIndexPresent: rawIndex?.present === 1,
       revision: Number(revision?.value),
       snapshotState: snapshot?.state,

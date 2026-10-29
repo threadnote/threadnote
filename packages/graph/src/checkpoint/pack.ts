@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {Gunzip, gzipSync} from 'fflate';
 import {canonicalJson, parseCanonicalJson} from './canonical_json.js';
@@ -27,6 +28,9 @@ import {
   type CodeGraphCheckpointRecordV1,
   type CodeGraphCheckpointSha256,
 } from './schema.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const UTF8 = new TextEncoder();
 const UTF8_FATAL = new TextDecoder('utf-8', {fatal: true});
@@ -139,19 +143,19 @@ export interface CodeGraphCheckpointVerificationV1 {
   readonly verification: 'full';
 }
 
-export class CodeGraphCheckpointPackError extends Schema.TaggedError<CodeGraphCheckpointPackError>()(
-  'CodeGraphCheckpointPackError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphCheckpointPackError extends Schema.TaggedError<
+  CodeGraphCheckpointPackError,
+  {readonly brand: unique symbol}
+>()('CodeGraphCheckpointPackError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 /** Exact bounded-read lengths for replaying one independently verifiable frame at a time. */
 export function codeGraphCheckpointReadPlanV1(header: CodeGraphCheckpointHeaderV1): CodeGraphCheckpointReadPlanV1 {
   const parsed = parseCodeGraphCheckpointHeaderV1(header);
   return {
-    chunks: parsed.chunks.map(chunk => ({
+    chunks: EffectArray.map(parsed.chunks, chunk => ({
       frameBytes: checkedAdd(CHUNK_FRAME_HEADER_BYTES, chunk.compressedBytes, 'Checkpoint chunk frame'),
       ordinal: chunk.ordinal,
     })),
@@ -170,9 +174,13 @@ export function codeGraphCheckpointAbiDigestV1(
       caseMode: 'sensitive',
       displayName: 'abi-validation',
       objectFormat: 'sha1',
-      repositoryId: '0'.repeat(64),
+      repositoryId: Effect.pipe('0', EffectString.repeat(64)),
     },
-    source: {commit: '0'.repeat(40), extractorSet: 'abi-validation', graphContentId: `cgc_${'0'.repeat(40)}`},
+    source: {
+      commit: Effect.pipe('0', EffectString.repeat(40)),
+      extractorSet: 'abi-validation',
+      graphContentId: `cgc_${Effect.pipe('0', EffectString.repeat(40))}`,
+    },
   }).abi;
   return digestParts(ABI_DOMAIN, canonicalBytes(metadata));
 }
@@ -422,14 +430,12 @@ export function encodeCodeGraphCheckpointPackV1(
   const chunks: CodeGraphCheckpointEncodedChunkV1[] = [];
   const encoder = new CodeGraphCheckpointStreamEncoderV1(metadata, options);
   encoder.write(
-    [...records]
-      .map(parseCodeGraphCheckpointRecordV1)
-      .sort((left, right) =>
-        compareCodeGraphCheckpointRecordOrderKeys(
-          codeGraphCheckpointRecordOrderKey(left),
-          codeGraphCheckpointRecordOrderKey(right),
-        ),
+    EffectArray.map([...records], parseCodeGraphCheckpointRecordV1).sort((left, right) =>
+      compareCodeGraphCheckpointRecordOrderKeys(
+        codeGraphCheckpointRecordOrderKey(left),
+        codeGraphCheckpointRecordOrderKey(right),
       ),
+    ),
     chunk => chunks.push(chunk),
   );
   const prepared = encoder.finish(chunk => chunks.push(chunk));
@@ -957,7 +963,7 @@ function metadataFromHeader(header: CodeGraphCheckpointHeaderV1): CodeGraphCheck
 function checkpointAttributionFiles(
   metadata: CodeGraphCheckpointMetadataV1,
 ): Map<string, CodeGraphCheckpointAttributionFileV1> {
-  return new Map((metadata.reuse?.inventory?.attributionFiles ?? []).map(file => [file.path, file]));
+  return new Map(EffectArray.map(metadata.reuse?.inventory?.attributionFiles ?? [], file => [file.path, file]));
 }
 
 function consumeAttributionFile(
@@ -1037,7 +1043,7 @@ function canonicalBytes(value: unknown, maximumBytes = UINT32_MAXIMUM, label = '
 
 function resolveLimits(overrides: Partial<CodeGraphCheckpointPackLimits> = {}): CodeGraphCheckpointPackLimits {
   const limits = {...DEFAULT_CODE_GRAPH_CHECKPOINT_PACK_LIMITS, ...overrides};
-  for (const [name, value] of Object.entries(limits)) {
+  for (const [name, value] of EffectRecord.toEntries(limits)) {
     if (!Number.isSafeInteger(value) || value <= 0 || value > UINT32_MAXIMUM) {
       throw CodeGraphCheckpointPackError.make({message: `${name} must be a positive uint32.`});
     }
@@ -1091,7 +1097,7 @@ function parseBareDigest(value: CodeGraphCheckpointDigestV1, label: string): str
 
 function parsePrefixedDigest(value: string, label: string): string {
   if (!/^sha256:[0-9a-f]{64}$/u.test(value)) throw CodeGraphCheckpointPackError.make({message: `${label} is invalid.`});
-  return value.slice('sha256:'.length);
+  return Effect.pipe(value, EffectString.slice('sha256:'.length));
 }
 
 function descriptor(size: number, digest: string): CodeGraphCheckpointDescriptorV1 {
@@ -1128,7 +1134,9 @@ function u32(value: number): Uint8Array {
 function hexBytes(value: string): Uint8Array {
   if (!/^[0-9a-f]{64}$/u.test(value))
     throw CodeGraphCheckpointPackError.make({message: 'Checkpoint digest is invalid.'});
-  return Uint8Array.from({length: 32}, (_, index) => Number.parseInt(value.slice(index * 2, index * 2 + 2), 16));
+  return Uint8Array.from({length: 32}, (_, index) =>
+    Number.parseInt(Effect.pipe(value, EffectString.slice(index * 2, index * 2 + 2)), 16),
+  );
 }
 
 function dataView(bytes: Uint8Array, offset = 0, length = bytes.byteLength - offset): DataView {
@@ -1143,7 +1151,8 @@ function checkedAdd(left: number, right: number, label: string): number {
 }
 
 function joinBytes(parts: readonly Uint8Array[], expected?: number): Uint8Array {
-  const length = expected ?? parts.reduce((total, part) => checkedAdd(total, part.byteLength, 'Byte sequence'), 0);
+  const length =
+    expected ?? EffectArray.reduce(parts, 0, (total, part) => checkedAdd(total, part.byteLength, 'Byte sequence'));
   const output = new Uint8Array(length);
   let offset = 0;
   for (const part of parts) {

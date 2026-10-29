@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   requiredIdentifier,
@@ -12,7 +13,11 @@ import {
   isJsonObject,
   type SourceConfig,
   type SourceConfiguration,
+  type ProjectionConfig,
 } from '@threadnote/integration-core/config';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export {validateSourceIdentifier} from '@threadnote/integration-core/config';
 export interface SuperhumanDocumentConfig {
   readonly id: string;
@@ -33,24 +38,24 @@ export interface SuperhumanSourceConfig {
 export const DEFAULT_SUPERHUMAN_CREDENTIAL_ENV = 'SUPERHUMAN_DOCS_API_TOKEN';
 export const DEFAULT_SUPERHUMAN_REFRESH_INTERVAL_MINUTES = 15;
 export const DEFAULT_SUPERHUMAN_MAX_STALE_HOURS = 24;
-export function upsertSuperhumanSource(
-  configuration: SourceConfiguration,
+export function upsertSuperhumanSource<S extends SourceConfig, P extends ProjectionConfig>(
+  configuration: SourceConfiguration<S, P>,
   source: SuperhumanSourceConfig,
-): SourceConfiguration {
+): SourceConfiguration<S | SuperhumanSourceConfig, P> {
   const checked = validateSuperhumanSourceConfig(source);
-  if (configuration.sources.some(item => item.id === checked.id && item.type !== checked.type)) {
+  if (EffectArray.some(configuration.sources, item => item.id === checked.id && item.type !== checked.type)) {
     throw SourceConfigurationError.make({message: `Source "${checked.id}" already has another type.`});
   }
   return {
     version: 2,
     projections: configuration.projections,
-    sources: [...configuration.sources.filter(item => item.id !== checked.id), checked].sort((left, right) =>
-      left.id.localeCompare(right.id),
+    sources: [...EffectArray.filter(configuration.sources, item => item.id !== checked.id), checked].sort(
+      (left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id)),
     ),
   };
 }
 export function requireSuperhumanSource(configuration: SourceConfiguration, id: string): SuperhumanSourceConfig {
-  const source = configuration.sources.find(item => item.id === id);
+  const source = EffectOption.getOrUndefined(EffectArray.findFirst(configuration.sources, item => item.id === id));
   if (!source || !isSuperhumanSource(source)) {
     throw SourceConfigurationError.make({message: `No Superhuman source named "${id}".`});
   }
@@ -71,7 +76,7 @@ export function validateSuperhumanSourceConfig(source: SuperhumanSourceConfig): 
       credential_env: source.credentialEnv,
       credential_storage: source.credentialStorage,
       project: source.project,
-      documents: source.documents.map(document => ({id: document.id, pages: document.pages})),
+      documents: EffectArray.map(source.documents, document => ({id: document.id, pages: document.pages})),
       include_hidden: source.includeHidden,
       refresh_interval_minutes: source.refreshIntervalMinutes,
       max_stale_hours: source.maxStaleHours,
@@ -91,17 +96,17 @@ export function parseSuperhumanSource(value: Record<string, unknown>, label: str
   if (value.credential_storage !== undefined && value.credential_storage !== 'local')
     throw SourceConfigurationError.make({message: `${label}.credential_storage must be "local" when present.`});
   const project = value.project === null ? null : requiredIdentifier(value.project, `${label}.project`);
-  if (!Array.isArray(value.documents) || value.documents.length === 0 || value.documents.length > 64) {
+  if (!EffectArray.isArray(value.documents) || value.documents.length === 0 || value.documents.length > 64) {
     throw SourceConfigurationError.make({message: `${label}.documents must contain 1 to 64 documents.`});
   }
-  const documents = value.documents.map((raw, index) => {
+  const documents = EffectArray.map(value.documents, (raw, index) => {
     const documentLabel = `${label}.documents[${index}]`;
     if (!isJsonObject(raw)) throw SourceConfigurationError.make({message: `${documentLabel} must be an object.`});
     const documentId = requiredProviderId(raw.id, `${documentLabel}.id`);
     const pages = raw.pages === undefined ? undefined : providerIds(raw.pages, `${documentLabel}.pages`, 256);
     return {id: documentId, ...(pages === undefined ? {} : {pages})};
   });
-  if (new Set(documents.map(document => document.id)).size !== documents.length) {
+  if (new Set(EffectArray.map(documents, document => document.id)).size !== documents.length) {
     throw SourceConfigurationError.make({message: `${label}.documents contains duplicate ids.`});
   }
   return {
@@ -141,9 +146,10 @@ export function sourceConfigurationFingerprint(source: SuperhumanSourceConfig): 
       credentialEnv: source.credentialEnv,
       ...(source.credentialStorage === undefined ? {} : {credentialStorage: source.credentialStorage}),
       project: source.project,
-      documents: source.documents
-        .map(document => ({id: document.id, pages: document.pages ? [...document.pages].sort() : null}))
-        .sort((left, right) => left.id.localeCompare(right.id)),
+      documents: EffectArray.map(source.documents, document => ({
+        id: document.id,
+        pages: document.pages ? [...document.pages].sort() : null,
+      })).sort((left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id))),
       includeHidden: source.includeHidden,
       refreshIntervalMinutes: source.refreshIntervalMinutes,
       maxStaleHours: source.maxStaleHours,
@@ -167,7 +173,7 @@ export function serializeSuperhumanSource(source: SuperhumanSourceConfig) {
     credential_env: source.credentialEnv,
     ...(source.credentialStorage === undefined ? {} : {credential_storage: source.credentialStorage}),
     project: source.project,
-    documents: source.documents.map(document => ({
+    documents: EffectArray.map(source.documents, document => ({
       id: document.id,
       ...(document.pages === undefined ? {} : {pages: [...document.pages]}),
     })),

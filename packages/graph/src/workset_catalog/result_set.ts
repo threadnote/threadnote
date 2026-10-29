@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   parseCodeGraphWorksetQueryResultV2,
@@ -7,6 +8,9 @@ import {
 } from '../workset/evidence.js';
 import {CODE_GRAPH_WORKSET_CATALOG_LIMITS, CodeGraphWorksetCatalogError} from './types.js';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const CARD_ID = /^cgec_[0-9a-f]{40}$/u;
 const QUALIFIED_REF = /^cgr_[0-9a-f]{40}$/u;
@@ -106,7 +110,7 @@ export function decodeStoredCodeGraphWorksetResultEnvelope(
 }
 
 export function codeGraphWorksetPersistedResultDigest(envelopeDigest: string, cardsDigest: string): string {
-  if (![envelopeDigest, cardsDigest].every(digest => /^[0-9a-f]{64}$/u.test(digest))) {
+  if (!EffectArray.every([envelopeDigest, cardsDigest], digest => /^[0-9a-f]{64}$/u.test(digest))) {
     throw invalid('Workset persisted result digest input is invalid.');
   }
   return sha256HexSync(`threadnote-code-graph-workset-persisted-result-v1\0${envelopeDigest}\0${cardsDigest}`);
@@ -115,7 +119,7 @@ export function codeGraphWorksetPersistedResultDigest(envelopeDigest: string, ca
 export function prepareCodeGraphWorksetResultSequence(
   input: readonly CodeGraphEvidenceCardV1[],
 ): PreparedCodeGraphWorksetResultSequenceV1 {
-  if (!Array.isArray(input) || input.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.resultSetCardsMaximum) {
+  if (!EffectArray.isArray(input) || input.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.resultSetCardsMaximum) {
     throw invalid('Workset result-set card count exceeds the supported bound.');
   }
   const cards: PreparedCodeGraphWorksetResultCardV1[] = [];
@@ -139,16 +143,16 @@ export function prepareCodeGraphWorksetResultSequence(
   }
   return {
     cards,
-    digest: codeGraphWorksetResultSequenceDigest(cards.map(card => card.digest)),
+    digest: codeGraphWorksetResultSequenceDigest(EffectArray.map(cards, card => card.digest)),
     totalBytes,
   };
 }
 
 export function codeGraphWorksetResultSequenceDigest(cardDigests: readonly string[]): string {
-  if (cardDigests.some(digest => !/^[0-9a-f]{64}$/u.test(digest))) {
+  if (EffectArray.some(cardDigests, digest => !/^[0-9a-f]{64}$/u.test(digest))) {
     throw invalid('Workset result-set card digest is invalid.');
   }
-  return sha256HexSync(`threadnote-code-graph-workset-result-sequence-v1\0${cardDigests.join('\0')}`);
+  return sha256HexSync(`threadnote-code-graph-workset-result-sequence-v1\0${EffectArray.join(cardDigests, '\0')}`);
 }
 
 export function decodeStoredCodeGraphWorksetResultCard(
@@ -179,14 +183,14 @@ export function decodeStoredCodeGraphWorksetResultCard(
 
 export function codeGraphWorksetResultSetId(resultSetToken: string): string {
   if (!RESULT_SET_TOKEN.test(resultSetToken)) throw invalid('Workset result-set token is invalid.');
-  return `cgwrs_${sha256HexSync(`threadnote-code-graph-workset-result-set-v1\0${resultSetToken}`).slice(0, 40)}`;
+  return `cgwrs_${Effect.pipe(sha256HexSync(`threadnote-code-graph-workset-result-set-v1\0${resultSetToken}`), EffectString.slice(0, 40))}`;
 }
 
 function canonicalEnvelope(result: CodeGraphWorksetQueryResultV2): CodeGraphWorksetResultEnvelopeV1 {
-  const repositories = Object.fromEntries(
-    Object.entries(result.repositories)
-      .sort(([left], [right]) => compareText(left, right))
-      .map(([repositoryKey, receipt]) => [
+  const repositories = EffectRecord.fromEntries(
+    EffectArray.map(
+      EffectRecord.toEntries(result.repositories).sort(([left], [right]) => compareText(left, right)),
+      ([repositoryKey, receipt]) => [
         repositoryKey,
         {
           considered: receipt.considered,
@@ -209,7 +213,8 @@ function canonicalEnvelope(result: CodeGraphWorksetQueryResultV2): CodeGraphWork
               }),
           state: receipt.state,
         },
-      ]),
+      ],
+    ),
   );
   return {
     coverage: {
@@ -264,14 +269,14 @@ function normalizeCard(value: unknown, reason: 'corrupt' | 'invalid-input'): Cod
   };
   const cardReason = object(card.reason, 'card reason', reason);
   exactKeys(cardReason, ['score', 'signals', 'summary'], [], reason);
-  const signals = array(cardReason.signals, 'card reason signals', 16, reason).map(signal =>
+  const signals = EffectArray.map(array(cardReason.signals, 'card reason signals', 16, reason), signal =>
     boundedText(signal, 'card reason signal', 128, reason),
   );
   if (new Set(signals).size !== signals.length) fail(reason, 'Workset result-set card reason signals are duplicated.');
-  const relationships = array(card.relationships, 'card relationships', 32, reason).map(relationship =>
+  const relationships = EffectArray.map(array(card.relationships, 'card relationships', 32, reason), relationship =>
     normalizeRelationship(relationship, ref, repositoryKey, reason),
   );
-  const relationshipKeys = relationships.map(relationshipKey);
+  const relationshipKeys = EffectArray.map(relationships, relationshipKey);
   if (new Set(relationshipKeys).size !== relationshipKeys.length) {
     fail(reason, 'Workset result-set card relationships are duplicated.');
   }
@@ -374,7 +379,7 @@ function cardRefOwners(card: CodeGraphEvidenceCardV1): ReadonlyMap<string, reado
     addRefOwner(owners, relationship.source.ref, relationship.source.repositoryKey);
     addRefOwner(owners, relationship.target.ref, relationship.target.repositoryKey);
   }
-  return new Map([...owners].map(([ref, keys]) => [ref, [...keys].sort(compareText)] as const));
+  return new Map(EffectArray.map([...owners], ([ref, keys]) => [ref, [...keys].sort(compareText)] as const));
 }
 
 function addRefOwner(owners: Map<string, Set<string>>, ref: string, repositoryKey: string): void {
@@ -384,18 +389,24 @@ function addRefOwner(owners: Map<string, Set<string>>, ref: string, repositoryKe
 }
 
 function relationshipKey(relationship: CompactEvidenceRelationshipV1): string {
-  return [
-    relationship.source.ref,
-    relationship.source.repositoryKey,
-    relationship.relation,
-    relationship.target.ref,
-    relationship.target.repositoryKey,
-    relationship.provenance,
-    relationship.evidence.repositoryKey,
-    relationship.evidence.path,
-    relationship.evidence.span.line,
-    relationship.evidence.span.column,
-  ].join('\0');
+  return EffectArray.join(
+    EffectArray.map(
+      [
+        relationship.source.ref,
+        relationship.source.repositoryKey,
+        relationship.relation,
+        relationship.target.ref,
+        relationship.target.repositoryKey,
+        relationship.provenance,
+        relationship.evidence.repositoryKey,
+        relationship.evidence.path,
+        relationship.evidence.span.line,
+        relationship.evidence.span.column,
+      ],
+      item => (item === null || item === undefined ? '' : String(item)),
+    ),
+    '\0',
+  );
 }
 
 function repositoryKeyText(value: unknown, reason: 'corrupt' | 'invalid-input'): string {
@@ -409,10 +420,13 @@ function repositoryKeyText(value: unknown, reason: 'corrupt' | 'invalid-input'):
 function repositoryPath(value: unknown, label: string, reason: 'corrupt' | 'invalid-input'): string {
   const path = boundedText(value, label, 4_096, reason);
   if (
-    path.startsWith('/') ||
-    path.includes('\\') ||
+    Effect.pipe(path, EffectString.startsWith('/')) ||
+    Effect.pipe(path, EffectString.includes('\\')) ||
     /^[A-Za-z]:/u.test(path) ||
-    path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    EffectArray.some(
+      Effect.pipe(path, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     fail(reason, `Workset result-set ${label} is not repository-relative.`);
   }
@@ -424,8 +438,13 @@ function boundedText(value: unknown, label: string, maximumBytes: number, reason
     typeof value !== 'string' ||
     value.length === 0 ||
     Buffer.byteLength(value, 'utf8') > maximumBytes ||
-    [...value].some(character => {
-      const point = character.codePointAt(0) ?? 0;
+    EffectArray.some([...value], character => {
+      const point =
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        ) ?? 0;
       return point <= 0x1f || point === 0x7f;
     })
   ) {
@@ -481,7 +500,7 @@ function array(
   maximumLength: number,
   reason: 'corrupt' | 'invalid-input',
 ): readonly unknown[] {
-  if (!Array.isArray(value) || value.length > maximumLength) {
+  if (!EffectArray.isArray(value) || value.length > maximumLength) {
     fail(reason, `Workset result-set ${label} is invalid.`);
   }
   return value;
@@ -500,9 +519,12 @@ function exactKeys(
   optional: readonly string[],
   reason: 'corrupt' | 'invalid-input',
 ): void {
-  const keys = Object.keys(value);
+  const keys = EffectRecord.keys(value);
   const allowed = new Set([...required, ...optional]);
-  if (required.some(key => !Object.hasOwn(value, key)) || keys.some(key => !allowed.has(key))) {
+  if (
+    EffectArray.some(required, key => !EffectRecord.has(value, key)) ||
+    EffectArray.some(keys, key => !allowed.has(key))
+  ) {
     fail(reason, 'Workset result-set card contains missing or unsupported fields.');
   }
 }

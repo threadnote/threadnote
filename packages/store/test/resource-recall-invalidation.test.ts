@@ -13,6 +13,7 @@ import {
   makeResourceRecallInvalidationObservation,
 } from '@threadnote/store/resource/recall-invalidation';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {Array as EffectArray} from 'effect';
 
 function provideLayer<Services, E, R>(layer: Layer.Layer<Services, E, R>) {
   return <A, E2, R2>(effect: Effect.Effect<A, E2, R2>) =>
@@ -201,7 +202,7 @@ it.effect.prop(
         if (acknowledged) acknowledge(observation, index);
       }
       expect(consumeResourceRecallInvalidationReceipt(observation.finish(true, [uri]), location, [uri])).toBe(
-        acknowledgements.every(Boolean),
+        EffectArray.every(acknowledgements, Boolean),
       );
     }),
   {arbitrary: {runs: 30}},

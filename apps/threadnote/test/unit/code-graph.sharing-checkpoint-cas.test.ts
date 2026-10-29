@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
@@ -26,16 +27,18 @@ import {
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {GraphSharingError} from '@threadnote/graph/sharing/errors';
 import {GRAPH_SHARE_HTTP_CAS_MAX_BYTES} from '@threadnote/graph/sharing/oci';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const sharingLayer = Layer.mergeAll(BunServices.layer, BunHttpClient.layer, TestSystemInfoLayer);
 
-const SHA256_ZERO = '0'.repeat(64);
-const SHA1_ZERO = '0'.repeat(40);
+const SHA256_ZERO = Effect2.pipe('0', EffectString.repeat(64));
+const SHA1_ZERO = Effect2.pipe('0', EffectString.repeat(40));
 const UTF8 = new TextEncoder();
 
 const pathArbitrary = FC.uniqueArray(
   FC.array(FC.constantFrom('a', 'b', 'Z', '0', '-', '_'), {maxLength: 8, minLength: 1}).map(
-    characters => `src/${characters.join('')}.ts`,
+    characters => `src/${EffectArray.join(characters, '')}.ts`,
   ),
   {maxLength: 10, minLength: 3},
 );
@@ -156,23 +159,23 @@ describe('graph share frontier checkpoint metadataDigest', () => {
         branch: 'refs/heads/main',
         deltas: [] as const,
         generation: 1,
-        graphAbi: 'e'.repeat(64),
-        graphContentId: `cgc_${'d'.repeat(40)}`,
+        graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
+        graphContentId: `cgc_${Effect2.pipe('d', EffectString.repeat(40))}`,
         logicalGraphDigest: digest,
         previousManifestDigest: null,
         profileDigest: digest,
         publisherFence: 1,
-        repositoryId: 'b'.repeat(64),
+        repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
         schemaVersion: 1,
         snapshotId: 'cgsn_imported',
-        sourceCommit: 'a'.repeat(40),
+        sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
       };
       const threeKey = parseGraphShareFrontierManifest({
         ...base,
         checkpoint: {
           manifestDigest: digest,
           snapshotId: 'cgsn_imported',
-          sourceCommit: 'a'.repeat(40),
+          sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
         },
       });
       expect(threeKey.checkpoint.metadataDigest).toBeUndefined();
@@ -182,7 +185,7 @@ describe('graph share frontier checkpoint metadataDigest', () => {
           manifestDigest: digest,
           metadataDigest,
           snapshotId: 'cgsn_imported',
-          sourceCommit: 'a'.repeat(40),
+          sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
         },
       });
       expect(withMetadata.checkpoint.metadataDigest).toBe(metadataDigest);
@@ -194,7 +197,7 @@ describe('graph share frontier checkpoint metadataDigest', () => {
             extra: true,
             manifestDigest: digest,
             snapshotId: 'cgsn_imported',
-            sourceCommit: 'a'.repeat(40),
+            sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
           },
         }),
       ).toThrow(/unsupported/i);
@@ -230,7 +233,7 @@ function metadataFor(eligibleFiles: number): CodeGraphCheckpointMetadataV1 {
 }
 
 function recordsFor(paths: readonly string[]): CodeGraphCheckpointRecordV1[] {
-  return paths.flatMap(path => [fileRecord(path), factRecord(path)]);
+  return EffectArray.flatMap(paths, path => [fileRecord(path), factRecord(path)]);
 }
 
 function fileRecord(path: string): CodeGraphCheckpointFileRecordV1 {
@@ -258,11 +261,11 @@ function factRecord(path: string): CodeGraphCheckpointFileFactRecordV1 {
 }
 
 function parseSha256FromDescriptor(digest: string) {
-  return digest.startsWith('sha256:') ? digest : sha256Digest(digest);
+  return Effect2.pipe(digest, EffectString.startsWith('sha256:')) ? digest : sha256Digest(digest);
 }
 
 function joinBytes(parts: readonly Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  const output = new Uint8Array(EffectArray.reduce(parts, 0, (total, part) => total + part.byteLength));
   let offset = 0;
   for (const part of parts) {
     output.set(part, offset);

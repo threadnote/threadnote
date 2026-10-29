@@ -1,5 +1,7 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {isPocketSource} from './config.js';
-import {Cause, Data, Effect, Redacted, Schema} from 'effect';
+import {Cause, Effect, Redacted, Schema} from 'effect';
 import type {IntegrationResult} from '@threadnote/integration-core/manager-contracts';
 import type {PocketSource} from './manager-contracts.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -25,18 +27,20 @@ import {
   PocketSourceConflictError,
 } from './source.js';
 import type {ManagerIntegrationApiRequest} from '@threadnote/integration-core/manager-http';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class ManagerPocketError extends Data.TaggedError('ManagerPocketError')<{
-  readonly status: number;
-  readonly message: string;
-}> {}
+class ManagerPocketError extends Schema.TaggedError<ManagerPocketError, {readonly brand: unique symbol}>()(
+  'ManagerPocketError',
+  {status: Schema.Int, message: Schema.String},
+) {}
 
 function invalid(message: string): never {
-  throw new ManagerPocketError({status: 400, message});
+  throw ManagerPocketError.make({status: 400, message});
 }
 
 function conflict(message: string): never {
-  throw new ManagerPocketError({status: 409, message});
+  throw ManagerPocketError.make({status: 409, message});
 }
 
 function sourceId(value: unknown): string {
@@ -66,8 +70,8 @@ function environmentToken(config: RuntimeConfig, name: string) {
     maxStaleHours: 24,
   };
   return resolvePocketCredential(config, source).pipe(
-    Effect.mapError(
-      () => new ManagerPocketError({status: 400, message: 'The selected environment credential is unavailable.'}),
+    Effect.mapError(() =>
+      ManagerPocketError.make({status: 400, message: 'The selected environment credential is unavailable.'}),
     ),
   );
 }
@@ -76,7 +80,7 @@ function safeErrorResponse(error: unknown) {
   if (Schema.is(PocketSourceConflictError)(error))
     return {status: 409, body: {error: 'This connection changed. Refresh connections before saving.'}};
   if (Schema.is(PocketCredentialError)(error)) return {status: 409, body: {error: error.message}};
-  if (error instanceof ManagerPocketError) return {status: error.status, body: {error: error.message}};
+  if (Schema.is(ManagerPocketError)(error)) return {status: error.status, body: {error: error.message}};
   return {status: 409, body: {error: 'The Pocket connection could not complete this action.'}};
 }
 
@@ -88,16 +92,15 @@ export const listPocketIntegrations = Effect.fn('manager.pocketList')(function* 
     const credentialConfigured = yield* pocketCredentialConfigured(config, source);
     const inventory = yield* runPocketSourceInventory(config, source.id);
     const entries = inventory.entries;
-    const active = entries.filter(entry => entry.status === 'active');
-    const attention = entries.some(entry => entry.status === 'quarantined' || entry.status === 'pending');
+    const active = EffectArray.filter(entries, entry => entry.status === 'active');
+    const attention = EffectArray.some(entries, entry => entry.status === 'quarantined' || entry.status === 'pending');
     const receipt = yield* readExternalSourceReceipt(
       {account: config.account, home: config.agentContextHome, user: config.user},
       source.id,
       'pocket',
     );
-    const nextAttemptAt = entries.reduce<number | undefined>(
-      (time, entry) => (entry.nextAttemptAt === undefined ? time : Math.max(time ?? 0, entry.nextAttemptAt)),
-      inventory.nextAttemptAt,
+    const nextAttemptAt = EffectArray.reduce(entries, inventory.nextAttemptAt, (time, entry) =>
+      entry.nextAttemptAt === undefined ? time : Math.max(time ?? 0, entry.nextAttemptAt),
     );
     sources.push({
       id: source.id,
@@ -114,8 +117,9 @@ export const listPocketIntegrations = Effect.fn('manager.pocketList')(function* 
           : receipt?.completedAt && !inventory.progress && active.length === entries.length
             ? 'active'
             : 'needs-sync',
-      recordings: active.filter(entry => entry.documentId.startsWith('r-')).length,
-      chunks: active.reduce((count, entry) => count + entry.chunks, 0),
+      recordings: EffectArray.filter(active, entry => Effect2.pipe(entry.documentId, EffectString.startsWith('r-')))
+        .length,
+      chunks: EffectArray.reduce(active, 0, (count, entry) => count + entry.chunks),
       ...(receipt?.completedAt === undefined ? {} : {lastSyncedAt: receipt.completedAt}),
       ...(inventory.progress === undefined ? {} : {progress: inventory.progress}),
       ...(nextAttemptAt === undefined ? {} : {nextAttemptAt}),
@@ -138,7 +142,9 @@ const route = Effect.fn('manager.pocketRoute')(function* (request: ManagerIntegr
       switch (body.action) {
         case 'save-source': {
           const configuration = yield* readSourceConfiguration(request.config);
-          const existing = configuration.sources.find(source => source.id === id);
+          const existing = EffectOption.getOrUndefined(
+            EffectArray.findFirst(configuration.sources, source => source.id === id),
+          );
           if (existing && !isPocketSource(existing)) conflict('Another connection already uses this name.');
           if (!!existing !== (body.editing === true))
             conflict(existing ? 'Open this source to edit it.' : 'This source no longer exists. Refresh connections.');
@@ -155,15 +161,15 @@ const route = Effect.fn('manager.pocketRoute')(function* (request: ManagerIntegr
           if (env) yield* environmentToken(request.config, env);
           if (body.project !== null && typeof body.project !== 'string')
             invalid('Choose a project or projectless source.');
-          if (!Number.isSafeInteger(body.refreshIntervalMinutes) || !Number.isSafeInteger(body.maxStaleHours))
+          if (!checkedIsSafeInteger(body.refreshIntervalMinutes) || !checkedIsSafeInteger(body.maxStaleHours))
             invalid('Choose valid Pocket source settings.');
           yield* runPocketSourceAdd(request.config, {
             id,
             apply,
             project: body.project ?? undefined,
             projectless: body.project === null,
-            refreshIntervalMinutes: body.refreshIntervalMinutes as number,
-            maxStaleHours: body.maxStaleHours as number,
+            refreshIntervalMinutes: body.refreshIntervalMinutes,
+            maxStaleHours: body.maxStaleHours,
             credentialEnv:
               env ?? (existing !== undefined && isPocketSource(existing) ? existing.credentialEnv : undefined),
             credentialStorage:
@@ -191,7 +197,7 @@ const route = Effect.fn('manager.pocketRoute')(function* (request: ManagerIntegr
             };
           return {
             output: `Pocket connection saved. ${synced.syncedDocuments.length} recording(s) refreshed.`,
-            warnings: synced.warnings.map(() => 'A recording could not be refreshed.'),
+            warnings: EffectArray.map(synced.warnings, () => 'A recording could not be refreshed.'),
           };
         }
         case 'sync-source': {
@@ -200,7 +206,7 @@ const route = Effect.fn('manager.pocketRoute')(function* (request: ManagerIntegr
             output: apply
               ? `${synced.syncedDocuments.length} recording(s) refreshed.`
               : 'Pocket source is ready to refresh.',
-            warnings: synced.warnings.map(() => 'A recording could not be refreshed.'),
+            warnings: EffectArray.map(synced.warnings, () => 'A recording could not be refreshed.'),
           };
         }
         case 'set-enabled': {

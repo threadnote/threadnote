@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot} from 'react-dom/client';
@@ -8,6 +9,9 @@ import {buildContextHealthReport} from '@threadnote/context/health';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import {HealthDetail} from '../../src/attention_details.js';
 import {SemanticComparisonEvidence} from '../../src/attention/semantic_comparison.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 function semanticFinding() {
   const memory = (name: string, body: string): MemoryRecord => ({
@@ -125,8 +129,14 @@ it('opens each exact memory through its own action without a repair request or m
       );
     });
     for (const label of ['A', 'B']) {
-      const button = [...host.querySelectorAll('button')].find(
-        value => value.textContent?.trim() === `Open memory ${label}`,
+      const button = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...host.querySelectorAll('button')],
+          value =>
+            Effect.pipe(value.textContent, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            ) === `Open memory ${label}`,
+        ),
       );
       expect(button).toBeDefined();
       await act(async () => button!.click());
@@ -155,7 +165,10 @@ it('preserves arbitrary source quotations verbatim and leaves comparison evidenc
       host.innerHTML = renderToStaticMarkup(
         <SemanticComparisonEvidence evidence={evidence} onOpenLibrary={() => {}} />,
       );
-      expect([...host.querySelectorAll('blockquote')].map(quote => quote.textContent)).toEqual([left, right]);
+      expect(EffectArray.map([...host.querySelectorAll('blockquote')], quote => quote.textContent)).toEqual([
+        left,
+        right,
+      ]);
       expect(JSON.stringify(evidence)).toBe(snapshot);
     }),
     {numRuns: 30},
@@ -176,9 +189,9 @@ it('offers accessible A/B and both-context choices without selecting a winner or
     );
     expect(host.querySelector('[role="radiogroup"]')?.getAttribute('aria-label')).toBe('Which memory is correct?');
     const inputs = [...host.querySelectorAll<HTMLInputElement>('input[type="radio"]')];
-    expect(inputs.map(input => input.value)).toEqual(['left', 'right', 'both']);
-    expect(inputs.every(input => !input.checked)).toBe(true);
-    expect(new Set(inputs.map(input => input.name)).size).toBe(1);
+    expect(EffectArray.map(inputs, input => input.value)).toEqual(['left', 'right', 'both']);
+    expect(EffectArray.every(inputs, input => !input.checked)).toBe(true);
+    expect(new Set(EffectArray.map(inputs, input => input.name)).size).toBe(1);
     for (const input of inputs) await act(async () => input.click());
     expect(choose.mock.calls).toEqual([['left'], ['right'], ['both']]);
     await act(async () =>
@@ -191,9 +204,9 @@ it('offers accessible A/B and both-context choices without selecting a winner or
       ),
     );
     expect(host.querySelector<HTMLInputElement>('input[value="right"]')?.checked).toBe(true);
-    expect([...host.querySelectorAll<HTMLInputElement>('input[type="radio"]')].every(input => input.disabled)).toBe(
-      true,
-    );
+    expect(
+      EffectArray.every([...host.querySelectorAll<HTMLInputElement>('input[type="radio"]')], input => input.disabled),
+    ).toBe(true);
     expect(host.textContent).toContain('does not change anything');
   } finally {
     await act(async () => root.unmount());

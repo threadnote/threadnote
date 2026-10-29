@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {describe, expect, it} from 'vitest';
@@ -11,6 +12,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {recallCandidateIsEligible} from '@threadnote/recall/eligibility';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Context Brief stable memory identity eligibility', () => {
   effectIt.effect('never emits an alias identity that is divergent in the authorized corpus', () =>
@@ -42,7 +45,7 @@ describe('Context Brief stable memory identity eligibility', () => {
       const retrieval = yield* retrieveContextBriefMemoryEvidence(config, plan.memory);
 
       expect(retrieval.candidates.length).toBeGreaterThan(0);
-      expect(retrieval.candidates.every(candidate => candidate.memoryId === undefined)).toBe(true);
+      expect(EffectArray.every(retrieval.candidates, candidate => candidate.memoryId === undefined)).toBe(true);
       expect(retrieval.gaps).toContain('stable-memory-identity-unavailable');
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -101,10 +104,10 @@ describe('Context Brief stable memory identity eligibility', () => {
       const outer = yield* retrieve(repository);
       const nested = yield* retrieve(nestedRepository);
 
-      expect(outer.candidates.map(candidate => candidate.topic)).toContain('outer-total-contract');
-      expect(outer.candidates.map(candidate => candidate.topic)).not.toContain('nested-total-contract');
-      expect(nested.candidates.map(candidate => candidate.topic)).toContain('nested-total-contract');
-      expect(nested.candidates.map(candidate => candidate.topic)).not.toContain('outer-total-contract');
+      expect(EffectArray.map(outer.candidates, candidate => candidate.topic)).toContain('outer-total-contract');
+      expect(EffectArray.map(outer.candidates, candidate => candidate.topic)).not.toContain('nested-total-contract');
+      expect(EffectArray.map(nested.candidates, candidate => candidate.topic)).toContain('nested-total-contract');
+      expect(EffectArray.map(nested.candidates, candidate => candidate.topic)).not.toContain('outer-total-contract');
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 });
@@ -127,16 +130,31 @@ describe('Context Brief memory project eligibility', () => {
             policy,
             candidateProject === undefined ? {} : {project: candidateProject},
           );
-          const normalizedMembers = new Set(members.map(project => project.normalize('NFC').toLowerCase()));
-          const normalizedSelected = selectedProject?.normalize('NFC').toLowerCase();
+          const normalizedMembers = new Set(
+            EffectArray.map(members, project =>
+              Effect2.pipe(project, EffectString.normalize('NFC'), EffectString.toLowerCase),
+            ),
+          );
+          const normalizedSelected = Effect2.pipe(
+            selectedProject,
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect2.pipe(effectOptionalString, EffectString.normalize('NFC')),
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+          );
           const selectedIsMember = normalizedSelected !== undefined && normalizedMembers.has(normalizedSelected);
           const expected =
             selectedProject !== undefined && !selectedIsMember
               ? false
               : candidateProject === undefined ||
                 (selectedProject === undefined
-                  ? normalizedMembers.has(candidateProject.normalize('NFC').toLowerCase())
-                  : candidateProject.normalize('NFC').toLowerCase() === normalizedSelected);
+                  ? normalizedMembers.has(
+                      Effect2.pipe(candidateProject, EffectString.normalize('NFC'), EffectString.toLowerCase),
+                    )
+                  : Effect2.pipe(candidateProject, EffectString.normalize('NFC'), EffectString.toLowerCase) ===
+                    normalizedSelected);
           expect(eligible).toBe(expected);
         },
       ),
@@ -158,30 +176,36 @@ describe('Context Brief memory project eligibility', () => {
 });
 
 function memory(body: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    'topic: conflicting-identity',
-    'memory_id: tn_context_brief_conflict',
-    'source_agent_client: test',
-    'timestamp: 2026-08-31T00:00:00.000Z',
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      'topic: conflicting-identity',
+      'memory_id: tn_context_brief_conflict',
+      'source_agent_client: test',
+      'timestamp: 2026-08-31T00:00:00.000Z',
+      '',
+      body,
+    ],
+    '\n',
+  );
 }
 
 function memoryForProject(project: string, topic: string, body: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    `project: ${project}`,
-    `topic: ${topic}`,
-    'source_agent_client: test',
-    'timestamp: 2026-10-08T00:00:00.000Z',
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      `project: ${project}`,
+      `topic: ${topic}`,
+      'source_agent_client: test',
+      'timestamp: 2026-10-08T00:00:00.000Z',
+      '',
+      body,
+    ],
+    '\n',
+  );
 }

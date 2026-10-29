@@ -1,3 +1,12 @@
+import {SystemInfo} from '@threadnote/platform/system';
+import {maintenanceContentHash as contentHash} from './maintenance_policy.js';
+import {readMaintenanceCandidateDecisions} from './maintenance_decisions.js';
+import {readContextMaintenanceSourceEpoch as sourceGeneration} from './maintenance_evidence.js';
+import {recordSourceRevision} from './maintenance_source.js';
+import {TOPIC_MAINTENANCE_FAMILY, readTopicMaintenanceCasePacket} from './maintenance_topic.js';
+import * as selectedMaintenance from './maintenance_refresh.js';
+import type {ContextMaintenanceError} from './maintenance.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, Schema} from 'effect';
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -11,12 +20,14 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {readTeamsFile} from '../../share/core.js';
 import type {ContextMaintenanceCaseV2} from './maintenance.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 import type {ContextMaintenanceRelationEvidence} from './maintenance_contracts.js';
 
-class ContextMaintenancePacketError extends Schema.TaggedError<ContextMaintenancePacketError>()(
-  'ContextMaintenancePacketError',
-  {message: Schema.String},
-) {}
+class ContextMaintenancePacketError extends Schema.TaggedError<
+  ContextMaintenancePacketError,
+  {readonly brand: unique symbol}
+>()('ContextMaintenancePacketError', {message: Schema.String}) {}
 
 export function withMaintenancePacketRevision<A, E, R, E2, R2>(
   assertCurrent: Effect.Effect<void, E, R>,
@@ -36,13 +47,17 @@ export function sharedMaintenanceOwnerProposal(
   sharedBase?: {readonly repositoryId: string; readonly commit: string},
   selectedEvidence?: ContextMaintenanceRelationEvidence,
 ) {
-  const edits = (selectedEvidence === undefined ? (record.metadata.relations ?? []) : [])
-    .filter(relation => resolveContextHealthRelationTargetV2(corpus, relation.uri).state === 'missing')
-    .map(relation => ({
+  const edits = EffectArray.map(
+    EffectArray.filter(
+      selectedEvidence === undefined ? (record.metadata.relations ?? []) : [],
+      relation => resolveContextHealthRelationTargetV2(corpus, relation.uri).state === 'missing',
+    ),
+    relation => ({
       operation: 'remove-relation' as const,
       relation,
       reason: 'target-unresolved-in-readable-corpus',
-    }));
+    }),
+  );
   const expectedContentHash = sha256HexSync(canonicalMemoryDocumentContent(record.content));
   return {
     readOnly: true as const,
@@ -111,7 +126,7 @@ export function buildContextMaintenancePacket<E, R>(
       metadata: {...record.metadata, codeCitations: currentMemoryCodeCitations(record)},
     });
     const record = citationRecord(input.record);
-    const corpus = input.corpus.map(citationRecord);
+    const corpus = EffectArray.map(input.corpus, citationRecord);
     if (
       (input.selection?.startLine !== undefined &&
         (!Number.isSafeInteger(input.selection.startLine) || input.selection.startLine < 1)) ||
@@ -123,21 +138,32 @@ export function buildContextMaintenancePacket<E, R>(
       return yield* ContextMaintenancePacketError.make({
         message: 'Choose a positive source line and 1 to 24 excerpt lines.',
       });
-    const scopedRecords = corpus.filter(
-      candidate =>
-        candidate.uri === record.uri || item.subjectContentHashes?.some(subject => subject.uri === candidate.uri),
+    const scopedRecords = EffectArray.filter(
+      corpus,
+      (candidate, __effectArrayIndex) =>
+        __effectArrayIndex in corpus &&
+        Boolean(
+          candidate.uri === record.uri ||
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(item.subjectContentHashes), __effectArrayReceiver =>
+              EffectArray.some(__effectArrayReceiver, subject => subject.uri === candidate.uri),
+            ),
+          ),
+        ),
     );
     const selectedRecord =
       input.selection?.memoryUri === undefined
         ? record
-        : scopedRecords.find(candidate => candidate.uri === input.selection?.memoryUri);
+        : EffectOption.getOrUndefined(
+            EffectArray.findFirst(scopedRecords, candidate => candidate.uri === input.selection?.memoryUri),
+          );
     if (selectedRecord === undefined)
       return yield* ContextMaintenancePacketError.make({
         message: 'Select evidence from the exact maintenance case subjects.',
       });
     const citations = selectedRecord.metadata.codeCitations ?? [];
     const selectedCitationId = input.selection?.citationId ?? item.citationId;
-    const matches = citations.filter(citation =>
+    const matches = EffectArray.filter(citations, citation =>
       selectedCitationId === undefined
         ? item.slot === `anchor:${memoryCodeCitationAnchorId(citation)}`
         : citation.id === selectedCitationId,
@@ -145,8 +171,8 @@ export function buildContextMaintenancePacket<E, R>(
     const citation = matches.length === 1 ? matches[0] : undefined;
     if (input.selection?.citationId !== undefined && citation === undefined)
       return yield* ContextMaintenancePacketError.make({message: 'Select an exact citation from the scoped memory.'});
-    const evidenceSelectors = scopedRecords.flatMap(candidate =>
-      (candidate.metadata.codeCitations ?? []).map(value => ({
+    const evidenceSelectors = EffectArray.flatMap(scopedRecords, candidate =>
+      EffectArray.map(candidate.metadata.codeCitations ?? [], value => ({
         caseId: item.caseId,
         memoryUri: candidate.uri,
         citationId: value.id,
@@ -186,7 +212,17 @@ export function buildContextMaintenancePacket<E, R>(
         const canRetire =
           canReviewRetirement &&
           citation?.id === item.citationId &&
-          !evidence?.excerpts.some(excerpt => excerpt.provenance === 'current-verified' && excerpt.supportsCitation);
+          !EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(evidence?.excerpts), __effectArrayReceiver =>
+              EffectArray.some(
+                __effectArrayReceiver,
+                __effectArrayValue =>
+                  !!(excerpt => excerpt.provenance === 'current-verified' && excerpt.supportsCitation)(
+                    __effectArrayValue,
+                  ),
+              ),
+            ),
+          );
         if (sharedBase !== undefined) {
           const after = yield* readSharedBase(config, record.uri);
           if (after?.commit !== sharedBase.commit || after.repositoryId !== sharedBase.repositoryId)
@@ -217,15 +253,16 @@ export function buildContextMaintenancePacket<E, R>(
                     ? findContextHealthSemanticContradiction(
                         scopedRecords,
                         undefined,
-                        item.slot.split(':') as [string, string],
+                        Effect2.pipe(item.slot, EffectString.split(':')),
                       )
                     : undefined,
               }
             : {}),
           disposition: item.disposition,
-          relatedMemories: (item.subjectContentHashes ?? [])
-            .slice(0, 32)
-            .map(subject => ({uri: subject.uri, expectedContentHash: subject.hash})),
+          relatedMemories: EffectArray.map((item.subjectContentHashes ?? []).slice(0, 32), subject => ({
+            uri: subject.uri,
+            expectedContentHash: subject.hash,
+          })),
           omittedRelatedMemories: Math.max(0, (item.subjectContentHashes?.length ?? 0) - 32),
           sourceRevision: item.sourceSnapshot,
           ...(item.relationEvidence ? {relationEvidence: item.relationEvidence} : {}),
@@ -236,16 +273,15 @@ export function buildContextMaintenancePacket<E, R>(
               ? {
                   kind: item.family,
                   slot: item.slot,
-                  relations: (record.metadata.relations ?? [])
-                    .filter(
-                      relation =>
-                        item.family === 'shared-owner-proposal' ||
-                        relation.uri === item.slot ||
-                        memoryIdFromIdentityAlias(relation.uri) === item.slot ||
-                        resolveContextHealthRelationTargetV2(corpus, relation.uri).record?.metadata.memoryId ===
-                          item.slot,
-                    )
-                    .slice(0, 32),
+                  relations: EffectArray.filter(
+                    record.metadata.relations ?? [],
+                    relation =>
+                      item.family === 'shared-owner-proposal' ||
+                      relation.uri === item.slot ||
+                      memoryIdFromIdentityAlias(relation.uri) === item.slot ||
+                      resolveContextHealthRelationTargetV2(corpus, relation.uri).record?.metadata.memoryId ===
+                        item.slot,
+                  ).slice(0, 32),
                 }
               : {
                   kind: 'citation' as const,
@@ -371,4 +407,167 @@ export function buildContextMaintenancePacket<E, R>(
       }),
     );
   });
+}
+
+export function makeContextMaintenancePacketReader(
+  readState: typeof import('./maintenance.js').readState,
+  fail: (message: string) => ContextMaintenanceError,
+) {
+  return function* (
+    config: RuntimeConfig,
+    caseId: string,
+    selection: {
+      readonly citationId?: string;
+      readonly memoryUri?: string;
+      readonly startLine?: number;
+      readonly maximumLines?: number;
+    } = {},
+    selectedRecords?: readonly MemoryRecord[],
+  ) {
+    const state = yield* readState(config);
+    const item = EffectOption.getOrUndefined(EffectArray.findFirst(state.cases, item => item.caseId === caseId));
+    if (item === undefined) return yield* fail('The selected maintenance case changed or expired.');
+    if (item.family === 'candidate') {
+      const current = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          yield* readMaintenanceCandidateDecisions(config, item.project),
+          decision => decision.candidate.candidateId === item.slot,
+        ),
+      );
+      if (current === undefined || current.revision !== item.evidenceRevision)
+        return yield* fail('The candidate review changed or completed. Refresh maintenance and the review inbox.');
+      return {
+        version: 2 as const,
+        caseId: item.caseId,
+        project: item.project,
+        subject: {
+          kind: 'candidate-review' as const,
+          reviewId: current.review.reviewId,
+          candidateId: item.slot,
+          revision: current.review.revision,
+        },
+        memoryUri: current.candidate.targetUri,
+        memoryId: item.memoryId,
+        evidenceRevision: item.evidenceRevision,
+        expectedContentHash: current.revision,
+        disposition: item.disposition,
+        reason: item.reason,
+        choices: [
+          'Preview the exact candidate review',
+          'Approve an explicitly reviewed candidate',
+          'Defer or reject the candidate',
+        ],
+        allowedOperations: ['list_memory_candidates', 'apply_memory_candidates'],
+        reviewInbox: {
+          reviewId: current.review.reviewId,
+          candidateId: item.slot,
+          command: `threadnote closeout preview --review-id ${current.review.reviewId} --candidate-id ${item.slot} --json`,
+        },
+        instructions:
+          'Preview this exact review revision before choosing approve, defer, or reject. Approval and destructive replacement require explicit user authorization. Candidate decisions use the review inbox, not context-health memory repair.',
+      };
+    }
+    const corpus = yield* selectedMaintenance.readPacketRecords(config, item, selectedRecords);
+    const relatedMemories = ['semantic-contradiction', 'repository-recovery'].includes(item.family)
+      ? EffectArray.filter(
+          corpus,
+          record =>
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(item.subjectContentHashes), findArray =>
+                EffectArray.some(findArray, subject => subject.uri === record.uri),
+              ),
+            ) === true,
+        )
+      : [];
+    const record =
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(corpus, record => (record.metadata.memoryId ?? record.uri) === item.memoryId),
+      ) ?? relatedMemories[0];
+    if (record === undefined) return yield* fail('The selected memory is unavailable.');
+    const stale =
+      item.subjectContentHashes === undefined ||
+      EffectArray.some(
+        item.subjectContentHashes,
+        subject =>
+          contentHash(
+            EffectOption.getOrUndefined(EffectArray.findFirst(corpus, record => record.uri === subject.uri))?.content ??
+              '',
+          ) !== subject.hash,
+      );
+    if (stale)
+      return yield* fail(
+        'The selected maintenance case is stale. Use context maintain --action refresh --project <project> --case-id <case-id> --json to refresh this exact decision.',
+      );
+    if (item.family === TOPIC_MAINTENANCE_FAMILY) {
+      const assertTopicCaseCurrent = Effect.gen(function* () {
+        const latest = EffectOption.getOrUndefined(
+          EffectArray.findFirst((yield* readState(config)).cases, current => current.caseId === item.caseId),
+        );
+        if (
+          latest?.evidenceRevision !== item.evidenceRevision ||
+          latest.disposition !== item.disposition ||
+          latest.reason !== item.reason
+        )
+          return yield* fail('The enrolled topic case changed. Refresh maintenance.');
+      });
+      return yield* readTopicMaintenanceCasePacket(
+        config,
+        item,
+        record,
+        state.topicCheckpoints?.[item.caseId],
+        selection,
+        assertTopicCaseCurrent,
+      );
+    }
+    if (
+      item.sourceSnapshot !== undefined &&
+      ((yield* sourceGeneration(config, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.generation ||
+        (yield* recordSourceRevision(config, record, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.revision)
+    )
+      return yield* fail(
+        'The selected maintenance case is stale. Source evidence changed; use context maintain --action refresh --project <project> --case-id <case-id> --json to check this exact decision.',
+      );
+    const assertCurrent = Effect.gen(function* () {
+      const latest = EffectOption.getOrUndefined(
+        EffectArray.findFirst((yield* readState(config)).cases, current => current.caseId === item.caseId),
+      );
+      if (latest?.evidenceRevision !== item.evidenceRevision || latest.disposition !== item.disposition)
+        return yield* fail('The selected maintenance case changed. Refresh its packet.');
+      const subjects = yield* selectedMaintenance.readPacketSubjects(config, item, latest);
+      if (
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(item.subjectContentHashes), findArray =>
+            EffectArray.some(
+              findArray,
+              subject =>
+                contentHash(
+                  EffectOption.getOrUndefined(EffectArray.findFirst(subjects, record => record.uri === subject.uri))
+                    ?.content ?? '',
+                ) !== subject.hash,
+            ),
+          ),
+        )
+      )
+        return yield* fail('The selected maintenance subject changed. Refresh its packet.');
+      for (const source of item.sourceSnapshots ?? []) {
+        const subject = EffectOption.getOrUndefined(
+          EffectArray.findFirst(subjects, record => record.uri === source.uri),
+        );
+        if (
+          subject === undefined ||
+          (yield* sourceGeneration(config, source.cwd)) !== source.generation ||
+          (yield* recordSourceRevision(config, subject, source.cwd)) !== source.revision
+        )
+          return yield* fail('The selected repository recovery source changed. Refresh its packet.');
+      }
+      if (
+        item.sourceSnapshot !== undefined &&
+        ((yield* sourceGeneration(config, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.generation ||
+          (yield* recordSourceRevision(config, record, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.revision)
+      )
+        return yield* fail('The selected maintenance source changed. Refresh its packet.');
+    });
+    const callerCwd = item.sourceSnapshot?.cwd ?? (yield* SystemInfo).currentDirectory();
+    return yield* buildContextMaintenancePacket(config, {item, record, corpus, callerCwd, selection}, assertCurrent);
+  };
 }

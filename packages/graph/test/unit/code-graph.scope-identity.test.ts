@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -15,20 +16,29 @@ import {
   codeGraphScopeViewKey,
   type CodeGraphScopeIdentity,
 } from '@threadnote/graph/scope/identity';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const identity = {
-  checkoutId: 'c'.repeat(64),
-  headCommit: 'e'.repeat(40),
-  repositoryId: 'a'.repeat(64),
-  worktreeId: 'd'.repeat(64),
+  checkoutId: Effect.pipe('c', EffectString.repeat(64)),
+  headCommit: Effect.pipe('e', EffectString.repeat(40)),
+  repositoryId: Effect.pipe('a', EffectString.repeat(64)),
+  worktreeId: Effect.pipe('d', EffectString.repeat(64)),
 };
 const files = [
-  {path: 'src/a.ts', contentHash: '1'.repeat(64), source: 'commit', language: 'typescript', mode: '100644'},
+  {
+    path: 'src/a.ts',
+    contentHash: Effect.pipe('1', EffectString.repeat(64)),
+    source: 'commit',
+    language: 'typescript',
+    mode: '100644',
+  },
 ];
 const full: CodeGraphScopeIdentity = {
   scopeKey: 'full-repository',
-  definitionDigest: '1'.repeat(64),
-  closureDigest: '2'.repeat(64),
+  definitionDigest: Effect.pipe('1', EffectString.repeat(64)),
+  closureDigest: Effect.pipe('2', EffectString.repeat(64)),
 };
 function identities(scope?: CodeGraphScopeIdentity) {
   return {
@@ -42,7 +52,7 @@ function identities(scope?: CodeGraphScopeIdentity) {
       BUILTIN_LANGUAGE_PACK_REGISTRY,
       undefined,
       false,
-      '1'.repeat(64),
+      Effect.pipe('1', EffectString.repeat(64)),
       scope,
     ),
   };
@@ -80,7 +90,7 @@ describe('scope-bound graph identities', () => {
           {...scope, closureDigest: sha256HexSync(`other-closure:${seed}`)},
         ]) {
           const other = identities(changed);
-          for (const key of Object.keys(original) as (keyof typeof original)[]) {
+          for (const key of EffectRecord.keys(original)) {
             expect(other[key]).not.toBe(original[key]);
           }
           expect(codeGraphScopeIdentityCompatible(scope, changed)).toBe(false);
@@ -96,13 +106,13 @@ describe('scope-bound graph identities', () => {
   it('keys views by the independent worktree and logical scope, not their changing definition', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.string({maxLength: 32}), {minLength: 2, maxLength: 12}), seeds => {
-        const keys = seeds.flatMap(worktree =>
-          seeds.map(scope =>
+        const keys = EffectArray.flatMap(seeds, worktree =>
+          EffectArray.map(seeds, scope =>
             codeGraphScopeViewKey(sha256HexSync(worktree), `code-graph-scope:${sha256HexSync(scope)}`),
           ),
         );
         expect(new Set(keys).size).toBe(seeds.length ** 2);
-        expect(keys.every(key => /^[0-9a-f]{64}\.scope-[0-9a-f]{64}$/u.test(key))).toBe(true);
+        expect(EffectArray.every(keys, key => /^[0-9a-f]{64}\.scope-[0-9a-f]{64}$/u.test(key))).toBe(true);
       }),
       {numRuns: 80},
     );

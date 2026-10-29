@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {assertProfileMatches, buildZotConfig} from '../../../../deploy/threadnote-org-registry/render-config.js';
@@ -80,14 +81,31 @@ describe('organization Zot configuration', () => {
   it('keeps every generated worker limited to worker writes and canonical reads', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.stringMatching(/^[a-z0-9"\\]{1,8}$/u), {minLength: 1, maxLength: 4}), suffixes => {
-        const workers = suffixes.map(suffix => `worker-${suffix}`);
+        const workers = EffectArray.map(suffixes, suffix => `worker-${suffix}`);
         const config = buildZotConfig({...env, ZOT_WORKER_SUBJECTS_JSON: JSON.stringify(workers)});
         const canonicalPolicies = config.http.accessControl.repositories['fixture/canonical'].policies;
         const workerPolicies = config.http.accessControl.repositories['fixture/worker'].policies;
         if (canonicalPolicies === undefined || workerPolicies === undefined) throw new Error('Missing scoped policy');
-        expect(canonicalPolicies.find(policy => policy.actions.includes('create'))?.users).toEqual(['publisher']);
-        expect(workerPolicies.find(policy => policy.actions.includes('create'))?.users).toEqual(workers);
-        expect(canonicalPolicies.find(policy => policy.actions.length === 1)?.users).toEqual([...workers, 'observer']);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              canonicalPolicies,
+              __effectArrayValue => !!(policy => policy.actions.includes('create'))(__effectArrayValue),
+            ),
+          )?.users,
+        ).toEqual(['publisher']);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              workerPolicies,
+              __effectArrayValue => !!(policy => policy.actions.includes('create'))(__effectArrayValue),
+            ),
+          )?.users,
+        ).toEqual(workers);
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(canonicalPolicies, policy => policy.actions.length === 1))
+            ?.users,
+        ).toEqual([...workers, 'observer']);
         expect(config.http.auth.bearer.oidc[0]?.claimMapping.validations[0]?.expression).toContain(
           `claims.sub in ${JSON.stringify(workers)}`,
         );

@@ -1,5 +1,10 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
 import {gzipSync as fflateGzipSync} from 'fflate';
 import {sha256HexSync} from './native_digest.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
 
 const DISK_LIMIT = 16 * 1024 * 1024;
 const LOGICAL_LIMIT = 64 * 1024 * 1024;
@@ -97,8 +102,8 @@ export async function decodeWorkflowJournal(text: string, signal?: AbortSignal):
 export async function decodeBoundedWorkflowJson(text: string, format: string, signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted();
   if (new TextEncoder().encode(text).byteLength > DISK_LIMIT) throw new Error('Workflow journal exceeds disk limit');
-  const trimmed = text.trimStart();
-  if (!trimmed.startsWith('{')) {
+  const trimmed = Effect.pipe(text, EffectString.trimStart);
+  if (!Effect.pipe(trimmed, EffectString.startsWith('{'))) {
     if (encoder.encode(text).byteLength > LOGICAL_LIMIT) throw new Error('Workflow journal exceeds logical limit');
     return text;
   }
@@ -109,21 +114,22 @@ export async function decodeBoundedWorkflowJson(text: string, format: string, si
     if (encoder.encode(text).byteLength > LOGICAL_LIMIT) throw new Error('Workflow journal exceeds logical limit');
     return text;
   }
-  if (typeof parsed !== 'object' || parsed === null || !('format' in parsed)) return text;
-  const envelope = parsed as Record<string, unknown>;
+  if (!Schema.is(Schema.Record(Schema.String, Schema.Unknown))(parsed) || !EffectRecord.has(parsed, 'format'))
+    return text;
+  const envelope = parsed;
   if (envelope.format !== format) throw new Error('Unsupported workflow journal format');
   if (
-    Object.keys(envelope).sort().join(',') !== 'expandedBytes,format,payload,sha256' ||
-    !Number.isSafeInteger(envelope.expandedBytes) ||
-    (envelope.expandedBytes as number) < 1 ||
-    (envelope.expandedBytes as number) > LOGICAL_LIMIT ||
+    EffectArray.join(EffectRecord.keys(envelope).sort(), ',') !== 'expandedBytes,format,payload,sha256' ||
+    !checkedIsSafeInteger(envelope.expandedBytes) ||
+    envelope.expandedBytes < 1 ||
+    envelope.expandedBytes > LOGICAL_LIMIT ||
     typeof envelope.sha256 !== 'string' ||
     !/^[a-f0-9]{64}$/u.test(envelope.sha256) ||
     typeof envelope.payload !== 'string'
   )
     throw new Error('Invalid journal envelope');
   const compressed = decodeBase64(envelope.payload);
-  const bytes = await inflateBounded(compressed, envelope.expandedBytes as number, signal);
+  const bytes = await inflateBounded(compressed, envelope.expandedBytes, signal);
   if (digest(bytes) !== envelope.sha256) throw new Error('Journal digest mismatch');
   return decoder.decode(bytes);
 }

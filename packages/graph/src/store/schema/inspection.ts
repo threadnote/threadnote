@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as SqlError from 'effect/sql/SqlError';
@@ -12,6 +13,8 @@ import {
   type SqliteTableColumnRow,
 } from './contracts.js';
 import {CodeGraphStoreError} from '../../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export function persistentExtensionTableInspection(
   sql: SqlClient.SqlClient,
@@ -33,13 +36,13 @@ export function persistentExtensionTableInspection(
         : yield* sql.unsafe<SqliteIndexListRow>(`PRAGMA index_list("${contract.name}")`);
     const compatibleColumns =
       columns.length === contract.columns.length &&
-      columns.every((column, index) => {
+      EffectArray.every(columns, (column, index) => {
         const expected = contract.columns[index];
         return (
           expected !== undefined &&
           Number(column.cid) === index &&
           column.name === expected.name &&
-          column.type.toUpperCase() === expected.type &&
+          Effect2.pipe(column.type, EffectString.toUpperCase) === expected.type &&
           Number(column.notnull) === Number(expected.notNull) &&
           Number(column.pk) === expected.primaryKeyPosition &&
           column.dflt_value == null
@@ -48,30 +51,29 @@ export function persistentExtensionTableInspection(
     const expectedForeignKeys = contract.foreignKeys ?? [
       {from: 'snapshot_id', onDelete: 'CASCADE', table: 'snapshots', to: 'id'},
     ];
-    const actualForeignKeys = foreignKeys
-      .map(key => ({
-        from: key.from,
-        onDelete: key.on_delete.toUpperCase(),
-        table: key.table,
-        to: key.to,
-      }))
-      .sort(
-        (left, right) =>
-          compareCodeUnits(left.from, right.from) ||
-          compareCodeUnits(left.table, right.table) ||
-          compareCodeUnits(left.to, right.to),
-      );
-    const normalizedExpectedForeignKeys = [...expectedForeignKeys]
-      .map(key => ({...key, onDelete: key.onDelete.toUpperCase()}))
-      .sort(
-        (left, right) =>
-          compareCodeUnits(left.from, right.from) ||
-          compareCodeUnits(left.table, right.table) ||
-          compareCodeUnits(left.to, right.to),
-      );
+    const actualForeignKeys = EffectArray.map(foreignKeys, key => ({
+      from: key.from,
+      onDelete: Effect2.pipe(key.on_delete, EffectString.toUpperCase),
+      table: key.table,
+      to: key.to,
+    })).sort(
+      (left, right) =>
+        compareCodeUnits(left.from, right.from) ||
+        compareCodeUnits(left.table, right.table) ||
+        compareCodeUnits(left.to, right.to),
+    );
+    const normalizedExpectedForeignKeys = EffectArray.map([...expectedForeignKeys], key => ({
+      ...key,
+      onDelete: Effect2.pipe(key.onDelete, EffectString.toUpperCase),
+    })).sort(
+      (left, right) =>
+        compareCodeUnits(left.from, right.from) ||
+        compareCodeUnits(left.table, right.table) ||
+        compareCodeUnits(left.to, right.to),
+    );
     const compatibleForeignKeys =
       actualForeignKeys.length === normalizedExpectedForeignKeys.length &&
-      actualForeignKeys.every((key, index) => {
+      EffectArray.every(actualForeignKeys, (key, index) => {
         const expected = normalizedExpectedForeignKeys[index];
         return (
           expected !== undefined &&
@@ -84,18 +86,25 @@ export function persistentExtensionTableInspection(
     const actualUniqueKeys: (readonly string[])[] = [];
     for (const index of indexes) {
       if (Number(index.unique) !== 1 || Number(index.partial) !== 0) continue;
-      const escapedIndexName = index.name.replaceAll('"', '""');
+      const escapedIndexName = Effect2.pipe(index.name, EffectString.replaceAll('"', '""'));
       const indexedColumns = yield* sql.unsafe<SqliteIndexInfoRow>(`PRAGMA index_info("${escapedIndexName}")`);
       actualUniqueKeys.push(
-        [...indexedColumns].sort((left, right) => Number(left.seqno) - Number(right.seqno)).map(column => column.name),
+        EffectArray.map(
+          [...indexedColumns].sort((left, right) => Number(left.seqno) - Number(right.seqno)),
+          column => column.name,
+        ),
       );
     }
-    const compatibleUniqueKeys = (contract.uniqueKeys ?? []).every(expected =>
-      actualUniqueKeys.some(
-        actual => actual.length === expected.length && actual.every((column, index) => column === expected[index]),
+    const compatibleUniqueKeys = EffectArray.every(contract.uniqueKeys ?? [], expected =>
+      EffectArray.some(
+        actualUniqueKeys,
+        actual =>
+          actual.length === expected.length && EffectArray.every(actual, (column, index) => column === expected[index]),
       ),
     );
-    const compatibleDefinition = (contract.requiredDefinitionPatterns ?? []).every(pattern => pattern.test(definition));
+    const compatibleDefinition = EffectArray.every(contract.requiredDefinitionPatterns ?? [], pattern =>
+      pattern.test(definition),
+    );
     const expectsWithoutRowid = contract.withoutRowid ?? true;
     return {
       compatible:
@@ -122,7 +131,7 @@ export const inspectPersistentExtensionTables = Effect.fn('codeGraph.inspectPers
 export const codeGraphPersistentExtensionSchemaCompatible = Effect.fn('codeGraph.persistentExtensionSchemaCompatible')(
   function* (sql: SqlClient.SqlClient) {
     const inspections = yield* inspectPersistentExtensionTables(sql);
-    return inspections.every(inspection => inspection.exists && inspection.compatible);
+    return EffectArray.every(inspections, inspection => inspection.exists && inspection.compatible);
   },
 );
 
@@ -130,10 +139,13 @@ export const validatePersistentExtensionTables = Effect.fn('codeGraph.validatePe
   sql: SqlClient.SqlClient,
 ) {
   const inspections = yield* inspectPersistentExtensionTables(sql);
-  const incompatible = inspections.filter(inspection => !inspection.exists || !inspection.compatible);
+  const incompatible = EffectArray.filter(inspections, inspection => !inspection.exists || !inspection.compatible);
   if (incompatible.length > 0) {
     return yield* CodeGraphStoreError.of(
-      `Code graph persistent extension schema is incompatible: ${incompatible.map(table => table.name).join(', ')}.`,
+      `Code graph persistent extension schema is incompatible: ${EffectArray.join(
+        EffectArray.map(incompatible, table => table.name),
+        ', ',
+      )}.`,
     );
   }
 });

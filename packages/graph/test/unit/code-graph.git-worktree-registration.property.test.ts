@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -13,8 +14,10 @@ import {
   scanCodeGraphWorktreeAuthorityWorkerRequest,
   type CodeGraphGitWorktreeRegistryRequest,
 } from '@threadnote/graph/git/worktree/registration';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 
 describe('code graph common-gitdir authority properties', () => {
   it('is deterministic across insertion order and becomes present exactly when the target name is added', async () => {
@@ -22,11 +25,14 @@ describe('code graph common-gitdir authority properties', () => {
       fc.asyncProperty(
         fc.uniqueArray(fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9._-]{0,23}$/), {
           maxLength: 12,
-          selector: value => value.toLowerCase(),
+          selector: value => Effect2.pipe(value, EffectString.toLowerCase),
         }),
         fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9._-]{0,23}$/),
         async (generated, target) => {
-          const entries = generated.filter(name => name.toLowerCase() !== target.toLowerCase());
+          const entries = EffectArray.filter(
+            generated,
+            name => Effect2.pipe(name, EffectString.toLowerCase) !== Effect2.pipe(target, EffectString.toLowerCase),
+          );
           const first = registryFixture(entries);
           const second = registryFixture([...entries].reverse());
           try {
@@ -58,12 +64,12 @@ describe('code graph common-gitdir authority properties', () => {
       entries: fc.uniqueArray(fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/), {
         maxLength: 10,
         minLength: 1,
-        selector: value => value.toLowerCase(),
+        selector: value => Effect2.pipe(value, EffectString.toLowerCase),
       }),
       generatedTargets: fc.uniqueArray(fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/), {
         maxLength: 16,
         minLength: 1,
-        selector: value => value.toLowerCase(),
+        selector: value => Effect2.pipe(value, EffectString.toLowerCase),
       }),
       reverseTargets: fc.boolean(),
     },
@@ -74,7 +80,9 @@ describe('code graph common-gitdir authority properties', () => {
         registry =>
           Effect.promise(() =>
             scanCodeGraphGitWorktreeRegistryBatch({
-              adminNameKeySets: targets.map(target => codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, target)),
+              adminNameKeySets: EffectArray.map(targets, target =>
+                codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, target),
+              ),
               checkoutId: CHECKOUT_ID,
               gitCommonDirectory: registry,
               protocol: 2,
@@ -84,9 +92,13 @@ describe('code graph common-gitdir authority properties', () => {
               Effect.sync(() => {
                 expect(observation.state).toBe('complete');
                 if (observation.state === 'complete') {
-                  const present = new Set(entries.map(entry => entry.toLowerCase()));
+                  const present = new Set(
+                    EffectArray.map(entries, entry => Effect2.pipe(entry, EffectString.toLowerCase)),
+                  );
                   expect(observation.states).toEqual(
-                    targets.map(target => (present.has(target.toLowerCase()) ? 'present' : 'absent')),
+                    EffectArray.map(targets, target =>
+                      present.has(Effect2.pipe(target, EffectString.toLowerCase)) ? 'present' : 'absent',
+                    ),
                   );
                 }
               }),
@@ -137,7 +149,7 @@ describe('code graph common-gitdir authority properties', () => {
                 {
                   adminNameKeys: codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, adminName),
                   canonicalWorktreePath: target,
-                  evidenceToken: 'b'.repeat(64),
+                  evidenceToken: Effect2.pipe('b', EffectString.repeat(64)),
                 },
               ],
             }),

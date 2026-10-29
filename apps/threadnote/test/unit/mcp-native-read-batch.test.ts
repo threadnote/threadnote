@@ -1,6 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import * as FC from 'fast-check';
 import {describe, expect} from 'vitest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -11,6 +12,9 @@ import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const PRESENT_BODY = 'Present memory body for mixed batch read.';
 
@@ -55,17 +59,47 @@ describe('MCP native batch read_context', () => {
         );
 
         const result = yield* runNativeReadTool(config, [missingUri, presentUri]);
-        const texts = result.content.filter(item => item.type === 'text').map(item => item.text);
-        const canonicalRead = result._meta?.['threadnote.io/canonical-read'] as
-          | {readonly missing?: readonly string[]; readonly resources?: readonly {readonly requestedUri: string}[]}
-          | undefined;
+        const texts = EffectArray.map(
+          EffectArray.filter(result.content, item => item.type === 'text'),
+          item => item.text,
+        );
+        const rawCanonicalRead = result._meta?.['threadnote.io/canonical-read'];
+        const canonicalRead =
+          rawCanonicalRead === undefined
+            ? undefined
+            : yield* Schema.decodeUnknownEffect(
+                Schema.StructWithRest(
+                  Schema.Struct({
+                    missing: Schema.optional(Schema.Array(Schema.String)),
+                    resources: Schema.optional(
+                      Schema.Array(
+                        Schema.StructWithRest(Schema.Struct({requestedUri: Schema.String}), [
+                          Schema.Record(Schema.String, Schema.Unknown),
+                        ]),
+                      ),
+                    ),
+                  }),
+                  [Schema.Record(Schema.String, Schema.Unknown)],
+                ),
+              )(rawCanonicalRead);
 
         expect(result.isError).not.toBe(true);
-        expect(texts.some(text => text.includes(PRESENT_BODY))).toBe(true);
+        expect(EffectArray.some(texts, text => Effect2.pipe(text, EffectString.includes(PRESENT_BODY)))).toBe(true);
         expect(canonicalRead?.missing).toEqual([missingUri]);
-        expect(canonicalRead?.resources?.map(resource => resource.requestedUri)).toEqual([presentUri]);
         expect(
-          memoryReadResourcesFromNativeResult(result, [missingUri, presentUri])?.map(resource => resource.uri),
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(canonicalRead?.resources), __effectArrayReceiver =>
+              EffectArray.map(__effectArrayReceiver, resource => resource.requestedUri),
+            ),
+          ),
+        ).toEqual([presentUri]);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectOption.map(
+              EffectOption.fromNullishOr(memoryReadResourcesFromNativeResult(result, [missingUri, presentUri])),
+              __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, resource => resource.uri),
+            ),
+          ),
         ).toEqual([presentUri]);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -112,9 +146,9 @@ describe('MCP native batch read_context', () => {
           };
           const store = yield* ResourceStore;
           const location = {account: config.account, home: config.agentContextHome, user: config.user};
-          const uris = flags.map((_, index) => memoryUri(`batch-${index}`));
+          const uris = EffectArray.map(flags, (_, index) => memoryUri(`batch-${index}`));
           yield* Effect.forEach(
-            flags.flatMap((present, index) => (present ? [index] : [])),
+            EffectArray.flatMap(flags, (present, index) => (present ? [index] : [])),
             index =>
               store.write(
                 location,
@@ -126,9 +160,16 @@ describe('MCP native batch read_context', () => {
           );
 
           const result = yield* runNativeReadTool(config, uris);
-          const presentCount = flags.filter(Boolean).length;
-          const canonicalRead = result._meta?.['threadnote.io/canonical-read'] as
-            {readonly resources?: readonly unknown[]} | undefined;
+          const presentCount = EffectArray.filter(flags, Boolean).length;
+          const rawCanonicalRead = result._meta?.['threadnote.io/canonical-read'];
+          const canonicalRead =
+            rawCanonicalRead === undefined
+              ? undefined
+              : yield* Schema.decodeUnknownEffect(
+                  Schema.StructWithRest(Schema.Struct({resources: Schema.optional(Schema.Array(Schema.Unknown))}), [
+                    Schema.Record(Schema.String, Schema.Unknown),
+                  ]),
+                )(rawCanonicalRead);
           expect(canonicalRead?.resources?.length ?? 0).toBe(presentCount);
           expect(result.isError === true).toBe(presentCount === 0);
         }),

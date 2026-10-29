@@ -1,24 +1,27 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {BunFileSystem} from '@effect/platform-bun';
 import {describe, expect, it} from '@effect/vitest';
-import {Effect, FileSystem} from 'effect';
+import {Effect, FileSystem, Predicate} from 'effect';
 import {JSON_SCHEMA, load} from 'js-yaml';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-interface PublisherWorkflow {
-  readonly env?: Readonly<Record<string, string>>;
-  readonly jobs: Readonly<{
-    readonly publish?: {
-      readonly env?: Readonly<Record<string, string>>;
-      readonly steps?: readonly {
-        readonly name?: string;
-        readonly run?: string;
-        readonly uses?: string;
-        readonly with?: Readonly<Record<string, string>>;
-      }[];
-    };
-  }>;
-}
+const property = (value: unknown, key: string): unknown => (Predicate.isObject(value) ? value[key] : undefined);
+const stringProperty = (value: unknown, key: string): string | undefined => {
+  const candidate = property(value, key);
+  return typeof candidate === 'string' ? candidate : undefined;
+};
+const requiredStringProperty = (value: unknown, key: string): string => {
+  const candidate = stringProperty(value, key);
+  if (candidate === undefined) throw new Error(`Expected string property ${key}.`);
+  return candidate;
+};
+const arrayProperty = (value: unknown, key: string): readonly unknown[] | undefined => {
+  const candidate = property(value, key);
+  return EffectArray.isArray(candidate) ? candidate : undefined;
+};
 
 const readProjectFile = (path: string) =>
   FileSystem.FileSystem.pipe(
@@ -36,11 +39,9 @@ describe('standalone release workflows', () => {
   it.effect('reruns only release control-plane smokes before platform payload validation', () =>
     Effect.gen(function* () {
       const workflow = yield* readProjectFile('.github/workflows/publish.yml');
-      const manifest = JSON.parse(yield* readProjectFile('package.json')) as {
-        readonly scripts?: Readonly<Record<string, string>>;
-      };
+      const manifest: unknown = JSON.parse(yield* readProjectFile('package.json'));
 
-      expect(manifest.scripts?.['test:smoke:release']).toBe(
+      expect(stringProperty(property(manifest, 'scripts'), 'test:smoke:release')).toBe(
         'bun --bun vitest run apps/threadnote/test/unit/bun-package-contract.test.ts apps/threadnote/test/unit/publish-workflow.test.ts',
       );
       expect(workflow).toContain('name: Run release contract smokes');
@@ -79,7 +80,13 @@ describe('standalone release workflows', () => {
       expect(workflow).toContain('bun-windows-x64-baseline-v$env:BUN_VERSION');
       expect(workflow).toContain('bun-windows-arm64');
       expect(workflow).toContain('windows-11-arm');
-      expect(workflow.match(/if: \$\{\{ false \}\}/g)).toHaveLength(1);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/if: \$\{\{ false \}\}/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(1);
       expect(workflow).toContain('name: Windows · ${{ matrix.architecture }} · unsigned');
       expect(workflow).toContain('bun --bun vitest run --config vitest.windows-e2e.config.ts');
       expect(workflow).toContain('name: release-windows-${{ matrix.architecture }}');
@@ -126,11 +133,32 @@ describe('standalone release workflows', () => {
     Effect.gen(function* () {
       const workflow = yield* readProjectFile('.github/workflows/publish.yml');
       const publisher = yield* readProjectFile('.github/workflows/publish-release-assets.yml');
-      const signing = workflow.indexOf('Sign nested native code and Bun executable');
-      const notarization = workflow.indexOf('Notarize the exact release payload');
-      const macArchive = workflow.indexOf('THREADNOTE_RELEASE_TARGET: darwin-');
-      const authenticode = workflow.indexOf('Authenticode-sign executable and native payload');
-      const unsignedWindowsArchive = workflow.indexOf('THREADNOTE_RELEASE_TARGET: windows-');
+      const signing = Effect2.pipe(
+        workflow,
+        EffectString.indexOf('Sign nested native code and Bun executable'),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      const notarization = Effect2.pipe(
+        workflow,
+        EffectString.indexOf('Notarize the exact release payload'),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      const macArchive = Effect2.pipe(
+        workflow,
+        EffectString.indexOf('THREADNOTE_RELEASE_TARGET: darwin-'),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      const authenticode = Effect2.pipe(
+        workflow,
+        EffectString.indexOf('Authenticode-sign executable and native payload'),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      const unsignedWindowsArchive = Effect2.pipe(
+        workflow,
+        EffectString.indexOf('THREADNOTE_RELEASE_TARGET: windows-'),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
       const signedWindowsArchive = workflow.indexOf('THREADNOTE_RELEASE_TARGET: windows-', authenticode);
 
       expect(signing).toBeGreaterThan(0);
@@ -145,7 +173,16 @@ describe('standalone release workflows', () => {
       expect(signedWindowsArchive).toBeGreaterThan(authenticode);
       expect(publisher).toContain('gh release create');
       expect(publisher).toContain('Verify release immutability');
-      const websiteRefresh = workflow.slice(workflow.indexOf('\n  refresh-website:'));
+      const websiteRefresh = Effect2.pipe(
+        workflow,
+        EffectString.slice(
+          Effect2.pipe(
+            workflow,
+            EffectString.indexOf('\n  refresh-website:'),
+            Effect2.Option.getOrElse(() => -1),
+          ),
+        ),
+      );
       expect(websiteRefresh).toContain('needs: publish-release');
       expect(websiteRefresh).toContain('Refresh website after stable release publication');
       expect(websiteRefresh).toContain(
@@ -158,25 +195,31 @@ describe('standalone release workflows', () => {
 
   it.effect('sets up the pinned Bun runtime before every publisher Bun invocation', () =>
     Effect.gen(function* () {
-      const publisher = load(yield* readProjectFile('.github/workflows/publish-release-assets.yml'), {
+      const publisher: unknown = load(yield* readProjectFile('.github/workflows/publish-release-assets.yml'), {
         schema: JSON_SCHEMA,
-      }) as PublisherWorkflow;
-      const releaseWorkflow = load(yield* readProjectFile('.github/workflows/publish.yml'), {
+      });
+      const releaseWorkflow: unknown = load(yield* readProjectFile('.github/workflows/publish.yml'), {
         schema: JSON_SCHEMA,
-      }) as PublisherWorkflow;
-      const job = publisher.jobs.publish;
-      const steps = job?.steps ?? [];
-      const setupIndex = steps.findIndex(step => step.uses === 'oven-sh/setup-bun@v2');
-      const bunRunSteps = steps
-        .map((step, index) => ({index, run: step.run ?? ''}))
-        .filter(({run}) => /(?:^|[\s;&|])bun(?:\s|$)/.test(run));
+      });
+      const job = property(property(publisher, 'jobs'), 'publish');
+      const steps = arrayProperty(job, 'steps') ?? [];
+      const setupIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(steps, step => stringProperty(step, 'uses') === 'oven-sh/setup-bun@v2'),
+        () => -1,
+      );
+      const bunRunSteps = EffectArray.filter(
+        EffectArray.map(steps, (step, index) => ({index, run: stringProperty(step, 'run') ?? ''})),
+        ({run}) => /(?:^|[\s;&|])bun(?:\s|$)/.test(run),
+      );
 
-      expect(releaseWorkflow?.env?.BUN_VERSION).toBe('1.4.4');
-      expect(job?.env?.BUN_VERSION).toBe(releaseWorkflow?.env?.BUN_VERSION);
+      expect(stringProperty(property(releaseWorkflow, 'env'), 'BUN_VERSION')).toBe('1.4.4');
+      expect(stringProperty(property(job, 'env'), 'BUN_VERSION')).toBe(
+        stringProperty(property(releaseWorkflow, 'env'), 'BUN_VERSION'),
+      );
       expect(setupIndex).toBeGreaterThanOrEqual(0);
-      expect(steps[setupIndex]?.with).toEqual({'bun-version': '${{ env.BUN_VERSION }}'});
+      expect(property(steps[setupIndex], 'with')).toEqual({'bun-version': '${{ env.BUN_VERSION }}'});
       expect(bunRunSteps.length).toBeGreaterThan(0);
-      expect(bunRunSteps.every(({index}) => setupIndex < index)).toBe(true);
+      expect(EffectArray.every(bunRunSteps, ({index}) => setupIndex < index)).toBe(true);
     }),
   );
 
@@ -215,9 +258,27 @@ describe('standalone release workflows', () => {
       expect(recovery).toContain('Verify PowerShell installer and installed runtime');
       expect(recovery).toContain('artifact.digest !== expected.digest');
       expect(recovery).toContain('artifact.expired !== false');
-      expect(recovery.match(/sha256:[0-9a-f]{64}/g)).toHaveLength(4);
-      expect(recovery.match(/artifact: release-(?:darwin|windows)-(?:arm64|x64)$/gm)).toHaveLength(4);
-      expect(recovery.match(/ref: 9ac28435659ce421ebc78b302616eaac75112597/g)).toHaveLength(1);
+      expect(
+        Effect2.pipe(
+          recovery,
+          EffectString.match(/sha256:[0-9a-f]{64}/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(4);
+      expect(
+        Effect2.pipe(
+          recovery,
+          EffectString.match(/artifact: release-(?:darwin|windows)-(?:arm64|x64)$/gm),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(4);
+      expect(
+        Effect2.pipe(
+          recovery,
+          EffectString.match(/ref: 9ac28435659ce421ebc78b302616eaac75112597/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(1);
       expect(recovery).toContain('bun-linux-x64-baseline');
       expect(recovery).toContain('bun-linux-arm64');
       expect(recovery).toContain('doctor --dry-run --strict');
@@ -226,7 +287,13 @@ describe('standalone release workflows', () => {
       expect(recovery).toContain('artifact-ids: ${{ matrix.artifact_id }}');
       expect(recovery).toContain('digest-mismatch: error');
       expect(recovery).toContain('merge-multiple: true');
-      expect(recovery.match(/artifact_id: [0-9]+$/gm)).toHaveLength(4);
+      expect(
+        Effect2.pipe(
+          recovery,
+          EffectString.match(/artifact_id: [0-9]+$/gm),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(4);
       expect(recovery).toContain('run-id: 33518869399');
       expect(recovery).toContain('needs: [verify, linux, promote-rehearsal]');
       expect(recovery).toContain('uses: ./.github/workflows/publish-release-assets.yml');
@@ -239,10 +306,11 @@ describe('standalone release workflows', () => {
     Effect.gen(function* () {
       const workflow = yield* readProjectFile('.github/workflows/publish.yml');
       const publisher = yield* readProjectFile('.github/workflows/publish-release-assets.yml');
-      const manifest = JSON.parse(yield* readProjectFile('package.json')) as {readonly version: string};
-      const notes = yield* readProjectFile(`.github/release-notes/v${manifest.version}.md`);
+      const manifest: unknown = JSON.parse(yield* readProjectFile('package.json'));
+      const version = requiredStringProperty(manifest, 'version');
+      const notes = yield* readProjectFile(`.github/release-notes/v${version}.md`);
 
-      expect(notes.trimStart()).toMatch(/^## What's new\s/);
+      expect(Effect2.pipe(notes, EffectString.trimStart)).toMatch(/^## What's new\s/);
       expect(workflow).toContain('Verify versioned release notes');
       expect(workflow).toContain('.github/release-notes/${RELEASE_TAG}.md');
       expect(publisher).toContain('release_flags=(--verify-tag --generate-notes)');
@@ -254,9 +322,31 @@ describe('standalone release workflows', () => {
     Effect.gen(function* () {
       const workflow = yield* readProjectFile('.github/workflows/publish.yml');
       const publisher = yield* readProjectFile('.github/workflows/publish-release-assets.yml');
-      const verifyJob = workflow.slice(workflow.indexOf('  verify:'), workflow.indexOf('\n  linux:'));
-      const resolveRelease = verifyJob.indexOf('Resolve exact release source');
-      const releaseSmokes = verifyJob.indexOf('Run release contract smokes');
+      const verifyJob = Effect2.pipe(
+        workflow,
+        EffectString.slice(
+          Effect2.pipe(
+            workflow,
+            EffectString.indexOf('  verify:'),
+            Effect2.Option.getOrElse(() => -1),
+          ),
+          Effect2.pipe(
+            workflow,
+            EffectString.indexOf('\n  linux:'),
+            Effect2.Option.getOrElse(() => -1),
+          ),
+        ),
+      );
+      const resolveRelease = Effect2.pipe(
+        verifyJob,
+        EffectString.indexOf('Resolve exact release source'),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      const releaseSmokes = Effect2.pipe(
+        verifyJob,
+        EffectString.indexOf('Run release contract smokes'),
+        Effect2.Option.getOrElse(() => -1),
+      );
 
       expect(verifyJob).toContain('runs-on: ubuntu-latest');
       expect(verifyJob).toContain('release_commit: ${{ steps.release_source.outputs.release_commit }}');
@@ -275,16 +365,56 @@ describe('standalone release workflows', () => {
       expect(verifyJob).not.toContain('CANDIDATE_COMMIT');
       expect(resolveRelease).toBeGreaterThan(0);
       expect(releaseSmokes).toBeGreaterThan(resolveRelease);
-      expect(verifyJob.indexOf('Validate release tag syntax')).toBeLessThan(
-        verifyJob.indexOf('Verify release tag matches package version'),
+      expect(
+        Effect2.pipe(
+          verifyJob,
+          EffectString.indexOf('Validate release tag syntax'),
+          Effect2.Option.getOrElse(() => -1),
+        ),
+      ).toBeLessThan(
+        Effect2.pipe(
+          verifyJob,
+          EffectString.indexOf('Verify release tag matches package version'),
+          Effect2.Option.getOrElse(() => -1),
+        ),
       );
       expect(verifyJob).not.toContain('release_tag="${{ github.ref_name }}"');
       expect(verifyJob).not.toContain('.github/release-notes/${{ github.ref_name }}.md');
-      expect(workflow.match(/needs: verify/g)).toHaveLength(3);
-      expect(workflow.match(/name: Select exact verified release source/g)).toHaveLength(3);
-      expect(workflow.match(/RELEASE_COMMIT: \$\{\{ needs\.verify\.outputs\.release_commit \}\}/g)).toHaveLength(3);
-      expect(workflow.match(/ref: \$\{\{ github\.sha \}\}/g)).toHaveLength(5);
-      expect(workflow.match(/persist-credentials: false/g)).toHaveLength(5);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/needs: verify/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(3);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/name: Select exact verified release source/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(3);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/RELEASE_COMMIT: \$\{\{ needs\.verify\.outputs\.release_commit \}\}/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(3);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/ref: \$\{\{ github\.sha \}\}/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(5);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/persist-credentials: false/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(5);
       expect(workflow).toContain('release_sha: ${{ github.sha }}');
       expect(workflow).not.toContain('THREADNOTE_RELEASE_COORDINATOR_TOKEN');
       expect(publisher).toContain('ref: ${{ inputs.release_sha }}');
@@ -297,7 +427,13 @@ describe('standalone release workflows', () => {
       expect(publisher).toContain(
         'Release source is no longer present on protected origin/main; refusing publication.',
       );
-      expect(publisher.match(/verify_release_source/g)).toHaveLength(3);
+      expect(
+        Effect2.pipe(
+          publisher,
+          EffectString.match(/verify_release_source/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(3);
       expect(publisher).toContain('final practical gate');
       expect(publisher).toContain('protected-main provenance');
       expect(publisher).toContain('GH_TOKEN: ${{ github.token }}');
@@ -311,8 +447,20 @@ describe('standalone release workflows', () => {
   it.effect('produces a real embedding on every native release runner before signing or archiving', () =>
     Effect.gen(function* () {
       const workflow = yield* readProjectFile('.github/workflows/publish.yml');
-      expect(workflow.match(/Produce a real embedding with the release payload/g)).toHaveLength(3);
-      expect(workflow.match(/test\/e2e\/local-bins\.e2e\.ts/g)).toHaveLength(3);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/Produce a real embedding with the release payload/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(3);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/test\/e2e\/local-bins\.e2e\.ts/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(3);
     }),
   );
 
@@ -323,10 +471,10 @@ describe('standalone release workflows', () => {
       const asset = yield* readProjectFile('apps/threadnote/src/models/core-embedding-asset.ts');
       const checker = yield* readProjectFile('scripts/check-embedded-core-model.ts');
       const modelLicense = yield* readProjectFile('assets/models/licenses/bge-small-en-v1.5.LICENSE');
-      const packageManifest = JSON.parse(yield* readProjectFile('package.json')) as {
-        readonly scripts?: Readonly<Record<string, string>>;
-      };
-      const model = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.id === CORE_EMBEDDING_MODEL_ID)!;
+      const packageManifest: unknown = JSON.parse(yield* readProjectFile('package.json'));
+      const model = EffectOption.getOrUndefined(
+        EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.id === CORE_EMBEDDING_MODEL_ID),
+      )!;
 
       expect(asset).toContain(`${model.sha256}.gguf`);
       expect(asset).toContain("type: 'file'");
@@ -334,8 +482,12 @@ describe('standalone release workflows', () => {
       expect(checker).toContain('BUNDLED_MODEL_LICENSE_SHA256');
       expect(modelLicense).toContain('Copyright (c) 2022 staoxiao');
       expect(modelLicense).toContain('The above copyright notice and this permission notice shall be included');
-      expect(packageManifest.scripts?.build).toMatch(/^bun scripts\/check-embedded-core-model\.ts && /);
-      expect(packageManifest.scripts?.['compile:targets']).toMatch(/^bun scripts\/check-embedded-core-model\.ts && /);
+      expect(stringProperty(property(packageManifest, 'scripts'), 'build')).toMatch(
+        /^bun scripts\/check-embedded-core-model\.ts && /,
+      );
+      expect(stringProperty(property(packageManifest, 'scripts'), 'compile:targets')).toMatch(
+        /^bun scripts\/check-embedded-core-model\.ts && /,
+      );
       for (const content of [ci, workflow]) {
         expect(content).not.toContain('THREADNOTE_E2E_MODEL_PATH');
         expect(content).not.toContain('E2E_EMBEDDING_MODEL_SHA256');
@@ -343,9 +495,27 @@ describe('standalone release workflows', () => {
       expect(ci).not.toContain('prepare-e2e-model:');
       expect(workflow).not.toContain('prepare-release-model:');
       expect(workflow).not.toContain('name: Download pinned release model');
-      expect(workflow.match(/needs: verify/g)).toHaveLength(3);
-      expect(workflow.match(/install --no-start/g)).toHaveLength(3);
-      expect(workflow.match(/doctor --dry-run --strict/g)).toHaveLength(3);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/needs: verify/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(3);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/install --no-start/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(3);
+      expect(
+        Effect2.pipe(
+          workflow,
+          EffectString.match(/doctor --dry-run --strict/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(3);
     }),
   );
 
@@ -358,7 +528,7 @@ describe('standalone release workflows', () => {
         'bun-linux-arm64',
         'bun-linux-arm64-musl',
         'bun-linux-x64-baseline',
-        'bun-linux-x64-musl-baseline',
+        'bun-linux-x64-baseline-musl',
         'bun-windows-arm64',
         'bun-windows-x64-baseline',
       ]) {
@@ -380,29 +550,38 @@ describe('standalone release workflows', () => {
       expect(ci).not.toMatch(/^\s*args:[^\n]*-ignore/gm);
       expect(yield* projectFileExists('.github/actionlint.yaml')).toBe(false);
       expect(yield* readProjectFile('.github/actionlint.yml')).toBe(
-        [
-          'self-hosted-runner:',
-          '  labels:',
-          '    - threadnote-large-graph',
-          '',
-          'paths:',
-          '  .github/workflows/publish.yml:',
-          '    # These jobs are intentionally and immutably disabled until Windows signing is approved.',
-          '    ignore:',
-          `      - '^constant expression "false" in condition\\. remove the if: section$'`,
-          '  .github/workflows/telemetry-gateway.yml:',
-          '    # GitHub supports queue:max; Actionlint 1.7.12 predates that workflow syntax.',
-          '    ignore:',
-          `      - '^unexpected key "queue" for "concurrency" section\\. expected one of "cancel-in-progress", "group"$'`,
-          '  .github/workflows/telemetry-dashboard.yml:',
-          '    # GitHub supports queue:max; Actionlint 1.7.12 predates that workflow syntax.',
-          '    ignore:',
-          `      - '^unexpected key "queue" for "concurrency" section\\. expected one of "cancel-in-progress", "group"$'`,
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'self-hosted-runner:',
+            '  labels:',
+            '    - threadnote-large-graph',
+            '',
+            'paths:',
+            '  .github/workflows/publish.yml:',
+            '    # These jobs are intentionally and immutably disabled until Windows signing is approved.',
+            '    ignore:',
+            `      - '^constant expression "false" in condition\\. remove the if: section$'`,
+            '  .github/workflows/telemetry-gateway.yml:',
+            '    # GitHub supports queue:max; Actionlint 1.7.12 predates that workflow syntax.',
+            '    ignore:',
+            `      - '^unexpected key "queue" for "concurrency" section\\. expected one of "cancel-in-progress", "group"$'`,
+            '  .github/workflows/telemetry-dashboard.yml:',
+            '    # GitHub supports queue:max; Actionlint 1.7.12 predates that workflow syntax.',
+            '    ignore:',
+            `      - '^unexpected key "queue" for "concurrency" section\\. expected one of "cancel-in-progress", "group"$'`,
+            '',
+          ],
+          '\n',
+        ),
       );
       for (const runner of hostedReleaseRunners) {
-        expect(publish.match(new RegExp(`runner: ${runner}$`, 'gm'))).toHaveLength(1);
+        expect(
+          Effect2.pipe(
+            publish,
+            EffectString.match(new RegExp(`runner: ${runner}$`, 'gm')),
+            Effect2.Option.getOrElse(() => null),
+          ),
+        ).toHaveLength(1);
       }
     }),
   );

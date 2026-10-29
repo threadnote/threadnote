@@ -1,13 +1,16 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {SystemInfo} from '@threadnote/platform/system';
+import {isJsonObject} from '@threadnote/platform/json';
 import {reserveWorkflowNameFamily} from '../../src/workflow_automation/naming.js';
 import {resolveWorkflowBinding} from '../../src/workflow_memory/profile.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
-import type {WorkflowBinding} from '../../src/workflow_memory/protocol.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
 const failure = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.result);
@@ -37,6 +40,23 @@ const writeInput = (
 });
 
 const readOutcome = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.result);
+
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array of objects.');
+  const records = EffectArray.filter(value, isJsonObject);
+  if (records.length !== value.length) throw new Error('Expected an array of objects.');
+  return records;
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Expected a string.');
+  return value;
+}
 
 describe('native workflow naming corruption boundaries', () => {
   effectIt.effect(
@@ -68,12 +88,13 @@ describe('native workflow naming corruption boundaries', () => {
             'workflow-names.json',
           );
           const originalRegistry = yield* f.fs.readFileString(registryPath);
-          const corrupt = JSON.parse(originalRegistry) as Record<string, unknown> & {
-            reservations: Array<Record<string, unknown> & {family: Record<string, unknown>}>;
-          };
+          const corrupt = requireRecord(JSON.parse(originalRegistry));
+          const reservations = requireRecordArray(corrupt.reservations);
+          const firstReservation = reservations[0];
+          if (!firstReservation) throw new Error('Expected a workflow reservation.');
           if (malformedLevel === 'root') corrupt.extra = true;
-          else if (malformedLevel === 'reservation') corrupt.reservations[0].extra = true;
-          else corrupt.reservations[0].family.extra = true;
+          else if (malformedLevel === 'reservation') firstReservation.extra = true;
+          else requireRecord(firstReservation.family).extra = true;
           yield* f.fs.writeFileString(registryPath, JSON.stringify(corrupt));
           const corruptRegistry = yield* f.fs.readFileString(registryPath);
 
@@ -83,7 +104,9 @@ describe('native workflow naming corruption boundaries', () => {
           const journalEntries = (yield* f.fs.exists(journalDirectory))
             ? yield* f.fs.readDirectory(journalDirectory)
             : [];
-          const journalExists = journalEntries.some(name => name.endsWith('.json'));
+          const journalExists = EffectArray.some(journalEntries, name =>
+            Effect2.pipe(name, EffectString.endsWith('.json')),
+          );
           const stateExists = yield* f.fs.exists(f.statePath(runId));
           const manifestUri =
             'threadnote://user/tester/memories/handoffs/active/fixture/workflow-corrupt-reservation-state.md';
@@ -131,12 +154,12 @@ describe('native workflow naming corruption boundaries', () => {
           yield* f.store.write(f.location, occupiedUri, foreignBytes, {mode: 'create'});
 
           const journalPath = f.journalPath(initialized.bindingId);
-          const beforeArchiveJournal = JSON.parse(yield* f.fs.readFileString(journalPath)) as {
-            binding: WorkflowBinding;
-            artifacts: Record<string, {artifactKey: string; sourceRunId: string; role: string}>;
-          };
-          const source = beforeArchiveJournal.artifacts[original.uri];
-          if (!source) throw new Error('Expected the new plan in the binding journal.');
+          const beforeArchiveJournal = requireRecord(JSON.parse(yield* f.fs.readFileString(journalPath)));
+          const artifacts = requireRecord(beforeArchiveJournal.artifacts);
+          const source = requireRecord(artifacts[original.uri]);
+          const artifactKey = requireString(source.artifactKey);
+          const sourceRunId = requireString(source.sourceRunId);
+          const role = requireString(source.role);
           const system = yield* SystemInfo;
           const scopedSystem = {...system, currentDirectory: () => f.repo, environment: () => ({})};
           const archiveRequest = {
@@ -144,9 +167,9 @@ describe('native workflow naming corruption boundaries', () => {
             action: 'archive' as const,
             bindingId: initialized.bindingId,
             operationId: `archive-${direction.original}-plan`,
-            artifactKey: source.artifactKey,
-            sourceRunId: source.sourceRunId,
-            role: source.role,
+            artifactKey,
+            sourceRunId,
+            role,
             uri: original.uri,
             expectedRevision: original.revision,
             storageKind: direction.requested,
@@ -161,16 +184,15 @@ describe('native workflow naming corruption boundaries', () => {
           expect(yield* f.store.read(f.location, expectedUri)).toContain('A plan to archive safely.');
 
           const journalAfterArchive = yield* f.fs.readFileString(journalPath);
-          const journal = JSON.parse(journalAfterArchive) as {
-            manifestUri: string;
-          };
-          const manifestAfterArchive = yield* f.store.read(f.location, journal.manifestUri);
+          const journal = requireRecord(JSON.parse(journalAfterArchive));
+          const manifestUri = requireString(journal.manifestUri);
+          const manifestAfterArchive = yield* f.store.read(f.location, manifestUri);
           const replay = yield* runWorkflowMemory(f.config, archiveRequest).pipe(
             Effect.provideService(SystemInfo, scopedSystem),
           );
           expect(replay).toMatchObject({status: 'ok', canonicalUri: expectedUri, state: 'archived'});
           expect(yield* f.fs.readFileString(journalPath)).toBe(journalAfterArchive);
-          expect(yield* f.store.read(f.location, journal.manifestUri)).toBe(manifestAfterArchive);
+          expect(yield* f.store.read(f.location, manifestUri)).toBe(manifestAfterArchive);
           expect(yield* f.store.read(f.location, occupiedUri)).toBe(foreignBytes);
         }
       }).pipe(run),

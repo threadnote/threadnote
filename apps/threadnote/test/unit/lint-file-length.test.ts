@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -22,10 +23,16 @@ function runGit(repositoryRoot: string, arguments_: readonly string[]): void {
 
 describe('production file length lint', () => {
   it('configures the native max-lines rule as a 2000-line error without path ignores', async () => {
-    const config = (await Bun.file(FILE_LENGTH_OXLINT_CONFIG).json()) as {
-      readonly ignorePatterns?: readonly string[];
-      readonly rules: Readonly<Record<string, unknown>>;
-    };
+    const config: unknown = await Bun.file(FILE_LENGTH_OXLINT_CONFIG).json();
+    if (
+      !Schema.is(
+        Schema.Struct({
+          ignorePatterns: Schema.optionalKey(Schema.Array(Schema.String)),
+          rules: Schema.Record(Schema.String, Schema.Unknown),
+        }),
+      )(config)
+    )
+      throw TestError.make({message: 'Expected a native Oxlint configuration.'});
     expect(PRODUCTION_FILE_LINE_LIMIT).toBe(2_000);
     expect(config.rules['max-lines']).toEqual(['error', {max: 2_000, skipBlankLines: false, skipComments: false}]);
     expect(config.ignorePatterns).toBeUndefined();
@@ -57,7 +64,7 @@ describe('production file length lint', () => {
     'selects every production path deterministically regardless iteration order',
     {indexes: FC.uniqueArray(FC.integer({max: 30, min: 0}), {maxLength: 30})},
     ({indexes}) => {
-      const files = indexes.map(index => `packages/example/src/module-${index}.ts`);
+      const files = EffectArray.map(indexes, index => `packages/example/src/module-${index}.ts`);
       const expected = productionCodeFiles(files);
 
       expect(productionCodeFiles([...files].reverse())).toEqual(expected);

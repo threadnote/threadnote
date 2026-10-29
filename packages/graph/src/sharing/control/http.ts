@@ -12,6 +12,10 @@ import {
   graphSharingUnavailable,
   graphShareRetryAfterMilliseconds,
 } from '../errors.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export const makeAuthenticatedGraphControlClient = Effect.fn('codeGraph.sharing.authenticatedControlClient')(function* (
   home: string,
@@ -40,8 +44,10 @@ export const makeAuthenticatedGraphControlClient = Effect.fn('codeGraph.sharing.
           ? undefined
           : yield* Schema.decodeUnknownEffect(Schema.Json)(body).pipe(
               Effect.flatMap(Schema.encodeEffect(Schema.fromJsonString(Schema.Json))),
-              Effect.map(value => new TextEncoder().encode(value)),
-              Effect.mapError(() => graphSharingFailure('Graph control request is invalid.')),
+              Effect.mapBoth({
+                onSuccess: value => new TextEncoder().encode(value),
+                onFailure: () => graphSharingFailure('Graph control request is invalid.'),
+              }),
             );
       if (encoded !== undefined && encoded.byteLength > GRAPH_SHARE_CONTROL_MAX_BODY_BYTES)
         return yield* graphSharingFailure('Graph control request exceeds the 64 KiB metadata limit.');
@@ -53,7 +59,9 @@ export const makeAuthenticatedGraphControlClient = Effect.fn('codeGraph.sharing.
           return yield* graphSharingFailure('Graph control request is no longer authorized.');
         const response = yield* Effect.scoped(
           Effect.gen(function* () {
-            let outbound = HttpClientRequest.make(method)(scope.coordinatorUrl.replace(/\/$/u, '') + pathname).pipe(
+            let outbound = HttpClientRequest.make(method)(
+              Effect2.pipe(scope.coordinatorUrl, EffectString.replace(/\/$/u, '')) + pathname,
+            ).pipe(
               HttpClientRequest.setHeader('accept', 'application/json'),
               HttpClientRequest.setHeader('authorization', Redacted.value(credential.authorization)),
               HttpClientRequest.setHeader('x-threadnote-repository-id', scope.repositoryId),
@@ -95,7 +103,7 @@ export const makeAuthenticatedGraphControlClient = Effect.fn('codeGraph.sharing.
             );
             if (inbound.status === 409) {
               if (
-                Object.keys(parsed).sort().join(',') !== 'error,idempotencyKey' ||
+                EffectArray.join(EffectRecord.keys(parsed).sort(), ',') !== 'error,idempotencyKey' ||
                 parsed.error !== 'stale-source' ||
                 typeof parsed.idempotencyKey !== 'string' ||
                 !SHA256_DIGEST.test(parsed.idempotencyKey)

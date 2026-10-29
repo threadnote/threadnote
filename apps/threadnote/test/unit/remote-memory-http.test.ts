@@ -1,6 +1,9 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import type {RemoteMemoryReceiptV1} from '@threadnote/memory/remote/receipts';
-import type {AuthorizedRemotePrincipal} from '@threadnote/remote-memory/authorization';
+import type {AuthorizedRemotePrincipal, RemoteMemoryScope} from '@threadnote/remote-memory/authorization';
+import {isJsonObject} from '@threadnote/platform/json';
 import type {RemoteMemoryServiceConfig} from '@threadnote/remote-memory/config';
 import {remoteMemoryError} from '@threadnote/remote-memory/errors';
 import {orgCloudRepositorySetDigest} from '@threadnote/remote-memory/cloud_admission';
@@ -18,6 +21,9 @@ import {
   REMOTE_MEMORY_TOOL_NAMES,
 } from '@threadnote/threadnote/remote_memory/tools';
 
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 const PROTOCOL_VERSION = '2025-06-18';
 
 interface Fixture {
@@ -32,7 +38,7 @@ function fixture(
     readonly allowedOrigins?: readonly string[];
     readonly allowedProjects?: ReadonlySet<string> | 'all';
     readonly attestationRequiredForWrites?: boolean;
-    readonly capabilities?: readonly string[];
+    readonly capabilities?: readonly RemoteMemoryScope[];
     readonly cloudAdmissionRequired?: boolean;
     readonly repositoryBindings?: readonly string[];
     readonly gitBinding?: RemoteMemoryServiceConfig['gitBinding'];
@@ -50,7 +56,11 @@ function fixture(
 ): Fixture {
   const calls: string[] = [];
   const readInputs: Array<{readonly revision?: string; readonly uri: string}> = [];
-  const capabilities = options.capabilities ?? ['memory:read', 'memory:write:durable', 'memory:write:handoff'];
+  const capabilities: readonly RemoteMemoryScope[] = options.capabilities ?? [
+    'memory:read',
+    'memory:write:durable',
+    'memory:write:handoff',
+  ];
   const OAuth: OAuthPrincipalClaims = {
     issuer: 'https://auth.example.test',
     scopes: new Set(capabilities),
@@ -59,7 +69,7 @@ function fixture(
   const principal: AuthorizedRemotePrincipal = {
     allowedProjects: options.allowedProjects ?? 'all',
     attestationRequiredForWrites: options.attestationRequiredForWrites ?? false,
-    capabilities: new Set(capabilities) as AuthorizedRemotePrincipal['capabilities'],
+    capabilities: new Set(capabilities),
     cloudAdmissionRequired: options.cloudAdmissionRequired ?? false,
     cursorOwnerIds: new Set(),
     cursorSubjects: new Set(),
@@ -93,7 +103,7 @@ function fixture(
         directSearchTruncated: false,
         matchedAnchorOrdinals: [],
         receipt: {...receipt, requestId},
-        results: (options.recallResults ?? []).map(result => ({...result, evidence: 'lexical' as const})),
+        results: EffectArray.map(options.recallResults ?? [], result => ({...result, evidence: 'lexical' as const})),
       };
     },
     list: async (_principal, _input, requestId) => {
@@ -124,7 +134,7 @@ function fixture(
         project: 'threadnote',
         proposalId,
         proposerPrincipalId: 'principal-proposer',
-        requestHash: 'a'.repeat(64),
+        requestHash: Effect.pipe('a', EffectString.repeat(64)),
         revision: 'proposal-revision-1',
         status: 'pending',
         topic: 'proposal',
@@ -144,7 +154,7 @@ function fixture(
       return {
         expiresAt: '2026-10-16T00:00:00.000Z',
         proposalId: 'proposal-1',
-        requestHash: 'a'.repeat(64),
+        requestHash: Effect.pipe('a', EffectString.repeat(64)),
         revision: 'proposal-revision-1',
         status: 'pending',
         version: 1,
@@ -159,7 +169,7 @@ function fixture(
         project: 'threadnote',
         proposalId: input.proposalId,
         proposerPrincipalId: 'principal-proposer',
-        requestHash: 'a'.repeat(64),
+        requestHash: Effect.pipe('a', EffectString.repeat(64)),
         revision: input.revision,
         status: input.decision === 'approve' ? 'approved' : 'rejected',
         topic: 'proposal',
@@ -294,8 +304,50 @@ function mcpRequest(
   });
 }
 
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireJsonObjectArray(value: unknown): Record<string, unknown>[] {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array of JSON objects.');
+  return EffectArray.map(value, requireJsonObject);
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Expected a string.');
+  return value;
+}
+
+function requireNumber(value: unknown): number {
+  if (typeof value !== 'number') throw new Error('Expected a number.');
+  return value;
+}
+
+function requireBoolean(value: unknown): boolean {
+  if (typeof value !== 'boolean') throw new Error('Expected a boolean.');
+  return value;
+}
+
+function requireToolDescriptions(
+  value: unknown,
+): Array<{readonly inputSchema?: Record<string, unknown>; readonly name: string}> {
+  return EffectArray.map(requireJsonObjectArray(value), tool => ({
+    ...(tool.inputSchema === undefined ? {} : {inputSchema: requireJsonObject(tool.inputSchema)}),
+    name: requireString(tool.name),
+  }));
+}
+
+function requireTextBlocks(value: unknown): Array<{readonly text: string; readonly type?: string}> {
+  return EffectArray.map(requireJsonObjectArray(value), block => ({
+    ...(block.type === undefined ? {} : {type: requireString(block.type)}),
+    text: requireString(block.text),
+  }));
+}
+
 async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
+  const value: unknown = await response.json();
+  return requireJsonObject(value);
 }
 
 describe('remote memory HTTP transport', () => {
@@ -315,6 +367,7 @@ describe('remote memory HTTP transport', () => {
     ]) {
       const test = fixture({gitBinding: {tenantId: 'tenant-1', shareId: 'share-1'}, repositoryBindings: repositories});
       const request = mcpRequest({id: 1, method: 'tools/list', params: {}});
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
       for (const [name, value] of Object.entries(headers)) request.headers.set(name, value);
       expect((await test.handler(request)).status).toBe(403);
       expect(test.calls).toEqual(['oauth:fixture-token', 'authorize:share-1']);
@@ -341,7 +394,7 @@ describe('remote memory HTTP transport', () => {
       const response = await test.handler(request);
       const body = await json(response);
       expect(JSON.stringify(body)).toContain(access === 'read-only' ? 'forbidden' : 'attestation_required');
-      expect(test.calls.some(call => call.startsWith('remember:'))).toBe(false);
+      expect(EffectArray.some(test.calls, call => Effect.pipe(call, EffectString.startsWith('remember:')))).toBe(false);
     }
   });
 
@@ -486,8 +539,8 @@ describe('remote memory HTTP transport', () => {
 
     const listed = await test.handler(mcpRequest({id: 2, method: 'tools/list', params: {}}));
     const payload = await json(listed);
-    const result = payload.result as {readonly tools: readonly {readonly name: string}[]};
-    expect(result.tools.map(tool => tool.name)).toEqual(REMOTE_MEMORY_TOOL_NAMES);
+    const result = requireJsonObject(payload.result);
+    expect(EffectArray.map(requireToolDescriptions(result.tools), tool => tool.name)).toEqual(REMOTE_MEMORY_TOOL_NAMES);
     expect(test.calls).toEqual([
       'oauth:fixture-token',
       'authorize:share-1',
@@ -499,19 +552,19 @@ describe('remote memory HTTP transport', () => {
   it('advertises Effect input schemas that match valid and rejected MCP tool calls', async () => {
     const test = fixture({trackRateLimits: true});
     const listed = await json(await test.handler(mcpRequest({id: 20, method: 'tools/list', params: {}})));
-    const tools = (
-      listed.result as {
-        readonly tools: readonly {readonly inputSchema: Record<string, unknown>; readonly name: string}[];
-      }
-    ).tools;
-    const readSchema = tools.find(tool => tool.name === 'read_context')?.inputSchema;
+    const tools = requireToolDescriptions(requireJsonObject(listed.result).tools);
+    const readSchema = EffectOption.getOrUndefined(
+      EffectArray.findFirst(tools, tool => tool.name === 'read_context'),
+    )?.inputSchema;
     expect(readSchema).toMatchObject({
       additionalProperties: false,
       properties: {mode: {type: 'string'}, uri: {type: 'string'}, version: {enum: [1]}},
       required: ['uri', 'version'],
       type: 'object',
     });
-    expect(tools.find(tool => tool.name === 'remember_context')?.inputSchema).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(tools, tool => tool.name === 'remember_context'))?.inputSchema,
+    ).toMatchObject({
       additionalProperties: false,
       properties: {
         lifecycle: {additionalProperties: false},
@@ -530,7 +583,7 @@ describe('remote memory HTTP transport', () => {
       ),
     );
     expect(valid).toMatchObject({id: 21, result: {structuredContent: {uri}}});
-    const readsBeforeInvalid = test.calls.filter(call => call === 'rate:read_context').length;
+    const readsBeforeInvalid = EffectArray.filter(test.calls, call => call === 'rate:read_context').length;
     for (const [id, arguments_] of [
       [22, {version: 1}],
       [23, {uri, unexpected: 'private-value', version: 1}],
@@ -547,7 +600,7 @@ describe('remote memory HTTP transport', () => {
       expect(response).toMatchObject({id, result: {isError: true}});
       expect(JSON.stringify(response)).not.toContain('private-value');
     }
-    expect(test.calls.filter(call => call === 'rate:read_context')).toHaveLength(readsBeforeInvalid);
+    expect(EffectArray.filter(test.calls, call => call === 'rate:read_context')).toHaveLength(readsBeforeInvalid);
   });
 
   it('routes only an authorized matching explicit CAS replacement URI to storage', async () => {
@@ -567,7 +620,13 @@ describe('remote memory HTTP transport', () => {
     const valid = await json(await call(30, input));
     expect(valid).toMatchObject({id: 30, result: {structuredContent: {revision: 'revision-2'}}});
     expect(test.calls).toContain('remember:request-123:operation-30');
-    const writes = test.calls.filter(entry => entry.startsWith('remember:')).length;
+    const writes = EffectArrayPipe(test.calls, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (entry, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && Effect.pipe(entry, EffectString.startsWith('remember:')),
+      ),
+    ).length;
     for (const [id, overrides, code] of [
       [31, {replaceUri: 'threadnote://share/share-2/memories/durable/threadnote/remote.md'}, 'forbidden'],
       [32, {replaceUri: 'threadnote://share/share-1/memories/durable/threadnote/other.md'}, 'invalid_request'],
@@ -576,7 +635,15 @@ describe('remote memory HTTP transport', () => {
       const result = await json(await call(id, {...input, ...overrides, operationId: `operation-${id}`}));
       expect(result).toMatchObject({id, result: {isError: true, structuredContent: {code}}});
     }
-    expect(test.calls.filter(entry => entry.startsWith('remember:'))).toHaveLength(writes);
+    expect(
+      EffectArrayPipe(test.calls, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (entry, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && Effect.pipe(entry, EffectString.startsWith('remember:')),
+        ),
+      ),
+    ).toHaveLength(writes);
   });
 
   it('keeps proposal-only principals outside direct durable writes', async () => {
@@ -613,7 +680,7 @@ describe('remote memory HTTP transport', () => {
       ),
     );
     expect(direct).toMatchObject({id: 36, result: {isError: true, structuredContent: {code: 'forbidden'}}});
-    expect(test.calls.some(call => call.startsWith('remember:'))).toBe(false);
+    expect(EffectArray.some(test.calls, call => Effect.pipe(call, EffectString.startsWith('remember:')))).toBe(false);
   });
 
   it('requires review plus durable-write capability for approval while allowing reviewer rejection', async () => {
@@ -638,7 +705,9 @@ describe('remote memory HTTP transport', () => {
         ),
       ),
     ).toMatchObject({id: 37, result: {isError: true, structuredContent: {code: 'forbidden'}}});
-    expect(reviewer.calls.some(call => call.startsWith('proposal:review:'))).toBe(false);
+    expect(
+      EffectArray.some(reviewer.calls, call => Effect.pipe(call, EffectString.startsWith('proposal:review:'))),
+    ).toBe(false);
 
     const rejected = await json(
       await reviewer.handler(
@@ -691,13 +760,19 @@ describe('remote memory HTTP transport', () => {
   it('bounds proposal discovery and review schemas', async () => {
     const test = fixture({capabilities: ['memory:read', 'memory:review:durable'], trackRateLimits: true});
     const listed = await json(await test.handler(mcpRequest({id: 40, method: 'tools/list', params: {}})));
-    const tools = (listed.result as {readonly tools: readonly {inputSchema: unknown; name: string}[]}).tools;
-    expect(tools.find(tool => tool.name === 'propose_durable_memory')?.inputSchema).toMatchObject({
+    const tools = requireToolDescriptions(requireJsonObject(listed.result).tools);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(tools, tool => tool.name === 'propose_durable_memory'))
+        ?.inputSchema,
+    ).toMatchObject({
       additionalProperties: false,
       properties: {relations: {maxItems: 16}, text: {maxLength: 1_000_000}, version: {enum: [1]}},
       required: ['operationId', 'project', 'text', 'topic', 'version'],
     });
-    expect(tools.find(tool => tool.name === 'list_memory_proposals')?.inputSchema).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(tools, tool => tool.name === 'list_memory_proposals'))
+        ?.inputSchema,
+    ).toMatchObject({
       additionalProperties: false,
       properties: {limit: {type: 'integer', minimum: 1, maximum: 100}, status: {type: 'string'}},
     });
@@ -753,7 +828,9 @@ describe('remote memory HTTP transport', () => {
       ),
     );
     expect(whitespaceRejection).toMatchObject({id: 42, result: {isError: true}});
-    expect(test.calls.some(call => call.startsWith('proposal:review:'))).toBe(false);
+    expect(EffectArray.some(test.calls, call => Effect.pipe(call, EffectString.startsWith('proposal:review:')))).toBe(
+      false,
+    );
   });
 
   it('charges each proposal tool to its stable rate-limit operation key', async () => {
@@ -787,7 +864,15 @@ describe('remote memory HTTP transport', () => {
       expect(response).toMatchObject({id: 410 + index});
       expect(response).not.toMatchObject({result: {isError: true}});
     }
-    expect(test.calls.filter(call => call.startsWith('rate:'))).toEqual([
+    expect(
+      EffectArrayPipe(test.calls, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (call, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && Effect.pipe(call, EffectString.startsWith('rate:')),
+        ),
+      ),
+    ).toEqual([
       'rate:propose_durable_memory',
       'rate:list_memory_proposals',
       'rate:read_memory_proposal',
@@ -819,7 +904,13 @@ describe('remote memory HTTP transport', () => {
       id: 40,
       result: {structuredContent: {revision: 'revision-2'}},
     });
-    const writes = test.calls.filter(entry => entry.startsWith('remember:')).length;
+    const writes = EffectArrayPipe(test.calls, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (entry, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && Effect.pipe(entry, EffectString.startsWith('remember:')),
+      ),
+    ).length;
     const invalid = [
       [{relations: [{type: 'depends_on', uri: source}]}, 'invalid_request'],
       [
@@ -856,7 +947,15 @@ describe('remote memory HTTP transport', () => {
       expect(result).toMatchObject({result: {isError: true, structuredContent: {code}}});
       expect(JSON.stringify(result)).not.toContain((overrides.relations as readonly {readonly uri: string}[])[0]?.uri);
     }
-    expect(test.calls.filter(entry => entry.startsWith('remember:'))).toHaveLength(writes);
+    expect(
+      EffectArrayPipe(test.calls, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (entry, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && Effect.pipe(entry, EffectString.startsWith('remember:')),
+        ),
+      ),
+    ).toHaveLength(writes);
   });
 
   it('preserves minute-precision UTC expiry validation at the MCP boundary', async () => {
@@ -923,26 +1022,29 @@ describe('remote memory HTTP transport', () => {
       expected: {propose: true, review: true},
     },
     {capabilities: ['memory:read'], expected: {propose: false, review: false}},
-  ])('reports review-gated capabilities for $capabilities', async ({capabilities, expected}) => {
-    const test = fixture({capabilities});
-    const response = await json(
-      await test.handler(
-        mcpRequest({id: 303, method: 'tools/call', params: {arguments: {version: 1}, name: 'memory_status'}}),
-      ),
-    );
-    expect(response).toMatchObject({result: {structuredContent: {reviewGated: expected}}});
-  });
+  ] satisfies readonly {capabilities: readonly RemoteMemoryScope[]; expected: {propose: boolean; review: boolean}}[])(
+    'reports review-gated capabilities for $capabilities',
+    async ({capabilities, expected}) => {
+      const test = fixture({capabilities});
+      const response = await json(
+        await test.handler(
+          mcpRequest({id: 303, method: 'tools/call', params: {arguments: {version: 1}, name: 'memory_status'}}),
+        ),
+      );
+      expect(response).toMatchObject({result: {structuredContent: {reviewGated: expected}}});
+    },
+  );
 
   it('projects 100 worst-case remote recall hits as a compact unread prefix with bounded explain details', async () => {
     const recallResults: RemoteMemoryRecallResult[] = Array.from({length: 100}, (_, index) => ({
-      excerpt: `REMOTE_EXCERPT_${index.toString().padStart(3, '0')}_${'e'.repeat(600)}`,
+      excerpt: `REMOTE_EXCERPT_${Effect.pipe(index.toString(), EffectString.padStart(3, '0'))}_${Effect.pipe('e', EffectString.repeat(600))}`,
       kind: index % 2 === 0 ? 'durable' : 'handoff',
       project: 'threadnote',
       revision: `revision-${index}`,
       score: Number((1 - index / 200).toFixed(3)),
       status: 'active',
-      topic: `topic-${index.toString().padStart(3, '0')}`,
-      uri: `threadnote://share/share-1/memories/durable/threadnote/topic-${index.toString().padStart(3, '0')}.md`,
+      topic: `topic-${Effect.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
+      uri: `threadnote://share/share-1/memories/durable/threadnote/topic-${Effect.pipe(index.toString(), EffectString.padStart(3, '0'))}.md`,
     }));
     const test = fixture({recallResults, trackRateLimits: true});
     const callRecall = async (id: number, explain: boolean) => {
@@ -964,18 +1066,15 @@ describe('remote memory HTTP transport', () => {
         }),
       );
       const payload = await json(response);
-      const result = payload.result as {
-        readonly content?: readonly {readonly text?: string; readonly type?: string}[];
-        readonly isError?: boolean;
-        readonly structuredContent?: Readonly<Record<string, unknown>>;
-      };
+      const result = requireJsonObject(payload.result);
       expect(result.isError, JSON.stringify(payload)).not.toBe(true);
-      const blocks = result.content ?? [];
-      const structured = result.structuredContent ?? {};
+      const blocks = result.content === undefined ? [] : requireTextBlocks(result.content);
+      const structured = result.structuredContent === undefined ? {} : requireJsonObject(result.structuredContent);
       const responseBytes =
-        blocks.reduce(
-          (total, block) => total + (block.type === 'text' ? Buffer.byteLength(block.text ?? '', 'utf8') : 0),
+        EffectArray.reduce(
+          blocks,
           0,
+          (total, block) => total + (block.type === 'text' ? Buffer.byteLength(block.text ?? '', 'utf8') : 0),
         ) + Buffer.byteLength(JSON.stringify(structured), 'utf8');
       expect(responseBytes).toBeLessThanOrEqual(1_500 * 3);
       expect(structured.estimatedTokens).toBe(Math.ceil(responseBytes / 3));
@@ -983,21 +1082,21 @@ describe('remote memory HTTP transport', () => {
     };
 
     const compact = await callRecall(3_100, false);
-    const compactResults = compact.structured.results as readonly Readonly<Record<string, unknown>>[];
+    const compactResults = requireJsonObjectArray(compact.structured.results);
     expect(compactResults.length).toBeGreaterThan(0);
     expect(compactResults.length).toBeLessThan(100);
-    expect(compactResults.map(result => result.uri)).toEqual(
-      recallResults.slice(0, compactResults.length).map(result => result.uri),
+    expect(EffectArray.map(compactResults, result => result.uri)).toEqual(
+      EffectArray.map(recallResults.slice(0, compactResults.length), result => result.uri),
     );
-    expect(compactResults.every(result => result.readState === 'unread' && typeof result.reason === 'string')).toBe(
-      true,
-    );
-    expect(compactResults.every(result => !('excerpt' in result))).toBe(true);
+    expect(
+      EffectArray.every(compactResults, result => result.readState === 'unread' && typeof result.reason === 'string'),
+    ).toBe(true);
+    expect(EffectArray.every(compactResults, result => !('excerpt' in result))).toBe(true);
     expect(JSON.stringify({content: compact.blocks, structured: compact.structured})).not.toContain('REMOTE_EXCERPT_');
     expect(compact.structured).toMatchObject({
       confidence: {level: 'high', topScore: 1},
       explain: false,
-      nextAction: {tool: 'read_context', uris: recallResults.slice(0, 3).map(result => result.uri)},
+      nextAction: {tool: 'read_context', uris: EffectArray.map(recallResults.slice(0, 3), result => result.uri)},
       omittedResults: 100 - compactResults.length,
       rankerVersion: 'remote-postgres-tsvector-v1',
       totalResults: 100,
@@ -1006,16 +1105,20 @@ describe('remote memory HTTP transport', () => {
     expect(compact.blocks[0]?.text).toContain(recallResults[0].uri);
 
     const explained = await callRecall(3_101, true);
-    const explainedResults = explained.structured.results as readonly Readonly<Record<string, unknown>>[];
+    const explainedResults = requireJsonObjectArray(explained.structured.results);
     expect(explainedResults.length).toBeGreaterThan(0);
     expect(explainedResults.length).toBeLessThan(compactResults.length);
     expect(explainedResults[0]?.excerpt).toEqual(expect.stringContaining('REMOTE_EXCERPT_000_'));
     expect(explained.structured.explain).toBe(true);
     expect(explained.blocks[0]?.text).toContain('REMOTE_EXCERPT_000_');
     expect(
-      JSON.stringify({content: explained.blocks, structured: explained.structured}).match(/REMOTE_EXCERPT_000_/gu),
+      Effect.pipe(
+        JSON.stringify({content: explained.blocks, structured: explained.structured}),
+        EffectString.match(/REMOTE_EXCERPT_000_/gu),
+        Effect.Option.getOrElse(() => null),
+      ),
     ).toHaveLength(2);
-    expect(test.calls.filter(call => call === 'rate:recall_context')).toHaveLength(2);
+    expect(EffectArray.filter(test.calls, call => call === 'rate:recall_context')).toHaveLength(2);
   });
 
   it('exposes a read-only remote Context Brief with bounded task input and no checkout claim', async () => {
@@ -1041,7 +1144,12 @@ describe('remote memory HTTP transport', () => {
           method: 'tools/call',
           params: {
             arguments: {
-              anchors: [{path: 'apps/threadnote/src/remote_memory/tools.ts', repositoryId: 'a'.repeat(64)}],
+              anchors: [
+                {
+                  path: 'apps/threadnote/src/remote_memory/tools.ts',
+                  repositoryId: Effect.pipe('a', EffectString.repeat(64)),
+                },
+              ],
               budgetTokens: 800,
               project: 'threadnote',
               task: 'Explain the remote brief boundary.',
@@ -1052,10 +1160,12 @@ describe('remote memory HTTP transport', () => {
         }),
       ),
     );
-    const result = response.result as {content: readonly {text: string}[]; structuredContent: Record<string, unknown>};
-    expect(result.structuredContent.type).toBe('threadnote-remote-context-brief');
-    expect(result.content[0]?.text).toContain('capture-time provenance');
-    expect(result.content[0]?.text).toContain('threadnote-local');
+    const result = requireJsonObject(response.result);
+    const content = requireTextBlocks(result.content);
+    const structuredContent = requireJsonObject(result.structuredContent);
+    expect(structuredContent.type).toBe('threadnote-remote-context-brief');
+    expect(content[0]?.text).toContain('capture-time provenance');
+    expect(content[0]?.text).toContain('threadnote-local');
     expect(test.calls).toContain('brief:request-123:Explain the remote brief boundary.');
     expect(test.calls).toContain('rate:context_brief');
 
@@ -1070,7 +1180,7 @@ describe('remote memory HTTP transport', () => {
       ),
     );
     expect(deniedResponse).toMatchObject({result: {isError: true, structuredContent: {code: 'forbidden'}}});
-    expect(denied.calls.some(call => call.startsWith('brief:'))).toBe(false);
+    expect(EffectArray.some(denied.calls, call => Effect.pipe(call, EffectString.startsWith('brief:')))).toBe(false);
   });
 
   it.each([{policyVersion: 'wrong-grant-policy'}, {sharePolicyVersion: 'wrong-share-policy'}])(
@@ -1103,7 +1213,13 @@ describe('remote memory HTTP transport', () => {
     expect(payload).toMatchObject({id: 31, result: {isError: true}});
     expect(JSON.stringify(payload)).toContain('unexpected');
     expect(JSON.stringify(payload)).not.toContain('must-not-be-ignored');
-    expect(test.calls.some(call => call.startsWith('rate:') || call.startsWith('status:'))).toBe(false);
+    expect(
+      EffectArray.some(
+        test.calls,
+        call =>
+          Effect.pipe(call, EffectString.startsWith('rate:')) || Effect.pipe(call, EffectString.startsWith('status:')),
+      ),
+    ).toBe(false);
   });
 
   it('reads canonical resources through the same share, scope, rate, and correlation boundary', async () => {
@@ -1136,17 +1252,27 @@ describe('remote memory HTTP transport', () => {
       mcpRequest({id: 3_200, method: 'tools/call', params: {arguments: {uri, version: 1}, name: 'read_context'}}),
     );
     const payload = await json(response);
-    const result = payload.result as {
-      content: readonly {text: string}[];
-      structuredContent: {revision: string; receipt: unknown};
-    };
-    expect(result.content[0].text).toContain('Fixture body');
-    const sourceText = result.content.at(-1)!.text;
-    const source = JSON.parse(sourceText.slice(sourceText.indexOf('\n') + 1));
+    const result = requireJsonObject(payload.result);
+    const content = requireTextBlocks(result.content);
+    expect(content[0]?.text).toContain('Fixture body');
+    const sourceText = content.at(-1)!.text;
+    const source = JSON.parse(
+      Effect.pipe(
+        sourceText,
+        EffectString.slice(
+          Effect.pipe(
+            sourceText,
+            EffectString.indexOf('\n'),
+            Effect.Option.getOrElse(() => -1),
+          ) + 1,
+        ),
+      ),
+    );
+    const structuredContent = requireJsonObject(result.structuredContent);
     expect(source).toMatchObject({
       uri,
-      revision: result.structuredContent.revision,
-      receipt: result.structuredContent.receipt,
+      revision: structuredContent.revision,
+      receipt: structuredContent.receipt,
       trust: 'untrusted',
     });
     expect(sourceText).not.toContain('Fixture body');
@@ -1154,6 +1280,7 @@ describe('remote memory HTTP transport', () => {
 
   it('refuses a 1 MB remote memory with an outline instead of paged reconstruction', async () => {
     const prefix = 'MEMORY\nkind: durable\n\n# Ledger\n## Open\nREMOTE_PRIVATE_SENTINEL\n';
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     const content = `${prefix}${'x'.repeat(1_000_000 - prefix.length)}`;
     const test = fixture({readContent: content, trackRateLimits: true});
     const uri = 'threadnote://share/share-1/memories/durable/threadnote/fixture.md';
@@ -1165,25 +1292,21 @@ describe('remote memory HTTP transport', () => {
       }),
     );
     const payload = await json(response);
-    const result = payload.result as {
-      readonly content?: readonly {readonly text?: string; readonly type?: string}[];
-      readonly isError?: boolean;
-      readonly structuredContent?: Readonly<Record<string, unknown>>;
-    };
+    const result = requireJsonObject(payload.result);
     expect(result.isError, JSON.stringify(payload)).toBe(true);
-    const text = result.content?.[0]?.text ?? '';
+    const text = requireTextBlocks(result.content)[0]?.text ?? '';
     expect(text).toContain(`${REMOTE_MEMORY_RESOURCE_READ_MAX_BYTES} bytes`);
     expect(text).toContain('mode=outline');
     expect(text).toContain('## Open');
     expect(text).not.toContain('REMOTE_PRIVATE_SENTINEL');
-    expect(text).not.toContain('x'.repeat(80));
+    expect(text).not.toContain(Effect.pipe('x', EffectString.repeat(80)));
     expect(JSON.stringify(payload)).not.toContain('REMOTE_PRIVATE_SENTINEL');
     expect(test.readInputs).toEqual([{uri}]);
-    expect(test.calls.filter(call => call === 'rate:read_context')).toEqual(['rate:read_context']);
+    expect(EffectArray.filter(test.calls, call => call === 'rate:read_context')).toEqual(['rate:read_context']);
   });
 
   it('explicitly pages an oversized heading-less remote memory with a stable source hash', async () => {
-    const content = `MEMORY\nkind: durable\n\n${'🙂'.repeat(28_000)}`;
+    const content = `MEMORY\nkind: durable\n\n${Effect.pipe('🙂', EffectString.repeat(28_000))}`;
     const test = fixture({readContent: content});
     const uri = 'threadnote://share/share-1/memories/durable/threadnote/fixture.md';
     let offsetBytes = 0;
@@ -1198,21 +1321,19 @@ describe('remote memory HTTP transport', () => {
         }),
       );
       const payload = await json(response);
-      const result = payload.result as {
-        readonly content: readonly {readonly text: string}[];
-        readonly isError?: boolean;
-        readonly structuredContent: {
-          readonly complete: boolean;
-          readonly content: string;
-          readonly nextOffsetBytes?: number;
-          readonly sourceHash: string;
-          readonly totalBytes: number;
-        };
+      const result = requireJsonObject(payload.result);
+      const blocks = requireTextBlocks(result.content);
+      const pageValue = requireJsonObject(result.structuredContent);
+      const page = {
+        complete: requireBoolean(pageValue.complete),
+        content: requireString(pageValue.content),
+        nextOffsetBytes: pageValue.nextOffsetBytes === undefined ? undefined : requireNumber(pageValue.nextOffsetBytes),
+        sourceHash: requireString(pageValue.sourceHash),
+        totalBytes: requireNumber(pageValue.totalBytes),
       };
       expect(result.isError, JSON.stringify(payload)).not.toBe(true);
-      const page = result.structuredContent;
-      expect(result.content[0]?.text).toBe(page.content);
-      if (!page.complete) expect(result.content[1]?.text).toContain('Incomplete memory page');
+      expect(blocks[0]?.text).toBe(page.content);
+      if (!page.complete) expect(blocks[1]?.text).toContain('Incomplete memory page');
       expect(page.totalBytes).toBe(Buffer.byteLength(content, 'utf8'));
       parts.push(page.content);
       sourceHash = page.sourceHash;
@@ -1223,11 +1344,11 @@ describe('remote memory HTTP transport', () => {
       expect(page.nextOffsetBytes).toBeGreaterThan(offsetBytes);
       offsetBytes = page.nextOffsetBytes!;
     }
-    expect(parts.join('')).toBe(content);
+    expect(EffectArray.join(parts, '')).toBe(content);
   });
 
   it('refuses to expose an oversized remote memory through resources/read', async () => {
-    const privateBody = `REMOTE_RESOURCE_PRIVATE_SENTINEL\n${'x'.repeat(70_000)}`;
+    const privateBody = `REMOTE_RESOURCE_PRIVATE_SENTINEL\n${Effect.pipe('x', EffectString.repeat(70_000))}`;
     const test = fixture({readContent: privateBody});
     const uri = 'threadnote://share/share-1/memories/durable/threadnote/fixture.md';
     const response = await test.handler(mcpRequest({id: 321, method: 'resources/read', params: {uri}}));
@@ -1252,7 +1373,13 @@ describe('remote memory HTTP transport', () => {
     expect(response.status).toBe(200);
     expect(payload).toMatchObject({error: {code: -32_603}, id: 33});
     expect(JSON.stringify(payload)).not.toContain('Fixture body');
-    expect(test.calls.some(call => call.startsWith('rate:') || call.startsWith('read:'))).toBe(false);
+    expect(
+      EffectArray.some(
+        test.calls,
+        call =>
+          Effect.pipe(call, EffectString.startsWith('rate:')) || Effect.pipe(call, EffectString.startsWith('read:')),
+      ),
+    ).toBe(false);
   });
 
   it('confines read tools and resources to authorized URI projects before storage dispatch', async () => {
@@ -1274,7 +1401,7 @@ describe('remote memory HTTP transport', () => {
       result: {isError: true, structuredContent: {code: 'forbidden'}},
     });
     expect(await json(resourceResponse)).toMatchObject({error: {code: -32_603}, id: 332});
-    expect(test.calls.some(call => call.startsWith('read:'))).toBe(false);
+    expect(EffectArray.some(test.calls, call => Effect.pipe(call, EffectString.startsWith('read:')))).toBe(false);
   });
 
   it('returns a bounded rate-limit tool error without invoking storage', async () => {
@@ -1299,7 +1426,7 @@ describe('remote memory HTTP transport', () => {
     });
     expect(serialized.length).toBeLessThan(600);
     expect(test.calls).toContain('rate:memory_status');
-    expect(test.calls.some(call => call.startsWith('status:'))).toBe(false);
+    expect(EffectArray.some(test.calls, call => Effect.pipe(call, EffectString.startsWith('status:')))).toBe(false);
   });
 
   it('maps unexpected storage failures to a generic error without leaking memory or bearer tokens', async () => {
@@ -1314,9 +1441,23 @@ describe('remote memory HTTP transport', () => {
       ),
     );
     const payload = await json(response);
-    const result = payload.result as {content: readonly {text: string}[]};
-    const errorText = result.content.at(-1)!.text;
-    expect(JSON.parse(errorText.slice(errorText.indexOf('\n') + 1))).toEqual({
+    const result = requireJsonObject(payload.result);
+    const content = requireTextBlocks(result.content);
+    const errorText = content.at(-1)!.text;
+    expect(
+      JSON.parse(
+        Effect.pipe(
+          errorText,
+          EffectString.slice(
+            Effect.pipe(
+              errorText,
+              EffectString.indexOf('\n'),
+              Effect.Option.getOrElse(() => -1),
+            ) + 1,
+          ),
+        ),
+      ),
+    ).toEqual({
       code: 'service_unavailable',
       details: {},
       requestId: 'request-123',
@@ -1353,7 +1494,7 @@ describe('remote memory HTTP transport', () => {
     expect(payload).toMatchObject({
       result: {isError: true, structuredContent: {code: 'forbidden', requestId: 'request-123'}},
     });
-    expect(test.calls.some(call => call.startsWith('remember:'))).toBe(false);
+    expect(EffectArray.some(test.calls, call => Effect.pipe(call, EffectString.startsWith('remember:')))).toBe(false);
   });
 
   it('is POST-only and rejects declared oversized bodies before OAuth', async () => {

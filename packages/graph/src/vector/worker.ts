@@ -34,15 +34,17 @@ import {
   type CodeGraphEmbeddingDemandOwner,
   type CodeGraphEmbeddingDemandAcknowledgement,
 } from './demand.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class CodeGraphEmbeddingWorkerSuperseded extends Schema.TaggedError<CodeGraphEmbeddingWorkerSuperseded>()(
-  'CodeGraphEmbeddingWorkerSuperseded',
-  {message: Schema.String},
-) {}
-class CodeGraphEmbeddingWorkerModelInvalidated extends Schema.TaggedError<CodeGraphEmbeddingWorkerModelInvalidated>()(
-  'CodeGraphEmbeddingWorkerModelInvalidated',
-  {message: Schema.String},
-) {}
+export class CodeGraphEmbeddingWorkerSuperseded extends Schema.TaggedError<
+  CodeGraphEmbeddingWorkerSuperseded,
+  {readonly brand: unique symbol}
+>()('CodeGraphEmbeddingWorkerSuperseded', {message: Schema.String}) {}
+class CodeGraphEmbeddingWorkerModelInvalidated extends Schema.TaggedError<
+  CodeGraphEmbeddingWorkerModelInvalidated,
+  {readonly brand: unique symbol}
+>()('CodeGraphEmbeddingWorkerModelInvalidated', {message: Schema.String}) {}
 export interface CodeGraphEmbeddingWorkerCatalogPage {
   readonly checkoutIds: readonly string[];
   readonly after?: string;
@@ -367,8 +369,8 @@ function expectedWorkerFailure(error: unknown) {
   const tag = typeof error === 'object' && error !== null && '_tag' in error ? String(error._tag) : '';
   return (
     isFileLockTimeout(error) ||
-    tag.startsWith('CodeGraphStore') ||
-    tag.startsWith('CodeGraphDiskCapacity') ||
+    Effect2.pipe(tag, EffectString.startsWith('CodeGraphStore')) ||
+    Effect2.pipe(tag, EffectString.startsWith('CodeGraphDiskCapacity')) ||
     tag === 'CodeGraphVectorClaimCleanupPending' ||
     tag === 'CodeGraphMaintenanceActiveError'
   );
@@ -435,7 +437,12 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
           for (const checkoutId of page.checkoutIds) {
             let after: {worktreeId: string; scopeId: string} | undefined;
             do {
-              const catalogLayout = codeGraphLayout(path, canonicalHome, checkoutId, '0'.repeat(64));
+              const catalogLayout = codeGraphLayout(
+                path,
+                canonicalHome,
+                checkoutId,
+                Effect2.pipe('0', EffectString.repeat(64)),
+              );
               if (!(yield* fs.exists(catalogLayout.databasePath))) break;
               const lanes = yield* store
                 .withSession(
@@ -479,7 +486,9 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
       Effect.ensuring(
         fs.readFileString(receiptPath).pipe(
           Effect.flatMap(content =>
-            content.includes(owner.token) ? fs.remove(receiptPath, {force: true}) : Effect.void,
+            Effect2.pipe(content, EffectString.includes(owner.token))
+              ? fs.remove(receiptPath, {force: true})
+              : Effect.void,
           ),
           Effect.ignore,
         ),

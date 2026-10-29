@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
@@ -50,7 +51,7 @@ for (const token of [undefined, 'existing-token']) {
           Effect.provideService(HttpService, http),
         );
         expect(version).toBe('5.4.0');
-        expect(notes.map(note => note.version)).toEqual(['5.4.0']);
+        expect(EffectArray.map(notes, note => note.version)).toEqual(['5.4.0']);
         expect(requests).toEqual(Array(2).fill(token ? `Bearer ${token}` : undefined));
       }).pipe(provideTestLayer(TestSystemInfoLayer)),
   );
@@ -179,7 +180,7 @@ effectIt.effect('authenticates updater and release notes requests but never a cu
       Effect.provideService(HttpService, http),
     );
     expect(version).toBe('4.7.3');
-    expect(notes.map(note => note.version)).toEqual(['4.7.3']);
+    expect(EffectArray.map(notes, note => note.version)).toEqual(['4.7.3']);
     expect(legacyVersion).toBe('4.7.3');
     expect(customVersion).toBe('4.7.3');
     expect(requests).toEqual([

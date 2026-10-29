@@ -5,10 +5,12 @@ import {
 } from '@threadnote/memory/document';
 import {memoryCodeCitationSharingBlocker} from '@threadnote/memory/code/citation-policy';
 import {remoteMemoryError} from './errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function assertRemoteBodyReplacementSupported(content: string): void {
   assertMemoryDocumentSchemaWritable(content);
-  const normalized = content.trim().replace(/\r\n?/gu, '\n');
+  const normalized = Effect.pipe(content, EffectString.trim, EffectString.replace(/\r\n?/gu, '\n'));
   if (/\n\n<!-- MEMORY_FIELDS\n[\s\S]*?\n-->\s*$/u.test(normalized)) unsupportedMetadata();
   const record = parseMemoryDocument('threadnote://share/compatibility/memories/durable/project/topic.md', content);
   if (!record) unsupportedMetadata();
@@ -20,11 +22,13 @@ export function assertRemoteBodyReplacementSupported(content: string): void {
     unsupportedMetadata();
   }
   const remaining = new Map<string, number>();
-  for (const line of formatted.split('\n\n', 1)[0].split('\n')) {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+  for (const line of Effect.pipe(formatted.split('\n\n', 1)[0], EffectString.split('\n'))) {
     remaining.set(line, (remaining.get(line) ?? 0) + 1);
   }
   // Tolerant readers may discard unknown or malformed fields; a rewrite must preserve every occurrence.
-  for (const line of normalized.split('\n\n', 1)[0].split('\n')) {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+  for (const line of Effect.pipe(normalized.split('\n\n', 1)[0], EffectString.split('\n'))) {
     const count = remaining.get(line) ?? 0;
     if (count === 0) unsupportedMetadata();
     remaining.set(line, count - 1);

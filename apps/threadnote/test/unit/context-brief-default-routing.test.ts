@@ -1,3 +1,5 @@
+import {provideTestLayer} from '../helpers/effect-layer.js';
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import fc from 'fast-check';
@@ -9,17 +11,30 @@ import type {
   ContextBriefGraphEvidenceV1,
   ContextBriefMemoryRetrievalV1,
   ContextBriefRequestV1,
-  ProjectedContextBriefV1,
 } from '@threadnote/context/types';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runContextBrief} from '@threadnote/threadnote/context_brief/commands';
 import {managerContextBriefInput, runManagerContextBrief} from '@threadnote/threadnote/manager/context';
-import {CliOutput} from '@threadnote/threadnote/effect/cli/output';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const controls = vi.hoisted(() => ({
   empty: false,
   freshness: 'fresh' as 'fresh' | 'stale',
-  requests: [] as ContextBriefRequestV1[],
+  requests: Array.from<ContextBriefRequestV1>([]),
+  output: '',
 }));
+vi.mock('@threadnote/threadnote/effect/cli/output', async importOriginal => {
+  const actual = await importOriginal<typeof import('@threadnote/threadnote/effect/cli/output')>();
+  const {Effect: MockEffect} = await import('effect');
+  return {
+    ...actual,
+    writeFinalCliOutput: (text: string) =>
+      MockEffect.sync(() => {
+        controls.output = text;
+      }),
+  };
+});
 vi.mock('@threadnote/threadnote/context_brief/index', () => ({
   compileContextBrief: (_config: unknown, request: ContextBriefRequestV1) =>
     Effect.gen(function* () {
@@ -33,17 +48,14 @@ vi.mock('@threadnote/threadnote/context_brief/index', () => ({
       );
     }),
 }));
-const COMMIT = 'a'.repeat(40);
+const COMMIT = Effect2.pipe('a', EffectString.repeat(40));
 const CWD = '/workspace/pricing';
 const TASK = 'Continue pricing input validation and aggregate discount decisions.';
-// The mocked compiler needs no runtime services; this fixture always supplies cwd.
-const runFixtureCli = runContextBrief as (
-  config: Parameters<typeof runContextBrief>[0],
-  options: Parameters<typeof runContextBrief>[1] & {readonly cwd: string},
-) => Effect.Effect<void, unknown, CliOutput>;
-const runFixtureManager = runManagerContextBrief as (
-  ...args: Parameters<typeof runManagerContextBrief>
-) => Effect.Effect<ProjectedContextBriefV1, unknown>;
+// The command always receives a fixed cwd; the test layer supplies its remaining SystemInfo requirement.
+const runFixtureCli = (config: Parameters<typeof runContextBrief>[0], options: Parameters<typeof runContextBrief>[1]) =>
+  runContextBrief(config, options).pipe(provideTestLayer(ApplicationLayer));
+const runFixtureManager = (...args: Parameters<typeof runManagerContextBrief>) =>
+  runManagerContextBrief(...args).pipe(provideTestLayer(ApplicationLayer));
 const config = {
   account: 'local',
   agentContextHome: '/unused',
@@ -61,8 +73,7 @@ const body = (budgetTokens: number) => ({
 
 const captureCli = (budgetTokens: number, json = false) =>
   Effect.gen(function* () {
-    let output = '';
-    const ignored = Effect.void;
+    controls.output = '';
     yield* runFixtureCli(config, {
       budgetTokens,
       cwd: CWD,
@@ -70,28 +81,14 @@ const captureCli = (budgetTokens: number, json = false) =>
       mode: 'resume',
       project: 'pricing',
       task: TASK,
-    }).pipe(
-      Effect.provideService(
-        CliOutput,
-        CliOutput.of({
-          drain: ignored,
-          flush: ignored,
-          enqueueError: () => {},
-          enqueueOutput: () => {},
-          writeError: () => ignored,
-          writeFinal: text =>
-            Effect.sync(() => {
-              output = text;
-            }),
-        }),
-      ),
-    );
-    return output;
+    });
+    return controls.output;
   });
 const reset = (empty = false, freshness: 'fresh' | 'stale' = 'fresh') => {
   controls.empty = empty;
   controls.freshness = freshness;
   controls.requests = [];
+  controls.output = '';
 };
 
 describe('Context Brief surface defaults', () => {
@@ -102,9 +99,13 @@ describe('Context Brief surface defaults', () => {
         const text = yield* captureCli(budget);
         const json = parseContextBriefV1(JSON.parse(yield* captureCli(budget, true)));
         const manager = yield* runFixtureManager(config, body(budget));
-        expect(controls.requests.map(request => request.responseFormat)).toEqual(['agent', 'agent', 'agent']);
+        expect(EffectArray.map(controls.requests, request => request.responseFormat)).toEqual([
+          'agent',
+          'agent',
+          'agent',
+        ]);
         expect(managerContextBriefInput(body(budget)).responseFormat).toBe('agent');
-        expect(text).toBe(manager.text.trimEnd());
+        expect(text).toBe(Effect2.pipe(manager.text, EffectString.trimEnd));
         expect(json).toEqual(manager.structuredContent);
         expect(json.activeHandoffs).toHaveLength(1);
         expect(json.durableDecisions.length).toBeGreaterThan(0);
@@ -174,7 +175,7 @@ function graph(): ContextBriefGraphEvidenceV1 {
           id: `card-${rank}`,
           rank,
           reason: 'Pricing source match.',
-          ref: `cgs_${String(rank + 1).repeat(32)}`,
+          ref: `cgs_${Effect2.pipe(String(rank + 1), EffectString.repeat(32))}`,
           repositoryKey: 'pricing',
           symbol: {
             kind: 'function',
@@ -199,7 +200,7 @@ function graph(): ContextBriefGraphEvidenceV1 {
         commit: COMMIT,
         dirty: false,
         freshness: controls.freshness,
-        repositoryId: 'b'.repeat(64),
+        repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
         repositoryKey: 'pricing',
         snapshotId: 'cgsn_test',
       },
@@ -215,11 +216,11 @@ function memory(): ContextBriefMemoryRetrievalV1 {
   return {
     candidates: controls.empty
       ? []
-      : ['handoff', 'durable', 'durable'].map((kind, rank) => ({
+      : EffectArray.map(['handoff', 'durable', 'durable'] as const, (kind, rank) => ({
           citationErrorCount: 0,
           codeCitations: [],
           excerpt: 'Preserve validation; apply aggregate discount once.',
-          kind: kind as 'handoff' | 'durable',
+          kind,
           project: 'pricing',
           rank,
           sourceCommit: COMMIT,

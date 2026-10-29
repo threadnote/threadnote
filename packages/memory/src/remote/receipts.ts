@@ -40,10 +40,10 @@ export const RemoteMemoryReceiptSchemaV1 = Schema.Struct({
 
 export type RemoteMemoryReceiptV1 = typeof RemoteMemoryReceiptSchemaV1.Type;
 
-export class InvalidRemoteMemoryReceipt extends Schema.TaggedError<InvalidRemoteMemoryReceipt>()(
-  'InvalidRemoteMemoryReceipt',
-  {message: Schema.String},
-) {}
+export class InvalidRemoteMemoryReceipt extends Schema.TaggedError<
+  InvalidRemoteMemoryReceipt,
+  {readonly brand: unique symbol}
+>()('InvalidRemoteMemoryReceipt', {message: Schema.String}) {}
 
 const STRICT_PARSE_OPTIONS = {errors: 'all', onExcessProperty: 'error'} as const;
 

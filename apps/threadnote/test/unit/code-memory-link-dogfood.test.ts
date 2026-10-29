@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {
   CODE_MEMORY_LINK_DOGFOOD_CASE_IDS,
@@ -9,11 +10,17 @@ import {
   type CodeMemoryLinkDogfoodArtifactV1,
   type CodeMemoryLinkDogfoodObservationSummaryV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-dogfood';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const CANDIDATE = {buildIdentityHash: 'b'.repeat(64), commit: 'c'.repeat(40), dirty: false as const};
+const CANDIDATE = {
+  buildIdentityHash: Effect.pipe('b', EffectString.repeat(64)),
+  commit: Effect.pipe('c', EffectString.repeat(40)),
+  dirty: false as const,
+};
 const RUNTIME = {executableSha256: CANDIDATE.buildIdentityHash, sourceCommit: CANDIDATE.commit};
-const HARNESS_COMMIT = 'a'.repeat(40);
-const RUN_ID = `run_${'d'.repeat(16)}`;
+const HARNESS_COMMIT = Effect.pipe('a', EffectString.repeat(40));
+const RUN_ID = `run_${Effect.pipe('d', EffectString.repeat(16))}`;
 
 describe('Code Memory Link practical dogfood evidence', () => {
   it('keeps a complete practical matrix insufficient until its exact evidence hash is reviewed', () => {
@@ -36,7 +43,7 @@ describe('Code Memory Link practical dogfood evidence', () => {
 
   it('fails unsafe, duplicate, unbounded, and semantically wrong practical observations', () => {
     const artifact = validArtifact();
-    const observations = artifact.observations.map(observation => {
+    const observations = EffectArray.map(artifact.observations, observation => {
       if (observation.id === 'file-backlink') return reseal({...observation, duplicateMemoryCount: 1});
       if (observation.id === 'symbol-backlink') return reseal({...observation, estimatedTokens: 1_251});
       if (observation.id === 'no-backlink') {
@@ -60,15 +67,15 @@ describe('Code Memory Link practical dogfood evidence', () => {
 
   it('hashes every practical outcome and rejects tampering or a noncanonical matrix', () => {
     const artifact = validArtifact();
-    expect(() => parseCodeMemoryLinkDogfoodArtifactV1({...artifact, artifactHash: 'f'.repeat(64)})).toThrow(
-      /hash does not match/,
-    );
+    expect(() =>
+      parseCodeMemoryLinkDogfoodArtifactV1({...artifact, artifactHash: Effect.pipe('f', EffectString.repeat(64))}),
+    ).toThrow(/hash does not match/);
     expect(() =>
       codeMemoryLinkDogfoodArtifactHash({
         candidate: artifact.candidate,
         deferredAnchorLifecycle: artifact.deferredAnchorLifecycle,
         harnessCommit: artifact.harnessCommit,
-        observations: artifact.observations.map((observation, index) =>
+        observations: EffectArray.map(artifact.observations, (observation, index) =>
           index === 0 ? {...observation, responseBytes: observation.responseBytes + 1} : observation,
         ),
         runId: artifact.runId,
@@ -86,13 +93,16 @@ describe('Code Memory Link practical dogfood evidence', () => {
     expect(() =>
       parseCodeMemoryLinkDogfoodArtifactV1({
         ...artifact,
-        observations: artifact.observations.map((entry, index) =>
+        observations: EffectArray.map(artifact.observations, (entry, index) =>
           index === 0
             ? {
                 ...entry,
                 attestation: {
                   ...entry.attestation,
-                  postRuntime: {...entry.attestation.postRuntime, executableSha256: 'e'.repeat(64)},
+                  postRuntime: {
+                    ...entry.attestation.postRuntime,
+                    executableSha256: Effect.pipe('e', EffectString.repeat(64)),
+                  },
                 },
               }
             : entry,
@@ -102,7 +112,7 @@ describe('Code Memory Link practical dogfood evidence', () => {
     expect(() =>
       parseCodeMemoryLinkDogfoodArtifactV1({
         ...artifact,
-        observations: artifact.observations.map((entry, index) =>
+        observations: EffectArray.map(artifact.observations, (entry, index) =>
           index === 1 ? {...second, attestation: first.attestation} : entry,
         ),
       }),
@@ -116,14 +126,16 @@ describe('Code Memory Link practical dogfood evidence', () => {
     const notStale = reseal({...stale, graphStatus: {...stale.graphStatus!, stale: false}});
     const wrongSnapshot = reseal({
       ...stale,
-      graphStatus: {...stale.graphStatus!, readySnapshotCommit: 'e'.repeat(40)},
+      graphStatus: {...stale.graphStatus!, readySnapshotCommit: Effect.pipe('e', EffectString.repeat(40))},
     });
 
     expect(
       evaluateCodeMemoryLinkDogfood(
         withHash({
           ...artifact,
-          observations: artifact.observations.map((entry, index) => (index === staleIndex ? notStale : entry)),
+          observations: EffectArray.map(artifact.observations, (entry, index) =>
+            index === staleIndex ? notStale : entry,
+          ),
         }),
       ).gate.qualityFailures,
     ).toContain('stale-graph-abstention did not independently observe a stale graph');
@@ -131,7 +143,9 @@ describe('Code Memory Link practical dogfood evidence', () => {
       evaluateCodeMemoryLinkDogfood(
         withHash({
           ...artifact,
-          observations: artifact.observations.map((entry, index) => (index === staleIndex ? wrongSnapshot : entry)),
+          observations: EffectArray.map(artifact.observations, (entry, index) =>
+            index === staleIndex ? wrongSnapshot : entry,
+          ),
         }),
       ).gate.qualityFailures,
     ).toContain('stale-graph-abstention graph snapshot does not match the reviewed harness checkout');
@@ -196,7 +210,7 @@ describe('Code Memory Link practical dogfood evidence', () => {
 });
 
 function validArtifact(): CodeMemoryLinkDogfoodArtifactV1 {
-  const observations = CODE_MEMORY_LINK_DOGFOOD_CASE_IDS.map((id, index) => {
+  const observations = EffectArray.map(CODE_MEMORY_LINK_DOGFOOD_CASE_IDS, (id, index) => {
     const summary = observation(id);
     return createCodeMemoryLinkDogfoodObservationV1({
       candidate: CANDIDATE,
@@ -251,7 +265,7 @@ function deferredObservation() {
     graphStatusAfterStore: {
       readySnapshotCommit: HARNESS_COMMIT,
       readySnapshotDirty: false,
-      readySnapshotId: `cgsn_${'f'.repeat(40)}`,
+      readySnapshotId: `cgsn_${Effect.pipe('f', EffectString.repeat(40))}`,
       stale: true,
     },
     indexingStartedByWrite: false,
@@ -299,7 +313,7 @@ function observation(
       graphStatus: {
         readySnapshotCommit: HARNESS_COMMIT,
         readySnapshotDirty: false,
-        readySnapshotId: `cgsn_${'f'.repeat(40)}`,
+        readySnapshotId: `cgsn_${Effect.pipe('f', EffectString.repeat(40))}`,
         stale: true,
       },
       outputVersion: 3,
@@ -333,7 +347,7 @@ function reseal(input: ReturnType<typeof validArtifact>['observations'][number])
 }
 
 function opaqueInvocation(index: number): string {
-  return `inv_${index.toString(16).padStart(16, '0')}`;
+  return `inv_${Effect.pipe(index.toString(16), EffectString.padStart(16, '0'))}`;
 }
 
 function withHash(

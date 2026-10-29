@@ -1,8 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {spawnSync} from '@threadnote/testing/node-child-process';
 import {constants, tmpdir} from '@threadnote/testing/node-os';
 import {join, resolve} from '@threadnote/testing/node-path';
 import {afterAll, beforeAll, expect, it} from 'vitest';
+import {Schema} from 'effect';
 import fc from 'fast-check';
 import {
   connectNativeSocket,
@@ -10,7 +12,6 @@ import {
   NETWORK_PROBE_TIMEOUT_MS,
   requireNativeNetworkDenial,
   type NativeSocketApi,
-  type NativeConnectResult,
 } from './native-release-network-probe.js';
 import {verifyIsolation} from './release-artifact.js';
 
@@ -41,7 +42,13 @@ it('accepts only raw connection denial errno, preserving immediate and SO_ERROR 
     for (const deferred of [false, true]) {
       const f = fixture(
         deferred
-          ? {socketError: () => ({value: 0, errno: 0, socketError: expected})}
+          ? {
+              socketError: () => ({
+                value: 0,
+                errno: 0,
+                socketError: expected,
+              }),
+            }
           : {connect: () => ({value: -1, errno: expected})},
       );
       const result = connectNativeSocket(f.api, address);
@@ -54,18 +61,32 @@ it('accepts only raw connection denial errno, preserving immediate and SO_ERROR 
 
 it('rejects connected, refused, timeout and unknown errno as isolation proof', () => {
   for (const observed of [0, errno.ECONNREFUSED, errno.ETIMEDOUT, 99999]) {
-    const f = fixture({connect: () => ({value: observed === 0 ? 0 : -1, errno: observed})});
+    const f = fixture({
+      connect: () => ({value: observed === 0 ? 0 : -1, errno: observed}),
+    });
     const result = connectNativeSocket(f.api, address);
     expect(result.errno).toBe(observed);
     expect(() => requireNativeNetworkDenial(result)).toThrow('Outbound network was not denied');
     expect(f.closed()).toBe(1);
   }
-  expect(() => requireNativeNetworkDenial({errno: errno.EPERM, syscall: 'poll', elapsedMs: 0})).toThrow();
+  expect(() =>
+    requireNativeNetworkDenial({
+      errno: errno.EPERM,
+      syscall: 'poll',
+      elapsedMs: 0,
+    }),
+  ).toThrow();
 });
 
 it('fails closed on socket/setup/poll/SO_ERROR/close failures and preserves a primary error', () => {
   for (const step of ['socket', 'flags', 'setFlags', 'poll', 'socketError', 'close'] as const) {
-    const f = fixture({[step]: () => ({value: -1, errno: errno.EACCES, socketError: errno.EPERM})});
+    const f = fixture({
+      [step]: () => ({
+        value: -1,
+        errno: errno.EACCES,
+        socketError: errno.EPERM,
+      }),
+    });
     expect(() => connectNativeSocket(f.api, address)).toThrow('Native socket probe');
     if (step !== 'close') expect(f.closed()).toBe(step === 'socket' ? 0 : 1);
   }
@@ -104,13 +125,20 @@ it('keeps a single two-second monotonic deadline across interrupted operations a
   });
   const result = connectNativeSocket(f.api, address, {now: () => time});
   expect(budgets).toEqual([2000, 1250, 500]);
-  expect(result).toEqual({errno: errno.ETIMEDOUT, syscall: 'poll', elapsedMs: 2000});
+  expect(result).toEqual({
+    errno: errno.ETIMEDOUT,
+    syscall: 'poll',
+    elapsedMs: 2000,
+  });
   expect(() => requireNativeNetworkDenial(result)).toThrow();
   expect(f.closed()).toBe(1);
   const expired = fixture();
-  expect(() => connectNativeSocket(expired.api, address, {now: () => 2000, startedAt: 0})).toThrow(
-    'timed out during socket',
-  );
+  expect(() =>
+    connectNativeSocket(expired.api, address, {
+      now: () => 2000,
+      startedAt: 0,
+    }),
+  ).toThrow('timed out during socket');
   expect(expired.closed()).toBe(0);
   time = 0;
   const setupInterrupted = fixture({
@@ -183,9 +211,13 @@ it('bounds arbitrary EINTR schedules without resetting the deadline or leaking t
         },
       });
       const result = connectNativeSocket(f.api, address, {now: () => time});
-      expect(result).toEqual({errno: errno.ETIMEDOUT, syscall: 'poll', elapsedMs: NETWORK_PROBE_TIMEOUT_MS});
-      expect(budgets.every(budget => budget > 0 && budget <= NETWORK_PROBE_TIMEOUT_MS)).toBe(true);
-      expect(budgets.every((budget, at) => at === 0 || budget < budgets[at - 1])).toBe(true);
+      expect(result).toEqual({
+        errno: errno.ETIMEDOUT,
+        syscall: 'poll',
+        elapsedMs: NETWORK_PROBE_TIMEOUT_MS,
+      });
+      expect(EffectArray.every(budgets, budget => budget > 0 && budget <= NETWORK_PROBE_TIMEOUT_MS)).toBe(true);
+      expect(EffectArray.every(budgets, (budget, at) => at === 0 || budget < budgets[at - 1])).toBe(true);
       expect(f.closed()).toBe(1);
     }),
     {numRuns: 16},
@@ -221,7 +253,9 @@ beforeAll(async () => {
   if (!posix) return;
   root = realpathSync(mkdtempSync(join(tmpdir(), 'threadnote-network-probe-test-')));
   checkout = join(root, 'synthetic-checkout');
-  mkdirSync(join(checkout, 'config/agent-skills/dev-plan'), {recursive: true});
+  mkdirSync(join(checkout, 'config/agent-skills/dev-plan'), {
+    recursive: true,
+  });
   writeFileSync(join(checkout, 'config/agent-skills/dev-plan/SKILL.md'), 'synthetic source denial fixture');
   mkdirSync(join(root, 'user'));
   binary = join(root, 'native-probe');
@@ -268,7 +302,21 @@ const isolated = (args: string[]) => {
     ...args,
   ];
 };
-const invoke = (command: string[]) => {
+const decodeIsolationOutput = Schema.decodeUnknownSync(
+  Schema.Struct({
+    enforced: Schema.Boolean,
+    sourceReadErrno: Schema.Int,
+    outboundConnectErrno: Schema.Int,
+  }),
+);
+const decodeNativeSocketOutput = Schema.decodeUnknownSync(
+  Schema.Struct({
+    errno: Schema.Int,
+    syscall: Schema.Literals(['connect', 'getsockopt', 'poll']),
+    elapsedMs: Schema.Finite,
+  }),
+);
+const invoke = <A>(command: string[], decode: (value: unknown) => A): A => {
   const result = spawnSync(command[0], command.slice(1), {
     encoding: 'utf8',
     cwd: root,
@@ -284,17 +332,13 @@ const invoke = (command: string[]) => {
   });
   expect(result.error, result.error?.message).toBeUndefined();
   expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout) as NativeConnectResult & {
-    enforced: boolean;
-    sourceReadErrno: number;
-    outboundConnectErrno: number;
-  };
+  return decode(JSON.parse(result.stdout));
 };
 
 it.skipIf(!enforceable)(
   'proves actual native connect denial and source denial inside the unchanged compiled OS sandbox',
   () => {
-    const result = invoke(isolated([checkout]));
+    const result = invoke(isolated([checkout]), decodeIsolationOutput);
     expect(result.enforced).toBe(true);
     expect([errno.EPERM, errno.EACCES, errno.ENOENT]).toContain(result.sourceReadErrno);
     expect([errno.EPERM, errno.EACCES, errno.ENETUNREACH]).toContain(result.outboundConnectErrno);
@@ -323,14 +367,14 @@ it.skipIf(!posix)(
     const command = (value: number) =>
       process.platform === 'darwin' ? isolated(['--loopback', String(value)]) : [binary, '--loopback', String(value)];
     try {
-      const connected = invoke(command(port));
+      const connected = invoke(command(port), decodeNativeSocketOutput);
       expect(connected.errno).toBe(0);
       expect(connected.elapsedMs).toBeLessThan(NETWORK_PROBE_TIMEOUT_MS);
       expect(() => requireNativeNetworkDenial(connected)).toThrow();
     } finally {
       listener.stop(true);
     }
-    const refused = invoke(command(port));
+    const refused = invoke(command(port), decodeNativeSocketOutput);
     expect(refused.errno).toBe(errno.ECONNREFUSED);
     expect(refused.elapsedMs).toBeLessThan(NETWORK_PROBE_TIMEOUT_MS);
     expect(() => requireNativeNetworkDenial(refused)).toThrow();

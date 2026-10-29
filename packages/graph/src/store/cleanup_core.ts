@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -284,7 +285,10 @@ export function codeGraphExactSnapshotRetirementStatement(
   now: number,
 ): CodeGraphSqlQueryStatement {
   const candidates = [...new Set(snapshotIds)];
-  const placeholders = candidates.map(() => '?').join(', ');
+  const placeholders = EffectArray.join(
+    EffectArray.map(candidates, () => '?'),
+    ', ',
+  );
   return {
     parameters: [...candidates, now],
     text: `UPDATE snapshots AS candidate
@@ -354,7 +358,7 @@ function compactLexicalCleanupPageStatement(
   batchRows: number,
   retiredSnapshotId: Option.Option<string>,
 ): CodeGraphSqlQueryStatement {
-  const key = `(${spec.keyColumns.join(', ')})`;
+  const key = `(${EffectArray.join(spec.keyColumns, ', ')})`;
   const retirement = Option.match(retiredSnapshotId, {
     onNone: () => ({parameters: [] as readonly string[], predicate: ''}),
     onSome: snapshotId => ({
@@ -373,11 +377,17 @@ function compactLexicalCleanupPageStatement(
     parameters: [snapshotKey, ...retirement.parameters, batchRows],
     text: `DELETE FROM ${spec.table}
       WHERE ${key} IN (
-        SELECT ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
+        SELECT ${EffectArray.join(
+          EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+          ', ',
+        )}
         FROM ${spec.table} AS candidate${spec.indexName ? ` INDEXED BY ${spec.indexName}` : ''}
         WHERE candidate.snapshot_key = ?
           ${retirement.predicate}
-        ORDER BY ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
+        ORDER BY ${EffectArray.join(
+          EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+          ', ',
+        )}
         LIMIT ?
       )`,
   };
@@ -389,7 +399,9 @@ export function codeGraphCompactLexicalCleanupPageStatement(
   snapshotKey: number,
   batchRows: number,
 ): CodeGraphSqlQueryStatement {
-  const spec = COMPACT_LEXICAL_CLEANUP_SPECS.find(candidate => candidate.table === table);
+  const spec = Option.getOrUndefined(
+    EffectArray.findFirst(COMPACT_LEXICAL_CLEANUP_SPECS, candidate => candidate.table === table),
+  );
   if (spec === undefined) throw new Error(`Unknown compact lexical cleanup table: ${table}`);
   return compactLexicalCleanupPageStatement(spec, snapshotKey, batchRows, Option.none());
 }
@@ -758,14 +770,20 @@ const clearSnapshotOwnedRows = Effect.fn('codeGraph.clearSnapshotOwnedRows')(fun
         sql.withTransaction(
           Effect.gen(function* () {
             if (ownerToken !== undefined) yield* assertPersistentBuildOwner(sql, snapshotId, ownerToken);
-            const key = `(${spec.keyColumns.join(', ')})`;
+            const key = `(${EffectArray.join(spec.keyColumns, ', ')})`;
             yield* sql.unsafe(
               `DELETE FROM ${spec.table}
              WHERE ${key} IN (
-               SELECT ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
+               SELECT ${EffectArray.join(
+                 EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+                 ', ',
+               )}
                FROM ${spec.table} AS candidate
                WHERE candidate.snapshot_id = ?
-               ORDER BY ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
+               ORDER BY ${EffectArray.join(
+                 EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+                 ', ',
+               )}
                LIMIT ?
              )`,
               [snapshotId, batchRows],
@@ -829,7 +847,10 @@ const pruneCachedFileBlobs = Effect.fn('codeGraph.pruneCachedFileBlobs')(functio
   }
   yield* sql.unsafe(
     `DELETE FROM file_blobs
-     WHERE extractor_set NOT IN (${acceptedExtractorSets.map(() => '?').join(', ')})
+     WHERE extractor_set NOT IN (${EffectArray.join(
+       EffectArray.map(acceptedExtractorSets, () => '?'),
+       ', ',
+     )})
         OR (
           NOT EXISTS (
             SELECT 1

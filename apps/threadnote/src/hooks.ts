@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, FileSystem, Path, Result, Stdio, Stream} from 'effect';
 import {
   CLAUDE_SETTINGS_PATH,
@@ -26,6 +27,9 @@ import {exists, isJsonObject, parseJsonConfigObject, resolveRepoName} from './ut
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {withSetupMutationLock} from './setup/lock.js';
 import {readAutoUpdateStatus, triggerAutoUpdateIfEnabled} from './release/auto_update.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type HookEvent = 'PreCompact' | 'PreToolUse' | 'SessionStart';
 
@@ -121,7 +125,7 @@ function runClaudeHooksInstall(options: {readonly apply: boolean; readonly remov
 export function withThreadnoteHooks(input: JsonObject): JsonObject {
   const hooks: Record<string, unknown> = ensureMutableObject(input.hooks);
   for (const entry of MANAGED_HOOKS) {
-    const list = ensureMutableArray(hooks[entry.event]).filter(item => !isManagedThreadnoteEntry(item));
+    const list = EffectArray.filter(ensureMutableArray(hooks[entry.event]), item => !isManagedThreadnoteEntry(item));
     list.push({
       [THREADNOTE_HOOK_MARKER]: THREADNOTE_HOOK_MARKER_VALUE,
       matcher: entry.matcher ?? '',
@@ -141,17 +145,17 @@ function withoutThreadnoteHooks(input: JsonObject): JsonObject {
     return input;
   }
   const hooks: Record<string, unknown> = {};
-  for (const [event, value] of Object.entries(input.hooks)) {
-    if (!Array.isArray(value)) {
+  for (const [event, value] of EffectRecord.toEntries(input.hooks)) {
+    if (!EffectArray.isArray(value)) {
       hooks[event] = value;
       continue;
     }
-    const filtered = value.filter(item => !isManagedThreadnoteEntry(item));
+    const filtered = EffectArray.filter(value, item => !isManagedThreadnoteEntry(item));
     if (filtered.length > 0) {
       hooks[event] = filtered;
     }
   }
-  if (Object.keys(hooks).length === 0) {
+  if (EffectRecord.keys(hooks).length === 0) {
     const next: Record<string, unknown> = {...input};
     delete next.hooks;
     return next;
@@ -168,7 +172,7 @@ function ensureMutableObject(value: unknown): Record<string, unknown> {
 }
 
 function ensureMutableArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? [...value] : [];
+  return EffectArray.isArray(value) ? [...value] : [];
 }
 
 function printNoHooksSupported(agent: AgentClient, remove: boolean) {
@@ -176,11 +180,14 @@ function printNoHooksSupported(agent: AgentClient, remove: boolean) {
     return Console.log(`${agent} does not expose a hook surface; nothing to remove.`);
   }
   return Console.log(
-    [
-      `${agent} does not expose agent-mode hooks today.`,
-      'Threadnote already installs user-level instructions for this agent; that remains the active guidance surface.',
-      'Hooks support will be added if the agent gains a hook surface upstream.',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        `${agent} does not expose agent-mode hooks today.`,
+        'Threadnote already installs user-level instructions for this agent; that remains the active guidance surface.',
+        'Hooks support will be added if the agent gains a hook surface upstream.',
+      ],
+      '\n',
+    ),
   );
 }
 
@@ -195,11 +202,11 @@ export const hasManagedClaudeHooks = Effect.fn('hooks.hasManagedClaudeHooks')(fu
   if (!parsed || !isJsonObject(parsed.hooks)) {
     return false;
   }
-  for (const value of Object.values(parsed.hooks)) {
-    if (!Array.isArray(value)) {
+  for (const value of EffectRecord.values(parsed.hooks)) {
+    if (!EffectArray.isArray(value)) {
       continue;
     }
-    if (value.some(item => isManagedThreadnoteEntry(item))) {
+    if (EffectArray.some(value, item => isManagedThreadnoteEntry(item))) {
       return true;
     }
   }
@@ -294,25 +301,30 @@ export function renderSessionStartRecallQueue(project: string, recallOutput: str
   const warnings = operationalRecallWarnings(recallOutput);
   const queue =
     uris.length > 0
-      ? uris.map(uri => `- [unread] ${uri}`)
+      ? EffectArray.map(uris, uri => `- [unread] ${uri}`)
       : warnings.length > 0
         ? ['No unread context pointers were returned, but recall ran in degraded mode.']
         : ['No unread context pointers were recalled for this workspace.'];
   const warningSection =
-    warnings.length > 0 ? ['', 'Recall warnings (bounded):', ...warnings.map(warning => `- ${warning}`)] : [];
-  return [
-    `## Threadnote — unread context queue for ${project}`,
-    '',
-    ...queue,
-    ...warningSection,
-    '',
-    uris.length > 0
-      ? 'Required next action: call `read_context` for the relevant URI above before relying on memory-backed claims.'
-      : warnings.length > 0
-        ? 'Required next action: continue with repository evidence, follow the warning remediation, and retry recall when healthy. Do not treat this empty queue as proof that no memory exists.'
-        : 'Continue with current repository evidence; there is no recalled memory to treat as context.',
-    'A ranked recall pointer is not evidence until its content has been read.',
-  ].join('\n');
+    warnings.length > 0
+      ? ['', 'Recall warnings (bounded):', ...EffectArray.map(warnings, warning => `- ${warning}`)]
+      : [];
+  return EffectArray.join(
+    [
+      `## Threadnote — unread context queue for ${project}`,
+      '',
+      ...queue,
+      ...warningSection,
+      '',
+      uris.length > 0
+        ? 'Required next action: call `read_context` for the relevant URI above before relying on memory-backed claims.'
+        : warnings.length > 0
+          ? 'Required next action: continue with repository evidence, follow the warning remediation, and retry recall when healthy. Do not treat this empty queue as proof that no memory exists.'
+          : 'Continue with current repository evidence; there is no recalled memory to treat as context.',
+      'A ranked recall pointer is not evidence until its content has been read.',
+    ],
+    '\n',
+  );
 }
 
 const SESSION_START_RECALL_POINTER_LIMIT = 5;
@@ -329,9 +341,14 @@ const SESSION_START_RECALL_WARNING_PREFIXES = [
 function operationalRecallWarnings(output: string): readonly string[] {
   const seen = new Set<string>();
   const warnings: string[] = [];
-  for (const line of output.split(/\r?\n/)) {
-    const normalized = line.trim().replace(/\s+/g, ' ');
-    if (!SESSION_START_RECALL_WARNING_PREFIXES.some(prefix => normalized.startsWith(prefix))) continue;
+  for (const line of Effect2.pipe(output, EffectString.split(/\r?\n/))) {
+    const normalized = Effect2.pipe(line, EffectString.trim, EffectString.replace(/\s+/g, ' '));
+    if (
+      !EffectArray.some(SESSION_START_RECALL_WARNING_PREFIXES, prefix =>
+        Effect2.pipe(normalized, EffectString.startsWith(prefix)),
+      )
+    )
+      continue;
     const bounded = boundedRecallWarning(normalized);
     if (seen.has(bounded)) continue;
     seen.add(bounded);
@@ -345,13 +362,13 @@ function boundedRecallWarning(warning: string): string {
   const characters = [...warning];
   return characters.length <= SESSION_START_RECALL_WARNING_MAX_CHARACTERS
     ? warning
-    : `${characters.slice(0, SESSION_START_RECALL_WARNING_MAX_CHARACTERS - 1).join('')}…`;
+    : `${EffectArray.join(characters.slice(0, SESSION_START_RECALL_WARNING_MAX_CHARACTERS - 1), '')}…`;
 }
 
 function rankedRecallUris(output: string): readonly string[] {
   const seen = new Set<string>();
   const uris: string[] = [];
-  for (const line of output.split(/\r?\n/)) {
+  for (const line of Effect2.pipe(output, EffectString.split(/\r?\n/))) {
     const uri = /^\s*\d+\.\s+.*\s·\s+(threadnote:\/\/\S+)\s*$/.exec(line)?.[1];
     if (!uri || seen.has(uri)) continue;
     seen.add(uri);
@@ -398,7 +415,7 @@ export const readHookPayload = Effect.fn('hooks.readPayload')(function* () {
     return undefined;
   }
   const raw = yield* readStdinWithTimeout(1500, 512 * 1024);
-  if (!raw.trim()) {
+  if (!Effect2.pipe(raw, EffectString.trim)) {
     return undefined;
   }
   const parsedResult = Result.try((): unknown => JSON.parse(raw));
@@ -426,7 +443,8 @@ export const readHookPayload = Effect.fn('hooks.readPayload')(function* () {
     prompt: typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
     turnId: typeof parsed.turn_id === 'string' ? parsed.turn_id : undefined,
     workspaceRoots:
-      Array.isArray(parsed.workspace_roots) && parsed.workspace_roots.every(root => typeof root === 'string')
+      EffectArray.isArray(parsed.workspace_roots) &&
+      EffectArray.every(parsed.workspace_roots, root => typeof root === 'string')
         ? parsed.workspace_roots
         : undefined,
     transcriptPath: typeof parsed.transcript_path === 'string' ? parsed.transcript_path : undefined,
@@ -439,7 +457,7 @@ const readStdinWithTimeout = Effect.fn('hooks.readStdin')(function* (timeoutMs: 
     Stream.decodeText,
     Stream.runFold(
       () => '',
-      (output, chunk) => `${output}${chunk}`.slice(0, maxBytes),
+      (output, chunk) => Effect2.pipe(`${output}${chunk}`, EffectString.slice(0, maxBytes)),
     ),
     Effect.timeoutOrElse({duration: timeoutMs, orElse: () => Effect.succeed('')}),
     Effect.orElseSucceed(() => ''),

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -27,11 +28,17 @@ import {
   createCodeMemoryLinkAgentAttemptStartedV1,
   type CodeMemoryLinkAgentAttemptEventV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-attempts';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const FIXTURE_HASH = 'a'.repeat(64);
-const APPROVAL_COMMIT = 'a'.repeat(40);
+const FIXTURE_HASH = Effect.pipe('a', EffectString.repeat(64));
+const APPROVAL_COMMIT = Effect.pipe('a', EffectString.repeat(40));
 const LABELS = {X: 'anchored', Y: 'task-only', Z: 'no-memory'} as const;
-const CLIENT_IDS = [`cli_${'1'.repeat(16)}`, `cli_${'2'.repeat(16)}`] as const;
+const CLIENT_IDS = [
+  `cli_${Effect.pipe('1', EffectString.repeat(16))}`,
+  `cli_${Effect.pipe('2', EffectString.repeat(16))}`,
+] as const;
 const CONTROL_SCENARIO_FAMILIES = [
   'control:ambiguous',
   'control:archived',
@@ -43,7 +50,7 @@ const CONTROL_SCENARIO_FAMILIES = [
   'control:stale-changed',
   'control:superseded',
 ] as const;
-const CLIENTS = CLIENT_IDS.map((clientId, index) => ({
+const CLIENTS = EffectArray.map(CLIENT_IDS, (clientId, index) => ({
   clientId,
   configurationProjectionHash: hash(880 + index),
   environmentPolicyHash: hash(890 + index),
@@ -135,7 +142,7 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('uses observed task completion as a conservative censor for no-use observations', () => {
-    const trials = releaseTrials().map(trial =>
+    const trials = EffectArray.map(releaseTrials(), trial =>
       trial.taskKind === 'hidden-constraint' && armFor(trial.blindLabel) === 'task-only'
         ? reseal({...trial, firstUsefulMemoryUse: null})
         : trial,
@@ -157,7 +164,7 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('keeps mock receipts out of release evidence and derives missing coverage from the manifest roster', () => {
-    const trials = releaseTrials().map(trial => reseal({...trial, evidenceKind: 'mock' as const}));
+    const trials = EffectArray.map(releaseTrials(), trial => reseal({...trial, evidenceKind: 'mock' as const}));
     const result = evaluateCodeMemoryLinkAgentAb({assignment: ASSIGNMENT, manifest: MANIFEST, trials});
 
     expect(result.evidence).toMatchObject({eligibleExternalTrials: 0, excludedMockTrials: 168});
@@ -172,7 +179,7 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('requires every rostered client and does not infer a narrower experiment from supplied trials', () => {
-    const trials = releaseTrials().filter(trial => trial.clientId === CLIENT_IDS[0]);
+    const trials = EffectArray.filter(releaseTrials(), trial => trial.clientId === CLIENT_IDS[0]);
     const result = evaluateCodeMemoryLinkAgentAb({assignment: ASSIGNMENT, manifest: MANIFEST, trials});
 
     expect(result.evidence.distinctClients).toBe(2);
@@ -183,7 +190,7 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('returns failed, not insufficient, for a complete experiment that misses quality gates', () => {
-    const degraded = releaseTrials().map(trial => {
+    const degraded = EffectArray.map(releaseTrials(), trial => {
       const arm = armFor(trial.blindLabel);
       if (trial.taskKind === 'negative-control' && arm === 'anchored') {
         return reseal({...trial, taskPassed: false});
@@ -221,7 +228,7 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('gates hidden-task taskPassed even when constraint adherence remains favorable', () => {
-    const trials = releaseTrials().map(trial =>
+    const trials = EffectArray.map(releaseTrials(), trial =>
       trial.taskKind === 'hidden-constraint' ? reseal({...trial, taskPassed: false}) : trial,
     );
     const result = evaluateCodeMemoryLinkAgentAb({assignment: ASSIGNMENT, manifest: MANIFEST, trials});
@@ -233,7 +240,7 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('applies finite-corpus scenario-family floors and per-client non-regression', () => {
-    const uncertain = releaseTrials().map(trial => {
+    const uncertain = EffectArray.map(releaseTrials(), trial => {
       if (trial.taskKind !== 'hidden-constraint' || armFor(trial.blindLabel) !== 'task-only') return trial;
       const index = taskIndex(trial.taskId);
       const failed = index === 0 || (index === 1 && trial.clientId === CLIENT_IDS[0]);
@@ -250,7 +257,7 @@ describe('Code Memory Link agent A/B evidence', () => {
       expect.arrayContaining([expect.stringContaining('anchored-only family anchored adherence delta')]),
     );
 
-    const clientRegression = releaseTrials().map(trial => {
+    const clientRegression = EffectArray.map(releaseTrials(), trial => {
       if (trial.taskKind !== 'hidden-constraint') return trial;
       const arm = armFor(trial.blindLabel);
       const index = taskIndex(trial.taskId);
@@ -274,7 +281,7 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('does not present replicated successes as a 95% population bound or let one family carry another', () => {
-    const identicalReplicas = releaseTrials().map(trial =>
+    const identicalReplicas = EffectArray.map(releaseTrials(), trial =>
       trial.taskKind === 'hidden-constraint' && armFor(trial.blindLabel) === 'task-only'
         ? reseal({...trial, constraintAdherence: {satisfied: 0, total: 2}})
         : trial,
@@ -289,9 +296,11 @@ describe('Code Memory Link agent A/B evidence', () => {
     expect(identicalResult.metrics.adherence.minimumScenarioFamilyDeltaPercentagePoints).toBe(100);
     expect(JSON.stringify(identicalResult.metrics)).not.toMatch(/(?:95%|confidence|bound)/iu);
 
-    const oneFamilyOnly = releaseTrials().map(trial => {
+    const oneFamilyOnly = EffectArray.map(releaseTrials(), trial => {
       if (trial.taskKind !== 'hidden-constraint' || armFor(trial.blindLabel) !== 'task-only') return trial;
-      const scenarioFamily = MANIFEST.tasks.find(task => task.taskId === trial.taskId)!.scenarioFamily;
+      const scenarioFamily = EffectOption.getOrUndefined(
+        EffectArray.findFirst(MANIFEST.tasks, task => task.taskId === trial.taskId),
+      )!.scenarioFamily;
       return reseal({
         ...trial,
         constraintAdherence: {satisfied: scenarioFamily === 'hidden:anchored-only' ? 2 : 0, total: 2},
@@ -311,7 +320,7 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('gates task-only usefulness against no-memory globally, by scenario family, and per client', () => {
-    const noAdherenceGain = releaseTrials().map(trial =>
+    const noAdherenceGain = EffectArray.map(releaseTrials(), trial =>
       trial.taskKind === 'hidden-constraint' && armFor(trial.blindLabel) === 'task-only'
         ? reseal({...trial, constraintAdherence: {satisfied: 0, total: 2}})
         : trial,
@@ -328,7 +337,7 @@ describe('Code Memory Link agent A/B evidence', () => {
       ]),
     );
 
-    const passRegression = releaseTrials().map(trial =>
+    const passRegression = EffectArray.map(releaseTrials(), trial =>
       trial.taskKind === 'hidden-constraint' && armFor(trial.blindLabel) === 'task-only'
         ? reseal({...trial, taskPassed: false})
         : trial,
@@ -345,7 +354,7 @@ describe('Code Memory Link agent A/B evidence', () => {
       ]),
     );
 
-    const negativeRegression = releaseTrials().map(trial =>
+    const negativeRegression = EffectArray.map(releaseTrials(), trial =>
       trial.taskKind === 'negative-control' && armFor(trial.blindLabel) === 'task-only'
         ? reseal({...trial, taskPassed: false})
         : trial,
@@ -364,7 +373,7 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('fails closed when every arm fails all negative controls', () => {
-    const trials = releaseTrials().map(trial =>
+    const trials = EffectArray.map(releaseTrials(), trial =>
       trial.taskKind === 'negative-control' ? reseal({...trial, taskPassed: false}) : trial,
     );
     const result = evaluateCodeMemoryLinkAgentAb({assignment: ASSIGNMENT, manifest: MANIFEST, trials});
@@ -391,7 +400,7 @@ describe('Code Memory Link agent A/B evidence', () => {
     expect(result.metrics.negativeControl.scenarioFamilies).toHaveLength(CONTROL_SCENARIO_FAMILIES.length);
     expect(result.metrics.negativeControl.scenarioFamilies).toEqual(
       expect.arrayContaining(
-        CONTROL_SCENARIO_FAMILIES.map(scenarioFamily =>
+        EffectArray.map(CONTROL_SCENARIO_FAMILIES, scenarioFamily =>
           expect.objectContaining({
             anchoredPassRate: 1,
             anchoredRegressionEventRate: 0,
@@ -431,7 +440,7 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('requires first-use reductions in every scenario family and prevents a pooled gain from hiding a client regression', () => {
-    const variable = releaseTrials().map(trial => {
+    const variable = EffectArray.map(releaseTrials(), trial => {
       if (trial.taskKind !== 'hidden-constraint' || armFor(trial.blindLabel) !== 'anchored') return trial;
       return taskIndex(trial.taskId) < 2
         ? reseal({
@@ -454,7 +463,7 @@ describe('Code Memory Link agent A/B evidence', () => {
       ]),
     );
 
-    const pooled = releaseTrials().map(trial => {
+    const pooled = EffectArray.map(releaseTrials(), trial => {
       if (trial.taskKind !== 'hidden-constraint' || armFor(trial.blindLabel) !== 'anchored') return trial;
       return trial.clientId === CLIENT_IDS[0]
         ? reseal({
@@ -475,30 +484,38 @@ describe('Code Memory Link agent A/B evidence', () => {
   });
 
   it('makes absolute anchored safety failures monotone even when the paired matrix is incomplete', () => {
-    const firstAnchored = releaseTrials().find(
-      trial => trial.taskKind === 'hidden-constraint' && armFor(trial.blindLabel) === 'anchored',
+    const firstAnchored = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        releaseTrials(),
+        trial => trial.taskKind === 'hidden-constraint' && armFor(trial.blindLabel) === 'anchored',
+      ),
     )!;
-    const firstTaskOnly = releaseTrials().find(
-      trial =>
-        trial.taskKind === 'hidden-constraint' &&
-        trial.taskId !== firstAnchored.taskId &&
-        armFor(trial.blindLabel) === 'task-only',
+    const firstTaskOnly = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        releaseTrials(),
+        trial =>
+          trial.taskKind === 'hidden-constraint' &&
+          trial.taskId !== firstAnchored.taskId &&
+          armFor(trial.blindLabel) === 'task-only',
+      ),
     )!;
-    const trials = releaseTrials()
-      .filter(
+    const trials = EffectArray.map(
+      EffectArray.filter(
+        releaseTrials(),
         trial =>
           !(
             trial.clientId === firstAnchored.clientId &&
             trial.taskId === firstAnchored.taskId &&
             armFor(trial.blindLabel) === 'task-only'
           ),
-      )
-      .map(trial => {
+      ),
+      trial => {
         if (trial.trialId === firstAnchored.trialId) {
           return reseal({...trial, acceptedStaleOrHarmful: true, firstUsefulMemoryUse: null, taskPassed: false});
         }
         return trial.trialId === firstTaskOnly.trialId ? reseal({...trial, acceptedStaleOrHarmful: true}) : trial;
-      });
+      },
+    );
     const result = evaluateCodeMemoryLinkAgentAb({assignment: ASSIGNMENT, manifest: MANIFEST, trials});
 
     expect(result.gate.status).toBe('failed');
@@ -529,7 +546,9 @@ describe('Code Memory Link agent A/B evidence', () => {
     });
     const changed = codeMemoryLinkAgentAbExternalEvidenceHash({
       manifestHash: MANIFEST.manifestHash,
-      trials: trials.map((trial, index) => (index === 0 ? reseal({...trial, taskPassed: !trial.taskPassed}) : trial)),
+      trials: EffectArray.map(trials, (trial, index) =>
+        index === 0 ? reseal({...trial, taskPassed: !trial.taskPassed}) : trial,
+      ),
       version: 1,
     });
 
@@ -601,7 +620,7 @@ describe('Code Memory Link agent A/B evidence', () => {
         tasks: [MANIFEST.tasks[0], {...MANIFEST.tasks[1], packetHash: MANIFEST.tasks[0].packetHash}],
       }),
     ).toThrow(/packet hashes must be unique/);
-    const reassignedFamilies = MANIFEST.tasks.map((task, index) =>
+    const reassignedFamilies = EffectArray.map(MANIFEST.tasks, (task, index) =>
       index === 0 ? {...task, scenarioFamily: 'hidden:anchored-only' as const} : task,
     );
     expect(codeMemoryLinkAgentAbManifestHash({...MANIFEST, tasks: reassignedFamilies, version: 1})).not.toBe(
@@ -610,7 +629,7 @@ describe('Code Memory Link agent A/B evidence', () => {
     expect(() =>
       codeMemoryLinkAgentAbManifestHash({
         ...MANIFEST,
-        tasks: MANIFEST.tasks.map((task, index) =>
+        tasks: EffectArray.map(MANIFEST.tasks, (task, index) =>
           index === 0 ? {...task, scenarioFamily: 'control:no-backlink' as const} : task,
         ),
         version: 1,
@@ -623,21 +642,21 @@ describe('Code Memory Link agent A/B evidence', () => {
       evaluateCodeMemoryLinkAgentAb({
         assignment: ASSIGNMENT,
         manifest: MANIFEST,
-        trials: [reseal({...first, clientId: `cli_${'f'.repeat(16)}`})],
+        trials: [reseal({...first, clientId: `cli_${Effect.pipe('f', EffectString.repeat(16))}`})],
       }),
     ).toThrow(/outside the manifest roster/);
     expect(() =>
       evaluateCodeMemoryLinkAgentAb({
         assignment: ASSIGNMENT,
         manifest: MANIFEST,
-        trials: [reseal({...first, packetHash: 'f'.repeat(64)})],
+        trials: [reseal({...first, packetHash: Effect.pipe('f', EffectString.repeat(64))})],
       }),
     ).toThrow(/task contract does not match/);
     expect(() =>
       evaluateCodeMemoryLinkAgentAb({
         assignment: ASSIGNMENT,
         manifest: MANIFEST,
-        trials: [reseal({...first, runNonce: `run_${'f'.repeat(16)}`})],
+        trials: [reseal({...first, runNonce: `run_${Effect.pipe('f', EffectString.repeat(16))}`})],
       }),
     ).toThrow(/preregistered run position and nonce/);
     expect(() =>
@@ -647,19 +666,22 @@ describe('Code Memory Link agent A/B evidence', () => {
 
   it('binds a protocol-v2 harness commit without invalidating legacy manifests', () => {
     const {manifestHash: _legacyHash, ...legacyInput} = MANIFEST;
-    const input = {...legacyInput, harnessGovernanceCommit: 'd'.repeat(40)};
+    const input = {...legacyInput, harnessGovernanceCommit: Effect.pipe('d', EffectString.repeat(40))};
     const protocolV2 = {...input, manifestHash: codeMemoryLinkAgentAbManifestHash(input)};
 
     expect(parseCodeMemoryLinkAgentAbManifestV1(protocolV2)).toEqual(protocolV2);
     expect(parseCodeMemoryLinkAgentAbManifestV1(MANIFEST)).toEqual(MANIFEST);
     expect(() =>
-      parseCodeMemoryLinkAgentAbManifestV1({...protocolV2, harnessGovernanceCommit: 'e'.repeat(40)}),
+      parseCodeMemoryLinkAgentAbManifestV1({
+        ...protocolV2,
+        harnessGovernanceCommit: Effect.pipe('e', EffectString.repeat(40)),
+      }),
     ).toThrow(/manifest hash does not match/u);
   });
 
   it('binds the reviewed protocol, provider usage, common budgets, and counterbalanced run order', () => {
     const [first] = releaseTrials();
-    const clientReported = releaseTrials().map((trial, index) =>
+    const clientReported = EffectArray.map(releaseTrials(), (trial, index) =>
       index === 0 ? reseal({...trial, tokenAccounting: 'client-reported' as const}) : trial,
     );
     const accounting = evaluateCodeMemoryLinkAgentAb({
@@ -673,8 +695,8 @@ describe('Code Memory Link agent A/B evidence', () => {
     const mixedApprovals = evaluateCodeMemoryLinkAgentAb({
       assignment: ASSIGNMENT,
       manifest: MANIFEST,
-      trials: releaseTrials().map((trial, index) =>
-        index === 0 ? reseal({...trial, approvalCommit: 'f'.repeat(40)}) : trial,
+      trials: EffectArray.map(releaseTrials(), (trial, index) =>
+        index === 0 ? reseal({...trial, approvalCommit: Effect.pipe('f', EffectString.repeat(40))}) : trial,
       ),
     });
     expect(mixedApprovals.gate.insufficiencies).toContain(
@@ -697,33 +719,47 @@ describe('Code Memory Link agent A/B evidence', () => {
       ),
     ).toThrow(/first useful memory use exceeds observed total task usage/);
 
-    const unevenTasks = MANIFEST.tasks.map((task, index) =>
+    const unevenTasks = EffectArray.map(MANIFEST.tasks, (task, index) =>
       index === 1 ? {...task, budget: {steps: task.budget.steps, tokens: task.budget.tokens + 1}} : task,
     );
     expect(() => codeMemoryLinkAgentAbManifestHash({...MANIFEST, tasks: unevenTasks, version: 1})).toThrow(
       /share one token and step budget/,
     );
 
-    const chronologicallyMisbound = MANIFEST.schedule.map(entry => ({
+    const nextArmPosition = (position: 1 | 2 | 3): 1 | 2 | 3 => {
+      switch (position) {
+        case 1:
+          return 2;
+        case 2:
+          return 3;
+        case 3:
+          return 1;
+      }
+    };
+    const chronologicallyMisbound = EffectArray.map(MANIFEST.schedule, entry => ({
       ...entry,
-      armPosition: ((entry.armPosition % 3) + 1) as 1 | 2 | 3,
+      armPosition: nextArmPosition(entry.armPosition),
     }));
     expect(() =>
       codeMemoryLinkAgentAbManifestHash({...MANIFEST, schedule: chronologicallyMisbound, version: 1}),
     ).toThrow(/chronological order must match arm positions/);
 
-    const unbalancedSchedule = MANIFEST.schedule
-      .map(entry => {
-        const armPosition = ({X: 1, Y: 2, Z: 3} as const)[entry.blindLabel];
-        const clientIndex = MANIFEST.clients.findIndex(client => client.clientId === entry.clientId);
-        const taskIndex_ = MANIFEST.tasks.findIndex(task => task.taskId === entry.taskId);
-        return {
-          ...entry,
-          armPosition,
-          runOrder: clientIndex * MANIFEST.tasks.length * 3 + taskIndex_ * 3 + armPosition - 1,
-        };
-      })
-      .sort((left, right) => left.runOrder - right.runOrder);
+    const unbalancedSchedule = EffectArray.map(MANIFEST.schedule, entry => {
+      const armPosition = ({X: 1, Y: 2, Z: 3} as const)[entry.blindLabel];
+      const clientIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(MANIFEST.clients, client => client.clientId === entry.clientId),
+        () => -1,
+      );
+      const taskIndex_ = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(MANIFEST.tasks, task => task.taskId === entry.taskId),
+        () => -1,
+      );
+      return {
+        ...entry,
+        armPosition,
+        runOrder: clientIndex * MANIFEST.tasks.length * 3 + taskIndex_ * 3 + armPosition - 1,
+      };
+    }).sort((left, right) => left.runOrder - right.runOrder);
     expect(() => codeMemoryLinkAgentAbManifestHash({...MANIFEST, schedule: unbalancedSchedule, version: 1})).toThrow(
       /not counterbalanced/,
     );
@@ -761,7 +797,11 @@ describe('Code Memory Link agent A/B evidence', () => {
     ).toThrow(/output digest|summary digest/);
 
     const {attestation: _attestation, previousReceiptDigest, trialId, ...summary} = first;
-    const otherCandidate = {buildIdentityHash: hash(999_001), commit: 'f'.repeat(40), dirty: false as const};
+    const otherCandidate = {
+      buildIdentityHash: hash(999_001),
+      commit: Effect.pipe('f', EffectString.repeat(40)),
+      dirty: false as const,
+    };
     const otherRuntime = {
       executableSha256: otherCandidate.buildIdentityHash,
       sourceCommit: otherCandidate.commit,
@@ -806,7 +846,7 @@ describe('Code Memory Link agent A/B evidence', () => {
         trials: [
           {
             ...first,
-            attestation: {...first.attestation, harnessCommit: 'f'.repeat(40)},
+            attestation: {...first.attestation, harnessCommit: Effect.pipe('f', EffectString.repeat(40))},
           },
         ],
       }),
@@ -861,15 +901,25 @@ describe('Code Memory Link agent A/B evidence', () => {
         } as const;
         const schedule = deriveCodeMemoryLinkAgentAbScheduleV1(input);
         expect(deriveCodeMemoryLinkAgentAbScheduleV1(input)).toEqual(schedule);
-        expect(schedule.map(entry => entry.runOrder)).toEqual(schedule.map((_, index) => index));
+        expect(EffectArray.map(schedule, entry => entry.runOrder)).toEqual(
+          EffectArray.map(schedule, (_, index) => index),
+        );
         for (const {clientId} of MANIFEST.clients) {
           for (const taskKind of ['hidden-constraint', 'negative-control'] as const) {
-            const taskIds = new Set(MANIFEST.tasks.filter(task => task.taskKind === taskKind).map(task => task.taskId));
+            const taskIds = new Set(
+              EffectArray.map(
+                EffectArray.filter(MANIFEST.tasks, task => task.taskKind === taskKind),
+                task => task.taskId,
+              ),
+            );
             for (const blindLabel of ['X', 'Y', 'Z'] as const) {
-              const counts = [1, 2, 3].map(
+              const counts = EffectArray.map(
+                [1, 2, 3],
                 armPosition =>
-                  schedule.filter(
-                    entry =>
+                  EffectArray.filter(
+                    schedule,
+                    (entry, __effectArrayIndex) =>
+                      __effectArrayIndex in schedule &&
                       entry.clientId === clientId &&
                       taskIds.has(entry.taskId) &&
                       entry.blindLabel === blindLabel &&
@@ -906,7 +956,9 @@ function manifestFor(clientIds: readonly string[]): CodeMemoryLinkAgentAbManifes
     ...Array.from({length: 12}, (_, index) => manifestTask(index, 'hidden-constraint')),
     ...Array.from({length: 16}, (_, index) => manifestTask(index + 12, 'negative-control')),
   ];
-  const clients = clientIds.map(clientId => CLIENTS.find(client => client.clientId === clientId)!);
+  const clients = EffectArray.map(clientIds, clientId =>
+    EffectOption.getOrUndefined(EffectArray.findFirst(CLIENTS, client => client.clientId === clientId))!,
+  );
   const scheduleSeed = hash(702);
   const schedule = deriveCodeMemoryLinkAgentAbScheduleV1({
     clients,
@@ -917,12 +969,12 @@ function manifestFor(clientIds: readonly string[]): CodeMemoryLinkAgentAbManifes
   const input = {
     adjudicationArtifactHash: hash(703),
     assignmentHash: ASSIGNMENT.assignmentHash,
-    candidate: {buildIdentityHash: hash(700), commit: 'c'.repeat(40), dirty: false as const},
+    candidate: {buildIdentityHash: hash(700), commit: Effect.pipe('c', EffectString.repeat(40)), dirty: false as const},
     clients,
-    evaluatorVersion: `ver_${'e'.repeat(16)}`,
-    experimentId: `exp_${'0'.repeat(16)}`,
+    evaluatorVersion: `ver_${Effect.pipe('e', EffectString.repeat(16))}`,
+    experimentId: `exp_${Effect.pipe('0', EffectString.repeat(16))}`,
     fixtureHash: FIXTURE_HASH,
-    judgeVersion: `ver_${'d'.repeat(16)}`,
+    judgeVersion: `ver_${Effect.pipe('d', EffectString.repeat(16))}`,
     schedule,
     scheduleAlgorithmVersion: CODE_MEMORY_LINK_AGENT_AB_SCHEDULE_ALGORITHM_VERSION,
     scheduleSeed,
@@ -959,12 +1011,16 @@ function manifestTask(
 }
 
 function releaseTrials(): readonly CodeMemoryLinkAgentAbTrialV1[] {
-  return CLIENT_IDS.flatMap((clientId, clientIndex) =>
-    MANIFEST.tasks.flatMap((task, taskIndex_) =>
-      (Object.entries(LABELS) as readonly [CodeMemoryLinkAgentAbBlindLabel, CodeMemoryLinkAgentAbArm][]).map(
+  return EffectArray.flatMap(CLIENT_IDS, (clientId, clientIndex) =>
+    EffectArray.flatMap(MANIFEST.tasks, (task, taskIndex_) =>
+      EffectArray.map(
+        EffectRecord.toEntries(LABELS) as readonly [CodeMemoryLinkAgentAbBlindLabel, CodeMemoryLinkAgentAbArm][],
         ([blindLabel, arm], labelIndex) => {
-          const scheduled = MANIFEST.schedule.find(
-            entry => entry.clientId === clientId && entry.taskId === task.taskId && entry.blindLabel === blindLabel,
+          const scheduled = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              MANIFEST.schedule,
+              entry => entry.clientId === clientId && entry.taskId === task.taskId && entry.blindLabel === blindLabel,
+            ),
           )!;
           return trial(clientId, clientIndex, task, taskIndex_, blindLabel, arm, labelIndex, scheduled);
         },
@@ -985,12 +1041,12 @@ function chainedReleaseTrials(): readonly CodeMemoryLinkAgentAbTrialV1[] {
 
 function trialsWithAnchoredNegativeControlRegressions(taskCount: number): readonly CodeMemoryLinkAgentAbTrialV1[] {
   const regressedTaskIds = new Set(
-    MANIFEST.tasks
-      .filter(task => task.taskKind === 'negative-control')
-      .slice(0, taskCount)
-      .map(task => task.taskId),
+    EffectArray.map(
+      EffectArray.filter(MANIFEST.tasks, task => task.taskKind === 'negative-control').slice(0, taskCount),
+      task => task.taskId,
+    ),
   );
-  return releaseTrials().map(trial =>
+  return EffectArray.map(releaseTrials(), trial =>
     regressedTaskIds.has(trial.taskId) && armFor(trial.blindLabel) === 'anchored'
       ? reseal({...trial, taskPassed: false})
       : trial,
@@ -1103,7 +1159,7 @@ function attemptEventsForTrials(
       events.length === 0 ? null : codeMemoryLinkAgentAttemptEventDigest(events[events.length - 1]);
     const started = attemptStart(
       trial,
-      `attempt_${index.toString(16).padStart(32, '0')}`,
+      `attempt_${Effect.pipe(index.toString(16), EffectString.padStart(32, '0'))}`,
       previousEventDigest,
       index === 0 ? retryOfAttemptId : null,
       index === 0 ? retryReason : null,
@@ -1126,8 +1182,9 @@ function attemptStart(
     assignmentHash: trial.assignmentHash,
     attemptId,
     blindLabel: trial.blindLabel,
-    clientDescriptorHash: MANIFEST.clients.find(client => client.clientId === trial.clientId)!
-      .implementationDescriptorHash,
+    clientDescriptorHash: EffectOption.getOrUndefined(
+      EffectArray.findFirst(MANIFEST.clients, client => client.clientId === trial.clientId),
+    )!.implementationDescriptorHash,
     clientId: trial.clientId,
     invocationNonce,
     manifestHash: trial.manifestHash,
@@ -1146,13 +1203,13 @@ function armFor(label: CodeMemoryLinkAgentAbBlindLabel): CodeMemoryLinkAgentAbAr
 }
 
 function taskIndex(taskId: string): number {
-  return Number.parseInt(taskId.slice(-16), 16);
+  return Number.parseInt(Effect.pipe(taskId, EffectString.slice(-16)), 16);
 }
 
 function opaqueId(prefix: 'inv' | 'run' | 'trl' | 'tsk', value: number): string {
-  return `${prefix}_${value.toString(16).padStart(16, '0')}`;
+  return `${prefix}_${Effect.pipe(value.toString(16), EffectString.padStart(16, '0'))}`;
 }
 
 function hash(value: number): string {
-  return value.toString(16).padStart(64, '0');
+  return Effect.pipe(value.toString(16), EffectString.padStart(64, '0'));
 }

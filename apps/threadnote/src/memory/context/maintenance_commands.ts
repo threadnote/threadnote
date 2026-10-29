@@ -72,6 +72,7 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
   },
   generate: typeof runSelectedDraft = runSelectedDraft,
 ) {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve narrowing for the optional action passed to the policy update.
   if (options.action?.startsWith('background-')) {
     const status = yield* setAutomaticDraftBackgroundPolicy(config, {
       action: options.action,
@@ -140,7 +141,7 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
         : options.action === 'draft'
           ? yield* requestTopicMaintenanceDraft(config, {
               caseId: options.caseId ?? '',
-              backend: options.backend as 'local-ai' | 'effect-ai',
+              backend: options.backend,
               modelId: options.modelId ?? '',
               regenerate: options.regenerate,
             }).pipe(
@@ -174,7 +175,12 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
                   ? yield* decideTopicMaintenanceReview(config, {
                       reviewId: options.reviewId ?? '',
                       revision: options.revision ?? 0,
-                      action: options.action.slice(6) as 'reject' | 'defer' | 'resume',
+                      action:
+                        options.action === 'draft-reject'
+                          ? 'reject'
+                          : options.action === 'draft-defer'
+                            ? 'defer'
+                            : 'resume',
                       caseId: options.caseId,
                     })
                   : options.action === 'retire-anchor'

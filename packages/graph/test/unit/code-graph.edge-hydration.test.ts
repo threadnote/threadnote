@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect, Exit, Layer} from 'effect';
@@ -61,9 +62,11 @@ describe('selected graph edge hydration', () => {
       yield* insertEdge('overlay', ids[402], 'src/override.ts');
       const requested = [...ids].reverse();
       const edges = yield* selectEdgesByIds('overlay', [...requested, requested[0]]);
-      expect(edges.map(edge => edge.id)).toEqual(requested);
-      expect(edges.find(edge => edge.id === ids[402])?.evidencePath).toBe('src/override.ts');
-      expect(edges.every(edge => edge.evidenceSpan.line === 1)).toBe(true);
+      expect(EffectArray.map(edges, edge => edge.id)).toEqual(requested);
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(edges, edge => edge.id === ids[402]))?.evidencePath,
+      ).toBe('src/override.ts');
+      expect(EffectArray.every(edges, edge => edge.evidenceSpan.line === 1)).toBe(true);
     }).pipe(withDatabase),
   );
 

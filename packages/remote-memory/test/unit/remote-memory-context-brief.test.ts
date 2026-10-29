@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import type {RemoteMemoryReceiptV1} from '@threadnote/memory/remote/receipts';
@@ -6,6 +7,8 @@ import {
   projectRemoteContextBrief,
   remoteContextBriefAnchorSelectors,
 } from '@threadnote/remote-memory/context/brief';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const receipt: RemoteMemoryReceiptV1 = {
   consistency: 'current',
@@ -19,21 +22,38 @@ const receipt: RemoteMemoryReceiptV1 = {
   version: 1,
 };
 
+const coverageSchema = Schema.StructWithRest(
+  Schema.Struct({
+    directSearchTruncated: Schema.Boolean,
+    matchedAnchorOrdinals: Schema.Array(Schema.Finite),
+    omittedMatchedAnchorOrdinals: Schema.Array(Schema.Finite),
+    returnedAnchorOrdinals: Schema.Array(Schema.Finite),
+    unmatchedAnchorOrdinals: Schema.Array(Schema.Finite),
+    unresolvedAnchorOrdinals: Schema.Array(Schema.Finite),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const projectedAnchorsSchema = Schema.StructWithRest(Schema.Struct({coverage: coverageSchema}), [
+  Schema.Record(Schema.String, Schema.Unknown),
+]);
+
 describe('remote Context Brief', () => {
   it('derives the same opaque selector set for every anchor order', () => {
     const segment = fc.stringMatching(/^[a-z][a-z0-9_-]{0,8}$/u);
     const anchor = fc.record({
-      path: fc.array(segment, {minLength: 1, maxLength: 3}).map(segments => `${segments.join('/')}.ts`),
+      path: fc.array(segment, {minLength: 1, maxLength: 3}).map(segments => `${EffectArray.join(segments, '/')}.ts`),
       repositoryId: fc.stringMatching(/^[a-f]{64}$/u),
     });
     fc.assert(
       fc.property(fc.array(anchor, {maxLength: 8}), anchors => {
-        const forward = remoteContextBriefAnchorSelectors(anchors)
-          .map(selector => selector.selectorDigest)
-          .sort();
-        const backward = remoteContextBriefAnchorSelectors([...anchors].reverse())
-          .map(selector => selector.selectorDigest)
-          .sort();
+        const forward = EffectArray.map(
+          remoteContextBriefAnchorSelectors(anchors),
+          selector => selector.selectorDigest,
+        ).sort();
+        const backward = EffectArray.map(
+          remoteContextBriefAnchorSelectors([...anchors].reverse()),
+          selector => selector.selectorDigest,
+        ).sort();
         expect(backward).toEqual(forward);
       }),
       {numRuns: 50},
@@ -42,8 +62,8 @@ describe('remote Context Brief', () => {
 
   it('deduplicates anchors and preserves remote-only provenance guidance within budget', () => {
     const anchors = normalizeRemoteContextBriefAnchors([
-      {path: 'apps/threadnote/src/remote_memory/tools.ts', repositoryId: 'a'.repeat(64)},
-      {path: 'apps/threadnote/src/remote_memory/tools.ts', repositoryId: 'a'.repeat(64)},
+      {path: 'apps/threadnote/src/remote_memory/tools.ts', repositoryId: Effect.pipe('a', EffectString.repeat(64))},
+      {path: 'apps/threadnote/src/remote_memory/tools.ts', repositoryId: Effect.pipe('a', EffectString.repeat(64))},
     ])!;
     const projected = projectRemoteContextBrief({
       anchors,
@@ -99,7 +119,7 @@ describe('remote Context Brief', () => {
       matchedAnchorOrdinals: [],
       receipt,
       results: [],
-      task: 'x'.repeat(4_096),
+      task: Effect.pipe('x', EffectString.repeat(4_096)),
     });
 
     expect(
@@ -111,8 +131,8 @@ describe('remote Context Brief', () => {
   it('reports verified anchor matches omitted by the projection budget', () => {
     const projected = projectRemoteContextBrief({
       anchors: [
-        {path: 'src/a.ts', repositoryId: 'a'.repeat(64)},
-        {path: 'src/b.ts', repositoryId: 'a'.repeat(64)},
+        {path: 'src/a.ts', repositoryId: Effect.pipe('a', EffectString.repeat(64))},
+        {path: 'src/b.ts', repositoryId: Effect.pipe('a', EffectString.repeat(64))},
       ],
       budgetTokens: 800,
       directSearchComplete: false,
@@ -122,7 +142,7 @@ describe('remote Context Brief', () => {
       results: Array.from({length: 24}, (_, index) => ({
         anchorOrdinals: index === 23 ? [1] : [0],
         evidence: 'anchor' as const,
-        excerpt: 'x'.repeat(1_000),
+        excerpt: Effect.pipe('x', EffectString.repeat(1_000)),
         kind: 'durable' as const,
         project: 'threadnote',
         revision: `revision-${index}`,
@@ -133,16 +153,7 @@ describe('remote Context Brief', () => {
       })),
       task: 'Trace anchors.',
     });
-    const anchors = projected.structuredContent.anchors as {
-      coverage: {
-        directSearchTruncated: boolean;
-        matchedAnchorOrdinals: number[];
-        omittedMatchedAnchorOrdinals: number[];
-        returnedAnchorOrdinals: number[];
-        unmatchedAnchorOrdinals: number[];
-        unresolvedAnchorOrdinals: number[];
-      };
-    };
+    const anchors = Schema.decodeUnknownSync(projectedAnchorsSchema)(projected.structuredContent.anchors);
 
     expect(anchors.coverage).toMatchObject({
       directSearchTruncated: true,
@@ -157,8 +168,8 @@ describe('remote Context Brief', () => {
   it('keeps absent anchors unresolved while backlink repair is incomplete', () => {
     const projected = projectRemoteContextBrief({
       anchors: [
-        {path: 'src/a.ts', repositoryId: 'a'.repeat(64)},
-        {path: 'src/b.ts', repositoryId: 'a'.repeat(64)},
+        {path: 'src/a.ts', repositoryId: Effect.pipe('a', EffectString.repeat(64))},
+        {path: 'src/b.ts', repositoryId: Effect.pipe('a', EffectString.repeat(64))},
       ],
       budgetTokens: 800,
       directSearchComplete: false,
@@ -168,9 +179,7 @@ describe('remote Context Brief', () => {
       results: [],
       task: 'Trace pending repair.',
     });
-    const anchors = projected.structuredContent.anchors as {
-      coverage: {unmatchedAnchorOrdinals: number[]; unresolvedAnchorOrdinals: number[]};
-    };
+    const anchors = Schema.decodeUnknownSync(projectedAnchorsSchema)(projected.structuredContent.anchors);
 
     expect(anchors.coverage.unmatchedAnchorOrdinals).toEqual([]);
     expect(anchors.coverage.unresolvedAnchorOrdinals).toEqual([1]);

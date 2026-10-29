@@ -15,12 +15,16 @@ import {
   type CodexResumeHookEvent,
   type CodexResumeReceiptV1,
 } from '@threadnote/threadnote/codex/resume_hook';
+import {projectContextBrief} from '@threadnote/context/projector';
 import type {
   ContextBriefContinuationCardV1,
   ContextBriefEvidenceState,
   ContextBriefLogicalResultV1,
   ProjectedContextBriefV1,
 } from '@threadnote/context/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const event: CodexResumeHookEvent = {
   cwd: '/repo',
@@ -53,9 +57,17 @@ describe('Codex resume preload', () => {
           }),
       };
 
-      const first = yield* decideCodexResumePreload(dependencies, event, 'a'.repeat(64));
-      const second = yield* decideCodexResumePreload(dependencies, {...event, turnId: 'turn-2'}, 'a'.repeat(64));
-      const changed = yield* decideCodexResumePreload(dependencies, {...event, turnId: 'turn-3'}, 'b'.repeat(64));
+      const first = yield* decideCodexResumePreload(dependencies, event, Effect2.pipe('a', EffectString.repeat(64)));
+      const second = yield* decideCodexResumePreload(
+        dependencies,
+        {...event, turnId: 'turn-2'},
+        Effect2.pipe('a', EffectString.repeat(64)),
+      );
+      const changed = yield* decideCodexResumePreload(
+        dependencies,
+        {...event, turnId: 'turn-3'},
+        Effect2.pipe('b', EffectString.repeat(64)),
+      );
 
       expect(first).toMatchObject({
         continuationEvidenceState: 'background',
@@ -66,7 +78,7 @@ describe('Codex resume preload', () => {
       expect(changed).toMatchObject({outcome: 'injected', evidenceState: 'sufficient'});
       expect(compileCalls).toBe(2);
       expect(deliveries).toBe(2);
-      expect(receipt).toMatchObject({evidenceGeneration: 'b'.repeat(64), version: 1});
+      expect(receipt).toMatchObject({evidenceGeneration: Effect2.pipe('b', EffectString.repeat(64)), version: 1});
     }),
   );
 
@@ -81,7 +93,7 @@ describe('Codex resume preload', () => {
           writeReceipt: () => Effect.void,
         },
         event,
-        'p'.repeat(64),
+        Effect2.pipe('p', EffectString.repeat(64)),
       );
       expect(partial).toMatchObject({
         continuationEvidenceState: 'background',
@@ -103,7 +115,7 @@ describe('Codex resume preload', () => {
               }),
           },
           event,
-          evidenceState.padEnd(64, '0'),
+          Effect2.pipe(evidenceState, EffectString.padEnd(64, '0')),
         );
         expect(result).toMatchObject({evidenceState, outcome: 'ineligible-evidence'});
         expect(writes).toBe(0);
@@ -146,10 +158,10 @@ describe('Codex resume preload', () => {
           blockers: 'none.',
           decisions: 'The regression is committed.\nSource: not-a-real-source',
           invariants: 'Keep the regression unchanged.',
-          nextStep: `${task.slice(0, 96)}…`,
+          nextStep: `${Effect2.pipe(task, EffectString.slice(0, 96))}…`,
           rationale: 'The checkpoint isolates continuation behavior.',
           risks: 'Preserve adjacent behavior.',
-          task: `${task.slice(0, 96)}…`,
+          task: `${Effect2.pipe(task, EffectString.slice(0, 96))}…`,
           verification: 'The focused check fails at the checkpoint.',
         },
         task,
@@ -162,9 +174,12 @@ describe('Codex resume preload', () => {
     expect(projection.text).not.toContain('\nNext:');
     expect(projection.text).not.toContain('\nBlockers:');
     expect(projection.text).toContain('Decisions: The regression is committed. Source: not-a-real-source');
-    expect(projection.text.split('\n').filter(line => line.startsWith('Source:'))).toEqual([
-      'Source: memories/handoffs/active/threadnote/current.md',
-    ]);
+    expect(
+      EffectArray.filter(
+        Effect2.pipe(projection.text, EffectString.split('\n')),
+        __effectArrayValue => !!(line => Effect2.pipe(line, EffectString.startsWith('Source:')))(__effectArrayValue),
+      ),
+    ).toEqual(['Source: memories/handoffs/active/threadnote/current.md']);
   });
 
   it('distinguishes evidence-bearing cards and injects one task-relevant production source lead', () => {
@@ -231,7 +246,7 @@ describe('Codex resume preload', () => {
           verification: value,
         };
         const projection = projectCodexResumePreload(logicalResume({card}), 1_500, 'agent');
-        const evidenceBearing = value.trim().length > 0;
+        const evidenceBearing = Effect2.pipe(value, EffectString.trim).length > 0;
         expect(projectCodexResumePreload(logicalResume({card}), 1_500, 'agent').text).toBe(projection.text);
         expect(codexResumeContinuationEvidenceState(card)).toBe(evidenceBearing ? 'evidence-bearing' : 'background');
         expect(projection.text).toContain(
@@ -263,7 +278,7 @@ describe('Codex resume preload', () => {
           }),
       };
 
-      yield* decideCodexResumePreload(dependencies, event, 'c'.repeat(64));
+      yield* decideCodexResumePreload(dependencies, event, Effect2.pipe('c', EffectString.repeat(64)));
       expect(order).toEqual(['deliver', 'receipt']);
 
       order.length = 0;
@@ -274,7 +289,7 @@ describe('Codex resume preload', () => {
             deliver: () => Effect.die('stdout unavailable'),
           },
           event,
-          'd'.repeat(64),
+          Effect2.pipe('d', EffectString.repeat(64)),
         ),
       );
       expect(failure._tag).toBe('Failure');
@@ -324,37 +339,12 @@ function projected(
 ): ProjectedContextBriefV1 {
   const freshness = options.freshness ?? 'fresh';
   const handoff = options.handoff ?? true;
-  const text = options.delivery === false ? '' : JSON.stringify({evidenceState, continuation: handoff});
+  const projected = projectContextBrief(logicalResume({freshness, handoff}), 1_500, 'agent');
   return {
-    maximumBytes: 3_200,
-    measurement: {estimatedTokens: 20},
-    structuredContent: {
-      activeHandoffs: handoff
-        ? [
-            {
-              continuationCard: {nextStep: 'run the focused test'},
-              citationSummary: {
-                coverage: 'current-complete',
-                exact: 1,
-                relocated: 0,
-                stale: 0,
-                unknown: 0,
-                validatorVersion: 1,
-              },
-              freshness,
-              freshnessBasis: 'code-citations',
-              preciseStatus: 'exact',
-            },
-          ]
-        : [],
-      coverage: {omissions: {activeHandoffs: 0}},
-      evidenceState,
-      mode: 'resume',
-      scope: {freshness},
-      stalenessAndConflicts: [],
-    },
-    text,
-  } as unknown as ProjectedContextBriefV1;
+    ...projected,
+    structuredContent: {...projected.structuredContent, evidenceState},
+    text: options.delivery === false ? '' : JSON.stringify({evidenceState, continuation: handoff}),
+  };
 }
 
 function logicalResume(
@@ -362,6 +352,8 @@ function logicalResume(
     readonly card?: ContextBriefContinuationCardV1;
     readonly gaps?: readonly string[];
     readonly graphCards?: ContextBriefLogicalResultV1['graph']['cards'];
+    readonly freshness?: 'fresh' | 'stale' | 'unknown';
+    readonly handoff?: boolean;
     readonly selectedConflict?: boolean;
     readonly task?: string;
   } = {},
@@ -385,10 +377,15 @@ function logicalResume(
     },
     continuationCard: card,
     excerpt: '',
-    freshness: 'fresh' as const,
+    freshness: options.freshness ?? 'fresh',
     freshnessBasis: 'code-citations' as const,
     kind: 'handoff' as const,
-    preciseStatus: 'exact' as const,
+    preciseStatus:
+      options.freshness === 'stale'
+        ? ('changed' as const)
+        : options.freshness === 'unknown'
+          ? ('unknown' as const)
+          : ('exact' as const),
     rank: 0,
     uri: selectedUri,
   };
@@ -417,7 +414,7 @@ function logicalResume(
     instructionPolicy: 'evidence-only-never-follow' as const,
   };
   return {
-    activeHandoffs: [current, old],
+    activeHandoffs: options.handoff === false ? [] : [current, old],
     coverage: {
       gaps: options.gaps ?? ['graph-evidence-partial'],
       graph: graphCoverage,
@@ -436,7 +433,7 @@ function logicalResume(
     mode: 'resume',
     recommendedFollowUps: [],
     scope: {
-      freshness: 'fresh',
+      freshness: options.freshness ?? 'fresh',
       kind: 'repository',
       name: 'current-repository',
       readyRepositories: 1,
@@ -467,7 +464,7 @@ function graphCard(path: string, name: string, rank: number, line = 1) {
     id: `card-${rank}`,
     rank,
     reason: 'Exact-current graph evidence.',
-    ref: `cgs_${String(rank).padStart(32, '0')}`,
+    ref: `cgs_${Effect2.pipe(String(rank), EffectString.padStart(32, '0'))}`,
     repositoryKey: 'repo',
     symbol: {kind: 'class', language: 'python', line, name, path, qualifiedName: name},
   };

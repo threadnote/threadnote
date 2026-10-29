@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Console, Effect, FileSystem, Path} from 'effect';
 import {agentAdapterStatus, runAgentAdapterAction} from '../agent_integration/adapter_actions.js';
 import type {AgentAdapter, AgentAdapterStatus} from '../agent_integration/adapters/contract.js';
@@ -17,12 +18,7 @@ import {planContextBrief} from '@threadnote/context/planner';
 import {hasCurrentCursorHooks, hasManagedCursorHooks} from '../cursor/hooks.js';
 import {CLAUDE_SETTINGS_PATH, CODEX_HOOKS_PATH, USER_MANIFEST_NAME} from '../constants.js';
 import {hasCurrentCodexHooks, hasManagedCodexHooks} from '../codex/hooks.js';
-import {
-  CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS,
-  type ContextBriefGraphEvidenceV1,
-  type ContextBriefRequestV1,
-  type ProjectedContextBriefV1,
-} from '@threadnote/context/types';
+import {CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS, type ContextBriefRequestV1} from '@threadnote/context/types';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {SystemInfo} from '@threadnote/platform/system';
 import {hasCurrentClaudeHooks, hasManagedClaudeHooks, runHooksInstall} from '../hooks.js';
@@ -43,6 +39,8 @@ import {
   type SetupReceiptVerificationV1,
 } from './contract.js';
 import type {SetupOperationOutcome, SetupOrchestratorDependencies} from './index.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type EffectEnvironment<Value> =
   Value extends Effect.Effect<unknown, unknown, infer Requirements> ? Requirements : never;
@@ -422,18 +420,42 @@ const verifyDoctor = Effect.fn('setup.verifyDoctor')(function* (config: RuntimeC
   const system = yield* SystemInfo;
   const checks = yield* collectDoctorChecks(config, {}, system.platform);
   yield* printDoctorChecks(checks);
-  if (checks.some(check => check.status === 'fail'))
+  if (EffectArray.some(checks, check => check.status === 'fail'))
     return yield* SetupOperationError.make({message: 'Threadnote doctor reported a failed check.'});
   return {ownership: 'preexisting', status: 'verified'} satisfies SetupOperationOutcome;
 });
 
+interface SetupSourceEvidenceBrief {
+  readonly coverage: {
+    readonly gaps: readonly string[];
+    readonly graph: {readonly complete: boolean};
+    readonly omissions: {readonly graphCards: number; readonly graphContracts: number};
+  };
+  readonly graph: {readonly cards: readonly unknown[]; readonly contracts: readonly unknown[]};
+  readonly output?: {readonly truncated: boolean};
+  readonly scope: {
+    readonly freshness: string;
+    readonly readyRepositories: number;
+    readonly requestedRepositories: number;
+  };
+}
+
+interface SetupSourceVerificationBrief {
+  readonly structuredContent: SetupSourceEvidenceBrief;
+  readonly text: string;
+}
+
+interface SetupGraphLocatorEvidence {
+  readonly cards: readonly {readonly ref: string}[];
+}
+
 export interface SetupSourceVerificationDependencies<Requirements = never> {
   readonly compileFinal: (
     request: ContextBriefRequestV1,
-  ) => Effect.Effect<ProjectedContextBriefV1, unknown, Requirements>;
+  ) => Effect.Effect<SetupSourceVerificationBrief, unknown, Requirements>;
   readonly graphLocator: (
     request: ContextBriefRequestV1,
-  ) => Effect.Effect<ContextBriefGraphEvidenceV1, unknown, Requirements>;
+  ) => Effect.Effect<SetupGraphLocatorEvidence, unknown, Requirements>;
   readonly resolveProject: (projectRoot: string) => Effect.Effect<string | undefined, unknown, Requirements>;
   readonly sourceHash: (projectRoot: string) => Effect.Effect<string, unknown, Requirements>;
 }
@@ -516,7 +538,7 @@ export function setupContextBriefRequest(
   };
 }
 
-export function setupContextBriefAnchor(graph: Pick<ContextBriefGraphEvidenceV1, 'cards'>): string | undefined {
+export function setupContextBriefAnchor(graph: SetupGraphLocatorEvidence): string | undefined {
   return graph.cards[0]?.ref;
 }
 
@@ -541,7 +563,8 @@ const fileHash = Effect.fn('setup.fileHash')(function* (target: string) {
 });
 
 const printDoctorChecks = Effect.fn('setup.printDoctorChecks')(function* (checks: readonly DoctorCheck[]) {
-  for (const check of checks) yield* Console.log(`${check.status.toUpperCase()} ${check.name}: ${check.detail}`);
+  for (const check of checks)
+    yield* Console.log(`${Effect2.pipe(check.status, EffectString.toUpperCase)} ${check.name}: ${check.detail}`);
 });
 
 export function setupSurfaceAction(status: AgentAdapterStatus): 'install' | 'repair' | 'reuse' | 'unsupported' {
@@ -560,7 +583,7 @@ export function agentSurfaceTargetMatches(
   return receipt === undefined || (receipt.scope === scope && receipt.cwd === requestedCwd);
 }
 
-export function setupBriefIsSourceVerified(brief: ProjectedContextBriefV1['structuredContent']): boolean {
+export function setupBriefIsSourceVerified(brief: SetupSourceEvidenceBrief): boolean {
   return (
     brief.scope.freshness === 'fresh' &&
     brief.scope.requestedRepositories === 1 &&

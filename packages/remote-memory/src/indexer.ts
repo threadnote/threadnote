@@ -1,10 +1,12 @@
-import type {Sql, TransactionSql} from 'postgres';
+import {Array as EffectArray} from 'effect';
+import type {Sql, ISql} from 'postgres';
 import {GitCanonicalMemoryStore} from './git/canonical_store.js';
 import {assertGitMemoryBinding, requireGitMemoryBinding} from './git/binding.js';
 import {PostgresRemoteMemoryRepository} from './postgres/repository.js';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {formatRemoteMemoryUri} from '@threadnote/memory/remote/address';
 import {replaceRemoteCodeLinkBacklinks} from './code_link_backlinks.js';
+import {Option as EffectOption} from 'effect';
 
 const DEFAULT_BATCH_SIZE = 64;
 const DEFAULT_POLL_MILLISECONDS = 250;
@@ -242,7 +244,7 @@ export class RemoteMemoryIndexer {
     let deadLetters = 0;
     let pendingWork = 0;
     let oldestPendingAt: Date | undefined;
-    for (const tenantId of new Set(shares.map(share => share.tenant_id))) {
+    for (const tenantId of new Set(EffectArray.map(shares, share => share.tenant_id))) {
       const rows = await this.withTenant(
         tenantId,
         transaction =>
@@ -282,7 +284,7 @@ export class RemoteMemoryIndexer {
     `;
   }
 
-  private async withTenant<A>(tenantId: string, use: (transaction: TransactionSql) => Promise<A>): Promise<A> {
+  private async withTenant<A>(tenantId: string, use: (transaction: ISql) => Promise<A>): Promise<A> {
     return await this.sql.begin<Promise<A>>(async transaction => {
       await configureTenantTransaction(transaction, tenantId);
       return use(transaction);
@@ -300,7 +302,10 @@ export function rotateShares<A extends {readonly share_id: string; readonly tena
   nextShareKey: string | undefined,
 ): readonly A[] {
   if (!nextShareKey || shares.length < 2) return shares;
-  const index = shares.findIndex(share => shareKey(share) >= nextShareKey);
+  const index = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(shares, share => shareKey(share) >= nextShareKey),
+    () => -1,
+  );
   if (index <= 0) return index === 0 ? shares : [...shares];
   return [...shares.slice(index), ...shares.slice(0, index)];
 }
@@ -311,12 +316,15 @@ function shareKey(share: ShareDirectoryRow): string {
 
 function shareKeyAfter(shares: readonly ShareDirectoryRow[], current: ShareDirectoryRow): string | undefined {
   if (shares.length === 0) return undefined;
-  const index = shares.findIndex(share => shareKey(share) === shareKey(current));
+  const index = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(shares, share => shareKey(share) === shareKey(current)),
+    () => -1,
+  );
   return shareKey(shares[(index + 1) % shares.length]);
 }
 
 async function loadOutboxHead(
-  transaction: TransactionSql,
+  transaction: ISql,
   share: ShareDirectoryRow,
   headId: string,
 ): Promise<ClaimedHead | undefined> {
@@ -334,7 +342,7 @@ async function loadOutboxHead(
 }
 
 async function projectSearchDocument(
-  transaction: TransactionSql,
+  transaction: ISql,
   share: ShareDirectoryRow,
   event: OutboxRow,
   head: ClaimedHead,
@@ -377,7 +385,7 @@ async function projectSearchDocument(
 }
 
 async function markIndexerFailure(
-  transaction: TransactionSql,
+  transaction: ISql,
   share: ShareDirectoryRow,
   event: OutboxRow,
   cause: unknown,
@@ -392,7 +400,7 @@ async function markIndexerFailure(
   `;
 }
 
-async function advanceContiguousGeneration(transaction: TransactionSql, share: ShareDirectoryRow): Promise<void> {
+async function advanceContiguousGeneration(transaction: ISql, share: ShareDirectoryRow): Promise<void> {
   await transaction`
     UPDATE remote_memory.shares s SET indexed_generation = GREATEST(
       s.indexed_generation,
@@ -404,7 +412,7 @@ async function advanceContiguousGeneration(transaction: TransactionSql, share: S
   `;
 }
 
-async function configureTenantTransaction(transaction: TransactionSql, tenantId: string): Promise<void> {
+async function configureTenantTransaction(transaction: ISql, tenantId: string): Promise<void> {
   await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
   await transaction`SELECT set_config('statement_timeout', '10000', true)`;
   await transaction`SELECT set_config('lock_timeout', '5000', true)`;

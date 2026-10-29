@@ -10,15 +10,18 @@ import {
   type TopicGenerationReceiptV1,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const receipt = (ordinal: number): TopicGenerationReceiptV1 => ({
   version: 1,
-  receiptId: 'topic-generation-' + ordinal.toString(16).padStart(32, '0'),
-  caseId: 'health-case-' + 'a'.repeat(40),
-  reviewId: 'review-' + 'b'.repeat(24),
-  targetHash: 'c'.repeat(64),
-  observationRevision: 'd'.repeat(64),
-  packetDigest: 'e'.repeat(64),
+  receiptId: 'topic-generation-' + Effect2.pipe(ordinal.toString(16), EffectString.padStart(32, '0')),
+  caseId: 'health-case-' + Effect2.pipe('a', EffectString.repeat(40)),
+  reviewId: 'review-' + Effect2.pipe('b', EffectString.repeat(24)),
+  targetHash: Effect2.pipe('c', EffectString.repeat(64)),
+  observationRevision: Effect2.pipe('d', EffectString.repeat(64)),
+  packetDigest: Effect2.pipe('e', EffectString.repeat(64)),
   agent: 'local-ai',
   model: 'fixture',
   promptVersion: 'v5',
@@ -49,9 +52,12 @@ describe('private generation receipt storage', () => {
         yield* fs.writeFileString(orphan, 'private staged output');
         const current = receipt(1001);
         yield* saveTopicGenerationReceipt(home, current);
-        expect((yield* fs.readDirectory(directory)).filter(name => name.endsWith('.json'))).toHaveLength(
-          MAX_TOPIC_GENERATION_RECEIPTS,
-        );
+        expect(
+          EffectArray.filter(
+            yield* fs.readDirectory(directory),
+            __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+          ),
+        ).toHaveLength(MAX_TOPIC_GENERATION_RECEIPTS);
         expect(yield* fs.exists(orphan)).toBe(false);
         expect(yield* fs.exists(path.join(directory, receipt(0).receiptId + '.json'))).toBe(false);
         expect(yield* fs.exists(path.join(home, 'threadnote/candidates/v1/reviews'))).toBe(false);
@@ -68,13 +74,16 @@ describe('private generation receipt storage', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped();
-        const extra = yield* saveTopicGenerationReceipt(home, {...receipt(1), apiKey: 'private key'} as never).pipe(
-          Effect.flip,
-        );
+        const extra = yield* saveTopicGenerationReceipt(home, {
+          ...receipt(1),
+          // @ts-expect-error This schema rejection fixture deliberately adds a private field.
+          apiKey: 'private key',
+        }).pipe(Effect.flip);
         expect(extra.message).not.toContain('private key');
-        const oversized = yield* saveTopicGenerationReceipt(home, {...receipt(2), model: 'x'.repeat(256 * 1024)}).pipe(
-          Effect.flip,
-        );
+        const oversized = yield* saveTopicGenerationReceipt(home, {
+          ...receipt(2),
+          model: Effect2.pipe('x', EffectString.repeat(256 * 1024)),
+        }).pipe(Effect.flip);
         expect(oversized.message).toContain('could not be saved');
         const invalid = yield* loadTopicGenerationReceipt(home, '../reviews/fixture').pipe(Effect.flip);
         expect(invalid.message).toContain('unavailable');

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
@@ -12,7 +13,7 @@ describe('publisher contribution evidence', () => {
           FC.array(FC.string({maxLength: 20}), {minLength: 129, maxLength: 200}),
         ),
         values => {
-          const digests = values.map(sha256Digest);
+          const digests = EffectArray.map(values, sha256Digest);
           const before = [...digests];
           const input = {
             hydration: {status: 'completed' as const, hydratedResults: digests.length},
@@ -39,7 +40,7 @@ describe('publisher contribution evidence', () => {
           expect(result.verifiedResults).toBe(digests.length);
           expect(result.selectedResults).toBe(digests.length);
           expect(result.index).toEqual({reusedFiles: 3, skippedFiles: 1, snapshotId: 'snapshot', totalFiles: 5});
-          expect(result.resultManifestDigests.every(digest => digests.includes(digest))).toBe(true);
+          expect(EffectArray.every(result.resultManifestDigests, digest => digests.includes(digest))).toBe(true);
         },
       ),
       {numRuns: 40},

@@ -1,11 +1,11 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {expect, it} from '@effect/vitest';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {Effect} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe} from 'vitest';
-import {pathQuery} from '../../src/query/path.js';
-import type {CodeGraphStoreShape} from '../../src/store.js';
+import {pathQuery, type CodeGraphPathQueryStore} from '../../src/query/path.js';
 import type {CodeGraphEdge, CodeGraphQueryNode} from '../../src/types.js';
 
 const node = (id: string): CodeGraphQueryNode => ({
@@ -36,21 +36,28 @@ const edge = (sourceId: string, targetId: string): CodeGraphEdge => ({
 
 function fixture(edges: readonly CodeGraphEdge[], expiredAt?: 'adjacency' | 'symbols' | 'evidence') {
   const evidenceRequests: Array<{ids: readonly string[]; snapshotId: string}> = [];
-  const nodes = [...new Set(['start', 'target', ...edges.flatMap(edge => [edge.sourceId!, edge.targetId!])])].map(node);
+  const nodes = EffectArray.map(
+    [...new Set(['start', 'target', ...EffectArray.flatMap(edges, edge => [edge.sourceId!, edge.targetId!])])],
+    node,
+  );
   const store = {
-    directEdgeBetweenNodes: () => Effect.void,
+    // oxlint-disable-next-line effecttsgo/effect-succeed-with-void -- The store requires an undefined edge; Effect.void returns void and cannot satisfy its result type.
+    directEdgeBetweenNodes: () => Effect.succeed<CodeGraphEdge | undefined>(undefined),
+    findSymbolsByPathAndName: () => Effect.succeed([]),
     edgesByIds: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
       Effect.gen(function* () {
         evidenceRequests.push({ids: [...ids], snapshotId});
         if (expiredAt === 'evidence') yield* TestClock.adjust(2_001);
-        return ids.map(id => edges.find(edge => edge.id === id)!);
+        return EffectArray.map(ids, id =>
+          EffectOption.getOrUndefined(EffectArray.findFirst(edges, edge => edge.id === id))!,
+        );
       }),
     searchSymbols: (_databasePath: string, _snapshotId: string, query: string) =>
-      Effect.succeed(nodes.filter(node => node.id === query)),
+      Effect.succeed(EffectArray.filter(nodes, node => node.id === query)),
     symbolsByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
       Effect.gen(function* () {
         if (expiredAt === 'symbols') yield* TestClock.adjust(2_001);
-        return nodes.filter(node => ids.includes(node.id));
+        return EffectArray.filter(nodes, node => ids.includes(node.id));
       }),
     traversalEdgesForNodes: (
       _databasePath: string,
@@ -61,27 +68,28 @@ function fixture(edges: readonly CodeGraphEdge[], expiredAt?: 'adjacency' | 'sym
     ) =>
       Effect.gen(function* () {
         if (expiredAt === 'adjacency') yield* TestClock.adjust(2_001);
-        return edges
-          .filter(
+        return EffectArray.map(
+          EffectArray.filter(
+            edges,
             edge =>
               (direction !== 'incoming' && ids.includes(edge.sourceId!)) ||
               (direction !== 'outgoing' && ids.includes(edge.targetId!)),
-          )
-          .slice(0, limit)
-          .map(({id, sourceId, targetId, relation, provenance, confidence}) => ({
+          ).slice(0, limit),
+          ({id, sourceId, targetId, relation, provenance, confidence}) => ({
             confidence,
             id,
             provenance,
             relation,
             sourceId,
             targetId,
-          }));
+          }),
+        );
       }),
-  } as unknown as CodeGraphStoreShape;
+  } satisfies CodeGraphPathQueryStore;
   return {evidenceRequests, store};
 }
 
-const path = (store: CodeGraphStoreShape) =>
+const path = (store: CodeGraphPathQueryStore) =>
   pathQuery(store, '/fixture/graph.sqlite', 'leased-snapshot', 'start', 'target', 100, 200, 3, ['resolved']);
 
 describe('traversal evidence hydration', () => {
@@ -102,13 +110,15 @@ describe('traversal evidence hydration', () => {
     ({noise}) =>
       Effect.gen(function* () {
         const expected = [edge('start', 'middle'), edge('middle', 'target')];
-        const discarded = noise.map(id => edge('start', `noise-${id}`));
+        const discarded = EffectArray.map(noise, id => edge('start', `noise-${id}`));
         const {store, evidenceRequests} = fixture([...discarded, ...expected]);
         const result = yield* path(store);
         expect(result.edges).toEqual(expected);
-        expect(result.nodes.map(node => node.id)).toEqual(['start', 'middle', 'target']);
+        expect(EffectArray.map(result.nodes, node => node.id)).toEqual(['start', 'middle', 'target']);
         expect(result.searchCoverage.status).toBe('found');
-        expect(evidenceRequests).toEqual([{ids: expected.map(edge => edge.id), snapshotId: 'leased-snapshot'}]);
+        expect(evidenceRequests).toEqual([
+          {ids: EffectArray.map(expected, edge => edge.id), snapshotId: 'leased-snapshot'},
+        ]);
       }),
     {fastCheck: {numRuns: 30, seed: 741}},
   );

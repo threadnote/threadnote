@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
@@ -43,31 +44,40 @@ import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {canonicalResourceUri} from '@threadnote/store/resource-id';
 import {renderCodeBriefEditContext} from '@threadnote/threadnote/context_brief/edit_hook';
 import {summarizeLocalValueEvents, type LocalValueEventV1} from '@threadnote/threadnote/value_report/events';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const COMMIT = 'a'.repeat(40);
-const OTHER_COMMIT = 'b'.repeat(40);
-const REPOSITORY_ID = 'c'.repeat(64);
-const SHA256_ARBITRARY = fc
-  .uint8Array({minLength: 32, maxLength: 32})
-  .map(bytes => [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join(''));
-const LOCAL_SYMBOL_ARBITRARY = fc
-  .uint8Array({minLength: 16, maxLength: 16})
-  .map(bytes => `cgs_${[...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('')}`);
+const COMMIT = Effect2.pipe('a', EffectString.repeat(40));
+const OTHER_COMMIT = Effect2.pipe('b', EffectString.repeat(40));
+const REPOSITORY_ID = Effect2.pipe('c', EffectString.repeat(64));
+const SHA256_ARBITRARY = fc.uint8Array({minLength: 32, maxLength: 32}).map(bytes =>
+  EffectArray.join(
+    EffectArray.map([...bytes], byte => Effect2.pipe(byte.toString(16), EffectString.padStart(2, '0'))),
+    '',
+  ),
+);
+const LOCAL_SYMBOL_ARBITRARY = fc.uint8Array({minLength: 16, maxLength: 16}).map(
+  bytes =>
+    `cgs_${EffectArray.join(
+      EffectArray.map([...bytes], byte => Effect2.pipe(byte.toString(16), EffectString.padStart(2, '0'))),
+      '',
+    )}`,
+);
 const CANONICAL_CODE_PATH_ARBITRARY = fc
   .array(
     fc
       .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789_-'), {minLength: 1, maxLength: 12})
-      .map(characters => characters.join('')),
+      .map(characters => EffectArray.join(characters, '')),
     {minLength: 2, maxLength: 4},
   )
-  .map(segments => segments.join('/'));
+  .map(segments => EffectArray.join(segments, '/'));
 const SNAPSHOT = {
   commit: COMMIT,
   dirty: false,
   freshness: 'fresh' as const,
   repositoryId: REPOSITORY_ID,
   repositoryKey: 'threadnote',
-  snapshotId: `cgsn_${'d'.repeat(40)}`,
+  snapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
 };
 
 function verifiedProcedureEvidence() {
@@ -76,9 +86,9 @@ function verifiedProcedureEvidence() {
     dependencies: [],
     owner: 'platform-team',
     provenance: {
-      artifactSha256: 'a'.repeat(64),
+      artifactSha256: Effect2.pipe('a', EffectString.repeat(64)),
       kind: 'verified-procedure-git-share' as const,
-      manifestSha256: 'b'.repeat(64),
+      manifestSha256: Effect2.pipe('b', EffectString.repeat(64)),
       team: 'default',
       threadnoteVersion: '5.0.0',
       verifiedAt: '2026-09-17T12:00:00.000Z',
@@ -278,20 +288,25 @@ describe('Context Brief compiler', () => {
 
   effectIt.effect('keeps two direct memories for one code anchor visible at the default budget', () =>
     Effect.gen(function* () {
-      const task = createCodeMemoryLinkAgentSuiteCorpusV1().releaseTasks.find(
-        candidate => candidate.controlScenario === 'ambiguous',
+      const task = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          createCodeMemoryLinkAgentSuiteCorpusV1().releaseTasks,
+          candidate => candidate.controlScenario === 'ambiguous',
+        ),
       )!;
       const result = yield* compileCodeLinkedRecoveryFixture(5, 2, 1_250, {
         sharedCodeAnchor: true,
-        shortMemoryEvidence: task.memorySeeds.map(seed => seed.text),
+        shortMemoryEvidence: EffectArray.map(task.memorySeeds, seed => seed.text),
         task: task.prompt,
       });
       const brief = result.structuredContent;
       const agentView = projectContextBriefAgentView(result.structuredContent, true);
 
       expect(brief.durableDecisions).toHaveLength(2);
-      expect(brief.durableDecisions.every(memory => memory.selectionBasis === 'code-citation')).toBe(true);
-      expect(brief.durableDecisions.every(memory => memory.codeRelations?.[0]?.anchorOrdinal === 0)).toBe(true);
+      expect(EffectArray.every(brief.durableDecisions, memory => memory.selectionBasis === 'code-citation')).toBe(true);
+      expect(EffectArray.every(brief.durableDecisions, memory => memory.codeRelations?.[0]?.anchorOrdinal === 0)).toBe(
+        true,
+      );
       expect(agentView.durableDecisions).toHaveLength(2);
       expect(result.measurement.totalBytes).toBeLessThanOrEqual(1_250 * 3);
     }),
@@ -337,7 +352,13 @@ describe('Context Brief compiler', () => {
       });
       const brief = result.structuredContent;
       expect(brief.activeHandoffs[0]?.citationSummary?.exact).toBe(1);
-      expect(brief.activeHandoffs[0]?.codeRelations?.every(relation => relation.status === 'changed')).toBe(true);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(brief.activeHandoffs[0]?.codeRelations), __effectArrayReceiver =>
+            EffectArray.every(__effectArrayReceiver, relation => relation.status === 'changed'),
+          ),
+        ),
+      ).toBe(true);
       expect(brief.graph.cards).toHaveLength(1);
     }),
   );
@@ -351,7 +372,15 @@ describe('Context Brief compiler', () => {
       });
       const brief = result.structuredContent;
       expect(
-        brief.activeHandoffs.some(memory => memory.codeRelations?.some(relation => relation.status === 'exact')),
+        EffectArray.some(brief.activeHandoffs, memory =>
+          Boolean(
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(memory.codeRelations), __effectArrayReceiver =>
+                EffectArray.some(__effectArrayReceiver, relation => relation.status === 'exact'),
+              ),
+            ),
+          ),
+        ),
       ).toBe(true);
       expect(brief.graph.cards).toHaveLength(1);
       expect(brief.coverage.memory.codeAnchors?.matchedMemories).toBe(8);
@@ -366,9 +395,17 @@ describe('Context Brief compiler', () => {
         shortMemoryEvidence: ['shared=alpha', 'anchor-0=beta', 'anchor-1=gamma'],
       });
       const brief = result.structuredContent;
-      const shared = brief.durableDecisions.find(memory => memory.excerpt === 'shared=alpha')!;
+      const shared = EffectOption.getOrUndefined(
+        EffectArray.findFirst(brief.durableDecisions, memory => memory.excerpt === 'shared=alpha'),
+      )!;
       const agentView = projectContextBriefAgentView(brief);
-      const agentShared = agentView.durableDecisions?.find(memory => memory.excerpt === 'shared=alpha');
+      const agentShared = EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(agentView.durableDecisions), __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(__effectArrayReceiver, memory => memory.excerpt === 'shared=alpha'),
+          ),
+        ),
+      );
 
       expect(shared.codeRelations).toHaveLength(2);
       expect(agentShared).toBeDefined();
@@ -480,7 +517,9 @@ describe('Context Brief compiler', () => {
             resolved: 0,
             unresolvedOrdinals: [0, 1, 2, 3, 4, 5, 6, 7],
           });
-          const recovery = brief.recommendedFollowUps.find(followUp => followUp.operation === 'graph-status');
+          const recovery = EffectOption.getOrUndefined(
+            EffectArray.findFirst(brief.recommendedFollowUps, followUp => followUp.operation === 'graph-status'),
+          );
           expect(recovery).toMatchObject({
             operation: 'graph-status',
             scope: 'repository',
@@ -561,7 +600,7 @@ describe('Context Brief compiler', () => {
     'atomically preserves a linked handoff, incident contract, and selector with durable and long-path pressure',
     () =>
       Effect.gen(function* () {
-        const originalEvidencePath = `src/${'very-long-relationship-evidence-segment/'.repeat(128)}consumer.ts`;
+        const originalEvidencePath = `src/${Effect2.pipe('very-long-relationship-evidence-segment/', EffectString.repeat(128))}consumer.ts`;
         const result = yield* compileCodeLinkedRecoveryFixture(24, 8, 1_500, {
           contractCount: 64,
           contractEvidencePath: originalEvidencePath,
@@ -584,7 +623,12 @@ describe('Context Brief compiler', () => {
           relation: 'imports',
         });
         expect(new TextEncoder().encode(contract.evidence.path).byteLength).toBeLessThanOrEqual(48);
-        expect(originalEvidencePath.startsWith(contract.evidence.path.replace(/…$/u, ''))).toBe(true);
+        expect(
+          Effect2.pipe(
+            originalEvidencePath,
+            EffectString.startsWith(Effect2.pipe(contract.evidence.path, EffectString.replace(/…$/u, ''))),
+          ),
+        ).toBe(true);
         expect(recovery).toMatchObject({operation: 'inspect-node', rank: 0});
         if (recovery.operation !== 'inspect-node') throw new Error('Expected an exact graph inspection action.');
         expect([contract.sourceRef, contract.targetRef]).toContain(recovery.ref);
@@ -622,13 +666,17 @@ describe('Context Brief compiler', () => {
         for (const includeActiveHandoff of [false, true] as const) {
           const result = yield* compileCodeLinkedRecoveryFixture(24, 1, 1_500, {
             contractCount: 1,
-            contractEvidencePath: `src/${'p'.repeat(4_096)}`,
+            contractEvidencePath: `src/${Effect2.pipe('p', EffectString.repeat(4_096))}`,
             extraGraphGaps: ['graph-evidence-partial'],
             includeActiveHandoff,
             maximumMemoryIdentity: true,
             mode: 'impact',
-            scope: {callerCwd: `/${'c'.repeat(4_095)}`, kind: 'repository', project: 'threadnote'},
-            task: 'T'.repeat(4_096),
+            scope: {
+              callerCwd: `/${Effect2.pipe('c', EffectString.repeat(4_095))}`,
+              kind: 'repository',
+              project: 'threadnote',
+            },
+            task: Effect2.pipe('T', EffectString.repeat(4_096)),
           });
           const brief = result.structuredContent;
           const memory = includeActiveHandoff ? brief.activeHandoffs[0] : brief.durableDecisions[0];
@@ -637,7 +685,7 @@ describe('Context Brief compiler', () => {
             ? projectContextBriefAgentView(result.structuredContent, true).activeHandoffs?.[0]
             : projectContextBriefAgentView(result.structuredContent, true).durableDecisions?.[0];
 
-          expect(memory.uri).toBe(memoryIdentityAlias(`tn_${'0'.repeat(127)}1`));
+          expect(memory.uri).toBe(memoryIdentityAlias(`tn_${Effect2.pipe('0', EffectString.repeat(127))}1`));
           expect(new TextEncoder().encode(memory.uri).byteLength).toBeLessThan(160);
           expect(JSON.stringify(brief)).not.toContain(encodeURIComponent('界'));
           expect(memory).toMatchObject({
@@ -669,24 +717,28 @@ describe('Context Brief compiler', () => {
       Effect.gen(function* () {
         const result = yield* compileCodeLinkedRecoveryFixture(24, 2, 800, {
           contractCount: 1,
-          contractEvidencePath: `src/${'p'.repeat(4_096)}`,
+          contractEvidencePath: `src/${Effect2.pipe('p', EffectString.repeat(4_096))}`,
           extraGraphGaps: ['graph-evidence-partial'],
           maximumMemoryIdentity: true,
           mode: 'impact',
           projectCoverage: {
             completeness: 'partial',
-            configuredRoots: [`src/${'root/'.repeat(800)}`],
+            configuredRoots: [`src/${Effect2.pipe('root/', EffectString.repeat(800))}`],
             dependencyComponents: 1,
             kind: 'project',
             negativeProof: 'selected-graph-only',
-            observedWorktreeCommit: 'a'.repeat(40),
+            observedWorktreeCommit: Effect2.pipe('a', EffectString.repeat(40)),
             project: 'threadnote',
             reusedEquivalentSnapshot: false,
             rootComponents: 1,
           },
-          scope: {callerCwd: `/${'c'.repeat(4_095)}`, kind: 'repository', project: 'threadnote'},
+          scope: {
+            callerCwd: `/${Effect2.pipe('c', EffectString.repeat(4_095))}`,
+            kind: 'repository',
+            project: 'threadnote',
+          },
           sharedCodeAnchor: true,
-          task: 'T'.repeat(4_096),
+          task: Effect2.pipe('T', EffectString.repeat(4_096)),
         });
         const agentView = projectDualTextView(result.structuredContent);
 
@@ -719,13 +771,17 @@ describe('Context Brief compiler', () => {
     Effect.gen(function* () {
       const result = yield* compileCodeLinkedRecoveryFixture(24, 1, 1_500, {
         contractCount: 1,
-        contractEvidencePath: `src/${'p'.repeat(4_096)}`,
+        contractEvidencePath: `src/${Effect2.pipe('p', EffectString.repeat(4_096))}`,
         extraGraphGaps: ['graph-evidence-partial'],
         maximumMemoryIdentity: true,
         mode: 'impact',
         omitMemoryId: true,
-        scope: {callerCwd: `/${'c'.repeat(4_095)}`, kind: 'repository', project: 'threadnote'},
-        task: 'T'.repeat(4_096),
+        scope: {
+          callerCwd: `/${Effect2.pipe('c', EffectString.repeat(4_095))}`,
+          kind: 'repository',
+          project: 'threadnote',
+        },
+        task: Effect2.pipe('T', EffectString.repeat(4_096)),
       });
       const brief = result.structuredContent;
 
@@ -750,11 +806,12 @@ describe('Context Brief compiler', () => {
           mode: 'impact',
           projectCoverage: {
             completeness: 'partial',
+            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
             configuredRoots: [`src/${'root/'.repeat(rootLength)}`],
             dependencyComponents: 1,
             kind: 'project',
             negativeProof: 'selected-graph-only',
-            observedWorktreeCommit: 'a'.repeat(40),
+            observedWorktreeCommit: Effect2.pipe('a', EffectString.repeat(40)),
             project: 'threadnote',
             reusedEquivalentSnapshot: false,
             rootComponents: 1,
@@ -781,7 +838,7 @@ describe('Context Brief compiler', () => {
   effectIt.effect('retains canonical v2 memory, issue, and read-follow-up URIs when memory IDs are present', () =>
     Effect.gen(function* () {
       const evidence = memoryEvidence();
-      const candidates = evidence.candidates.map((candidate, rank) => ({
+      const candidates = EffectArray.map(evidence.candidates, (candidate, rank) => ({
         ...candidate,
         memoryId: `tn_v2_contract_${rank}`,
       }));
@@ -791,17 +848,25 @@ describe('Context Brief compiler', () => {
         1_500,
       );
       const brief = result.structuredContent;
-      const canonicalUris = new Set(candidates.map(candidate => candidate.uri));
+      const canonicalUris = new Set(EffectArray.map(candidates, candidate => candidate.uri));
       const memories = [...brief.activeHandoffs, ...brief.durableDecisions];
-      const readFollowUps = brief.recommendedFollowUps.filter(followUp => followUp.operation === 'read-memory');
+      const readFollowUps = EffectArray.filter(
+        brief.recommendedFollowUps,
+        followUp => followUp.operation === 'read-memory',
+      );
 
       expect(brief.version).toBe(2);
       expect(memories.length).toBeGreaterThan(0);
-      expect(memories.every(memory => canonicalUris.has(memory.uri))).toBe(true);
+      expect(EffectArray.every(memories, memory => canonicalUris.has(memory.uri))).toBe(true);
       expect(readFollowUps.length).toBeGreaterThan(0);
-      expect(readFollowUps.every(followUp => canonicalUris.has(followUp.uri))).toBe(true);
+      expect(EffectArray.every(readFollowUps, followUp => canonicalUris.has(followUp.uri))).toBe(true);
       expect(brief.stalenessAndConflicts.length).toBeGreaterThan(0);
-      expect(brief.stalenessAndConflicts.flatMap(issue => issue.uris).every(uri => canonicalUris.has(uri))).toBe(true);
+      expect(
+        EffectArray.every(
+          EffectArray.flatMap(brief.stalenessAndConflicts, issue => issue.uris),
+          uri => canonicalUris.has(uri),
+        ),
+      ).toBe(true);
       expect(JSON.stringify(brief)).not.toContain('memoryId');
       expect(JSON.stringify(brief)).not.toContain('threadnote://memory/');
     }),
@@ -811,8 +876,8 @@ describe('Context Brief compiler', () => {
     Effect.gen(function* () {
       const result = yield* compileCodeLinkedRecoveryFixture(16, 8, 800, {
         extraGraphGaps: ['graph-evidence-partial'],
-        scope: {kind: 'workset', name: '\\'.repeat(256), project: 'threadnote'},
-        task: '\\'.repeat(4_096),
+        scope: {kind: 'workset', name: Effect2.pipe('\\', EffectString.repeat(256)), project: 'threadnote'},
+        task: Effect2.pipe('\\', EffectString.repeat(4_096)),
       });
       const brief = result.structuredContent;
 
@@ -886,7 +951,7 @@ describe('Context Brief compiler', () => {
   });
 
   it('accepts only the public budget range and exact canonical local code references', () => {
-    const symbol = `cgs_${'8'.repeat(32)}`;
+    const symbol = `cgs_${Effect2.pipe('8', EffectString.repeat(32))}`;
     expect(parseContextBriefRequestV1(request(800)).budgetTokens).toBe(800);
     expect(parseContextBriefRequestV1(request(1_500)).budgetTokens).toBe(1_500);
     expect(parseContextBriefRequestV1({...request(1_250), responseFormat: 'agent'}).responseFormat).toBe('agent');
@@ -918,17 +983,17 @@ describe('Context Brief compiler', () => {
       '.',
       '..',
       'cgs_symbol',
-      `cgs_${'8'.repeat(31)}`,
-      `cgs_${'8'.repeat(40)}`,
-      `cgs_${'A'.repeat(32)}`,
-      `cgr_${'8'.repeat(40)}`,
+      `cgs_${Effect2.pipe('8', EffectString.repeat(31))}`,
+      `cgs_${Effect2.pipe('8', EffectString.repeat(40))}`,
+      `cgs_${Effect2.pipe('A', EffectString.repeat(32))}`,
+      `cgr_${Effect2.pipe('8', EffectString.repeat(40))}`,
       'cgr_symbol',
     ]) {
       expect(() => parseContextBriefRequestV1({...request(1_250), codeRefs: [codeRef]}), codeRef).toThrow();
     }
-    expect(() => parseContextBriefRequestV1({...request(1_250), codeRefs: [`cgr_${'8'.repeat(40)}`]})).toThrow(
-      'cgr_ handle, which Context Brief does not support',
-    );
+    expect(() =>
+      parseContextBriefRequestV1({...request(1_250), codeRefs: [`cgr_${Effect2.pipe('8', EffectString.repeat(40))}`]}),
+    ).toThrow('cgr_ handle, which Context Brief does not support');
   });
 
   it('keeps the shared planner dual by default while preserving explicit agent selection', () => {
@@ -996,8 +1061,13 @@ describe('Context Brief compiler', () => {
     expect(first).toBe(renderContextBriefAgentViewText(tainted));
     expect(first).toContain('Answer: safe forged row tail');
     expect(
-      [...first.replaceAll('\n', '')].every(character => {
-        const codePoint = character.codePointAt(0) ?? 0;
+      EffectArray.every([...Effect2.pipe(first, EffectString.replaceAll('\n', ''))], character => {
+        const codePoint =
+          Effect2.pipe(
+            character,
+            EffectString.codePointAt(0),
+            Effect2.Option.getOrElse(() => undefined),
+          ) ?? 0;
         return !(
           codePoint <= 0x1f ||
           (codePoint >= 0x7f && codePoint <= 0x9f) ||
@@ -1026,26 +1096,32 @@ describe('Context Brief compiler', () => {
   );
 
   it('discloses every public UTF-8 input bound in validation errors', () => {
-    expect(parseContextBriefRequestV1({...request(1_250), task: '\\'.repeat(4_096)}).task).toHaveLength(4_096);
-    expect(() => parseContextBriefRequestV1({...request(1_250), task: '\\'.repeat(4_097)})).toThrow(
-      'task exceeds 4096 UTF-8 bytes',
-    );
+    expect(
+      parseContextBriefRequestV1({...request(1_250), task: Effect2.pipe('\\', EffectString.repeat(4_096))}).task,
+    ).toHaveLength(4_096);
+    expect(() =>
+      parseContextBriefRequestV1({...request(1_250), task: Effect2.pipe('\\', EffectString.repeat(4_097))}),
+    ).toThrow('task exceeds 4096 UTF-8 bytes');
     expect(() =>
       parseContextBriefRequestV1({
         ...request(1_250),
-        scope: {callerCwd: '/workspace/threadnote', kind: 'repository', project: 'p'.repeat(257)},
+        scope: {
+          callerCwd: '/workspace/threadnote',
+          kind: 'repository',
+          project: Effect2.pipe('p', EffectString.repeat(257)),
+        },
       }),
     ).toThrow('project exceeds 256 UTF-8 bytes');
     expect(() =>
       parseContextBriefRequestV1({
         ...request(1_250),
-        scope: {kind: 'workset', name: 'w'.repeat(257)},
+        scope: {kind: 'workset', name: Effect2.pipe('w', EffectString.repeat(257))},
       }),
     ).toThrow('workset name exceeds 256 UTF-8 bytes');
     expect(() =>
       parseContextBriefRequestV1({
         ...request(1_250),
-        scope: {callerCwd: `/${'c'.repeat(4_096)}`, kind: 'repository'},
+        scope: {callerCwd: `/${Effect2.pipe('c', EffectString.repeat(4_096))}`, kind: 'repository'},
       }),
     ).toThrow('callerCwd exceeds 4096 UTF-8 bytes');
   });
@@ -1100,8 +1176,8 @@ describe('Context Brief compiler', () => {
           `./${path}`,
           `/${path}`,
           `C:/${path}`,
-          path.replaceAll('/', '\\'),
-          `${path.split('/')[0]}//${path.split('/').slice(1).join('/')}`,
+          Effect2.pipe(path, EffectString.replaceAll('/', '\\')),
+          `${Effect2.pipe(path, EffectString.split('/'))[0]}//${EffectArray.join(Effect2.pipe(path, EffectString.split('/')).slice(1), '/')}`,
           `${path}/../replacement.ts`,
         ]) {
           expect(() => parseContextBriefRequestV1({...request(1_250), codeRefs: [nonCanonical]})).toThrow();
@@ -1122,14 +1198,14 @@ describe('Context Brief compiler', () => {
       ],
       [
         {anchorOrdinal: 0, anchorPath: 'src/a.ts'},
-        {anchorNodeId: `cgs_${'9'.repeat(32)}`, anchorOrdinal: 2, anchorPath: 'src/b.ts'},
+        {anchorNodeId: `cgs_${Effect2.pipe('9', EffectString.repeat(32))}`, anchorOrdinal: 2, anchorPath: 'src/b.ts'},
       ],
     );
 
     expect(matches.get(uri)).toEqual([
       {anchorOrdinal: 0, anchorPath: 'src/a.ts', citationId: 'citation-a', matchKind: 'file-path'},
       {
-        anchorNodeId: `cgs_${'9'.repeat(32)}`,
+        anchorNodeId: `cgs_${Effect2.pipe('9', EffectString.repeat(32))}`,
         anchorOrdinal: 2,
         anchorPath: 'src/b.ts',
         citationId: 'citation-b',
@@ -1144,7 +1220,8 @@ describe('Context Brief compiler', () => {
         fc.integer({min: 1, max: 8}),
         fc.array(fc.integer({min: -2, max: 10}), {maxLength: 16}),
         (requested, observed) => {
-          const expected = Array.from({length: requested}, (_, ordinal) => ordinal).filter(
+          const expected = EffectArray.filter(
+            Array.from({length: requested}, (_, ordinal) => ordinal),
             ordinal => !observed.includes(ordinal),
           );
           const unresolved = unresolvedContextBriefCodeAnchorOrdinals(requested, observed);
@@ -1248,12 +1325,12 @@ describe('Context Brief compiler', () => {
           {
             citationValidation: (_scope, candidates) =>
               Effect.succeed(
-                candidates.flatMap(candidate =>
+                EffectArray.flatMap(candidates, candidate =>
                   candidate.uri !== directUri
                     ? []
                     : [
                         {
-                          receipts: [fileCitation, symbolCitation].map(citation => ({
+                          receipts: EffectArray.map([fileCitation, symbolCitation], citation => ({
                             candidateCount: 1,
                             citationId: citation.id,
                             coverage: 'current-complete' as const,
@@ -1273,7 +1350,10 @@ describe('Context Brief compiler', () => {
               ),
             codeLinkedMemoryEvidence: plan =>
               Effect.sync(() => {
-                expect(plan.codeRefs).toEqual(['src/catalog/store.ts', `cgs_${'8'.repeat(32)}`]);
+                expect(plan.codeRefs).toEqual([
+                  'src/catalog/store.ts',
+                  `cgs_${Effect2.pipe('8', EffectString.repeat(32))}`,
+                ]);
                 return {
                   codeAnchorCoverage: {complete: true, matchedMemories: 1, requested: 2, resolved: 2},
                   candidates: [directCandidate],
@@ -1294,7 +1374,7 @@ describe('Context Brief compiler', () => {
           },
           {
             ...request(1_250),
-            codeRefs: ['src/catalog/store.ts', `cgs_${'8'.repeat(32)}`],
+            codeRefs: ['src/catalog/store.ts', `cgs_${Effect2.pipe('8', EffectString.repeat(32))}`],
           },
         );
 
@@ -1307,7 +1387,9 @@ describe('Context Brief compiler', () => {
           resolved: 2,
         });
         expect(result.structuredContent.graph.cards).toHaveLength(1);
-        const direct = result.structuredContent.durableDecisions.find(memory => memory.uri === directUri);
+        const direct = EffectOption.getOrUndefined(
+          EffectArray.findFirst(result.structuredContent.durableDecisions, memory => memory.uri === directUri),
+        );
         expect(direct).toMatchObject({
           excerpt: 'The reverse citation index selected this decision from the inspected code.',
           selectionBasis: 'code-citation',
@@ -1408,7 +1490,7 @@ describe('Context Brief compiler', () => {
           `src/very-long-private-directory-name-${index}/very-long-code-file-name-${index}.ts`,
         ),
       );
-      const uri = `threadnote://user/test/memories/durable/projects/threadnote/${'u'.repeat(120)}.md`;
+      const uri = `threadnote://user/test/memories/durable/projects/threadnote/${Effect2.pipe('u', EffectString.repeat(120))}.md`;
       const graph = minimalGraphEvidence();
       const card = graph.cards[0];
       const result = yield* compileContextBriefWith(
@@ -1416,7 +1498,7 @@ describe('Context Brief compiler', () => {
           citationValidation: () =>
             Effect.succeed([
               {
-                receipts: citations.map(citation => ({
+                receipts: EffectArray.map(citations, citation => ({
                   candidateCount: 1,
                   citationId: citation.id,
                   coverage: 'current-complete' as const,
@@ -1438,18 +1520,18 @@ describe('Context Brief compiler', () => {
                 {
                   citationErrorCount: 0,
                   codeCitations: citations,
-                  codeLinkMatches: citations.map((citation, anchorOrdinal) => ({
+                  codeLinkMatches: EffectArray.map(citations, (citation, anchorOrdinal) => ({
                     anchorOrdinal,
                     anchorPath: citation.path,
                     citationId: citation.id,
                     matchKind: 'file-path' as const,
                   })),
-                  excerpt: 'e'.repeat(240),
+                  excerpt: Effect2.pipe('e', EffectString.repeat(240)),
                   kind: 'durable' as const,
                   project: 'threadnote',
                   rank: 0,
                   sourceCommit: COMMIT,
-                  topic: 't'.repeat(128),
+                  topic: Effect2.pipe('t', EffectString.repeat(128)),
                   uri,
                 },
               ],
@@ -1463,24 +1545,30 @@ describe('Context Brief compiler', () => {
               cards: [
                 {
                   ...card,
-                  reason: 'r'.repeat(160),
+                  reason: Effect2.pipe('r', EffectString.repeat(160)),
                   symbol: {
                     ...card.symbol,
-                    name: 'n'.repeat(160),
-                    packageName: 'k'.repeat(160),
-                    path: `src/${'p'.repeat(240)}.ts`,
-                    qualifiedName: 'q'.repeat(240),
+                    name: Effect2.pipe('n', EffectString.repeat(160)),
+                    packageName: Effect2.pipe('k', EffectString.repeat(160)),
+                    path: `src/${Effect2.pipe('p', EffectString.repeat(240))}.ts`,
+                    qualifiedName: Effect2.pipe('q', EffectString.repeat(240)),
                   },
                 },
               ],
             }),
           memoryEvidence: () => Effect.succeed({...memoryEvidence(), candidates: []}),
         },
-        {...request(1_250), codeRefs: citations.map(citation => citation.path), task: 'T'.repeat(4_096)},
+        {
+          ...request(1_250),
+          codeRefs: EffectArray.map(citations, citation => citation.path),
+          task: Effect2.pipe('T', EffectString.repeat(4_096)),
+        },
       );
 
       expect(result.structuredContent.graph.cards.length).toBeLessThanOrEqual(1);
-      const decision = result.structuredContent.durableDecisions.find(memory => memory.uri === uri);
+      const decision = EffectOption.getOrUndefined(
+        EffectArray.findFirst(result.structuredContent.durableDecisions, memory => memory.uri === uri),
+      );
       expect(decision?.codeRelations).toHaveLength(1);
       expect(decision?.citationSummary?.exact).toBe(8);
       expect(decision).not.toHaveProperty('citationReceipts');
@@ -1496,7 +1584,7 @@ describe('Context Brief compiler', () => {
     Effect.gen(function* () {
       const fileCitation = codeCitation(3, 'file');
       const symbolCitation = codeCitation(4, 'symbol');
-      const anchorNodeId = `cgs_${'f'.repeat(32)}`;
+      const anchorNodeId = `cgs_${Effect2.pipe('f', EffectString.repeat(32))}`;
       const anchorSymbolPath = 'private/current-symbol-anchor.ts';
       const anchorFilePath = 'private/current-file-anchor.ts';
       const uri = 'threadnote://user/test/memories/durable/projects/threadnote/selector-collision.md';
@@ -1529,7 +1617,7 @@ describe('Context Brief compiler', () => {
         {
           citationValidation: (_scope, candidates) =>
             Effect.succeed(
-              candidates.map(validatedCandidate => ({
+              EffectArray.map(candidates, validatedCandidate => ({
                 receipts: [
                   {
                     candidateCount: 1,
@@ -1581,8 +1669,12 @@ describe('Context Brief compiler', () => {
         },
       );
 
-      const decision = result.structuredContent.durableDecisions.find(memory => memory.uri === uri);
-      const topicalDecision = result.structuredContent.durableDecisions.find(memory => memory.uri === lexicalUri);
+      const decision = EffectOption.getOrUndefined(
+        EffectArray.findFirst(result.structuredContent.durableDecisions, memory => memory.uri === uri),
+      );
+      const topicalDecision = EffectOption.getOrUndefined(
+        EffectArray.findFirst(result.structuredContent.durableDecisions, memory => memory.uri === lexicalUri),
+      );
       expect(decision).toBeUndefined();
       expect(topicalDecision?.citationSummary?.exact).toBe(2);
       expect(topicalDecision).not.toHaveProperty('codeRelations');
@@ -1639,7 +1731,7 @@ describe('Context Brief compiler', () => {
                 coverage: 'current-complete',
                 kind: 'symbol',
                 observedAt: '2026-08-28T00:00:00.000Z',
-                observedNodeId: `cgs_${'e'.repeat(32)}`,
+                observedNodeId: `cgs_${Effect2.pipe('e', EffectString.repeat(32))}`,
                 observedPath: 'src/relocated-symbol.ts',
                 reason: 'relocated',
                 status: 'relocated',
@@ -1928,14 +2020,17 @@ describe('Context Brief compiler', () => {
         expect.arrayContaining([expect.objectContaining({operation: 'inspect-node', ref: fixture.observedNodeId})]),
       );
       const firstDecision = expanded.structuredContent.durableDecisions[0];
-      const relocatedTargets = [`cgs_${'a'.repeat(32)}`, `cgs_${'b'.repeat(32)}`] as const;
+      const relocatedTargets = [
+        `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
+        `cgs_${Effect2.pipe('b', EffectString.repeat(32))}`,
+      ] as const;
       const multiTargetView = projectContextBriefAgentView({
         ...expanded.structuredContent,
         durableDecisions: [
           {
             ...firstDecision,
-            citationReceipts: relocatedTargets.map((observedNodeId, index) => ({
-              citationId: `tncc_${String(index + 1).repeat(40)}`,
+            citationReceipts: EffectArray.map(relocatedTargets, (observedNodeId, index) => ({
+              citationId: `tncc_${Effect2.pipe(String(index + 1), EffectString.repeat(40))}`,
               observedNodeId,
               reason: 'relocated' as const,
               status: 'relocated' as const,
@@ -1962,7 +2057,7 @@ describe('Context Brief compiler', () => {
     expect(
       validateContextBriefPreciseCodeEvidence({
         evidence,
-        observation: {...observation, contentHash: 'f'.repeat(64)},
+        observation: {...observation, contentHash: Effect2.pipe('f', EffectString.repeat(64))},
       }),
     ).toBe('changed');
     expect(validateContextBriefPreciseCodeEvidence({evidence, observation: {...observation, exists: false}})).toBe(
@@ -1977,7 +2072,7 @@ describe('Context Brief compiler', () => {
     expect(
       validateContextBriefPreciseCodeEvidence({
         evidence,
-        observation: {...observation, repositoryId: 'f'.repeat(64)},
+        observation: {...observation, repositoryId: Effect2.pipe('f', EffectString.repeat(64))},
       }),
     ).toBe('unknown');
   });
@@ -1995,8 +2090,8 @@ describe('Context Brief compiler', () => {
         const graph = graphEvidence();
         const memory = memoryEvidence();
         const reordered = yield* compile(
-          {...graph, cards: graphOrder.map(index => graph.cards[index])},
-          {...memory, candidates: memoryOrder.map(index => memory.candidates[index])},
+          {...graph, cards: EffectArray.map(graphOrder, index => graph.cards[index])},
+          {...memory, candidates: EffectArray.map(memoryOrder, index => memory.candidates[index])},
           1_500,
         );
         expect(reordered.structuredContent).toEqual(baseline.structuredContent);
@@ -2016,12 +2111,14 @@ describe('Context Brief compiler', () => {
           const merged = mergeContextBriefMemoryEvidence(lexical, direct, 24, 8);
           const expectedIds = [...new Set([...directIds.slice(0, 8), ...lexicalIds])].slice(0, 24);
 
-          expect(merged.candidates.map(candidate => candidate.uri)).toEqual(
-            expectedIds.map(id => `threadnote://user/test/memories/durable/projects/threadnote/${id}.md`),
+          expect(EffectArray.map(merged.candidates, candidate => candidate.uri)).toEqual(
+            EffectArray.map(expectedIds, id => `threadnote://user/test/memories/durable/projects/threadnote/${id}.md`),
           );
           expect(merged.candidates).toHaveLength(Math.min(expectedIds.length, 24));
-          expect(new Set(merged.candidates.map(candidate => candidate.uri)).size).toBe(merged.candidates.length);
-          expect(merged.candidates.map(candidate => candidate.rank)).toEqual(
+          expect(new Set(EffectArray.map(merged.candidates, candidate => candidate.uri)).size).toBe(
+            merged.candidates.length,
+          );
+          expect(EffectArray.map(merged.candidates, candidate => candidate.rank)).toEqual(
             Array.from({length: merged.candidates.length}, (_, rank) => rank),
           );
         },
@@ -2063,7 +2160,7 @@ describe('Context Brief compiler', () => {
         codeCitations: [citation],
         codeLinkMatches: [
           {
-            anchorNodeId: `cgs_${'f'.repeat(32)}`,
+            anchorNodeId: `cgs_${Effect2.pipe('f', EffectString.repeat(32))}`,
             anchorOrdinal: 0,
             anchorPath: 'src/current-anchor.ts',
             citationId: citation.id,
@@ -2080,7 +2177,7 @@ describe('Context Brief compiler', () => {
       trust: lexical.trust,
     };
     const merged = mergeContextBriefMemoryEvidence(lexical, codeLinked, 24, 8);
-    const validations = merged.candidates.flatMap(candidate =>
+    const validations = EffectArray.flatMap(merged.candidates, candidate =>
       candidate.codeCitations.length === 0
         ? []
         : [
@@ -2112,7 +2209,7 @@ describe('Context Brief compiler', () => {
     });
 
     expect(merged.candidates).toHaveLength(9);
-    expect(logical.durableDecisions.map(memory => memory.uri)).toEqual([lexical.candidates[0].uri]);
+    expect(EffectArray.map(logical.durableDecisions, memory => memory.uri)).toEqual([lexical.candidates[0].uri]);
     expect(logical.coverage.memory.codeAnchors?.matchedMemories).toBe(0);
   });
 
@@ -2124,7 +2221,7 @@ describe('Context Brief compiler', () => {
         .array(fc.constantFrom('a', ' ', '"', '\\', '\n', '\t', 'Ł', '東', '京', '🙂', '\u0301'), {
           maxLength: 32,
         })
-        .map(characters => characters.join('')),
+        .map(characters => EffectArray.join(characters, '')),
     },
     ({escaped}) =>
       Effect.gen(function* () {
@@ -2133,7 +2230,7 @@ describe('Context Brief compiler', () => {
         const result = yield* compile(
           {
             ...graph,
-            cards: graph.cards.map((card, index) =>
+            cards: EffectArray.map(graph.cards, (card, index) =>
               index === 0
                 ? {
                     ...card,
@@ -2149,7 +2246,7 @@ describe('Context Brief compiler', () => {
           },
           {
             ...memory,
-            candidates: memory.candidates.map((candidate, index) =>
+            candidates: EffectArray.map(memory.candidates, (candidate, index) =>
               index === 0 ? {...candidate, excerpt: `Evidence ${escaped}`} : candidate,
             ),
           },
@@ -2287,9 +2384,10 @@ describe('Context Brief compiler', () => {
           },
         );
         const view = projectContextBriefAgentView(result.structuredContent, true);
-        const scopeRecovery = (view.recommendedFollowUps ?? [])
-          .map(followUp => followUp.operation)
-          .filter(operation => operation === 'continue-workset');
+        const scopeRecovery = EffectArray.filter(
+          EffectArray.map(view.recommendedFollowUps ?? [], followUp => followUp.operation),
+          operation => operation === 'continue-workset',
+        );
 
         expect(view.graph?.cards).toHaveLength(2);
         expect(scopeRecovery).toEqual(testCase.expected);
@@ -2381,7 +2479,7 @@ describe('Context Brief compiler', () => {
             expect.fail(`unexpected non-executable recovery: ${String((followUp as {operation: string}).operation)}`);
         }
       }
-      expect(variants.map(followUp => followUp.operation)).not.toContain('prepare-workset');
+      expect(EffectArray.map(variants, followUp => followUp.operation)).not.toContain('prepare-workset');
     }),
   );
 
@@ -2454,7 +2552,11 @@ describe('Context Brief compiler', () => {
         ?.excerpt;
       expect(explainView.answer).toMatch(/^(?:Candidate )?Rationale/u);
       expect(rationaleExcerpt).toBeDefined();
-      expect(explainView.answer).toContain(rationaleExcerpt?.slice(0, 24));
+      expect(explainView.answer).toContain(
+        Effect2.pipe(rationaleExcerpt, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.slice(0, 24)),
+        ),
+      );
     }),
   );
 
@@ -2493,10 +2595,13 @@ describe('Context Brief compiler', () => {
         const baseline = yield* compileTaskOnlyMixedCitationFixture(budget, {excerptLength});
         const annotated = yield* compileTaskOnlyMixedCitationFixture(budget, {excerptLength, validationStatus});
         const highRankedUris = new Set([TASK_ONLY_TOP_HANDOFF_URI, TASK_ONLY_TOP_DECISION_URI]);
-        const baselinePrefix = [
-          ...memoryUris(baseline.structuredContent.activeHandoffs),
-          ...memoryUris(baseline.structuredContent.durableDecisions),
-        ].filter(uri => highRankedUris.has(uri));
+        const baselinePrefix = EffectArray.filter(
+          [
+            ...memoryUris(baseline.structuredContent.activeHandoffs),
+            ...memoryUris(baseline.structuredContent.durableDecisions),
+          ],
+          uri => highRankedUris.has(uri),
+        );
         const annotatedUris = [
           ...memoryUris(annotated.structuredContent.activeHandoffs),
           ...memoryUris(annotated.structuredContent.durableDecisions),
@@ -2571,6 +2676,7 @@ describe('Context Brief compiler', () => {
         const options = {
           allActiveHandoffs: true,
           sharedCodeAnchor: true,
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           shortMemoryEvidence: Array.from({length: memoryCount}, () => 'e'.repeat(excerptLength)),
           validationStatus: 'changed' as const,
         };
@@ -2580,7 +2686,9 @@ describe('Context Brief compiler', () => {
         expect(expanded.structuredContent.graph.cards).toHaveLength(1);
         expect(expanded.structuredContent.activeHandoffs.length).toBeGreaterThan(0);
         for (const memory of narrow.structuredContent.activeHandoffs) {
-          expect(expanded.structuredContent.activeHandoffs.map(candidate => candidate.uri)).toContain(memory.uri);
+          expect(EffectArray.map(expanded.structuredContent.activeHandoffs, candidate => candidate.uri)).toContain(
+            memory.uri,
+          );
         }
         expect(expanded.measurement.totalBytes).toBeLessThanOrEqual(1_500 * 3);
       }),
@@ -2602,7 +2710,7 @@ describe('Context Brief compiler', () => {
           sharedCodeAnchor: true,
           shortMemoryEvidence: Array.from(
             {length: memoryCount},
-            (_, rank) => `direct-code-anchor-${rank}=${'e'.repeat(40)}`,
+            (_, rank) => `direct-code-anchor-${rank}=${Effect2.pipe('e', EffectString.repeat(40))}`,
           ),
         });
         const selected =
@@ -2639,11 +2747,23 @@ describe('Context Brief compiler', () => {
         const agentMemories = [...(agentView.activeHandoffs ?? []), ...(agentView.durableDecisions ?? [])];
 
         for (const ordinal of [0, 1]) {
-          const structuredCount = structuredMemories.filter(memory =>
-            memory.codeRelations?.some(relation => relation.anchorOrdinal === ordinal),
+          const structuredCount = EffectArray.filter(structuredMemories, memory =>
+            Boolean(
+              EffectOption.getOrUndefined(
+                EffectOption.map(EffectOption.fromNullishOr(memory.codeRelations), __effectArrayReceiver =>
+                  EffectArray.some(__effectArrayReceiver, relation => relation.anchorOrdinal === ordinal),
+                ),
+              ),
+            ),
           ).length;
-          const agentCount = agentMemories.filter(memory =>
-            memory.codeRelations?.some(relation => relation.anchorOrdinal === ordinal),
+          const agentCount = EffectArray.filter(agentMemories, memory =>
+            Boolean(
+              EffectOption.getOrUndefined(
+                EffectOption.map(EffectOption.fromNullishOr(memory.codeRelations), __effectArrayReceiver =>
+                  EffectArray.some(__effectArrayReceiver, relation => relation.anchorOrdinal === ordinal),
+                ),
+              ),
+            ),
           ).length;
           expect(
             structuredCount === 0 || structuredCount >= 2,
@@ -2667,14 +2787,18 @@ describe('Context Brief compiler', () => {
       Effect.gen(function* () {
         const result = yield* compileCodeLinkedRecoveryFixture(24, 2, 1_500, {
           contractCount: 1,
-          contractEvidencePath: `src/${'p'.repeat(4_096)}`,
+          contractEvidencePath: `src/${Effect2.pipe('p', EffectString.repeat(4_096))}`,
           extraGraphGaps: ['graph-evidence-partial'],
           includeActiveHandoff,
           maximumMemoryIdentity: true,
           mode,
-          scope: {callerCwd: `/${'c'.repeat(4_095)}`, kind: 'repository', project: 'threadnote'},
+          scope: {
+            callerCwd: `/${Effect2.pipe('c', EffectString.repeat(4_095))}`,
+            kind: 'repository',
+            project: 'threadnote',
+          },
           sharedCodeAnchor: true,
-          task: 'T'.repeat(4_096),
+          task: Effect2.pipe('T', EffectString.repeat(4_096)),
         });
 
         expect(result.structuredContent.activeHandoffs.length + result.structuredContent.durableDecisions.length).toBe(
@@ -2726,6 +2850,7 @@ describe('Context Brief compiler', () => {
     },
     ({budget, evidencePathLength, includeActiveHandoff, mode}) =>
       Effect.gen(function* () {
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const originalEvidencePath = `src/${'p'.repeat(evidencePathLength)}`;
         const result = yield* compileCodeLinkedRecoveryFixture(24, 2, budget, {
           contractCount: 64,
@@ -2768,6 +2893,7 @@ describe('Context Brief compiler', () => {
         const largeBudget = Math.min(1_500, smallBudget + delta);
         const options = {
           contractCount: 64,
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           contractEvidencePath: `src/${'p'.repeat(evidencePathLength)}`,
           includeActiveHandoff,
           mode,
@@ -2805,17 +2931,24 @@ describe('Context Brief compiler', () => {
     },
     ({gapCount, scopeCharacter, scopeNameLength, taskCharacter, taskLength}) =>
       Effect.gen(function* () {
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const scopeName = scopeCharacter.repeat(scopeNameLength);
         const result = yield* compileCodeLinkedRecoveryFixture(16, 8, 800, {
-          extraGraphGaps: Array.from({length: gapCount}, (_, index) => `bounded-gap-${index}-${'g'.repeat(32)}`),
+          extraGraphGaps: Array.from(
+            {length: gapCount},
+            (_, index) => `bounded-gap-${index}-${Effect2.pipe('g', EffectString.repeat(32))}`,
+          ),
           scope: {kind: 'workset', name: scopeName, project: 'threadnote'},
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           task: taskCharacter.repeat(taskLength),
         });
         const brief = result.structuredContent;
         const agentView = projectContextBriefAgentView(result.structuredContent, true);
         const expectedGapCount = Math.min(24, 1 + gapCount);
         const expectedFirstGap =
-          gapCount === 0 ? 'one-optional-contract-extractor-unavailable' : 'bounded-gap-0-' + 'g'.repeat(32);
+          gapCount === 0
+            ? 'one-optional-contract-extractor-unavailable'
+            : 'bounded-gap-0-' + Effect2.pipe('g', EffectString.repeat(32));
 
         expect(brief.coverage.gaps.length + brief.coverage.omissions.coverageGaps).toBe(expectedGapCount);
         expect(brief.coverage.gaps[0]).toBe(expectedFirstGap);
@@ -2919,6 +3052,7 @@ function compileTaskOnlyMixedCitationFixture(
 ) {
   const graph = graphEvidence();
   const citation = codeCitation(9, 'file', 'src/context_brief/unrelated-cited-memory.ts');
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   const excerpt = 'e'.repeat(options.excerptLength ?? 64);
   const graphFreshness = options.graphFreshness;
   const validationStatus = options.validationStatus;
@@ -2990,7 +3124,7 @@ function compileTaskOnlyMixedCitationFixture(
             ? {}
             : {
                 coverage: {...graph.coverage, states: {[graphFreshness]: 1}},
-                resolvedSnapshots: graph.resolvedSnapshots.map(snapshot => ({
+                resolvedSnapshots: EffectArray.map(graph.resolvedSnapshots, snapshot => ({
                   ...snapshot,
                   freshness: graphFreshness,
                 })),
@@ -3076,8 +3210,8 @@ function compileCodeLinkedRecoveryFixture(
     {length: memoryCount},
     (_, index) => options.codeAnchorOrdinalsByMemory?.[index] ?? [options.sharedCodeAnchor === true ? 0 : index],
   );
-  const citationsByMemory = anchorOrdinalsByMemory.map(ordinals =>
-    ordinals.map(ordinal =>
+  const citationsByMemory = EffectArray.map(anchorOrdinalsByMemory, ordinals =>
+    EffectArray.map(ordinals, ordinal =>
       codeCitation(
         ordinal + 1,
         'file',
@@ -3085,18 +3219,21 @@ function compileCodeLinkedRecoveryFixture(
       ),
     ),
   );
-  const codeRefs = [...new Set(citationsByMemory.flat().map(citation => citation.path))];
+  const codeRefs = [...new Set(EffectArray.map(citationsByMemory.flat(), citation => citation.path))];
   const unmatchedCitation = codeCitation(9, 'file', 'src/unrelated.ts');
-  const candidates: readonly ContextBriefMemoryCandidateV1[] = citationsByMemory.map((citations, rank) => {
+  const candidates: readonly ContextBriefMemoryCandidateV1[] = EffectArray.map(citationsByMemory, (citations, rank) => {
     const kind =
       options.allActiveHandoffs === true || (options.includeActiveHandoff === true && rank === 0)
         ? ('handoff' as const)
         : ('durable' as const);
-    const maximumSegment = '界'.repeat(85);
+    const maximumSegment = Effect2.pipe('界', EffectString.repeat(85));
     const user = options.maximumMemoryIdentity === true ? maximumSegment : 'u';
     const project = options.maximumMemoryIdentity === true ? maximumSegment : 'threadnote';
-    const topic = options.maximumMemoryIdentity === true ? `${'界'.repeat(83)}${rank}` : `code-linked-recovery-${rank}`;
-    const memoryId = `tn_${(rank + 1).toString(16).padStart(options.maximumMemoryIdentity === true ? 128 : 32, '0')}`;
+    const topic =
+      options.maximumMemoryIdentity === true
+        ? `${Effect2.pipe('界', EffectString.repeat(83))}${rank}`
+        : `code-linked-recovery-${rank}`;
+    const memoryId = `tn_${Effect2.pipe((rank + 1).toString(16), EffectString.padStart(options.maximumMemoryIdentity === true ? 128 : 32, '0'))}`;
     const uri =
       kind === 'handoff'
         ? canonicalResourceUri('user', [user, 'memories', 'handoffs', 'active', project, `${topic}.md`])
@@ -3116,13 +3253,15 @@ function compileCodeLinkedRecoveryFixture(
         : {}),
       codeCitations:
         options.unmatchedExactCitationOnFirst === true && rank === 0 ? [...citations, unmatchedCitation] : citations,
-      codeLinkMatches: citations.map((citation, relationIndex) => ({
+      codeLinkMatches: EffectArray.map(citations, (citation, relationIndex) => ({
         anchorOrdinal: anchorOrdinalsByMemory[rank][relationIndex],
         anchorPath: citation.path,
         citationId: citation.id,
         matchKind: 'file-path' as const,
       })),
-      excerpt: options.shortMemoryEvidence?.[rank] ?? `Code-linked recovery decision ${rank}: ${'e'.repeat(160)}`,
+      excerpt:
+        options.shortMemoryEvidence?.[rank] ??
+        `Code-linked recovery decision ${rank}: ${Effect2.pipe('e', EffectString.repeat(160))}`,
       kind,
       ...(options.omitMemoryId === true ? {} : {memoryId}),
       project,
@@ -3132,18 +3271,19 @@ function compileCodeLinkedRecoveryFixture(
       uri,
     };
   });
-  const unresolvedOrdinals = [...new Set(options.unresolvedOrdinals ?? [])].filter(
+  const unresolvedOrdinals = EffectArray.filter(
+    [...new Set(options.unresolvedOrdinals ?? [])],
     ordinal => ordinal >= 0 && ordinal < memoryCount,
   );
   const unresolved = new Set(unresolvedOrdinals);
-  const linkedCandidates = candidates.filter((_, ordinal) => !unresolved.has(ordinal));
+  const linkedCandidates = EffectArray.filter(candidates, (_, ordinal) => !unresolved.has(ordinal));
   const graph = graphEvidence();
   return compileContextBriefWith(
     {
       citationValidation: () =>
         Effect.succeed(
-          linkedCandidates.map(candidate => ({
-            receipts: candidate.codeCitations.map(citation => {
+          EffectArray.map(linkedCandidates, candidate => ({
+            receipts: EffectArray.map(candidate.codeCitations, citation => {
               const status =
                 options.unmatchedExactCitationOnFirst === true && citation.id === unmatchedCitation.id
                   ? 'exact'
@@ -3176,8 +3316,8 @@ function compileCodeLinkedRecoveryFixture(
             matchedMemories: linkedCandidates.length,
             requested: codeRefs.length,
             resolved: new Set(
-              linkedCandidates.flatMap(candidate =>
-                (candidate.codeLinkMatches ?? []).map(match => match.anchorOrdinal),
+              EffectArray.flatMap(linkedCandidates, candidate =>
+                EffectArray.map(candidate.codeLinkMatches ?? [], match => match.anchorOrdinal),
               ),
             ).size,
             ...(unresolvedOrdinals.length === 0 ? {} : {unresolvedOrdinals}),
@@ -3197,9 +3337,11 @@ function compileCodeLinkedRecoveryFixture(
             ...graph.cards[0],
             id: `recovery-card-${rank}`,
             rank,
-            reason: `Bounded recovery graph evidence ${rank}: ${'r'.repeat(96)}`,
+            reason: `Bounded recovery graph evidence ${rank}: ${Effect2.pipe('r', EffectString.repeat(96))}`,
             ref: recoveryGraphCardRef(rank),
-            ...(options.maximumMemoryIdentity === true ? {repositoryKey: '界'.repeat(85)} : {}),
+            ...(options.maximumMemoryIdentity === true
+              ? {repositoryKey: Effect2.pipe('界', EffectString.repeat(85))}
+              : {}),
             symbol: {
               ...graph.cards[0].symbol,
               line: rank + 1,
@@ -3218,7 +3360,9 @@ function compileCodeLinkedRecoveryFixture(
                 rank === 0 && options.contractEvidencePath !== undefined
                   ? options.contractEvidencePath
                   : `src/context_brief/recovery-consumer-${rank}.ts`,
-              ...(options.maximumMemoryIdentity === true ? {repositoryKey: '界'.repeat(85)} : {}),
+              ...(options.maximumMemoryIdentity === true
+                ? {repositoryKey: Effect2.pipe('界', EffectString.repeat(85))}
+                : {}),
             },
             id: `recovery-contract-${rank}`,
             rank,
@@ -3231,7 +3375,7 @@ function compileCodeLinkedRecoveryFixture(
           ...(options.staleGraph === true
             ? {
                 coverage: {...graph.coverage, states: {stale: 1}},
-                resolvedSnapshots: graph.resolvedSnapshots.map(snapshot => ({
+                resolvedSnapshots: EffectArray.map(graph.resolvedSnapshots, snapshot => ({
                   ...snapshot,
                   freshness: 'stale' as const,
                 })),
@@ -3261,7 +3405,7 @@ function compileCodeLinkedRecoveryFixture(
 }
 
 function recoveryGraphCardRef(rank: number): string {
-  return `cgs_${(rank + 1).toString(16).padStart(32, '0')}`;
+  return `cgs_${Effect2.pipe((rank + 1).toString(16), EffectString.padStart(32, '0'))}`;
 }
 
 function graphEvidence(): ContextBriefGraphEvidenceV1 {
@@ -3270,7 +3414,7 @@ function graphEvidence(): ContextBriefGraphEvidenceV1 {
       id: `card-${rank}`,
       rank,
       reason: `Exact catalog generation evidence ${rank}.`,
-      ref: `cgs_${String(rank + 1).repeat(32)}`,
+      ref: `cgs_${Effect2.pipe(String(rank + 1), EffectString.repeat(32))}`,
       repositoryKey: 'threadnote',
       symbol: {
         kind: 'function',
@@ -3281,7 +3425,7 @@ function graphEvidence(): ContextBriefGraphEvidenceV1 {
         qualifiedName: `catalog.publishGeneration${rank}`,
       },
     })),
-    continuation: {cursor: `cgwc_${'1'.repeat(40)}`, remainingEstimate: 4},
+    continuation: {cursor: `cgwc_${Effect2.pipe('1', EffectString.repeat(40))}`, remainingEstimate: 4},
     contracts: [
       {
         authority: 'authoritative',
@@ -3290,8 +3434,8 @@ function graphEvidence(): ContextBriefGraphEvidenceV1 {
         provenance: 'resolved',
         rank: 0,
         relation: 'depends_on',
-        sourceRef: `cgs_${'4'.repeat(32)}`,
-        targetRef: `cgs_${'5'.repeat(32)}`,
+        sourceRef: `cgs_${Effect2.pipe('4', EffectString.repeat(32))}`,
+        targetRef: `cgs_${Effect2.pipe('5', EffectString.repeat(32))}`,
       },
     ],
     coverage: {
@@ -3364,7 +3508,7 @@ function memoryEvidence(): ContextBriefMemoryRetrievalV1 {
 
 function retrievalForIds(ids: readonly number[]): ContextBriefMemoryRetrievalV1 {
   return {
-    candidates: ids.map((id, rank) => ({
+    candidates: EffectArray.map(ids, (id, rank) => ({
       citationErrorCount: 0,
       codeCitations: [],
       excerpt: `Evidence ${id}.`,
@@ -3381,7 +3525,7 @@ function retrievalForIds(ids: readonly number[]): ContextBriefMemoryRetrievalV1 
 function codeCitation(index: number, kind: 'file' | 'symbol', path = `src/catalog/code-link-${index}.ts`) {
   return createMemoryCodeCitation({
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256', value: String(index).repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe(String(index), EffectString.repeat(64))},
     path,
     repositoryId: REPOSITORY_ID,
     repositoryIdentityKind: 'local',
@@ -3393,11 +3537,14 @@ function codeCitation(index: number, kind: 'file' | 'symbol', path = `src/catalo
         ? {kind: 'file' as const}
         : {
             fragmentCanonicalization: 'utf8-source-span-v1' as const,
-            fragmentHash: {algorithm: 'sha256' as const, value: String(index + 1).repeat(64)},
+            fragmentHash: {
+              algorithm: 'sha256' as const,
+              value: Effect2.pipe(String(index + 1), EffectString.repeat(64)),
+            },
             kind: 'symbol' as const,
             language: 'typescript',
             name: `codeLink${index}`,
-            nodeId: `cgs_${String(index).repeat(32)}`,
+            nodeId: `cgs_${Effect2.pipe(String(index), EffectString.repeat(32))}`,
             qualifiedName: `catalog.codeLink${index}`,
             span: {column: 1, endColumn: 18, endLine: index, line: index},
             symbolKind: 'function',
@@ -3412,13 +3559,13 @@ function worstCaseCitationMemoryEvidence(): {
   readonly observedPath: string;
   readonly sourcePath: string;
 } {
-  const sourcePath = `s/${'x'.repeat(4_094)}`;
-  const observedPath = `m/${'y'.repeat(4_094)}`;
-  const observedNodeId = `cgs_${'f'.repeat(32)}`;
+  const sourcePath = `s/${Effect2.pipe('x', EffectString.repeat(4_094))}`;
+  const observedPath = `m/${Effect2.pipe('y', EffectString.repeat(4_094))}`;
+  const observedNodeId = `cgs_${Effect2.pipe('f', EffectString.repeat(32))}`;
   const citations = Array.from({length: 8}, (_, index) =>
     createMemoryCodeCitation({
       extractorSet: 'native-code-graph-13',
-      fileContentHash: {algorithm: 'sha256', value: String(index + 1).repeat(64)},
+      fileContentHash: {algorithm: 'sha256', value: Effect2.pipe(String(index + 1), EffectString.repeat(64))},
       path: sourcePath,
       repositoryId: REPOSITORY_ID,
       repositoryIdentityKind: 'local',
@@ -3429,11 +3576,11 @@ function worstCaseCitationMemoryEvidence(): {
         index === 0
           ? {
               fragmentCanonicalization: 'utf8-source-span-v1' as const,
-              fragmentHash: {algorithm: 'sha256' as const, value: 'e'.repeat(64)},
+              fragmentHash: {algorithm: 'sha256' as const, value: Effect2.pipe('e', EffectString.repeat(64))},
               kind: 'symbol' as const,
               language: 'typescript',
               name: 'publishGeneration',
-              nodeId: `cgs_${'1'.repeat(32)}`,
+              nodeId: `cgs_${Effect2.pipe('1', EffectString.repeat(32))}`,
               qualifiedName: 'catalog.publishGeneration',
               span: {column: 1, endColumn: 18, endLine: 1, line: 1},
               symbolKind: 'function',
@@ -3460,7 +3607,7 @@ function worstCaseCitationMemoryEvidence(): {
       ],
       citationValidations: [
         {
-          receipts: citations.map((citation, index) => ({
+          receipts: EffectArray.map(citations, (citation, index) => ({
             candidateCount: 1,
             citationId: citation.id,
             coverage: 'current-complete',
@@ -3492,8 +3639,8 @@ function worstCaseCitationMemoryEvidence(): {
 
 function preciseEvidence() {
   return {
-    contentHash: 'd'.repeat(64),
-    nodeId: `cgs_${'6'.repeat(32)}`,
+    contentHash: Effect2.pipe('d', EffectString.repeat(64)),
+    nodeId: `cgs_${Effect2.pipe('6', EffectString.repeat(32))}`,
     path: 'src/catalog/store.ts',
     repositoryId: REPOSITORY_ID,
     sourceCommit: COMMIT,
@@ -3502,9 +3649,9 @@ function preciseEvidence() {
 
 function preciseObservation() {
   return {
-    contentHash: 'd'.repeat(64),
+    contentHash: Effect2.pipe('d', EffectString.repeat(64)),
     exists: true,
-    nodeId: `cgs_${'6'.repeat(32)}`,
+    nodeId: `cgs_${Effect2.pipe('6', EffectString.repeat(32))}`,
     path: 'src/catalog/store.ts',
     repositoryId: REPOSITORY_ID,
     snapshotCommit: COMMIT,
@@ -3512,11 +3659,11 @@ function preciseObservation() {
 }
 
 function sectionIds(items: readonly {readonly id: string}[]): readonly string[] {
-  return items.map(item => item.id);
+  return EffectArray.map(items, item => item.id);
 }
 
 function memoryUris(items: readonly {readonly uri: string}[]): readonly string[] {
-  return items.map(item => item.uri);
+  return EffectArray.map(items, item => item.uri);
 }
 
 function expectPrefix<T>(small: readonly T[], large: readonly T[]): void {
@@ -3537,26 +3684,26 @@ function expectAgentViewLanePrefixes(small: ContextBriefAgentViewV1, large: Cont
   expectPrefix(memoryUris(small.activeHandoffs ?? []), memoryUris(large.activeHandoffs ?? []));
   expectPrefix(memoryUris(small.durableDecisions ?? []), memoryUris(large.durableDecisions ?? []));
   expectPrefix(
-    (small.graph?.cards ?? []).map(card => card.ref),
-    (large.graph?.cards ?? []).map(card => card.ref),
+    EffectArray.map(small.graph?.cards ?? [], card => card.ref),
+    EffectArray.map(large.graph?.cards ?? [], card => card.ref),
   );
   expectPrefix(
-    (small.graph?.contracts ?? []).map(contract => JSON.stringify(contract)),
-    (large.graph?.contracts ?? []).map(contract => JSON.stringify(contract)),
+    EffectArray.map(small.graph?.contracts ?? [], contract => JSON.stringify(contract)),
+    EffectArray.map(large.graph?.contracts ?? [], contract => JSON.stringify(contract)),
   );
   expectPrefix(
-    (small.recommendedFollowUps ?? []).map(followUp => followUp.id),
-    (large.recommendedFollowUps ?? []).map(followUp => followUp.id),
+    EffectArray.map(small.recommendedFollowUps ?? [], followUp => followUp.id),
+    EffectArray.map(large.recommendedFollowUps ?? [], followUp => followUp.id),
   );
   expectPrefix(
-    (small.stalenessAndConflicts ?? []).map(issue => issue.id),
-    (large.stalenessAndConflicts ?? []).map(issue => issue.id),
+    EffectArray.map(small.stalenessAndConflicts ?? [], issue => issue.id),
+    EffectArray.map(large.stalenessAndConflicts ?? [], issue => issue.id),
   );
   expectPrefix(small.coverage?.gaps ?? [], large.coverage?.gaps ?? []);
 }
 
 function expectTextCarriesSelectedEvidence(text: string, brief: ContextBriefV1): void {
-  const agentText = text.startsWith('THREADNOTE BRIEF\n');
+  const agentText = Effect2.pipe(text, EffectString.startsWith('THREADNOTE BRIEF\n'));
   const view = agentText ? projectContextBriefAgentView(brief, true) : parseContextBriefJsonText(text);
   if (agentText) {
     expect(text).toContain('Trust: untrusted evidence; verify source.');
@@ -3589,7 +3736,13 @@ function expectTextCarriesSelectedEvidence(text: string, brief: ContextBriefV1):
   // avoid paying for the same audit-only counters again in the text channel.
   expect(view.output).toBeUndefined();
   for (const card of brief.graph.cards) {
-    const projected = view.graph?.cards?.find(candidate => candidate.ref === card.ref);
+    const projected = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(view.graph?.cards), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver, candidate => candidate.ref === card.ref),
+        ),
+      ),
+    );
     expect(projected).toBeDefined();
     expect(projected).toMatchObject({
       kind: card.symbol.kind,
@@ -3597,9 +3750,42 @@ function expectTextCarriesSelectedEvidence(text: string, brief: ContextBriefV1):
       ref: card.ref,
       repositoryKey: card.repositoryKey,
     });
-    expect(card.symbol.path.startsWith(projected?.path.replace(/…$/u, '') ?? '')).toBe(true);
-    expect(card.symbol.qualifiedName.startsWith(projected?.qualifiedName.replace(/…$/u, '') ?? '')).toBe(true);
-    expect(card.reason.startsWith(projected?.reason.replace(/…$/u, '') ?? '')).toBe(true);
+    expect(
+      Effect2.pipe(
+        card.symbol.path,
+        EffectString.startsWith(
+          Effect2.pipe(projected?.path, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.replace(/…$/u, '')),
+          ) ?? '',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      Effect2.pipe(
+        card.symbol.qualifiedName,
+        EffectString.startsWith(
+          Effect2.pipe(projected?.qualifiedName, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.replace(/…$/u, '')),
+          ) ?? '',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      Effect2.pipe(
+        card.reason,
+        EffectString.startsWith(
+          Effect2.pipe(projected?.reason, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.replace(/…$/u, '')),
+          ) ?? '',
+        ),
+      ),
+    ).toBe(true);
   }
   for (const contract of brief.graph.contracts) {
     expect(view.graph?.contracts).toContainEqual({
@@ -3612,8 +3798,11 @@ function expectTextCarriesSelectedEvidence(text: string, brief: ContextBriefV1):
     });
   }
   for (const memory of [...brief.durableDecisions, ...brief.activeHandoffs]) {
-    const projected = [...(view.durableDecisions ?? []), ...(view.activeHandoffs ?? [])].find(
-      candidate => candidate.uri === memory.uri,
+    const projected = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...(view.durableDecisions ?? []), ...(view.activeHandoffs ?? [])],
+        candidate => candidate.uri === memory.uri,
+      ),
     );
     expect(projected).toMatchObject({
       ...(memory.authority === undefined ? {} : {authority: memory.authority}),
@@ -3636,19 +3825,31 @@ function expectTextCarriesSelectedEvidence(text: string, brief: ContextBriefV1):
             unknown: memory.citationSummary.unknown,
           },
     );
-    const nonExactReceipts = (memory.citationReceipts ?? []).filter(receipt => receipt.status !== 'exact');
+    const nonExactReceipts = EffectArray.filter(memory.citationReceipts ?? [], receipt => receipt.status !== 'exact');
     if (nonExactReceipts.length === 0) {
       expect(projected?.citationActions).toBeUndefined();
     } else {
-      expect(projected?.citationActions?.reduce((total, action) => total + action.count, 0)).toBe(
-        nonExactReceipts.length,
-      );
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(projected?.citationActions), __effectArrayReceiver2 =>
+            EffectArray.reduce(__effectArrayReceiver2, 0, (total, action) => total + action.count),
+          ),
+        ),
+      ).toBe(nonExactReceipts.length);
       for (const receipt of nonExactReceipts) {
-        const action = projected?.citationActions?.find(
-          candidate => candidate.reason === receipt.reason && candidate.status === receipt.status,
+        const action = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(projected?.citationActions), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                __effectArrayReceiver,
+                candidate => candidate.reason === receipt.reason && candidate.status === receipt.status,
+              ),
+            ),
+          ),
         );
         expect(action?.count).toBe(
-          nonExactReceipts.filter(
+          EffectArray.filter(
+            nonExactReceipts,
             candidate => candidate.reason === receipt.reason && candidate.status === receipt.status,
           ).length,
         );

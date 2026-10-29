@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {compareCodeUnits} from '../../ordering.js';
@@ -98,7 +99,10 @@ export function codeGraphPersistentLookupMatchStatement(
   return {
     parameters: [...pairs.flat(), snapshotId, boundedLimit + 1],
     text: `WITH requested(lookup_key, resolution_domain) AS (
-        VALUES ${pairs.map(() => '(?, ?)').join(', ')}
+        VALUES ${EffectArray.join(
+          EffectArray.map(pairs, () => '(?, ?)'),
+          ', ',
+        )}
       )
       SELECT requested.lookup_key, requested.resolution_domain,
         lookup.symbol_id, lookup.exported
@@ -185,7 +189,7 @@ export const resolvePersistedFullReferencePage = Effect.fn('codeGraph.resolvePer
        ORDER BY reference.edge_id`,
     [snapshotId, cursor, batchEnd],
   );
-  const metadataByEdge = new Map(metadata.map(row => [row.id, row]));
+  const metadataByEdge = new Map(EffectArray.map(metadata, row => [row.id, row]));
   const inputs: PersistedReferenceResolutionInput[] = [];
   const pairDomainsByKey = new Map<string, Set<string>>();
   for (const reference of decoded) {
@@ -210,8 +214,8 @@ export const resolvePersistedFullReferencePage = Effect.fn('codeGraph.resolvePer
       }
     }
   }
-  const pairs = [...pairDomainsByKey].flatMap(([lookupKey, domains]) =>
-    [...domains].map(domain => [lookupKey, domain] as const),
+  const pairs = EffectArray.flatMap([...pairDomainsByKey], ([lookupKey, domains]) =>
+    EffectArray.map([...domains], domain => [lookupKey, domain] as const),
   );
   pairs.sort((left, right) => compareCodeUnits(left[0], right[0]) || compareCodeUnits(left[1], right[1]));
   const summaries: PersistedLookupSummary[] = [];
@@ -221,17 +225,20 @@ export const resolvePersistedFullReferencePage = Effect.fn('codeGraph.resolvePer
   const selections = resolvePersistedReferenceSelections(inputs, summaries);
   if (selections.length === 0) return [] satisfies readonly ResolvableActivationReferenceRow[];
   const symbolsById = new Map<string, PersistedTargetSymbolRow>();
-  const targetIds = [...new Set(selections.map(selection => selection.symbolId))];
+  const targetIds = [...new Set(EffectArray.map(selections, selection => selection.symbolId))];
   for (const targetBatch of chunk(targetIds, PERSISTENT_TARGET_SYMBOL_BATCH_ROWS)) {
     const symbols = yield* sql.unsafe<PersistedTargetSymbolRow>(
       `SELECT id, name, exported, kind, resolution_domain
          FROM symbols
-         WHERE snapshot_id = ? AND id IN (${targetBatch.map(() => '?').join(', ')})`,
+         WHERE snapshot_id = ? AND id IN (${EffectArray.join(
+           EffectArray.map(targetBatch, () => '?'),
+           ', ',
+         )})`,
       [snapshotId, ...targetBatch],
     );
     for (const symbol of symbols) symbolsById.set(symbol.id, symbol);
   }
-  const selectionByEdge = new Map(selections.map(selection => [selection.edgeId, selection.symbolId]));
+  const selectionByEdge = new Map(EffectArray.map(selections, selection => [selection.edgeId, selection.symbolId]));
   const rows: ResolvableActivationReferenceRow[] = [];
   for (const reference of decoded) {
     const row = metadataByEdge.get(reference.edgeId);
@@ -255,7 +262,7 @@ function decodePersistedReferencePage(
 ): Effect.Effect<readonly DecodedPersistedReference[], CodeGraphStoreFailure> {
   return Effect.try({
     try: () =>
-      references.map(reference => {
+      EffectArray.map(references, reference => {
         if (
           !Number.isSafeInteger(reference.candidate_count) ||
           reference.candidate_count < 0 ||
@@ -278,8 +285,11 @@ function decodePersistedReferencePage(
         }
         const parsed: unknown = JSON.parse(reference.lookup_tiers_json);
         if (
-          !Array.isArray(parsed) ||
-          !parsed.every(tier => Array.isArray(tier) && tier.every(lookupKey => typeof lookupKey === 'string'))
+          !EffectArray.isArray(parsed) ||
+          !EffectArray.every(
+            parsed,
+            tier => EffectArray.isArray(tier) && EffectArray.every(tier, lookupKey => typeof lookupKey === 'string'),
+          )
         ) {
           throw CodeGraphStoreError.of('Stored reference lookup tiers are invalid.');
         }
@@ -376,7 +386,7 @@ function summarizeLookupMatches(matches: readonly PersistedLookupMatchRow[]): re
       summary.maximumExportedSymbolId = maximumId(summary.maximumExportedSymbolId, match.symbol_id);
     }
   }
-  return [...summariesByKey.values()].flatMap(byDomain => [...byDomain.values()]);
+  return EffectArray.flatMap([...summariesByKey.values()], byDomain => [...byDomain.values()]);
 }
 
 interface MutablePersistedLookupSummary {

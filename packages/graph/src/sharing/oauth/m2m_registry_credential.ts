@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   canonicalOAuthUrl,
   oauthCredentialEnvironment,
@@ -9,6 +10,8 @@ import {
   type OAuthM2MHelperIO,
   type OAuthM2MTokenDependencies,
 } from './m2m_graph_credential.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const MAX_INPUT_BYTES = 512;
 const SERVER = /^[a-z0-9.-]+(?::[1-9][0-9]{0,4})?$/u;
@@ -173,7 +176,20 @@ function validSubject(value: string): boolean {
   return (
     value.length > 0 &&
     value.length <= 512 &&
-    [...value].every(character => character.charCodeAt(0) > 32 && character.charCodeAt(0) !== 127)
+    EffectArray.every(
+      [...value],
+      character =>
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) > 32 &&
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) !== 127,
+    )
   );
 }
 
@@ -216,8 +232,19 @@ async function runRegistryCredentialHelper(
       offset += chunk.length;
     }
     const value = new TextDecoder('utf-8', {fatal: true}).decode(input);
-    if (!value.endsWith('\n') || value.indexOf('\n') !== value.length - 1) throw credentialFailure();
-    io.writeStdout(`${JSON.stringify(await getCredential(value.slice(0, -1), environment))}\n`);
+    if (
+      !Effect.pipe(value, EffectString.endsWith('\n')) ||
+      Effect.pipe(
+        value,
+        EffectString.indexOf('\n'),
+        Effect.Option.getOrElse(() => -1),
+      ) !==
+        value.length - 1
+    )
+      throw credentialFailure();
+    io.writeStdout(
+      `${JSON.stringify(await getCredential(Effect.pipe(value, EffectString.slice(0, -1)), environment))}\n`,
+    );
     return 0;
   } catch {
     io.writeStderr('OAuth registry credential unavailable.\n');

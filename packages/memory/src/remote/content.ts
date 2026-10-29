@@ -9,6 +9,8 @@ import {
 } from '../document.js';
 import {memoryCodeCitationSharingBlocker, memoryCodeCitationSharingBlockerMessage} from '../code/citation-policy.js';
 import {applyScrubber, type ScrubberPattern} from '@threadnote/platform/scrubber';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const REMOTE_MEMORY_CONTENT_CONTRACT_VERSION = 1 as const;
 
@@ -42,10 +44,10 @@ export interface RemoteMemoryContentPolicy {
   readonly additionalPatterns?: readonly ScrubberPattern[];
 }
 
-export class InvalidRemoteMemoryDocument extends Schema.TaggedError<InvalidRemoteMemoryDocument>()(
-  'InvalidRemoteMemoryDocument',
-  {message: Schema.String, reason: Schema.String},
-) {}
+export class InvalidRemoteMemoryDocument extends Schema.TaggedError<
+  InvalidRemoteMemoryDocument,
+  {readonly brand: unique symbol}
+>()('InvalidRemoteMemoryDocument', {message: Schema.String, reason: Schema.String}) {}
 
 /**
  * Apply Threadnote's fail-closed baseline scrubber without returning the input or
@@ -59,7 +61,7 @@ export function inspectRemoteMemoryContent(
   if (scrubbed.blocker) {
     return {
       allowed: false,
-      category: scrubbed.blocker.endsWith(' path') ? 'machine_local_path' : 'credential',
+      category: Effect.pipe(scrubbed.blocker, EffectString.endsWith(' path')) ? 'machine_local_path' : 'credential',
       reason: scrubbed.blocker,
       version: REMOTE_MEMORY_CONTENT_CONTRACT_VERSION,
     };

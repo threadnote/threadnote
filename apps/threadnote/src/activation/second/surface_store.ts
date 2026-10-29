@@ -13,6 +13,8 @@ import {
   type SecondSurfaceProofContextV1,
   type SecondSurfaceProofReceiptV1,
 } from './surface.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ATTESTATION_VERSION = 1 as const;
 const MAX_ATTESTATION_BYTES = 64 * 1_024;
@@ -240,7 +242,7 @@ const readAttestationKey = Effect.fn('activation.proof.readKey')(function* (
 ) {
   const fs = yield* FileSystem.FileSystem;
   const target = yield* attestationKeyPath(config);
-  const raw = (yield* fs.readFileString(target)).trim();
+  const raw = Effect2.pipe(yield* fs.readFileString(target), EffectString.trim);
   assertSha256(raw, 'attestation key');
   return raw;
 });

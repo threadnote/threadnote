@@ -2,11 +2,12 @@ import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {createSourceLineIndex, sourcePositionAt} from '@threadnote/graph/languages/source_line_index';
+import {Array as EffectArray} from 'effect';
 
 const sourceArbitrary = FC.array(
   FC.oneof(FC.string({maxLength: 12}), FC.constantFrom('\n', '\r', '\r\n', '\u2028', '\u2029', '🙂', '\u0000')),
   {maxLength: 48},
-).map(parts => parts.join(''));
+).map(parts => EffectArray.join(parts, ''));
 
 describe('code graph source line index properties', () => {
   fcProp(

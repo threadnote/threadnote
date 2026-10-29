@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -21,13 +22,15 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const execute = promisify(execFile);
 const standalone = join(process.cwd(), 'apps', 'threadnote', 'src', 'standalone.ts');
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
 });
 
 describe('verified procedure Git publication', () => {
@@ -70,7 +73,7 @@ describe('verified procedure Git publication', () => {
         expect(preview.mode).toBe('preview');
         expect(preview.repository).toMatchObject({
           branchRef: expect.stringMatching(/^refs\/heads\//u),
-          targets: preview.paths.map(path => ({path, state: 'absent'})),
+          targets: EffectArray.map(preview.paths, path => ({path, state: 'absent'})),
         });
         expect(yield* publishVerifiedProcedure(fixture.config, fixture.options)).toEqual(preview);
         const pushPreview = yield* publishVerifiedProcedure(fixture.config, {...fixture.options, push: true});
@@ -153,7 +156,10 @@ describe('verified procedure Git publication', () => {
         });
 
         expect(
-          (yield* gitEffect(fixture.worktree, ['show', '--format=', '--name-only', 'HEAD'])).split('\n').sort(),
+          Effect2.pipe(
+            yield* gitEffect(fixture.worktree, ['show', '--format=', '--name-only', 'HEAD']),
+            EffectString.split('\n'),
+          ).sort(),
         ).toEqual([...preview.paths].sort());
         expect(yield* gitEffect(fixture.worktree, ['diff', '--cached', '--binary'])).toBe(cachedBefore);
         expect(yield* gitEffect(fixture.worktree, ['rev-parse', ':unrelated.txt'])).toBe(unrelatedBlobBefore);
@@ -381,5 +387,5 @@ async function makeFixture(trackForAfterEach = true) {
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
-  return (await execute('git', ['-C', cwd, ...args])).stdout.trim();
+  return Effect2.pipe((await execute('git', ['-C', cwd, ...args])).stdout, EffectString.trim);
 }

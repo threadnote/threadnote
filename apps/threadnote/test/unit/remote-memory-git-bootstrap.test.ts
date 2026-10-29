@@ -6,6 +6,8 @@ import {testGitWorktreeLock} from '../helpers/git-worktree-lock.js';
 import {createGitShareWorktreeFixture, git} from '@threadnote/testing/git-share-worktree';
 import {mkdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {join} from '@threadnote/testing/node-path';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const environment = {
   THREADNOTE_REMOTE_PUBLIC_URL: 'https://memory.example.test',
@@ -80,7 +82,9 @@ describe('production Git bootstrap', () => {
         worktreeLock: testGitWorktreeLock,
       });
       await store.refresh();
-      expect((await git(['remote', 'get-url', '--push', 'team'], worktree)).trim()).toBe(fixture.remote);
+      expect(Effect.pipe(await git(['remote', 'get-url', '--push', 'team'], worktree), EffectString.trim)).toBe(
+        fixture.remote,
+      );
     } finally {
       await rm(fixture.root, {recursive: true, force: true});
     }
@@ -96,7 +100,7 @@ describe('production Git bootstrap', () => {
           expectedRemoteUrl: fixture.remote,
           worktreeLock: testGitWorktreeLock,
         });
-        const before = (await git(['rev-parse', 'HEAD'], fixture.worktree)).trim();
+        const before = Effect.pipe(await git(['rev-parse', 'HEAD'], fixture.worktree), EffectString.trim);
         if (change === 'extra-pushurl')
           await git(['config', '--add', 'remote.origin.pushurl', fixture.remote], fixture.worktree);
         if (change === 'rewrite')
@@ -115,7 +119,7 @@ describe('production Git bootstrap', () => {
         await expect(
           store.commit({path: 'durable/projects/test/canary.md', content: 'safe canary', message: 'canary'}),
         ).rejects.toThrow('exact configured');
-        expect((await git(['rev-parse', 'HEAD'], fixture.worktree)).trim()).toBe(before);
+        expect(Effect.pipe(await git(['rev-parse', 'HEAD'], fixture.worktree), EffectString.trim)).toBe(before);
       } finally {
         await rm(fixture.root, {recursive: true, force: true});
       }

@@ -1,10 +1,15 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {Effect, Stream} from 'effect';
 import type * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import {ManagerRequestError, type ManagerHttpRequest} from '@threadnote/manager/server';
 import type {ModelSetupAction, ModelSetupStatus} from '@threadnote/manager/model-setup-contracts';
 import {readModelSetupStatus, requestModelSetup, setModelSetupPolicy} from '../models/setup.js';
+import * as EffectRecord from 'effect/Record';
 
 const invalidRequest = {status: 400, body: {error: 'Choose a valid model setup action and confirm it.'}} as const;
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 
 /** Bound the raw stream before JSON parsing; Bun's request.json does not honor MaxBodySize. */
 export const readManagerModelSetupBody = Effect.fn('manager.modelSetup.body')(function* (
@@ -29,8 +34,8 @@ export const readManagerModelSetupBody = Effect.fn('manager.modelSetup.body')(fu
         offset += chunk.byteLength;
       }
       const value: unknown = JSON.parse(new TextDecoder().decode(bytes));
-      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected an object');
-      return value as Record<string, unknown>;
+      if (!isRecord(value)) throw new Error('Expected an object');
+      return value;
     },
     catch: () => ManagerRequestError.make({message: 'Expected a model setup JSON object.'}),
   });
@@ -39,17 +44,17 @@ export const readManagerModelSetupBody = Effect.fn('manager.modelSetup.body')(fu
 function parseAction(body: Record<string, unknown>): ModelSetupAction | undefined {
   if (
     body.confirm !== true ||
-    !Number.isSafeInteger(body.expectedEpoch) ||
-    (body.expectedEpoch as number) < 0 ||
-    Object.keys(body).some(key => !['action', 'confirm', 'policy', 'expectedEpoch'].includes(key))
+    !checkedIsSafeInteger(body.expectedEpoch) ||
+    body.expectedEpoch < 0 ||
+    EffectArray.some(EffectRecord.keys(body), key => !['action', 'confirm', 'policy', 'expectedEpoch'].includes(key))
   )
     return undefined;
   if (body.action === 'policy') {
     if (body.policy !== 'automatic' && body.policy !== 'off') return undefined;
-    return {action: 'policy', confirm: true, policy: body.policy, expectedEpoch: body.expectedEpoch as number};
+    return {action: 'policy', confirm: true, policy: body.policy, expectedEpoch: body.expectedEpoch};
   }
   if ((body.action === 'setup' || body.action === 'retry') && body.policy === undefined)
-    return {action: body.action, confirm: true, expectedEpoch: body.expectedEpoch as number};
+    return {action: body.action, confirm: true, expectedEpoch: body.expectedEpoch};
   return undefined;
 }
 

@@ -1,6 +1,10 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {benchmarkMeasurement, type BenchmarkMeasurementV1} from '@threadnote/evidence/benchmark';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CONTEXT_BRIEF_CITATION_RUNTIME_EVALUATION_VERSION = 1 as const;
 
@@ -131,21 +135,21 @@ export function parseContextBriefCitationRuntimeFixtureV1(value: unknown): Conte
   const expectedContractHash = matchingString(fixture.expectedContractHash, HASH, 'expected contract hash');
   const source = parseSource(fixture.source);
   const thresholds = parseThresholds(fixture.thresholds);
-  if (!Array.isArray(fixture.scenarios)) invalid('scenarios must be an array');
-  const scenarios = fixture.scenarios.map(parseScenario);
+  if (!EffectArray.isArray(fixture.scenarios)) invalid('scenarios must be an array');
+  const scenarios = EffectArray.map(fixture.scenarios, parseScenario);
   if (scenarios.length !== CONTEXT_BRIEF_CITATION_RUNTIME_SCENARIO_KINDS.length + 1) {
     invalid(`scenarios must contain exactly ${CONTEXT_BRIEF_CITATION_RUNTIME_SCENARIO_KINDS.length + 1} cases`);
   }
   assertUnique(
-    scenarios.map(scenario => scenario.id),
+    EffectArray.map(scenarios, scenario => scenario.id),
     'scenario ids',
   );
   assertUnique(
-    scenarios.map(scenario => scenario.currentSnapshotId),
+    EffectArray.map(scenarios, scenario => scenario.currentSnapshotId),
     'current snapshot ids',
   );
   for (const kind of CONTEXT_BRIEF_CITATION_RUNTIME_SCENARIO_KINDS) {
-    if (!scenarios.some(scenario => scenario.kind === kind)) invalid(`missing ${kind} scenario`);
+    if (!EffectArray.some(scenarios, scenario => scenario.kind === kind)) invalid(`missing ${kind} scenario`);
   }
   const equivalenceGroups = new Map<string, ContextBriefCitationRuntimeScenarioV1[]>();
   for (const scenario of scenarios) {
@@ -159,9 +163,9 @@ export function parseContextBriefCitationRuntimeFixtureV1(value: unknown): Conte
   for (const [key, group] of equivalenceGroups) {
     if (
       group.length !== 2 ||
-      !group.some(scenario => scenario.execution === 'clean') ||
-      !group.some(scenario => scenario.execution === 'incremental') ||
-      group.some(scenario => scenario.kind !== 'exact')
+      !EffectArray.some(group, scenario => scenario.execution === 'clean') ||
+      !EffectArray.some(group, scenario => scenario.execution === 'incremental') ||
+      EffectArray.some(group, scenario => scenario.kind !== 'exact')
     ) {
       invalid(`equivalence group ${key} must contain one clean and one incremental exact scenario`);
     }
@@ -179,20 +183,22 @@ export function finalizeContextBriefCitationRuntimeEvaluation(
   observationsInput: readonly ContextBriefCitationRuntimeObservationV1[],
 ): ContextBriefCitationRuntimeEvaluationResultV1 {
   const fixture = parseContextBriefCitationRuntimeFixtureV1(fixtureInput);
-  const observations = [...observationsInput].sort((left, right) => left.id.localeCompare(right.id));
+  const observations = [...observationsInput].sort((left, right) =>
+    Effect.pipe(left.id, EffectString.localeCompare(right.id)),
+  );
   assertUnique(
-    observations.map(observation => observation.id),
+    EffectArray.map(observations, observation => observation.id),
     'observation ids',
   );
-  const expectedContract = fixture.scenarios
-    .map(scenario => expectedContractObservation(fixture, scenario))
-    .sort((left, right) => left.id.localeCompare(right.id));
-  const observedContract = observations.map(observedContractObservation);
+  const expectedContract = EffectArray.map(fixture.scenarios, scenario =>
+    expectedContractObservation(fixture, scenario),
+  ).sort((left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id)));
+  const observedContract = EffectArray.map(observations, observedContractObservation);
   const derivedExpectedHash = sha256HexSync(canonicalJson(expectedContract));
   const expectedHash = fixture.expectedContractHash;
   const observedHash = sha256HexSync(canonicalJson(observedContract));
-  const byId = new Map(observations.map(observation => [observation.id, observation]));
-  const falseFreshRiskCount = fixture.scenarios.reduce((count, scenario) => {
+  const byId = new Map(EffectArray.map(observations, observation => [observation.id, observation]));
+  const falseFreshRiskCount = EffectArray.reduce(fixture.scenarios, 0, (count, scenario) => {
     const observed = byId.get(scenario.id);
     if (!observed) return count;
     const memoryRisk = scenario.expectedFreshness !== 'fresh' && observed.observedFreshness === 'fresh' ? 1 : 0;
@@ -204,11 +210,12 @@ export function finalizeContextBriefCitationRuntimeEvaluation(
         ? 1
         : 0;
     return count + memoryRisk + citationRisk;
-  }, 0);
-  const incompleteFalseDeletedCount = observations.filter(
+  });
+  const incompleteFalseDeletedCount = EffectArray.filter(
+    observations,
     observation => observation.snapshotState === 'current-incomplete' && observation.observedStatus === 'deleted',
   ).length;
-  const crossRepositoryLeakageCount = fixture.scenarios.filter(scenario => {
+  const crossRepositoryLeakageCount = EffectArray.filter(fixture.scenarios, scenario => {
     if (scenario.kind !== 'cross-repository') return false;
     const status = byId.get(scenario.id)?.observedStatus;
     return status !== undefined && status !== 'unknown';
@@ -221,83 +228,107 @@ export function finalizeContextBriefCitationRuntimeEvaluation(
       scenario,
     ]);
   }
-  const incrementalCleanMismatchCount = [...equivalenceGroups.values()].filter(group => {
-    const clean = byId.get(group.find(scenario => scenario.execution === 'clean')!.id);
-    const incremental = byId.get(group.find(scenario => scenario.execution === 'incremental')!.id);
+  const incrementalCleanMismatchCount = EffectArray.filter([...equivalenceGroups.values()], group => {
+    const clean = byId.get(
+      EffectOption.getOrUndefined(EffectArray.findFirst(group, scenario => scenario.execution === 'clean'))!.id,
+    );
+    const incremental = byId.get(
+      EffectOption.getOrUndefined(EffectArray.findFirst(group, scenario => scenario.execution === 'incremental'))!.id,
+    );
     return runtimeOutcome(clean) !== runtimeOutcome(incremental);
   }).length;
-  const legacyScenarios = fixture.scenarios.filter(scenario => scenario.kind === 'legacy-v1');
+  const legacyScenarios = EffectArray.filter(fixture.scenarios, scenario => scenario.kind === 'legacy-v1');
   const legacyRecallContinuity = ratio(
-    legacyScenarios.filter(scenario => byId.get(scenario.id)?.observedRecallCount === scenario.expectedRecallCount)
-      .length,
+    EffectArray.filter(
+      legacyScenarios,
+      scenario => byId.get(scenario.id)?.observedRecallCount === scenario.expectedRecallCount,
+    ).length,
     legacyScenarios.length,
   );
   const scenarioAccuracy = ratio(
-    expectedContract.filter(expected =>
-      observedContract.some(observed => canonicalJson(observed) === canonicalJson(expected)),
+    EffectArray.filter(
+      expectedContract,
+      (expected, index) =>
+        index in expectedContract &&
+        EffectArray.some(observedContract, observed => canonicalJson(observed) === canonicalJson(expected)),
     ).length,
     expectedContract.length,
   );
-  const maximumEstimatedTokens = Math.max(0, ...observations.map(observation => observation.estimatedTokens));
+  const maximumEstimatedTokens = Math.max(
+    0,
+    ...EffectArray.map(observations, observation => observation.estimatedTokens),
+  );
   const measurements = {
     captureMilliseconds: benchmarkMeasurement(
       'context-brief-citation-runtime-capture',
       'milliseconds',
-      observations
-        .filter(observation => observation.capture.succeeded)
-        .map(observation => observation.capture.milliseconds),
+      EffectArray.map(
+        EffectArray.filter(
+          observations,
+          (observation, __effectArrayIndex) => __effectArrayIndex in observations && observation.capture.succeeded,
+        ),
+        observation => observation.capture.milliseconds,
+      ),
     ),
     contextBriefMilliseconds: benchmarkMeasurement(
       'context-brief-citation-runtime-total',
       'milliseconds',
-      observations.map(observation => observation.contextBriefMilliseconds),
+      EffectArray.map(observations, observation => observation.contextBriefMilliseconds),
     ),
     validationMilliseconds: benchmarkMeasurement(
       'context-brief-citation-runtime-validation',
       'milliseconds',
-      observations
-        .filter(observation => observation.capture.succeeded)
-        .map(observation => observation.validationMilliseconds),
+      EffectArray.map(
+        EffectArray.filter(
+          observations,
+          (observation, __effectArrayIndex) => __effectArrayIndex in observations && observation.capture.succeeded,
+        ),
+        observation => observation.validationMilliseconds,
+      ),
     ),
   };
-  const failures = [
-    observations.length === fixture.scenarios.length
-      ? ''
-      : `runtime observation count ${observations.length}; required ${fixture.scenarios.length}`,
-    derivedExpectedHash === expectedHash ? '' : 'reviewed runtime contract hash does not match fixture truth',
-    expectedHash === observedHash ? '' : 'runtime observations differ from the reviewed deterministic contract',
-    falseFreshRiskCount === 0 ? '' : `false-fresh risk count ${falseFreshRiskCount}; required 0`,
-    incompleteFalseDeletedCount === 0
-      ? ''
-      : `deleted statuses from incomplete coverage ${incompleteFalseDeletedCount}; required 0`,
-    crossRepositoryLeakageCount === 0
-      ? ''
-      : `cross-repository authoritative leakage ${crossRepositoryLeakageCount}; required 0`,
-    incrementalCleanMismatchCount === 0
-      ? ''
-      : `clean/incremental runtime mismatch count ${incrementalCleanMismatchCount}; required 0`,
-    legacyRecallContinuity === 1 ? '' : `legacy-v1 recall continuity ${legacyRecallContinuity}; required 1`,
-    maximumEstimatedTokens <= fixture.thresholds.maximumEstimatedTokens
-      ? ''
-      : `Context Brief token maximum ${maximumEstimatedTokens}; limit ${fixture.thresholds.maximumEstimatedTokens}`,
-    measurements.validationMilliseconds.p95 <= fixture.thresholds.maximumValidationP95Milliseconds
-      ? ''
-      : `citation validation p95 ${measurements.validationMilliseconds.p95}ms; limit ${fixture.thresholds.maximumValidationP95Milliseconds}ms`,
-    measurements.contextBriefMilliseconds.p95 <= fixture.thresholds.maximumBriefP95Milliseconds
-      ? ''
-      : `Context Brief p95 ${measurements.contextBriefMilliseconds.p95}ms; limit ${fixture.thresholds.maximumBriefP95Milliseconds}ms`,
-    observations.every(observation => observation.leaseBalance === 0)
-      ? ''
-      : 'runtime evaluation leaked at least one graph snapshot lease',
-    observations.every(observation => observation.maintenanceRequests === 0)
-      ? ''
-      : 'runtime evaluation requested forbidden graph maintenance',
-    observations
-      .filter(observation => observation.snapshotState === 'current-incomplete')
-      .every(observation => observation.validationEvidenceCalls === 0)
-      ? ''
-      : 'incomplete graph coverage reached authoritative citation evidence',
-  ].filter(Boolean);
+  const failures = EffectArray.filter(
+    [
+      observations.length === fixture.scenarios.length
+        ? ''
+        : `runtime observation count ${observations.length}; required ${fixture.scenarios.length}`,
+      derivedExpectedHash === expectedHash ? '' : 'reviewed runtime contract hash does not match fixture truth',
+      expectedHash === observedHash ? '' : 'runtime observations differ from the reviewed deterministic contract',
+      falseFreshRiskCount === 0 ? '' : `false-fresh risk count ${falseFreshRiskCount}; required 0`,
+      incompleteFalseDeletedCount === 0
+        ? ''
+        : `deleted statuses from incomplete coverage ${incompleteFalseDeletedCount}; required 0`,
+      crossRepositoryLeakageCount === 0
+        ? ''
+        : `cross-repository authoritative leakage ${crossRepositoryLeakageCount}; required 0`,
+      incrementalCleanMismatchCount === 0
+        ? ''
+        : `clean/incremental runtime mismatch count ${incrementalCleanMismatchCount}; required 0`,
+      legacyRecallContinuity === 1 ? '' : `legacy-v1 recall continuity ${legacyRecallContinuity}; required 1`,
+      maximumEstimatedTokens <= fixture.thresholds.maximumEstimatedTokens
+        ? ''
+        : `Context Brief token maximum ${maximumEstimatedTokens}; limit ${fixture.thresholds.maximumEstimatedTokens}`,
+      measurements.validationMilliseconds.p95 <= fixture.thresholds.maximumValidationP95Milliseconds
+        ? ''
+        : `citation validation p95 ${measurements.validationMilliseconds.p95}ms; limit ${fixture.thresholds.maximumValidationP95Milliseconds}ms`,
+      measurements.contextBriefMilliseconds.p95 <= fixture.thresholds.maximumBriefP95Milliseconds
+        ? ''
+        : `Context Brief p95 ${measurements.contextBriefMilliseconds.p95}ms; limit ${fixture.thresholds.maximumBriefP95Milliseconds}ms`,
+      EffectArray.every(observations, observation => observation.leaseBalance === 0)
+        ? ''
+        : 'runtime evaluation leaked at least one graph snapshot lease',
+      EffectArray.every(observations, observation => observation.maintenanceRequests === 0)
+        ? ''
+        : 'runtime evaluation requested forbidden graph maintenance',
+      EffectArray.every(
+        EffectArray.filter(observations, observation => observation.snapshotState === 'current-incomplete'),
+        observation => observation.validationEvidenceCalls === 0,
+      )
+        ? ''
+        : 'incomplete graph coverage reached authoritative citation evidence',
+    ],
+    Boolean,
+  );
   return {
     contract: {expectedHash, matched: expectedHash === observedHash, observedHash},
     fixture: {
@@ -381,9 +412,9 @@ function parseSource(value: unknown): ContextBriefCitationRuntimeFixtureV1['sour
     sourceSnapshotId: matchingString(source.sourceSnapshotId, SNAPSHOT_ID, 'source snapshot id'),
   };
   if (
-    parsed.path.startsWith('/') ||
-    parsed.path.includes('\\') ||
-    parsed.path.split('/').some(part => !part || part === '..')
+    Effect.pipe(parsed.path, EffectString.startsWith('/')) ||
+    Effect.pipe(parsed.path, EffectString.includes('\\')) ||
+    EffectArray.some(Effect.pipe(parsed.path, EffectString.split('/')), part => !part || part === '..')
   ) {
     invalid('source path must be repository-relative');
   }
@@ -512,12 +543,12 @@ function runtimeOutcome(observation: ContextBriefCitationRuntimeObservationV1 | 
 }
 
 function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (EffectArray.isArray(value)) return `[${EffectArray.join(EffectArray.map(value, canonicalJson), ',')}]`;
   if (Predicate.isObject(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(',')}}`;
+    return `{${EffectArray.join(
+      EffectArray.map(EffectRecord.keys(value).sort(), key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`),
+      ',',
+    )}}`;
   }
   const encoded = JSON.stringify(value);
   if (encoded === undefined) throw new Error('Runtime citation contract contains an unsupported value.');
@@ -530,9 +561,12 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].filter(key => value[key] !== undefined || Object.hasOwn(value, key)).sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  const actual = EffectRecord.keys(value).sort();
+  const expected = EffectArray.filter(
+    [...keys],
+    key => value[key] !== undefined || EffectRecord.has(value, key),
+  ).sort();
+  if (actual.length !== expected.length || EffectArray.some(actual, (key, index) => key !== expected[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
@@ -547,7 +581,7 @@ function literal<const Values extends readonly string[]>(
 }
 
 function isLiteral<const Values extends readonly string[]>(value: string, values: Values): value is Values[number] {
-  return values.some(candidate => candidate === value);
+  return EffectArray.some(values, candidate => candidate === value);
 }
 
 function matchingString(value: unknown, pattern: RegExp, label: string): string {
@@ -557,7 +591,8 @@ function matchingString(value: unknown, pattern: RegExp, label: string): string 
 }
 
 function nonEmptyString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !value.trim()) invalid(`${label} must be a non-empty string`);
+  if (typeof value !== 'string' || !Effect.pipe(value, EffectString.trim))
+    invalid(`${label} must be a non-empty string`);
   return value;
 }
 

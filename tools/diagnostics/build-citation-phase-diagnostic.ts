@@ -8,6 +8,8 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {ScriptSystemInfoLayer, ScriptCommandExecutorLayer} from '../../scripts/effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from '../../scripts/effect/errors.js';
 import {parseDiagnosticArguments} from './citation-phase-contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const program = Effect.scoped(
   Effect.gen(function* () {
@@ -18,13 +20,20 @@ const program = Effect.scoped(
     if (args.includes('--built-artifact-sha256'))
       return yield* ScriptError.make({message: 'Diagnostic build digest is reserved for the wrapper.'});
     yield* Effect.try({
-      try: () => parseDiagnosticArguments([...args, '--built-artifact-sha256', '0'.repeat(64)]),
+      try: () =>
+        parseDiagnosticArguments([...args, '--built-artifact-sha256', Effect2.pipe('0', EffectString.repeat(64))]),
       catch: cause => ScriptError.make({message: 'Invalid citation diagnostic arguments.', cause}),
     });
     const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-citation-phase-diagnostic-build-'});
-    const manifest = JSON.parse(yield* fs.readFileString('package.json')) as {version?: unknown};
-    if (typeof manifest.version !== 'string')
+    const manifest: unknown = JSON.parse(yield* fs.readFileString('package.json'));
+    if (
+      typeof manifest !== 'object' ||
+      manifest === null ||
+      !('version' in manifest) ||
+      typeof manifest.version !== 'string'
+    ) {
       return yield* ScriptError.make({message: 'Candidate package version is unavailable.'});
+    }
     const entrypoint = yield* path.fromFileUrl(new URL('./citation-phase-diagnostic.ts', import.meta.url));
     const result = yield* Effect.tryPromise({
       try: () =>

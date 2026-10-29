@@ -1,3 +1,8 @@
+import {
+  isSafeInteger as checkedIsSafeInteger,
+  isFiniteNumber as checkedIsFiniteNumber,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -5,6 +10,9 @@ import {
   canonicalContextHealthProjectV1,
   type ContextHealthAggregateV1,
 } from '@threadnote/context/health_schedule';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const HOSTED_CONTEXT_HEALTH_VERSION = 1 as const;
 
@@ -191,7 +199,10 @@ export function buildHostedContextHealthScheduleV1(input: {
     tenantId,
     version: HOSTED_CONTEXT_HEALTH_VERSION,
   };
-  return {...unsigned, scheduleId: `tnhs_${sha256HexSync(canonicalJson(unsigned)).slice(0, 32)}`};
+  return {
+    ...unsigned,
+    scheduleId: `tnhs_${Effect.pipe(sha256HexSync(canonicalJson(unsigned)), EffectString.slice(0, 32))}`,
+  };
 }
 
 export function buildHostedContextHealthReceiptV1(input: HostedContextHealthRunInputV1): HostedContextHealthReceiptV1 {
@@ -211,7 +222,7 @@ export function buildHostedContextHealthReceiptV1(input: HostedContextHealthRunI
       ? Number.POSITIVE_INFINITY
       : elapsedMinutes(Date.parse(heartbeatAt), observedMilliseconds);
   const policy = input.schedule.policy;
-  const alerts = HOSTED_CONTEXT_HEALTH_ALERT_KINDS.map(kind => {
+  const alerts = EffectArray.map(HOSTED_CONTEXT_HEALTH_ALERT_KINDS, kind => {
     const evidenceCount = alertEvidenceCount(kind, {
       backlogDepth: input.backlogDepth,
       consecutiveStaleRuns,
@@ -259,11 +270,14 @@ export function buildHostedContextHealthReceiptV1(input: HostedContextHealthRunI
     memoryMutation: 'none' as const,
     observedAt,
     outcome,
-    reviewRequired: outcome !== 'clean' || alerts.some(alert => alert.state === 'firing'),
+    reviewRequired: outcome !== 'clean' || EffectArray.some(alerts, alert => alert.state === 'firing'),
     scheduleId: input.schedule.scheduleId,
     version: HOSTED_CONTEXT_HEALTH_VERSION,
   };
-  return {...unsignedReceipt, receiptId: `tnhr_${sha256HexSync(canonicalJson(unsignedReceipt)).slice(0, 32)}`};
+  return {
+    ...unsignedReceipt,
+    receiptId: `tnhr_${Effect.pipe(sha256HexSync(canonicalJson(unsignedReceipt)), EffectString.slice(0, 32))}`,
+  };
 }
 
 /**
@@ -275,12 +289,12 @@ export function selectHostedContextHealthJobsV1(
   input: {readonly concurrency: number; readonly tenantCursorOrdinal?: number},
 ): HostedContextHealthSelectionV1 {
   const concurrency = boundedInteger(input.concurrency, 1, MAXIMUM_CONCURRENCY, 'scheduler concurrency');
-  const canonical = jobs.map(job => ({
+  const canonical = EffectArray.map(jobs, job => ({
     dueAt: canonicalTimestamp(job.dueAt, 'job due timestamp'),
     scheduleId: scheduleIdentifier(job.scheduleId),
     tenantId: identifier(job.tenantId, 'job tenant ID'),
   }));
-  if (new Set(canonical.map(job => job.scheduleId)).size !== canonical.length) {
+  if (new Set(EffectArray.map(canonical, job => job.scheduleId)).size !== canonical.length) {
     fail('Hosted context health due work contains duplicate schedules.');
   }
   const queues = new Map<string, HostedContextHealthDueJobV1[]>();
@@ -343,14 +357,136 @@ export function verifyHostedContextHealthEvaluationV1(input: HostedContextHealth
 
 export function parseHostedContextHealthRunInputV1(value: unknown): HostedContextHealthRunInputV1 {
   if (!isRecord(value)) fail('Hosted context health input must be a JSON object.');
-  const candidate = value as unknown as HostedContextHealthRunInputV1;
-  return {...candidate, signals: validateRunInput(candidate)};
+  if (!isHostedContextHealthRunInput(value)) fail('Hosted context health input has an invalid shape.');
+  return {...value, signals: validateRunInput(value)};
+}
+
+function isHostedContextHealthRunInput(value: unknown): value is HostedContextHealthRunInputV1 {
+  if (!isRecord(value)) return false;
+  return (
+    value.version === HOSTED_CONTEXT_HEALTH_VERSION &&
+    typeof value.backlogDepth === 'number' &&
+    typeof value.dueAt === 'string' &&
+    isHostedContextHealthEvaluationAttestationShape(value.evaluationAttestation) &&
+    typeof value.memorySnapshotRevision === 'string' &&
+    typeof value.observedAt === 'string' &&
+    typeof value.priorConsecutiveStaleRuns === 'number' &&
+    typeof value.repositoryCommit === 'string' &&
+    isHostedContextHealthScheduleShape(value.schedule) &&
+    isHostedContextHealthSignalShape(value.signals) &&
+    isContextHealthAggregateShape(value.aggregate) &&
+    (value.workerHeartbeatAt === undefined || typeof value.workerHeartbeatAt === 'string')
+  );
+}
+
+function isHostedContextHealthEvaluationAttestationShape(
+  value: unknown,
+): value is HostedContextHealthEvaluationAttestationV1 {
+  return (
+    isRecord(value) &&
+    value.audience === EVALUATION_AUDIENCE &&
+    typeof value.claimGeneration === 'number' &&
+    typeof value.claimToken === 'string' &&
+    typeof value.signature === 'string' &&
+    value.version === HOSTED_CONTEXT_HEALTH_VERSION
+  );
+}
+
+function isHostedContextHealthScheduleShape(value: unknown): value is HostedContextHealthScheduleV1 {
+  return (
+    isRecord(value) &&
+    typeof value.cadenceMinutes === 'number' &&
+    isRecord(value.execution) &&
+    value.execution.memoryMutation === 'forbidden' &&
+    value.execution.repositorySnapshot === 'immutable' &&
+    isHostedContextHealthPolicy(value.policy) &&
+    typeof value.project === 'string' &&
+    typeof value.scheduleId === 'string' &&
+    typeof value.shareId === 'string' &&
+    typeof value.tenantId === 'string' &&
+    value.version === HOSTED_CONTEXT_HEALTH_VERSION
+  );
+}
+
+function isHostedContextHealthSignalShape(value: unknown): value is HostedContextHealthSignalCountsV1 {
+  return (
+    isRecord(value) &&
+    typeof value.citationChanged === 'number' &&
+    typeof value.citationCurrent === 'number' &&
+    typeof value.citationMissing === 'number' &&
+    typeof value.citationUnknown === 'number' &&
+    typeof value.failedChecks === 'number' &&
+    typeof value.policyDrift === 'number' &&
+    typeof value.staleHandoffs === 'number' &&
+    typeof value.unindexedScope === 'number'
+  );
+}
+
+function isContextHealthAggregateShape(value: unknown): value is ContextHealthAggregateV1 {
+  return (
+    isRecord(value) &&
+    typeof value.aggregateId === 'string' &&
+    typeof value.completeSources === 'number' &&
+    (value.exitCode === 0 || value.exitCode === 1 || value.exitCode === 2) &&
+    EffectArray.isArray(value.findings) &&
+    EffectArray.every(
+      value.findings,
+      finding => isRecord(finding) && typeof finding.findingId === 'string' && typeof finding.sourceKey === 'string',
+    ) &&
+    typeof value.knownFindings === 'number' &&
+    typeof value.project === 'string' &&
+    EffectArray.isArray(value.sources) &&
+    EffectArray.every(value.sources, isContextHealthAggregateSourceShape) &&
+    (value.status === 'clean' || value.status === 'findings' || value.status === 'unknown') &&
+    typeof value.unknownSources === 'number' &&
+    value.version === 1
+  );
+}
+
+function isContextHealthAggregateSourceShape(value: unknown): value is ContextHealthAggregateV1['sources'][number] {
+  if (!isRecord(value) || typeof value.sourceKey !== 'string') return false;
+  if (value.state === 'complete') {
+    return (
+      typeof value.evidenceRevision === 'string' &&
+      typeof value.findingCount === 'number' &&
+      typeof value.recordsScanned === 'number'
+    );
+  }
+  return (
+    value.state === 'unknown' &&
+    (value.evidenceRevision === undefined || typeof value.evidenceRevision === 'string') &&
+    (value.findingCount === undefined || typeof value.findingCount === 'number') &&
+    (value.recordsScanned === undefined || typeof value.recordsScanned === 'number') &&
+    (value.reason === 'citation-evidence-unavailable' ||
+      value.reason === 'configured-teams-invalid' ||
+      value.reason === 'evidence-incomplete' ||
+      value.reason === 'snapshot-dirty' ||
+      value.reason === 'snapshot-missing' ||
+      value.reason === 'snapshot-raced' ||
+      value.reason === 'snapshot-unreadable' ||
+      value.reason === 'team-not-configured')
+  );
 }
 
 export function parseHostedContextHealthScheduleV1(value: unknown): HostedContextHealthScheduleV1 {
   if (!isRecord(value)) fail('Hosted context health schedule must be a JSON object.');
-  const candidate = value as unknown as HostedContextHealthScheduleV1;
-  const rebuilt = buildHostedContextHealthScheduleV1(candidate);
+  const candidate = value;
+  if (
+    typeof candidate.cadenceMinutes !== 'number' ||
+    typeof candidate.project !== 'string' ||
+    typeof candidate.shareId !== 'string' ||
+    typeof candidate.tenantId !== 'string' ||
+    !isHostedContextHealthPolicy(candidate.policy)
+  ) {
+    fail('Hosted context health schedule is invalid.');
+  }
+  const rebuilt = buildHostedContextHealthScheduleV1({
+    cadenceMinutes: candidate.cadenceMinutes,
+    policy: candidate.policy,
+    project: candidate.project,
+    shareId: candidate.shareId,
+    tenantId: candidate.tenantId,
+  });
   if (rebuilt.scheduleId !== candidate.scheduleId) fail('Hosted context health schedule digest does not match.');
   return rebuilt;
 }
@@ -396,14 +532,17 @@ function validateUnsignedRunInput(input: HostedContextHealthUnsignedRunInputV1):
 
 function validateEvaluationAttestation(value: unknown): HostedContextHealthEvaluationAttestationV1 {
   if (!isRecord(value)) fail('Hosted context health evaluation attestation is required.');
-  const keys = Object.keys(value);
+  const keys = EffectRecord.keys(value);
   if (
     keys.length !== 5 ||
-    keys.some(key => !['audience', 'claimGeneration', 'claimToken', 'signature', 'version'].includes(key)) ||
+    EffectArray.some(
+      keys,
+      key => !['audience', 'claimGeneration', 'claimToken', 'signature', 'version'].includes(key),
+    ) ||
     value.audience !== EVALUATION_AUDIENCE ||
     value.version !== HOSTED_CONTEXT_HEALTH_VERSION ||
-    !Number.isSafeInteger(value.claimGeneration) ||
-    (value.claimGeneration as number) < 1 ||
+    !checkedIsSafeInteger(value.claimGeneration) ||
+    value.claimGeneration < 1 ||
     typeof value.claimToken !== 'string' ||
     !CLAIM_TOKEN.test(value.claimToken) ||
     typeof value.signature !== 'string' ||
@@ -411,7 +550,13 @@ function validateEvaluationAttestation(value: unknown): HostedContextHealthEvalu
   ) {
     fail('Hosted context health evaluation attestation is invalid.');
   }
-  return value as unknown as HostedContextHealthEvaluationAttestationV1;
+  return {
+    audience: EVALUATION_AUDIENCE,
+    claimGeneration: value.claimGeneration,
+    claimToken: value.claimToken,
+    signature: value.signature,
+    version: HOSTED_CONTEXT_HEALTH_VERSION,
+  };
 }
 
 function evaluationAttestation(
@@ -471,7 +616,7 @@ function hmacSha256Hex(key: string, message: string): string {
 function hexBytes(hex: string): Uint8Array {
   const result = new Uint8Array(hex.length / 2);
   for (let index = 0; index < result.length; index += 1) {
-    result[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+    result[index] = Number.parseInt(Effect.pipe(hex, EffectString.slice(index * 2, index * 2 + 2)), 16);
   }
   return result;
 }
@@ -479,9 +624,33 @@ function hexBytes(hex: string): Uint8Array {
 function constantTimeEqual(left: string, right: string): boolean {
   let difference = left.length ^ right.length;
   for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-    difference |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
+    difference |=
+      (Effect.pipe(
+        left,
+        EffectString.charCodeAt(index),
+        Effect.Option.getOrElse(() => NaN),
+      ) || 0) ^
+      (Effect.pipe(
+        right,
+        EffectString.charCodeAt(index),
+        Effect.Option.getOrElse(() => NaN),
+      ) || 0);
   }
   return difference === 0;
+}
+
+function isHostedContextHealthPolicy(value: unknown): value is HostedContextHealthPolicyV1 {
+  return (
+    isRecord(value) &&
+    typeof value.backlogAlertCount === 'number' &&
+    typeof value.digest === 'string' &&
+    typeof value.persistentStaleRuns === 'number' &&
+    typeof value.policyVersion === 'string' &&
+    typeof value.schedulerLagMinutes === 'number' &&
+    typeof value.supportOwner === 'string' &&
+    value.version === HOSTED_CONTEXT_HEALTH_VERSION &&
+    typeof value.workerHeartbeatMinutes === 'number'
+  );
 }
 
 function validatePolicy(policy: HostedContextHealthPolicyV1): HostedContextHealthPolicyV1 {
@@ -499,14 +668,21 @@ function validateAggregate(aggregate: ContextHealthAggregateV1, project: string)
     fail('Hosted context health aggregate identity is invalid.');
   }
   const {aggregateId: _aggregateId, ...unsigned} = aggregate;
-  if (`context-health-${sha256HexSync(canonicalJson(unsigned)).slice(0, 40)}` !== aggregate.aggregateId) {
+  if (
+    `context-health-${Effect.pipe(sha256HexSync(canonicalJson(unsigned)), EffectString.slice(0, 40))}` !==
+    aggregate.aggregateId
+  ) {
     fail('Hosted context health aggregate digest does not match its evidence.');
   }
   if (!['clean', 'findings', 'unknown'].includes(aggregate.status)) fail('Hosted context health status is invalid.');
   if (
-    !Array.isArray(aggregate.sources) ||
+    !EffectArray.isArray(aggregate.sources) ||
     aggregate.sources.length === 0 ||
-    aggregate.sources.some(source => !source.sourceKey.startsWith('team:'))
+    EffectArray.some(
+      aggregate.sources,
+      (source: ContextHealthAggregateV1['sources'][number]) =>
+        !Effect.pipe(source.sourceKey, EffectString.startsWith('team:')),
+    )
   ) {
     fail('Hosted context health accepts canonical shared-memory sources only.');
   }
@@ -514,12 +690,15 @@ function validateAggregate(aggregate: ContextHealthAggregateV1, project: string)
 
 function validateSignals(signals: unknown): HostedContextHealthSignalCountsV1 {
   if (!isRecord(signals)) fail('Hosted context health signal counts are invalid.');
-  const enumerableKeys = Reflect.ownKeys(signals).filter(key =>
+  const enumerableKeys = EffectArray.filter(Reflect.ownKeys(signals), key =>
     Object.prototype.propertyIsEnumerable.call(signals, key),
   );
   if (
     enumerableKeys.length !== HOSTED_CONTEXT_HEALTH_SIGNAL_COUNT_KEYS.length ||
-    enumerableKeys.some(key => typeof key !== 'string' || !HOSTED_CONTEXT_HEALTH_SIGNAL_COUNT_KEY_SET.has(key))
+    EffectArray.some(
+      enumerableKeys,
+      key => typeof key !== 'string' || !HOSTED_CONTEXT_HEALTH_SIGNAL_COUNT_KEY_SET.has(key),
+    )
   ) {
     fail('Hosted context health signal counts must contain exactly the canonical signals.');
   }
@@ -567,7 +746,7 @@ function alertEvidenceCount(
   if (kind === 'failed-checks') return evidence.failedChecks;
   if (kind === 'persistent-stale-evidence') return evidence.staleCount === 0 ? 0 : evidence.consecutiveStaleRuns;
   if (kind === 'scheduler-lag') return evidence.schedulerLagMinutes;
-  return Number.isFinite(evidence.heartbeatLagMinutes) ? evidence.heartbeatLagMinutes : MAXIMUM_COUNT;
+  return checkedIsFiniteNumber(evidence.heartbeatLagMinutes) ? evidence.heartbeatLagMinutes : MAXIMUM_COUNT;
 }
 
 function alertFires(kind: HostedContextHealthAlertKindV1, evidenceCount: number, policy: HostedContextHealthPolicyV1) {
@@ -593,7 +772,7 @@ function alertGuidance(kind: HostedContextHealthAlertKindV1): {
 }
 
 function opaqueLabel(kind: 'project' | 'share' | 'tenant', value: string): string {
-  return `${kind}-${sha256HexSync(`threadnote-hosted-health-v1\0${kind}\0${value}`).slice(0, 20)}`;
+  return `${kind}-${Effect.pipe(sha256HexSync(`threadnote-hosted-health-v1\0${kind}\0${value}`), EffectString.slice(0, 20))}`;
 }
 
 function elapsedMinutes(earlier: number, later: number): number {
@@ -622,21 +801,21 @@ function identifier(value: unknown, name: string): string {
 function canonicalTimestamp(value: unknown, name: string): string {
   if (typeof value !== 'string') fail(`Invalid hosted health ${name}.`);
   const milliseconds = Date.parse(value);
-  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) {
+  if (!checkedIsFiniteNumber(milliseconds) || new Date(milliseconds).toISOString() !== value) {
     fail(`Invalid hosted health ${name}.`);
   }
   return value;
 }
 
 function boundedInteger(value: unknown, minimum: number, maximum: number, name: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+  if (!checkedIsSafeInteger(value) || value < minimum || value > maximum) {
     fail(`Invalid hosted health ${name}.`);
   }
-  return value as number;
+  return value;
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function compareText(left: string, right: string): number {

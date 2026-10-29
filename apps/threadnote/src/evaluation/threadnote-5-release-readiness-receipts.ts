@@ -1,8 +1,10 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
+  ACTIVATION_APPROVAL_KINDS,
   activationReceiptRevisionV1,
   parseActivationPlanV1,
   parseActivationReceiptV1,
@@ -30,14 +32,19 @@ import {
   buildKnowledgeDeltaGitProposalV1,
   type KnowledgeDeltaGitProposalInputV1,
 } from '../git_proposal/knowledge_delta.js';
-import {parseCandidateReview, type CandidateReview, type MemoryCandidate} from '@threadnote/memory/candidate';
+import {
+  isMemoryCandidate,
+  parseCandidateReview,
+  type CandidateReview,
+  type LegacyMemoryCandidate,
+  type MemoryCandidate,
+} from '@threadnote/memory/candidate';
 import {deriveThreadnote5HealthClaimsV1} from './threadnote-5-release-readiness-health.js';
 import {projectKnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
 import {
   parseProcedureManifest,
   parseProcedureVerificationReceipt,
   procedureStatus,
-  type ProcedureStatusInput,
 } from '@threadnote/context/procedure/contract';
 import {
   parseThreadnote5TrustedSourceV1,
@@ -87,47 +94,103 @@ import {
   text,
   unique,
 } from './threadnote-5-release-readiness-validation.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
+const ActivationApprovalSchema = Schema.Struct({
+  approvalHash: Schema.String,
+  approved: Schema.Literal(true),
+  kind: Schema.Literals(ACTIVATION_APPROVAL_KINDS),
+  operationId: Schema.String,
+  planHash: Schema.String,
+  receiptRevision: Schema.String,
+  reviewRevisionHash: Schema.String,
+  type: Schema.Literal('threadnote-activation-approval'),
+  version: Schema.Literal(1),
+});
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const ReviewedSharedMemoryMutationSchema = withRest(
+  Schema.Struct({
+    approval: withRest(
+      Schema.Struct({
+        expectedSourceContentHash: Schema.String,
+        reviewId: Schema.String,
+        revision: Schema.Finite,
+        share: Schema.Literal(true),
+      }),
+    ),
+    candidateId: Schema.String,
+    expectedTarget: Schema.Union([
+      withRest(Schema.Struct({state: Schema.Literal('absent')})),
+      withRest(
+        Schema.Struct({
+          content: Schema.String,
+          contentHash: Schema.String,
+          state: Schema.Literal('present'),
+        }),
+      ),
+    ]),
+    operation: Schema.Literals(['create', 'replace']),
+    sourceContent: Schema.String,
+    sourceUri: Schema.String,
+  }),
+);
+const ProcedureStatusInputSchema = withRest(
+  Schema.Struct({
+    availableArtifact: Schema.optionalKey(
+      Schema.Struct({
+        id: Schema.String,
+        semanticVersion: Schema.String,
+        sha256: Schema.String,
+      }),
+    ),
+    capabilities: Schema.Array(Schema.String),
+    localArtifactSha256: Schema.optionalKey(Schema.String),
+    receipt: Schema.optionalKey(Schema.Unknown),
+    surfaceIds: Schema.Array(Schema.String),
+  }),
+);
+import type {
+  Threadnote5LocalSourceKindV1,
+  Threadnote5LocalSubsystemReceiptRecordV1,
+  Threadnote5OfflineNetworkObserverV1,
+  Threadnote5ScenarioReceiptVerificationV1,
+  Threadnote5LocalReceiptVerificationV1,
+  Threadnote5DerivedLocalReceiptSetV1,
+  DerivedClaims,
+  Threadnote5SecondSurfaceLinkV1,
+  Threadnote5SharedDecisionLinkV1,
+  Threadnote5DerivedCorrelationsV1,
+  Threadnote5LocalReceiptAdapterV1,
+} from './threadnote-5-release-readiness-receipts-contracts.js';
+import {
+  unknownFor,
+  contentFreeRecord,
+  withoutDigest,
+  sameSource,
+  encodedBytes,
+  compareMeasurement,
+  isSourceKind,
+  releaseScenario,
+} from './threadnote-5-release-readiness-receipts/helpers.js';
+export type {
+  Threadnote5LocalSourceKindV1,
+  Threadnote5LocalSubsystemReceiptRecordV1,
+  Threadnote5OfflineNetworkObserverV1,
+  Threadnote5ScenarioReceiptVerificationV1,
+  Threadnote5LocalReceiptVerificationV1,
+  Threadnote5DerivedScenarioClaimsV1,
+  Threadnote5DerivedLocalReceiptSetV1,
+} from './threadnote-5-release-readiness-receipts-contracts.js';
 export const THREADNOTE_5_LOCAL_SUBSYSTEM_RECEIPT_VERSION = 1 as const;
 
 const MAX_RECORDS = 64;
 const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_RECORD_SET_BYTES = 8 * 1024 * 1024;
 const MAX_ATTEMPTS = 64;
-const SOURCE_KINDS = [
-  'activation',
-  'closeout',
-  'context-brief',
-  'context-check',
-  'context-health',
-  'git-proposal',
-  'guidance',
-  'migration',
-  'procedure',
-  'recall',
-  'sharing',
-  'value-report',
-] as const;
-
-export type Threadnote5LocalSourceKindV1 = (typeof SOURCE_KINDS)[number];
-
-/**
- * Private, short-lived source material used to derive content-free release evidence.
- * The digest binds the artifact to one scenario and one exact candidate runtime.
- */
-export interface Threadnote5LocalSubsystemReceiptRecordV1 {
-  readonly artifact: unknown;
-  readonly candidate: Threadnote5SourceV1;
-  readonly digest: string;
-  readonly kind: Threadnote5LocalSourceKindV1;
-  readonly scenario: Threadnote5ReleaseScenario;
-  readonly version: typeof THREADNOTE_5_LOCAL_SUBSYSTEM_RECEIPT_VERSION;
-}
-
-/** A narrow observer supplied by the offline harness around the production activation flow. */
-export interface Threadnote5OfflineNetworkObserverV1 {
-  readonly attemptedNetworkActivityCount: () => number;
-}
 
 /**
  * Captures only replayable activation evidence from the production stores. The receipt history
@@ -149,14 +212,15 @@ export const captureThreadnote5ActivationTrialV1 = Effect.fn('releaseReadiness.c
   const beforeAttempts = input.offlineObserver?.attemptedNetworkActivityCount();
   const state = yield* readActivationStateV1(config, input.activationId);
   if (state === undefined) throw new Error('Activation capture requires retained production state.');
-  const receiptChain = input.receiptChain.map(parseActivationReceiptV1);
+  const receiptChain = EffectArray.map(input.receiptChain, parseActivationReceiptV1);
   if (canonicalJson(receiptChain.at(-1)) !== canonicalJson(state.receipt)) {
     throw new Error('Activation capture chain does not end at the live production state.');
   }
   const approvals = input.approvals ?? [];
   verifyActivationReceiptChain(state.plan, receiptChain, approvals);
-  const eventIds = new Set(activationValueEventsV1(state.receipt).map(event => event.eventId));
-  const events = (yield* readLocalValueEvents(config.agentContextHome)).filter(
+  const eventIds = new Set(EffectArray.map(activationValueEventsV1(state.receipt), event => event.eventId));
+  const events = EffectArray.filter(
+    yield* readLocalValueEvents(config.agentContextHome),
     (event): event is Extract<LocalValueEventV1, {readonly kind: 'activation'}> =>
       event.kind === 'activation' && eventIds.has(event.eventId),
   );
@@ -207,101 +271,6 @@ export const captureThreadnote5ActivationTrialV1 = Effect.fn('releaseReadiness.c
   };
 });
 
-export interface Threadnote5ScenarioReceiptVerificationV1 {
-  readonly missingKinds: readonly string[];
-  readonly scenario: Threadnote5ReleaseScenario;
-  readonly state: 'unknown' | 'verified';
-  readonly verifiedKinds: readonly string[];
-}
-
-export type Threadnote5LocalReceiptVerificationV1 =
-  | {
-      readonly reason: 'records-invalid' | 'records-unavailable' | 'records-mismatched' | 'verifier-incomplete';
-      readonly scenarios: readonly Threadnote5ScenarioReceiptVerificationV1[];
-      readonly state: 'unknown';
-    }
-  | {
-      readonly authorityManifestHash: string | null;
-      readonly receiptCount: number;
-      readonly recordsHash: string;
-      readonly scenarios: readonly Threadnote5ScenarioReceiptVerificationV1[];
-      readonly state: 'verified';
-    };
-
-export interface Threadnote5DerivedScenarioClaimsV1 {
-  readonly assertions: readonly string[];
-  readonly measurements: readonly Threadnote5MeasurementV1[];
-  readonly metricContributingKinds: readonly Threadnote5LocalSourceKindV1[];
-  readonly missingKinds: readonly string[];
-  readonly scenario: Threadnote5ReleaseScenario;
-  readonly subsystemReceipts: readonly {readonly digest: string; readonly kind: Threadnote5LocalSourceKindV1}[];
-}
-
-export interface Threadnote5DerivedLocalReceiptSetV1 {
-  readonly authorityManifestHash: string;
-  readonly records: readonly Threadnote5LocalSubsystemReceiptRecordV1[];
-  readonly scenarios: readonly Threadnote5DerivedScenarioClaimsV1[];
-}
-
-interface DerivedClaims {
-  readonly assertions: readonly string[];
-  readonly correlations?: Threadnote5DerivedCorrelationsV1;
-  readonly measurements: readonly Threadnote5MeasurementV1[];
-  readonly missingKinds?: readonly string[];
-}
-
-interface Threadnote5SecondSurfaceLinkV1 {
-  readonly activationId: string;
-  readonly activationReceiptRevision: string;
-  readonly decisionCanonicalUri: string;
-  readonly decisionContentHash: string;
-  readonly decisionMemoryId: string;
-  readonly proofHash: string;
-  readonly publicationReceiptHash: string;
-}
-
-interface Threadnote5SharedDecisionLinkV1 {
-  readonly activationId: string;
-  readonly activationReceiptRevision: string;
-  readonly decisionCanonicalUri: string;
-  readonly decisionContentHash: string;
-  readonly decisionMemoryId: string;
-  readonly publicationReceiptHash: string;
-}
-
-interface Threadnote5DerivedCorrelationsV1 {
-  readonly activationValues?: readonly Threadnote5ActivationValueLinkV1[];
-  readonly feedbackTrials?: readonly Threadnote5FeedbackTrialLinkV1[];
-  readonly firstBriefs?: readonly Threadnote5FirstBriefLinkV1[];
-  readonly secondSurfaceProofs?: readonly Threadnote5SecondSurfaceLinkV1[];
-  readonly sharedDecisions?: readonly Threadnote5SharedDecisionLinkV1[];
-}
-
-type Threadnote5AuthorityRequirementV1 =
-  | 'activation-live-verification-authority'
-  | 'context-brief-plan-citation-authority'
-  | 'context-check-read-fence-authority'
-  | 'context-health-schedule-authority'
-  | 'context-health-team-aggregate-authority'
-  | 'guidance-stale-precondition-rejection-authority'
-  | 'migration-execution-authority'
-  | 'git-proposal-review-authority'
-  | 'procedure-execution-authority'
-  | 'value-report-trial-authority';
-
-interface Threadnote5LocalReceiptAdapterV1 {
-  readonly acceptedScenarios: readonly Threadnote5ReleaseScenario[];
-  readonly kind: Threadnote5LocalSourceKindV1;
-  readonly requiredAuthority: readonly Threadnote5AuthorityRequirementV1[];
-  readonly authorityType?: (
-    record: Threadnote5LocalSubsystemReceiptRecordV1,
-  ) => Threadnote5LocalAuthorityEntryV1['type'] | undefined;
-  readonly derive: (
-    record: Threadnote5LocalSubsystemReceiptRecordV1,
-    authority: Threadnote5LocalAuthorityEntryV1 | undefined,
-  ) => DerivedClaims;
-}
-
 export function threadnote5LocalSubsystemReceiptDigest(
   record: Omit<Threadnote5LocalSubsystemReceiptRecordV1, 'digest'>,
 ): string {
@@ -329,15 +298,15 @@ export function deriveThreadnote5LocalScenarioClaims(input: {
   readonly retainedRecords: unknown;
 }): Threadnote5DerivedLocalReceiptSetV1 {
   const candidate = parseThreadnote5TrustedSourceV1(input.candidate, 'candidate');
-  if (!Array.isArray(input.retainedRecords)) throw new Error('Retained subsystem records must be an array.');
+  if (!EffectArray.isArray(input.retainedRecords)) throw new Error('Retained subsystem records must be an array.');
   if (input.retainedRecords.length > MAX_RECORDS || encodedBytes(input.retainedRecords) > MAX_RECORD_SET_BYTES) {
     throw new Error('Retained subsystem record set exceeds its bounds.');
   }
-  const records = input.retainedRecords.map(parseRecord);
+  const records = EffectArray.map(input.retainedRecords, parseRecord);
   if (
-    !unique(records.map(record => record.digest)) ||
-    !unique(records.map(record => `${record.scenario}\0${record.kind}`)) ||
-    records.some(record => !sameSource(record.candidate, candidate))
+    !unique(EffectArray.map(records, record => record.digest)) ||
+    !unique(EffectArray.map(records, record => `${record.scenario}\0${record.kind}`)) ||
+    EffectArray.some(records, record => !sameSource(record.candidate, candidate))
   ) {
     throw new Error('Retained subsystem records are duplicated or candidate-mismatched.');
   }
@@ -355,37 +324,58 @@ export function deriveThreadnote5LocalScenarioClaims(input: {
     }
     derivedByDigest.set(record.digest, deriveClaims(record, authority.byRecordDigest.get(record.digest)));
   }
-  const feedbackTrials = [...derivedByDigest.values()].flatMap(claims => claims.correlations?.feedbackTrials ?? []);
+  const feedbackTrials = EffectArray.flatMap(
+    [...derivedByDigest.values()],
+    claims => claims.correlations?.feedbackTrials ?? [],
+  );
   if (
-    !unique(feedbackTrials.map(trial => trial.feedbackEventDigest)) ||
-    !unique(feedbackTrials.map(trial => trial.laneId))
+    !unique(EffectArray.map(feedbackTrials, trial => trial.feedbackEventDigest)) ||
+    !unique(EffectArray.map(feedbackTrials, trial => trial.laneId))
   ) {
     throw new Error('Production capture feedback events and scenario lanes must be globally unique.');
   }
-  const order = new Map(THREADNOTE_5_RELEASE_SCENARIOS.map((scenario, index) => [scenario, index] as const));
+  const order = new Map(
+    EffectArray.map(THREADNOTE_5_RELEASE_SCENARIOS, (scenario, index) => [scenario, index] as const),
+  );
   const sortedRecords = [...records].sort((left, right) => {
     const scenarioOrder = order.get(left.scenario)! - order.get(right.scenario)!;
     return scenarioOrder === 0 ? compareText(left.kind, right.kind) : scenarioOrder;
   });
-  const scenarios = [...new Set(sortedRecords.map(record => record.scenario))].map(scenario => {
-    const scenarioRecords = sortedRecords.filter(record => record.scenario === scenario);
-    const collected = collectScenarioClaims(
-      scenario,
-      scenarioRecords.map(record => ({digest: record.digest, kind: record.kind})),
-      derivedByDigest,
-    );
-    return {
-      assertions: [...collected.assertions].sort(compareText),
-      measurements: [...collected.measurements].sort(compareMeasurement),
-      metricContributingKinds: scenarioRecords
-        .filter(record => isMetricLaneSource(scenario, derivedByDigest.get(record.digest)))
-        .map(record => record.kind),
-      missingKinds: [...new Set(collected.missingKinds)].sort(compareText),
-      scenario,
-      subsystemReceipts: scenarioRecords.map(record => ({digest: record.digest, kind: record.kind})),
-    };
-  });
-  return {authorityManifestHash: authority.manifestHash, records: sortedRecords, scenarios};
+  const scenarios = EffectArray.map(
+    [...new Set(EffectArray.map(sortedRecords, record => record.scenario))],
+    scenario => {
+      const scenarioRecords = EffectArray.filter(sortedRecords, record => record.scenario === scenario);
+      const collected = collectScenarioClaims(
+        scenario,
+        EffectArray.map(scenarioRecords, record => ({
+          digest: record.digest,
+          kind: record.kind,
+        })),
+        derivedByDigest,
+      );
+      return {
+        assertions: [...collected.assertions].sort(compareText),
+        measurements: [...collected.measurements].sort(compareMeasurement),
+        metricContributingKinds: EffectArray.map(
+          EffectArray.filter(scenarioRecords, record =>
+            isMetricLaneSource(scenario, derivedByDigest.get(record.digest)),
+          ),
+          record => record.kind,
+        ),
+        missingKinds: [...new Set(collected.missingKinds)].sort(compareText),
+        scenario,
+        subsystemReceipts: EffectArray.map(scenarioRecords, record => ({
+          digest: record.digest,
+          kind: record.kind,
+        })),
+      };
+    },
+  );
+  return {
+    authorityManifestHash: authority.manifestHash,
+    records: sortedRecords,
+    scenarios,
+  };
 }
 
 function isMetricLaneSource(scenario: Threadnote5ReleaseScenario, claims: DerivedClaims | undefined): boolean {
@@ -411,7 +401,7 @@ export function verifyThreadnote5LocalSubsystemReceipts(input: {
   } catch {
     return unknownFor(input.observations, 'records-invalid');
   }
-  if (!Array.isArray(input.retainedRecords)) return unknownFor(input.observations, 'records-unavailable');
+  if (!EffectArray.isArray(input.retainedRecords)) return unknownFor(input.observations, 'records-unavailable');
   let recordSetBytes: number;
   try {
     recordSetBytes = encodedBytes(input.retainedRecords);
@@ -424,31 +414,37 @@ export function verifyThreadnote5LocalSubsystemReceipts(input: {
 
   let records: readonly Threadnote5LocalSubsystemReceiptRecordV1[];
   try {
-    records = input.retainedRecords.map(parseRecord);
+    records = EffectArray.map(input.retainedRecords, parseRecord);
   } catch {
     return unknownFor(input.observations, 'records-invalid');
   }
   if (
-    !unique(records.map(record => record.digest)) ||
-    !unique(records.map(record => `${record.scenario}\0${record.kind}`)) ||
-    records.some(record => !sameSource(record.candidate, candidate))
+    !unique(EffectArray.map(records, record => record.digest)) ||
+    !unique(EffectArray.map(records, record => `${record.scenario}\0${record.kind}`)) ||
+    EffectArray.some(records, record => !sameSource(record.candidate, candidate))
   ) {
     return unknownFor(input.observations, 'records-mismatched');
   }
 
   const expected = new Map<
     string,
-    {readonly kind: Threadnote5LocalSourceKindV1; readonly scenario: Threadnote5ReleaseScenario}
+    {
+      readonly kind: Threadnote5LocalSourceKindV1;
+      readonly scenario: Threadnote5ReleaseScenario;
+    }
   >();
   for (const observation of input.observations) {
     for (const receipt of observation.attestation.subsystemReceipts) {
       if (isSourceKind(receipt.kind))
-        expected.set(receipt.digest, {kind: receipt.kind, scenario: observation.scenario});
+        expected.set(receipt.digest, {
+          kind: receipt.kind,
+          scenario: observation.scenario,
+        });
     }
   }
   if (
     records.length !== expected.size ||
-    records.some(record => {
+    EffectArray.some(records, record => {
       const reference = expected.get(record.digest);
       return reference?.kind !== record.kind || reference.scenario !== record.scenario;
     })
@@ -477,43 +473,55 @@ export function verifyThreadnote5LocalSubsystemReceipts(input: {
   }
 
   let claimsMismatch = false;
-  const scenarios = input.observations.map(observation => {
+  const scenarios = EffectArray.map(input.observations, observation => {
     const result = verifyObservation(observation, derivedByDigest);
     claimsMismatch ||= result.claimsMismatch;
     return result.verification;
   });
   if (claimsMismatch) return {reason: 'records-mismatched', scenarios, state: 'unknown'};
-  if (scenarios.some(scenario => scenario.state !== 'verified')) {
+  if (EffectArray.some(scenarios, scenario => scenario.state !== 'verified')) {
     return {reason: 'verifier-incomplete', scenarios, state: 'unknown'};
   }
   const recordsHash = sha256HexSync(
     `threadnote-5-local-subsystem-records-v1\0${canonicalJson({
       authorityManifestHash,
-      records: records.map(contentFreeRecord).sort((left, right) => left.digest.localeCompare(right.digest)),
+      records: EffectArray.map(records, contentFreeRecord).sort((left, right) =>
+        Effect2.pipe(left.digest, EffectString.localeCompare(right.digest)),
+      ),
     })}`,
   );
-  return {authorityManifestHash, receiptCount: records.length, recordsHash, scenarios, state: 'verified'};
+  return {
+    authorityManifestHash,
+    receiptCount: records.length,
+    recordsHash,
+    scenarios,
+    state: 'verified',
+  };
 }
 
 function verifyObservation(
   observation: Threadnote5ObservationV1,
   derivedByDigest: ReadonlyMap<string, DerivedClaims>,
-): {readonly claimsMismatch: boolean; readonly verification: Threadnote5ScenarioReceiptVerificationV1} {
+): {
+  readonly claimsMismatch: boolean;
+  readonly verification: Threadnote5ScenarioReceiptVerificationV1;
+} {
   const {assertions, measurements, missingKinds, verifiedKinds} = collectScenarioClaims(
     observation.scenario,
     observation.attestation.subsystemReceipts,
     derivedByDigest,
   );
-  if (!unique(measurements.map(measurement => measurement.id))) {
+  if (!unique(EffectArray.map(measurements, measurement => measurement.id))) {
     return {
       claimsMismatch: true,
       verification: scenarioVerification(observation.scenario, verifiedKinds, ['duplicate-derived-metric']),
     };
   }
   const incomplete = missingKinds.length > 0;
-  const expectedAssertions = observation.transcript.assertionResults
-    .filter(result => result.observed)
-    .map(result => result.id);
+  const expectedAssertions = EffectArray.map(
+    EffectArray.filter(observation.transcript.assertionResults, result => result.observed),
+    result => result.id,
+  );
   const claimsMismatch =
     !incomplete &&
     (observation.transcript.outcome !== 'passed' ||
@@ -569,7 +577,7 @@ function collectScenarioClaims(
   return {
     assertions,
     measurements,
-    missingKinds: missingKinds.filter(kind => !verifiedKindSet.has(kind)),
+    missingKinds: EffectArray.filter(missingKinds, kind => !verifiedKindSet.has(kind)),
     verifiedKinds,
   };
 }
@@ -591,11 +599,19 @@ function correlateScenarioClaims(
       !sameCorrelationSet(activation?.secondSurfaceProofs, recall?.secondSurfaceProofs) ||
       !sameCorrelationSet(activation?.activationValues, value?.activationValues) ||
       !sameLaneSet(
-        recall?.secondSurfaceProofs?.map(proof => proof.proofHash),
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(recall?.secondSurfaceProofs), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, proof => proof.proofHash),
+          ),
+        ),
         feedback,
       )
     ) {
-      return {assertions: [], measurements: [], missingKinds: ['cross-record-correlation']};
+      return {
+        assertions: [],
+        measurements: [],
+        missingKinds: ['cross-record-correlation'],
+      };
     }
     return {
       assertions: ['second-surface-reused-decision', 'activation-receipt-reused-by-value-report'],
@@ -606,15 +622,31 @@ function correlateScenarioClaims(
   if (scenario === 'git-shared') {
     const sharing = correlations.get('sharing')?.sharedDecisions;
     const recallProofs = correlations.get('recall')?.secondSurfaceProofs;
-    const recall = recallProofs?.map(sharedDecisionLink);
+    const recall = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(recallProofs), __effectArrayReceiver2 =>
+        EffectArray.map(__effectArrayReceiver2, sharedDecisionLink),
+      ),
+    );
     return sameCorrelationSet(sharing, recall) &&
       (feedback === undefined ||
         sameLaneSet(
-          recallProofs?.map(proof => proof.proofHash),
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(recallProofs), __effectArrayReceiver =>
+              EffectArray.map(__effectArrayReceiver, proof => proof.proofHash),
+            ),
+          ),
           feedback,
         ))
-      ? {assertions: ['git-shared-decision-retrieved'], measurements: [], missingKinds: []}
-      : {assertions: [], measurements: [], missingKinds: ['cross-record-correlation']};
+      ? {
+          assertions: ['git-shared-decision-retrieved'],
+          measurements: [],
+          missingKinds: [],
+        }
+      : {
+          assertions: [],
+          measurements: [],
+          missingKinds: ['cross-record-correlation'],
+        };
   }
   if (scenario === 'solo') {
     const firstBriefs = correlations.get('activation')?.firstBriefs;
@@ -624,15 +656,19 @@ function correlateScenarioClaims(
     }
     if (
       !sameStringSet(
-        firstBriefs?.map(item => item.laneId),
-        contextBriefs?.map(item => item.laneId),
+        EffectArray.map(firstBriefs, item => item.laneId),
+        EffectArray.map(contextBriefs, item => item.laneId),
       ) ||
       !sameLaneSet(
-        firstBriefs?.map(item => item.laneId),
+        EffectArray.map(firstBriefs, item => item.laneId),
         feedback,
       )
     ) {
-      return {assertions: [], measurements: [], missingKinds: ['cross-record-correlation']};
+      return {
+        assertions: [],
+        measurements: [],
+        missingKinds: ['cross-record-correlation'],
+      };
     }
     return {
       assertions: [],
@@ -640,7 +676,7 @@ function correlateScenarioClaims(
         {
           id: 'time-to-first-cited-correct-plan',
           sampleCount: firstBriefs.length,
-          total: firstBriefs.reduce((sum, item) => sum + item.durationMilliseconds, 0),
+          total: EffectArray.reduce(firstBriefs, 0, (sum, item) => sum + item.durationMilliseconds),
         },
       ],
       missingKinds: [],
@@ -651,12 +687,20 @@ function correlateScenarioClaims(
     if (feedback === undefined) return {assertions: [], measurements: [], missingKinds: []};
     if (
       !sameLaneSet(
-        firstBriefs?.map(item => item.laneId),
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(firstBriefs), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, item => item.laneId),
+          ),
+        ),
         feedback,
       ) ||
-      feedback?.some(item => !item.offlineVerified)
+      EffectArray.some(feedback, item => !item.offlineVerified)
     ) {
-      return {assertions: [], measurements: [], missingKinds: ['cross-record-correlation']};
+      return {
+        assertions: [],
+        measurements: [],
+        missingKinds: ['cross-record-correlation'],
+      };
     }
     return {assertions: [], measurements: [], missingKinds: []};
   }
@@ -670,7 +714,8 @@ function sameLaneSet(
   if (lanes === undefined || feedback === undefined || lanes.length === 0 || lanes.length !== feedback.length)
     return false;
   return (
-    canonicalJson([...lanes].sort(compareText)) === canonicalJson(feedback.map(item => item.laneId).sort(compareText))
+    canonicalJson([...lanes].sort(compareText)) ===
+    canonicalJson(EffectArray.map(feedback, item => item.laneId).sort(compareText))
   );
 }
 
@@ -681,7 +726,7 @@ function sameStringSet(left: readonly string[] | undefined, right: readonly stri
 
 function sameCorrelationSet<T>(left: readonly T[] | undefined, right: readonly T[] | undefined): boolean {
   if (left === undefined || right === undefined || left.length === 0 || left.length !== right.length) return false;
-  const canonical = (values: readonly T[]) => values.map(value => canonicalJson(value)).sort(compareText);
+  const canonical = (values: readonly T[]) => EffectArray.map(values, value => canonicalJson(value)).sort(compareText);
   return canonicalJson(canonical(left)) === canonicalJson(canonical(right));
 }
 
@@ -792,10 +837,12 @@ const LOCAL_RECEIPT_ADAPTERS: readonly Threadnote5LocalReceiptAdapterV1[] = [
   },
 ];
 
-const LOCAL_RECEIPT_ADAPTER_BY_KIND = new Map(LOCAL_RECEIPT_ADAPTERS.map(adapter => [adapter.kind, adapter] as const));
+const LOCAL_RECEIPT_ADAPTER_BY_KIND = new Map(
+  EffectArray.map(LOCAL_RECEIPT_ADAPTERS, adapter => [adapter.kind, adapter] as const),
+);
 
 /** Adapter declarations are exported so capture tooling can reject a mislabeled source before persistence. */
-export const THREADNOTE_5_LOCAL_RECEIPT_ADAPTERS = LOCAL_RECEIPT_ADAPTERS.map(adapter => ({
+export const THREADNOTE_5_LOCAL_RECEIPT_ADAPTERS = EffectArray.map(LOCAL_RECEIPT_ADAPTERS, adapter => ({
   acceptedScenarios: [...adapter.acceptedScenarios],
   kind: adapter.kind,
   requiredAuthority: [...adapter.requiredAuthority],
@@ -826,53 +873,72 @@ function deriveActivation(
   const trialValues = boundedArray(source.trials, 'activation trials', 1, MAX_ATTEMPTS);
   const authorityTrials = authority?.type === 'activation-verification' ? authority.trials : [];
   if (authority?.type !== 'activation-verification') {
-    return {assertions: [], measurements: [], missingKinds: ['activation-live-verification-authority']};
+    return {
+      assertions: [],
+      measurements: [],
+      missingKinds: ['activation-live-verification-authority'],
+    };
   }
   if (authorityTrials.length !== trialValues.length) {
     throw new Error('Activation authority must exactly cover its captured trials.');
   }
-  const trials = trialValues.map(trial => {
+  const trials = EffectArray.map(trialValues, trial => {
     const activationId = object(object(trial, 'activation trial').state, 'activation state').plan;
     const plan = parseActivationPlanV1(activationId);
     return parseActivationTrial(
       trial,
       scenario,
-      authorityTrials.find(candidate => candidate.activationId === plan.activationId),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(authorityTrials, candidate => candidate.activationId === plan.activationId),
+      ),
     );
   });
-  if (!unique(trials.map(trial => trial.plan.activationId))) throw new Error('Activation trials must be unique.');
-  const completed = trials.filter(trial => trial.finalReceipt.status === 'completed').length;
+  if (!unique(EffectArray.map(trials, trial => trial.plan.activationId)))
+    throw new Error('Activation trials must be unique.');
+  const completed = EffectArray.filter(trials, trial => trial.finalReceipt.status === 'completed').length;
   if (scenario === 'solo') {
     return {
-      assertions: trials.every(trial => trial.finalReceipt.firstBrief !== undefined) ? ['local-setup-complete'] : [],
-      correlations: {firstBriefs: trials.map(trial => trial.firstBriefLink!)},
-      measurements: [{eligibleCount: trials.length, id: 'setup-success-rate', positiveCount: completed}],
+      assertions: EffectArray.every(trials, trial => trial.finalReceipt.firstBrief !== undefined)
+        ? ['local-setup-complete']
+        : [],
+      correlations: {
+        firstBriefs: EffectArray.map(trials, trial => trial.firstBriefLink!),
+      },
+      measurements: [
+        {
+          eligibleCount: trials.length,
+          id: 'setup-success-rate',
+          positiveCount: completed,
+        },
+      ],
     };
   }
   if (scenario === 'two-agent') {
-    if (trials.some(trial => !trial.secondSurfaceVerified)) {
+    if (EffectArray.some(trials, trial => !trial.secondSurfaceVerified)) {
       throw new Error('Two-agent activation trial lacks a bound second-surface proof.');
     }
     return {
       assertions: ['two-surfaces-connected'],
       correlations: {
-        activationValues: trials.map(activationValueLink),
-        secondSurfaceProofs: trials.map(trial => trial.secondSurfaceLink!),
+        activationValues: EffectArray.map(trials, activationValueLink),
+        secondSurfaceProofs: EffectArray.map(trials, trial => trial.secondSurfaceLink!),
       },
       measurements: [],
     };
   }
   if (scenario === 'offline') {
-    if (trials.some(trial => !trial.offlineObserved || trial.finalReceipt.status !== 'completed')) {
+    if (EffectArray.some(trials, trial => !trial.offlineObserved || trial.finalReceipt.status !== 'completed')) {
       throw new Error('Offline activation trial is incomplete or lacks a zero-attempt network observer.');
     }
     return {
       assertions: ['local-flow-complete', 'network-attempts-zero'],
-      correlations: {firstBriefs: trials.map(trial => trial.firstBriefLink!)},
+      correlations: {
+        firstBriefs: EffectArray.map(trials, trial => trial.firstBriefLink!),
+      },
       measurements: [],
     };
   }
-  if (trials.some(trial => !trial.interruptionVerified)) {
+  if (EffectArray.some(trials, trial => !trial.interruptionVerified)) {
     throw new Error('Interrupted activation trial lacks a retained pre-resume receipt.');
   }
   return {
@@ -914,8 +980,14 @@ function parseActivationTrial(
   const state = exactObject(trial.state, ['plan', 'receipt'], 'activation state');
   const plan = parseActivationPlanV1(state.plan);
   const finalReceipt = parseActivationReceiptV1(state.receipt);
-  const chain = boundedArray(trial.receiptChain, 'activation receipt chain', 1, 16).map(parseActivationReceiptV1);
-  const approvals = boundedArray(trial.approvals, 'activation approvals', 0, 16).map(parseActivationApproval);
+  const chain = EffectArray.map(
+    boundedArray(trial.receiptChain, 'activation receipt chain', 1, 16),
+    parseActivationReceiptV1,
+  );
+  const approvals = EffectArray.map(
+    boundedArray(trial.approvals, 'activation approvals', 0, 16),
+    parseActivationApproval,
+  );
   if (canonicalJson(chain.at(-1)) !== canonicalJson(finalReceipt)) {
     throw new Error('Activation receipt chain does not end at the retained state.');
   }
@@ -966,7 +1038,7 @@ function activationFirstBriefLink(
   plan: ActivationPlanV1,
   chain: readonly ActivationReceiptV1[],
 ): Threadnote5FirstBriefLinkV1 | undefined {
-  const receipt = chain.find(item => item.firstBrief !== undefined);
+  const receipt = EffectOption.getOrUndefined(EffectArray.findFirst(chain, item => item.firstBrief !== undefined));
   if (receipt?.firstBrief === undefined) return undefined;
   const identity = {
     activationId: plan.activationId,
@@ -989,7 +1061,7 @@ function verifyActivationReceiptChain(
   if (canonicalJson(initial) !== canonicalJson(createActivationReceiptV1(plan, initial.startedAt))) {
     throw new Error('Activation receipt chain must begin with the initial persisted receipt.');
   }
-  const approvalsByHash = new Map(approvals.map(approval => [approval.approvalHash, approval] as const));
+  const approvalsByHash = new Map(EffectArray.map(approvals, approval => [approval.approvalHash, approval] as const));
   if (approvalsByHash.size !== approvals.length) throw new Error('Activation approvals must be unique.');
   const usedApprovals = new Set<string>();
   for (let index = 0; index < chain.length; index += 1) {
@@ -999,7 +1071,8 @@ function verifyActivationReceiptChain(
       receipt.planHash !== plan.planHash ||
       activationReceiptRevisionV1(receipt) !== receipt.revision ||
       receipt.operations.length !== plan.operations.length ||
-      receipt.operations.some(
+      EffectArray.some(
+        receipt.operations,
         (operation, operationIndex) =>
           operation.id !== plan.operations[operationIndex]?.id ||
           operation.kind !== plan.operations[operationIndex]?.kind ||
@@ -1014,7 +1087,9 @@ function verifyActivationReceiptChain(
     const operation =
       resume.status === 'completed' || resume.status === 'drifted'
         ? undefined
-        : receipt.operations.find(candidate => candidate.id === resume.operationId);
+        : EffectOption.getOrUndefined(
+            EffectArray.findFirst(receipt.operations, candidate => candidate.id === resume.operationId),
+          );
     const approvalHash = operation?.approvalHash;
     const approval = approvalHash === undefined ? undefined : approvalsByHash.get(approvalHash);
     if (!activationReceiptTransitionMatchesV1(plan, previous, receipt, approval)) {
@@ -1026,7 +1101,7 @@ function verifyActivationReceiptChain(
 }
 
 function parseActivationApproval(value: unknown): ActivationApprovalV1 {
-  return exactObject(
+  const source = exactObject(
     value,
     [
       'approvalHash',
@@ -1040,7 +1115,8 @@ function parseActivationApproval(value: unknown): ActivationApprovalV1 {
       'version',
     ],
     'activation approval',
-  ) as unknown as ActivationApprovalV1;
+  );
+  return Schema.decodeUnknownSync(ActivationApprovalSchema)(source);
 }
 
 function verifySecondSurfaceCapture(
@@ -1058,14 +1134,25 @@ function verifySecondSurfaceCapture(
   const attestation = parseSecondSurfaceProofAttestationV1(challenge.receipt);
   const proof = parseSecondSurfaceProofReceiptV1(attestation.proof);
   if (!secondSurfaceProofMatchesContextV1(challenge.context, proof)) return undefined;
-  const proofTransition = chain.findIndex(receipt =>
-    receipt.operations.some(operation => operation.kind === 'secondary.prove' && operation.status === 'verified'),
+  const proofTransition = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(
+      chain,
+      __effectArrayValue =>
+        !!(receipt =>
+          EffectArray.some(
+            receipt.operations,
+            operation => operation.kind === 'secondary.prove' && operation.status === 'verified',
+          ))(__effectArrayValue),
+    ),
+    () => -1,
   );
   const proofPrevious = proofTransition > 0 ? chain[proofTransition - 1] : undefined;
   if (
     challenge.context.activationId !== plan.activationId ||
     challenge.context.activationReceiptRevision !== proofPrevious?.revision ||
-    receipt.operations.find(operation => operation.kind === 'secondary.prove')?.subsystemReceiptHash !== proof.proofHash
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(receipt.operations, operation => operation.kind === 'secondary.prove'),
+    )?.subsystemReceiptHash !== proof.proofHash
   ) {
     return undefined;
   }
@@ -1092,32 +1179,40 @@ function verifyOfflineObservation(
 }
 
 function resumeBoundaryIsVerified(chain: readonly ActivationReceiptV1[], boundaryRevision: string): boolean {
-  const boundaryIndex = chain.findIndex(receipt => receipt.revision === boundaryRevision);
+  const boundaryIndex = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(chain, receipt => receipt.revision === boundaryRevision),
+    () => -1,
+  );
   return boundaryIndex > 0 && boundaryIndex < chain.length - 1;
 }
 
 function deriveRecall(_scenario: Threadnote5ReleaseScenario, value: unknown): DerivedClaims {
   const source = exactObject(value, ['trials'], 'recall capture');
-  const trials = boundedArray(source.trials, 'recall trials', 1, MAX_ATTEMPTS).map(trial => {
+  const trials = EffectArray.map(boundedArray(source.trials, 'recall trials', 1, MAX_ATTEMPTS), trial => {
     const item = exactObject(trial, ['proof'], 'recall trial');
     return parseSecondSurfaceProofReceiptV1(item.proof);
   });
-  if (!unique(trials.map(trial => trial.proofHash))) throw new Error('Recall trials must be unique.');
+  if (!unique(EffectArray.map(trials, trial => trial.proofHash))) throw new Error('Recall trials must be unique.');
   return {
     assertions: [],
-    correlations: {secondSurfaceProofs: trials.map(secondSurfaceLink)},
+    correlations: {
+      secondSurfaceProofs: EffectArray.map(trials, secondSurfaceLink),
+    },
     measurements: [],
   };
 }
 
 function deriveSharing(value: unknown): DerivedClaims {
   const source = exactObject(value, ['trials'], 'sharing capture');
-  const links = boundedArray(source.trials, 'sharing trials', 1, MAX_ATTEMPTS).map(trial => {
+  const links = EffectArray.map(boundedArray(source.trials, 'sharing trials', 1, MAX_ATTEMPTS), trial => {
     const item = exactObject(trial, ['decision', 'plan', 'receipt'], 'sharing trial');
     const plan = parseActivationPlanV1(item.plan);
     const receipt = parseActivationReceiptV1(item.receipt);
-    const publication = receipt.operations.find(
-      operation => operation.kind === 'decision.publish' || operation.kind === 'decision.propose',
+    const publication = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        receipt.operations,
+        operation => operation.kind === 'decision.publish' || operation.kind === 'decision.propose',
+      ),
     );
     const next = previewActivationResumeV1(plan, receipt);
     const decision = exactObject(
@@ -1149,14 +1244,21 @@ function deriveSharing(value: unknown): DerivedClaims {
       publicationReceiptHash: decision.publicationReceiptHash,
     };
   });
-  if (!unique(links.map(link => `${link.activationId}\0${link.activationReceiptRevision}`))) {
+  if (!unique(EffectArray.map(links, link => `${link.activationId}\0${link.activationReceiptRevision}`))) {
     throw new Error('Sharing trials must be unique.');
   }
-  return {assertions: [], correlations: {sharedDecisions: links}, measurements: []};
+  return {
+    assertions: [],
+    correlations: {sharedDecisions: links},
+    measurements: [],
+  };
 }
 
 function activationValueLink(trial: ParsedActivationTrialV1): Threadnote5ActivationValueLinkV1 {
-  return {activationId: trial.plan.activationId, finalReceiptRevision: trial.finalReceipt.revision};
+  return {
+    activationId: trial.plan.activationId,
+    finalReceiptRevision: trial.finalReceipt.revision,
+  };
 }
 
 function secondSurfaceLink(proof: SecondSurfaceProofReceiptV1): Threadnote5SecondSurfaceLinkV1 {
@@ -1200,9 +1302,16 @@ function deriveContextCheck(
     throw new Error('Context Check capture does not prove dirty evidence is non-current and the outcome is unknown.');
   }
   if (authority?.type !== 'context-check-read-fence' || !authority.assertions.includes('dirty-evidence-not-current')) {
-    return {assertions: [], measurements: [], missingKinds: ['context-check-read-fence-authority']};
+    return {
+      assertions: [],
+      measurements: [],
+      missingKinds: ['context-check-read-fence-authority'],
+    };
   }
-  return {assertions: ['dirty-evidence-not-current', 'outcome-unknown'], measurements: []};
+  return {
+    assertions: ['dirty-evidence-not-current', 'outcome-unknown'],
+    measurements: [],
+  };
 }
 
 function deriveGuidance(
@@ -1228,26 +1337,32 @@ function deriveGuidance(
   const before = parseGuidanceReceiptV2(capture.before, expected);
   const after = parseGuidanceReceiptV2(capture.after, expected);
   const preview = parseGuidanceReceiptV2(capture.preview, expected);
-  if (!Array.isArray(capture.sources) || capture.sources.length === 0 || capture.sources.length > 64) {
+  if (!EffectArray.isArray(capture.sources) || capture.sources.length === 0 || capture.sources.length > 64) {
     throw new Error('Guidance capture must retain bounded source receipts.');
   }
-  const sources = capture.sources.map(source => {
+  const sources = EffectArray.map(capture.sources, source => {
     const entry = exactObject(source, ['contentHash', 'text', 'uri'], 'guidance source');
     const contentHash = text(entry.contentHash, 'guidance source hash', 64);
     const sourceText = text(entry.text, 'guidance source text', 60 * 1024);
     if (!hash(contentHash) || sha256HexSync(sourceText) !== contentHash)
       throw new Error('Guidance source content hash is invalid.');
-    return {contentHash, text: sourceText, uri: text(entry.uri, 'guidance source URI', 4_096)};
+    return {
+      contentHash,
+      text: sourceText,
+      uri: text(entry.uri, 'guidance source URI', 4_096),
+    };
   });
-  if (!unique(sources.map(source => source.uri))) throw new Error('Guidance capture source URIs must be unique.');
+  if (!unique(EffectArray.map(sources, source => source.uri)))
+    throw new Error('Guidance capture source URIs must be unique.');
   const beforeText = text(capture.beforeText, 'guidance before text', 256 * 1024);
   const capturedAfterText = text(capture.afterText, 'guidance after text', 256 * 1024);
   const block = renderManagedGuidanceBlock(sources);
   const afterText = upsertGuidanceBlock(beforeText, block);
   const beforeBlock = guidanceBlock(beforeText);
-  const projectedSources = [...sources]
-    .sort((left, right) => compareText(left.uri, right.uri))
-    .map(({contentHash, uri}) => ({contentHash, uri}));
+  const projectedSources = EffectArray.map(
+    [...sources].sort((left, right) => compareText(left.uri, right.uri)),
+    ({contentHash, uri}) => ({contentHash, uri}),
+  );
   if (
     beforeBlock === undefined ||
     stripThreadnoteManagedGuidance(beforeText) !== stripThreadnoteManagedGuidance(afterText) ||
@@ -1290,7 +1405,11 @@ function deriveMigration(
   const upgrade = migrationExecution(capture.upgrade, baseline, candidate, 'upgrade');
   const downgrade = migrationExecution(capture.downgrade, candidate, baseline, 'downgrade');
   if (authority?.type !== 'migration-execution' || !authority.assertions.includes('migration-runtime-executed')) {
-    return {assertions: [], measurements: [], missingKinds: ['migration-execution-authority']};
+    return {
+      assertions: [],
+      measurements: [],
+      missingKinds: ['migration-execution-authority'],
+    };
   }
   const assertions = [
     ...(upgrade.outcome === 'readable' ? ['upgrade-readable'] : []),
@@ -1321,7 +1440,7 @@ function captureBoundary(
   const boundary = object(value, label);
   if (
     !allowedKeys(boundary, ['candidate', 'digest', ...required]) ||
-    Object.keys(boundary).length !== required.length + 2
+    EffectRecord.keys(boundary).length !== required.length + 2
   ) {
     throw new Error(`${label} has unsupported or missing fields.`);
   }
@@ -1339,7 +1458,10 @@ function migrationExecution(
   from: Threadnote5SourceV1,
   to: Threadnote5SourceV1,
   label: string,
-): {readonly outcome: 'readable' | 'safe-refusal'; readonly protectedWriteCount: number} {
+): {
+  readonly outcome: 'readable' | 'safe-refusal';
+  readonly protectedWriteCount: number;
+} {
   const execution = exactObject(
     value,
     ['afterDigest', 'beforeDigest', 'from', 'outcome', 'protectedWriteCount', 'to'],
@@ -1361,7 +1483,10 @@ function migrationExecution(
   ) {
     throw new Error(`${label} migration execution is invalid.`);
   }
-  return {outcome: execution.outcome, protectedWriteCount: execution.protectedWriteCount};
+  return {
+    outcome: execution.outcome,
+    protectedWriteCount: execution.protectedWriteCount,
+  };
 }
 
 function deriveCloseout(
@@ -1370,12 +1495,12 @@ function deriveCloseout(
   candidate: Threadnote5SourceV1,
 ): DerivedClaims {
   const source = exactObject(value, ['reviews'], 'closeout artifact');
-  const reviews = boundedArray(source.reviews, 'closeout reviews', 1, MAX_ATTEMPTS).map(review =>
+  const reviews = EffectArray.map(boundedArray(source.reviews, 'closeout reviews', 1, MAX_ATTEMPTS), review =>
     strictCandidateReview(review, candidate),
   );
-  if (!unique(reviews.map(review => review.reviewId))) throw new Error('Closeout trials must be unique.');
-  const completed = reviews.filter(review =>
-    review.candidates.some(candidate => candidateIsApplied(candidate, review)),
+  if (!unique(EffectArray.map(reviews, review => review.reviewId))) throw new Error('Closeout trials must be unique.');
+  const completed = EffectArray.filter(reviews, review =>
+    EffectArray.some(review.candidates, candidate => candidateIsApplied(candidate, review)),
   ).length;
   if (scenario === 'structured-closeout') {
     return {
@@ -1386,17 +1511,33 @@ function deriveCloseout(
         'invalidations-present',
         'unresolved-risks-present',
       ],
-      measurements: [{eligibleCount: reviews.length, id: 'knowledge-delta-completion-rate', positiveCount: completed}],
+      measurements: [
+        {
+          eligibleCount: reviews.length,
+          id: 'knowledge-delta-completion-rate',
+          positiveCount: completed,
+        },
+      ],
     };
   }
   if (scenario === 'output-budgets') {
-    return {assertions: ['knowledge-delta-items-at-most-three'], measurements: [], missingKinds: ['context-brief']};
+    return {
+      assertions: ['knowledge-delta-items-at-most-three'],
+      measurements: [],
+      missingKinds: ['context-brief'],
+    };
   }
   return {
     assertions: [],
     measurements:
       scenario === 'interrupted-resumed'
-        ? [{eligibleCount: reviews.length, id: 'knowledge-delta-completion-rate', positiveCount: completed}]
+        ? [
+            {
+              eligibleCount: reviews.length,
+              id: 'knowledge-delta-completion-rate',
+              positiveCount: completed,
+            },
+          ]
         : [],
     missingKinds: ['activation'],
   };
@@ -1417,37 +1558,39 @@ function deriveProposal(
     if (typeof attempt.artifact !== 'string') throw new Error('Git proposal artifact must be text.');
     const review = strictCandidateReview(attempt.review, candidate);
     const input = exactObject(attempt.input, ['baseCommit', 'mutations', 'project', 'target'], 'Git proposal input');
-    const mutations = boundedArray(
-      input.mutations,
-      'Git proposal mutations',
-      1,
-      3,
-    ) as KnowledgeDeltaGitProposalInputV1['mutations'];
+    const mutations = EffectArray.map(boundedArray(input.mutations, 'Git proposal mutations', 1, 3), mutation =>
+      Schema.decodeUnknownSync(ReviewedSharedMemoryMutationSchema)(mutation),
+    );
     for (const mutation of mutations) assertMutationApproval(review, mutation);
+    const target = exactObject(input.target, ['repositoryId', 'team'], 'Git proposal target');
     const rebuilt = buildKnowledgeDeltaGitProposalV1({
-      baseCommit: input.baseCommit as string,
+      baseCommit: text(input.baseCommit, 'Git proposal base commit', 64),
       delta: projectKnowledgeDeltaV1(review),
       mutations,
-      project: input.project as string,
-      target: input.target as KnowledgeDeltaGitProposalInputV1['target'],
+      project: text(input.project, 'Git proposal project', 256),
+      target: {
+        repositoryId: text(target.repositoryId, 'Git proposal repository id', 256),
+        team: text(target.team, 'Git proposal team', 256),
+      },
     });
     if (attempt.artifact !== rebuilt.artifact || canonicalJson(attempt.proposal) !== canonicalJson(rebuilt.proposal)) {
       throw new Error('Git proposal does not reconstruct from its reviewed source evidence.');
     }
-    const approvals = mutations
-      .map(mutation => {
-        const applyEvent = review.auditEvents.find(
+    const approvals = EffectArray.map(mutations, mutation => {
+      const applyEvent = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          review.auditEvents,
           event => event.action === 'apply' && event.candidateId === mutation.candidateId,
-        );
-        if (applyEvent === undefined) throw new Error('Git proposal approval has no apply audit event.');
-        return {
-          applyAuditDigest: threadnote5ApplyAuditDigest(applyEvent),
-          approvedContentHash: mutation.approval.expectedSourceContentHash,
-          candidateId: mutation.candidateId,
-          sourceUriHash: threadnote5ApprovedSourceUriHash(mutation.sourceUri),
-        };
-      })
-      .sort((left, right) => left.candidateId.localeCompare(right.candidateId));
+        ),
+      );
+      if (applyEvent === undefined) throw new Error('Git proposal approval has no apply audit event.');
+      return {
+        applyAuditDigest: threadnote5ApplyAuditDigest(applyEvent),
+        approvedContentHash: mutation.approval.expectedSourceContentHash,
+        candidateId: mutation.candidateId,
+        sourceUriHash: threadnote5ApprovedSourceUriHash(mutation.sourceUri),
+      };
+    }).sort((left, right) => Effect2.pipe(left.candidateId, EffectString.localeCompare(right.candidateId)));
     authorityTrials.push({
       approvals,
       proposalHash: rebuilt.proposal.proposalHash,
@@ -1456,7 +1599,8 @@ function deriveProposal(
       revision: review.revision,
     });
   }
-  if (!unique(authorityTrials.map(trial => trial.proposalHash))) throw new Error('Git proposal trials must be unique.');
+  if (!unique(EffectArray.map(authorityTrials, trial => trial.proposalHash)))
+    throw new Error('Git proposal trials must be unique.');
   if (authority === undefined) {
     return {
       assertions: ['proposal-provider-neutral'],
@@ -1467,15 +1611,23 @@ function deriveProposal(
   if (
     authority.type !== 'git-proposal-review' ||
     canonicalJson(authority.trials) !==
-      canonicalJson([...authorityTrials].sort((left, right) => left.proposalHash.localeCompare(right.proposalHash))) ||
-    authority.trials.some(trial => trial.providerApiCallCount !== 0)
+      canonicalJson(
+        [...authorityTrials].sort((left, right) =>
+          Effect2.pipe(left.proposalHash, EffectString.localeCompare(right.proposalHash)),
+        ),
+      ) ||
+    EffectArray.some(authority.trials, trial => trial.providerApiCallCount !== 0)
   ) {
     throw new Error('Git proposal authority does not match independently reviewed apply/provider evidence.');
   }
   return {
     assertions: ['provider-apis-zero', 'proposal-provider-neutral', 'proposal-review-approved'],
     measurements: [
-      {eligibleCount: attempts.length, id: 'knowledge-delta-completion-rate', positiveCount: attempts.length},
+      {
+        eligibleCount: attempts.length,
+        id: 'knowledge-delta-completion-rate',
+        positiveCount: attempts.length,
+      },
     ],
   };
 }
@@ -1497,21 +1649,23 @@ function deriveProcedure(
     const attempt = exactObject(attemptValue, ['artifactText', 'manifest', 'statusInput'], 'procedure attempt');
     if (typeof attempt.artifactText !== 'string') throw new Error('Procedure artifact text is required.');
     const manifest = parseProcedureManifest(attempt.manifest);
-    const statusInput = attempt.statusInput as ProcedureStatusInput;
+    const statusInput = Schema.decodeUnknownSync(ProcedureStatusInputSchema)(attempt.statusInput);
     const receipt = parseProcedureVerificationReceipt(object(statusInput, 'procedure status input').receipt);
     if (
       sha256HexSync(attempt.artifactText) !== manifest.artifact.sha256 ||
       manifest.dependencies.length !== 0 ||
       receipt.threadnoteVersion !== candidate.version ||
-      procedureStatus(manifest, {...statusInput, localArtifactSha256: sha256HexSync(attempt.artifactText)}) !==
-        'current'
+      procedureStatus(manifest, {
+        ...statusInput,
+        localArtifactSha256: sha256HexSync(attempt.artifactText),
+      }) !== 'current'
     ) {
       throw new Error('Procedure evidence is not current and dependency-compatible for this candidate.');
     }
     expectedAuthority = {
       artifactId: manifest.artifact.id,
       automaticExecutionCount: 0,
-      commandResults: manifest.verification.commands.map(command => ({
+      commandResults: EffectArray.map(manifest.verification.commands, command => ({
         commandId: command.id,
         exitCode: 0,
         outputDigest: '',
@@ -1536,9 +1690,18 @@ function deriveProcedure(
     authority.receiptDigest !== expectedAuthority.receiptDigest ||
     authority.automaticExecutionCount !== 0 ||
     canonicalJson(
-      authority.commandResults.map(result => ({commandId: result.commandId, exitCode: result.exitCode})),
-    ) !== canonicalJson(expectedAuthority.commandResults.map(result => ({commandId: result.commandId, exitCode: 0}))) ||
-    authority.commandResults.some(result => result.exitCode !== 0)
+      EffectArray.map(authority.commandResults, result => ({
+        commandId: result.commandId,
+        exitCode: result.exitCode,
+      })),
+    ) !==
+      canonicalJson(
+        EffectArray.map(expectedAuthority.commandResults, result => ({
+          commandId: result.commandId,
+          exitCode: 0,
+        })),
+      ) ||
+    EffectArray.some(authority.commandResults, result => result.exitCode !== 0)
   ) {
     throw new Error('Procedure authority does not prove explicit successful verification without auto-execution.');
   }
@@ -1579,13 +1742,13 @@ function strictCandidateReview(value: unknown, candidate: Threadnote5SourceV1): 
     source.sourceCommit !== candidate.commit ||
     !nonEmptyText(source.task, 4_000) ||
     !nonEmptyText(source.topic, 256) ||
-    !Array.isArray(source.candidates) ||
+    !EffectArray.isArray(source.candidates) ||
     source.candidates.length < 1 ||
     source.candidates.length > 3 ||
-    !Array.isArray(source.auditEvents) ||
+    !EffectArray.isArray(source.auditEvents) ||
     source.auditEvents.length < 1 ||
     source.auditEvents.length > 100 ||
-    !Array.isArray(source.codeCitations)
+    !EffectArray.isArray(source.codeCitations)
   ) {
     throw new Error('Candidate review is not a bounded v2 review.');
   }
@@ -1593,15 +1756,19 @@ function strictCandidateReview(value: unknown, candidate: Threadnote5SourceV1): 
   const review = parseCandidateReview(value);
   if (review.auditEvents.length !== source.auditEvents.length)
     throw new Error('Candidate review contains invalid audit events.');
-  const ids = review.candidates.map(candidate => candidate.candidateId);
-  if (!unique(ids) || !review.candidates.every(candidate => candidateIsReviewedDecision(candidate, review))) {
+  const ids = EffectArray.map(review.candidates, candidate => candidate.candidateId);
+  if (
+    !unique(ids) ||
+    !EffectArray.every(review.candidates, candidate => candidateIsReviewedDecision(candidate, review))
+  ) {
     throw new Error('Candidate review does not contain valid durable decision candidates.');
   }
-  if (!review.auditEvents.every(event => strictAuditEvent(event, review, new Set(ids)))) {
+  if (!EffectArray.every(review.auditEvents, event => strictAuditEvent(event, review, new Set(ids)))) {
     throw new Error('Candidate review audit history is malformed or crosses review identities.');
   }
   if (
-    !review.auditEvents.some(
+    !EffectArray.some(
+      review.auditEvents,
       event => event.action === 'create_review' && event.reviewId === review.reviewId && event.revision === 1,
     )
   ) {
@@ -1610,7 +1777,7 @@ function strictCandidateReview(value: unknown, candidate: Threadnote5SourceV1): 
   const closeout = review.structuredCloseout;
   if (
     closeout === undefined ||
-    closeout.rationale.trim().length === 0 ||
+    Effect2.pipe(closeout.rationale, EffectString.trim).length === 0 ||
     closeout.constraints.length === 0 ||
     closeout.verificationPerformed.length === 0 ||
     closeout.knowledgeInvalidated.length === 0 ||
@@ -1633,18 +1800,22 @@ function strictStructuredCloseout(value: unknown): void {
   for (const field of ['constraints', 'knowledgeInvalidated', 'unresolvedRisks', 'verificationPerformed'] as const) {
     const items = source[field];
     if (
-      !Array.isArray(items) ||
+      !EffectArray.isArray(items) ||
       items.length < 1 ||
       items.length > 32 ||
-      !items.every(item => nonEmptyText(item, 2_000) && item.trim() === item)
+      !EffectArray.every(items, item => nonEmptyText(item, 2_000) && Effect2.pipe(item, EffectString.trim) === item)
     ) {
       throw new Error(`Structured closeout ${field} must contain bounded non-empty items.`);
     }
   }
 }
 
-function candidateIsReviewedDecision(candidate: MemoryCandidate, review: CandidateReview): boolean {
-  const source = candidate as unknown as Record<string, unknown>;
+function candidateIsReviewedDecision(
+  candidate: MemoryCandidate | LegacyMemoryCandidate,
+  review: CandidateReview,
+): boolean {
+  if (!isMemoryCandidate(candidate)) return false;
+  const source = object(candidate, 'candidate');
   return (
     allowedKeys(source, [
       'applyApprovedAt',
@@ -1676,22 +1847,24 @@ function candidateIsReviewedDecision(candidate: MemoryCandidate, review: Candida
     ['applied', 'applying', 'conflict', 'deferred', 'pending', 'rejected'].includes(candidate.state) &&
     candidate.project === review.project &&
     candidate.topic === review.topic &&
-    candidate.proposedText.trim().length > 0 &&
+    Effect2.pipe(candidate.proposedText, EffectString.trim).length > 0 &&
     candidate.proposedText.length <= 66_000 &&
-    candidate.reason.trim().length > 0 &&
+    Effect2.pipe(candidate.reason, EffectString.trim).length > 0 &&
     Number.isFinite(candidate.confidence) &&
     candidate.confidence >= 0 &&
     candidate.confidence <= 1 &&
-    Array.isArray(candidate.evidence) &&
+    EffectArray.isArray(candidate.evidence) &&
     candidate.evidence.length > 0 &&
     candidate.evidence.length <= 34 &&
-    candidate.evidence.every(item => nonEmptyText(item, 4_000)) &&
-    Array.isArray(candidate.categories) &&
+    EffectArray.every(candidate.evidence, item => nonEmptyText(item, 4_000)) &&
+    EffectArray.isArray(candidate.categories) &&
     candidate.categories.length > 0 &&
     candidate.categories.length <= 4 &&
     unique(candidate.categories) &&
-    candidate.categories.every(category => ['decision', 'handoff', 'invariant', 'preference'].includes(category)) &&
-    candidate.categories.some(category => category === 'decision' || category === 'invariant') &&
+    EffectArray.every(candidate.categories, category =>
+      EffectArray.some(['decision', 'handoff', 'invariant', 'preference'], allowed => allowed === category),
+    ) &&
+    EffectArray.some(candidate.categories, category => category === 'decision' || category === 'invariant') &&
     (candidate.applyApprovedAt === undefined || isoInstant(candidate.applyApprovedAt)) &&
     (candidate.applyBodyText === undefined || nonEmptyText(candidate.applyBodyText, 66_000)) &&
     (candidate.applyContentHash === undefined || hash(candidate.applyContentHash)) &&
@@ -1712,7 +1885,7 @@ function strictAuditEvent(
   review: CandidateReview,
   candidateIds: ReadonlySet<string>,
 ): boolean {
-  const source = event as unknown as Record<string, unknown>;
+  const source = object(event, 'audit event');
   return (
     allowedKeys(source, ['action', 'at', 'candidateId', 'memoryUri', 'reviewId', 'revision']) &&
     event.reviewId === review.reviewId &&
@@ -1726,14 +1899,16 @@ function strictAuditEvent(
   );
 }
 
-function candidateIsApplied(candidate: MemoryCandidate, review: CandidateReview): boolean {
+function candidateIsApplied(candidate: MemoryCandidate | LegacyMemoryCandidate, review: CandidateReview): boolean {
   return (
+    isMemoryCandidate(candidate) &&
     candidate.state === 'applied' &&
     hash(candidate.applyContentHash) &&
     nonEmptyText(candidate.applyBodyText, 66_000) &&
     nonEmptyText(candidate.applyTargetUri, 4_000) &&
     (candidate.applyOperation === 'create' || candidate.applyOperation === 'replace') &&
-    review.auditEvents.some(
+    EffectArray.some(
+      review.auditEvents,
       event =>
         event.action === 'apply' &&
         event.candidateId === candidate.candidateId &&
@@ -1747,7 +1922,9 @@ function assertMutationApproval(
   review: CandidateReview,
   mutation: KnowledgeDeltaGitProposalInputV1['mutations'][number],
 ): void {
-  const candidate = review.candidates.find(item => item.candidateId === mutation.candidateId);
+  const candidate = EffectOption.getOrUndefined(
+    EffectArray.findFirst(review.candidates, item => item.candidateId === mutation.candidateId),
+  );
   if (
     candidate === undefined ||
     !candidateIsApplied(candidate, review) ||
@@ -1778,11 +1955,11 @@ function resolveAuthority(
   if (manifestHash !== expectedHash || !sameSource(manifest.candidate, candidate)) {
     throw new Error('Local authority manifest does not match its trusted hash or exact candidate.');
   }
-  const authorityRecords = records.filter(record => authorityTypeForRecord(record) !== undefined);
+  const authorityRecords = EffectArray.filter(records, record => authorityTypeForRecord(record) !== undefined);
   if (manifest.entries.length !== authorityRecords.length) {
     throw new Error('Local authority manifest must exactly cover authority-dependent source records.');
   }
-  const byRecordDigest = new Map(manifest.entries.map(entry => [entry.recordDigest, entry] as const));
+  const byRecordDigest = new Map(EffectArray.map(manifest.entries, entry => [entry.recordDigest, entry] as const));
   for (const record of authorityRecords) {
     const entry = byRecordDigest.get(record.digest);
     if (entry === undefined || entry.type !== authorityTypeForRecord(record)) {
@@ -1818,65 +1995,4 @@ function parseRecord(value: unknown): Threadnote5LocalSubsystemReceiptRecordV1 {
     scenario: releaseScenario(record.scenario),
     version: 1,
   };
-}
-
-function unknownFor(
-  observations: readonly Threadnote5ObservationV1[],
-  reason: Extract<Threadnote5LocalReceiptVerificationV1, {readonly state: 'unknown'}>['reason'],
-): Extract<Threadnote5LocalReceiptVerificationV1, {readonly state: 'unknown'}> {
-  return {
-    reason,
-    scenarios: observations.map(observation => ({
-      missingKinds: observation.attestation.subsystemReceipts.map(receipt => receipt.kind),
-      scenario: observation.scenario,
-      state: 'unknown',
-      verifiedKinds: [],
-    })),
-    state: 'unknown',
-  };
-}
-
-function contentFreeRecord(record: Threadnote5LocalSubsystemReceiptRecordV1): {
-  readonly candidateHash: string;
-  readonly digest: string;
-  readonly kind: Threadnote5LocalSourceKindV1;
-  readonly scenario: Threadnote5ReleaseScenario;
-  readonly version: 1;
-} {
-  return {
-    candidateHash: sha256HexSync(canonicalJson(record.candidate)),
-    digest: record.digest,
-    kind: record.kind,
-    scenario: record.scenario,
-    version: 1,
-  };
-}
-
-function withoutDigest(
-  record: Threadnote5LocalSubsystemReceiptRecordV1,
-): Omit<Threadnote5LocalSubsystemReceiptRecordV1, 'digest'> {
-  const {digest: _, ...rest} = record;
-  return rest;
-}
-
-function sameSource(left: Threadnote5SourceV1, right: Threadnote5SourceV1): boolean {
-  return canonicalJson(left) === canonicalJson(right);
-}
-
-function encodedBytes(value: unknown): number {
-  return new TextEncoder().encode(canonicalJson(value)).byteLength;
-}
-
-function compareMeasurement(left: Threadnote5MeasurementV1, right: Threadnote5MeasurementV1): number {
-  return compareText(left.id, right.id);
-}
-
-function isSourceKind(value: unknown): value is Threadnote5LocalSourceKindV1 {
-  return SOURCE_KINDS.includes(value as Threadnote5LocalSourceKindV1);
-}
-
-function releaseScenario(value: unknown): Threadnote5ReleaseScenario {
-  if (!THREADNOTE_5_RELEASE_SCENARIOS.includes(value as Threadnote5ReleaseScenario))
-    throw new Error('Subsystem record scenario is invalid.');
-  return value as Threadnote5ReleaseScenario;
 }

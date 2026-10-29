@@ -1,14 +1,17 @@
+import {Array as EffectArray} from 'effect';
 import type {TreeNode} from './ui/contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type LibraryScope = 'local' | `team:${string}`;
 
 /** Scope the canonical tree without changing node identities or descendants. */
 export function libraryScopeTree(tree: TreeNode | undefined, scope: LibraryScope): TreeNode | undefined {
   if (!tree) return undefined;
-  if (scope === 'local' && tree.uri.endsWith('/memories/shared')) return undefined;
-  const matches = scope === 'local' ? !tree.isShared : tree.sharedTeam === scope.slice(5);
+  if (scope === 'local' && Effect.pipe(tree.uri, EffectString.endsWith('/memories/shared'))) return undefined;
+  const matches = scope === 'local' ? !tree.isShared : tree.sharedTeam === Effect.pipe(scope, EffectString.slice(5));
   if (!tree.isDir) return matches ? tree : undefined;
-  const children = (tree.children ?? []).flatMap(child => {
+  const children = EffectArray.flatMap(tree.children ?? [], child => {
     const scoped = libraryScopeTree(child, scope);
     return scoped ? [scoped] : [];
   });
@@ -20,7 +23,10 @@ export function libraryScopeTree(tree: TreeNode | undefined, scope: LibraryScope
 export function descendantMemoryUris(node: TreeNode): readonly string[] {
   if (node.isSystem) return [];
   if (!node.isDir) return [node.uri];
-  return [...new Set((node.children ?? []).flatMap(descendantMemoryUris))];
+  const children = node.children ?? [];
+  return [
+    ...new Set(EffectArray.flatMap(children, (child, index) => (index in children ? descendantMemoryUris(child) : []))),
+  ];
 }
 
 export function toggleMemorySelection(
@@ -42,16 +48,16 @@ export function reconcileMemorySelection(
 ): ReadonlySet<string> {
   if (!tree) return new Set();
   const available = new Set(descendantMemoryUris(tree));
-  const next = new Set([...selected].filter(uri => available.has(uri)));
+  const next = new Set(EffectArray.filter([...selected], uri => available.has(uri)));
   return next.size === selected.size ? selected : next;
 }
 
 /** Keep identity, citations, relations and legacy fields outside the authoring surface. */
 export function memoryDocumentParts(content: string): {header: string; body: string; trailer: string} {
   const header = /^(?:MEMORY|HANDOFF)(?:\r\n|\r|\n)[\s\S]*?(?:\r\n\r\n|\n\n|\r\r)/u.exec(content)?.[0] ?? '';
-  const rest = content.slice(header.length);
+  const rest = Effect.pipe(content, EffectString.slice(header.length));
   const trailer = /\r?\n\r?\n<!-- MEMORY_FIELDS\r?\n[\s\S]*?\r?\n-->\s*$/u.exec(rest)?.[0] ?? '';
-  return {header, body: trailer ? rest.slice(0, -trailer.length) : rest, trailer};
+  return {header, body: trailer ? Effect.pipe(rest, EffectString.slice(0, -trailer.length)) : rest, trailer};
 }
 
 export function replaceMemoryBody(content: string, body: string): string {
@@ -61,9 +67,19 @@ export function replaceMemoryBody(content: string, body: string): string {
 
 /** Present the authored title while leaving the canonical URI untouched. */
 export function libraryItemTitle(node: TreeNode): string {
-  const title = node.metadata?.topic ?? node.name.replace(/\.md$/iu, '');
-  const readable = title.replace(/[-_]/gu, ' ');
-  return readable.charAt(0).toUpperCase() + readable.slice(1);
+  const title = node.metadata?.topic ?? Effect.pipe(node.name, EffectString.replace(/\.md$/iu, ''));
+  const readable = Effect.pipe(title, EffectString.replace(/[-_]/gu, ' '));
+  return (
+    Effect.pipe(readable, __effectPipeInput => {
+      const __effectPipeStage0 = Effect.pipe(
+        __effectPipeInput,
+        EffectString.charAt(0),
+        Effect.Option.getOrElse(() => ''),
+      );
+      const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.toUpperCase);
+      return __effectPipeStage1;
+    }) + Effect.pipe(readable, EffectString.slice(1))
+  );
 }
 
 /** Hide single-child storage wrappers; actions still receive their real subtree. */
@@ -86,15 +102,21 @@ export function librarySearchTree(
   showSystem: boolean,
 ): TreeNode | undefined {
   if (!tree || (!showSystem && tree.isSystem)) return undefined;
-  const needle = query.trim().toLocaleLowerCase();
+  const needle = Effect.pipe(query, EffectString.trim, EffectString.toLocaleLowerCase());
   if (!needle) return tree;
   if (!tree.isDir) {
     return recalledUris.has(tree.uri) ||
-      [tree.name, tree.uri, tree.metadata?.topic ?? ''].some(value => value.toLocaleLowerCase().includes(needle))
+      EffectArray.some(
+        [tree.name, tree.uri, tree.metadata?.topic ?? ''],
+        __effectArrayValue =>
+          !!(value => Effect.pipe(value, EffectString.toLocaleLowerCase(), EffectString.includes(needle)))(
+            __effectArrayValue,
+          ),
+      )
       ? tree
       : undefined;
   }
-  const children = (tree.children ?? []).flatMap(child => {
+  const children = EffectArray.flatMap(tree.children ?? [], child => {
     const match = librarySearchTree(child, query, recalledUris, showSystem);
     return match ? [match] : [];
   });

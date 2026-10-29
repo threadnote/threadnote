@@ -1,9 +1,10 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
-import {Effect, Layer} from 'effect';
+import {Effect, Layer, Schema} from 'effect';
 import {
   isolatedLocalModelRuntimeLayer,
   serveWorker,
@@ -13,17 +14,23 @@ import {
 import {LocalModelRuntime, type LocalModelRuntimeShape} from '@threadnote/inference/engine/local-model-runtime';
 
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const generationManifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'generation')!;
+const generationManifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'generation'),
+)!;
 const embeddingManifest = {
-  ...BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'embedding')!,
+  ...EffectOption.getOrUndefined(
+    EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'embedding'),
+  )!,
   dimensions: 2,
 };
 
 const unicodeTextArbitrary = FC.array(
   FC.constantFrom('a', 'Z', '0', ' ', 'é', '漢', '🙂', '🧪', '\n', '\r', '\0', '\\', '"'),
   {maxLength: 24},
-).map(characters => characters.join(''));
+).map(characters => EffectArray.join(characters, ''));
 
 const chunkWidthsArbitrary = FC.array(FC.integer({max: 64, min: 1}), {
   maxLength: 80,
@@ -32,9 +39,9 @@ const chunkWidthsArbitrary = FC.array(FC.integer({max: 64, min: 1}), {
 
 const echoRuntime: LocalModelRuntimeShape = {
   diagnostics: Effect.succeed({backend: 'property-test', buildType: 'prebuilt', cpuMathCores: 4}),
-  embedMany: request => Effect.succeed(request.inputs.map(input => [input.length, 1])),
+  embedMany: request => Effect.succeed(EffectArray.map(request.inputs, input => [input.length, 1])),
   generate: request => Effect.succeed({prompt: request.prompt, system: request.system}),
-  rerank: request => Effect.succeed(request.documents.map(document => document.length)),
+  rerank: request => Effect.succeed(EffectArray.map(request.documents, document => document.length)),
 };
 
 describe('isolated local model worker protocol properties', () => {
@@ -57,7 +64,7 @@ describe('isolated local model worker protocol properties', () => {
     },
     ({finalNewline, leadingBlankLines, requests, widths}) =>
       Effect.gen(function* () {
-        const lines: FramedLine[] = requests.map((request, index) => ({
+        const lines: FramedLine[] = EffectArray.map(requests, (request, index) => ({
           blankLines: request.blankLines,
           eol: request.crlf ? '\r\n' : '\n',
           line: JSON.stringify({
@@ -85,8 +92,8 @@ describe('isolated local model worker protocol properties', () => {
           },
         });
 
-        expect(output.map(line => JSON.parse(line))).toEqual(
-          requests.map((request, index) => ({
+        expect(EffectArray.map(output, line => JSON.parse(line))).toEqual(
+          EffectArray.map(requests, (request, index) => ({
             id: `request-${index}`,
             ok: true,
             protocol: 1,
@@ -122,7 +129,7 @@ describe('isolated local model worker protocol properties', () => {
     ({finalNewline, invalidLines, widths}) =>
       Effect.gen(function* () {
         const lines: FramedLine[] = [
-          ...invalidLines.map(record => ({
+          ...EffectArray.map(invalidLines, record => ({
             blankLines: record.blankLines,
             eol: record.crlf ? ('\r\n' as const) : ('\n' as const),
             line: record.line,
@@ -148,8 +155,8 @@ describe('isolated local model worker protocol properties', () => {
           },
         });
 
-        expect(output.map(line => JSON.parse(line))).toEqual([
-          ...invalidLines.map(() => ({
+        expect(EffectArray.map(output, line => JSON.parse(line))).toEqual([
+          ...EffectArray.map(invalidLines, () => ({
             error: {tag: 'WorkerProtocolInvalid'},
             id: 'invalid',
             ok: false,
@@ -174,12 +181,12 @@ describe('isolated local model worker protocol properties', () => {
         embedMany: request =>
           Effect.sync(() => {
             embeddingCalls += 1;
-            return request.inputs.map(input => [input.length, 1]);
+            return EffectArray.map(request.inputs, input => [input.length, 1]);
           }),
       };
       const invalidValues: readonly unknown[] = [3, '8'];
-      const input = invalidValues
-        .map((embeddingContextPoolSize, index) =>
+      const input = EffectArray.join(
+        EffectArray.map(invalidValues, (embeddingContextPoolSize, index) =>
           JSON.stringify({
             id: `invalid-pool-${index}`,
             operation: 'embedMany',
@@ -191,8 +198,9 @@ describe('isolated local model worker protocol properties', () => {
             },
             protocol: 1,
           }),
-        )
-        .join('\n');
+        ),
+        '\n',
+      );
       const output: string[] = [];
 
       yield* serveWorker(runtime, {
@@ -203,8 +211,8 @@ describe('isolated local model worker protocol properties', () => {
         },
       });
 
-      expect(output.map(line => JSON.parse(line))).toEqual(
-        invalidValues.map((_, index) => ({
+      expect(EffectArray.map(output, line => JSON.parse(line))).toEqual(
+        EffectArray.map(invalidValues, (_, index) => ({
           error: {tag: 'WorkerProtocolInvalid'},
           id: `invalid-pool-${index}`,
           ok: false,
@@ -242,11 +250,12 @@ describe('isolated local model worker protocol properties', () => {
                 })}\n`,
               );
             } else {
-              worker.stdoutFeed.push('x'.repeat(257));
+              worker.stdoutFeed.push(Effect2.pipe('x', EffectString.repeat(257)));
             }
             return;
           }
           const eol = crlf ? '\r\n' : '\n';
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           const response = `${eol.repeat(blankLines)}${JSON.stringify({
             id: request.id,
             ok: true,
@@ -289,12 +298,15 @@ interface FramedLine {
 
 function frameLines(lines: readonly FramedLine[], leadingBlankLines: number, finalNewline: boolean): string {
   const firstEol = lines[0]?.eol ?? '\n';
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   let framed = firstEol.repeat(leadingBlankLines);
   for (const entry of lines) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     framed += entry.eol.repeat(entry.blankLines);
     framed += `${entry.line}${entry.eol}`;
   }
-  if (!finalNewline && lines.length > 0) framed = framed.slice(0, -lines.at(-1)!.eol.length);
+  if (!finalNewline && lines.length > 0)
+    framed = Effect2.pipe(framed, EffectString.slice(0, -lines.at(-1)!.eol.length));
   return framed;
 }
 
@@ -324,14 +336,15 @@ function workerRuntimeLayer(spawnWorker: LocalModelWorkerSpawner) {
   }).pipe(Layer.provide(TestSystemInfoLayer));
 }
 
-interface WireRequest {
-  readonly id: string;
-  readonly operation: string;
-  readonly payload: {
-    readonly inputs: readonly string[];
-  };
-  readonly protocol: number;
-}
+const decodeWireRequest = Schema.decodeUnknownSync(
+  Schema.Struct({
+    id: Schema.String,
+    operation: Schema.String,
+    payload: Schema.Unknown,
+    protocol: Schema.Finite,
+  }),
+);
+type WireRequest = ReturnType<typeof decodeWireRequest>;
 
 class ScriptedWorkerProcess implements LocalModelWorkerProcess {
   readonly stderrFeed = new AsyncFeed<string | Uint8Array>();
@@ -364,7 +377,7 @@ class ScriptedWorkerProcess implements LocalModelWorkerProcess {
   }
 
   write(line: string): void {
-    const request = JSON.parse(line) as WireRequest;
+    const request = decodeWireRequest(JSON.parse(line));
     this.writes.push(request);
     this.onWrite(request);
   }

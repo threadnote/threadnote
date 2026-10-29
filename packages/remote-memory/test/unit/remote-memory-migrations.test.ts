@@ -1,8 +1,9 @@
-import type {Sql} from 'postgres';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {dirname, join} from '@threadnote/testing/node-path';
 import {migrateRemoteMemoryDatabase, standaloneMigrationFilePath} from '@threadnote/remote-memory/migrations';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface FakeMigrationOptions {
   readonly conflictingChecksum?: string;
@@ -11,7 +12,7 @@ interface FakeMigrationOptions {
 
 const appliedMigrationCycle = ['lookup', 'begin', 'migration', 'record', 'verify', 'commit'] as const;
 
-function fakeMigrationSql(options: FakeMigrationOptions = {}): {readonly events: string[]; readonly sql: Sql} {
+function fakeMigrationSql(options: FakeMigrationOptions = {}) {
   const events: string[] = [];
   const recordedChecksums = new Map<number, string>();
   const checksumLookups = new Map<number, number>();
@@ -19,16 +20,16 @@ function fakeMigrationSql(options: FakeMigrationOptions = {}): {readonly events:
 
   const connection = Object.assign(
     async (parts: TemplateStringsArray, ...values: readonly unknown[]): Promise<readonly unknown[]> => {
-      const query = parts.join('?');
-      if (query.includes('pg_advisory_unlock')) {
+      const query = Effect.Array.join(parts, '?');
+      if (Effect.pipe(query, EffectString.includes('pg_advisory_unlock'))) {
         events.push('unlock');
         return [];
       }
-      if (query.includes('pg_advisory_lock')) {
+      if (Effect.pipe(query, EffectString.includes('pg_advisory_lock'))) {
         events.push('lock');
         return [];
       }
-      if (query.includes('SELECT checksum FROM remote_memory.schema_migrations')) {
+      if (Effect.pipe(query, EffectString.includes('SELECT checksum FROM remote_memory.schema_migrations'))) {
         const version = Number(values[0]);
         const lookups = checksumLookups.get(version) ?? 0;
         checksumLookups.set(version, lookups + 1);
@@ -36,7 +37,7 @@ function fakeMigrationSql(options: FakeMigrationOptions = {}): {readonly events:
         const checksum = recordedChecksums.get(version);
         return checksum === undefined ? [] : [{checksum}];
       }
-      if (query.includes('INSERT INTO remote_memory.schema_migrations')) {
+      if (Effect.pipe(query, EffectString.includes('INSERT INTO remote_memory.schema_migrations'))) {
         events.push('record');
         recordedChecksums.set(Number(values[0]), options.conflictingChecksum ?? String(values[1]));
         return [];
@@ -49,7 +50,7 @@ function fakeMigrationSql(options: FakeMigrationOptions = {}): {readonly events:
       },
       unsafe: async (query: string): Promise<readonly unknown[]> => {
         if (query === 'BEGIN' || query === 'COMMIT' || query === 'ROLLBACK') {
-          events.push(query.toLowerCase());
+          events.push(Effect.pipe(query, EffectString.toLowerCase));
           return [];
         }
         if (!appliedBootstrap) {
@@ -65,7 +66,7 @@ function fakeMigrationSql(options: FakeMigrationOptions = {}): {readonly events:
   );
   const sql = {
     reserve: async () => connection,
-  } as unknown as Sql;
+  };
   return {events, sql};
 }
 

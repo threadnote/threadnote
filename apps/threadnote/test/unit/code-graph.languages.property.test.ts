@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -12,10 +13,12 @@ import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/regist
 import type {CodeGraphFileMatcher} from '@threadnote/graph/languages/types';
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSpan} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const fuzzCases = BUILTIN_LANGUAGE_PACK_REGISTRY.packs.flatMap(pack => {
+const fuzzCases = EffectArray.flatMap(BUILTIN_LANGUAGE_PACK_REGISTRY.packs, pack => {
   const seen = new Set<string>();
-  return pack.files.flatMap(matcher => {
+  return EffectArray.flatMap(pack.files, matcher => {
     if (matcher.role !== 'source' || seen.has(matcher.language)) return [];
     seen.add(matcher.language);
     return [{language: matcher.language, path: fuzzPath(matcher)}];
@@ -69,7 +72,7 @@ const sourceArbitrary = FC.array(
     '\u2029',
   ),
   {maxLength: 48},
-).map(fragments => fragments.join(''));
+).map(fragments => EffectArray.join(fragments, ''));
 
 const overloadAritiesArbitrary = FC.uniqueArray(FC.integer({max: 4, min: 0}), {
   maxLength: 5,
@@ -152,15 +155,17 @@ describe('polyglot code graph extractor properties', () => {
           const first = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(file);
           const repeated = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(file);
           const bodyOnly = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(revisedFile);
-          const parseSymbols = first.symbols.filter(symbol => symbol.name === 'parse');
-          const shadowSymbols = first.symbols.filter(symbol => symbol.name === 'shadow');
-          const stableSymbol = first.symbols.find(symbol => symbol.name === 'stable');
+          const parseSymbols = EffectArray.filter(first.symbols, symbol => symbol.name === 'parse');
+          const shadowSymbols = EffectArray.filter(first.symbols, symbol => symbol.name === 'shadow');
+          const stableSymbol = Option.getOrUndefined(
+            EffectArray.findFirst(first.symbols, symbol => symbol.name === 'stable'),
+          );
 
           expect(first).toEqual(repeated);
           expect(parseSymbols).toHaveLength(arities.length + 1);
           expect(shadowSymbols).toHaveLength(2);
           expect(stableSymbol?.id).toBe(legacyTypeScriptSymbolId('src/overloads.ts', 'function', 'stable'));
-          expect(new Set(first.symbols.map(symbol => symbol.id)).size).toBe(first.symbols.length);
+          expect(new Set(EffectArray.map(first.symbols, symbol => symbol.id)).size).toBe(first.symbols.length);
           expect(hasSameCodeGraphResolutionSurface(first.symbols, bodyOnly.symbols)).toBe(true);
         });
       },
@@ -174,32 +179,42 @@ describe('polyglot code graph extractor properties', () => {
       ({declarationCount, padding}) => {
         const file = inventoryFile(
           'src/merged.ts',
-          [
-            ...Array.from({length: padding}, () => '// harmless leading layout'),
-            ...Array.from(
-              {length: declarationCount},
-              (_, index) => `export interface Shape { readonly field${index}: string; }`,
-            ),
-            'export class Widget implements Shape {}',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              ...Array.from({length: padding}, () => '// harmless leading layout'),
+              ...Array.from(
+                {length: declarationCount},
+                (_, index) => `export interface Shape { readonly field${index}: string; }`,
+              ),
+              'export class Widget implements Shape {}',
+              '',
+            ],
+            '\n',
+          ),
         );
         return Effect.gen(function* () {
           const extracted = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(file);
           const attributed = createResolutionAttributor([file])([extracted]);
           const resolved = createRepositoryFactResolver(attributed, [file]).resolve(attributed)[0];
-          const declarations = resolved.symbols.filter(
+          const declarations = EffectArray.filter(
+            resolved.symbols,
             symbol => symbol.kind === 'interface' && symbol.name === 'Shape',
           );
-          const canonical = declarations.filter(symbol =>
-            symbol.lookupKeys?.some(key => key.endsWith(':merge-canonical')),
+          const canonical = EffectArray.filter(
+            declarations,
+            symbol =>
+              symbol.lookupKeys !== undefined &&
+              EffectArray.some(symbol.lookupKeys, key => Effect2.pipe(key, EffectString.endsWith(':merge-canonical'))),
           );
-          const implementation = resolved.edges.find(
-            edge => edge.sourceName === 'Widget' && edge.relation === 'implements' && edge.targetName === 'Shape',
+          const implementation = Option.getOrUndefined(
+            EffectArray.findFirst(
+              resolved.edges,
+              edge => edge.sourceName === 'Widget' && edge.relation === 'implements' && edge.targetName === 'Shape',
+            ),
           );
 
           expect(declarations).toHaveLength(declarationCount);
-          expect(new Set(declarations.map(symbol => symbol.id)).size).toBe(declarationCount);
+          expect(new Set(EffectArray.map(declarations, symbol => symbol.id)).size).toBe(declarationCount);
           expect(canonical).toHaveLength(1);
           expect(implementation).toMatchObject({provenance: 'resolved', targetId: canonical[0]?.id});
         });
@@ -222,60 +237,84 @@ describe('polyglot code graph extractor properties', () => {
         const objectFile = inventoryFile(objectPath, structuredConfigSource(format, flatKey, segment));
         const protobufFile = inventoryFile(
           'schema/fuzz.proto',
-          [
-            '/* package fake.pkg; import "ghost.proto"; service Ghost { rpc Nope(Request) returns (Response); } */',
-            '// 🙂 service Fake { rpc Bad(Request) returns (Response); }',
-            'package real.pkg;',
-            'import "real.proto";',
-            ...Array.from({length: serviceCount}, (_, index) =>
-              [
-                `service Service${index} {`,
-                `  // 🙂 service Fake${index} { rpc Bad(Request) returns (Response); }`,
-                `  option note = "🙂 }";`,
-                `  /* } service Ghost${index} { rpc Nope(Request) returns (Response); } */`,
-                '  rpc Get(Request) returns (Response);',
-                '  rpc Get(Request) returns (Response);',
-                '}',
-              ].join(lineSeparator),
-            ),
-          ].join(lineSeparator),
+          EffectArray.join(
+            [
+              '/* package fake.pkg; import "ghost.proto"; service Ghost { rpc Nope(Request) returns (Response); } */',
+              '// 🙂 service Fake { rpc Bad(Request) returns (Response); }',
+              'package real.pkg;',
+              'import "real.proto";',
+              ...Array.from({length: serviceCount}, (_, index) =>
+                EffectArray.join(
+                  [
+                    `service Service${index} {`,
+                    `  // 🙂 service Fake${index} { rpc Bad(Request) returns (Response); }`,
+                    `  option note = "🙂 }";`,
+                    `  /* } service Ghost${index} { rpc Nope(Request) returns (Response); } */`,
+                    '  rpc Get(Request) returns (Response);',
+                    '  rpc Get(Request) returns (Response);',
+                    '}',
+                  ],
+                  lineSeparator,
+                ),
+              ),
+            ],
+            lineSeparator,
+          ),
         );
         return Effect.gen(function* () {
           const structured = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(objectFile);
           const protobuf = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(protobufFile);
-          const rpcSymbols = protobuf.symbols.filter(symbol => symbol.kind === 'rpc');
-          const firstService = protobuf.symbols.find(symbol => symbol.name === 'Service0');
-          const flatProperty = structured.symbols.find(
-            symbol => symbol.qualifiedName === `${objectPath}#/${escapeStructuredSegment(flatKey)}`,
+          const rpcSymbols = EffectArray.filter(protobuf.symbols, symbol => symbol.kind === 'rpc');
+          const firstService = Option.getOrUndefined(
+            EffectArray.findFirst(protobuf.symbols, symbol => symbol.name === 'Service0'),
           );
-          const nestedProperty = structured.symbols.find(
-            symbol => symbol.qualifiedName === `${objectPath}#/root/${escapeStructuredSegment(segment)}`,
+          const flatProperty = Option.getOrUndefined(
+            EffectArray.findFirst(
+              structured.symbols,
+              symbol => symbol.qualifiedName === `${objectPath}#/${escapeStructuredSegment(flatKey)}`,
+            ),
+          );
+          const nestedProperty = Option.getOrUndefined(
+            EffectArray.findFirst(
+              structured.symbols,
+              symbol => symbol.qualifiedName === `${objectPath}#/root/${escapeStructuredSegment(segment)}`,
+            ),
           );
 
           expect(structured.diagnostics, format).toEqual([]);
-          expect(new Set(structured.symbols.map(symbol => symbol.id)).size).toBe(structured.symbols.length);
-          expect(new Set(structured.symbols.map(symbol => symbol.qualifiedName)).size).toBe(structured.symbols.length);
+          expect(new Set(EffectArray.map(structured.symbols, symbol => symbol.id)).size).toBe(
+            structured.symbols.length,
+          );
+          expect(new Set(EffectArray.map(structured.symbols, symbol => symbol.qualifiedName)).size).toBe(
+            structured.symbols.length,
+          );
           expect(flatProperty?.id).toBe(
             legacyStructuredSymbolId(objectPath, format, 'property', `${objectPath}#${flatKey}`),
           );
           expect(nestedProperty?.id).toBeDefined();
           expect(nestedProperty?.id).not.toBe(flatProperty?.id);
           expect(rpcSymbols).toHaveLength(serviceCount * 2);
-          expect(new Set(rpcSymbols.map(symbol => symbol.id)).size).toBe(serviceCount * 2);
+          expect(new Set(EffectArray.map(rpcSymbols, symbol => symbol.id)).size).toBe(serviceCount * 2);
           expect(firstService?.id).toBe(
             legacyStructuredSymbolId('schema/fuzz.proto', 'protobuf', 'service', 'real.pkg.Service0'),
           );
-          expect(new Set(rpcSymbols.map(symbol => symbol.qualifiedName))).toEqual(
+          expect(new Set(EffectArray.map(rpcSymbols, symbol => symbol.qualifiedName))).toEqual(
             new Set(Array.from({length: serviceCount}, (_, index) => `real.pkg.Service${index}.Get`)),
           );
-          expect(protobuf.edges.filter(edge => edge.relation === 'imports').map(edge => edge.targetName)).toEqual([
-            'real.proto',
-          ]);
+          expect(
+            EffectArray.map(
+              EffectArray.filter(protobuf.edges, edge => edge.relation === 'imports'),
+              edge => edge.targetName,
+            ),
+          ).toEqual(['real.proto']);
           for (const rpc of rpcSymbols) {
             expect(
-              protobuf.edges.some(
+              EffectArray.some(
+                protobuf.edges,
                 edge =>
-                  edge.relation === 'contains' && edge.targetId === rpc.id && edge.sourceName.startsWith('Service'),
+                  edge.relation === 'contains' &&
+                  edge.targetId === rpc.id &&
+                  Effect2.pipe(edge.sourceName, EffectString.startsWith('Service')),
               ),
             ).toBe(true);
           }
@@ -290,12 +329,13 @@ describe('polyglot code graph extractor properties', () => {
       {padding: FC.integer({max: 20, min: 0}), sample: textStructuralCaseArbitrary},
       ({padding, sample}) => {
         const plain = inventoryFile(sample.path, sample.content);
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const padded = inventoryFile(sample.path, `${sample.prefix.repeat(padding + 1)}${sample.content}`);
         return Effect.gen(function* () {
           const first = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(plain);
           const shifted = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(padded);
-          expect(new Set(first.symbols.map(symbol => symbol.id)).size).toBe(first.symbols.length);
-          expect(new Set(shifted.symbols.map(symbol => symbol.id)).size).toBe(shifted.symbols.length);
+          expect(new Set(EffectArray.map(first.symbols, symbol => symbol.id)).size).toBe(first.symbols.length);
+          expect(new Set(EffectArray.map(shifted.symbols, symbol => symbol.id)).size).toBe(shifted.symbols.length);
           expect(symbolIdentityProjection(shifted)).toEqual(symbolIdentityProjection(first));
         });
       },
@@ -306,8 +346,8 @@ describe('polyglot code graph extractor properties', () => {
 
 function assertFacts(file: CodeGraphInventoryFile, facts: CodeGraphFileFacts, language: string): void {
   const message = `${language}:${file.path}`;
-  const symbolIds = new Set(facts.symbols.map(symbol => symbol.id));
-  const edgeIds = new Set(facts.edges.map(edge => edge.id));
+  const symbolIds = new Set(EffectArray.map(facts.symbols, symbol => symbol.id));
+  const edgeIds = new Set(EffectArray.map(facts.edges, edge => edge.id));
   const edgeIdentityById = new Map<string, ReturnType<typeof edgeIdentityProjection>>();
   const inputBytes = Buffer.byteLength(file.content ?? '');
   const factCountBound = Math.max(64, inputBytes * 8);
@@ -356,7 +396,7 @@ function edgeIdentityProjection(edge: CodeGraphFileFacts['edges'][number]) {
 }
 
 function assertSpan(span: CodeGraphSpan, content: string, message: string): void {
-  const lines = content.split(/\r\n|[\n\r\u2028\u2029]/u);
+  const lines = Effect2.pipe(content, EffectString.split(/\r\n|[\n\r\u2028\u2029]/u));
   expect(Number.isSafeInteger(span.line), message).toBe(true);
   expect(Number.isSafeInteger(span.column), message).toBe(true);
   expect(Number.isSafeInteger(span.endLine), message).toBe(true);
@@ -389,76 +429,90 @@ function inventoryFile(path: string, content: string): CodeGraphInventoryFile {
 
 function fuzzPath(matcher: CodeGraphFileMatcher): string {
   if (matcher.kind === 'basename') return `src/${matcher.value}`;
-  if (matcher.kind === 'basename-pattern') return `src/${matcher.value.replaceAll('*', 'fuzz')}`;
-  if (matcher.kind === 'path-suffix') return `src/fuzz${matcher.value.startsWith('/') ? '' : '/'}${matcher.value}`;
+  if (matcher.kind === 'basename-pattern')
+    return `src/${Effect2.pipe(matcher.value, EffectString.replaceAll('*', 'fuzz'))}`;
+  if (matcher.kind === 'path-suffix')
+    return `src/fuzz${Effect2.pipe(matcher.value, EffectString.startsWith('/')) ? '' : '/'}${matcher.value}`;
   return `src/fuzz${matcher.value}`;
 }
 
 function typescriptIdentityFixture(arities: readonly number[], revision: number): string {
-  return [
-    ...arities.map(arity => {
-      const parameters = Array.from({length: arity}, (_, index) => `value${index}: number`).join(', ');
-      return `export function parse(${parameters}): string;`;
-    }),
-    'export function parse(...values: readonly number[]): string {',
-    `  return values.join(',') + '${revision}';`,
-    '}',
-    'export function stable(): void {}',
-    'if (true) {',
-    '  const shadow = 1;',
-    '  void shadow;',
-    '} else {',
-    '  const shadow = 1;',
-    '  void shadow;',
-    '}',
-    '',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      ...EffectArray.map(arities, arity => {
+        const parameters = EffectArray.join(
+          Array.from({length: arity}, (_, index) => `value${index}: number`),
+          ', ',
+        );
+        return `export function parse(${parameters}): string;`;
+      }),
+      'export function parse(...values: readonly number[]): string {',
+      `  return values.join(',') + '${revision}';`,
+      '}',
+      'export function stable(): void {}',
+      'if (true) {',
+      '  const shadow = 1;',
+      '  void shadow;',
+      '} else {',
+      '  const shadow = 1;',
+      '  void shadow;',
+      '}',
+      '',
+    ],
+    '\n',
+  );
 }
 
 function legacyTypeScriptSymbolId(path: string, kind: string, qualifiedName: string): string {
-  return `cgs_${createHash('sha256')
-    .update(`symbol-v1\n${path}\ntypescript\n${kind}\n${qualifiedName}`)
-    .digest('hex')
-    .slice(0, 32)}`;
+  return `cgs_${Effect2.pipe(
+    createHash('sha256').update(`symbol-v1\n${path}\ntypescript\n${kind}\n${qualifiedName}`).digest('hex'),
+    EffectString.slice(0, 32),
+  )}`;
 }
 
 function legacyStructuredSymbolId(path: string, language: string, kind: string, qualifiedName: string): string {
-  return `cgs_${createHash('sha256')
-    .update(`structured-symbol-v1\n${path}\n${language}\n${kind}\n${qualifiedName}`)
-    .digest('hex')
-    .slice(0, 32)}`;
+  return `cgs_${Effect2.pipe(
+    createHash('sha256').update(`structured-symbol-v1\n${path}\n${language}\n${kind}\n${qualifiedName}`).digest('hex'),
+    EffectString.slice(0, 32),
+  )}`;
 }
 
 function structuredConfigSource(format: 'json' | 'jsonc' | 'yaml', flatKey: string, nestedKey: string): string {
   const value = {[flatKey]: {leaf: true}, root: {[nestedKey]: {leaf: false}}, literal: '/* value */ // ,}'};
   if (format === 'json') return JSON.stringify(value);
   if (format === 'jsonc') {
-    return [
-      '\uFEFF{',
-      '  // comments and trailing commas must preserve string contents and source offsets',
-      `  ${JSON.stringify(flatKey)}: {"leaf": true,},`,
-      `  "root": {${JSON.stringify(nestedKey)}: {"leaf": false,},},`,
-      '  "literal": "/* value */ // ,}",',
-      '}',
-    ].join('\n');
+    return EffectArray.join(
+      [
+        '\uFEFF{',
+        '  // comments and trailing commas must preserve string contents and source offsets',
+        `  ${JSON.stringify(flatKey)}: {"leaf": true,},`,
+        `  "root": {${JSON.stringify(nestedKey)}: {"leaf": false,},},`,
+        '  "literal": "/* value */ // ,}",',
+        '}',
+      ],
+      '\n',
+    );
   }
-  return [
-    `${JSON.stringify(flatKey)}:`,
-    '  leaf: true',
-    'root:',
-    `  ${JSON.stringify(nestedKey)}:`,
-    '    leaf: false',
-    'literal: "/* value */ // ,}"',
-    '',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `${JSON.stringify(flatKey)}:`,
+      '  leaf: true',
+      'root:',
+      `  ${JSON.stringify(nestedKey)}:`,
+      '    leaf: false',
+      'literal: "/* value */ // ,}"',
+      '',
+    ],
+    '\n',
+  );
 }
 
 function escapeStructuredSegment(value: string): string {
-  return value.replaceAll('~', '~0').replaceAll('/', '~1');
+  return Effect2.pipe(value, EffectString.replaceAll('~', '~0'), EffectString.replaceAll('/', '~1'));
 }
 
 function symbolIdentityProjection(facts: CodeGraphFileFacts) {
-  return facts.symbols.map(symbol => ({
+  return EffectArray.map(facts.symbols, symbol => ({
     id: symbol.id,
     kind: symbol.kind,
     name: symbol.name,

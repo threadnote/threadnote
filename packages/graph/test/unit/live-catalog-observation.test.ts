@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, DateTime, Effect, FileSystem, Layer, Path} from 'effect';
@@ -10,13 +11,61 @@ import {CODE_GRAPH_BUILD_STALE_AFTER_MILLISECONDS, type CodeGraphBuildStatus} fr
 import {readCodeGraphLocalAssociation} from '../../src/local_provenance.js';
 import {observeManagerGraphCatalogStatus} from '../../src/manager/catalog_revision.js';
 import {CodeGraphStore} from '../../src/store.js';
+import type {CodeGraphStoreShape} from '../../src/store/shape.js';
 import {CODE_GRAPH_SCHEMA_VERSION} from '../../src/types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const TestLayer = Layer.mergeAll(
   BunServices.layer,
-  Layer.succeed(SystemInfo, {platform: process.platform, homeDirectory: '/unused'} as never),
-  Layer.succeed(CommandExecutor, {execute: () => Effect.die('live observation must not execute Git')} as never),
+  Layer.succeed(
+    SystemInfo,
+    SystemInfo.of({
+      architecture: 'x64',
+      availableDiskBytes: () => Effect.die('unexpected disk capacity query'),
+      currentDirectory: () => process.cwd(),
+      environment: () => process.env,
+      developmentEntrypoint: '/test/threadnote.ts',
+      intendedChildEnvironment: environment => environment,
+      executablePath: process.execPath,
+      homeDirectory: '/unused',
+      hardwareInfo: Effect.succeed({
+        cpuModel: 'test',
+        memoryBytes: 1,
+        effectiveMemoryBytes: 1,
+        operatingSystem: 'test',
+      }),
+      isProcessRunning: () => false,
+      memoryUsage: () => ({external: 0, heapUsed: 0, rss: 0}),
+      processStartIdentity: () => Effect.as(Effect.void, undefined),
+      runtimeVersion: Bun.version,
+      pathDelimiter: process.platform === 'win32' ? ';' : ':',
+      platform: process.platform,
+      processId: process.pid,
+      processArguments: process.argv,
+      readLine: () => () => undefined,
+      signalProcess: () => undefined,
+      setExitCode: () => undefined,
+      setEnvironmentVariable: () => undefined,
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+      tempDirectory: '/tmp',
+      userName: 'test',
+    }),
+  ),
+  Layer.succeed(
+    CommandExecutor,
+    CommandExecutor.of({
+      execute: () => Effect.die('live observation must not execute Git'),
+      executeStreaming: () => Effect.die('live observation must not execute Git'),
+    }),
+  ),
 );
+
+function liveCatalogStore(adapter: Pick<CodeGraphStoreShape, 'loadActiveViewIdentities'>): CodeGraphStoreShape {
+  // @ts-expect-error -- The catalog projection uses only loadActiveViewIdentities from this store test double.
+  return adapter;
+}
 
 describe('graph live source inventory', () => {
   effectIt.layer(TestLayer)(it => {
@@ -29,9 +78,9 @@ describe('graph live source inventory', () => {
           const home = yield* fs
             .makeTempDirectoryScoped({prefix: 'graph-live-provenance-'})
             .pipe(Effect.flatMap(fs.realPath));
-          const checkoutId = 'a'.repeat(64),
-            worktreeId = 'b'.repeat(64),
-            repositoryId = 'c'.repeat(64);
+          const checkoutId = Effect2.pipe('a', EffectString.repeat(64)),
+            worktreeId = Effect2.pipe('b', EffectString.repeat(64)),
+            repositoryId = Effect2.pipe('c', EffectString.repeat(64));
           const repository = path.join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
           const context = path.join(repository, 'local-context');
           const directory = path.join(context, 'worktrees');
@@ -55,9 +104,12 @@ describe('graph live source inventory', () => {
             'no database reads in live observer',
           );
           const projection = observeManagerGraphCatalogStatus(home).pipe(
-            Effect.provideService(CodeGraphStore, {
-              loadActiveViewIdentities: () => Effect.succeed([{repositoryId, worktreeId, snapshotId: 'fixture'}]),
-            } as never),
+            Effect.provideService(
+              CodeGraphStore,
+              liveCatalogStore({
+                loadActiveViewIdentities: () => Effect.succeed([{repositoryId, worktreeId, snapshotId: 'fixture'}]),
+              }),
+            ),
           );
           const before = yield* codeGraphLiveObservationPaths(home);
           expect(before.files).toContain(file);
@@ -90,21 +142,21 @@ describe('graph live source inventory', () => {
           'indexes',
           'code-graph',
           'repositories',
-          'a'.repeat(64),
+          Effect2.pipe('a', EffectString.repeat(64)),
           'build-status',
-          'b'.repeat(64),
+          Effect2.pipe('b', EffectString.repeat(64)),
         );
         yield* fs.makeDirectory(directory, {recursive: true});
         const now = yield* Clock.currentTimeMillis;
         const timestamp = DateTime.formatIso(DateTime.makeUnsafe(now));
         const status: CodeGraphBuildStatus = {
-          buildId: 'c'.repeat(32),
+          buildId: Effect2.pipe('c', EffectString.repeat(32)),
           counters: {},
           identity: {
-            checkoutId: 'a'.repeat(64),
-            worktreeId: 'b'.repeat(64),
-            repositoryId: 'd'.repeat(64),
-            commit: 'e'.repeat(40),
+            checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+            repositoryId: Effect2.pipe('d', EffectString.repeat(64)),
+            commit: Effect2.pipe('e', EffectString.repeat(40)),
           },
           owner: {processId: 42, runtime: 'bun', runtimeVersion: 'fixture'},
           phase: 'materializing',
@@ -131,7 +183,7 @@ describe('graph live source inventory', () => {
         const terminal = yield* codeGraphLiveObservationPaths(home);
         expect(terminal.nextChangeAt).toBeUndefined();
         expect(terminal.statusRevision).not.toBe(active.statusRevision);
-        yield* fs.writeFileString(file, ' '.repeat(64 * 1024 + 1));
+        yield* fs.writeFileString(file, Effect2.pipe(' ', EffectString.repeat(64 * 1024 + 1)));
         expect((yield* codeGraphLiveObservationPaths(home).pipe(Effect.result))._tag).toBe('Failure');
       }),
     );
@@ -140,7 +192,13 @@ describe('graph live source inventory', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-live-paths-'});
-        const repository = path.join(home, 'indexes', 'code-graph', 'repositories', 'a'.repeat(64));
+        const repository = path.join(
+          home,
+          'indexes',
+          'code-graph',
+          'repositories',
+          Effect2.pipe('a', EffectString.repeat(64)),
+        );
         yield* fs.makeDirectory(path.join(repository, 'stale'), {recursive: true});
         for (const name of ['graph-v42.sqlite', 'graph-v42.sqlite-wal', 'graph-v42.sqlite-shm', 'stale/a.stale'])
           yield* fs.writeFileString(path.join(repository, name), 'deliberately not SQLite');
@@ -149,7 +207,11 @@ describe('graph live source inventory', () => {
         expect(result.files).toContain(path.join(repository, 'graph-v42.sqlite-wal'));
         expect(result.files).toContain(path.join(repository, 'stale/a.stale'));
         expect(result.files).not.toContain(path.join(repository, 'graph-v42.sqlite-shm'));
-        expect(result.files.some(file => file.endsWith('maintenance-status-v1.json'))).toBe(true);
+        expect(
+          EffectArray.some(result.files, file =>
+            Effect2.pipe(file, EffectString.endsWith('maintenance-status-v1.json')),
+          ),
+        ).toBe(true);
         expect(result.nextChangeAt).toBeUndefined();
       }),
     );
@@ -173,7 +235,13 @@ describe('graph live source inventory', () => {
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-live-file-cap-'});
         for (const id of ['a', 'b', 'c']) {
-          const repository = path.join(home, 'indexes', 'code-graph', 'repositories', id.repeat(64));
+          const repository = path.join(
+            home,
+            'indexes',
+            'code-graph',
+            'repositories',
+            Effect2.pipe(id, EffectString.repeat(64)),
+          );
           yield* fs.makeDirectory(repository, {recursive: true});
           for (let index = 0; index < 180; index++)
             yield* fs.writeFileString(path.join(repository, `graph-v${index}.sqlite`), 'metadata-only');
@@ -186,7 +254,14 @@ describe('graph live source inventory', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-live-provenance-cap-'});
-        const context = path.join(home, 'indexes', 'code-graph', 'repositories', 'a'.repeat(64), 'local-context');
+        const context = path.join(
+          home,
+          'indexes',
+          'code-graph',
+          'repositories',
+          Effect2.pipe('a', EffectString.repeat(64)),
+          'local-context',
+        );
         const directory = path.join(context, 'worktrees');
         yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
         yield* fs.chmod(context, 0o700);

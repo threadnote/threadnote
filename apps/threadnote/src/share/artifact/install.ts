@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, DateTime, Effect, FileSystem, Path, Predicate, Result} from 'effect';
 
 import {SystemInfo} from '@threadnote/platform/system';
@@ -59,6 +60,8 @@ import {
 } from '../core.js';
 
 import {syncSharedReposBeforeAgentRead} from '../sync.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const runShareInstallArtifacts = Effect.fn('share.runShareInstallArtifacts')(function* (
   config: ShareRuntime,
@@ -66,7 +69,7 @@ export const runShareInstallArtifacts = Effect.fn('share.runShareInstallArtifact
 ) {
   const result = yield* installSharedAgentArtifacts(config, options);
   if (result.syncedTeams.length > 0) {
-    yield* Console.log(`Synced shared teams: ${result.syncedTeams.join(', ')}`);
+    yield* Console.log(`Synced shared teams: ${EffectArray.join(result.syncedTeams, ', ')}`);
   }
   for (const warning of result.warnings) {
     yield* Console.warn(`Warning: ${warning}`);
@@ -125,9 +128,10 @@ export const installSharedAgentArtifacts = Effect.fn('share.installSharedAgentAr
     (options.agent === undefined || options.kind === undefined)
   ) {
     throw ShareOperationError.make({
-      message: `Shared artifact "${options.name}" is ambiguous. Specify agent and kind. Matches: ${artifacts
-        .map(artifact => sharedArtifactLabel(artifact.artifact))
-        .join(', ')}`,
+      message: `Shared artifact "${options.name}" is ambiguous. Specify agent and kind. Matches: ${EffectArray.join(
+        EffectArray.map(artifacts, artifact => sharedArtifactLabel(artifact.artifact)),
+        ', ',
+      )}`,
     });
   }
   let installedCount = 0;
@@ -175,7 +179,7 @@ export const installSharedAgentArtifacts = Effect.fn('share.installSharedAgentAr
 });
 
 function sharedArtifactFromRelativePath(relativePath: string): ShareArtifactMetadata | undefined {
-  const parts = relativePath.split('/');
+  const parts = Effect2.pipe(relativePath, EffectString.split('/'));
   if (parts[0] !== SHAREABLE_ARTIFACT_DIR) {
     return undefined;
   }
@@ -187,8 +191,13 @@ function sharedArtifactFromRelativePath(relativePath: string): ShareArtifactMeta
   ) {
     return {agent: parts[2], kind: 'skill', name: parts[3]};
   }
-  if (parts.length === 4 && parts[1] === 'commands' && parts[2] === 'claude' && parts[3].endsWith('.md')) {
-    return {agent: 'claude', kind: 'command', name: parts[3].slice(0, -'.md'.length)};
+  if (
+    parts.length === 4 &&
+    parts[1] === 'commands' &&
+    parts[2] === 'claude' &&
+    Effect2.pipe(parts[3], EffectString.endsWith('.md'))
+  ) {
+    return {agent: 'claude', kind: 'command', name: Effect2.pipe(parts[3], EffectString.slice(0, -'.md'.length))};
   }
   if (
     parts.length === 5 &&
@@ -216,10 +225,11 @@ const collectSharedArtifacts = Effect.fn('share.collectSharedArtifacts')(functio
           yield* visit(full);
           continue;
         }
-        if (!entry.isFile() || !entry.name.endsWith('.md')) {
+        if (!entry.isFile() || !Effect2.pipe(entry.name, EffectString.endsWith('.md'))) {
           continue;
         }
-        const relativePath = (yield* pathRelative(worktree, full)).split(yield* pathSeparator).join('/');
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+        const relativePath = EffectArray.join((yield* pathRelative(worktree, full)).split(yield* pathSeparator), '/');
         const artifact = sharedArtifactFromRelativePath(relativePath);
         if (artifact === undefined) {
           continue;
@@ -261,7 +271,7 @@ const collectSharedArtifacts = Effect.fn('share.collectSharedArtifacts')(functio
       }
     });
   yield* visit(root);
-  return out.sort((a, b) => a.sourcePath.localeCompare(b.sourcePath));
+  return out.sort((a, b) => Effect2.pipe(a.sourcePath, EffectString.localeCompare(b.sourcePath)));
 });
 
 const collectArtifactMembers = Effect.fn('share.collectArtifactMembers')(function* (
@@ -288,11 +298,11 @@ const isContainedMemberPath = Effect.fn('share.isContainedMemberPath')(function*
   baseDir: string,
   relativePath: string,
 ) {
-  if ((yield* pathIsAbsolute(relativePath)) || relativePath.split('/').includes('..')) {
+  if ((yield* pathIsAbsolute(relativePath)) || Effect2.pipe(relativePath, EffectString.split('/')).includes('..')) {
     return false;
   }
-  const resolved = yield* pathJoin(baseDir, ...relativePath.split('/'));
-  return resolved === baseDir || resolved.startsWith(baseDir + (yield* pathSeparator));
+  const resolved = yield* pathJoin(baseDir, ...Effect2.pipe(relativePath, EffectString.split('/')));
+  return resolved === baseDir || Effect2.pipe(resolved, EffectString.startsWith(baseDir + (yield* pathSeparator)));
 });
 
 const collectSharedPackMembers = Effect.fn('share.collectSharedPackMembers')(function* (
@@ -306,7 +316,7 @@ const collectSharedPackMembers = Effect.fn('share.collectSharedPackMembers')(fun
   const manifestRaw = yield* readFileIfExists(yield* pathJoin(packDir, `${artifact.name}${PACK_MANIFEST_SUFFIX}`));
   if (manifestRaw !== undefined) {
     const rawMembers = parseJsonConfigObject(manifestRaw)?.members;
-    if (Array.isArray(rawMembers)) {
+    if (EffectArray.isArray(rawMembers)) {
       const fromManifest: BundleMemberFile[] = [];
       for (const entry of rawMembers) {
         const path = memberPath(entry);
@@ -316,7 +326,10 @@ const collectSharedPackMembers = Effect.fn('share.collectSharedPackMembers')(fun
               message: `Refusing pack member with an unsafe path that escapes the pack root: ${path}`,
             });
           }
-          fromManifest.push({absolutePath: yield* pathJoin(filesDir, ...path.split('/')), relativePath: path});
+          fromManifest.push({
+            absolutePath: yield* pathJoin(filesDir, ...Effect2.pipe(path, EffectString.split('/'))),
+            relativePath: path,
+          });
         }
       }
       if (fromManifest.length > 0) {
@@ -335,7 +348,7 @@ const collectSharedBundleMembers = Effect.fn('share.collectSharedBundleMembers')
   if (manifestRaw !== undefined) {
     const parsed = parseJsonConfigObject(manifestRaw);
     const rawMembers = parsed?.members;
-    if (Array.isArray(rawMembers)) {
+    if (EffectArray.isArray(rawMembers)) {
       const fromManifest: BundleMemberFile[] = [];
       for (const entry of rawMembers) {
         const path = memberPath(entry);
@@ -345,7 +358,10 @@ const collectSharedBundleMembers = Effect.fn('share.collectSharedBundleMembers')
               message: `Refusing skill member with an unsafe path that escapes the skill root: ${path}`,
             });
           }
-          fromManifest.push({absolutePath: yield* pathJoin(skillDir, ...path.split('/')), relativePath: path});
+          fromManifest.push({
+            absolutePath: yield* pathJoin(skillDir, ...Effect2.pipe(path, EffectString.split('/'))),
+            relativePath: path,
+          });
         }
       }
       if (fromManifest.length > 0) {
@@ -361,7 +377,7 @@ function filterSharedArtifacts(
   options: ShareInstallArtifactsOptions | ShareListArtifactsOptions,
 ): readonly SharedArtifactFile[] {
   const name = options.name === undefined ? undefined : uriSegment(options.name);
-  return artifacts.filter(artifact => {
+  return EffectArray.filter(artifacts, artifact => {
     if (options.agent !== undefined && artifact.artifact.agent !== options.agent) {
       return false;
     }
@@ -419,7 +435,11 @@ const readBundleInstallMetadata = Effect.fn('share.readBundleInstallMetadata')(f
     return undefined;
   }
   const parsed = parseJsonConfigObject(raw);
-  if (parsed === undefined || parsed.version !== ARTIFACT_INSTALL_METADATA_VERSION || !Array.isArray(parsed.members)) {
+  if (
+    parsed === undefined ||
+    parsed.version !== ARTIFACT_INSTALL_METADATA_VERSION ||
+    !EffectArray.isArray(parsed.members)
+  ) {
     return undefined;
   }
   // Only trust metadata this artifact wrote for itself; a file left by a
@@ -453,7 +473,7 @@ const sharedBundleInstallStatus = Effect.fn('share.sharedBundleInstallStatus')(f
   // no-metadata fallback can recognize a pristine (token-expanded) install as
   // current instead of misreading it as a local modification.
   const expanded = yield* prepareInstallMembers(members, installRoot, artifact.artifact.kind === 'pack');
-  const expectedByPath = new Map(expanded.map(entry => [entry.relativePath, entry]));
+  const expectedByPath = new Map(EffectArray.map(expanded, entry => [entry.relativePath, entry]));
   let installedCount = 0;
   let localChanged = false;
   let remoteChanged = false;
@@ -468,7 +488,7 @@ const sharedBundleInstallStatus = Effect.fn('share.sharedBundleInstallStatus')(f
       continue;
     }
     const installedBytes = yield* readFileBytesIfExists(
-      yield* pathJoin(installRoot, ...member.relativePath.split('/')),
+      yield* pathJoin(installRoot, ...Effect2.pipe(member.relativePath, EffectString.split('/'))),
     );
     if (installedBytes === undefined) {
       remoteChanged = true;
@@ -503,7 +523,9 @@ const sharedBundleInstallStatus = Effect.fn('share.sharedBundleInstallStatus')(f
       remoteChanged = true;
       // The member was dropped upstream; if the user edited the now-orphaned
       // local copy, flag it so the install refuses to delete it without --force.
-      const installedBytes = yield* readFileBytesIfExists(yield* pathJoin(installRoot, ...recordedPath.split('/')));
+      const installedBytes = yield* readFileBytesIfExists(
+        yield* pathJoin(installRoot, ...Effect2.pipe(recordedPath, EffectString.split('/'))),
+      );
       if (installedBytes !== undefined && (yield* sha256(installedBytes)) !== recorded.installedSha256) {
         localChanged = true;
       }
@@ -532,7 +554,8 @@ interface PreparedInstallMember {
 }
 
 function expandPackRoot(text: string, installRoot: string): string {
-  return text.split(PACK_ROOT_TOKEN).join(installRoot);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+  return EffectArray.join(text.split(PACK_ROOT_TOKEN), installRoot);
 }
 
 // Resolves what each member will actually look like on disk. Pack-root token
@@ -567,20 +590,18 @@ const prepareInstallMembers = Effect.fn('share.prepareInstallMembers')(function*
       };
     }),
   );
-  return prepared.filter((member): member is PreparedInstallMember => member !== undefined);
+  return EffectArray.filter(prepared, (member): member is PreparedInstallMember => member !== undefined);
 });
 
 function serializeInstallMetadata(artifact: SharedArtifactFile, prepared: readonly PreparedInstallMember[]): string {
   const metadata = {
     artifact: artifact.artifact,
     installedAt: new Date().toISOString(),
-    members: prepared
-      .map(entry => ({
-        installedSha256: entry.installedSha256,
-        path: entry.relativePath,
-        sourceSha256: entry.sourceSha256,
-      }))
-      .sort((a, b) => compareStrings(a.path, b.path)),
+    members: EffectArray.map(prepared, entry => ({
+      installedSha256: entry.installedSha256,
+      path: entry.relativePath,
+      sourceSha256: entry.sourceSha256,
+    })).sort((a, b) => compareStrings(a.path, b.path)),
     team: artifact.team,
     version: ARTIFACT_INSTALL_METADATA_VERSION,
   };
@@ -632,7 +653,7 @@ const installBundleArtifact = Effect.fn('share.installBundleArtifact')(function*
   const stagingRoot = `${installRoot}.threadnote-staging`;
   yield* rm(stagingRoot, {force: true, recursive: true});
   for (const entry of prepared) {
-    const dest = yield* pathJoin(stagingRoot, ...entry.relativePath.split('/'));
+    const dest = yield* pathJoin(stagingRoot, ...Effect2.pipe(entry.relativePath, EffectString.split('/')));
     yield* ensureDirectory(yield* pathDirname(dest), false);
     yield* writeFile(dest, entry.installedBytes, {mode: 0o600});
   }
@@ -689,14 +710,16 @@ const surfacePackRequirements = Effect.fn('share.surfacePackRequirements')(funct
     return;
   }
   const stringList = (value: unknown): string[] =>
-    Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+    EffectArray.isArray(value) ? EffectArray.filter(value, (item): item is string => typeof item === 'string') : [];
   const tooling = [...stringList(deps.runtime), ...stringList(deps.cli), ...stringList(deps.os)];
   const mcp = stringList(deps.mcp);
   if (tooling.length > 0) {
-    messages.push(`This pack will NOT run until these exist (Threadnote installs files only): ${tooling.join(', ')}.`);
+    messages.push(
+      `This pack will NOT run until these exist (Threadnote installs files only): ${EffectArray.join(tooling, ', ')}.`,
+    );
   }
   if (mcp.length > 0) {
-    messages.push(`Configure these MCP server(s) separately: ${mcp.join(', ')}.`);
+    messages.push(`Configure these MCP server(s) separately: ${EffectArray.join(mcp, ', ')}.`);
   }
 });
 
@@ -805,7 +828,7 @@ const readSharedArtifactMetadata = Effect.fn('share.readSharedArtifactMetadata')
     typeof parsed.installedAt !== 'string' ||
     typeof artifactValue !== 'object' ||
     artifactValue === null ||
-    Array.isArray(artifactValue)
+    EffectArray.isArray(artifactValue)
   ) {
     return undefined;
   }
@@ -892,7 +915,7 @@ function sharedArtifactFilterLabel(options: ShareInstallArtifactsOptions | Share
   if (options.name !== undefined) {
     filters.push(`name=${uriSegment(options.name)}`);
   }
-  return filters.join(', ');
+  return EffectArray.join(filters, ', ');
 }
 
 function sharedArtifactLabel(artifact: ShareArtifactMetadata): string {

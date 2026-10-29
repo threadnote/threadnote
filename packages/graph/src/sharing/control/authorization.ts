@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Schema, Stream} from 'effect';
 import type {AccessTokenClaims} from '@threadnote/protocol/access-token';
 import {SHA256_DIGEST, SHA256_HEX} from '../digest.js';
@@ -32,7 +33,7 @@ export function parseGraphControlPolicy(value: unknown): GraphControlPolicy {
     policyUrl(policy.audience);
     if (
       issuer.origin !== jwks.origin ||
-      new Set(policy.grants.map(grant => grant.subject)).size !== policy.grants.length
+      new Set(EffectArray.map(policy.grants, grant => grant.subject)).size !== policy.grants.length
     ) {
       throw new Error('Invalid policy binding');
     }
@@ -96,8 +97,15 @@ export function graphControlGrantExpiry(
     !principal.scopes.has(capability)
   )
     return undefined;
-  return policy.grants.find(
-    grant => grant.subject === principal.subject && grant.expiresAt > nowSeconds && grant.scopes.includes(capability),
+  return Option.getOrUndefined(
+    EffectArray.findFirst(
+      policy.grants,
+      __effectArrayValue =>
+        !!(grant =>
+          grant.subject === principal.subject && grant.expiresAt > nowSeconds && grant.scopes.includes(capability))(
+          __effectArrayValue,
+        ),
+    ),
   )?.expiresAt;
 }
 

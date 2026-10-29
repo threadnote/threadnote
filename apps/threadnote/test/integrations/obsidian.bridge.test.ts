@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -32,6 +33,9 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {sourceConfigurationLayer} from '@threadnote/threadnote/integrations/config';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const base = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, recallResourceInvalidationLayer);
 const dependencies = Layer.merge(base, sourceConfigurationLayer.pipe(Layer.provide(base)));
@@ -62,20 +66,26 @@ describe('Obsidian zero-plugin bridge', () => {
       const config = runtime(home);
       yield* fs.makeDirectory(vault, {recursive: true});
       yield* write(join(vault, 'Engineering', 'Auth.md'), '# Mobile authentication\n\nUse the token mediator.');
-      yield* write(join(vault, 'Engineering', 'Secret.md'), `# Do not ingest\n\nsk-${'a'.repeat(24)}`);
+      yield* write(
+        join(vault, 'Engineering', 'Secret.md'),
+        `# Do not ingest\n\nsk-${Effect2.pipe('a', EffectString.repeat(24))}`,
+      );
       yield* write(
         join(vault, 'Threadnote Inbox', 'Bridge.md'),
-        [
-          '---',
-          'threadnote_candidate: true',
-          'kind: durable',
-          'project: threadnote',
-          'topic: obsidian-bridge',
-          'category: invariant',
-          '---',
-          '',
-          'External notes never override canonical repository guidance.',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            '---',
+            'threadnote_candidate: true',
+            'kind: durable',
+            'project: threadnote',
+            'topic: obsidian-bridge',
+            'category: invariant',
+            '---',
+            '',
+            'External notes never override canonical repository guidance.',
+          ],
+          '\n',
+        ),
       );
 
       yield* runObsidianSourceAdd(config, {
@@ -113,7 +123,7 @@ describe('Obsidian zero-plugin bridge', () => {
         includeInactive: false,
         query: 'Mobile authentication token mediator',
       });
-      expect(externalRecallIndex.candidates.map(candidate => candidate.uri)).toContain(externalUri);
+      expect(EffectArray.map(externalRecallIndex.candidates, candidate => candidate.uri)).toContain(externalUri);
 
       const memoryUri = 'threadnote://user/tester/memories/durable/projects/threadnote/obsidian-bridge.md';
       const unselectedMemoryUri =
@@ -145,19 +155,22 @@ describe('Obsidian zero-plugin bridge', () => {
       yield* store.write(
         {account: config.account, home: config.agentContextHome, user: config.user},
         unselectedMemoryUri,
-        [
-          'MEMORY',
-          'schema_version: 3',
-          'memory_id: tn_unselected',
-          'kind: durable',
-          'status: active',
-          'project: threadnote',
-          'topic: unselected-obsidian-bridge',
-          'source_agent_client: codex',
-          'timestamp: 2026-07-27T00:00:00.000Z',
-          '',
-          'This memory must stay out of the vault until explicitly selected.',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'MEMORY',
+            'schema_version: 3',
+            'memory_id: tn_unselected',
+            'kind: durable',
+            'status: active',
+            'project: threadnote',
+            'topic: unselected-obsidian-bridge',
+            'source_agent_client: codex',
+            'timestamp: 2026-07-27T00:00:00.000Z',
+            '',
+            'This memory must stay out of the vault until explicitly selected.',
+          ],
+          '\n',
+        ),
         {mode: 'upsert'},
       );
       yield* runObsidianProjectionAdd(config, {
@@ -205,7 +218,12 @@ describe('Obsidian zero-plugin bridge', () => {
       expect(secondInbox.output).toContain('UNCHANGED Bridge.md');
       expect(secondInbox.output).toContain('No new candidate reviews were created');
       const reviewDirectory = join(home, 'threadnote', 'candidates', 'v1', 'reviews');
-      expect((yield* fs.readDirectory(reviewDirectory)).filter(name => name.endsWith('.json'))).toHaveLength(1);
+      expect(
+        EffectArray.filter(
+          yield* fs.readDirectory(reviewDirectory),
+          __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+        ),
+      ).toHaveLength(1);
 
       const noOpProjection = yield* runObsidianProjectionSync(config, {apply: false, id: 'memory'}).pipe(
         captureConsole,
@@ -260,20 +278,23 @@ describe('Obsidian zero-plugin bridge', () => {
         yield* store.write(
           {account: config.account, home: config.agentContextHome, user: config.user},
           uri,
-          [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'project: threadnote',
-            'topic: malformed-citation',
-            'source_agent_client: codex',
-            'timestamp: 2026-08-26T20:00:00.000Z',
-            `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-            'memory_id: tn_bad',
-            'code_citation: {not-json}',
-            '',
-            'The projection exposes only the bounded parse error.',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'project: threadnote',
+              'topic: malformed-citation',
+              'source_agent_client: codex',
+              'timestamp: 2026-08-26T20:00:00.000Z',
+              `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+              'memory_id: tn_bad',
+              'code_citation: {not-json}',
+              '',
+              'The projection exposes only the bounded parse error.',
+            ],
+            '\n',
+          ),
           {mode: 'upsert'},
         );
         yield* runObsidianProjectionAdd(config, {apply: true, folder: 'Threadnote', id: 'memory', vault});
@@ -295,13 +316,13 @@ describe('Obsidian zero-plugin bridge', () => {
 function projectionCitation() {
   return createMemoryCodeCitation({
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
     path: 'src/obsidian_projection.ts',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });
@@ -310,5 +331,7 @@ function projectionCitation() {
 function projectionFrontmatter(content: string): Record<string, unknown> {
   const match = /^---\n([\s\S]*?)\n---/u.exec(content);
   if (!match?.[1]) throw new Error('Projected memory is missing YAML frontmatter.');
-  return yaml.load(match[1]) as Record<string, unknown>;
+  const parsed: unknown = yaml.load(match[1]);
+  if (!isJsonObject(parsed)) throw new Error('Projected memory frontmatter must be a YAML object.');
+  return parsed;
 }

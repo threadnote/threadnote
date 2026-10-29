@@ -4,6 +4,7 @@ import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {initializeNativeWatch} from '@threadnote/workflow-automations/watch';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
+import {parseWatchWorkResponse} from './release-artifact.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 
 it.effect('dispatches explicit consumer attachment and renewal without a collector or provider sweep', () =>
@@ -39,6 +40,14 @@ it.effect('dispatches explicit consumer attachment and renewal without a collect
       consumerId: 'fixture-consumer',
       wakeupId: 'fixture-wakeup',
     };
+    const workResponse = yield* f.call({...request, command: 'work'});
+    expect(workResponse).not.toHaveProperty('collector');
+    expect(parseWatchWorkResponse(workResponse)).toMatchObject({
+      status: 'ok',
+      watchId: request.watchId,
+      revision: stored.revision,
+      work: {items: [], offset: 0, nextOffset: null},
+    });
     const attached = yield* f.call({...request, expectedRevision: stored.revision});
     expect(attached).toMatchObject({
       protocolVersion: 1,

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {
   declaredVirtualModules,
@@ -8,6 +9,9 @@ import {
   type SourceModule,
   type WorkspacePackage,
 } from './boundaries.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const Manifest = Schema.Struct({
   name: Schema.String,
@@ -22,7 +26,7 @@ for (const path of new Bun.Glob('{apps,packages}/*/package.json').scanSync('.'))
   const manifest = Schema.decodeSync(Manifest)(await Bun.file(path).json());
   packages.push({
     ...manifest,
-    directory: path.slice(0, -'/package.json'.length),
+    directory: Effect.pipe(path, EffectString.slice(0, -'/package.json'.length)),
     exports: manifest.exports ?? {},
     dependencies: manifest.dependencies ?? {},
   });
@@ -31,10 +35,10 @@ const sources: SourceModule[] = [];
 const sourceFiles: {content: string; path: string}[] = [];
 for (const path of new Bun.Glob('{scripts,tools,infra,apps,packages}/**/*.{ts,tsx,mts}').scanSync('.')) {
   if (
-    path.includes('/node_modules/') ||
-    path.includes('/fixtures/') ||
-    path.includes('/dist/') ||
-    path.startsWith('tools/bazel/spike/')
+    Effect.pipe(path, EffectString.includes('/node_modules/')) ||
+    Effect.pipe(path, EffectString.includes('/fixtures/')) ||
+    Effect.pipe(path, EffectString.includes('/dist/')) ||
+    Effect.pipe(path, EffectString.startsWith('tools/bazel/spike/'))
   )
     continue;
   const content = await Bun.file(path).text();
@@ -61,9 +65,13 @@ const gitFiles = Bun.spawnSync({
   stdout: 'pipe',
 });
 if (gitFiles.exitCode !== 0) {
-  errors.push(`Could not inspect Git-visible workspace files: ${gitFiles.stderr.toString().trim()}`);
+  errors.push(
+    `Could not inspect Git-visible workspace files: ${Effect.pipe(gitFiles.stderr.toString(), EffectString.trim)}`,
+  );
 } else {
-  const gitVisiblePaths = new Set(gitFiles.stdout.toString().split('\0').filter(Boolean));
+  const gitVisiblePaths = new Set(
+    EffectArray.filter(Effect.pipe(gitFiles.stdout.toString(), EffectString.split('\0')), Boolean),
+  );
   errors.push(...validateSourceVisibility(sources, gitVisiblePaths));
 }
 for (const retiredRoot of ['manager', 'public', 'src', 'test', 'website']) {
@@ -72,13 +80,13 @@ for (const retiredRoot of ['manager', 'public', 'src', 'test', 'website']) {
     errors.push(`${retiredRoot}/: retired root must be owned by apps/, packages/, or another declared Bazel package`);
 }
 for (const pkg of packages) {
-  for (const entry of Object.values(pkg.exports)) {
+  for (const entry of EffectRecord.values(pkg.exports)) {
     if (!(await Bun.file(`${pkg.directory}/${entry}`).exists()))
       errors.push(`${pkg.name}: missing exported file ${entry}`);
   }
 }
 if (errors.length) {
-  process.stderr.write(`${errors.join('\n')}\n`);
+  process.stderr.write(`${EffectArray.join(errors, '\n')}\n`);
   process.exitCode = 1;
 } else {
   process.stdout.write(`Checked ${packages.length} private workspaces and ${sources.length} source modules.\n`);

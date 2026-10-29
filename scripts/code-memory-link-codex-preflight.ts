@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed preflight owns exact Git and candidate CLI operating-system process boundaries. */
 import {createHash} from 'node:crypto';
 import {mkdir, readFile, realpath, stat} from 'node:fs/promises';
@@ -9,6 +10,9 @@ import {
   type CodeMemoryLinkContextBriefResponseReceiptV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
 import type {CodeMemoryLinkCodexClientConfigV1} from './code-memory-link-codex-isolation.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_EVALUATION_ACCOUNT = 'local' as const;
 export const CODE_MEMORY_LINK_EVALUATION_AGENT_ID = 'agent-gate' as const;
@@ -72,7 +76,7 @@ export async function initializeCodeMemoryLinkFixtureRepository(input: {
     maxOutputBytes: 64 * 1_024,
     timeoutMilliseconds: 30_000,
   });
-  const commit = (await run(['rev-parse', 'HEAD'])).stdout.trim();
+  const commit = Effect.pipe((await run(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
   if (!/^[0-9a-f]{40}$/u.test(commit)) throw new Error('Disposable fixture did not produce one deterministic commit.');
   if ((await run(['status', '--porcelain=v1'])).stdout !== '') {
     throw new Error('Disposable fixture repository is not clean after deterministic initialization.');
@@ -141,7 +145,7 @@ export async function preflightCodeMemoryLinkCandidate(input: {
             'brief',
             '--budget-tokens',
             String(budgetTokens),
-            ...codeRefs.flatMap(reference => ['--code-ref', reference]),
+            ...EffectArray.flatMap(codeRefs, reference => ['--code-ref', reference]),
           ])
         ).stdout,
         'Context Brief preflight',
@@ -154,12 +158,12 @@ export async function preflightCodeMemoryLinkCandidate(input: {
   const observedSelectedMemories = codeMemoryLinkContextBriefSelectedMemoriesV1(brief);
   const expectedGold = [...input.expectedGoldCitationDigests].sort();
   const expectedPreflight = [...input.expectedPreflightCitationDigests];
-  if (expectedGold.some(digest => !observedCitationDigests.includes(digest))) {
+  if (EffectArray.some(expectedGold, digest => !observedCitationDigests.includes(digest))) {
     throw new Error('Rebuilt exact-current graph did not reproduce every sealed gold citation digest.');
   }
   if (
     observedCitationDigests.length !== expectedPreflight.length ||
-    observedCitationDigests.some((digest, index) => digest !== expectedPreflight[index])
+    EffectArray.some(observedCitationDigests, (digest, index) => digest !== expectedPreflight[index])
   ) {
     throw new Error('Rebuilt exact-current graph differs from the sealed preflight citation digest set.');
   }
@@ -240,9 +244,13 @@ export function assertCodeMemoryLinkGraphStatusPreflight(
 
 function normalizedFixtureRemote(origin: string): string {
   const parsed = new URL(origin);
-  const path = parsed.pathname.replace(/^\/+|\/+$/gu, '').replace(/\.git$/u, '');
+  const path = Effect.pipe(
+    parsed.pathname,
+    EffectString.replace(/^\/+|\/+$/gu, ''),
+    EffectString.replace(/\.git$/u, ''),
+  );
   if (!parsed.hostname || !path) throw new Error('Fixture origin is invalid.');
-  return `${parsed.hostname.toLowerCase()}/${path}`;
+  return `${Effect.pipe(parsed.hostname, EffectString.toLowerCase)}/${path}`;
 }
 
 export function candidateEnvironment(
@@ -270,14 +278,14 @@ function contextBriefCitationDigests(brief: Record<string, unknown>): readonly s
   if (brief.type !== 'context-brief' || (brief.version !== 2 && brief.version !== 3)) {
     throw new Error('Candidate preflight did not return a supported Context Brief.');
   }
-  if (!Array.isArray(brief.durableDecisions) || !Array.isArray(brief.activeHandoffs)) {
+  if (!EffectArray.isArray(brief.durableDecisions) || !EffectArray.isArray(brief.activeHandoffs)) {
     throw new Error('Candidate preflight Context Brief is missing its memory arrays.');
   }
-  const digests = [...brief.durableDecisions, ...brief.activeHandoffs].flatMap((entry, index) => {
+  const digests = EffectArray.flatMap([...brief.durableDecisions, ...brief.activeHandoffs], (entry, index) => {
     const memory = object(entry, `Context Brief memory ${index + 1}`);
     if (memory.selectionBasis !== 'code-citation') return [];
-    if (!Array.isArray(memory.codeRelations)) throw new Error('Code-selected memory has no relation receipts.');
-    return memory.codeRelations.flatMap((entry, relationIndex) => {
+    if (!EffectArray.isArray(memory.codeRelations)) throw new Error('Code-selected memory has no relation receipts.');
+    return EffectArray.flatMap(memory.codeRelations, (entry, relationIndex) => {
       const relation = object(entry, `Context Brief relation ${relationIndex + 1}`);
       if (relation.status !== 'exact' && relation.status !== 'relocated') return [];
       return [codeMemoryLinkGoldCitationDigest(boundedText(relation.citationId, 'citation id', 256))];
@@ -337,7 +345,11 @@ async function capture(
       clearTimeout(timeout);
       if (exceeded) reject(new Error('Reviewed preflight command exceeded its output budget.'));
       else if (code !== 0) {
-        reject(new Error(`Reviewed preflight command failed: ${Buffer.concat(stderr).toString('utf8').slice(-2048)}`));
+        reject(
+          new Error(
+            `Reviewed preflight command failed: ${Effect.pipe(Buffer.concat(stderr).toString('utf8'), EffectString.slice(-2048))}`,
+          ),
+        );
       } else resolvePromise({stdout: Buffer.concat(stdout).toString('utf8')});
     });
   });
@@ -352,9 +364,8 @@ function parseJson(value: string, label: string): unknown {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object.`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error(`${label} must be an object.`);
+  return value;
 }
 
 function boundedText(value: unknown, label: string, maximum: number): string {
@@ -365,10 +376,10 @@ function boundedText(value: unknown, label: string, maximum: number): string {
 }
 
 function selectedMemoryRoster(value: unknown, label: string): readonly CodeMemoryLinkExpectedSelectedMemoryV1[] {
-  if (!Array.isArray(value) || value.length > 24) throw new Error(`${label} must be a bounded array.`);
-  const memories = value.map((entry, index) => {
+  if (!EffectArray.isArray(value) || value.length > 24) throw new Error(`${label} must be a bounded array.`);
+  const memories = EffectArray.map(value, (entry, index) => {
     const memory = object(entry, `${label}[${index}]`);
-    const keys = Object.keys(memory).sort();
+    const keys = EffectRecord.keys(memory).sort();
     if (keys.length !== 2 || keys[0] !== 'contentSha256' || keys[1] !== 'memoryIdDigest') {
       throw new Error(`${label}[${index}] has unsupported or missing fields.`);
     }
@@ -378,7 +389,8 @@ function selectedMemoryRoster(value: unknown, label: string): readonly CodeMemor
     };
   });
   if (
-    memories.some(
+    EffectArray.some(
+      memories,
       (entry, index) =>
         index > 0 &&
         (memories[index - 1].memoryIdDigest > entry.memoryIdDigest ||
@@ -388,7 +400,7 @@ function selectedMemoryRoster(value: unknown, label: string): readonly CodeMemor
   ) {
     throw new Error(`${label} must be unique and canonically sorted.`);
   }
-  if (new Set(memories.map(memory => memory.memoryIdDigest)).size !== memories.length) {
+  if (new Set(EffectArray.map(memories, memory => memory.memoryIdDigest)).size !== memories.length) {
     throw new Error(`${label} memory identities must be unique.`);
   }
   return memories;

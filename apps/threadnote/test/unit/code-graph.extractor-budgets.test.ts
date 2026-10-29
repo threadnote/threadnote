@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {Option} from 'effect';
 import fc from 'fast-check';
@@ -13,13 +14,16 @@ import {GENERIC_STRUCTURED_DECLARATION_LIMIT} from '@threadnote/graph/languages/
 import type {CodeGraphWorkspaceProject} from '@threadnote/graph/languages/types';
 import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph per-file extraction budgets', () => {
   it('bounds generic structured declarations deterministically across object widths', () => {
     fc.assert(
       fc.property(fc.integer({max: 800, min: 0}), width => {
         const content = JSON.stringify(
-          Object.fromEntries(Array.from({length: width}, (_, index) => [`property-${index}`, {leaf: index}])),
+          EffectRecord.fromEntries(Array.from({length: width}, (_, index) => [`property-${index}`, {leaf: index}])),
         );
         const first = extractStructuredSchemaFacts(sourceFile('data/object.json', 'json', content), {
           packageName: Option.none(),
@@ -33,7 +37,7 @@ describe('code graph per-file extraction budgets', () => {
         expect(first).toEqual(second);
         expect(first.symbols.length).toBeLessThanOrEqual(GENERIC_STRUCTURED_DECLARATION_LIMIT + 1);
         if (width > GENERIC_STRUCTURED_DECLARATION_LIMIT) {
-          expect(first.diagnostics.join('\n')).toContain('generic structured declarations were bounded');
+          expect(EffectArray.join(first.diagnostics, '\n')).toContain('generic structured declarations were bounded');
         }
       }),
       {numRuns: 40},
@@ -45,53 +49,70 @@ describe('code graph per-file extraction budgets', () => {
     const extracted = extractStructuredSchemaFacts(file, {packageName: Option.none(), project: Option.none()});
     const [facts] = createResolutionAttributor([file])([extracted]);
     if (!facts) throw TestError.make({message: 'missing resolved structured facts'});
-    const leaves = facts.symbols.filter(symbol => symbol.kind === 'property');
+    const leaves = EffectArray.filter(facts.symbols, symbol => symbol.kind === 'property');
 
     expect(leaves.length).toBeGreaterThan(0);
-    expect(leaves.every(symbol => (symbol.lookupKeys ?? []).length === 0)).toBe(true);
-    expect(facts.symbols.find(symbol => symbol.kind === 'module')?.lookupKeys).toEqual(
-      expect.arrayContaining(['global:path:data%2Fobject.json']),
-    );
+    expect(EffectArray.every(leaves, symbol => (symbol.lookupKeys ?? []).length === 0)).toBe(true);
+    expect(
+      Option.getOrUndefined(EffectArray.findFirst(facts.symbols, symbol => symbol.kind === 'module'))?.lookupKeys,
+    ).toEqual(expect.arrayContaining(['global:path:data%2Fobject.json']));
   });
 
   it('bounds pathological TypeScript calls while preserving imports, reexports, and later declarations', () => {
     const calls = Array.from({length: TYPESCRIPT_DYNAMIC_RELATIONSHIP_LIMIT + 2_000}, () => 'dependency();');
-    const content = [
-      'import {dependency} from "./dependency.js";',
-      'export function generated(): void {',
-      ...calls,
-      '}',
-      'export {dependency as forwarded} from "./dependency.js";',
-      'export interface PreservedAfterBudget { readonly value: string }',
-    ].join('\n');
+    const content = EffectArray.join(
+      [
+        'import {dependency} from "./dependency.js";',
+        'export function generated(): void {',
+        ...calls,
+        '}',
+        'export {dependency as forwarded} from "./dependency.js";',
+        'export interface PreservedAfterBudget { readonly value: string }',
+      ],
+      '\n',
+    );
     const startedAt = performance.now();
     const facts = extractFileFacts(sourceFile('src/generated.ts', 'typescript', content));
     const duration = performance.now() - startedAt;
 
-    expect(facts.edges.filter(edge => edge.relation === 'calls')).toHaveLength(1);
-    expect(facts.references?.filter(reference => reference.relation === 'calls')).toHaveLength(1);
-    expect(facts.edges.some(edge => edge.relation === 'imports' && edge.targetName === './dependency.js')).toBe(true);
-    expect(facts.edges.some(edge => edge.relation === 'reexports' && edge.targetName === './dependency.js')).toBe(true);
-    expect(facts.symbols.some(symbol => symbol.name === 'PreservedAfterBudget')).toBe(true);
-    expect(facts.diagnostics.join('\n')).toContain('call and construct relationships were bounded');
+    expect(EffectArray.filter(facts.edges, edge => edge.relation === 'calls')).toHaveLength(1);
+    const references = facts.references;
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(references), values =>
+          EffectArray.filter(values, (reference, index) => index in values && reference.relation === 'calls'),
+        ),
+      ),
+    ).toHaveLength(1);
+    expect(
+      EffectArray.some(facts.edges, edge => edge.relation === 'imports' && edge.targetName === './dependency.js'),
+    ).toBe(true);
+    expect(
+      EffectArray.some(facts.edges, edge => edge.relation === 'reexports' && edge.targetName === './dependency.js'),
+    ).toBe(true);
+    expect(EffectArray.some(facts.symbols, symbol => symbol.name === 'PreservedAfterBudget')).toBe(true);
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('call and construct relationships were bounded');
     expect(extractFileFacts(sourceFile('src/generated.ts', 'typescript', content))).toEqual(facts);
     expect(duration).toBeLessThan(5_000);
   });
 
   it('uses declaration-surface extraction for multi-megabyte generated TypeScript', () => {
-    const content = [
-      `/* ${'generated '.repeat(240_000)} */`,
-      'import {dependency} from "./dependency.js";',
-      'export function preserved(): void { dependency(); }',
-      'export {dependency as forwarded} from "./dependency.js";',
-    ].join('\n');
+    const content = EffectArray.join(
+      [
+        `/* ${Effect.pipe('generated ', EffectString.repeat(240_000))} */`,
+        'import {dependency} from "./dependency.js";',
+        'export function preserved(): void { dependency(); }',
+        'export {dependency as forwarded} from "./dependency.js";',
+      ],
+      '\n',
+    );
     const facts = extractFileFacts(sourceFile('src/huge-generated.ts', 'typescript', content));
 
-    expect(facts.symbols.some(symbol => symbol.name === 'preserved')).toBe(true);
-    expect(facts.edges.some(edge => edge.relation === 'imports')).toBe(true);
-    expect(facts.edges.some(edge => edge.relation === 'reexports')).toBe(true);
-    expect(facts.edges.some(edge => edge.relation === 'calls')).toBe(false);
-    expect(facts.diagnostics.join('\n')).toContain('declaration-surface extraction');
+    expect(EffectArray.some(facts.symbols, symbol => symbol.name === 'preserved')).toBe(true);
+    expect(EffectArray.some(facts.edges, edge => edge.relation === 'imports')).toBe(true);
+    expect(EffectArray.some(facts.edges, edge => edge.relation === 'reexports')).toBe(true);
+    expect(EffectArray.some(facts.edges, edge => edge.relation === 'calls')).toBe(false);
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('declaration-surface extraction');
   });
 
   it.each([
@@ -104,76 +125,84 @@ describe('code graph per-file extraction budgets', () => {
     ['yaml', 'data/large.yaml', (padding: string) => `root:\n  preserved: value\npayload: ${padding}`],
   ] as const)('indexes large unknown generic %s as bounded metadata', (language, path, buildContent) => {
     const facts = extractStructuredSchemaFacts(
-      sourceFile(path, language, buildContent('x'.repeat(5 * 1_024 * 1_024))),
+      sourceFile(path, language, buildContent(Effect.pipe('x', EffectString.repeat(5 * 1_024 * 1_024)))),
       {
         packageName: Option.none(),
         project: Option.none(),
       },
     );
 
-    expect(facts.symbols.map(symbol => symbol.name)).toEqual([path]);
-    expect(facts.diagnostics.join('\n')).toContain('module metadata only');
+    expect(EffectArray.map(facts.symbols, symbol => symbol.name)).toEqual([path]);
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('module metadata only');
   });
 
   it('keeps recognized multi-megabyte configs fully structured within their safety budget', () => {
-    const content = `{"architecture":{"runtime":{"owner":"platform"}},"payload":"${'x'.repeat(5 * 1_024 * 1_024)}"}`;
+    const content = `{"architecture":{"runtime":{"owner":"platform"}},"payload":"${Effect.pipe('x', EffectString.repeat(5 * 1_024 * 1_024))}"}`;
     const facts = extractStructuredSchemaFacts(sourceFile('config/runtime-config.json', 'json', content), {
       packageName: Option.none(),
       project: Option.none(),
     });
 
-    expect(facts.symbols.map(symbol => symbol.name)).toEqual(
+    expect(EffectArray.map(facts.symbols, symbol => symbol.name)).toEqual(
       expect.arrayContaining(['architecture', 'runtime', 'owner', 'payload']),
     );
     expect(facts.diagnostics).toEqual([]);
   });
 
   it('locates quoted, escaped, and duplicate JSON keys in one linear source pass', () => {
-    const content = [
-      '{',
-      '  "ordinary": 1,',
-      '  "escaped\\u0020key": {',
-      '    "duplicate": {"duplicate": 2}',
-      '  }',
-      '}',
-    ].join('\n');
+    const content = EffectArray.join(
+      ['{', '  "ordinary": 1,', '  "escaped\\u0020key": {', '    "duplicate": {"duplicate": 2}', '  }', '}'],
+      '\n',
+    );
     const facts = extractStructuredSchemaFacts(sourceFile('config/locations.json', 'json', content), {
       packageName: Option.none(),
       project: Option.none(),
     });
 
-    expect(facts.symbols.find(symbol => symbol.name === 'ordinary')?.span).toMatchObject({
+    expect(
+      Option.getOrUndefined(EffectArray.findFirst(facts.symbols, symbol => symbol.name === 'ordinary'))?.span,
+    ).toMatchObject({
       column: 4,
       endColumn: 12,
       line: 2,
     });
-    expect(facts.symbols.find(symbol => symbol.name === 'escaped key')?.span).toMatchObject({
+    expect(
+      Option.getOrUndefined(EffectArray.findFirst(facts.symbols, symbol => symbol.name === 'escaped key'))?.span,
+    ).toMatchObject({
       column: 4,
       endColumn: 20,
       line: 3,
     });
-    expect(facts.symbols.filter(symbol => symbol.name === 'duplicate').map(symbol => symbol.span.line)).toEqual([4, 4]);
-    expect(facts.symbols.filter(symbol => symbol.name === 'duplicate').map(symbol => symbol.span.column)).toEqual([
-      6, 20,
-    ]);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(facts.symbols, symbol => symbol.name === 'duplicate'),
+        symbol => symbol.span.line,
+      ),
+    ).toEqual([4, 4]);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(facts.symbols, symbol => symbol.name === 'duplicate'),
+        symbol => symbol.span.column,
+      ),
+    ).toEqual([6, 20]);
   });
 
   it('shallow-extracts recognized configs above the full-structure safety budget', () => {
-    const content = `{"architecture":{"owner":"runtime"},"payload":"${'x'.repeat(17 * 1_024 * 1_024)}"}`;
+    const content = `{"architecture":{"owner":"runtime"},"payload":"${Effect.pipe('x', EffectString.repeat(17 * 1_024 * 1_024))}"}`;
     const facts = extractStructuredSchemaFacts(sourceFile('config/architecture-schema.json', 'json', content), {
       packageName: Option.none(),
       project: Option.none(),
     });
 
-    expect(facts.symbols.map(symbol => symbol.name)).toEqual(
+    expect(EffectArray.map(facts.symbols, symbol => symbol.name)).toEqual(
       expect.arrayContaining(['architecture', 'owner', 'payload']),
     );
     expect(facts.symbols.length).toBeLessThanOrEqual(129);
-    expect(facts.diagnostics.join('\n')).toContain('bounded shallow extraction');
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('bounded shallow extraction');
   });
 
   it('keeps a 25 MiB generic JSON file searchable without materializing its object graph', () => {
-    const content = `{"architecture":{"owner":"runtime"},"payload":"${'x'.repeat(25 * 1_024 * 1_024)}"}`;
+    const content = `{"architecture":{"owner":"runtime"},"payload":"${Effect.pipe('x', EffectString.repeat(25 * 1_024 * 1_024))}"}`;
     const startedAt = performance.now();
     const facts = extractStructuredSchemaFacts(sourceFile('data/large.json', 'json', content), {
       packageName: Option.none(),
@@ -181,8 +210,8 @@ describe('code graph per-file extraction budgets', () => {
     });
     const duration = performance.now() - startedAt;
 
-    expect(facts.symbols.map(symbol => symbol.name)).toEqual(['data/large.json']);
-    expect(facts.diagnostics.join('\n')).toContain('module metadata only');
+    expect(EffectArray.map(facts.symbols, symbol => symbol.name)).toEqual(['data/large.json']);
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('module metadata only');
     expect(duration).toBeLessThan(1_000);
   });
 
@@ -202,8 +231,8 @@ describe('code graph per-file extraction budgets', () => {
       project: Option.none(),
     });
 
-    expect(facts.symbols.map(symbol => symbol.name)).toEqual([path]);
-    expect(facts.diagnostics.join('\n')).toContain('module metadata only');
+    expect(EffectArray.map(facts.symbols, symbol => symbol.name)).toEqual([path]);
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('module metadata only');
   });
 
   it('does not classify golden-like path prefixes as low-signal directories', () => {
@@ -213,7 +242,9 @@ describe('code graph per-file extraction budgets', () => {
       project: Option.none(),
     });
 
-    expect(facts.symbols.map(symbol => symbol.name)).toEqual(expect.arrayContaining([path, 'checksum', 'algorithm']));
+    expect(EffectArray.map(facts.symbols, symbol => symbol.name)).toEqual(
+      expect.arrayContaining([path, 'checksum', 'algorithm']),
+    );
     expect(facts.diagnostics).toEqual([]);
   });
 
@@ -233,8 +264,8 @@ describe('code graph per-file extraction budgets', () => {
       {packageName: Option.none(), project: Option.none()},
     );
 
-    expect(facts.symbols.map(symbol => symbol.name)).toEqual([path]);
-    expect(facts.diagnostics.join('\n')).toContain('module metadata only');
+    expect(EffectArray.map(facts.symbols, symbol => symbol.name)).toEqual([path]);
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('module metadata only');
   });
 
   it('keeps bounded iOS asset-catalog scalar values searchable', () => {
@@ -251,14 +282,16 @@ describe('code graph per-file extraction budgets', () => {
       {packageName: Option.some('MobileApp'), project: Option.none()},
     );
 
-    const resourceValues = facts.symbols.filter(symbol => symbol.kind === 'resource-value');
-    expect(resourceValues.map(symbol => symbol.name)).toEqual(
+    const resourceValues = EffectArray.filter(facts.symbols, symbol => symbol.kind === 'resource-value');
+    expect(EffectArray.map(resourceValues, symbol => symbol.name)).toEqual(
       expect.arrayContaining(['AppIcon-Monochrome@3x.png', 'universal', '3x', 'xcode', '1']),
     );
-    expect(resourceValues.find(symbol => symbol.name === 'AppIcon-Monochrome@3x.png')?.lookupKeys).toEqual(
-      expect.arrayContaining(['app', 'icon', 'monochrome', '3x', 'png']),
-    );
-    expect(resourceValues.every(symbol => symbol.packageName === 'MobileApp')).toBe(true);
+    expect(
+      Option.getOrUndefined(
+        EffectArray.findFirst(resourceValues, symbol => symbol.name === 'AppIcon-Monochrome@3x.png'),
+      )?.lookupKeys,
+    ).toEqual(expect.arrayContaining(['app', 'icon', 'monochrome', '3x', 'png']));
+    expect(EffectArray.every(resourceValues, symbol => symbol.packageName === 'MobileApp')).toBe(true);
   });
 
   it('attributes iOS asset-catalog values to the nearest typed mobile component through the registry', async () => {
@@ -289,7 +322,9 @@ describe('code graph per-file extraction budgets', () => {
       ),
     );
 
-    expect(facts.symbols.find(symbol => symbol.kind === 'resource-value')).toMatchObject({
+    expect(
+      Option.getOrUndefined(EffectArray.findFirst(facts.symbols, symbol => symbol.kind === 'resource-value')),
+    ).toMatchObject({
       name: 'AppIcon-Monochrome.png',
       packageName: 'MobileApp',
     });
@@ -299,7 +334,7 @@ describe('code graph per-file extraction budgets', () => {
     const content = JSON.stringify({
       dependencies: {'@fixture/runtime': '1.0.0'},
       name: '@fixture/large-manifest',
-      padding: 'x'.repeat(5 * 1_024 * 1_024),
+      padding: Effect.pipe('x', EffectString.repeat(5 * 1_024 * 1_024)),
     });
     const facts = extractFileFacts(sourceFile('package.json', 'npm-manifest', content));
 

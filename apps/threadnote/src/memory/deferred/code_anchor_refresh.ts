@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Layer} from 'effect';
 import {CodeGraphWatcher} from '@threadnote/graph/watcher';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -72,14 +73,14 @@ export function selectDeferredCodeAnchorMissingCheckoutIntents(
   intents: readonly DeferredCodeAnchorIntentV1[],
   observationByCwd: ReadonlyMap<string, DeferredCodeAnchorCallerCheckoutObservation>,
 ): readonly DeferredCodeAnchorIntentV1[] {
-  return intents.filter(intent => observationByCwd.get(intent.callerCwd)?.state === 'missing');
+  return EffectArray.filter(intents, intent => observationByCwd.get(intent.callerCwd)?.state === 'missing');
 }
 
 const observeDeferredCodeAnchorCallerCheckouts = Effect.fn('memoryCodeAnchor.observeCallerCheckouts')(function* (
   intents: readonly DeferredCodeAnchorIntentV1[],
 ) {
   const observationByCwd = new Map<string, DeferredCodeAnchorCallerCheckoutObservation>();
-  for (const cwd of new Set(intents.map(intent => intent.callerCwd))) {
+  for (const cwd of new Set(EffectArray.map(intents, intent => intent.callerCwd))) {
     observationByCwd.set(cwd, yield* observeDeferredCodeAnchorCallerCheckout(cwd));
   }
   return observationByCwd;
@@ -87,7 +88,7 @@ const observeDeferredCodeAnchorCallerCheckouts = Effect.fn('memoryCodeAnchor.obs
 
 export const listDeferredCodeAnchorWorkspaceRefreshTargets = Effect.fn('memoryCodeAnchor.listWorkspaceRefreshTargets')(
   function* (config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'manifestPath' | 'user'>) {
-    const intents = (yield* listDeferredCodeAnchorIntents(config)).flatMap(entry =>
+    const intents = EffectArray.flatMap(yield* listDeferredCodeAnchorIntents(config), entry =>
       entry.kind === 'valid' ? [entry.intent] : [],
     );
     return selectDeferredCodeAnchorWorkspaceRefreshTargets(
@@ -119,13 +120,16 @@ export const deferredCodeAnchorRefreshSchedulerLayer = Layer.effect(
 
 export const refreshPendingDeferredCodeAnchorWorkspaces = Effect.fn('memoryCodeAnchor.refreshPendingWorkspaces')(
   function* (config: RuntimeConfig) {
-    const intents = (yield* listDeferredCodeAnchorIntents(config)).flatMap(entry =>
+    const intents = EffectArray.flatMap(yield* listDeferredCodeAnchorIntents(config), entry =>
       entry.kind === 'valid' ? [entry.intent] : [],
     );
     const observationByCwd = yield* observeDeferredCodeAnchorCallerCheckouts(intents);
     const missingUris = [
       ...new Set(
-        selectDeferredCodeAnchorMissingCheckoutIntents(intents, observationByCwd).map(intent => intent.memoryUri),
+        EffectArray.map(
+          selectDeferredCodeAnchorMissingCheckoutIntents(intents, observationByCwd),
+          intent => intent.memoryUri,
+        ),
       ),
     ];
     if (missingUris.length > 0) {

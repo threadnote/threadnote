@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- Directory junctions keep caller-retarget fixtures usable without Windows symlink privilege.
 import {symlinkSync} from 'node:fs';
 import {it as effectIt} from '@effect/vitest';
@@ -16,6 +17,8 @@ import {
   startRepositoryWorktreeObservation,
 } from '@threadnote/graph/repository';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const mutations = ['untracked', 'nested', 'edit', 'delete', 'stage', 'ignore', 'gitignore', 'reset'] as const;
 type Mutation = (typeof mutations)[number];
@@ -36,7 +39,10 @@ const makeFixture = (format: 'sha1' | 'sha256' = 'sha1') =>
     yield* git(['add', '.']);
     yield* git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
     const identity = yield* resolveRepositoryIdentity(root);
-    const index = (yield* git(['rev-parse', '--path-format=absolute', '--git-path', 'index'])).stdout.trim();
+    const index = Effect2.pipe(
+      (yield* git(['rev-parse', '--path-format=absolute', '--git-path', 'index'])).stdout,
+      EffectString.trim,
+    );
     return {fs, path, root, home, git, identity, index};
   });
 
@@ -104,15 +110,24 @@ const scenario = (changes: readonly Mutation[], minimumIndexBytes = 0) =>
       const bind = yield* startRepositoryWorktreeObservation(f.root);
       const initial = yield* bind(f.identity);
       const final = yield* resolveRepositoryIdentityForExpectationAndWorktree(f.root, f.identity, cache);
-      const changed = raw.stdout.split('\0').some(record => record.length > 0 && !record.startsWith('# '));
+      const changed = EffectArray.some(
+        Effect2.pipe(raw.stdout, EffectString.split('\0')),
+        record => record.length > 0 && !Effect2.pipe(record, EffectString.startsWith('# ')),
+      );
       expect(initial).toBe(changed);
       expect((yield* observeInitialComposite(f, f.root, f.identity, minimumIndexBytes)).worktreeChanged).toBe(changed);
       expect(final.worktreeChanged).toBe(changed);
-      const privateStatus = statuses.find(status => status.private);
+      const privateStatus = Option.getOrUndefined(EffectArray.findFirst(statuses, status => status.private));
       if (privateStatus !== undefined) {
-        const tracked = statuses.find(status => status.tracked)!;
+        const tracked = Option.getOrUndefined(EffectArray.findFirst(statuses, status => status.tracked))!;
         const untracked = parseRepositoryUntrackedStatusRecords(privateStatus.stdout)!;
-        expect(tracked.stdout + untracked.map(record => `${record}\0`).join('')).toBe(raw.stdout);
+        expect(
+          tracked.stdout +
+            EffectArray.join(
+              EffectArray.map(untracked, record => `${record}\0`),
+              '',
+            ),
+        ).toBe(raw.stdout);
       }
       expect((yield* f.git(['count-objects', '-v'])).stdout).toBe(objects);
       expect(sha256HexSync(yield* f.fs.readFile(f.index))).toBe(before);
@@ -195,16 +210,20 @@ const fallbackScenario = (kind: (typeof unsupportedCases)[number]) =>
     if (kind === 'lock') yield* f.fs.writeFileString(lock!, 'busy');
     indexes.length = 0;
     const before = sha256HexSync(yield* f.fs.readFile(f.index));
-    const expected = (yield* f.git([
-      '--no-optional-locks',
-      'status',
-      '--porcelain=v2',
-      '-z',
-      '--branch',
-      '--untracked-files=normal',
-    ])).stdout
-      .split('\0')
-      .some(record => record.length > 0 && !record.startsWith('# '));
+    const expected = EffectArray.some(
+      Effect2.pipe(
+        (yield* f.git([
+          '--no-optional-locks',
+          'status',
+          '--porcelain=v2',
+          '-z',
+          '--branch',
+          '--untracked-files=normal',
+        ])).stdout,
+        EffectString.split('\0'),
+      ),
+      record => record.length > 0 && !Effect2.pipe(record, EffectString.startsWith('# ')),
+    );
     expect((yield* check).worktreeChanged).toBe(expected);
     expect(indexes).toEqual([]);
     expect(sha256HexSync(yield* f.fs.readFile(f.index))).toBe(before);
@@ -281,7 +300,11 @@ const ignoreRefreshScenario = (relaxed: boolean, nested: boolean, ignoreName = '
       expect(privateOutput).toBeUndefined();
       expect(trackedOutput).toBeUndefined();
       expect(rawOutput).toBe(raw);
-      expect(result.worktreeChanged).toBe(raw.split('\0').some(record => record && !record.startsWith('# ')));
+      expect(result.worktreeChanged).toBe(
+        EffectArray.some(Effect2.pipe(raw, EffectString.split('\0')), record =>
+          Boolean(record && !Effect2.pipe(record, EffectString.startsWith('# '))),
+        ),
+      );
       expect(sha256HexSync(yield* f.fs.readFile(f.index))).toBe(indexBefore);
       expect((yield* f.fs.stat(f.path.dirname(f.index))).mode).toBe(directoryMode);
       expect((yield* f.fs.stat(f.index)).mode).toBe(indexMode);
@@ -762,15 +785,23 @@ describe('bounded repository untracked cache', () => {
   });
 });
 
-const framedPath = fc.string({minLength: 1, maxLength: 30}).filter(value => !value.includes('\0'));
+const framedPath = fc
+  .string({minLength: 1, maxLength: 30})
+  .filter(value => !Effect2.pipe(value, EffectString.includes('\0')));
 it('selects only framed untracked entries, including rename sources resembling status records', () => {
   fc.assert(
     fc.property(framedPath, framedPath, fc.array(framedPath, {maxLength: 6}), (source, target, paths) => {
-      const prefix = `# branch.oid ${'a'.repeat(40)}\0# branch.head main\0`;
-      const rename = `2 R. N... 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} R100 ${target}\0? ${source}\0`;
-      const output = prefix + rename + paths.map(path => `? ${path}\0`).join('');
-      expect(parseRepositoryUntrackedStatusRecords(output)).toEqual(paths.map(path => `? ${path}`));
-      expect(parseRepositoryUntrackedStatusRecords(output.slice(0, -1))).toBeUndefined();
+      const prefix = `# branch.oid ${Effect2.pipe('a', EffectString.repeat(40))}\0# branch.head main\0`;
+      const rename = `2 R. N... 100644 100644 100644 ${Effect2.pipe('a', EffectString.repeat(40))} ${Effect2.pipe('b', EffectString.repeat(40))} R100 ${target}\0? ${source}\0`;
+      const output =
+        prefix +
+        rename +
+        EffectArray.join(
+          EffectArray.map(paths, path => `? ${path}\0`),
+          '',
+        );
+      expect(parseRepositoryUntrackedStatusRecords(output)).toEqual(EffectArray.map(paths, path => `? ${path}`));
+      expect(parseRepositoryUntrackedStatusRecords(Effect2.pipe(output, EffectString.slice(0, -1)))).toBeUndefined();
       expect(parseRepositoryUntrackedStatusRecords(prefix + rename + '? \0')).toBeUndefined();
       expect(parseRepositoryUntrackedStatusRecords(prefix + '2 broken\0')).toBeUndefined();
     }),

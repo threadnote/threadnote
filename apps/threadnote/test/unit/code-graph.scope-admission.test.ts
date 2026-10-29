@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -16,33 +17,35 @@ import type {CodeGraphSnapshot} from '@threadnote/graph/types';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const packs = BUILTIN_LANGUAGE_PACK_REGISTRY;
-const environment = 'f'.repeat(64);
+const environment = Effect2.pipe('f', EffectString.repeat(64));
 const snapshot: CodeGraphSnapshot = {
-  commit: 'a'.repeat(40),
+  commit: Effect2.pipe('a', EffectString.repeat(40)),
   dirty: false,
   edgeCount: 0,
-  extractorSet: 'b'.repeat(64),
+  extractorSet: Effect2.pipe('b', EffectString.repeat(64)),
   fileCount: 0,
-  id: `cgsn_${'c'.repeat(40)}`,
-  repositoryId: 'd'.repeat(64),
+  id: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
+  repositoryId: Effect2.pipe('d', EffectString.repeat(64)),
   state: 'ready',
   symbolCount: 0,
-  worktreeId: 'e'.repeat(64),
+  worktreeId: Effect2.pipe('e', EffectString.repeat(64)),
 };
 const scope: CodeGraphScopeAdmissionEvidence = {
-  scopeKey: `code-graph-scope:${'1'.repeat(64)}`,
-  closureDigest: '2'.repeat(64),
-  definitionDigest: '3'.repeat(64),
-  inventoryFingerprint: '4'.repeat(64),
-  observedCommit: '5'.repeat(40),
+  scopeKey: `code-graph-scope:${Effect2.pipe('1', EffectString.repeat(64))}`,
+  closureDigest: Effect2.pipe('2', EffectString.repeat(64)),
+  definitionDigest: Effect2.pipe('3', EffectString.repeat(64)),
+  inventoryFingerprint: Effect2.pipe('4', EffectString.repeat(64)),
+  observedCommit: Effect2.pipe('5', EffectString.repeat(40)),
 };
 const setup = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-scope-admission-'});
-  const layout = codeGraphLayout(path, home, 'a'.repeat(64), snapshot.worktreeId);
+  const layout = codeGraphLayout(path, home, Effect2.pipe('a', EffectString.repeat(64)), snapshot.worktreeId);
   const target = (key?: string) => codeGraphSnapshotAdmissionReceiptPath(path, layout, layout.worktreeId, false, key);
   const current = (evidence?: CodeGraphScopeAdmissionEvidence) =>
     codeGraphSnapshotAdmissionCurrent(layout, snapshot, environment, packs, false, evidence);
@@ -57,14 +60,17 @@ describe('scope-bound snapshot admission', () => {
     ({seeds}) =>
       Effect.gen(function* () {
         const {current, fs, layout, target} = yield* setup;
-        const scopes = seeds.map(seed => ({...scope, scopeKey: `code-graph-scope:${sha256HexSync(seed)}`}));
+        const scopes = EffectArray.map(seeds, seed => ({
+          ...scope,
+          scopeKey: `code-graph-scope:${sha256HexSync(seed)}`,
+        }));
         yield* recordCodeGraphSnapshotAdmission(layout, snapshot, environment, packs, false);
         for (const selection of scopes) {
           yield* recordCodeGraphSnapshotAdmission(layout, snapshot, environment, packs, false, {scope: selection});
         }
         for (const selection of scopes) expect(yield* current(selection)).toBe(true);
         expect(yield* current()).toBe(true);
-        const changed = {...scopes[0], inventoryFingerprint: '6'.repeat(64)};
+        const changed = {...scopes[0], inventoryFingerprint: Effect2.pipe('6', EffectString.repeat(64))};
         yield* recordCodeGraphSnapshotAdmission(layout, snapshot, environment, packs, false, {scope: changed});
         expect(yield* current(scopes[0])).toBe(false);
         expect(yield* current(changed)).toBe(true);
@@ -82,27 +88,34 @@ describe('scope-bound snapshot admission', () => {
       yield* recordCodeGraphSnapshotAdmission(layout, snapshot, environment, packs, false, {scope});
       expect(yield* current(scope)).toBe(true);
       for (const changed of [
-        {...scope, closureDigest: '9'.repeat(64)},
-        {...scope, definitionDigest: '9'.repeat(64)},
-        {...scope, inventoryFingerprint: '9'.repeat(64)},
-        {...scope, observedCommit: '9'.repeat(40)},
-        {...scope, scopedOverlayFingerprint: '9'.repeat(64)},
+        {...scope, closureDigest: Effect2.pipe('9', EffectString.repeat(64))},
+        {...scope, definitionDigest: Effect2.pipe('9', EffectString.repeat(64))},
+        {...scope, inventoryFingerprint: Effect2.pipe('9', EffectString.repeat(64))},
+        {...scope, observedCommit: Effect2.pipe('9', EffectString.repeat(40))},
+        {...scope, scopedOverlayFingerprint: Effect2.pipe('9', EffectString.repeat(64))},
       ])
         expect(yield* current(changed)).toBe(false);
-      expect(yield* codeGraphSnapshotAdmissionCurrent(layout, snapshot, '9'.repeat(64), packs, false, scope)).toBe(
-        false,
-      );
       expect(
         yield* codeGraphSnapshotAdmissionCurrent(
           layout,
-          {...snapshot, extractorSet: '9'.repeat(64)},
+          snapshot,
+          Effect2.pipe('9', EffectString.repeat(64)),
+          packs,
+          false,
+          scope,
+        ),
+      ).toBe(false);
+      expect(
+        yield* codeGraphSnapshotAdmissionCurrent(
+          layout,
+          {...snapshot, extractorSet: Effect2.pipe('9', EffectString.repeat(64))},
           environment,
           packs,
           false,
           scope,
         ),
       ).toBe(false);
-      const sibling = {...scope, scopeKey: `code-graph-scope:${'7'.repeat(64)}`};
+      const sibling = {...scope, scopeKey: `code-graph-scope:${Effect2.pipe('7', EffectString.repeat(64))}`};
       const contents = yield* fs.readFileString(target(scope.scopeKey));
       yield* fs.writeFileString(target(sibling.scopeKey), contents);
       expect(yield* current(sibling)).toBe(false);
@@ -110,7 +123,7 @@ describe('scope-bound snapshot admission', () => {
       expect(yield* current()).toBe(false);
       yield* fs.writeFileString(target(), JSON.stringify({...JSON.parse(contents), version: 1}));
       expect(yield* current()).toBe(false);
-      const other = {...layout, worktreeId: '0'.repeat(64)};
+      const other = {...layout, worktreeId: Effect2.pipe('0', EffectString.repeat(64))};
       yield* fs.writeFileString(
         codeGraphSnapshotAdmissionReceiptPath(yield* Path.Path, other, other.worktreeId, false, scope.scopeKey),
         contents,
@@ -151,9 +164,9 @@ describe('scope-bound snapshot admission', () => {
       const contents = yield* fs.readFileString(target(scope.scopeKey));
       for (const malformed of [
         '{',
-        ' '.repeat(4_097),
-        contents.replace('"version":2', '"version":3'),
-        JSON.stringify({...JSON.parse(contents), contract: '0'.repeat(64)}),
+        Effect2.pipe(' ', EffectString.repeat(4_097)),
+        Effect2.pipe(contents, EffectString.replace('"version":2', '"version":3')),
+        JSON.stringify({...JSON.parse(contents), contract: Effect2.pipe('0', EffectString.repeat(64))}),
         JSON.stringify({...JSON.parse(contents), scope: {...scope, closureDigest: 'malformed'}}),
       ]) {
         yield* fs.writeFileString(target(scope.scopeKey), malformed);
@@ -186,7 +199,7 @@ describe('scope-bound snapshot admission', () => {
       expect(
         yield* recordCodeGraphSnapshotAdmission(
           layout,
-          {...snapshot, id: 'x'.repeat(4_097)},
+          {...snapshot, id: Effect2.pipe('x', EffectString.repeat(4_097))},
           environment,
           packs,
           false,

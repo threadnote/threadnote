@@ -10,6 +10,8 @@ import {
   type CodeGraphBuildAnonymousTelemetryInput,
   type CodeGraphBuildEfficiencyClass,
 } from '@threadnote/graph/build/anonymous_telemetry';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph terminal anonymous telemetry', () => {
   it('classifies the ineffective two-file rematerialization incident as critical', () => {
@@ -210,7 +212,7 @@ const privateRepositoryFieldsArbitrary = fc.record({
 });
 
 function bucketExponent(bucket: ReturnType<typeof codeGraphPowerOfTwoBucket>): number {
-  return bucket === '0' ? -1 : Number(bucket.slice(2));
+  return bucket === '0' ? -1 : Number(Effect.pipe(bucket, EffectString.slice(2)));
 }
 
 function efficiencyRank(value: CodeGraphBuildEfficiencyClass): number {

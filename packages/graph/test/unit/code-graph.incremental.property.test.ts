@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -14,6 +15,8 @@ import type {
   CodeGraphReference,
   CodeGraphSymbol,
 } from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const optionalText = FC.oneof(FC.constant(undefined), FC.string({maxLength: 24}));
 const optionalArity = FC.oneof(FC.constant(undefined), FC.integer({max: 32, min: 0}));
@@ -28,12 +31,14 @@ const staticReexportReferenceArbitrary = FC.record({
     minLength: 1,
   }),
 }).map(({aliasIds, edgeId, line, sourceId, tierIds}): CodeGraphReference => ({
-  aliasLookupKeys: aliasIds.map(id => `typescript:scope:path:src/index.ts:name:alias${id}`),
+  aliasLookupKeys: EffectArray.map(aliasIds, id => `typescript:scope:path:src/index.ts:name:alias${id}`),
   edgeId: `edge-${edgeId}`,
   evidencePath: 'src/index.ts',
   evidenceSpan: {column: 1, endColumn: 2, endLine: line, line},
   exportedOnly: true,
-  lookupTiers: tierIds.map(ids => ids.map(id => `typescript:scope:path:src/source.ts:name:value${id}`)),
+  lookupTiers: EffectArray.map(tierIds, ids =>
+    EffectArray.map(ids, id => `typescript:scope:path:src/source.ts:name:value${id}`),
+  ),
   provenance: 'syntactic',
   relation: 'reexports',
   resolutionDomain: 'typescript',
@@ -99,7 +104,7 @@ const publishedSymbolArbitrary = symbolArbitrary.map(
 const typescriptPathArbitrary = FC.tuple(
   FC.constantFrom('src/private.ts', 'test/callback.spec.ts', 'packages/with space/file:name.ts'),
   FC.integer({max: 10_000, min: 0}),
-).map(([path, suffix]) => `${path.replace(/\.ts$/, '')}-${suffix}.ts`);
+).map(([path, suffix]) => `${Effect.pipe(path, EffectString.replace(/\.ts$/, ''))}-${suffix}.ts`);
 
 const resolutionScopeIdArbitrary = FC.oneof(
   FC.constant(undefined),
@@ -116,17 +121,15 @@ const effectiveInventoryArbitrary = FC.uniqueArray(
   }),
   {maxLength: 24, minLength: 1, selector: value => value.ordinal},
 ).map(values =>
-  values
-    .map((value): CodeGraphInventoryFile => ({
-      blobId: `blob-${value.ordinal}`,
-      contentHash: value.contentHash,
-      language: value.language,
-      mode: value.mode,
-      path: `src/file-${value.ordinal}.ts`,
-      size: value.size,
-      source: 'worktree',
-    }))
-    .sort((left, right) => left.path.localeCompare(right.path)),
+  EffectArray.map(values, (value): CodeGraphInventoryFile => ({
+    blobId: `blob-${value.ordinal}`,
+    contentHash: value.contentHash,
+    language: value.language,
+    mode: value.mode,
+    path: `src/file-${value.ordinal}.ts`,
+    size: value.size,
+    source: 'worktree',
+  })).sort((left, right) => Effect.pipe(left.path, EffectString.localeCompare(right.path))),
 );
 
 const pathLocalTypeScriptSymbolArbitrary = FC.record({
@@ -161,7 +164,7 @@ describe('code graph incremental-overlay properties', () => {
     'treats commit provenance as irrelevant only while the effective inventory stays exact',
     {files: effectiveInventoryArbitrary},
     ({files}) => {
-      const committed = files.map((file, index): CodeGraphInventoryFile => ({
+      const committed = EffectArray.map(files, (file, index): CodeGraphInventoryFile => ({
         ...file,
         blobId: `committed-${index}`,
         rawContentHash: `raw-${index}`,
@@ -180,7 +183,7 @@ describe('code graph incremental-overlay properties', () => {
         committed.slice(1),
         [first, first, ...rest],
       ];
-      expect(mutations.every(mutated => !sameEffectiveCodeGraphInventory(files, mutated))).toBe(true);
+      expect(EffectArray.every(mutations, mutated => !sameEffectiveCodeGraphInventory(files, mutated))).toBe(true);
       if (files.length > 1) expect(sameEffectiveCodeGraphInventory(files, [...committed].reverse())).toBe(false);
     },
     {fastCheck: {numRuns: 200}},
@@ -208,7 +211,7 @@ describe('code graph incremental-overlay properties', () => {
       const reorderedSets: CodeGraphReference = {
         ...spanOnly,
         aliasLookupKeys: [...reference.aliasLookupKeys!, ...reference.aliasLookupKeys!].reverse(),
-        lookupTiers: reference.lookupTiers.map(tier => [...tier, ...tier].reverse()),
+        lookupTiers: EffectArray.map(reference.lookupTiers, tier => [...tier, ...tier].reverse()),
       };
 
       expect(hasSameCodeGraphReexportResolutionSurface([reference], [reference])).toBe(true);
@@ -231,7 +234,7 @@ describe('code graph incremental-overlay properties', () => {
     'fails closed for every changed or unsupported re-export resolver surface',
     {reference: staticReexportReferenceArbitrary},
     ({reference}) => {
-      const changedTier = reference.lookupTiers.map((tier, index) =>
+      const changedTier = EffectArray.map(reference.lookupTiers, (tier, index) =>
         index === 0 ? [...tier, '__changed_target__'] : tier,
       );
       const mutations: readonly CodeGraphReference[] = [
@@ -249,7 +252,9 @@ describe('code graph incremental-overlay properties', () => {
         {...reference, targetName: `changed:${reference.targetName}`},
       ];
 
-      expect(mutations.every(mutated => !hasSameCodeGraphReexportResolutionSurface([reference], [mutated]))).toBe(true);
+      expect(
+        EffectArray.every(mutations, mutated => !hasSameCodeGraphReexportResolutionSurface([reference], [mutated])),
+      ).toBe(true);
       expect(hasSameCodeGraphReexportResolutionSurface([reference, reference], [reference, reference])).toBe(false);
       const unsupported: CodeGraphReference = {...reference, relation: 'calls'};
       expect(hasSameCodeGraphReexportResolutionSurface([unsupported], [unsupported])).toBe(false);
@@ -407,11 +412,18 @@ describe('code graph incremental-overlay properties', () => {
     };
 
     const attributed = createResolutionAttributor([file])([facts])[0];
-    expect(attributed.symbols.find(symbol => symbol.id === 'local')?.lookupKeys).toEqual([ownKey]);
-    expect(attributed.symbols.find(symbol => symbol.id === 'exported')?.lookupKeys).not.toContain(
-      'global:name:exported',
-    );
-    expect(attributed.symbols.find(symbol => symbol.id === 'explicit')?.lookupKeys).toContain(explicitGlobal);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(attributed.symbols, symbol => symbol.id === 'local'))
+        ?.lookupKeys,
+    ).toEqual([ownKey]);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(attributed.symbols, symbol => symbol.id === 'exported'))
+        ?.lookupKeys,
+    ).not.toContain('global:name:exported');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(attributed.symbols, symbol => symbol.id === 'explicit'))
+        ?.lookupKeys,
+    ).toContain(explicitGlobal);
   });
 
   fcProp(
@@ -442,7 +454,9 @@ describe('code graph incremental-overlay properties', () => {
         {...symbol, resolutionDomain: changedOptional(symbol.resolutionDomain)},
         {...symbol, resolutionScopeId: changedOptional(symbol.resolutionScopeId)},
       ];
-      expect(mutations.every(mutated => !hasSameCodeGraphResolutionSurface([symbol], [mutated]))).toBe(true);
+      expect(EffectArray.every(mutations, mutated => !hasSameCodeGraphResolutionSurface([symbol], [mutated]))).toBe(
+        true,
+      );
     },
     {fastCheck: {numRuns: 250}},
   );
@@ -515,7 +529,7 @@ describe('code graph incremental-overlay properties', () => {
     'is independent of published symbol materialization order while still requiring the exact published set',
     {symbols: FC.array(publishedSymbolArbitrary, {maxLength: 12, minLength: 1})},
     ({symbols}) => {
-      const unique = symbols.map((symbol, index) => ({...symbol, id: `symbol-${index}:${symbol.id}`}));
+      const unique = EffectArray.map(symbols, (symbol, index) => ({...symbol, id: `symbol-${index}:${symbol.id}`}));
       expect(hasSameCodeGraphResolutionSurface(unique, [...unique].reverse())).toBe(true);
       expect(hasSameCodeGraphResolutionSurface(unique, unique.slice(1))).toBe(false);
     },

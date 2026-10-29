@@ -1,3 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export function globToRegExp(glob: string): RegExp {
   let output = '^';
   for (let index = 0; index < glob.length; index += 1) {
@@ -27,19 +31,19 @@ export function globToRegExp(glob: string): RegExp {
 }
 
 export function getGlobBase(pattern: string): string {
-  const parts = pattern.split('/');
+  const parts = Effect.pipe(pattern, EffectString.split('/'));
   const baseParts: string[] = [];
   for (const part of parts) {
     if (hasGlob(part)) break;
     baseParts.push(part);
   }
-  return baseParts.length === 0 ? '.' : baseParts.join('/');
+  return baseParts.length === 0 ? '.' : EffectArray.join(baseParts, '/');
 }
 
 export function hasGlob(path: string): boolean {
-  return path.includes('*') || path.includes('?');
+  return Effect.pipe(path, EffectString.includes('*')) || Effect.pipe(path, EffectString.includes('?'));
 }
 
 export function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return Effect.pipe(value, EffectString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 }

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {describe, expect, it} from '@effect/vitest';
@@ -27,11 +29,13 @@ import type {
   CodeGraphSymbol,
 } from '@threadnote/graph/types';
 import {discoverManifestWorkspace} from '@threadnote/graph/workspace';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const utf8Bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 const unicodeText = FC.array(FC.constantFrom('a', '"', '\\', '\0', '\n', 'é', '漢', '🙂'), {
   maxLength: 48,
-}).map(characters => characters.join(''));
+}).map(characters => EffectArray.join(characters, ''));
 
 const factCase = {
   diagnostics: FC.array(unicodeText, {maxLength: 8}),
@@ -76,12 +80,12 @@ describe('cached code graph fact persistence budget', () => {
     const exportedDeclaration = graphSymbol('ts-exported-tail', 'interface', path, 10_000, true, 'private-doc');
     const declarations = Array.from({length: 60}, (_, index) =>
       graphSymbol(
-        `ts-local-${index.toString().padStart(3, '0')}`,
+        `ts-local-${Effect.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
         'function',
         path,
         index + 2,
         false,
-        `private documentation ${'漢'.repeat(80)}`,
+        `private documentation ${Effect.pipe('漢', EffectString.repeat(80))}`,
       ),
     );
     const architectureEdges = [
@@ -90,17 +94,33 @@ describe('cached code graph fact persistence budget', () => {
       graphEdge('ts-reexport', 'reexports', path, 3, module.id, undefined, 'external-symbol'),
       graphEdge('ts-declares', 'declares', path, 4, packageSymbol.id, module.id, module.name),
     ];
-    const callEdges = declarations.map((declaration, index) =>
-      graphEdge(`ts-call-${index.toString().padStart(3, '0')}`, 'calls', path, index + 10, module.id, declaration.id),
+    const callEdges = EffectArray.map(declarations, (declaration, index) =>
+      graphEdge(
+        `ts-call-${Effect.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
+        'calls',
+        path,
+        index + 10,
+        module.id,
+        declaration.id,
+      ),
     );
     const facts: CodeGraphFileFacts = {
       derivationInputs: {
-        rationale: [{documentation: `secret rationale ${'漢'.repeat(2_000)}`, line: 1, marker: 'why', name: 'private'}],
+        rationale: [
+          {
+            documentation: `secret rationale ${Effect.pipe('漢', EffectString.repeat(2_000))}`,
+            line: 1,
+            marker: 'why',
+            name: 'private',
+          },
+        ],
       },
       diagnostics: ['src/pathological.ts: private parser detail'],
       edges: [...callEdges, ...architectureEdges],
       path,
-      references: [...callEdges, ...architectureEdges].map(edge => graphReference(edge, `lookup:${edge.id}`)),
+      references: EffectArray.map([...callEdges, ...architectureEdges], edge =>
+        graphReference(edge, `lookup:${edge.id}`),
+      ),
       symbols: [...declarations, exportedDeclaration, module, packageSymbol],
     };
     const maximumBytes = 14_000;
@@ -109,12 +129,20 @@ describe('cached code graph fact persistence budget', () => {
     const bounded = budgetCachedCodeGraphFacts(facts, maximumBytes);
 
     expect(utf8Bytes(bounded)).toBeLessThanOrEqual(maximumBytes);
-    expect(bounded.symbols.map(symbol => symbol.id)).toEqual(
+    expect(EffectArray.map(bounded.symbols, symbol => symbol.id)).toEqual(
       expect.arrayContaining([module.id, packageSymbol.id, exportedDeclaration.id]),
     );
-    expect(bounded.edges.filter(edge => ['exports', 'imports', 'reexports'].includes(edge.relation))).toHaveLength(3);
-    expect(bounded.edges.filter(edge => edge.relation === 'calls').length).toBeLessThan(callEdges.length);
-    expect(bounded.symbols.every(symbol => symbol.documentation === undefined)).toBe(true);
+    expect(
+      EffectArrayPipe(bounded.edges, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (edge, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && ['exports', 'imports', 'reexports'].includes(edge.relation),
+        ),
+      ),
+    ).toHaveLength(3);
+    expect(EffectArray.filter(bounded.edges, edge => edge.relation === 'calls').length).toBeLessThan(callEdges.length);
+    expect(EffectArray.every(bounded.symbols, symbol => symbol.documentation === undefined)).toBe(true);
     expect(bounded.derivationInputs).toBeUndefined();
     expect(bounded.diagnostics[0]).toMatch(/^Cached code graph facts exceeded the per-file persistence budget/);
     expectGraphClosure(facts, bounded);
@@ -125,17 +153,17 @@ describe('cached code graph fact persistence budget', () => {
     const root = graphSymbol('json-root', 'object', path, 1, false);
     const properties = Array.from({length: 220}, (_, index) =>
       graphSymbol(
-        `json-property-${index.toString().padStart(3, '0')}`,
+        `json-property-${Effect.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
         'property',
         path,
         index + 2,
         false,
-        `schema detail ${'界'.repeat(40)}`,
+        `schema detail ${Effect.pipe('界', EffectString.repeat(40))}`,
       ),
     );
-    const edges = properties.map((property, index) =>
+    const edges = EffectArray.map(properties, (property, index) =>
       graphEdge(
-        `json-contains-${index.toString().padStart(3, '0')}`,
+        `json-contains-${Effect.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
         'contains',
         path,
         index + 2,
@@ -158,17 +186,19 @@ describe('cached code graph fact persistence budget', () => {
     expect(utf8Bytes(first)).toBeLessThanOrEqual(maximumBytes);
     expect(first).toEqual(second);
     expect(budgetCachedCodeGraphFacts(first, maximumBytes)).toEqual(first);
-    expect(first.symbols.some(symbol => symbol.id === root.id)).toBe(true);
-    const retainedContains = first.edges.filter(edge => edge.relation === 'contains');
+    expect(EffectArray.some(first.symbols, symbol => symbol.id === root.id)).toBe(true);
+    const retainedContains = EffectArray.filter(first.edges, edge => edge.relation === 'contains');
     expect(retainedContains.length).toBeGreaterThan(0);
     expect(retainedContains.length).toBeLessThan(edges.length);
-    expect(retainedContains.map(edge => edge.id)).toEqual(edges.slice(0, retainedContains.length).map(edge => edge.id));
+    expect(EffectArray.map(retainedContains, edge => edge.id)).toEqual(
+      EffectArray.map(edges.slice(0, retainedContains.length), edge => edge.id),
+    );
     expectGraphClosure(facts, first);
   });
 
   it('drops pathological corpus documentation before topology at the production 8 MiB limit', () => {
     const path = 'docs/pathological.rst';
-    const privateCorpus = `private-corpus-sentinel ${'漢'.repeat(2_850_000)}`;
+    const privateCorpus = `private-corpus-sentinel ${Effect.pipe('漢', EffectString.repeat(2_850_000))}`;
     const document = graphSymbol('corpus-document', 'document', path, 1, true, privateCorpus);
     const heading = graphSymbol('corpus-heading', 'heading', path, 2, true, 'short heading documentation');
     const documents = graphEdge('corpus-documents', 'documents', path, 2, document.id, heading.id);
@@ -183,8 +213,8 @@ describe('cached code graph fact persistence budget', () => {
     const bounded = budgetCachedCodeGraphFacts(facts);
 
     expect(utf8Bytes(bounded)).toBeLessThanOrEqual(CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM);
-    expect(bounded.symbols.map(symbol => symbol.id)).toEqual([document.id, heading.id]);
-    expect(bounded.symbols.every(symbol => symbol.documentation === undefined)).toBe(true);
+    expect(EffectArray.map(bounded.symbols, symbol => symbol.id)).toEqual([document.id, heading.id]);
+    expect(EffectArray.every(bounded.symbols, symbol => symbol.documentation === undefined)).toBe(true);
     expect(bounded.edges).toEqual([documents]);
     expect(JSON.stringify(bounded)).not.toContain('private-corpus-sentinel');
     expectGraphClosure(facts, bounded);
@@ -195,7 +225,7 @@ describe('cached code graph fact persistence budget', () => {
       diagnostics: [],
       edges: [],
       path: 'x',
-      symbols: [graphSymbol('oversized', 'module', 'x', 1, true, '漢'.repeat(100))],
+      symbols: [graphSymbol('oversized', 'module', 'x', 1, true, Effect.pipe('漢', EffectString.repeat(100)))],
     };
     const maximumBytes = 64;
     const bounded = budgetCachedCodeGraphFacts(facts, maximumBytes);
@@ -206,9 +236,9 @@ describe('cached code graph fact persistence budget', () => {
   });
 
   it('strictly limits exact serialized cached-fact bytes in every materialization batch', () => {
-    const sharedDocumentation = '漢'.repeat(1_100_000);
+    const sharedDocumentation = Effect.pipe('漢', EffectString.repeat(1_100_000));
     const files = Array.from({length: 5}, (_, index) => ({path: `docs/dense-${index}.md`, size: 32}));
-    const facts = files.map((file, index) =>
+    const facts = EffectArray.map(files, (file, index) =>
       budgetCachedCodeGraphFacts({
         diagnostics: [],
         edges: [],
@@ -216,15 +246,18 @@ describe('cached code graph fact persistence budget', () => {
         symbols: [graphSymbol(`document-${index}`, 'document', file.path, 1, true, sharedDocumentation)],
       }),
     );
-    const factBytes = new Map(facts.map(fact => [fact.path, utf8Bytes(fact)]));
+    const factBytes = new Map(EffectArray.map(facts, fact => [fact.path, utf8Bytes(fact)]));
     const batches = factMaterializationBatches(files, factBytes);
 
     expect(batches.flat()).toEqual(files);
-    expect(batches.every(batch => batch.length > 0)).toBe(true);
+    expect(EffectArray.every(batches, batch => batch.length > 0)).toBe(true);
     expect(
-      batches.every(batch => batch.reduce((total, file) => total + factBytes.get(file.path)!, 0) <= 8 * 1_048_576),
+      EffectArray.every(
+        batches,
+        batch => EffectArray.reduce(batch, 0, (total, file) => total + factBytes.get(file.path)!) <= 8 * 1_048_576,
+      ),
     ).toBe(true);
-    expect(facts.every(fact => utf8Bytes(fact) <= CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM)).toBe(true);
+    expect(EffectArray.every(facts, fact => utf8Bytes(fact) <= CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM)).toBe(true);
   });
 
   it('makes the bounded parser-facts policy part of cache identity', () => {
@@ -277,7 +310,7 @@ describe('cached code graph fact persistence budget', () => {
       span: {column: 1, endColumn: 1, endLine: 7_000, line: 1},
     } satisfies CodeGraphSymbol;
     const rationale = Array.from({length: 6_000}, (_, index) => ({
-      documentation: `rationale-${index}-${'漢'.repeat(160)}`,
+      documentation: `rationale-${index}-${Effect.pipe('漢', EffectString.repeat(160))}`,
       line: index + 2,
       marker: 'WHY',
       name: `WHY-${index}`,
@@ -304,8 +337,8 @@ describe('cached code graph fact persistence budget', () => {
     expect(batches).toHaveLength(1);
     expect(bounded.bytes).toBe(utf8Bytes(bounded.facts));
     expect(bounded.bytes).toBeLessThanOrEqual(CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM);
-    expect(bounded.facts.symbols.some(symbol => symbol.id === owner.id)).toBe(true);
-    expect(bounded.facts.symbols.every(symbol => symbol.documentation === undefined)).toBe(true);
+    expect(EffectArray.some(bounded.facts.symbols, symbol => symbol.id === owner.id)).toBe(true);
+    expect(EffectArray.every(bounded.facts.symbols, symbol => symbol.documentation === undefined)).toBe(true);
     expect(bounded.facts.derivationInputs).toBeUndefined();
     expectGraphClosure(attributed, bounded.facts);
   });
@@ -344,21 +377,47 @@ describe('cached code graph fact persistence budget', () => {
     const flattened = batches.flat();
 
     expect(batches).toHaveLength(2);
-    expect(batches.every(batch => batch.reduce((total, value) => total + value.bytes, 0) <= maximumBytes)).toBe(true);
-    expect(flattened.every(value => value.bytes === utf8Bytes(value.facts))).toBe(true);
-    expect(flattened.map(value => value.facts.path)).toEqual([firstPath, secondPath]);
-    expect(flattened.flatMap(value => value.facts.symbols).filter(symbol => symbol.id === firstShared.id)).toEqual([
-      firstShared,
-    ]);
-    expect(flattened.flatMap(value => value.facts.edges).filter(edge => edge.id === firstEdge.id)).toEqual([firstEdge]);
+    expect(
+      EffectArray.every(
+        batches,
+        batch => EffectArray.reduce(batch, 0, (total, value) => total + value.bytes) <= maximumBytes,
+      ),
+    ).toBe(true);
+    expect(EffectArray.every(flattened, value => value.bytes === utf8Bytes(value.facts))).toBe(true);
+    expect(EffectArray.map(flattened, value => value.facts.path)).toEqual([firstPath, secondPath]);
+    expect(
+      EffectArray.filter(
+        EffectArray.flatMap(flattened, value => value.facts.symbols),
+        symbol => symbol.id === firstShared.id,
+      ),
+    ).toEqual([firstShared]);
+    expect(
+      EffectArray.filter(
+        EffectArray.flatMap(flattened, value => value.facts.edges),
+        edge => edge.id === firstEdge.id,
+      ),
+    ).toEqual([firstEdge]);
 
-    const survivingEdgeFacts = flattened.find(value => value.facts.edges.some(edge => edge.id === firstEdge.id))!.facts;
+    const survivingEdgeFacts = Option.getOrUndefined(
+      EffectArray.findFirst(
+        flattened,
+        __effectArrayValue =>
+          !!(value => EffectArray.some(value.facts.edges, edge => edge.id === firstEdge.id))(__effectArrayValue),
+      ),
+    )!.facts;
     expect(survivingEdgeFacts.path).toBe(firstPath);
     expect(survivingEdgeFacts.references).toEqual([lastReference]);
-    expect(flattened.find(value => value.facts.path === secondPath)!.facts.references).toEqual([]);
+    expect(
+      Option.getOrUndefined(EffectArray.findFirst(flattened, value => value.facts.path === secondPath))!.facts
+        .references,
+    ).toEqual([]);
 
-    const retainedSymbols = new Set(flattened.flatMap(value => value.facts.symbols.map(symbol => symbol.id)));
-    const retainedEdges = new Set(flattened.flatMap(value => value.facts.edges.map(edge => edge.id)));
+    const retainedSymbols = new Set(
+      EffectArray.flatMap(flattened, value => EffectArray.map(value.facts.symbols, symbol => symbol.id)),
+    );
+    const retainedEdges = new Set(
+      EffectArray.flatMap(flattened, value => EffectArray.map(value.facts.edges, edge => edge.id)),
+    );
     for (const value of flattened) {
       for (const edge of value.facts.edges) {
         if (edge.sourceId !== undefined) expect(retainedSymbols.has(edge.sourceId)).toBe(true);
@@ -376,7 +435,7 @@ describe('cached code graph fact persistence budget', () => {
       const path = 'src/property.ts';
       const symbols = [
         graphSymbol('property-module', 'module', path, 1, true),
-        ...symbolDocuments.map((documentation, index) =>
+        ...EffectArray.map(symbolDocuments, (documentation, index) =>
           graphSymbol(
             `property-symbol-${index}`,
             index % 5 === 0 ? 'document' : 'function',
@@ -387,7 +446,7 @@ describe('cached code graph fact persistence budget', () => {
           ),
         ),
       ];
-      const edges = edgeSpecs.map((spec, index) =>
+      const edges = EffectArray.map(edgeSpecs, (spec, index) =>
         graphEdge(
           `property-edge-${index}`,
           spec.relation,
@@ -398,12 +457,12 @@ describe('cached code graph fact persistence budget', () => {
           spec.payload,
         ),
       );
-      const references = edgeSpecs.flatMap((spec, index) =>
+      const references = EffectArray.flatMap(edgeSpecs, (spec, index) =>
         spec.hasReference ? [graphReference(edges[index], spec.payload)] : [],
       );
       const facts: CodeGraphFileFacts = {
         derivationInputs: {
-          rationale: symbolDocuments.slice(0, 4).map((documentation, index) => ({
+          rationale: EffectArray.map(symbolDocuments.slice(0, 4), (documentation, index) => ({
             documentation,
             line: index + 1,
             marker: 'why',
@@ -439,8 +498,8 @@ describe('cached code graph fact persistence budget', () => {
       payloads: FC.array(unicodeText, {maxLength: 24, minLength: 1}),
     },
     ({maximumBytes, payloads}) => {
-      const files = payloads.map((_, index) => inventoryFile(`src/final-${index}.ts`));
-      const raw = files.map((file, index) => ({
+      const files = EffectArray.map(payloads, (_, index) => inventoryFile(`src/final-${index}.ts`));
+      const raw = EffectArray.map(files, (file, index) => ({
         diagnostics: [],
         edges: [],
         path: file.path,
@@ -452,14 +511,21 @@ describe('cached code graph fact persistence budget', () => {
       const flattened = first.flat();
 
       expect(first).toEqual(second);
-      expect(first.every(batch => batch.length > 0)).toBe(true);
-      expect(first.every(batch => batch.reduce((total, value) => total + value.bytes, 0) <= maximumBytes)).toBe(true);
-      expect(flattened.map(value => value.facts.path)).toEqual(attributed.map(fact => fact.path));
+      expect(EffectArray.every(first, batch => batch.length > 0)).toBe(true);
+      expect(
+        EffectArray.every(
+          first,
+          batch => EffectArray.reduce(batch, 0, (total, value) => total + value.bytes) <= maximumBytes,
+        ),
+      ).toBe(true);
+      expect(EffectArray.map(flattened, value => value.facts.path)).toEqual(
+        EffectArray.map(attributed, fact => fact.path),
+      );
       for (const value of flattened) {
         expect(value.bytes).toBe(utf8Bytes(value.facts));
         expect(value.bytes).toBeLessThanOrEqual(maximumBytes);
         expectGraphClosure(
-          attributed.find(fact => fact.path === value.facts.path)!,
+          Option.getOrUndefined(EffectArray.findFirst(attributed, fact => fact.path === value.facts.path))!,
           value.facts,
         );
       }
@@ -482,7 +548,11 @@ function graphSymbol(
     exported,
     id,
     kind,
-    language: path.endsWith('.json') ? 'json' : path.endsWith('.rst') ? 'rst' : 'typescript',
+    language: Effect.pipe(path, EffectString.endsWith('.json'))
+      ? 'json'
+      : Effect.pipe(path, EffectString.endsWith('.rst'))
+        ? 'rst'
+        : 'typescript',
     lookupKeys: [`lookup:${id}`],
     name: id,
     path,
@@ -543,9 +613,9 @@ function graphReference(edge: CodeGraphEdge, payload: string): CodeGraphReferenc
 }
 
 function expectGraphClosure(original: CodeGraphFileFacts, bounded: CodeGraphFileFacts): void {
-  const localIds = new Set(original.symbols.map(symbol => symbol.id));
-  const retainedIds = new Set(bounded.symbols.map(symbol => symbol.id));
-  const retainedEdgeIds = new Set(bounded.edges.map(edge => edge.id));
+  const localIds = new Set(EffectArray.map(original.symbols, symbol => symbol.id));
+  const retainedIds = new Set(EffectArray.map(bounded.symbols, symbol => symbol.id));
+  const retainedEdgeIds = new Set(EffectArray.map(bounded.edges, edge => edge.id));
   for (const edge of bounded.edges) {
     if (edge.sourceId !== undefined && localIds.has(edge.sourceId)) expect(retainedIds.has(edge.sourceId)).toBe(true);
     if (edge.targetId !== undefined && localIds.has(edge.targetId)) expect(retainedIds.has(edge.targetId)).toBe(true);
@@ -559,9 +629,9 @@ function expectGraphClosure(original: CodeGraphFileFacts, bounded: CodeGraphFile
 }
 
 function expectAtomicFacts(original: CodeGraphFileFacts, bounded: CodeGraphFileFacts): void {
-  const symbols = new Map(original.symbols.map(symbol => [symbol.id, symbol]));
-  const edges = new Map(original.edges.map(edge => [edge.id, edge]));
-  const references = new Map((original.references ?? []).map(reference => [reference.edgeId, reference]));
+  const symbols = new Map(EffectArray.map(original.symbols, symbol => [symbol.id, symbol]));
+  const edges = new Map(EffectArray.map(original.edges, edge => [edge.id, edge]));
+  const references = new Map(EffectArray.map(original.references ?? [], reference => [reference.edgeId, reference]));
   for (const symbol of bounded.symbols) {
     const originalSymbol = symbols.get(symbol.id)!;
     const {documentation: _documentation, ...withoutDocumentation} = originalSymbol;
@@ -590,20 +660,26 @@ function identityTestPack(): CodeGraphLanguagePack {
 }
 
 function testPackCacheIdentity(pack: CodeGraphLanguagePack, parserFactsVersion: string): string {
-  const matchers = pack.files
-    .map(matcher => `${matcher.kind}:${matcher.value.toLowerCase()}:${matcher.language}`)
-    .sort()
-    .join('\n');
+  const matchers = EffectArray.join(
+    EffectArray.map(
+      pack.files,
+      matcher => `${matcher.kind}:${Effect.pipe(matcher.value, EffectString.toLowerCase)}:${matcher.language}`,
+    ).sort(),
+    '\n',
+  );
   return sha256HexSync(
-    [
-      'code-graph-language-pack-v3',
-      parserFactsVersion,
-      `derivation-inputs:${CODE_GRAPH_RATIONALE_INPUT_VERSION}`,
-      `id:${pack.id}`,
-      `extractor:${pack.extractor.version}`,
-      'parser-runtime:pack-owned',
-      `files:\n${matchers}`,
-      'assets:\n',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'code-graph-language-pack-v3',
+        parserFactsVersion,
+        `derivation-inputs:${CODE_GRAPH_RATIONALE_INPUT_VERSION}`,
+        `id:${pack.id}`,
+        `extractor:${pack.extractor.version}`,
+        'parser-runtime:pack-owned',
+        `files:\n${matchers}`,
+        'assets:\n',
+      ],
+      '\n',
+    ),
   );
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Clock, DateTime, Effect, FileSystem, Path} from 'effect';
@@ -22,6 +23,10 @@ import {
 import {recallIndexPreselectionLimit} from '@threadnote/recall/results';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {atomicWrite, fixtureHash, printJson, scriptArguments} from './effect/script.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const FIXED_NOW = new Date('2026-08-20T00:00:00.000Z');
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
@@ -112,7 +117,7 @@ const benchmarkRecallCrossScopeSqlite = Effect.gen(function* () {
         operatingSystem: hardware.operatingSystem,
         runtime: `bun/${system.runtimeVersion}`,
       },
-      measurements: [...durations].map(([key, values]) =>
+      measurements: EffectArray.map([...durations], ([key, values]) =>
         benchmarkMeasurement(`${key}-sqlite-latency`, 'milliseconds', values),
       ),
       metadata: {
@@ -130,7 +135,7 @@ const benchmarkRecallCrossScopeSqlite = Effect.gen(function* () {
         topK: options.topK,
       },
       suite: 'recall-cross-scope-sqlite',
-      summaries: Object.fromEntries(summaries),
+      summaries: EffectRecord.fromEntries(summaries),
       version: 1,
       warmups: options.warmups,
     };
@@ -172,8 +177,8 @@ function runPass(
       onQueryDiagnostics: diagnostics('initial'),
       query,
     };
-    const topicalSelections = scopeSets.map(allowedUriScopes => ({...selection, allowedUriScopes}));
-    const workspaceSelections = scopeSets.map(allowedUriScopes => ({
+    const topicalSelections = EffectArray.map(scopeSets, allowedUriScopes => ({...selection, allowedUriScopes}));
+    const workspaceSelections = EffectArray.map(scopeSets, allowedUriScopes => ({
       ...selection,
       allowedUriScopes,
       workspaceScope: CURRENT_SCOPE,
@@ -184,7 +189,7 @@ function runPass(
     });
     const topicalResults = initial.slice(0, topicalSelections.length);
     const workspaceResults = initial.slice(topicalSelections.length);
-    const topicalCandidates = mergeRecallIndexCandidates(topicalResults.map(result => result.candidates));
+    const topicalCandidates = mergeRecallIndexCandidates(EffectArray.map(topicalResults, result => result.candidates));
     const ordinaryCross = prioritizeCrossScopeRecallCandidates(query, topicalCandidates, {
       now: FIXED_NOW,
       project,
@@ -192,7 +197,7 @@ function runPass(
     });
     const protectedCandidates = prioritizeWorkspaceRecallCandidates(
       query,
-      mergeRecallIndexCandidates(workspaceResults.map(result => result.candidates)),
+      mergeRecallIndexCandidates(EffectArray.map(workspaceResults, result => result.candidates)),
       {now: FIXED_NOW, project, workspaceScope: CURRENT_SCOPE},
     );
     const budgets = recallCrossScopeLaneBudgets(topK);
@@ -240,7 +245,7 @@ function runPass(
       initialSelections: topicalSelections.length + workspaceSelections.length,
       protectedCandidates: protectedCandidates.length,
       targetAdmitted:
-        targetUri === undefined ? null : admittedCandidates.some(candidate => candidate.uri === targetUri),
+        targetUri === undefined ? null : EffectArray.some(admittedCandidates, candidate => candidate.uri === targetUri),
     } satisfies PassResult;
   });
 }
@@ -273,7 +278,7 @@ function writeFixture(
       const current = index < Math.min(140, documents - 2) || index % 2 === 0;
       const scope = current ? CURRENT_SCOPE : SIBLING_SCOPE;
       const preferred = index < Math.floor(documents / 2);
-      const filename = `${String(index).padStart(6, '0')}.md`;
+      const filename = `${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}.md`;
       const selective = index === selectiveIndex;
       const buried = index === buriedIndex;
       const localBuriedDecoy = current && index < Math.min(140, documents - 2);
@@ -291,7 +296,7 @@ function writeFixture(
     );
     const noSiblingDocuments = Math.max(300, Math.floor(documents / 4));
     const noSiblingRecords = Array.from({length: noSiblingDocuments}, (_unused, index) => {
-      const filename = `${String(index).padStart(6, '0')}.md`;
+      const filename = `${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}.md`;
       return {
         content: noSiblingMemoryContent(index),
         filename,
@@ -305,9 +310,12 @@ function writeFixture(
     );
     const uriRoot = `threadnote://user/benchmark/memories/durable/projects/${PROJECT}`;
     const uriFor = (index: number) =>
-      `${uriRoot}/${index < Math.floor(documents / 2) ? 'preferred' : 'fallback'}/${String(index).padStart(6, '0')}.md`;
-    const commonSiblingIndex = Array.from({length: documents}, (_unused, index) => index).find(
-      index => index >= Math.max(Math.min(140, documents - 2), Math.floor(documents / 2)) && index % 2 === 1,
+      `${uriRoot}/${index < Math.floor(documents / 2) ? 'preferred' : 'fallback'}/${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}.md`;
+    const commonSiblingIndex = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        Array.from({length: documents}, (_unused, index) => index),
+        index => index >= Math.max(Math.min(140, documents - 2), Math.floor(documents / 2)) && index % 2 === 1,
+      ),
     );
     if (commonSiblingIndex === undefined) return yield* ScriptError.make({message: 'Fixture has no sibling document'});
     return {
@@ -315,7 +323,7 @@ function writeFixture(
       manifestSha256: sha256HexSync(
         JSON.stringify({
           currentScope: CURRENT_SCOPE,
-          records: [...mainRecords, ...noSiblingRecords].map(({content, relativePath}) => ({
+          records: EffectArray.map([...mainRecords, ...noSiblingRecords], ({content, relativePath}) => ({
             contentSha256: sha256HexSync(content),
             relativePath,
           })),
@@ -341,19 +349,22 @@ function writeFixture(
 }
 
 function noSiblingMemoryContent(index: number): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    `project: ${NO_SIBLING_PROJECT}`,
-    `topic: isolated-common-anchor-${index}`,
-    `workspace_scope: ${CURRENT_SCOPE}`,
-    'keywords: isolated common anchor',
-    'source_agent_client: benchmark',
-    'timestamp: 2026-08-20T00:00:00.000Z',
-    '',
-    `Isolated common anchor belongs only to the current scope ${index}.`,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      `project: ${NO_SIBLING_PROJECT}`,
+      `topic: isolated-common-anchor-${index}`,
+      `workspace_scope: ${CURRENT_SCOPE}`,
+      'keywords: isolated common anchor',
+      'source_agent_client: benchmark',
+      'timestamp: 2026-08-20T00:00:00.000Z',
+      '',
+      `Isolated common anchor belongs only to the current scope ${index}.`,
+    ],
+    '\n',
+  );
 }
 
 function memoryContent(
@@ -362,28 +373,35 @@ function memoryContent(
   options: {readonly buried: boolean; readonly localBuriedDecoy: boolean; readonly selective: boolean},
 ): string {
   const topic = options.localBuriedDecoy ? `buried-zephyr-contract-${index}` : `sqlite-record-${index}`;
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    `project: ${PROJECT}`,
-    `topic: ${topic}`,
-    `workspace_scope: ${workspaceScope}`,
-    'keywords: common posting anchor',
-    ...(options.buried ? ['keywords: current buried zephyr contract'] : []),
-    ...(options.selective ? ['keywords: selective heliotrope needle'] : []),
-    'source_agent_client: benchmark',
-    'timestamp: 2026-08-20T00:00:00.000Z',
-    '',
+  return EffectArray.join(
     [
-      'Common posting anchor for the production SQLite selection benchmark.',
-      options.localBuriedDecoy ? 'Buried zephyr contract decoy with stronger recorded topic evidence.' : '',
-      options.buried ? 'The governing buried zephyr contract belongs to the billing sibling.' : '',
-      options.selective ? 'Unique selective heliotrope needle belongs to the billing sibling.' : '',
-    ]
-      .filter(Boolean)
-      .join(' '),
-  ].join('\n');
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      `project: ${PROJECT}`,
+      `topic: ${topic}`,
+      `workspace_scope: ${workspaceScope}`,
+      'keywords: common posting anchor',
+      ...(options.buried ? ['keywords: current buried zephyr contract'] : []),
+      ...(options.selective ? ['keywords: selective heliotrope needle'] : []),
+      'source_agent_client: benchmark',
+      'timestamp: 2026-08-20T00:00:00.000Z',
+      '',
+      EffectArray.join(
+        EffectArray.filter(
+          [
+            'Common posting anchor for the production SQLite selection benchmark.',
+            options.localBuriedDecoy ? 'Buried zephyr contract decoy with stronger recorded topic evidence.' : '',
+            options.buried ? 'The governing buried zephyr contract belongs to the billing sibling.' : '',
+            options.selective ? 'Unique selective heliotrope needle belongs to the billing sibling.' : '',
+          ],
+          Boolean,
+        ),
+        ' ',
+      ),
+    ],
+    '\n',
+  );
 }
 
 function scenarioQuery(scenario: Scenario): string {
@@ -438,7 +456,9 @@ export function parseRecallCrossScopeSqliteBenchmarkArguments(
 }
 
 const git = Effect.fn('benchmark.git')((arguments_: readonly string[]) =>
-  runCommandEffect('git', arguments_, {timeoutMs: 30_000}).pipe(Effect.map(result => result.stdout.trim())),
+  runCommandEffect('git', arguments_, {timeoutMs: 30_000}).pipe(
+    Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+  ),
 );
 
 function positiveInteger(value: string | undefined, option: string): number {
@@ -458,6 +478,7 @@ function nonNegativeInteger(value: string | undefined, option: string): number {
 }
 
 function requiredValue(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }

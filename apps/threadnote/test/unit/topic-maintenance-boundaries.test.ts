@@ -11,19 +11,21 @@ import {storeMemory} from '@threadnote/threadnote/memory/commands';
 import {writeDurableMemory, writeMemoryContentWithExpectedHash} from '@threadnote/threadnote/mcp/server/memory';
 import {stripPersonalProvenanceForSharedPublication} from '@threadnote/threadnote/share/core';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/topic.md';
 const body = 'The code uses a retry limit.';
 const citation = createMemoryCodeCitation({
   evidenceRetention: 'capsule-retained',
   extractorSet: 'native-code-graph-13',
-  fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+  fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
   path: 'packages/memory/src/document.ts',
-  repositoryId: '1'.repeat(64),
+  repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
   repositoryIdentityKind: 'remote',
-  sourceCommit: '2'.repeat(40),
+  sourceCommit: Effect2.pipe('2', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceSnapshotId: `cgsn_${'4'.repeat(40)}`,
+  sourceSnapshotId: `cgsn_${Effect2.pipe('4', EffectString.repeat(40))}`,
   target: {kind: 'file'},
   version: 1,
 });
@@ -55,17 +57,24 @@ function enrolled() {
 describe('topic maintenance generic write boundaries', () => {
   it('blocks generic sharing of enrolled topics', () => {
     const content = enrolled().content;
-    for (const variant of [content, content.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:')])
+    for (const variant of [
+      content,
+      Effect2.pipe(content, EffectString.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:')),
+    ])
       expect(() => stripPersonalProvenanceForSharedPublication(variant)).toThrow(/reviewed existing-target/);
   });
 
   it('keeps an authored shared manifest valid only while accepted body and anchors survive', () => {
     const initial = enrolled();
-    const sharedUri = uri.replace('/memories/durable/', '/memories/shared/default/durable/');
+    const sharedUri = Effect2.pipe(
+      uri,
+      EffectString.replace('/memories/durable/', '/memories/shared/default/durable/'),
+    );
     const content = formatMemoryDocument('MEMORY', {...initial.metadata, visibility: 'shared'}, body);
     expect(parseMemoryDocument(sharedUri, content)?.metadata.topicMaintenance).toEqual(initial.manifest);
     expect(
-      parseMemoryDocument(sharedUri, content.replace(body, `${body} Changed.`))?.metadata.topicMaintenanceError,
+      parseMemoryDocument(sharedUri, Effect2.pipe(content, EffectString.replace(body, `${body} Changed.`)))?.metadata
+        .topicMaintenanceError,
     ).toBeDefined();
   });
 
@@ -118,8 +127,8 @@ describe('topic maintenance generic write boundaries', () => {
         expect(yield* store.read(location, uri)).toBe(initial.content);
 
         for (const invalid of [
-          initial.content.replace(/^topic_maintenance:.*\n/mu, ''),
-          initial.content.replace(body, `${body} Changed.`),
+          Effect2.pipe(initial.content, EffectString.replace(/^topic_maintenance:.*\n/mu, '')),
+          Effect2.pipe(initial.content, EffectString.replace(body, `${body} Changed.`)),
         ]) {
           const result = yield* writeMemoryContentWithExpectedHash(
             config,
@@ -131,7 +140,10 @@ describe('topic maintenance generic write boundaries', () => {
           expect(result.isError).toBe(true);
           expect(yield* store.read(location, uri)).toBe(initial.content);
         }
-        const metadataOnly = initial.content.replace('topic: topic', 'topic: topic\nowner: maintainer');
+        const metadataOnly = Effect2.pipe(
+          initial.content,
+          EffectString.replace('topic: topic', 'topic: topic\nowner: maintainer'),
+        );
         const accepted = yield* writeMemoryContentWithExpectedHash(
           config,
           'threadnote-native',
@@ -144,7 +156,10 @@ describe('topic maintenance generic write boundaries', () => {
           initial.manifest,
         );
 
-        const malformed = metadataOnly.replace(/^topic_maintenance:.*$/mu, 'topic_maintenance: {bad-json}');
+        const malformed = Effect2.pipe(
+          metadataOnly,
+          EffectString.replace(/^topic_maintenance:.*$/mu, 'topic_maintenance: {bad-json}'),
+        );
         yield* store.write(location, uri, malformed, {mode: 'replace'});
         const repair = yield* writeMemoryContentWithExpectedHash(
           config,

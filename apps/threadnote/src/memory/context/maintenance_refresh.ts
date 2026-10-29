@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {
   readState,
   writeState,
@@ -38,6 +39,8 @@ import {maintenanceContentHash, resolveRelationTarget, resolveMaintenanceRelatio
 import {readContextMaintenanceSourceEpoch} from './maintenance_evidence.js';
 import {maintenanceRecordRevision, recordSourceRevision} from './maintenance_source.js';
 import {observeTopicMaintenanceCase} from './maintenance_topic.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Only this invocation's state-lock acquisition is retryable; nested failures retain their original semantics. */
 export function withMaintenanceOperationLock<A, E, R>(config: RuntimeConfig, effect: Effect.Effect<A, E, R>) {
@@ -72,20 +75,23 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
     return yield* observeSelectedRelationMaintenanceCase(config, state, item, fallbackCwd);
   const uris = [
     ...new Set([
-      ...(item.subjectContentHashes ?? []).map(source => source.uri),
+      ...EffectArray.map(item.subjectContentHashes ?? [], source => source.uri),
       ...(item.subjectUri ? [item.subjectUri] : []),
     ]),
   ];
   if (uris.length === 0 || uris.length > 32)
     return {outcome: 'unavailable' as const, reason: 'The selected memory reference is unavailable.'};
   const subjects = yield* readMemoryRecordsByUriWithSourceHash(config, uris);
-  const records = subjects.map(subject => subject.record);
+  const records = EffectArray.map(subjects, subject => subject.record);
   const close = <A>(result: A) =>
     readMemoryRecordsByUriWithSourceHash(config, uris).pipe(
       Effect.map(after =>
         subjects.length === after.length &&
-        subjects.every(subject =>
-          after.some(current => current.record.uri === subject.record.uri && current.sourceHash === subject.sourceHash),
+        EffectArray.every(subjects, subject =>
+          EffectArray.some(
+            after,
+            current => current.record.uri === subject.record.uri && current.sourceHash === subject.sourceHash,
+          ),
         )
           ? result
           : {
@@ -96,12 +102,13 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
     );
   if (
     records.length !== uris.length ||
-    records.some(record => record.metadata.status !== 'active' || record.metadata.project !== item.project)
+    EffectArray.some(records, record => record.metadata.status !== 'active' || record.metadata.project !== item.project)
   )
     return {outcome: 'unavailable' as const, reason: 'A selected memory is no longer available in this project.'};
   const record =
-    records.find(record => (record.metadata.memoryId ?? record.uri) === item.memoryId) ??
-    (item.family === 'semantic-contradiction' ? records[0] : undefined);
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(records, record => (record.metadata.memoryId ?? record.uri) === item.memoryId),
+    ) ?? (item.family === 'semantic-contradiction' ? records[0] : undefined);
   if (!record)
     return {
       outcome: 'unavailable' as const,
@@ -117,7 +124,7 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
     const evidence = findContextHealthSemanticContradiction(
       records,
       undefined,
-      item.slot.split(':') as [string, string],
+      Effect2.pipe(item.slot, EffectString.split(':')),
     );
     if (!evidence) {
       const report = buildContextHealthReport({
@@ -132,7 +139,7 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
           reason:
             'The bounded comparison check could not review every statement. Your choice is saved; check current evidence after reviewing the source memories.',
         });
-      const comparisons = report.findings.filter(finding => finding.semanticEvidence);
+      const comparisons = EffectArray.filter(report.findings, finding => Boolean(finding.semanticEvidence));
       if (comparisons.length !== 1)
         return yield* close(
           superseded(
@@ -157,7 +164,10 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
     }
     next = {
       ...next,
-      subjectContentHashes: records.map(source => ({uri: source.uri, hash: maintenanceContentHash(source.content)})),
+      subjectContentHashes: EffectArray.map(records, source => ({
+        uri: source.uri,
+        hash: maintenanceContentHash(source.content),
+      })),
     };
   } else if (item.family === 'topic-maintenance') {
     const observed = yield* observeTopicMaintenanceCase(
@@ -167,7 +177,7 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
       root,
       now,
       state.topicCheckpoints ?? {},
-      new Map(state.cases.map(value => [value.caseId, value])),
+      new Map(EffectArray.map(state.cases, value => [value.caseId, value])),
     );
     if (!observed)
       return {
@@ -196,12 +206,25 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
     );
     const selectedCitation =
       item.family === 'citation-coverage'
-        ? (citations.find(citation => !maintenanceCoverageCurrent(record.uri, [citation], validations)) ?? citations[0])
+        ? (EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              citations,
+              citation => !maintenanceCoverageCurrent(record.uri, [citation], validations),
+            ),
+          ) ?? citations[0])
         : citations[0];
-    const receipt = validations
-      .filter(validation => validation.uri === record.uri)
-      .flatMap(validation => validation.receipts)
-      .find(value => value.citationId === selectedCitation.id);
+    const receipt = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(
+          EffectArray.filter(
+            validations,
+            (validation: ContextBriefMemoryCitationValidationV2) => validation.uri === record.uri,
+          ),
+          (validation: ContextBriefMemoryCitationValidationV2) => validation.receipts,
+        ),
+        (value: ContextBriefMemoryCitationValidationV2['receipts'][number]) => value.citationId === selectedCitation.id,
+      ),
+    );
     const report = buildContextHealthReport({
       project: item.project,
       records: [{...record, metadata: {...record.metadata, codeCitations: citations}}],
@@ -209,7 +232,11 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
       citationValidations: validations,
       now: yield* DateTime.nowAsDate,
     });
-    const finding = report.findings.find(value => value.category.startsWith('citation-'));
+    const finding = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.findings, value =>
+        Effect2.pipe(value.category, EffectString.startsWith('citation-')),
+      ),
+    );
     reference = {path: selectedCitation.path, citationId: selectedCitation.id, status: receipt?.status ?? 'unknown'};
     repairFinding = finding;
     next = {
@@ -272,15 +299,16 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
       topicCheckpoints,
       cases:
         next.caseId === item.caseId
-          ? state.cases.map(value => (value.caseId === item.caseId ? next : value))
+          ? EffectArray.map(state.cases, value => (value.caseId === item.caseId ? next : value))
           : [
-              ...state.cases
-                .map(value =>
+              ...EffectArray.filter(
+                EffectArray.map(state.cases, value =>
                   value.caseId === item.caseId
                     ? {...value, disposition: 'historical' as const, reason: 'selected-statements-changed'}
                     : value,
-                )
-                .filter(value => value.caseId !== next.caseId),
+                ),
+                value => value.caseId !== next.caseId,
+              ),
               next,
             ],
     },
@@ -303,7 +331,7 @@ export const readSelectedMaintenanceRelationResource = Effect.fn('contextMainten
       fs,
       path,
       root,
-      path.relative(resourceRoot, file).split(path.sep).join('/'),
+      EffectArray.join(Effect2.pipe(path.relative(resourceRoot, file), EffectString.split(path.sep)), '/'),
       8 * 1_024 * 1_024,
     );
     const content = yield* Effect.try(() => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes));
@@ -348,16 +376,15 @@ export function validRelationMaintenanceEvidence(input: unknown): input is Conte
       (item.status === undefined || (typeof item.status === 'string' && item.status.length <= 64))
     );
   };
-  return (
-    evidence.completeness === 'selected-only' &&
-    evidence.provenance === 'bounded-selected-resource-read' &&
-    stamp(evidence.subject) &&
-    Array.isArray(evidence.observations) &&
-    evidence.observations.length < 32 &&
-    evidence.observations.every(stamp) &&
-    new Set([evidence.subject.uri, ...evidence.observations.map(item => item.uri)]).size ===
-      evidence.observations.length + 1
-  );
+  if (evidence.completeness !== 'selected-only' || evidence.provenance !== 'bounded-selected-resource-read')
+    return false;
+  const subject = evidence.subject;
+  if (!stamp(subject)) return false;
+  const observations = evidence.observations;
+  const isValidObservations = (value: unknown): value is ReadonlyArray<ContextMaintenanceRelationResourceObservation> =>
+    EffectArray.isArray(value) && EffectArray.every(value, stamp);
+  if (!isValidObservations(observations) || observations.length >= 32) return false;
+  return new Set([subject.uri, ...EffectArray.map(observations, item => item.uri)]).size === observations.length + 1;
 }
 
 /** Reuse one bounded read per identity for packet construction and each closing fence. */
@@ -379,8 +406,11 @@ export const readCurrentRelationMaintenanceRecords = Effect.fn('contextMaintenan
     observation => readSelectedMaintenanceRelationResource(config, observation.uri),
     {concurrency: 16},
   );
-  return observed.every((value, index) => JSON.stringify(value.observation) === JSON.stringify(expected[index]))
-    ? observed.flatMap(value => (value.record ? [value.record] : []))
+  return EffectArray.every(
+    observed,
+    (value, index) => JSON.stringify(value.observation) === JSON.stringify(expected[index]),
+  )
+    ? EffectArray.flatMap(observed, value => (value.record ? [value.record] : []))
     : undefined;
 });
 
@@ -416,7 +446,7 @@ export const readPacketSubjects = Effect.fn('contextMaintenance.packetSubjects')
   }
   return yield* readMemoryRecordsByUri(
     config,
-    (item.subjectContentHashes ?? []).map(subject => subject.uri),
+    EffectArray.map(item.subjectContentHashes ?? [], subject => subject.uri),
   );
 });
 
@@ -441,12 +471,20 @@ const observeSelectedRelationMaintenanceCase = Effect.fn('contextMaintenance.obs
       outcome: 'unavailable' as const,
       reason: 'The selected relation subject is unreadable or its identity changed. Review the current memory first.',
     };
-  const relations = (record.metadata.relations ?? []).filter(relation => !isAgentArtifactUri(relation.uri));
-  const exact = relations.filter(
+  const relations = EffectArray.filter(record.metadata.relations ?? [], relation => !isAgentArtifactUri(relation.uri));
+  const exact = EffectArray.filter(
+    relations,
     relation => relation.uri === item.slot || memoryIdFromIdentityAlias(relation.uri) === item.slot,
   );
   const selected = item.family === 'relation' && exact.length > 0 ? exact : relations;
-  const identities = [...new Set(selected.map(relation => relation.uri).filter(uri => uri !== subjectUri))].sort();
+  const identities = [
+    ...new Set(
+      EffectArray.filter(
+        EffectArray.map(selected, relation => relation.uri),
+        uri => uri !== subjectUri,
+      ),
+    ),
+  ].sort();
   if (identities.length + 1 > 32)
     return {
       outcome: 'incomplete' as const,
@@ -456,8 +494,9 @@ const observeSelectedRelationMaintenanceCase = Effect.fn('contextMaintenance.obs
   const targets = yield* Effect.forEach(identities, uri => readSelectedMaintenanceRelationResource(config, uri), {
     concurrency: 16,
   });
-  const records = [record, ...targets.flatMap(target => (target.record ? [target.record] : []))];
-  const matching = selected.filter(
+  const records = [record, ...EffectArray.flatMap(targets, target => (target.record ? [target.record] : []))];
+  const matching = EffectArray.filter(
+    selected,
     relation =>
       relation.uri === item.slot ||
       memoryIdFromIdentityAlias(relation.uri) === item.slot ||
@@ -473,15 +512,15 @@ const observeSelectedRelationMaintenanceCase = Effect.fn('contextMaintenance.obs
     completeness: 'selected-only',
     provenance: 'bounded-selected-resource-read',
     subject: subject.observation,
-    observations: targets.map(target => target.observation),
+    observations: EffectArray.map(targets, target => target.observation),
   };
   const root = item.sourceSnapshot?.cwd ?? fallbackCwd;
   const epoch = item.sourceSnapshot ? yield* readContextMaintenanceSourceEpoch(config, root) : undefined;
   const sourceRevision = item.sourceSnapshot ? yield* recordSourceRevision(config, record, root) : undefined;
-  const policies = (item.family === 'relation' ? matching : selected).map(relation =>
+  const policies = EffectArray.map(item.family === 'relation' ? matching : selected, relation =>
     resolveMaintenanceRelationPolicy(record, relation, records, false),
   );
-  const unknown = policies.some(policy => policy.state === 'unknown' || policy.state === 'ambiguous');
+  const unknown = EffectArray.some(policies, policy => policy.state === 'unknown' || policy.state === 'ambiguous');
   const now = DateTime.formatIso(yield* DateTime.now);
   let next: ContextMaintenanceCaseV2 = {
     ...item,
@@ -489,7 +528,7 @@ const observeSelectedRelationMaintenanceCase = Effect.fn('contextMaintenance.obs
     disposition:
       item.family === 'shared-owner-proposal' || unknown
         ? 'waiting-evidence'
-        : policies.every(policy => policy.state === 'active')
+        : EffectArray.every(policies, policy => policy.state === 'active')
           ? 'resolved'
           : 'needs-decision',
     reason:
@@ -532,7 +571,7 @@ const observeSelectedRelationMaintenanceCase = Effect.fn('contextMaintenance.obs
     item: next,
     reference: undefined,
     repairFinding: undefined,
-    state: {...state, cases: state.cases.map(value => (value.caseId === item.caseId ? next : value))},
+    state: {...state, cases: EffectArray.map(state.cases, value => (value.caseId === item.caseId ? next : value))},
   };
 });
 
@@ -547,11 +586,12 @@ export function selectedMaintenanceCitations(
       ? current.slice(chunk * 64, (chunk + 1) * 64)
       : [];
   }
-  return current
-    .filter(citation =>
+  return EffectArray.take(
+    EffectArray.filter(current, citation =>
       item.citationId ? citation.id === item.citationId : contextHealthCitationCaseSlotV2(citation) === item.slot,
-    )
-    .slice(0, 64);
+    ),
+    64,
+  );
 }
 
 export function maintenanceCoverageCurrent(
@@ -559,11 +599,14 @@ export function maintenanceCoverageCurrent(
   citations: readonly MemoryCodeCitationV1[],
   validations: readonly ContextBriefMemoryCitationValidationV2[],
 ): boolean {
-  const receipts = validations.filter(validation => validation.uri === uri).flatMap(validation => validation.receipts);
+  const receipts = EffectArray.flatMap(
+    EffectArray.filter(validations, (validation: ContextBriefMemoryCitationValidationV2) => validation.uri === uri),
+    (validation: ContextBriefMemoryCitationValidationV2) => validation.receipts,
+  );
   return (
     citations.length > 0 &&
-    citations.every(citation => {
-      const matches = receipts.filter(receipt => receipt.citationId === citation.id);
+    EffectArray.every(citations, citation => {
+      const matches = EffectArray.filter(receipts, receipt => receipt.citationId === citation.id);
       return (
         matches.length === 1 &&
         (matches[0].status === 'exact' || matches[0].status === 'relocated') &&
@@ -580,7 +623,7 @@ function superseded(state: MaintenanceState, item: ContextMaintenanceCaseV2, rea
     outcome: 'superseded' as const,
     reason,
     item: updated,
-    state: {...state, cases: state.cases.map(value => (value.caseId === item.caseId ? updated : value))},
+    state: {...state, cases: EffectArray.map(state.cases, value => (value.caseId === item.caseId ? updated : value))},
   };
 }
 
@@ -595,7 +638,9 @@ export const refreshContextMaintenanceCase = Effect.fn('contextMaintenance.refre
       config,
       Effect.gen(function* () {
         const state = yield* readState(config);
-        const item = state.cases.find(value => value.caseId === input.caseId && value.project === input.project);
+        const item = EffectOption.getOrUndefined(
+          EffectArray.findFirst(state.cases, value => value.caseId === input.caseId && value.project === input.project),
+        );
         if (!item)
           return {outcome: 'unavailable' as const, reason: 'This decision is no longer available in this project.'};
         if (

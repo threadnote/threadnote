@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Console, Effect, Result} from 'effect';
 
 import {applyScrubber} from '@threadnote/platform/scrubber';
@@ -67,6 +68,9 @@ import {
   publishShareGitChange,
   writeSharedWorktreeFile,
 } from './git.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const runShareConflicts = Effect.fn('share.runShareConflicts')(function* (
   config: ShareRuntime,
@@ -175,7 +179,9 @@ export const resolveShareConflict = Effect.fn('share.resolveShareConflict')(func
   reference: string,
   options: ShareConflictResolveOptions,
 ) {
-  const fromFile = options.fromFile?.trim();
+  const fromFile = Effect2.pipe(options.fromFile, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   const mergedContent = options.mergedContent;
   const rawTake = options.take as string | undefined;
   if (rawTake !== undefined && rawTake !== 'shared' && rawTake !== 'local') {
@@ -473,16 +479,16 @@ const assertSharedGitIdentityAvailable = Effect.fn('share.assertSharedGitIdentit
       message: `Cannot verify stable memory_id ownership in shared team ${team.name}. Inspect the shared worktree and retry.`,
     });
   }
-  for (const candidate of listing.split('\0').filter(Boolean)) {
+  for (const candidate of EffectArray.filter(Effect2.pipe(listing, EffectString.split('\0')), Boolean)) {
     const relativePath = assertSafeShareRelativePath(candidate);
-    if (!relativePath.endsWith('.md')) continue;
+    if (!Effect2.pipe(relativePath, EffectString.endsWith('.md'))) continue;
     const rawContent = yield* gitFileContent(team.config.worktree, head, relativePath);
     if (rawContent === undefined) {
       throw ShareOperationError.make({
         message: `Cannot verify stable memory_id ownership for shared file ${relativePath}. Inspect the shared worktree and retry.`,
       });
     }
-    const candidatePath = yield* pathJoin(team.config.worktree, ...relativePath.split('/'));
+    const candidatePath = yield* pathJoin(team.config.worktree, ...Effect2.pipe(relativePath, EffectString.split('/')));
     const candidateUri = yield* workfileToResourceUri(config, team.config, candidatePath);
     const record = parseMemoryDocument(candidateUri, rawContent);
     if (record?.metadata.status === 'active' && record.metadata.memoryId === memoryId && candidateUri !== uri) {
@@ -501,11 +507,11 @@ const teamsForShareQuery = Effect.fn('share.teamsForShareQuery')(function* (
     return [yield* resolveTeam(config, teamName)];
   }
   const teams = yield* readTeamsFile(config);
-  const entries = Object.entries(teams.teams);
+  const entries = EffectRecord.toEntries(teams.teams);
   if (entries.length === 0) {
     throw ShareOperationError.make({message: 'No shared teams configured. Run: threadnote share init <remote-url>'});
   }
-  return entries.map(([name, team]) => ({config: team, name}));
+  return EffectArray.map(entries, ([name, team]) => ({config: team, name}));
 });
 
 const readPendingShareConflict = Effect.fn('share.readPendingShareConflict')(function* (
@@ -517,18 +523,31 @@ const readPendingShareConflict = Effect.fn('share.readPendingShareConflict')(fun
   const state = autoShareState(config);
   yield* loadPendingReindexes(config, state);
   const pending = state.pendingReindexes.get(target.team.name) ?? [];
-  const change = pending.find(candidate => candidate.relativePath === target.relativePath);
+  const change = EffectOption.getOrUndefined(
+    EffectArray.findFirst(pending, candidate => candidate.relativePath === target.relativePath),
+  );
   if (!change) {
-    const available = pending
-      .filter(isShareableMemoryChange)
-      .map(candidate => conflictId(target.team.name, candidate.relativePath));
+    const available = EffectArray.map(
+      EffectArray.filter(
+        pending,
+        (__effectFilterValue: (typeof pending)[number], __effectFilterIndex: number) =>
+          __effectFilterIndex in pending && isShareableMemoryChange(__effectFilterValue),
+      ),
+      candidate => conflictId(target.team.name, candidate.relativePath),
+    );
     throw ShareOperationError.make({
-      message: [
-        `No pending shared memory conflict found for ${conflictId(target.team.name, target.relativePath)}.`,
-        available.length > 0
-          ? `Pending conflicts for this team:\n${available.map(id => `- ${id}`).join('\n')}`
-          : `No pending conflicts for team "${target.team.name}".`,
-      ].join('\n'),
+      message: EffectArray.join(
+        [
+          `No pending shared memory conflict found for ${conflictId(target.team.name, target.relativePath)}.`,
+          available.length > 0
+            ? `Pending conflicts for this team:\n${EffectArray.join(
+                EffectArray.map(available, id => `- ${id}`),
+                '\n',
+              )}`
+            : `No pending conflicts for team "${target.team.name}".`,
+        ],
+        '\n',
+      ),
     });
   }
   return {change: yield* normalizePendingChange(target.team, change), team: target.team};
@@ -539,7 +558,7 @@ const parseShareConflictReference = Effect.fn('share.parseShareConflictReference
   reference: string,
   optionTeam: string | undefined,
 ) {
-  const trimmed = reference.trim();
+  const trimmed = Effect2.pipe(reference, EffectString.trim);
   if (!trimmed) {
     throw ShareOperationError.make({
       message: 'Provide a conflict id, relative path, or threadnote:// shared memory URI.',
@@ -557,10 +576,14 @@ const parseShareConflictReference = Effect.fn('share.parseShareConflictReference
       team,
     };
   }
-  const colon = trimmed.indexOf(':');
-  if (colon > 0 && !trimmed.slice(0, colon).includes('/')) {
-    const team = yield* resolveTeam(config, optionTeam ?? trimmed.slice(0, colon));
-    return {relativePath: assertSafeShareRelativePath(trimmed.slice(colon + 1)), team};
+  const colon = Effect2.pipe(
+    trimmed,
+    EffectString.indexOf(':'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  if (colon > 0 && !Effect2.pipe(trimmed, EffectString.slice(0, colon), EffectString.includes('/'))) {
+    const team = yield* resolveTeam(config, optionTeam ?? Effect2.pipe(trimmed, EffectString.slice(0, colon)));
+    return {relativePath: assertSafeShareRelativePath(Effect2.pipe(trimmed, EffectString.slice(colon + 1))), team};
   }
   const team = yield* resolveTeam(config, optionTeam);
   return {relativePath: assertSafeShareRelativePath(trimmed), team};
@@ -573,14 +596,16 @@ const normalizePendingChange = Effect.fn('share.normalizePendingChange')(functio
   const relativePath = assertSafeShareRelativePath(change.relativePath);
   return {
     ...change,
-    path: yield* pathJoin(team.config.worktree, ...relativePath.split('/')),
+    path: yield* pathJoin(team.config.worktree, ...Effect2.pipe(relativePath, EffectString.split('/'))),
     relativePath,
   };
 });
 
 function isShareableMemoryChange(change: ChangedFile): boolean {
-  const firstSegment = change.relativePath.split('/')[0];
-  return change.relativePath.endsWith('.md') && SHAREABLE_MEMORY_KIND_DIRS.includes(firstSegment);
+  const firstSegment = Effect2.pipe(change.relativePath, EffectString.split('/'))[0];
+  return (
+    Effect2.pipe(change.relativePath, EffectString.endsWith('.md')) && SHAREABLE_MEMORY_KIND_DIRS.includes(firstSegment)
+  );
 }
 
 const buildShareConflictSummary = Effect.fn('share.buildShareConflictSummary')(function* (
@@ -799,7 +824,7 @@ const backupShareConflict = Effect.fn('share.backupShareConflict')(function* (
     'conflict-backups',
     safeTimestamp(),
     conflict.team,
-    ...conflict.relativePath.split('/'),
+    ...Effect2.pipe(conflict.relativePath, EffectString.split('/')),
   );
   yield* mkdir(backupDir, {recursive: true});
   const metadata = {
@@ -831,7 +856,7 @@ const clearPendingShareConflict = Effect.fn('share.clearPendingShareConflict')(f
   const state = autoShareState(config);
   yield* loadPendingReindexes(config, state);
   const pending = state.pendingReindexes.get(teamName) ?? [];
-  const remaining = pending.filter(change => change.relativePath !== relativePath);
+  const remaining = EffectArray.filter(pending, change => change.relativePath !== relativePath);
   if (remaining.length > 0) {
     state.pendingReindexes.set(teamName, remaining);
   } else {
@@ -859,21 +884,24 @@ function shareConflictCanTakeShared(
 }
 
 function formatShareConflictNextSteps(teamName: string, conflicts: readonly ShareConflictSummary[]): string {
-  const entries = conflicts.map(conflict => ({conflict, id: conflictId(teamName, conflict.relativePath)}));
-  const ids = entries.map(({id}) => id);
+  const entries = EffectArray.map(conflicts, conflict => ({conflict, id: conflictId(teamName, conflict.relativePath)}));
+  const ids = EffectArray.map(entries, ({id}) => id);
   if (ids.length === 0) {
     return `Run \`threadnote share conflicts --team ${teamName}\` to inspect pending reindexes.`;
   }
-  return [
-    `Resolve pending shared memory conflicts with:`,
-    `  threadnote share conflicts --team ${teamName}`,
-    ...entries.flatMap(({conflict, id}) => [
-      `  threadnote share conflict show ${id}`,
-      ...(shareConflictCanTakeShared(conflict) ? [`  threadnote share conflict resolve ${id} --take shared`] : []),
-      `  threadnote share conflict resolve ${id} --take local`,
-      `  threadnote share conflict resolve ${id} --from-file merged.md`,
-    ]),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `Resolve pending shared memory conflicts with:`,
+      `  threadnote share conflicts --team ${teamName}`,
+      ...EffectArray.flatMap(entries, ({conflict, id}) => [
+        `  threadnote share conflict show ${id}`,
+        ...(shareConflictCanTakeShared(conflict) ? [`  threadnote share conflict resolve ${id} --take shared`] : []),
+        `  threadnote share conflict resolve ${id} --take local`,
+        `  threadnote share conflict resolve ${id} --from-file merged.md`,
+      ]),
+    ],
+    '\n',
+  );
 }
 
 function formatShareConflictDiff(conflict: InspectedShareConflict): string {
@@ -891,7 +919,7 @@ function formatShareConflictDiff(conflict: InspectedShareConflict): string {
   parts.push(
     formatTwoWayDiff('local native canonical store', conflict.localContent, 'shared file', conflict.sharedContent),
   );
-  return parts.join('\n\n');
+  return EffectArray.join(parts, '\n\n');
 }
 
 function formatTwoWayDiff(
@@ -915,14 +943,14 @@ function formatTwoWayDiff(
   for (const line of rightLines) {
     lines.push(`+${line}`);
   }
-  return lines.join('\n');
+  return EffectArray.join(lines, '\n');
 }
 
 function splitDiffLines(content: string | undefined): readonly string[] {
   if (content === undefined) {
     return ['<missing>'];
   }
-  const lines = content.split(/\n/);
+  const lines = Effect2.pipe(content, EffectString.split(/\n/));
   if (lines.length > 0 && lines[lines.length - 1] === '') {
     return lines.slice(0, -1);
   }

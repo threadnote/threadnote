@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate, Schema} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {JSON_SCHEMA, load} from 'js-yaml';
 import fc from 'fast-check';
@@ -25,6 +26,7 @@ import {
   IndexPhaseTimeline,
   type CodeGraphBenchmarkMeasurementRatchetV1,
 } from '../../../../scripts/benchmark-code-graph.js';
+import {isJsonObject} from '@threadnote/platform/json';
 import {PRODUCTION_LARGE_CODE_GRAPH_PROFILE} from '../../../../scripts/code-graph-fixture.js';
 import {CODE_GRAPH_HEAVY_TAIL_PROFILE} from '../../../../scripts/code-graph-heavy-tail-fixture.js';
 import {benchmarkMeasurement, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
@@ -33,17 +35,60 @@ import {
   retainedPerformanceArtifactFromHarness,
   validateRetainedPerformancePayload,
 } from '@threadnote/evidence/performance';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const CODE_GRAPH_BUDGETS = 'apps/threadnote/test/evaluation/baselines/code-graph-v1/budgets.json';
 const POLYGLOT_BUDGETS = 'apps/threadnote/test/evaluation/baselines/code-graph-polyglot-v1/budgets.json';
 const BETA30_STAGING_EVIDENCE =
   'apps/threadnote/test/evaluation/baselines/code-graph-v1/beta30-staging-development.json';
 
+const OpenWorkflowObject = Schema.Record(Schema.String, Schema.Unknown);
+const WorkflowWith = Schema.StructWithRest(
+  Schema.Struct({
+    'fetch-depth': Schema.optionalKey(Schema.Finite),
+    'if-no-files-found': Schema.optionalKey(Schema.String),
+    path: Schema.optionalKey(Schema.String),
+    ref: Schema.optionalKey(Schema.String),
+    'retention-days': Schema.optionalKey(Schema.Finite),
+  }),
+  [OpenWorkflowObject],
+);
+const WorkflowStep = Schema.StructWithRest(
+  Schema.Struct({
+    name: Schema.optionalKey(Schema.String),
+    run: Schema.optionalKey(Schema.String),
+    with: Schema.optionalKey(WorkflowWith),
+  }),
+  [OpenWorkflowObject],
+);
+const WorkflowJob = Schema.StructWithRest(
+  Schema.Struct({
+    if: Schema.optionalKey(Schema.String),
+    needs: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
+    steps: Schema.optionalKey(Schema.Array(WorkflowStep)),
+    uses: Schema.optionalKey(Schema.String),
+    with: Schema.optionalKey(WorkflowWith),
+  }),
+  [OpenWorkflowObject],
+);
+const WorkflowTrigger = Schema.StructWithRest(Schema.Struct({push: Schema.optionalKey(Schema.Unknown)}), [
+  OpenWorkflowObject,
+]);
+const BenchmarkWorkflowSchema = Schema.StructWithRest(
+  Schema.Struct({jobs: Schema.Record(Schema.String, WorkflowJob), on: WorkflowTrigger}),
+  [OpenWorkflowObject],
+);
+const decodeBenchmarkWorkflow = Schema.decodeUnknownSync(BenchmarkWorkflowSchema);
+
 describe('code graph release evidence', () => {
   it('keeps local heavy-tail attestation outside stable and beta publication gates', () => {
     const guide = readFileSync('docs/releasing.md', 'utf8');
     const publishing = guide
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native split indexing preserves this document section boundary.
       .split('## Publishing\n')[1]
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native split indexing preserves this document section boundary.
       ?.split('\n## Optional local heavy-tail performance evidence')[0];
     expect(publishing).toBeDefined();
     expect(publishing).toMatch(
@@ -71,11 +116,28 @@ describe('code graph release evidence', () => {
       parallelWorkers: 4,
       textlessSvgFiles: 4_000,
     });
-    const workflow = load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
-    const capture = workflow.jobs['code-graph-heavy-tail'].steps?.find(step =>
-      step.run?.includes('bench:code-graph:heavy-tail'),
+    const workflow = decodeBenchmarkWorkflow(
+      load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {
+        schema: JSON_SCHEMA,
+      }),
+    );
+    const capture = EffectOption.getOrUndefined(
+      EffectOption.map(
+        EffectOption.fromNullishOr(workflow.jobs['code-graph-heavy-tail'].steps),
+        __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              __effectArrayReceiver,
+              __effectArrayValue =>
+                !!(step =>
+                  Effect.pipe(step.run, effectOptionalString =>
+                    effectOptionalString == null
+                      ? undefined
+                      : Effect.pipe(effectOptionalString, EffectString.includes('bench:code-graph:heavy-tail')),
+                  ))(__effectArrayValue),
+            ),
+          ),
+      ),
     );
     expect(capture?.run).toContain('--evidence-class correctness-only');
     expect(capture?.run).not.toContain('--ratchet');
@@ -113,19 +175,22 @@ describe('code graph release evidence', () => {
           }
 
           const measurements = new Map(
-            indexPhaseMeasurements('cold', timeline, false).map(measurement => [measurement.name, measurement.minimum]),
+            EffectArray.map(indexPhaseMeasurements('cold', timeline, false), measurement => [
+              measurement.name,
+              measurement.minimum,
+            ]),
           );
           expect(measurements.get('cold-inventory-source-reading-n1')).toBe(
-            Math.max(...timings.map(observation => observation.readingMilliseconds)),
+            Math.max(...EffectArray.map(timings, observation => observation.readingMilliseconds)),
           );
           expect(measurements.get('cold-inventory-parser-extraction-summed-n1')).toBe(
-            Math.max(...timings.map(observation => observation.extractionMilliseconds)),
+            Math.max(...EffectArray.map(timings, observation => observation.extractionMilliseconds)),
           );
           expect(measurements.get('cold-inventory-cache-persistence-n1')).toBe(
-            Math.max(...timings.map(observation => observation.persistenceMilliseconds)),
+            Math.max(...EffectArray.map(timings, observation => observation.persistenceMilliseconds)),
           );
           expect(measurements.get('cold-inventory-parser-fact-serialization-n1')).toBe(
-            Math.max(...timings.map(observation => observation.serializationMilliseconds)),
+            Math.max(...EffectArray.map(timings, observation => observation.serializationMilliseconds)),
           );
         },
       ),
@@ -171,7 +236,10 @@ describe('code graph release evidence', () => {
           }
 
           const measurements = new Map(
-            indexPhaseMeasurements('cold', timeline, false).map(measurement => [measurement.name, measurement.minimum]),
+            EffectArray.map(indexPhaseMeasurements('cold', timeline, false), measurement => [
+              measurement.name,
+              measurement.minimum,
+            ]),
           );
           for (const [field, suffix] of [
             ['attributionCompute', 'attribution-compute'],
@@ -181,7 +249,7 @@ describe('code graph release evidence', () => {
             ['shardSerialization', 'shard-serialization'],
           ] as const) {
             expect(measurements.get(`cold-materialization-subphase-${suffix}-n1`)).toBe(
-              Math.max(...timings.map(observation => observation[field])),
+              Math.max(...EffectArray.map(timings, observation => observation[field])),
             );
           }
         },
@@ -228,7 +296,7 @@ describe('code graph release evidence', () => {
     );
 
     const measurements = new Map(
-      indexPhaseMeasurements('cold', timeline, false).map(measurement => [measurement.name, measurement]),
+      EffectArray.map(indexPhaseMeasurements('cold', timeline, false), measurement => [measurement.name, measurement]),
     );
     expect(measurements.get('cold-materialized-lookup-key-rows-n1')).toMatchObject({
       minimum: 7,
@@ -280,9 +348,18 @@ describe('code graph release evidence', () => {
     );
 
     const measurements = new Map(
-      indexPhaseMeasurements('cold', timeline, false).map(measurement => [measurement.name, measurement.minimum]),
+      EffectArray.map(indexPhaseMeasurements('cold', timeline, false), measurement => [
+        measurement.name,
+        measurement.minimum,
+      ]),
     );
-    expect(Object.fromEntries([...measurements].filter(([name]) => name.includes('reference-resolution-')))).toEqual({
+    expect(
+      EffectRecord.fromEntries(
+        EffectArray.filter([...measurements], ([name]) =>
+          Effect.pipe(name, EffectString.includes('reference-resolution-')),
+        ),
+      ),
+    ).toEqual({
       'cold-reference-resolution-aliases-discovered-n1': 13,
       'cold-reference-resolution-longest-transaction-n1': 125,
       'cold-reference-resolution-matching-n1': 700,
@@ -326,7 +403,7 @@ describe('code graph release evidence', () => {
       worktreeChurnScenarioCount: 6,
     });
     expect(profile.classMix.typescriptSourceFiles + profile.classMix.tsxSourceFiles).toBe(12);
-    expect(Object.values(profile.classMix).reduce((total, count) => total + count, 0)).toBe(
+    expect(EffectArray.reduce(EffectRecord.values(profile.classMix), 0, (total, count) => total + count)).toBe(
       profile.targetRepositoryFiles,
     );
     expect(profile.targetRepositoryFiles - profile.targetEligibleFiles).toBe(
@@ -338,21 +415,12 @@ describe('code graph release evidence', () => {
   });
 
   it('keeps the sanitized direct-staging claims, timings, digests, and documentation consistent', () => {
-    const evidence = readJson(BETA30_STAGING_EVIDENCE) as {
-      readonly observations: readonly {
-        readonly bytes?: Readonly<Record<string, number>>;
-        readonly digests?: Readonly<Record<string, string>>;
-        readonly milliseconds?: Readonly<Record<string, number>>;
-        readonly name: string;
-        readonly parity?: Readonly<Record<string, boolean>>;
-        readonly reviewedClaims?: Readonly<Record<string, boolean | number>>;
-      }[];
-      readonly provenance: {
-        readonly sourceArtifactSha256: Readonly<Record<string, string>>;
-      };
-    };
-    const direct = evidence.observations.find(
-      observation => observation.name === 'direct-persistent-materialization-10000',
+    const evidence = decodeStagingEvidence(readJson(BETA30_STAGING_EVIDENCE));
+    const direct = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        evidence.observations,
+        observation => observation.name === 'direct-persistent-materialization-10000',
+      ),
     );
     expect(direct).toBeDefined();
     expect(evidence.provenance.sourceArtifactSha256['direct-persistent-10000']).toBe(
@@ -396,8 +464,8 @@ describe('code graph release evidence', () => {
       temporaryDatabasePagesObserved: false,
     });
     const digests = direct!.digests!;
-    expect(Object.values(digests)).toHaveLength(6);
-    expect(Object.values(digests).every(digest => /^[0-9a-f]{64}$/.test(digest))).toBe(true);
+    expect(EffectRecord.values(digests)).toHaveLength(6);
+    expect(EffectArray.every(EffectRecord.values(digests), digest => /^[0-9a-f]{64}$/.test(digest))).toBe(true);
     expect(digests.primaryQueryCold).toBe(digests.primaryQueryIncremental);
     expect(digests.primaryQueryIncremental).toBe(digests.primaryQuerySameOverlayReference);
     expect(digests.structuralGraphCold).not.toBe(digests.structuralGraphIncremental);
@@ -411,7 +479,7 @@ describe('code graph release evidence', () => {
     const serialized = JSON.stringify(evidence);
     expect(serialized).not.toMatch(/\/Users\/|[A-Za-z]:\\Users\\|threadnote:\/\/|src\/workspaces\//);
     const documentation = readFileSync('apps/threadnote/test/evaluation/README.md', 'utf8');
-    const normalizedDocumentation = documentation.replace(/\s+/g, ' ');
+    const normalizedDocumentation = Effect.pipe(documentation, EffectString.replace(/\s+/g, ' '));
     for (const [phase, value] of [
       ['cold-snapshot-write-and-checkpoint', 556.407083],
       ['cold-snapshot-promotion', 62.470125],
@@ -463,13 +531,13 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        metadata: {...artifact.metadata, releaseEvidenceSha: 'f'.repeat(40)},
+        metadata: {...artifact.metadata, releaseEvidenceSha: Effect.pipe('f', EffectString.repeat(40))},
       }),
     ).toThrow(/clean exact release source provenance/);
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        metadata: {...artifact.metadata, releaseEvidenceResolvedSha: 'f'.repeat(40)},
+        metadata: {...artifact.metadata, releaseEvidenceResolvedSha: Effect.pipe('f', EffectString.repeat(40))},
       }),
     ).toThrow(/clean exact release source provenance/);
   });
@@ -507,18 +575,25 @@ describe('code graph release evidence', () => {
       harnessDeltaPaths: '[]',
       sourceMode: 'exact-release',
     });
-    const sha256Commit = 'a'.repeat(64);
+    const sha256Commit = Effect.pipe('a', EffectString.repeat(64));
     expect(
       resolvedReleaseEvidenceSource('refs/tags/v4.0.0-beta.30', sha256Commit, sha256Commit, sha256Commit, false),
     ).toMatchObject({sha: sha256Commit});
     for (const invalidLength of [39, 41, 63, 65]) {
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       const invalidCommit = 'a'.repeat(invalidLength);
       expect(() =>
         resolvedReleaseEvidenceSource('refs/tags/v4.0.0-beta.30', invalidCommit, invalidCommit, invalidCommit, false),
       ).toThrow(/locally resolvable tag/);
     }
     expect(() =>
-      resolvedReleaseEvidenceSource('refs/tags/v4.0.0-beta.30', commit, 'f'.repeat(40), commit, false),
+      resolvedReleaseEvidenceSource(
+        'refs/tags/v4.0.0-beta.30',
+        commit,
+        Effect.pipe('f', EffectString.repeat(40)),
+        commit,
+        false,
+      ),
     ).toThrow(/locally resolvable tag/);
     expect(() => resolvedReleaseEvidenceSource('refs/heads/main', commit, commit, commit, false)).toThrow(
       /locally resolvable tag/,
@@ -553,8 +628,8 @@ describe('code graph release evidence', () => {
   });
 
   it('accepts a clean release descendant only when every runtime delta is a reviewed harness path', () => {
-    const releaseCommit = '0'.repeat(40);
-    const harnessCommit = '1'.repeat(40);
+    const releaseCommit = Effect.pipe('0', EffectString.repeat(40));
+    const harnessCommit = Effect.pipe('1', EffectString.repeat(40));
     const reviewedPaths = ['scripts/benchmark-code-graph.ts', 'src/evaluation/external_evidence.ts'];
 
     expect(releaseEvidenceSourcePathspecs).toEqual(
@@ -636,8 +711,8 @@ describe('code graph release evidence', () => {
   });
 
   it('accepts exactly the non-empty unique subsets of reviewed harness paths', () => {
-    const releaseCommit = '0'.repeat(40);
-    const harnessCommit = '1'.repeat(40);
+    const releaseCommit = Effect.pipe('0', EffectString.repeat(40));
+    const harnessCommit = Effect.pipe('1', EffectString.repeat(40));
     const reviewedPaths = [
       'scripts/benchmark-code-graph.ts',
       'apps/website/tools/site-performance-evidence.ts',
@@ -707,7 +782,10 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.filter(measurement => measurement.name !== 'cold-materialization'),
+        measurements: EffectArray.filter(
+          artifact.measurements,
+          measurement => measurement.name !== 'cold-materialization',
+        ),
       }),
     ).toThrow(/cold-materialization/);
   });
@@ -725,7 +803,7 @@ describe('code graph release evidence', () => {
     );
     const withValues = (values: Readonly<Record<string, number>>) => ({
       ...artifact,
-      measurements: artifact.measurements.map(measurement =>
+      measurements: EffectArray.map(artifact.measurements, measurement =>
         values[measurement.name] === undefined
           ? measurement
           : benchmarkMeasurement(measurement.name, measurement.unit, [values[measurement.name]]),
@@ -774,7 +852,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === measurementName
             ? benchmarkMeasurement(measurement.name, 'percent', [belowFloor])
             : measurement,
@@ -866,7 +944,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertGovernedReducedProductionReleaseEvidence({
         ...artifact,
-        metadata: {...artifact.metadata, releaseEvidenceSha: 'f'.repeat(40)},
+        metadata: {...artifact.metadata, releaseEvidenceSha: Effect.pipe('f', EffectString.repeat(40))},
       }),
     ).toThrow(/clean exact release source provenance/);
     expect(() =>
@@ -878,7 +956,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertGovernedReducedProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === 'production-shape-symbol-target-attainment'
             ? benchmarkMeasurement(measurement.name, measurement.unit, [89])
             : measurement,
@@ -961,31 +1039,34 @@ describe('code graph release evidence', () => {
       ]),
     );
     const retained = new Map(
-      materializationStorageMeasurements('cold', {
-        attributedFilesCompleted: 6,
-        cachedFactBytesTotal: 10,
-        cachedFactReplayBytesCompleted: 12,
-        changedFactBytesCompleted: 2,
-        crossGenerationShardFilesCompleted: 0,
-        durableAvailableBytes: 20,
-        durableDatabaseGrowthHighWaterBytes: 60,
-        durableFilesystemHighWaterBytes: 70,
-        durableJournalHighWaterBytes: 80,
-        durableSidecarDatabaseHighWaterBytes: 90,
-        durableSidecarJournalHighWaterBytes: 100,
-        durableSidecarWalHighWaterBytes: 0,
-        durableWalHighWaterBytes: 110,
-        estimateBasis: 'cached-fact-bytes',
-        estimatedDurableFilesystemRequiredBytes: 30,
-        estimatedTemporaryFilesystemRequiredBytes: 40,
-        filesystemsShared: false,
-        exactGenerationShardFilesCompleted: 3,
-        materializedShardCacheDeferredFilesCompleted: 2,
-        materializedShardCacheDeferredRawFactBytesCompleted: 4,
-        materializedShardReplayBytesCompleted: 8,
-        rawFactReplayBytesCompleted: 4,
-        temporaryAvailableBytes: 50,
-      }).map(measurement => [measurement.name, measurement.minimum]),
+      EffectArray.map(
+        materializationStorageMeasurements('cold', {
+          attributedFilesCompleted: 6,
+          cachedFactBytesTotal: 10,
+          cachedFactReplayBytesCompleted: 12,
+          changedFactBytesCompleted: 2,
+          crossGenerationShardFilesCompleted: 0,
+          durableAvailableBytes: 20,
+          durableDatabaseGrowthHighWaterBytes: 60,
+          durableFilesystemHighWaterBytes: 70,
+          durableJournalHighWaterBytes: 80,
+          durableSidecarDatabaseHighWaterBytes: 90,
+          durableSidecarJournalHighWaterBytes: 100,
+          durableSidecarWalHighWaterBytes: 0,
+          durableWalHighWaterBytes: 110,
+          estimateBasis: 'cached-fact-bytes',
+          estimatedDurableFilesystemRequiredBytes: 30,
+          estimatedTemporaryFilesystemRequiredBytes: 40,
+          filesystemsShared: false,
+          exactGenerationShardFilesCompleted: 3,
+          materializedShardCacheDeferredFilesCompleted: 2,
+          materializedShardCacheDeferredRawFactBytesCompleted: 4,
+          materializedShardReplayBytesCompleted: 8,
+          rawFactReplayBytesCompleted: 4,
+          temporaryAvailableBytes: 50,
+        }),
+        measurement => [measurement.name, measurement.minimum],
+      ),
     );
     expect(retained).toEqual(
       new Map([
@@ -1047,7 +1128,7 @@ describe('code graph release evidence', () => {
       expect(() =>
         assertProductionReleaseEvidence({
           ...artifact,
-          measurements: artifact.measurements.filter(measurement => measurement.name !== missing),
+          measurements: EffectArray.filter(artifact.measurements, measurement => measurement.name !== missing),
         }),
       ).toThrow(new RegExp(missing));
     }
@@ -1055,7 +1136,7 @@ describe('code graph release evidence', () => {
       expect(() =>
         assertProductionReleaseEvidence({
           ...artifact,
-          measurements: artifact.measurements.map(measurement =>
+          measurements: EffectArray.map(artifact.measurements, measurement =>
             measurement.name === `${prefix}-materialization-cached-fact-replay-bytes-n1`
               ? benchmarkMeasurement(measurement.name, 'bytes', [3])
               : measurement,
@@ -1078,7 +1159,7 @@ describe('code graph release evidence', () => {
     );
     const withDuration = (name: string, value: number): BenchmarkArtifactV1 => ({
       ...artifact,
-      measurements: artifact.measurements.map(measurement =>
+      measurements: EffectArray.map(artifact.measurements, measurement =>
         measurement.name === name ? benchmarkMeasurement(name, measurement.unit, [value]) : measurement,
       ),
     });
@@ -1118,7 +1199,7 @@ describe('code graph release evidence', () => {
     );
     const withValues = (values: Readonly<Record<string, number>>): BenchmarkArtifactV1 => ({
       ...artifact,
-      measurements: artifact.measurements.map(measurement =>
+      measurements: EffectArray.map(artifact.measurements, measurement =>
         values[measurement.name] === undefined
           ? measurement
           : benchmarkMeasurement(measurement.name, measurement.unit, [values[measurement.name]]),
@@ -1217,9 +1298,9 @@ describe('code graph release evidence', () => {
           effectiveParserWorkers: 4,
           oneFileReindexMaterializationMode: 'incremental-overlay',
           oneFileReindexMaterializationStorageMode: 'unreported',
-          primaryQueryStructuralDigestCold: '1'.repeat(64),
-          primaryQueryStructuralDigestIncremental: '2'.repeat(64),
-          primaryQueryStructuralDigestSameOverlayReference: '2'.repeat(64),
+          primaryQueryStructuralDigestCold: Effect.pipe('1', EffectString.repeat(64)),
+          primaryQueryStructuralDigestIncremental: Effect.pipe('2', EffectString.repeat(64)),
+          primaryQueryStructuralDigestSameOverlayReference: Effect.pipe('2', EffectString.repeat(64)),
           retrievalMode: 'lexical-only',
           runnerClass: 'governed-test',
           runtimePlatform: 'darwin',
@@ -1227,9 +1308,15 @@ describe('code graph release evidence', () => {
           sameOverlayReferenceMaterializationStorageMode: 'direct-persistent',
           sqlitePageSizeBytes: 8192,
           sqliteVersion: '3.49.1',
-          structuralGraphDigestCold: coldIndexMilliseconds.toString(16).padStart(64, '0'),
-          structuralGraphDigestIncremental: (coldIndexMilliseconds + 1).toString(16).padStart(64, '0'),
-          structuralGraphDigestSameOverlayReference: (coldIndexMilliseconds + 1).toString(16).padStart(64, '0'),
+          structuralGraphDigestCold: Effect.pipe(coldIndexMilliseconds.toString(16), EffectString.padStart(64, '0')),
+          structuralGraphDigestIncremental: Effect.pipe(
+            (coldIndexMilliseconds + 1).toString(16),
+            EffectString.padStart(64, '0'),
+          ),
+          structuralGraphDigestSameOverlayReference: Effect.pipe(
+            (coldIndexMilliseconds + 1).toString(16),
+            EffectString.padStart(64, '0'),
+          ),
           vectorEnabled: false,
         },
         'code-graph-production-large-v2',
@@ -1242,27 +1329,30 @@ describe('code graph release evidence', () => {
     const ratchet = createCodeGraphProductionRatchet(artifacts);
 
     const completionDiagnosticNames = [
-      ...['cold', 'one-file-reindex', 'same-overlay-reference'].flatMap(prefix => [
-        ...[
-          'admission',
-          'database-session',
-          'database-session-body',
-          'index-scope',
-          'index-scope-body',
-          'lifecycle-opportunity',
-          'reporter-completion',
-          'share-drain',
-          'snapshot-lease-release',
-          'snapshot-lease-release-after-complete',
-        ].flatMap(stage =>
-          ['count', 'process-cpu-total', 'wall-maximum', 'wall-total'].map(
-            statistic => `${prefix}-completion-${stage}-${statistic}-n1`,
-          ),
+      ...EffectArray.flatMap(['cold', 'one-file-reindex', 'same-overlay-reference'], prefix => [
+        ...EffectArray.flatMap(
+          [
+            'admission',
+            'database-session',
+            'database-session-body',
+            'index-scope',
+            'index-scope-body',
+            'lifecycle-opportunity',
+            'reporter-completion',
+            'share-drain',
+            'snapshot-lease-release',
+            'snapshot-lease-release-after-complete',
+          ],
+          stage =>
+            EffectArray.map(
+              ['count', 'process-cpu-total', 'wall-maximum', 'wall-total'],
+              statistic => `${prefix}-completion-${stage}-${statistic}-n1`,
+            ),
         ),
         `${prefix}-post-activation-completion`,
         `${prefix}-post-activation-completion-process-cpu-n1`,
       ]),
-      ...['lease-acquire', 'read-session', 'lease-release'].flatMap(stage => [
+      ...EffectArray.flatMap(['lease-acquire', 'read-session', 'lease-release'], stage => [
         `whole-graph-structural-analysis-${stage}`,
         `whole-graph-structural-analysis-${stage}-process-cpu`,
       ]),
@@ -1270,14 +1360,14 @@ describe('code graph release evidence', () => {
     expect(new Set(completionDiagnosticNames).size).toBe(132);
     const withCompletionDiagnostics = (
       artifact: BenchmarkArtifactV1,
-      values: readonly number[] = completionDiagnosticNames.map(() => 100_000),
+      values: readonly number[] = EffectArray.map(completionDiagnosticNames, () => 100_000),
     ): BenchmarkArtifactV1 => ({
       ...artifact,
       metadata: {...artifact.metadata, analysisLeaseDiagnostics: JSON.stringify({version: 1, samples: []})},
       measurements: [
         ...artifact.measurements,
-        ...completionDiagnosticNames.map((name, index) =>
-          benchmarkMeasurement(name, name.endsWith('-count-n1') ? 'count' : 'milliseconds', [
+        ...EffectArray.map(completionDiagnosticNames, (name, index) =>
+          benchmarkMeasurement(name, Effect.pipe(name, EffectString.endsWith('-count-n1')) ? 'count' : 'milliseconds', [
             values[index],
             values[index] + 1,
             values[index] + 2,
@@ -1286,7 +1376,7 @@ describe('code graph release evidence', () => {
       ],
     });
     const originalArtifacts = structuredClone(artifacts);
-    const diagnosticArtifacts = artifacts.map(artifact => withCompletionDiagnostics(artifact));
+    const diagnosticArtifacts = EffectArray.map(artifacts, artifact => withCompletionDiagnostics(artifact));
     expect(createCodeGraphProductionRatchet(diagnosticArtifacts)).toEqual(ratchet);
     for (const name of ['whole-graph-structural-analysis', 'whole-graph-structural-analysis-process-cpu']) {
       expect(ratchet.measurements[name]).toBeDefined();
@@ -1295,7 +1385,7 @@ describe('code graph release evidence', () => {
         enforceCodeGraphBenchmarkRatchet(
           {
             ...diagnosticArtifacts[0],
-            measurements: diagnosticArtifacts[0].measurements.map(measurement =>
+            measurements: EffectArray.map(diagnosticArtifacts[0].measurements, measurement =>
               measurement.name === name ? benchmarkMeasurement(name, 'milliseconds', [maximum + 1]) : measurement,
             ),
           },
@@ -1305,11 +1395,13 @@ describe('code graph release evidence', () => {
     }
     for (const artifact of diagnosticArtifacts) {
       expect(() => enforceCodeGraphBenchmarkRatchet(artifact, ratchet)).not.toThrow();
-      expect(artifact.measurements.slice(-132).map(measurement => measurement.name)).toEqual(completionDiagnosticNames);
+      expect(EffectArray.map(artifact.measurements.slice(-132), measurement => measurement.name)).toEqual(
+        completionDiagnosticNames,
+      );
     }
     fc.assert(
       fc.property(fc.array(fc.nat({max: 1_000_000}), {minLength: 132, maxLength: 132}), values => {
-        const observed = artifacts.map(artifact => withCompletionDiagnostics(artifact, values));
+        const observed = EffectArray.map(artifacts, artifact => withCompletionDiagnostics(artifact, values));
         expect(createCodeGraphProductionRatchet(observed)).toEqual(ratchet);
         expect(() => enforceCodeGraphBenchmarkRatchet(observed[0], ratchet)).not.toThrow();
       }),
@@ -1361,7 +1453,7 @@ describe('code graph release evidence', () => {
     }
     const malformed = {
       ...diagnosticArtifacts[0],
-      measurements: diagnosticArtifacts[0].measurements.map(measurement =>
+      measurements: EffectArray.map(diagnosticArtifacts[0].measurements, measurement =>
         measurement.name === completionDiagnosticNames[0] ? {...measurement, samples: 0} : measurement,
       ),
     };
@@ -1369,12 +1461,12 @@ describe('code graph release evidence', () => {
       /at least one integer sample/u,
     );
 
-    const cleanRebuilds = artifacts.map((artifact, index) => ({
+    const cleanRebuilds = EffectArray.map(artifacts, (artifact, index) => ({
       ...artifact,
       metadata: {
         ...artifact.metadata,
-        benchmarkValidatedManagedExecutableSha256: (index + 1).toString(16).repeat(64),
-        benchmarkValidatedManagedPayloadManifestSha256: (index + 4).toString(16).repeat(64),
+        benchmarkValidatedManagedExecutableSha256: Effect.pipe((index + 1).toString(16), EffectString.repeat(64)),
+        benchmarkValidatedManagedPayloadManifestSha256: Effect.pipe((index + 4).toString(16), EffectString.repeat(64)),
       },
     }));
 
@@ -1382,20 +1474,25 @@ describe('code graph release evidence', () => {
     expect(createCodeGraphProductionRatchet(cleanRebuilds)).toEqual(ratchet);
     expect(
       createCodeGraphProductionRatchet(
-        artifacts.map((artifact, index) => ({
-          ...artifact,
-          environment: {
-            ...artifact.environment,
-            cpu: `governed-pool-cpu-${index}`,
-            memoryBytes: artifact.environment.memoryBytes + index * 1_073_741_824,
-            operatingSystem: `macOS 27.${index}`,
-          },
-          metadata: {
-            ...artifact.metadata,
-            effectiveParserMemoryBytes:
-              (artifact.metadata.effectiveParserMemoryBytes as number) + index * 1_073_741_824,
-          },
-        })),
+        EffectArray.map(artifacts, (artifact, index) => {
+          const effectiveParserMemoryBytes = artifact.metadata.effectiveParserMemoryBytes;
+          if (typeof effectiveParserMemoryBytes !== 'number' || !Number.isFinite(effectiveParserMemoryBytes)) {
+            throw new Error('Expected a finite effective parser memory value.');
+          }
+          return {
+            ...artifact,
+            environment: {
+              ...artifact.environment,
+              cpu: `governed-pool-cpu-${index}`,
+              memoryBytes: artifact.environment.memoryBytes + index * 1_073_741_824,
+              operatingSystem: `macOS 27.${index}`,
+            },
+            metadata: {
+              ...artifact.metadata,
+              effectiveParserMemoryBytes: effectiveParserMemoryBytes + index * 1_073_741_824,
+            },
+          };
+        }),
       ),
     ).toEqual(ratchet);
     expect(ratchet.environment).toEqual({
@@ -1409,7 +1506,7 @@ describe('code graph release evidence', () => {
     });
     fc.assert(
       fc.property(fc.array(fc.stringMatching(/^[0-9a-f]{64}$/u), {maxLength: 6, minLength: 6}), rebuildDigests => {
-        const rebuilt = artifacts.map((artifact, index) => ({
+        const rebuilt = EffectArray.map(artifacts, (artifact, index) => ({
           ...artifact,
           metadata: {
             ...artifact.metadata,
@@ -1428,7 +1525,7 @@ describe('code graph release evidence', () => {
           ...artifacts[2],
           metadata: {
             ...artifacts[2].metadata,
-            benchmarkValidatedManagedReleaseMetadataSha256: 'f'.repeat(64),
+            benchmarkValidatedManagedReleaseMetadataSha256: Effect.pipe('f', EffectString.repeat(64)),
           },
         },
       ]),
@@ -1462,8 +1559,12 @@ describe('code graph release evidence', () => {
       ['same-overlay-reference-registration-lock-and-database-setup', 3],
     ] as const) {
       const observedMaximum = Math.max(
-        ...artifacts.map(
-          artifact => artifact.measurements.find(measurement => measurement.name === registrationName)!.p50,
+        ...EffectArray.map(
+          artifacts,
+          artifact =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(artifact.measurements, measurement => measurement.name === registrationName),
+            )!.p50,
         ),
       );
       expect(ratchet.measurements[registrationName]).toMatchObject({
@@ -1479,9 +1580,9 @@ describe('code graph release evidence', () => {
             'cold-registration-lock-and-database-setup': coldRegistration,
             'same-overlay-reference-registration-lock-and-database-setup': referenceRegistration,
           };
-          const varied = artifacts.map(artifact => ({
+          const varied = EffectArray.map(artifacts, artifact => ({
             ...artifact,
-            measurements: artifact.measurements.map(measurement =>
+            measurements: EffectArray.map(artifact.measurements, measurement =>
               registrations[measurement.name] === undefined
                 ? measurement
                 : benchmarkMeasurement(measurement.name, measurement.unit, [registrations[measurement.name]]),
@@ -1504,7 +1605,7 @@ describe('code graph release evidence', () => {
       fc.property(fc.integer({max: 10_000, min: 1}), samplerCount => {
         const observed = {
           ...artifacts[0],
-          measurements: artifacts[0].measurements.map(measurement =>
+          measurements: EffectArray.map(artifacts[0].measurements, measurement =>
             measurement.name === 'hosted-sampler-samples-n1'
               ? benchmarkMeasurement(measurement.name, measurement.unit, [samplerCount])
               : measurement,
@@ -1516,7 +1617,7 @@ describe('code graph release evidence', () => {
     );
     const missingCoverage = {
       ...artifacts[0],
-      measurements: artifacts[0].measurements.map(measurement =>
+      measurements: EffectArray.map(artifacts[0].measurements, measurement =>
         measurement.name === 'hosted-sampler-samples-n1'
           ? benchmarkMeasurement(measurement.name, measurement.unit, [0])
           : measurement,
@@ -1535,9 +1636,9 @@ describe('code graph release evidence', () => {
       benchmarkReferenceDiskLocation: 'internal',
     });
     expect(ratchet.metadata).not.toHaveProperty('structuralGraphDigestCold');
-    const overTarget = artifacts.map(artifact => ({
+    const overTarget = EffectArray.map(artifacts, artifact => ({
       ...artifact,
-      measurements: artifact.measurements.map(measurement =>
+      measurements: EffectArray.map(artifact.measurements, measurement =>
         measurement.name === 'one-file-reindex-index'
           ? benchmarkMeasurement(measurement.name, measurement.unit, [30_000])
           : measurement,
@@ -1546,9 +1647,9 @@ describe('code graph release evidence', () => {
     expect(() => createCodeGraphProductionRatchet(overTarget)).toThrow(
       /objective one-file-reindex-index has not been attained/,
     );
-    const overRegistrationTarget = artifacts.map(artifact => ({
+    const overRegistrationTarget = EffectArray.map(artifacts, artifact => ({
       ...artifact,
-      measurements: artifact.measurements.map(measurement =>
+      measurements: EffectArray.map(artifact.measurements, measurement =>
         measurement.name === 'cold-registration-lock-and-database-setup'
           ? benchmarkMeasurement(measurement.name, measurement.unit, [5_000])
           : measurement,
@@ -1567,7 +1668,7 @@ describe('code graph release evidence', () => {
       const maximum = governedLimit.maximum ?? governedLimit.p95Maximum!;
       const regression = {
         ...artifacts[0],
-        measurements: artifacts[0].measurements.map(measurement =>
+        measurements: EffectArray.map(artifacts[0].measurements, measurement =>
           measurement.name === governedName
             ? benchmarkMeasurement(measurement.name, measurement.unit, [maximum + 1])
             : measurement,
@@ -1575,19 +1676,33 @@ describe('code graph release evidence', () => {
       };
       expect(() => enforceCodeGraphBenchmarkRatchet(regression, ratchet)).toThrow(new RegExp(governedName));
     }
-    expect(Object.keys(ratchet.measurements)).toHaveLength(artifacts[0].measurements.length - 8);
-    expect(Object.keys(ratchet.measurements).some(name => name.includes('-progress-external-'))).toBe(false);
-    expect(Object.keys(ratchet.measurements).some(name => name.endsWith('-boundary-rss-n1'))).toBe(false);
+    expect(EffectRecord.keys(ratchet.measurements)).toHaveLength(artifacts[0].measurements.length - 8);
     expect(
-      Object.keys(ratchet.measurements).some(name => name.endsWith('-external-process-tree-maximum-sample-gap-n1')),
+      EffectArray.some(EffectRecord.keys(ratchet.measurements), name =>
+        Effect.pipe(name, EffectString.includes('-progress-external-')),
+      ),
     ).toBe(false);
-    expect(Object.keys(ratchet.measurements).some(name => name.endsWith('-filesystem-available-n1'))).toBe(false);
+    expect(
+      EffectArray.some(EffectRecord.keys(ratchet.measurements), name =>
+        Effect.pipe(name, EffectString.endsWith('-boundary-rss-n1')),
+      ),
+    ).toBe(false);
+    expect(
+      EffectArray.some(EffectRecord.keys(ratchet.measurements), name =>
+        Effect.pipe(name, EffectString.endsWith('-external-process-tree-maximum-sample-gap-n1')),
+      ),
+    ).toBe(false);
+    expect(
+      EffectArray.some(EffectRecord.keys(ratchet.measurements), name =>
+        Effect.pipe(name, EffectString.endsWith('-filesystem-available-n1')),
+      ),
+    ).toBe(false);
     expect(ratchet.measurements['cold-external-rss-peak-observed-n1']).toBeDefined();
     expect(() => enforceCodeGraphBenchmarkRatchet(artifacts[0], ratchet)).not.toThrow();
     for (const name of nonIncreasingWorkMeasurements) {
       const withWork = (value: number): BenchmarkArtifactV1 => ({
         ...artifacts[0],
-        measurements: artifacts[0].measurements.map(measurement =>
+        measurements: EffectArray.map(artifacts[0].measurements, measurement =>
           measurement.name === name ? benchmarkMeasurement(name, 'count', [value]) : measurement,
         ),
       });
@@ -1603,8 +1718,8 @@ describe('code graph release evidence', () => {
             benchmarkPrimaryAvailableBytesAtStart: availableBytes,
             benchmarkReferenceAvailableBytesAtStart: availableBytes,
           },
-          measurements: artifacts[0].measurements.map(measurement =>
-            measurement.name.endsWith('-filesystem-available-n1')
+          measurements: EffectArray.map(artifacts[0].measurements, measurement =>
+            Effect.pipe(measurement.name, EffectString.endsWith('-filesystem-available-n1'))
               ? benchmarkMeasurement(measurement.name, measurement.unit, [availableBytes])
               : measurement,
           ),
@@ -1625,7 +1740,7 @@ describe('code graph release evidence', () => {
         ratchet,
       ),
     ).toThrow(/stable production measurement set changed.*future-stable-production-metric/u);
-    const scaledArtifacts = artifacts.map(artifact => ({
+    const scaledArtifacts = EffectArray.map(artifacts, artifact => ({
       ...artifact,
       metadata: {
         ...artifact.metadata,
@@ -1647,7 +1762,7 @@ describe('code graph release evidence', () => {
     for (const artifact of scaledArtifacts) {
       expect(() => enforceCodeGraphBenchmarkRatchet(artifact, scaledRatchet)).not.toThrow();
     }
-    const githubHostedArtifacts = scaledArtifacts.map(artifact => ({
+    const githubHostedArtifacts = EffectArray.map(scaledArtifacts, artifact => ({
       ...artifact,
       metadata: {
         ...artifact.metadata,
@@ -1677,7 +1792,7 @@ describe('code graph release evidence', () => {
       ...artifact,
       createdAt,
       environment: {...artifact.environment, commit},
-      measurements: artifact.measurements.map(measurement =>
+      measurements: EffectArray.map(artifact.measurements, measurement =>
         measurementValues[measurement.name] === undefined
           ? measurement
           : benchmarkMeasurement(measurement.name, measurement.unit, [measurementValues[measurement.name]]),
@@ -1689,8 +1804,8 @@ describe('code graph release evidence', () => {
         sameRunnerComparisonKey: 'github-hosted-linux-x64|Linux|x64|Intel test|17179869184',
       },
     });
-    const controlCommit = 'a'.repeat(40);
-    const candidateCommit = 'b'.repeat(40);
+    const controlCommit = Effect.pipe('a', EffectString.repeat(40));
+    const candidateCommit = Effect.pipe('b', EffectString.repeat(40));
     const sandwichStart = Date.parse('2026-08-28T00:00:00.000Z');
     const sandwichTime = (minutes: number) => new Date(sandwichStart + minutes * 60_000).toISOString();
     const pairedInitialCandidateArtifact = pairedArtifact(
@@ -1779,7 +1894,7 @@ describe('code graph release evidence', () => {
     const withProcessCount = (artifact: BenchmarkArtifactV1, name: string, value: number): BenchmarkArtifactV1 => ({
       ...artifact,
       measurements: [
-        ...artifact.measurements.filter(measurement => measurement.name !== name),
+        ...EffectArray.filter(artifact.measurements, measurement => measurement.name !== name),
         benchmarkMeasurement(name, 'count', [value]),
       ],
     });
@@ -1934,8 +2049,11 @@ describe('code graph release evidence', () => {
         [
           {
             ...observation,
-            environment: {...observation.environment, commit: 'c'.repeat(40)},
-            metadata: {...observation.metadata, benchmarkMeasuredSourceCommit: 'c'.repeat(40)},
+            environment: {...observation.environment, commit: Effect.pipe('c', EffectString.repeat(40))},
+            metadata: {
+              ...observation.metadata,
+              benchmarkMeasuredSourceCommit: Effect.pipe('c', EffectString.repeat(40)),
+            },
           },
           /candidate commit|control commit/u,
         ],
@@ -2228,16 +2346,16 @@ describe('code graph release evidence', () => {
     expect(() =>
       enforceCodeGraphBenchmarkRatchet(noisyCandidate, githubHostedRatchet, {
         ...pairedControl,
-        expectedCommit: 'c'.repeat(40),
+        expectedCommit: Effect.pipe('c', EffectString.repeat(40)),
       }),
     ).toThrow(/paired control commit/u);
     expect(() =>
       enforceCodeGraphBenchmarkRatchet(noisyCandidate, githubHostedRatchet, {
         ...pairedControl,
-        expectedCandidateCommit: 'c'.repeat(40),
+        expectedCandidateCommit: Effect.pipe('c', EffectString.repeat(40)),
       }),
     ).toThrow(/paired candidate commit/u);
-    const anotherCandidateCommit = 'c'.repeat(40);
+    const anotherCandidateCommit = Effect.pipe('c', EffectString.repeat(40));
     expect(() =>
       enforceCodeGraphBenchmarkRatchet(noisyCandidate, githubHostedRatchet, {
         ...pairedControl,
@@ -2382,7 +2500,7 @@ describe('code graph release evidence', () => {
     );
     expect(
       createCodeGraphProductionRatchet(
-        githubHostedArtifacts.map((artifact, index) => {
+        EffectArray.map(githubHostedArtifacts, (artifact, index) => {
           const filesystem = ['overlayfs', 'ext4', 'unknown'][index];
           return {
             ...artifact,
@@ -2439,7 +2557,7 @@ describe('code graph release evidence', () => {
           {maxLength: githubHostedArtifacts.length, minLength: githubHostedArtifacts.length},
         ),
         observations => {
-          const rebuilt = githubHostedArtifacts.map((artifact, index) => ({
+          const rebuilt = EffectArray.map(githubHostedArtifacts, (artifact, index) => ({
             ...artifact,
             metadata: {
               ...artifact.metadata,
@@ -2458,7 +2576,7 @@ describe('code graph release evidence', () => {
     );
     expect(() =>
       createCodeGraphProductionRatchet(
-        githubHostedArtifacts.map(artifact => ({
+        EffectArray.map(githubHostedArtifacts, artifact => ({
           ...artifact,
           metadata: {...artifact.metadata, benchmarkReferenceDiskMedium: 'unknown'},
         })),
@@ -2466,7 +2584,7 @@ describe('code graph release evidence', () => {
     ).not.toThrow();
     expect(() =>
       createCodeGraphProductionRatchet(
-        githubHostedArtifacts.map(artifact => ({
+        EffectArray.map(githubHostedArtifacts, artifact => ({
           ...artifact,
           metadata: {...artifact.metadata, benchmarkGithubRunnerEnvironment: 'self-hosted'},
         })),
@@ -2474,7 +2592,7 @@ describe('code graph release evidence', () => {
     ).toThrow(/governed storage evidence/);
     expect(() =>
       createCodeGraphProductionRatchet(
-        githubHostedArtifacts.map(artifact => ({
+        EffectArray.map(githubHostedArtifacts, artifact => ({
           ...artifact,
           metadata: {...artifact.metadata, benchmarkReferenceDiskMedium: 'rotational'},
         })),
@@ -2482,7 +2600,7 @@ describe('code graph release evidence', () => {
     ).not.toThrow();
     expect(() =>
       createCodeGraphProductionRatchet(
-        githubHostedArtifacts.map(artifact => ({
+        EffectArray.map(githubHostedArtifacts, artifact => ({
           ...artifact,
           metadata: {
             ...artifact.metadata,
@@ -2494,7 +2612,7 @@ describe('code graph release evidence', () => {
     ).toThrow(/governed storage evidence/);
     expect(() =>
       createCodeGraphProductionRatchet(
-        scaledArtifacts.map(artifact => ({
+        EffectArray.map(scaledArtifacts, artifact => ({
           ...artifact,
           metadata: {...artifact.metadata, benchmarkMinimumFreeBytes: 20 * 1_073_741_824 - 1},
         })),
@@ -2504,7 +2622,7 @@ describe('code graph release evidence', () => {
     const limit = ratchet.measurements['cold-index'].p95Maximum!;
     const regressed = {
       ...artifacts[0],
-      measurements: artifacts[0].measurements.map(measurement =>
+      measurements: EffectArray.map(artifacts[0].measurements, measurement =>
         measurement.name === 'cold-index'
           ? benchmarkMeasurement(measurement.name, measurement.unit, [limit + 1])
           : measurement,
@@ -2515,7 +2633,7 @@ describe('code graph release evidence', () => {
       fc.property(fc.integer({max: 1_000, min: 2}), changedFileRows => {
         const nondeterministic = {
           ...artifacts[2],
-          measurements: artifacts[2].measurements.map(measurement =>
+          measurements: EffectArray.map(artifacts[2].measurements, measurement =>
             measurement.name === 'cold-materialized-file-rows'
               ? benchmarkMeasurement(measurement.name, measurement.unit, [changedFileRows])
               : measurement,
@@ -2540,72 +2658,75 @@ describe('code graph release evidence', () => {
 
   it('retains and requires sampler v4 recursive process-tree and open temporary-file evidence', () => {
     const retained = new Map(
-      externalSamplerMeasurements('cold', {
-        intervalMilliseconds: 25,
-        phases: {
-          materializing: {
-            cpuMilliseconds: 100,
-            databasePeakBytes: 1_000,
-            ioReadBytes: 2_000,
-            ioWriteBytes: 3_000,
-            processPeakCount: 5,
-            processSampleAttempts: 7,
-            processSampleFailures: 0,
-            processSampleGapPeakMilliseconds: 25,
-            processSamples: 7,
-            rssPeakBytes: 4_000,
-            samples: 8,
-            shmPeakBytes: 6_000,
-            temporaryOpenAttempts: 6,
-            temporaryOpenFailures: 0,
-            temporaryPeakBytes: 7_000,
-            temporaryLinkedPeakBytes: 1_000,
-            temporaryOpenPeakBytes: 6_500,
-            temporaryOpenSamples: 6,
-            walPeakBytes: 8_000,
+      EffectArray.map(
+        externalSamplerMeasurements('cold', {
+          intervalMilliseconds: 25,
+          phases: {
+            materializing: {
+              cpuMilliseconds: 100,
+              databasePeakBytes: 1_000,
+              ioReadBytes: 2_000,
+              ioWriteBytes: 3_000,
+              processPeakCount: 5,
+              processSampleAttempts: 7,
+              processSampleFailures: 0,
+              processSampleGapPeakMilliseconds: 25,
+              processSamples: 7,
+              rssPeakBytes: 4_000,
+              samples: 8,
+              shmPeakBytes: 6_000,
+              temporaryOpenAttempts: 6,
+              temporaryOpenFailures: 0,
+              temporaryPeakBytes: 7_000,
+              temporaryLinkedPeakBytes: 1_000,
+              temporaryOpenPeakBytes: 6_500,
+              temporaryOpenSamples: 6,
+              walPeakBytes: 8_000,
+            },
+            scanning: {
+              cpuMilliseconds: 10,
+              databasePeakBytes: 100,
+              ioReadBytes: 200,
+              ioWriteBytes: 300,
+              processPeakCount: 3,
+              processSampleAttempts: 4,
+              processSampleFailures: 0,
+              processSampleGapPeakMilliseconds: 20,
+              processSamples: 4,
+              rssPeakBytes: 400,
+              samples: 5,
+              shmPeakBytes: 600,
+              temporaryOpenAttempts: 3,
+              temporaryOpenFailures: 0,
+              temporaryPeakBytes: 700,
+              temporaryLinkedPeakBytes: 100,
+              temporaryOpenPeakBytes: 650,
+              temporaryOpenSamples: 3,
+              walPeakBytes: 800,
+            },
           },
-          scanning: {
-            cpuMilliseconds: 10,
-            databasePeakBytes: 100,
-            ioReadBytes: 200,
-            ioWriteBytes: 300,
-            processPeakCount: 3,
-            processSampleAttempts: 4,
-            processSampleFailures: 0,
-            processSampleGapPeakMilliseconds: 20,
-            processSamples: 4,
-            rssPeakBytes: 400,
-            samples: 5,
-            shmPeakBytes: 600,
-            temporaryOpenAttempts: 3,
-            temporaryOpenFailures: 0,
-            temporaryPeakBytes: 700,
-            temporaryLinkedPeakBytes: 100,
-            temporaryOpenPeakBytes: 650,
-            temporaryOpenSamples: 3,
-            walPeakBytes: 800,
+          platform: 'linux',
+          processTelemetry: {
+            availability: 'available',
+            ioCounters: 'linux-proc-read-write-bytes',
+            parentIdentityValidation: 'linux-proc-starttime',
+            sampleIntervalMilliseconds: 25,
+            scope: 'recursive-process-tree',
+            source: 'linux-proc',
           },
-        },
-        platform: 'linux',
-        processTelemetry: {
-          availability: 'available',
-          ioCounters: 'linux-proc-read-write-bytes',
-          parentIdentityValidation: 'linux-proc-starttime',
-          sampleIntervalMilliseconds: 25,
-          scope: 'recursive-process-tree',
-          source: 'linux-proc',
-        },
-        samples: 13,
-        temporaryTelemetry: {
-          availability: 'available',
-          maximumOpenFileDescriptors: 65_536,
-          maximumProcesses: 4_096,
-          openFileSampleIntervalMilliseconds: 25,
-          scope: 'temporary-root-linked-plus-process-tree-open-files',
-          source: 'linux-proc-fd',
-        },
-        version: 4,
-      }).map(measurement => [measurement.name, measurement.minimum]),
+          samples: 13,
+          temporaryTelemetry: {
+            availability: 'available',
+            maximumOpenFileDescriptors: 65_536,
+            maximumProcesses: 4_096,
+            openFileSampleIntervalMilliseconds: 25,
+            scope: 'temporary-root-linked-plus-process-tree-open-files',
+            source: 'linux-proc-fd',
+          },
+          version: 4,
+        }),
+        measurement => [measurement.name, measurement.minimum],
+      ),
     );
     for (const [name, value] of [
       ['cold-external-sampler-version-n1', 4],
@@ -2643,7 +2764,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === 'cold-external-process-tree-samples-n1'
             ? benchmarkMeasurement(measurement.name, 'count', [0])
             : measurement,
@@ -2653,7 +2774,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === 'cold-external-process-tree-failures-n1'
             ? benchmarkMeasurement(measurement.name, 'count', [1])
             : measurement,
@@ -2663,7 +2784,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === 'one-file-reindex-external-sampler-version-n1'
             ? benchmarkMeasurement(measurement.name, 'count', [3])
             : measurement,
@@ -2673,7 +2794,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === 'same-overlay-reference-external-storage-samples-n1'
             ? benchmarkMeasurement(measurement.name, 'count', [0])
             : measurement,
@@ -2683,7 +2804,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === 'cold-external-open-temp-process-tree-failures-n1'
             ? benchmarkMeasurement(measurement.name, 'count', [1])
             : measurement,
@@ -2728,7 +2849,8 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.filter(
+        measurements: EffectArray.filter(
+          artifact.measurements,
           measurement => measurement.name !== 'cold-activation-copying-symbols-duration-n1',
         ),
       }),
@@ -2736,7 +2858,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === 'one-file-reindex-activation-observed-stages-n1'
             ? benchmarkMeasurement(measurement.name, 'count', [0])
             : measurement,
@@ -2752,7 +2874,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === 'cold-activation-copying-symbols-observed-n1'
             ? benchmarkMeasurement(measurement.name, 'count', [1])
             : measurement,
@@ -2762,7 +2884,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertProductionReleaseEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === 'cold-sqlite-durable-database-pages-high-water-n1'
             ? benchmarkMeasurement(measurement.name, 'bytes', [0])
             : measurement,
@@ -2772,14 +2894,17 @@ describe('code graph release evidence', () => {
   });
 
   it('gates materialization independently from end-to-end indexing', () => {
-    const measurements = [
-      'cold-index',
-      'cold-materialization',
-      'one-file-reindex-index',
-      'one-file-reindex-materialization',
-      'hot-exact-lexical-query',
-      'whole-graph-structural-analysis',
-    ].map(name => benchmarkMeasurement(name, 'milliseconds', [10]));
+    const measurements = EffectArray.map(
+      [
+        'cold-index',
+        'cold-materialization',
+        'one-file-reindex-index',
+        'one-file-reindex-materialization',
+        'hot-exact-lexical-query',
+        'whole-graph-structural-analysis',
+      ],
+      name => benchmarkMeasurement(name, 'milliseconds', [10]),
+    );
     const artifact = benchmarkArtifact([
       ...measurements,
       benchmarkMeasurement('incremental-process-peak-rss', 'bytes', [10]),
@@ -2801,7 +2926,7 @@ describe('code graph release evidence', () => {
     expect(() => enforceCodeGraphBenchmarkBudget(artifact, budget, undefined)).not.toThrow();
     const regressed = {
       ...artifact,
-      measurements: artifact.measurements.map(measurement =>
+      measurements: EffectArray.map(artifact.measurements, measurement =>
         measurement.name === 'one-file-reindex-materialization'
           ? benchmarkMeasurement(measurement.name, 'milliseconds', [21])
           : measurement,
@@ -2813,10 +2938,7 @@ describe('code graph release evidence', () => {
   });
 
   it('retains the independent 10k vector cold-wall calibration and every other performance guard', () => {
-    const budgets = readJson(CODE_GRAPH_BUDGETS) as {
-      readonly vectorPerformance: PerformanceBudget;
-      readonly vectorScalePerformance: Readonly<Record<string, PerformanceBudget>>;
-    };
+    const budgets = decodeCodeGraphBudgets(readJson(CODE_GRAPH_BUDGETS));
     const budget = budgets.vectorScalePerformance['10000'];
     const guardedMeasurements = [
       ['cold-materialization', 'coldMaterializationP95MillisecondsMaximum'],
@@ -2830,8 +2952,14 @@ describe('code graph release evidence', () => {
     const artifact = benchmarkArtifact(
       [
         benchmarkMeasurement('cold-index', 'milliseconds', [budget.coldIndexP95MillisecondsMaximum]),
-        ...guardedMeasurements.map(([name]) =>
-          benchmarkMeasurement(name, name.includes('rss') || name.includes('disk') ? 'bytes' : 'milliseconds', [1]),
+        ...EffectArray.map(guardedMeasurements, ([name]) =>
+          benchmarkMeasurement(
+            name,
+            Effect.pipe(name, EffectString.includes('rss')) || Effect.pipe(name, EffectString.includes('disk'))
+              ? 'bytes'
+              : 'milliseconds',
+            [1],
+          ),
         ),
       ],
       {scaleSymbols: 10_000, vectorEnabled: true},
@@ -2855,7 +2983,7 @@ describe('code graph release evidence', () => {
       enforceCodeGraphBenchmarkBudget(
         {
           ...artifact,
-          measurements: artifact.measurements.map(measurement =>
+          measurements: EffectArray.map(artifact.measurements, measurement =>
             measurement.name === 'cold-index'
               ? benchmarkMeasurement(measurement.name, measurement.unit, [600_001])
               : measurement,
@@ -2870,7 +2998,7 @@ describe('code graph release evidence', () => {
       fc.property(fc.constantFrom(...guardedMeasurements), fc.integer({max: 10_000, min: 1}), ([name, key], delta) => {
         const regressed = {
           ...artifact,
-          measurements: artifact.measurements.map(measurement =>
+          measurements: EffectArray.map(artifact.measurements, measurement =>
             measurement.name === name
               ? benchmarkMeasurement(measurement.name, measurement.unit, [budget[key] + delta])
               : measurement,
@@ -2977,7 +3105,7 @@ describe('code graph release evidence', () => {
   it('is invariant to artifact measurement order for arbitrary bounded exact ratchets', () => {
     fc.assert(
       fc.property(fc.array(fc.integer({max: 1_000_000, min: 0}), {maxLength: 30, minLength: 1}), values => {
-        const measurements = values.map((value, index) =>
+        const measurements = EffectArray.map(values, (value, index) =>
           benchmarkMeasurement(`metric-${index}`, index % 2 === 0 ? 'milliseconds' : 'bytes', [value]),
         );
         const ratchet = {
@@ -2987,8 +3115,8 @@ describe('code graph release evidence', () => {
             runner: 'threadnote-code-graph-e2e',
             runnerVersion: '1',
           },
-          measurements: Object.fromEntries(
-            measurements.map(measurement => [
+          measurements: EffectRecord.fromEntries(
+            EffectArray.map(measurements, measurement => [
               measurement.name,
               {maximum: measurement.maximum, minimum: measurement.minimum, unit: measurement.unit},
             ]),
@@ -3010,14 +3138,17 @@ describe('code graph release evidence', () => {
   });
 
   it('applies development scheduler headroom only to the recorded runtime platform', () => {
-    const measurements = [
-      'cold-index',
-      'cold-materialization',
-      'one-file-reindex-index',
-      'one-file-reindex-materialization',
-      'hot-exact-lexical-query',
-      'whole-graph-structural-analysis',
-    ].map(name => benchmarkMeasurement(name, 'milliseconds', [10]));
+    const measurements = EffectArray.map(
+      [
+        'cold-index',
+        'cold-materialization',
+        'one-file-reindex-index',
+        'one-file-reindex-materialization',
+        'hot-exact-lexical-query',
+        'whole-graph-structural-analysis',
+      ],
+      name => benchmarkMeasurement(name, 'milliseconds', [10]),
+    );
     const artifact = benchmarkArtifact(
       [
         ...measurements,
@@ -3056,13 +3187,16 @@ describe('code graph release evidence', () => {
       105,
       106,
     ]);
-    const measurements = [
-      'cold-index',
-      'cold-materialization',
-      'one-file-reindex-index',
-      'one-file-reindex-materialization',
-      'whole-graph-structural-analysis',
-    ].map(name => benchmarkMeasurement(name, 'milliseconds', [10]));
+    const measurements = EffectArray.map(
+      [
+        'cold-index',
+        'cold-materialization',
+        'one-file-reindex-index',
+        'one-file-reindex-materialization',
+        'whole-graph-structural-analysis',
+      ],
+      name => benchmarkMeasurement(name, 'milliseconds', [10]),
+    );
     const artifact = benchmarkArtifact([
       ...measurements,
       hotWall,
@@ -3090,11 +3224,17 @@ describe('code graph release evidence', () => {
 
     expect(hotWall.p95).toBe(105);
     expect(() => enforceCodeGraphBenchmarkBudget(artifact, {developmentPerformance}, undefined)).not.toThrow();
-    expect(artifact.measurements.find(measurement => measurement.name === hotWall.name)?.p95).toBe(105);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(artifact.measurements, measurement => measurement.name === hotWall.name),
+      )?.p95,
+    ).toBe(105);
 
     const replace = (name: string, measurement: BenchmarkArtifactV1['measurements'][number]) => ({
       ...artifact,
-      measurements: artifact.measurements.map(candidate => (candidate.name === name ? measurement : candidate)),
+      measurements: EffectArray.map(artifact.measurements, candidate =>
+        candidate.name === name ? measurement : candidate,
+      ),
     });
     expect(() =>
       enforceCodeGraphBenchmarkBudget(
@@ -3228,19 +3368,23 @@ describe('code graph release evidence', () => {
   });
 
   it('requires exact-commit aggregate evidence for an external repository soak', () => {
-    const controlMeasurements = [
-      'cold-materialized-file-rows-language-java',
-      'cold-materialized-symbol-rows-language-java',
-      'external-query-cold-java-returned-nodes',
-      'external-query-cold-java-expected-path-language-nodes',
-      'external-query-incremental-java-returned-nodes',
-      'external-query-incremental-java-expected-path-language-nodes',
-      'external-query-same-overlay-reference-java-returned-nodes',
-      'external-query-same-overlay-reference-java-expected-path-language-nodes',
-      'external-query-java-same-overlay-structural-parity',
-    ].map(name => benchmarkMeasurement(name, 'count', [1]));
+    const controlMeasurements = EffectArray.map(
+      [
+        'cold-materialized-file-rows-language-java',
+        'cold-materialized-symbol-rows-language-java',
+        'external-query-cold-java-returned-nodes',
+        'external-query-cold-java-expected-path-language-nodes',
+        'external-query-incremental-java-returned-nodes',
+        'external-query-incremental-java-expected-path-language-nodes',
+        'external-query-same-overlay-reference-java-returned-nodes',
+        'external-query-same-overlay-reference-java-expected-path-language-nodes',
+        'external-query-java-same-overlay-structural-parity',
+      ],
+      name => benchmarkMeasurement(name, 'count', [1]),
+    );
     controlMeasurements.push(benchmarkMeasurement('external-query-cold-java-duration', 'milliseconds', [10]));
-    const mcpMeasurements = (['query', 'node', 'neighbors', 'explain', 'impact', 'path'] as const).flatMap(
+    const mcpMeasurements = EffectArray.flatMap(
+      ['query', 'node', 'neighbors', 'explain', 'impact', 'path'] as const,
       operation => [
         benchmarkMeasurement(`mcp-${operation}-duration`, 'milliseconds', [10]),
         benchmarkMeasurement(`mcp-${operation}-structured-output`, 'bytes', [1_024]),
@@ -3266,7 +3410,7 @@ describe('code graph release evidence', () => {
           java: {
             path: 'src/Example.java',
             query: 'ExampleService',
-            stableNodeId: `cgs_${'1'.repeat(32)}`,
+            stableNodeId: `cgs_${Effect.pipe('1', EffectString.repeat(32))}`,
           },
         }),
         externalControlLanguages: 'java',
@@ -3299,9 +3443,9 @@ describe('code graph release evidence', () => {
         sameOverlayReferenceMaterializationStorageMode: 'direct-persistent',
         simultaneousWorktrees: 2,
         sqliteVersion: '3.49.1',
-        structuralGraphDigestCold: '1'.repeat(64),
-        structuralGraphDigestIncremental: '2'.repeat(64),
-        structuralGraphDigestSameOverlayReference: '2'.repeat(64),
+        structuralGraphDigestCold: Effect.pipe('1', EffectString.repeat(64)),
+        structuralGraphDigestIncremental: Effect.pipe('2', EffectString.repeat(64)),
+        structuralGraphDigestSameOverlayReference: Effect.pipe('2', EffectString.repeat(64)),
         worktreeIsolationCleanupPassed: true,
         worktreeIsolationCommandTimeoutMilliseconds: 30_000,
         worktreeIsolationIndexedFiles: 2,
@@ -3349,7 +3493,7 @@ describe('code graph release evidence', () => {
     expect(() =>
       assertExternalRepositoryEvidence({
         ...artifact,
-        measurements: artifact.measurements.map(measurement =>
+        measurements: EffectArray.map(artifact.measurements, measurement =>
           measurement.name === 'external-query-incremental-java-expected-path-language-nodes'
             ? benchmarkMeasurement(measurement.name, 'count', [0])
             : measurement,
@@ -3363,17 +3507,17 @@ describe('code graph release evidence', () => {
 
   it('requires the complete release-bound public-repository performance contract', () => {
     const languages = ['java', 'kotlin', 'typescript', 'bazel-build'] as const;
-    const controls = Object.fromEntries(
-      languages.map((language, index) => [
+    const controls = EffectRecord.fromEntries(
+      EffectArray.map(languages, (language, index) => [
         language === 'bazel-build' ? 'bazel' : language,
         {
           path: `src/control-${index}.${language === 'java' ? 'java' : language === 'kotlin' ? 'kt' : 'ts'}`,
           query: `Control${index}`,
-          stableNodeId: `cgs_${String(index + 1).repeat(32)}`,
+          stableNodeId: `cgs_${Effect.pipe(String(index + 1), EffectString.repeat(32))}`,
         },
       ]),
     );
-    const controlMeasurements = languages.flatMap(language => [
+    const controlMeasurements = EffectArray.flatMap(languages, language => [
       benchmarkMeasurement(`cold-materialized-file-rows-language-${language}`, 'count', [1]),
       benchmarkMeasurement(`cold-materialized-symbol-rows-language-${language}`, 'count', [1]),
       benchmarkMeasurement(`external-query-cold-${language}-duration`, 'milliseconds', [10]),
@@ -3389,7 +3533,8 @@ describe('code graph release evidence', () => {
       ),
       benchmarkMeasurement(`external-query-${language}-same-overlay-structural-parity`, 'count', [1]),
     ]);
-    const mcpMeasurements = (['query', 'node', 'neighbors', 'explain', 'impact', 'path'] as const).flatMap(
+    const mcpMeasurements = EffectArray.flatMap(
+      ['query', 'node', 'neighbors', 'explain', 'impact', 'path'] as const,
       operation => [
         benchmarkMeasurement(`mcp-${operation}-duration`, 'milliseconds', [10]),
         benchmarkMeasurement(`mcp-${operation}-structured-output`, 'bytes', [1_024]),
@@ -3402,7 +3547,7 @@ describe('code graph release evidence', () => {
       ...controlMeasurements,
       ...mcpMeasurements,
     ];
-    const evidenceMeasurementNames = new Set(evidenceMeasurements.map(measurement => measurement.name));
+    const evidenceMeasurementNames = new Set(EffectArray.map(evidenceMeasurements, measurement => measurement.name));
     for (const [name, unit] of [
       ['cold-index', 'milliseconds'],
       ['cold-registration-lock-and-database-setup', 'milliseconds'],
@@ -3463,13 +3608,13 @@ describe('code graph release evidence', () => {
         benchmarkLogicalCpuCount: 10,
         benchmarkSourceValidationMode: 'managed-payload-exact-head-validated',
         benchmarkValidatedManagedDependencyInstallation: 'bun install --frozen-lockfile',
-        benchmarkValidatedManagedExecutableSha256: 'c'.repeat(64),
+        benchmarkValidatedManagedExecutableSha256: Effect.pipe('c', EffectString.repeat(64)),
         benchmarkValidatedManagedPayload: 'exact-head-not-executed',
         benchmarkValidatedManagedPayloadBytes: 1_024,
         benchmarkValidatedManagedPayloadFileCount: 10,
-        benchmarkValidatedManagedPayloadManifestSha256: 'd'.repeat(64),
+        benchmarkValidatedManagedPayloadManifestSha256: Effect.pipe('d', EffectString.repeat(64)),
         benchmarkValidatedManagedProcessLeaseInspection: 'complete',
-        benchmarkValidatedManagedReleaseMetadataSha256: 'e'.repeat(64),
+        benchmarkValidatedManagedReleaseMetadataSha256: Effect.pipe('e', EffectString.repeat(64)),
         benchmarkValidatedManagedRuntime: 'bun-test',
         benchmarkValidatedManagedTarget: 'linux-x64',
         benchmarkValidatedManagedVersion: `4.0.0-beta.32-local.g${commit}`,
@@ -3477,7 +3622,7 @@ describe('code graph release evidence', () => {
         externalQueryControlTimeoutMilliseconds: 120_000,
         externalControlCount: 4,
         externalControlEvidence: JSON.stringify(controls),
-        externalControlLanguages: languages.join(','),
+        externalControlLanguages: EffectArray.join(languages, ','),
         externalRepositoryCommit: commit,
         externalRepositoryName: 'JetBrains/intellij-community',
         externalRepositoryPublicVerification: 'anonymous-https-exact-commit-fetch',
@@ -3514,9 +3659,9 @@ describe('code graph release evidence', () => {
         sqliteVersion: '3.49.1',
         runnerClass: 'local-unclassified',
         runnerIdentity: 'runner-0123456789abcdef',
-        structuralGraphDigestCold: '1'.repeat(64),
-        structuralGraphDigestIncremental: '2'.repeat(64),
-        structuralGraphDigestSameOverlayReference: '2'.repeat(64),
+        structuralGraphDigestCold: Effect.pipe('1', EffectString.repeat(64)),
+        structuralGraphDigestIncremental: Effect.pipe('2', EffectString.repeat(64)),
+        structuralGraphDigestSameOverlayReference: Effect.pipe('2', EffectString.repeat(64)),
         worktreeIsolationIndexedFiles: 2,
         worktreeIsolationCleanupPassed: true,
         worktreeIsolationCommandTimeoutMilliseconds: 30_000,
@@ -3549,18 +3694,18 @@ describe('code graph release evidence', () => {
           'scripts/site-performance-evidence.ts',
           'src/evaluation/external_evidence.ts',
         ]),
-        releaseEvidenceResolvedSha: 'f'.repeat(40),
-        releaseEvidenceSha: 'f'.repeat(40),
+        releaseEvidenceResolvedSha: Effect.pipe('f', EffectString.repeat(40)),
+        releaseEvidenceSha: Effect.pipe('f', EffectString.repeat(40)),
         releaseEvidenceSourceMode: 'release-plus-reviewed-harness-delta',
       },
     };
     expect(() => assertExternalPerformanceEvidence(harnessDeltaArtifact)).not.toThrow();
     expect(() => validateRetainedPerformancePayload(harnessDeltaArtifact)).not.toThrow();
     const projected = retainedPerformanceArtifactFromHarness(artifact, {
-      artifactSha256: 'f'.repeat(64),
+      artifactSha256: Effect.pipe('f', EffectString.repeat(64)),
       artifactUrl: '/performance/performance-evidence.json',
-      currentLockfileSha256: 'a'.repeat(64),
-      currentPackageManifestSha256: 'b'.repeat(64),
+      currentLockfileSha256: Effect.pipe('a', EffectString.repeat(64)),
+      currentPackageManifestSha256: Effect.pipe('b', EffectString.repeat(64)),
       generatedAt: artifact.createdAt,
     });
     expect(projected.manager).toMatchObject({
@@ -3603,8 +3748,8 @@ describe('code graph release evidence', () => {
       }),
     ).toThrow(/privacy-safe external control evidence matching declared languages/);
     for (const [field, value] of [
-      ['query', `ghp_${'a'.repeat(24)}`],
-      ['query', `sk-proj_${'b'.repeat(24)}`],
+      ['query', `ghp_${Effect.pipe('a', EffectString.repeat(24))}`],
+      ['query', `sk-proj_${Effect.pipe('b', EffectString.repeat(24))}`],
       ['path', '/Users/example/private.ts'],
       ['path', '/home/example/private.ts'],
       ['path', '/mnt/c/Users/example/private.ts'],
@@ -3612,15 +3757,15 @@ describe('code graph release evidence', () => {
       ['path', 'C:\\Users\\example\\private.ts'],
       ['path', '\\\\server\\share\\private.ts'],
     ] as const) {
-      const sensitiveControls = JSON.parse(JSON.stringify(controls)) as Record<
-        string,
-        Record<'path' | 'query' | 'stableNodeId', string>
-      >;
-      sensitiveControls.java[field] = value;
+      const sensitiveControlsValue: unknown = JSON.parse(JSON.stringify(controls));
+      if (!isJsonObject(sensitiveControlsValue)) throw new Error('Expected benchmark control values.');
+      const javaControls = sensitiveControlsValue.java;
+      if (!isJsonObject(javaControls)) throw new Error('Expected Java benchmark control values.');
+      javaControls[field] = value;
       expect(() =>
         assertExternalPerformanceEvidence({
           ...artifact,
-          metadata: {...artifact.metadata, externalControlEvidence: JSON.stringify(sensitiveControls)},
+          metadata: {...artifact.metadata, externalControlEvidence: JSON.stringify(sensitiveControlsValue)},
         }),
       ).toThrow(/privacy-safe external control evidence|credential-like|local filesystem path/);
     }
@@ -3639,14 +3784,19 @@ describe('code graph release evidence', () => {
     expect(() =>
       validateRetainedPerformancePayload({
         ...artifact,
-        measurements: artifact.measurements.filter(measurement => measurement.name !== 'manager-node-detail-cold'),
+        measurements: EffectArray.filter(
+          artifact.measurements,
+          measurement => measurement.name !== 'manager-node-detail-cold',
+        ),
       }),
     ).toThrow(/manager-node-detail-cold/);
   });
 
   it('keeps materialization ceilings reviewed for every checked graph profile', () => {
     for (const path of [CODE_GRAPH_BUDGETS, POLYGLOT_BUDGETS]) {
-      const root = readJson(path) as Readonly<Record<string, unknown>>;
+      const rootValue = readJson(path);
+      if (!isJsonObject(rootValue)) throw new Error('Expected a materialization budget document.');
+      const root = rootValue;
       const budgets = performanceBudgets(root);
       expect(budgets).toHaveLength(path === CODE_GRAPH_BUDGETS ? 6 : 1);
       for (const value of budgets) {
@@ -3666,10 +3816,14 @@ describe('code graph release evidence', () => {
   });
 
   it('runs bounded exact-tag production-large evidence once without gating publication on it', () => {
-    const workflow = load(readFileSync('.github/workflows/benchmarks.yml', 'utf8')) as BenchmarkWorkflow;
-    const evidence = load(readFileSync('.github/workflows/production-large-evidence.yml', 'utf8')) as BenchmarkWorkflow;
-    const publish = load(readFileSync('.github/workflows/publish.yml', 'utf8')) as BenchmarkWorkflow;
-    const releaseEvidence = load(readFileSync('.github/workflows/release-evidence.yml', 'utf8')) as BenchmarkWorkflow;
+    const workflow = decodeBenchmarkWorkflow(load(readFileSync('.github/workflows/benchmarks.yml', 'utf8')));
+    const evidence = decodeBenchmarkWorkflow(
+      load(readFileSync('.github/workflows/production-large-evidence.yml', 'utf8')),
+    );
+    const publish = decodeBenchmarkWorkflow(load(readFileSync('.github/workflows/publish.yml', 'utf8')));
+    const releaseEvidence = decodeBenchmarkWorkflow(
+      load(readFileSync('.github/workflows/release-evidence.yml', 'utf8')),
+    );
     expect(workflow.on.push).toBeUndefined();
 
     const scheduled = workflow.jobs['code-graph-production-large'];
@@ -3694,30 +3848,85 @@ describe('code graph release evidence', () => {
     expect(publish.jobs['production-large-evidence']).toBeUndefined();
 
     const production = evidence.jobs['code-graph-production-large'];
-    const checkout = production.steps?.find(step => step.uses === 'actions/checkout@v7');
+    const checkout = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(production.steps), __effectArrayReceiver2 =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver2, step => step.uses === 'actions/checkout@v7'),
+        ),
+      ),
+    );
     expect(checkout?.with).toMatchObject({
       'fetch-depth': 1,
       ref: expect.stringContaining('inputs.release_ref'),
     });
-    const verifyRef = production.steps?.find(step => step.name?.includes('release tag resolves'));
+    const verifyRef = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(production.steps), __effectArrayReceiver2 =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver2,
+            __effectArrayValue2 =>
+              !!(step =>
+                Effect.pipe(step.name, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.includes('release tag resolves')),
+                ))(__effectArrayValue2),
+          ),
+        ),
+      ),
+    );
     expect(verifyRef?.if).toContain("inputs.release_ref != ''");
     expect(verifyRef?.run).toContain('git rev-parse --verify "${RELEASE_REF}^{commit}"');
     expect(verifyRef?.run).toContain('test "$resolved" = "$RELEASE_SHA"');
-    const upload = production.steps?.find(step => step.id === 'upload-production-large');
+    const upload = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(production.steps), __effectArrayReceiver2 =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver2, step => step.id === 'upload-production-large'),
+        ),
+      ),
+    );
     expect(upload?.with).toMatchObject({'if-no-files-found': 'error', 'retention-days': 90});
     expect(upload?.with?.path).toContain('code-graph-production-large-admission-*.json');
     expect(upload?.with?.path).toContain('code-graph-production-large-n1-*.json');
     expect(upload?.with?.path).toContain('code-graph-production-reduced-n1-*.json');
-    const admission = production.steps?.find(step => step.id === 'classify_production_large_admission');
+    const admission = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(production.steps), __effectArrayReceiver2 =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver2, step => step.id === 'classify_production_large_admission'),
+        ),
+      ),
+    );
     expect(admission?.run).toContain('not-admitted-insufficient-capacity');
     expect(admission?.run).toContain('available_bytes >= required_bytes');
-    const enforcement = production.steps?.find(
-      step => step.name === 'Enforce a completed production-shaped observation',
+    const enforcement = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(production.steps), __effectArrayReceiver2 =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver2,
+            step => step.name === 'Enforce a completed production-shaped observation',
+          ),
+        ),
+      ),
     );
     expect(enforcement?.if).toContain("steps.capture_production_large.outcome != 'success'");
     expect(enforcement?.if).toContain("steps.capture_hosted_reduced.outcome != 'success'");
     expect(enforcement?.run).toContain('exit 1');
-    const capture = production.steps?.find(step => step.name?.includes('Capture one production-large'));
+    const capture = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(production.steps), __effectArrayReceiver2 =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver2,
+            __effectArrayValue2 =>
+              !!(step =>
+                Effect.pipe(step.name, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.includes('Capture one production-large')),
+                ))(__effectArrayValue2),
+          ),
+        ),
+      ),
+    );
     expect(production.steps?.indexOf(admission!)).toBeLessThan(production.steps?.indexOf(capture!) ?? 0);
     expect(capture?.if).toContain("steps.classify_production_large_admission.outputs.admitted == 'true'");
     expect(capture?.run).toContain('--minimum-free-gib 120');
@@ -3725,7 +3934,13 @@ describe('code graph release evidence', () => {
       THREADNOTE_BENCHMARK_RELEASE_REF: '${{ inputs.release_ref }}',
       THREADNOTE_BENCHMARK_RELEASE_SHA: '${{ inputs.release_sha }}',
     });
-    const fallback = production.steps?.find(step => step.id === 'capture_hosted_reduced');
+    const fallback = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(production.steps), __effectArrayReceiver2 =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver2, step => step.id === 'capture_hosted_reduced'),
+        ),
+      ),
+    );
     expect(fallback?.if).toContain("outputs.admitted != 'true'");
     expect(fallback?.run).toContain('--profile-files 3000');
     expect(fallback?.run).toContain('--profile-symbols 110000');
@@ -3755,29 +3970,42 @@ interface PerformanceBudget {
   readonly wholeGraphAnalysisP95MillisecondsMaximum: number;
 }
 
-interface BenchmarkWorkflow {
-  readonly jobs: Readonly<
-    Record<
-      string,
-      {
-        readonly if?: string;
-        readonly needs?: string | readonly string[];
-        readonly steps?: readonly {
-          readonly env?: Readonly<Record<string, unknown>>;
-          readonly if?: string;
-          readonly id?: string;
-          readonly name?: string;
-          readonly run?: string;
-          readonly uses?: string;
-          readonly with?: Readonly<Record<string, unknown>>;
-        }[];
-        readonly uses?: string;
-        readonly with?: Readonly<Record<string, unknown>>;
-      }
-    >
-  >;
-  readonly on: {readonly push?: {readonly tags: readonly string[]}};
-}
+const PerformanceBudgetSchema = Schema.Struct({
+  coldIndexP95MillisecondsMaximum: Schema.Finite,
+  coldMaterializationP95MillisecondsMaximum: Schema.Finite,
+  derivedIndexBytesMaximum: Schema.Finite,
+  hotQueryP95MillisecondsMaximum: Schema.Finite,
+  oneFileIncrementalP95MillisecondsMaximum: Schema.Finite,
+  oneFileMaterializationP95MillisecondsMaximum: Schema.Finite,
+  processPeakRssBytesMaximum: Schema.Finite,
+  wholeGraphAnalysisP95MillisecondsMaximum: Schema.Finite,
+});
+const CodeGraphBudgetsSchema = Schema.Struct({
+  vectorPerformance: PerformanceBudgetSchema,
+  vectorScalePerformance: Schema.Record(Schema.String, PerformanceBudgetSchema),
+});
+const decodeCodeGraphBudgets = Schema.decodeUnknownSync(CodeGraphBudgetsSchema);
+
+const StagingEvidenceSchema = Schema.Struct({
+  observations: Schema.Array(
+    Schema.StructWithRest(
+      Schema.Struct({
+        bytes: Schema.optionalKey(Schema.Record(Schema.String, Schema.Finite)),
+        digests: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+        milliseconds: Schema.optionalKey(Schema.Record(Schema.String, Schema.Finite)),
+        name: Schema.String,
+        parity: Schema.optionalKey(Schema.Record(Schema.String, Schema.Boolean)),
+        reviewedClaims: Schema.optionalKey(Schema.Record(Schema.String, Schema.Union([Schema.Boolean, Schema.Finite]))),
+      }),
+      [Schema.Record(Schema.String, Schema.Unknown)],
+    ),
+  ),
+  provenance: Schema.StructWithRest(
+    Schema.Struct({sourceArtifactSha256: Schema.Record(Schema.String, Schema.String)}),
+    [Schema.Record(Schema.String, Schema.Unknown)],
+  ),
+});
+const decodeStagingEvidence = Schema.decodeUnknownSync(StagingEvidenceSchema);
 
 function benchmarkArtifact(
   measurements: BenchmarkArtifactV1['measurements'],
@@ -3805,7 +4033,7 @@ function benchmarkArtifact(
       runner: 'threadnote-code-graph-e2e',
       runnerVersion: '1',
     },
-    measurements: measurements.map(measurement =>
+    measurements: EffectArray.map(measurements, measurement =>
       typeof metadata.releaseEvidenceRef === 'string' &&
       ['hot-exact-lexical-query', 'manager-bounded-query'].includes(measurement.name)
         ? benchmarkMeasurement(
@@ -3818,14 +4046,14 @@ function benchmarkArtifact(
     metadata: {
       benchmarkMeasuredExecutionMode: 'local-source-application-layer',
       benchmarkMeasuredSourceCommit: commit,
-      benchmarkMeasuredSourceLockfileSha256: 'a'.repeat(64),
-      benchmarkMeasuredSourcePackageManifestSha256: 'b'.repeat(64),
+      benchmarkMeasuredSourceLockfileSha256: Effect.pipe('a', EffectString.repeat(64)),
+      benchmarkMeasuredSourcePackageManifestSha256: Effect.pipe('b', EffectString.repeat(64)),
       benchmarkGithubRunnerArchitecture: 'X64',
       benchmarkGithubRunnerEnvironment: 'github-hosted',
       benchmarkGithubRunnerOperatingSystem: 'Linux',
       benchmarkSourceValidationMode: 'github-actions-clean-source',
       benchmarkValidatedManagedPayload: 'not-applicable-github-actions-clean-source',
-      ...(suite.startsWith('code-graph-production-large-')
+      ...(Effect.pipe(suite, EffectString.startsWith('code-graph-production-large-'))
         ? {
             ...productionProfileArtifactMetadata(PRODUCTION_LARGE_CODE_GRAPH_PROFILE),
             releaseEvidenceRef: 'refs/tags/v4.0.0-beta.30',
@@ -3850,31 +4078,44 @@ function requiredReleaseMeasurements(
     readonly unit: BenchmarkArtifactV1['measurements'][number]['unit'];
   }[],
 ): BenchmarkArtifactV1['measurements'] {
-  return required.map(measurement =>
+  return EffectArray.map(required, measurement =>
     benchmarkMeasurement(measurement.name, measurement.unit, [
       measurement.name === 'cold-activation-observed-stages-n1'
         ? 3
-        : measurement.name.endsWith('-materialization-cached-fact-replay-bytes-n1')
+        : Effect.pipe(measurement.name, EffectString.endsWith('-materialization-cached-fact-replay-bytes-n1'))
           ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 2
-          : measurement.name.endsWith('-materialization-cached-fact-bytes-total-n1')
+          : Effect.pipe(measurement.name, EffectString.endsWith('-materialization-cached-fact-bytes-total-n1'))
             ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 1
-            : measurement.name.endsWith('-materialization-raw-fact-replay-bytes-n1') ||
-                measurement.name.endsWith('-materialized-shard-cache-deferred-raw-fact-bytes-n1')
+            : Effect.pipe(measurement.name, EffectString.endsWith('-materialization-raw-fact-replay-bytes-n1')) ||
+                Effect.pipe(
+                  measurement.name,
+                  EffectString.endsWith('-materialized-shard-cache-deferred-raw-fact-bytes-n1'),
+                )
               ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 1
               : /-materialization-subphase-shard-(?:association|persistence|serialization)-n1$/u.test(measurement.name)
                 ? 0
-                : measurement.name.startsWith('production-shape-')
+                : Effect.pipe(measurement.name, EffectString.startsWith('production-shape-'))
                   ? 100
-                  : measurement.name.startsWith('cold-activation-copying-') && measurement.name.endsWith('-observed-n1')
+                  : Effect.pipe(measurement.name, EffectString.startsWith('cold-activation-copying-')) &&
+                      Effect.pipe(measurement.name, EffectString.endsWith('-observed-n1'))
                     ? 0
-                    : measurement.name.endsWith('-activation-observed-stages-n1')
+                    : Effect.pipe(measurement.name, EffectString.endsWith('-activation-observed-stages-n1'))
                       ? 32
-                      : measurement.name.endsWith('-external-sampler-version-n1')
+                      : Effect.pipe(measurement.name, EffectString.endsWith('-external-sampler-version-n1'))
                         ? 4
-                        : measurement.name.endsWith('-materialization-sidecar-wal-high-water-n1')
+                        : Effect.pipe(
+                              measurement.name,
+                              EffectString.endsWith('-materialization-sidecar-wal-high-water-n1'),
+                            )
                           ? 0
-                          : measurement.name.endsWith('-external-process-tree-failures-n1') ||
-                              measurement.name.endsWith('-external-open-temp-process-tree-failures-n1')
+                          : Effect.pipe(
+                                measurement.name,
+                                EffectString.endsWith('-external-process-tree-failures-n1'),
+                              ) ||
+                              Effect.pipe(
+                                measurement.name,
+                                EffectString.endsWith('-external-open-temp-process-tree-failures-n1'),
+                              )
                             ? 0
                             : measurement.name === 'one-file-reindex-materialization-stage-restoring-indexes-n1'
                               ? 0
@@ -3884,27 +4125,33 @@ function requiredReleaseMeasurements(
 }
 
 function performanceBudgets(root: Readonly<Record<string, unknown>>): readonly unknown[] {
-  const direct = ['developmentPerformance', 'vectorPerformance'].flatMap(name => {
+  const direct = EffectArray.flatMap(['developmentPerformance', 'vectorPerformance'], name => {
     const value = root[name];
     return value === undefined ? [] : [value];
   });
-  const scaled = ['scalePerformance', 'vectorScalePerformance'].flatMap(name => {
+  const scaled = EffectArray.flatMap(['scalePerformance', 'vectorScalePerformance'], name => {
     const value = root[name];
     if (typeof value !== 'object' || value === null) return [];
-    return Object.values(value);
+    return EffectRecord.values(value);
   });
   return [...direct, ...scaled];
 }
 
 function isPerformanceBudget(value: unknown): value is PerformanceBudget {
-  if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Partial<PerformanceBudget>;
-  return [
-    candidate.coldIndexP95MillisecondsMaximum,
-    candidate.coldMaterializationP95MillisecondsMaximum,
-    candidate.oneFileIncrementalP95MillisecondsMaximum,
-    candidate.oneFileMaterializationP95MillisecondsMaximum,
-  ].every(item => typeof item === 'number' && Number.isFinite(item));
+  if (!Predicate.isObject(value)) return false;
+  return EffectArray.every(
+    [
+      value.coldIndexP95MillisecondsMaximum,
+      value.coldMaterializationP95MillisecondsMaximum,
+      value.derivedIndexBytesMaximum,
+      value.hotQueryP95MillisecondsMaximum,
+      value.oneFileIncrementalP95MillisecondsMaximum,
+      value.oneFileMaterializationP95MillisecondsMaximum,
+      value.processPeakRssBytesMaximum,
+      value.wholeGraphAnalysisP95MillisecondsMaximum,
+    ],
+    item => typeof item === 'number' && Number.isFinite(item),
+  );
 }
 
 function readJson(path: string): unknown {

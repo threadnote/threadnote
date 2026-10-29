@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Result, Schedule, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
@@ -25,6 +26,9 @@ import {
   mergeContextBriefAnchoredRepositoryGraphResults,
 } from './anchor_evidence.js';
 import type {ContextBriefSourceEvidenceRequest, ContextBriefSourceEvidenceResult} from './source_evidence.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const TRUST = {
   classification: 'untrusted-repository-data',
@@ -37,10 +41,10 @@ const CONTEXT_BRIEF_GRAPH_READ_FAILED_WARNING =
 const CONTEXT_BRIEF_GRAPH_QUERY_READ_FAILED_WARNING =
   'The ready graph query failed after bounded retry; results are partial.';
 
-class ContextBriefGraphBudgetExhausted extends Schema.TaggedError<ContextBriefGraphBudgetExhausted>()(
-  'ContextBriefGraphBudgetExhausted',
-  {},
-) {}
+class ContextBriefGraphBudgetExhausted extends Schema.TaggedError<
+  ContextBriefGraphBudgetExhausted,
+  {readonly brand: unique symbol}
+>()('ContextBriefGraphBudgetExhausted', {}) {}
 
 export interface ContextBriefGraphReadBudget {
   remaining: number;
@@ -215,8 +219,8 @@ const retrieveRepositoryGraphEvidence = Effect.fn('contextBrief.retrieveReposito
       // the compiler already retrieves code-linked memory in parallel.
       {concurrency: 1},
     );
-    const exact = outcomes.flatMap(outcome => (outcome.result === undefined ? [] : [outcome.result]));
-    const readFailed = outcomes.some(outcome => outcome.readFailed);
+    const exact = EffectArray.flatMap(outcomes, outcome => (outcome.result === undefined ? [] : [outcome.result]));
+    const readFailed = EffectArray.some(outcomes, outcome => outcome.readFailed);
     if (exact.length === 0) {
       return withSourceGapIfRequested(
         unavailableReadyRepositoryGraphEvidence(
@@ -227,7 +231,10 @@ const retrieveRepositoryGraphEvidence = Effect.fn('contextBrief.retrieveReposito
         plan,
       );
     }
-    const complete = outcomes.filter(outcome => outcome.complete).length;
+    const complete = EffectArray.filter(
+      outcomes,
+      (outcome, __effectArrayIndex) => __effectArrayIndex in outcomes && outcome.complete,
+    ).length;
     const evidence = yield* repositoryEvidenceWithSources(
       mergeContextBriefAnchoredRepositoryGraphResults(plan, exact, anchoredRequests.length - complete),
       status,
@@ -340,7 +347,7 @@ function matchesReadyGraph(
 }
 
 export function fromWorksetProjection(result: CodeGraphWorksetEvidenceProjectionV2): ContextBriefGraphEvidenceV1 {
-  const cards = result.cards.map((card, rank): ContextBriefGraphCardV1 => ({
+  const cards = EffectArray.map(result.cards, (card, rank): ContextBriefGraphCardV1 => ({
     id: card.id,
     rank,
     reason: compactText(card.reason.summary, 160),
@@ -357,8 +364,8 @@ export function fromWorksetProjection(result: CodeGraphWorksetEvidenceProjection
     },
   }));
   const contracts = uniqueContracts(
-    result.cards.flatMap((card, cardRank) =>
-      card.relationships.map((relationship, relationshipRank): ContextBriefGraphContractV1 => ({
+    EffectArray.flatMap(result.cards, (card, cardRank) =>
+      EffectArray.map(card.relationships, (relationship, relationshipRank): ContextBriefGraphContractV1 => ({
         authority: relationship.authority,
         evidence: {
           line: relationship.evidence.span.line,
@@ -381,17 +388,20 @@ export function fromWorksetProjection(result: CodeGraphWorksetEvidenceProjection
       })),
     ),
   );
-  const snapshots = Object.entries(result.repositories)
-    .filter(([, receipt]) => receipt.snapshot !== undefined)
-    .sort(([left], [right]) => compareText(left, right))
-    .map(([repositoryKey, receipt]): ContextBriefSnapshotV1 => ({
+  const snapshots = EffectArray.map(
+    EffectArray.filter(
+      EffectRecord.toEntries(result.repositories),
+      ([, receipt]) => receipt.snapshot !== undefined,
+    ).sort(([left], [right]) => compareText(left, right)),
+    ([repositoryKey, receipt]): ContextBriefSnapshotV1 => ({
       commit: receipt.snapshot!.commit,
       dirty: receipt.snapshot!.dirty,
       freshness: receipt.snapshot!.freshness === 'current' ? 'fresh' : 'stale',
       repositoryId: receipt.repositoryId,
       repositoryKey,
       snapshotId: receipt.snapshot!.id,
-    }));
+    }),
+  );
   const readyRepositories = (result.coverage.states.current ?? 0) + (result.coverage.states.stale ?? 0);
   const gaps = [
     ...(result.coverage.complete ? [] : ['graph-coverage-incomplete']),
@@ -418,14 +428,14 @@ export function fromWorksetProjection(result: CodeGraphWorksetEvidenceProjection
     gaps,
     resolvedSnapshots: result.coverage.requestedRepositories === 1 && snapshots.length === 1 ? snapshots : [],
     trust: TRUST,
-    warnings: result.warnings.map(warning => compactText(warning, 240)).slice(0, 16),
+    warnings: EffectArray.map(result.warnings, warning => compactText(warning, 240)).slice(0, 16),
   };
 }
 
 export function fromRepositoryQuery(result: CodeGraphQueryResult): ContextBriefGraphEvidenceV1 {
   const repositoryKey = compactText(result.repository.displayName, 160);
-  const cards = result.nodes.map((node, rank): ContextBriefGraphCardV1 => ({
-    id: `cbgc_${sha256HexSync(`${result.repository.repositoryId}\u0000${node.id}`).slice(0, 24)}`,
+  const cards = EffectArray.map(result.nodes, (node, rank): ContextBriefGraphCardV1 => ({
+    id: `cbgc_${Effect2.pipe(sha256HexSync(`${result.repository.repositoryId}\u0000${node.id}`), EffectString.slice(0, 24))}`,
     rank,
     reason: `Indexed symbol match (${node.score.toFixed(3)}).`,
     ref: node.id,
@@ -441,7 +451,7 @@ export function fromRepositoryQuery(result: CodeGraphQueryResult): ContextBriefG
     },
   }));
   const contracts = uniqueContracts(
-    result.edges.flatMap((edge, rank) => repositoryContract(edge, rank, repositoryKey)),
+    EffectArray.flatMap(result.edges, (edge, rank) => repositoryContract(edge, rank, repositoryKey)),
   );
   const snapshot: ContextBriefSnapshotV1 = {
     commit: result.snapshot.commit,
@@ -470,7 +480,7 @@ export function fromRepositoryQuery(result: CodeGraphQueryResult): ContextBriefG
     gaps: result.projectCoverage?.completeness === 'partial' ? ['graph-project-scope-partial'] : [],
     resolvedSnapshots: [snapshot],
     trust: TRUST,
-    warnings: result.warnings.map(warning => compactText(warning, 240)).slice(0, 16),
+    warnings: EffectArray.map(result.warnings, warning => compactText(warning, 240)).slice(0, 16),
   };
 }
 
@@ -596,18 +606,18 @@ function uniqueContracts(contracts: readonly ContextBriefGraphContractV1[]): rea
     const current = byId.get(contract.id);
     if (current === undefined || contract.rank < current.rank) byId.set(contract.id, contract);
   }
-  return [...byId.values()]
-    .sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))
-    .slice(0, 64)
-    .map((contract, rank) => ({...contract, rank}));
+  return EffectArray.map(
+    [...byId.values()].sort((left, right) => left.rank - right.rank || compareText(left.id, right.id)).slice(0, 64),
+    (contract, rank) => ({...contract, rank}),
+  );
 }
 
 function contractId(parts: readonly string[]): string {
-  return `cbct_${sha256HexSync(parts.join('\u0000')).slice(0, 24)}`;
+  return `cbct_${Effect2.pipe(sha256HexSync(EffectArray.join(parts, '\u0000')), EffectString.slice(0, 24))}`;
 }
 
 function compactText(value: string, maximumBytes: number): string {
-  const normalized = value.replace(/\s+/gu, ' ').trim();
+  const normalized = Effect2.pipe(value, EffectString.replace(/\s+/gu, ' '), EffectString.trim);
   if (new TextEncoder().encode(normalized).byteLength <= maximumBytes) return normalized;
   let prefix = '';
   for (const character of normalized) {

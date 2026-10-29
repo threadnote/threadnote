@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {assertHostedContextCiWorkerPrivileges} from '@threadnote/remote-memory/runtime_privileges';
 import {controlHostedContextCi} from '@threadnote/remote-memory/hosted/context_ci_control';
 import postgres, {type Sql} from 'postgres';
@@ -23,6 +24,9 @@ import {
   createRemoteMemoryPostgresFixture,
   type RemoteMemoryPostgresFixture,
 } from '../helpers/remote-memory-postgres.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const databaseUrl = process.env.THREADNOTE_TEST_POSTGRES_URL;
 const webhookKey = 'test-only-webhook-key-at-least-thirty-two-bytes';
@@ -35,8 +39,8 @@ const event = {
   headRepositoryId: 'repository',
   ref: 'refs/heads/feature',
   baseRef: 'refs/heads/main',
-  headCommit: 'a'.repeat(40),
-  baseCommit: 'b'.repeat(40),
+  headCommit: Effect.pipe('a', EffectString.repeat(40)),
+  baseCommit: Effect.pipe('b', EffectString.repeat(40)),
 };
 const rawReport = JSON.stringify({
   version: 1,
@@ -58,15 +62,17 @@ const rawReport = JSON.stringify({
   beforeAll(async () => {
     database = await createRemoteMemoryPostgresFixture(databaseUrl!);
     admin = postgres(databaseUrl!, {max: 1, onnotice: () => undefined});
-    role = `tn_ci_${randomUuidV4().replaceAll('-', '')}`;
-    const password = randomUuidV4().replaceAll('-', '');
+    role = `tn_ci_${Effect.pipe(randomUuidV4(), EffectString.replaceAll('-', ''))}`;
+    const password = Effect.pipe(randomUuidV4(), EffectString.replaceAll('-', ''));
     await admin.unsafe(
       `CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`,
     );
     await admin.unsafe(`GRANT CONNECT ON DATABASE ${database.databaseName} TO ${role}`);
-    const grants = (await Bun.file('deploy/remote-memory/grants/003-context-ci-worker.sql').text())
-      .replace(/^\\set .*$/gm, '')
-      .replaceAll('threadnote_context_ci_worker', role);
+    const grants = Effect.pipe(
+      await Bun.file('deploy/remote-memory/grants/003-context-ci-worker.sql').text(),
+      EffectString.replace(/^\\set .*$/gm, ''),
+      EffectString.replaceAll('threadnote_context_ci_worker', role),
+    );
     await database.migratorSql.unsafe(grants);
     const url = new URL(databaseUrl!);
     url.pathname = `/${database.databaseName}`;
@@ -179,7 +185,7 @@ const rawReport = JSON.stringify({
     await runHostedContextCiOperator(worker, {tenantId: policy.tenantId, reader: identities().reader});
     await runHostedContextCiOperator(worker, {tenantId: policy.tenantId, reader: identities().reader});
     expect(workerQueries.length).toBeGreaterThan(0);
-    expect(workerQueries.join('\n')).not.toMatch(/pg_class|pg_proc|pg_roles|has_table_privilege/u);
+    expect(EffectArray.join(workerQueries, '\n')).not.toMatch(/pg_class|pg_proc|pg_roles|has_table_privilege/u);
   });
 
   it.each([
@@ -222,7 +228,7 @@ const rawReport = JSON.stringify({
   it('serializes distinct due jobs across replicas while the tenant lease is held', async () => {
     const policy = await target('ci-lease');
     await enqueue(policy);
-    await enqueue(policy, {headCommit: 'c'.repeat(40)});
+    await enqueue(policy, {headCommit: Effect.pipe('c', EffectString.repeat(40))});
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const {reader} = identities();
@@ -255,7 +261,9 @@ const rawReport = JSON.stringify({
     expect(await archiveHostedContextCiJobs(database.migratorSql, policy.tenantId, policy.repositoryId)).toBe(0);
     await runHostedContextCiOperator(worker, {tenantId: policy.tenantId, reader});
     await runHostedContextCiOperator(worker, {tenantId: policy.tenantId, reader, publisher});
-    expect(await enqueue(policy, {headCommit: 'c'.repeat(40)})).toEqual({status: 'queue-full'});
+    expect(await enqueue(policy, {headCommit: Effect.pipe('c', EffectString.repeat(40))})).toEqual({
+      status: 'queue-full',
+    });
     await expect(archiveHostedContextCiJobs(worker, policy.tenantId, policy.repositoryId)).rejects.toThrow();
     expect(
       await controlHostedContextCi(database.migratorSql, {
@@ -266,7 +274,9 @@ const rawReport = JSON.stringify({
     ).toEqual({version: 1, status: 'archived', count: 1});
     expect(await archiveHostedContextCiJobs(database.migratorSql, policy.tenantId, policy.repositoryId)).toBe(0);
     expect(await enqueue(policy)).toEqual({status: 'replay', jobId: admitted.jobId});
-    expect(await enqueue(policy, {headCommit: 'c'.repeat(40)})).toMatchObject({status: 'accepted'});
+    expect(await enqueue(policy, {headCommit: Effect.pipe('c', EffectString.repeat(40))})).toMatchObject({
+      status: 'accepted',
+    });
     await worker.begin(async transaction => {
       await transaction`SELECT set_config('threadnote.tenant_id', ${policy.tenantId}, true)`;
       const [tombstone] = await transaction`SELECT stage, job, diagnostics, archived_outcome
@@ -294,20 +304,24 @@ const rawReport = JSON.stringify({
         async stages => {
           const policy = await target(`ci-archive-property-${example++}`);
           for (const [index, stage] of stages.entries()) {
-            const admitted = await enqueue(policy, {headCommit: index.toString(16).padStart(40, '0')});
+            const admitted = await enqueue(policy, {
+              headCommit: Effect.pipe(index.toString(16), EffectString.padStart(40, '0')),
+            });
             await worker.begin(async transaction => {
               await transaction`SELECT set_config('threadnote.tenant_id', ${policy.tenantId}, true)`;
               await transaction`UPDATE remote_memory.context_ci_jobs SET stage = ${stage}
               WHERE tenant_id = ${policy.tenantId} AND job_id = ${admitted.jobId!}`;
             });
           }
-          const terminalCount = stages.filter(stage => stage === 'published' || stage === 'failed').length;
+          const terminalCount = EffectArray.filter(stages, stage => stage === 'published' || stage === 'failed').length;
           expect(await archiveHostedContextCiJobs(database.migratorSql, policy.tenantId, policy.repositoryId)).toBe(
             terminalCount,
           );
           expect(await archiveHostedContextCiJobs(database.migratorSql, policy.tenantId, policy.repositoryId)).toBe(0);
           for (const index of stages.keys()) {
-            expect(await enqueue(policy, {headCommit: index.toString(16).padStart(40, '0')})).toMatchObject({
+            expect(
+              await enqueue(policy, {headCommit: Effect.pipe(index.toString(16), EffectString.padStart(40, '0'))}),
+            ).toMatchObject({
               status: 'replay',
             });
           }
@@ -325,7 +339,7 @@ const rawReport = JSON.stringify({
     const policy = await target('ci-main');
     const other = await target('ci-other');
     const admitted = await Promise.all([enqueue(policy), enqueue(policy)]);
-    expect(admitted.map(result => result.status).sort()).toEqual(['accepted', 'replay']);
+    expect(EffectArray.map(admitted, result => result.status).sort()).toEqual(['accepted', 'replay']);
     expect(await enqueue(other)).toMatchObject({status: 'accepted'});
     expect((await enqueue(other)).jobId).not.toBe(admitted[0].jobId);
     const {reader, publisher} = identities();
@@ -333,8 +347,8 @@ const rawReport = JSON.stringify({
       runHostedContextCiOperator(worker, {tenantId: policy.tenantId, reader}),
       runHostedContextCiOperator(worker, {tenantId: policy.tenantId, reader}),
     ]);
-    expect(attempts.filter(Boolean)).toHaveLength(1);
-    expect(attempts.find(Boolean)?.status).toBe('evaluated');
+    expect(EffectArray.filter(attempts, Boolean)).toHaveLength(1);
+    expect(EffectOption.getOrUndefined(EffectArray.findFirst(attempts, Boolean))?.status).toBe('evaluated');
     expect(publisher.publish).not.toHaveBeenCalled();
     const published = await runHostedContextCiOperator(worker, {tenantId: policy.tenantId, reader, publisher});
     expect(published).toMatchObject({status: 'published', attempt: 2});
@@ -378,10 +392,14 @@ const rawReport = JSON.stringify({
   it('bounds queue storage and admission rate and records publication retry without raw failures', async () => {
     const bounded = await target('ci-bound', {queueLimit: 1});
     expect(await enqueue(bounded)).toMatchObject({status: 'accepted'});
-    expect(await enqueue(bounded, {headCommit: 'c'.repeat(40)})).toEqual({status: 'queue-full'});
+    expect(await enqueue(bounded, {headCommit: Effect.pipe('c', EffectString.repeat(40))})).toEqual({
+      status: 'queue-full',
+    });
     const limited = await target('ci-rate', {requestsPerMinute: 1});
     expect(await enqueue(limited)).toMatchObject({status: 'accepted'});
-    expect(await enqueue(limited, {headCommit: 'c'.repeat(40)})).toMatchObject({status: 'rate-limited'});
+    expect(await enqueue(limited, {headCommit: Effect.pipe('c', EffectString.repeat(40))})).toMatchObject({
+      status: 'rate-limited',
+    });
     const {reader, publisher} = identities();
     await runHostedContextCiOperator(worker, {tenantId: limited.tenantId, reader});
     vi.mocked(publisher.publish).mockRejectedValue(new Error('private-memory token=secret'));
@@ -417,7 +435,7 @@ const rawReport = JSON.stringify({
     expect(final).toMatchObject({attempt: exhaust ? 4 : 3, status: exhaust ? 'failed' : 'published'});
     expect(await runHostedContextCiOperator(worker, {tenantId: policy.tenantId, reader, publisher})).toBeUndefined();
     expect(reader.evaluate).toHaveBeenCalledTimes(1);
-    const calls = vi.mocked(publisher.publish).mock.calls.map(([input]) => input);
+    const calls = EffectArray.map(vi.mocked(publisher.publish).mock.calls, ([input]) => input);
     expect(calls).toHaveLength(exhaust ? 3 : 2);
     for (const call of calls) expect(call).toEqual(calls[0]);
     expect(calls[0].idempotencyKey).toBe(admitted.jobId);

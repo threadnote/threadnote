@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -6,6 +7,8 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {initializeSchema} from '@threadnote/graph/store/schema/initialization';
 import {useDatabaseDirect} from '@threadnote/graph/store/session';
 import {makeRetiredSnapshotReclamationPage} from '@threadnote/graph/store/staging_core';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const TARGET = 'retired-target';
 
@@ -84,7 +87,7 @@ describe('required snapshot reclamation pages', () => {
             deleted += page.rowsDeleted;
             if (page.complete) break;
           }
-          expect(deleted).toBe(rows.reduce((sum, count) => sum + count, 0) + targets.length);
+          expect(deleted).toBe(EffectArray.reduce(rows, 0, (sum, count) => sum + count) + targets.length);
           expect(yield* final).toEqual({complete: true, rowsDeleted: 0});
           expect(yield* sql.unsafe('SELECT id FROM snapshots')).toEqual([]);
           expect(yield* sql.unsafe('PRAGMA foreign_key_check')).toEqual([]);
@@ -210,7 +213,11 @@ function observeCandidateDeletes(sql: SqlClient.SqlClient) {
     get(target, key, receiver) {
       if (key !== 'unsafe') return Reflect.get(target, key, receiver);
       return (text: string, parameters: readonly unknown[] = []) => {
-        if (text.startsWith('DELETE FROM') && text.includes(' AS candidate')) statements.push({text, parameters});
+        if (
+          Effect2.pipe(text, EffectString.startsWith('DELETE FROM')) &&
+          Effect2.pipe(text, EffectString.includes(' AS candidate'))
+        )
+          statements.push({text, parameters});
         return sql.unsafe(text, parameters);
       };
     },
@@ -226,11 +233,16 @@ function assertIndexedPages(sql: SqlClient.SqlClient, statements: readonly Obser
         statement.parameters,
       );
       expect(
-        plan.some(row => row.detail.includes('TEMP B-TREE')),
+        EffectArray.some(plan, row => Effect2.pipe(row.detail, EffectString.includes('TEMP B-TREE'))),
         statement.text,
       ).toBe(false);
       expect(
-        plan.some(row => row.detail.startsWith('SEARCH candidate ') && row.detail.includes('(snapshot_id=?)')),
+        EffectArray.some(
+          plan,
+          row =>
+            Effect2.pipe(row.detail, EffectString.startsWith('SEARCH candidate ')) &&
+            Effect2.pipe(row.detail, EffectString.includes('(snapshot_id=?)')),
+        ),
         statement.text,
       ).toBe(true);
     }

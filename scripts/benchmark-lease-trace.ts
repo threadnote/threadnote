@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphLeaseTimingObserver} from '@threadnote/graph/store';
 
 interface LeaseTimingPoint {
@@ -62,15 +63,15 @@ export class BenchmarkLeaseTrace {
       'transaction-body',
     ];
     const required = [
-      ...['token', 'prepare', 'prune', ...common].map(stage => `acquire:${stage}`),
-      ...['exists', ...common].map(stage => `release:${stage}`),
+      ...EffectArray.map(['token', 'prepare', 'prune', ...common], stage => `acquire:${stage}`),
+      ...EffectArray.map(['exists', ...common], stage => `release:${stage}`),
     ];
     const boundariesBalanced = balanced && stack.length === 0 && !repeated;
     return {
       boundariesBalanced,
-      complete: this.#dropped === 0 && boundariesBalanced && required.every(key => started.has(key)),
+      complete: this.#dropped === 0 && boundariesBalanced && EffectArray.every(required, key => started.has(key)),
       dropped: this.#dropped,
-      points: this.#points.map(point => ({...point})),
+      points: EffectArray.map(this.#points, point => ({...point})),
     };
   }
 }

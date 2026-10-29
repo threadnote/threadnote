@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -24,6 +25,8 @@ import {lastStatementChangeCount} from '../activation/core.js';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../../index_scope.js';
 import {codeGraphScopeCursorParameters} from '../scope/cursor.js';
 import {codeGraphScopeAuthorityInstalled} from '../scope/schema.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const validateViewRemovalTarget = Effect.fn('codeGraph.validateViewRemovalTarget')(function* (
   worktreeId: string,
@@ -316,10 +319,16 @@ const boundedAuthorityTableDefinition = Effect.fn('codeGraph.boundedAuthorityTab
 function exactCodeGraphSnapshotStateCheck(definition: string): boolean {
   const match = /\bstate\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\((?<values>[^)]*)\)\s*\)/iu.exec(definition);
   const values = match?.groups?.values;
-  if (values === undefined || values.replace(/'[^']*'/gu, '').replace(/[\s,]/gu, '') !== '') return false;
+  if (
+    values === undefined ||
+    Effect2.pipe(values, EffectString.replace(/'[^']*'/gu, ''), EffectString.replace(/[\s,]/gu, '')) !== ''
+  )
+    return false;
   return (
-    [...values.matchAll(/'([^']*)'/gu)].map(value => value[1]).join('\0') ===
-    ['building', 'ready', 'failed', 'retired'].join('\0')
+    EffectArray.join(
+      EffectArray.map([...Effect2.pipe(values, EffectString.matchAll(/'([^']*)'/gu))], value => value[1]),
+      '\0',
+    ) === EffectArray.join(['building', 'ready', 'failed', 'retired'], '\0')
   );
 }
 
@@ -369,13 +378,16 @@ const codeGraphReconciliationIndexState = Effect.fn('codeGraph.reconciliationInd
     readonly name: string | null;
     readonly seqno: number;
   }>(`SELECT * FROM pragma_index_xinfo(?) LIMIT ${index.columns.length + 2}`, [index.name]);
-  const keyColumns = xinfo.filter(column => Number(column.key) === 1).sort((left, right) => left.seqno - right.seqno);
+  const keyColumns = EffectArray.filter(xinfo, column => Number(column.key) === 1).sort(
+    (left, right) => left.seqno - right.seqno,
+  );
   return xinfo.length === index.columns.length + 1 &&
     keyColumns.length === index.columns.length &&
-    keyColumns.every(
+    EffectArray.every(
+      keyColumns,
       (column, columnIndex) =>
         column.name === index.columns[columnIndex] &&
-        column.coll.toUpperCase() === 'BINARY' &&
+        Effect2.pipe(column.coll, EffectString.toUpperCase) === 'BINARY' &&
         Number(column.desc) === 0,
     )
     ? ('ready' as const)
@@ -486,11 +498,11 @@ const CLEANUP_TOKEN = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,511}$/u;
 const CODE_GRAPH_SNAPSHOT_ID = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u;
 
 function validRemovedViewCleanupBlockedCode(value: string): value is CodeGraphRemovedViewCleanupBlockedCode {
-  return CODE_GRAPH_REMOVED_VIEW_CLEANUP_BLOCKED_CODES.some(code => code === value);
+  return EffectArray.some(CODE_GRAPH_REMOVED_VIEW_CLEANUP_BLOCKED_CODES, code => code === value);
 }
 
 function validRemovedViewCleanupPhase(value: string): value is CodeGraphRemovedViewCleanupPhase {
-  return CODE_GRAPH_REMOVED_VIEW_CLEANUP_PHASES.some(phase => phase === value);
+  return EffectArray.some(CODE_GRAPH_REMOVED_VIEW_CLEANUP_PHASES, phase => phase === value);
 }
 
 function validCanonicalTimestamp(value: string): boolean {

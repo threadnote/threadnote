@@ -1,3 +1,15 @@
+import {
+  isJobResponse,
+  isManagerContextConnectionsResponse,
+  isManagerContextReadResponse,
+  isManagerMemoryRelationsResponse,
+  isManagerRecallFeedbackResponse,
+  isManagerRecallResponse,
+  isManagerWorksetCatalog,
+  isOutputResponse,
+  isProjectedContextBriefV1,
+} from '../api/response_guards.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
   CONTEXT_BRIEF_MODES,
@@ -29,6 +41,8 @@ import {MANAGER_CONTEXT_RECALL_PAGE_SIZE_DEFAULT, projectManagerRecallPage} from
 import {api, errorMessage} from '@threadnote/manager/ui/support';
 import type {ManagerWorksetCatalog, ManagerWorksetPrepareJob} from '@threadnote/manager/workset/contracts';
 import {ValuePanel} from '../value_view.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 type ContextWorkspaceView = 'brief' | 'recall' | 'value';
 type ContextScopeKind = 'repository' | 'workset';
@@ -123,7 +137,16 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
     budgetTokens < CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS ||
     budgetTokens > CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS;
   const memoryProjectOptions = useMemo(
-    () => [...new Set([...(props.projectOptions ?? []), ...(catalog?.projects.map(item => item.name) ?? [])])],
+    () => [
+      ...new Set([
+        ...(props.projectOptions ?? []),
+        ...(EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(catalog?.projects), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, item => item.name),
+          ),
+        ) ?? []),
+      ]),
+    ],
     [catalog?.projects, props.projectOptions],
   );
 
@@ -142,7 +165,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
 
   useEffect(() => {
     const controller = new AbortController();
-    void api<ManagerWorksetCatalog>('/api/worksets', undefined, {signal: controller.signal})
+    void api<ManagerWorksetCatalog>('/api/worksets', undefined, {signal: controller.signal}, isManagerWorksetCatalog)
       .then(next => {
         if (controller.signal.aborted) return;
         setCatalog(next);
@@ -156,8 +179,8 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
 
   useEffect(() => {
     if (!catalog) return;
-    const repositoryAvailable = !callerCwd || catalog.projects.some(item => item.path === callerCwd);
-    const worksetAvailable = !workset || catalog.definitions.some(item => item.name === workset);
+    const repositoryAvailable = !callerCwd || EffectArray.some(catalog.projects, item => item.path === callerCwd);
+    const worksetAvailable = !workset || EffectArray.some(catalog.definitions, item => item.name === workset);
     if (!repositoryAvailable) setCallerCwd('');
     if (!worksetAvailable) setWorkset('');
     if (scopeKind === 'repository' ? !repositoryAvailable : !worksetAvailable) setScope(scopeKind);
@@ -170,10 +193,12 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
     const nextWorkset = overrides.workset ?? workset;
     const nextScopeKind = overrides.workset === undefined ? scopeKind : 'workset';
     if (
-      !nextTask.trim() ||
+      !Effect.pipe(nextTask, EffectString.trim) ||
       invalidBudget ||
-      parseCodeRefs(nextCodeRefs.join('\n')).length > CONTEXT_BRIEF_MAXIMUM_CODE_REFS ||
-      (nextScopeKind === 'repository' ? !callerCwd.trim() : !nextWorkset.trim())
+      parseCodeRefs(EffectArray.join(nextCodeRefs, '\n')).length > CONTEXT_BRIEF_MAXIMUM_CODE_REFS ||
+      (nextScopeKind === 'repository'
+        ? !Effect.pipe(callerCwd, EffectString.trim)
+        : !Effect.pipe(nextWorkset, EffectString.trim))
     )
       return;
     graphRecoveryRequest.current?.abort();
@@ -183,7 +208,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
     setGraphRecoveryNotice('');
     if (overrides.task !== undefined) setTask(overrides.task);
     if (overrides.mode !== undefined) setMode(overrides.mode);
-    if (overrides.codeRefs !== undefined) setCodeRefsText(overrides.codeRefs.join('\n'));
+    if (overrides.codeRefs !== undefined) setCodeRefsText(EffectArray.join(overrides.codeRefs, '\n'));
     if (overrides.workset !== undefined) {
       invalidateRecall();
       setScopeKind('workset');
@@ -195,14 +220,16 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
         codeRefs: nextCodeRefs,
         ...(detail === 'compact' ? {} : {detail}),
         mode: nextMode,
-        ...(project.trim() ? {project: project.trim()} : {}),
-        task: nextTask.trim(),
-        ...(nextScopeKind === 'repository' ? {callerCwd: callerCwd.trim()} : {workset: nextWorkset.trim()}),
+        ...(Effect.pipe(project, EffectString.trim) ? {project: Effect.pipe(project, EffectString.trim)} : {}),
+        task: Effect.pipe(nextTask, EffectString.trim),
+        ...(nextScopeKind === 'repository'
+          ? {callerCwd: Effect.pipe(callerCwd, EffectString.trim)}
+          : {workset: Effect.pipe(nextWorkset, EffectString.trim)}),
       },
       scope:
         nextScopeKind === 'repository'
-          ? {callerCwd: callerCwd.trim(), kind: 'repository'}
-          : {kind: 'workset', workset: nextWorkset.trim()},
+          ? {callerCwd: Effect.pipe(callerCwd, EffectString.trim), kind: 'repository'}
+          : {kind: 'workset', workset: Effect.pipe(nextWorkset, EffectString.trim)},
     };
     await executeBrief(snapshot);
   }
@@ -214,9 +241,14 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
     setBriefBusy(true);
     setBriefError('');
     try {
-      const result = await api<ProjectedContextBriefV1>('/api/context/brief', snapshot.body, {
-        signal: controller.signal,
-      });
+      const result = await api<ProjectedContextBriefV1>(
+        '/api/context/brief',
+        snapshot.body,
+        {
+          signal: controller.signal,
+        },
+        isProjectedContextBriefV1,
+      );
       if (controller.signal.aborted) return false;
       setBrief(result);
       setBriefRequestSnapshot(snapshot);
@@ -233,20 +265,20 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
     const snapshot = briefRequestSnapshot;
     const currentScopeMatches =
       snapshot?.scope.kind === 'repository'
-        ? scopeKind === 'repository' && snapshot.scope.callerCwd === callerCwd.trim()
+        ? scopeKind === 'repository' && snapshot.scope.callerCwd === Effect.pipe(callerCwd, EffectString.trim)
         : snapshot?.scope.kind === 'workset'
-          ? scopeKind === 'workset' && snapshot.scope.workset === workset.trim()
+          ? scopeKind === 'workset' && snapshot.scope.workset === Effect.pipe(workset, EffectString.trim)
           : false;
     if (
       !snapshot ||
       snapshot.scope.kind !== scope ||
       !currentScopeMatches ||
-      snapshot.body.task !== task.trim() ||
+      snapshot.body.task !== Effect.pipe(task, EffectString.trim) ||
       snapshot.body.mode !== mode ||
       (snapshot.body.detail ?? 'compact') !== detail ||
       snapshot.body.budgetTokens !== budgetTokens ||
-      (snapshot.body.project ?? '') !== project.trim() ||
-      snapshot.body.codeRefs.join('\n') !== codeRefs.join('\n')
+      (snapshot.body.project ?? '') !== Effect.pipe(project, EffectString.trim) ||
+      EffectArray.join(snapshot.body.codeRefs, '\n') !== EffectArray.join(codeRefs, '\n')
     ) {
       setGraphRecoveryError('The Context Brief inputs changed. Rerun the brief before preparing its graph scope.');
       return;
@@ -265,6 +297,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
                 '/api/graphs/action',
                 {action: 'index-cwd', cwd: snapshot.scope.callerCwd},
                 {signal: controller.signal},
+                isOutputResponse,
               )
             ).output
           : await prepareWorksetForContext(snapshot.scope.workset, controller.signal);
@@ -286,7 +319,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
   }
 
   async function runRecall(): Promise<void> {
-    if (!recallQuery.trim()) return;
+    if (!Effect.pipe(recallQuery, EffectString.trim)) return;
     recallRequest.current?.abort();
     const controller = new AbortController();
     recallRequest.current = controller;
@@ -297,12 +330,17 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
         '/api/context/recall',
         {
           includeArchived,
-          ...(callerCwd.trim() && scopeKind === 'repository' ? {callerCwd: callerCwd.trim()} : {}),
-          ...(project.trim() ? {project: project.trim()} : {}),
-          query: recallQuery.trim(),
-          ...(workset.trim() && scopeKind === 'workset' ? {workset: workset.trim()} : {}),
+          ...(Effect.pipe(callerCwd, EffectString.trim) && scopeKind === 'repository'
+            ? {callerCwd: Effect.pipe(callerCwd, EffectString.trim)}
+            : {}),
+          ...(Effect.pipe(project, EffectString.trim) ? {project: Effect.pipe(project, EffectString.trim)} : {}),
+          query: Effect.pipe(recallQuery, EffectString.trim),
+          ...(Effect.pipe(workset, EffectString.trim) && scopeKind === 'workset'
+            ? {workset: Effect.pipe(workset, EffectString.trim)}
+            : {}),
         },
         {signal: controller.signal},
+        isManagerRecallResponse,
       );
       if (!controller.signal.aborted) {
         setRecall(result);
@@ -338,6 +376,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
           uri: result.canonicalUri,
         },
         {signal: controller.signal},
+        isManagerRecallFeedbackResponse,
       );
       if (!controller.signal.aborted) {
         setFeedbackByUri(current => ({...current, [feedback.uri]: feedback.action}));
@@ -372,6 +411,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
         '/api/context/read',
         {page, uri},
         {signal: controller.signal},
+        isManagerContextReadResponse,
       );
       if (!controller.signal.aborted) setReadResult(result);
     } catch (cause) {
@@ -392,6 +432,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
         '/api/context/connections',
         {includeHistorical: includeArchived, uri},
         {signal: controller.signal},
+        isManagerContextConnectionsResponse,
       );
       if (!controller.signal.aborted) setConnections(result);
     } catch (cause) {
@@ -415,6 +456,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
         '/api/memory/relations',
         {expectedContent: editor.expectedContent, relations, uri: editor.uri},
         {signal: controller.signal},
+        isManagerMemoryRelationsResponse,
       );
       if (controller.signal.aborted || readerNavigationRevision.current !== navigationRevision) return;
       setConnections(current =>
@@ -517,16 +559,24 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
         >
           <option value="">{scopeKind === 'repository' ? 'Select repository' : 'Select Workset'}</option>
           {scopeKind === 'repository'
-            ? catalog?.projects.map(item => (
-                <option key={item.name} value={item.path}>
-                  {item.name} — {item.path}
-                </option>
-              ))
-            : catalog?.definitions.map(item => (
-                <option key={item.name} value={item.name}>
-                  {item.name} · {item.memberCount} projects
-                </option>
-              ))}
+            ? EffectOption.getOrUndefined(
+                EffectOption.map(EffectOption.fromNullishOr(catalog?.projects), __effectArrayReceiver =>
+                  EffectArray.map(__effectArrayReceiver, item => (
+                    <option key={item.name} value={item.path}>
+                      {item.name} — {item.path}
+                    </option>
+                  )),
+                ),
+              )
+            : EffectOption.getOrUndefined(
+                EffectOption.map(EffectOption.fromNullishOr(catalog?.definitions), __effectArrayReceiver =>
+                  EffectArray.map(__effectArrayReceiver, item => (
+                    <option key={item.name} value={item.name}>
+                      {item.name} · {item.memberCount} projects
+                    </option>
+                  )),
+                ),
+              )}
         </select>
       </label>
       <label>
@@ -540,7 +590,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
           value={project}
         >
           <option value="">Infer from repository / search all</option>
-          {memoryProjectOptions.map(item => (
+          {EffectArray.map(memoryProjectOptions, item => (
             <option key={item} value={item}>
               {item}
             </option>
@@ -555,7 +605,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
   return (
     <div className="context-workspace">
       <div aria-label="Context workspace view" className="workspace-tabs" role="tablist">
-        {(['brief', 'recall', 'value'] as const).map(next => (
+        {EffectArray.map(['brief', 'recall', 'value'] as const, next => (
           <button
             aria-selected={view === next}
             className={view === next ? 'is-active' : undefined}
@@ -592,10 +642,13 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
                 Mode
                 <select
                   disabled={graphRecoveryBusy}
-                  onChange={event => setMode(event.target.value as ContextBriefMode)}
+                  onChange={event => {
+                    const selected = selectAllowedValue(event.target.value, CONTEXT_BRIEF_MODES);
+                    if (selected !== undefined) setMode(selected);
+                  }}
                   value={mode}
                 >
-                  {CONTEXT_BRIEF_MODES.map(value => (
+                  {EffectArray.map(CONTEXT_BRIEF_MODES, value => (
                     <option key={value}>{value}</option>
                   ))}
                 </select>
@@ -606,7 +659,10 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
                   Evidence detail
                   <select
                     disabled={graphRecoveryBusy}
-                    onChange={event => setDetail(event.target.value as ContextBriefDetail)}
+                    onChange={event => {
+                      const selected = selectAllowedValue(event.target.value, ['compact', 'source'] as const);
+                      if (selected !== undefined) setDetail(selected);
+                    }}
                     value={detail}
                   >
                     <option value="compact">Compact evidence</option>
@@ -646,8 +702,10 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
                     graphRecoveryBusy ||
                     Boolean(codeRefsError) ||
                     invalidBudget ||
-                    !task.trim() ||
-                    (scopeKind === 'repository' ? !callerCwd.trim() : !workset.trim())
+                    !Effect.pipe(task, EffectString.trim) ||
+                    (scopeKind === 'repository'
+                      ? !Effect.pipe(callerCwd, EffectString.trim)
+                      : !Effect.pipe(workset, EffectString.trim))
                   }
                   onClick={() => void runBrief()}
                   type="button"
@@ -728,7 +786,11 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
               />
               Include inactive memory
             </label>
-            <button disabled={recallBusy || !recallQuery.trim()} onClick={() => void runRecall()} type="button">
+            <button
+              disabled={recallBusy || !Effect.pipe(recallQuery, EffectString.trim)}
+              onClick={() => void runRecall()}
+              type="button"
+            >
               {recallBusy ? 'Searching…' : 'Recall context'}
             </button>
           </div>
@@ -752,7 +814,9 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
           <ContextStatus error={feedbackError} loading={false} loadingText="" />
         </section>
       ) : (
-        <ValuePanel {...(project.trim() ? {project: project.trim()} : {})} />
+        <ValuePanel
+          {...(Effect.pipe(project, EffectString.trim) ? {project: Effect.pipe(project, EffectString.trim)} : {})}
+        />
       )}
 
       {readBusy || readResult || readError ? (
@@ -808,11 +872,15 @@ export function ContextBriefResult(props: {
 }): React.ReactElement {
   const brief = props.brief;
   const anchors = brief.coverage.memory.codeAnchors;
-  const continuationRef = brief.recommendedFollowUps.find(followUp => followUp.operation === 'inspect-node')?.ref;
+  const continuationRef = EffectOption.getOrUndefined(
+    EffectArray.findFirst(brief.recommendedFollowUps, followUp => followUp.operation === 'inspect-node'),
+  )?.ref;
   const continuationCodeRefs = continuationRef === undefined ? undefined : contextBriefRerunCodeRefs(continuationRef);
   const continuationRecovery =
     brief.scope.freshness === 'stale' && anchors?.complete === false
-      ? brief.recommendedFollowUps.find(followUp => followUp.operation === 'graph-status')
+      ? EffectOption.getOrUndefined(
+          EffectArray.findFirst(brief.recommendedFollowUps, followUp => followUp.operation === 'graph-status'),
+        )
       : undefined;
   return (
     <div className="context-brief-result" aria-label="Context Brief result">
@@ -848,7 +916,7 @@ export function ContextBriefResult(props: {
       {brief.coverage.gaps.length > 0 ? (
         <section className="context-notices" aria-label="Coverage gaps">
           <h3>Coverage gaps</h3>
-          {brief.coverage.gaps.map(gap => (
+          {EffectArray.map(brief.coverage.gaps, gap => (
             <p key={gap}>{gap}</p>
           ))}
         </section>
@@ -860,7 +928,7 @@ export function ContextBriefResult(props: {
           {brief.graph.cards.length === 0 ? (
             <SmallEmpty text="No graph cards survived the bounded projection." />
           ) : null}
-          {brief.graph.cards.map(card => (
+          {EffectArray.map(brief.graph.cards, card => (
             <GraphEvidenceCard card={card} key={card.id} onRerun={props.onRerun} />
           ))}
           {brief.graph.continuation ? (
@@ -910,10 +978,10 @@ export function ContextBriefResult(props: {
           {[...brief.durableDecisions, ...brief.activeHandoffs].length === 0 ? (
             <SmallEmpty text="No active durable memory or handoff survived this brief." />
           ) : null}
-          {brief.durableDecisions.map(memory => (
+          {EffectArray.map(brief.durableDecisions, memory => (
             <MemoryEvidenceCard key={memory.uri} memory={memory} onOpen={props.onOpenMemory} />
           ))}
-          {brief.activeHandoffs.map(memory => (
+          {EffectArray.map(brief.activeHandoffs, memory => (
             <MemoryEvidenceCard key={memory.uri} memory={memory} onOpen={props.onOpenMemory} />
           ))}
         </section>
@@ -923,7 +991,7 @@ export function ContextBriefResult(props: {
         <section className="context-contracts">
           <SectionHeading count={brief.graph.contracts.length} title="Relationships" />
           <div>
-            {brief.graph.contracts.map(contract => (
+            {EffectArray.map(brief.graph.contracts, contract => (
               <article key={contract.id}>
                 <strong>{contract.relation}</strong>
                 <code>{contract.sourceRef}</code>
@@ -941,11 +1009,11 @@ export function ContextBriefResult(props: {
       {brief.stalenessAndConflicts.length > 0 ? (
         <section className="context-notices is-warning">
           <h3>Staleness and conflicts</h3>
-          {brief.stalenessAndConflicts.map(issue => (
+          {EffectArray.map(brief.stalenessAndConflicts, issue => (
             <article key={issue.id}>
               <strong>{issue.kind}</strong>
               <p>{issue.summary}</p>
-              {issue.uris.map(uri => (
+              {EffectArray.map(issue.uris, uri => (
                 <button key={uri} onClick={() => props.onOpenMemory(uri)} type="button">
                   Read affected memory
                 </button>
@@ -958,7 +1026,7 @@ export function ContextBriefResult(props: {
       {brief.recommendedFollowUps.length > 0 ? (
         <section className="context-followups">
           <SectionHeading count={brief.recommendedFollowUps.length} title="Recommended follow-ups" />
-          {brief.recommendedFollowUps.map(followUp => (
+          {EffectArray.map(brief.recommendedFollowUps, followUp => (
             <FollowUpAction
               followUp={followUp}
               key={followUp.id}
@@ -1034,7 +1102,7 @@ function RecallResults(props: {
           </h3>
           <p>
             {response.confidence
-              ? `${response.confidence.level.replaceAll('_', ' ')} confidence · ${response.confidence.reason}`
+              ? `${Effect.pipe(response.confidence.level, EffectString.replaceAll('_', ' '))} confidence · ${response.confidence.reason}`
               : 'Open a pointer before using it as evidence.'}
           </p>
           {response.resultSet.truncated ? (
@@ -1044,7 +1112,7 @@ function RecallResults(props: {
           ) : null}
         </div>
         <span>
-          Page {page.index + 1} of {page.pageCount} · {response.trust.replaceAll('-', ' ')}
+          Page {page.index + 1} of {page.pageCount} · {Effect.pipe(response.trust, EffectString.replaceAll('-', ' '))}
         </span>
       </header>
       {response.results.length === 0 ? (
@@ -1054,7 +1122,7 @@ function RecallResults(props: {
         />
       ) : (
         <div className="context-recall-list" role="list">
-          {page.results.map(result => (
+          {EffectArray.map(page.results, result => (
             <RecallResultCard
               busy={props.feedbackBusy}
               feedback={props.feedbackByUri[result.canonicalUri]}
@@ -1070,7 +1138,7 @@ function RecallResults(props: {
       {response.queryExpansions.length > 0 ? (
         <div className="context-query-expansions">
           <strong>Evaluated query expansions</strong>
-          {response.queryExpansions.map(expansion => (
+          {EffectArray.map(response.queryExpansions, expansion => (
             <span key={expansion}>{expansion}</span>
           ))}
         </div>
@@ -1078,7 +1146,7 @@ function RecallResults(props: {
       {response.warnings.length > 0 ? (
         <div className="context-notices is-warning" aria-label="Recall warnings">
           <h3>Recall may be incomplete</h3>
-          {response.warnings.map(warning => (
+          {EffectArray.map(response.warnings, warning => (
             <p key={warning.code}>
               {warning.message} {warning.remediation}
             </p>
@@ -1113,7 +1181,7 @@ function RecallResultCard(props: {
       <button className="context-recall-open" onClick={() => props.onOpen(result.canonicalUri)} type="button">
         <span className="context-rank">#{result.rank}</span>
         <span className="context-recall-card-main">
-          <strong>{result.metadata?.topic ?? result.canonicalUri.split('/').at(-1)}</strong>
+          <strong>{result.metadata?.topic ?? Effect.pipe(result.canonicalUri, EffectString.split('/')).at(-1)}</strong>
           <small>
             {result.readState} · {result.category} · {result.metadata?.kind ?? result.contextType}
             {result.metadata?.project ? ` · ${result.metadata.project}` : ''}
@@ -1125,7 +1193,7 @@ function RecallResultCard(props: {
           ) : null}
           <code>{result.canonicalUri}</code>
           {result.requestedUri !== result.canonicalUri ? <em>Relocated from the recalled URI</em> : null}
-          {result.warnings.map(warning => (
+          {EffectArray.map(result.warnings, warning => (
             <em className="is-warning" key={warning}>
               {warning}
             </em>
@@ -1135,7 +1203,7 @@ function RecallResultCard(props: {
       </button>
       <footer className="context-recall-feedback" aria-label={`Feedback for result ${result.rank}`}>
         <span>{props.feedback ? `Recorded: ${props.feedback}` : 'Was this context useful?'}</span>
-        {(['useful', 'wrong', 'pin', 'dismiss', 'applied'] as const).map(action => {
+        {EffectArray.map(['useful', 'wrong', 'pin', 'dismiss', 'applied'] as const, action => {
           const key = `${result.canonicalUri}:${action}`;
           return (
             <button
@@ -1146,7 +1214,13 @@ function RecallResultCard(props: {
               title={action === 'applied' ? 'This context materially informed a plan or change' : undefined}
               type="button"
             >
-              {props.busy === key ? 'Saving…' : action[0]?.toUpperCase() + action.slice(1)}
+              {props.busy === key
+                ? 'Saving…'
+                : Effect.pipe(action[0], effectOptionalString =>
+                    effectOptionalString == null
+                      ? undefined
+                      : Effect.pipe(effectOptionalString, EffectString.toUpperCase),
+                  ) + Effect.pipe(action, EffectString.slice(1))}
             </button>
           );
         })}
@@ -1243,7 +1317,10 @@ function ContextReader(props: {
         <footer>
           <button
             disabled={result.page.previous === undefined || props.busy}
-            onClick={() => props.onPage(result.requestedUri, result.page.previous!)}
+            onClick={() => {
+              const previous = result.page.previous;
+              if (previous !== undefined) props.onPage(result.requestedUri, previous);
+            }}
             type="button"
           >
             Previous page
@@ -1253,7 +1330,10 @@ function ContextReader(props: {
           </span>
           <button
             disabled={result.page.next === undefined || props.busy}
-            onClick={() => props.onPage(result.requestedUri, result.page.next!)}
+            onClick={() => {
+              const next = result.page.next;
+              if (next !== undefined) props.onPage(result.requestedUri, next);
+            }}
             type="button"
           >
             Next page
@@ -1279,20 +1359,22 @@ function ContextConnections(props: {
   if (!props.result)
     return <ContextEmpty title="Connections not loaded" text="Open this tab to verify direct links." />;
   const result = props.result;
-  const nodes = new Map(result.nodes.map(node => [node.memoryId, node]));
+  const nodes = new Map(EffectArray.map(result.nodes, node => [node.memoryId, node]));
   const groups = [
     {
-      connections: result.connections.filter(connection => connection.resolution === 'unresolved'),
+      connections: EffectArray.filter(result.connections, connection => connection.resolution === 'unresolved'),
       title: 'Unresolved authored links',
     },
     {
-      connections: result.connections.filter(
+      connections: EffectArray.filter(
+        result.connections,
         connection => connection.direction === 'incoming' && connection.resolution !== 'unresolved',
       ),
       title: 'Incoming',
     },
     {
-      connections: result.connections.filter(
+      connections: EffectArray.filter(
+        result.connections,
         connection => connection.direction === 'outgoing' && connection.resolution !== 'unresolved',
       ),
       title: 'Outgoing',
@@ -1302,23 +1384,23 @@ function ContextConnections(props: {
     <div className="context-connections" aria-label="Verified memory connections">
       <div className="context-connection-summary">
         <strong>{result.coverage.resultCount} direct neighbor(s)</strong>
-        <span>{result.trust.replaceAll('-', ' ')}</span>
+        <span>{Effect.pipe(result.trust, EffectString.replaceAll('-', ' '))}</span>
         {result.coverage.truncated ? <em>Bounded result is truncated.</em> : null}
       </div>
       <div className="context-premises">
-        {result.premises.map(premise => (
+        {EffectArray.map(result.premises, premise => (
           <span className={`is-${premise.state}`} key={`${premise.requestedOrdinal}:${premise.requestedRef}`}>
             Premise {premise.requestedOrdinal + 1}: {premise.state}
           </span>
         ))}
       </div>
-      {groups.map(group => (
+      {EffectArray.map(groups, group => (
         <section className="context-connection-group" key={group.title}>
           <SectionHeading count={group.connections.length} title={group.title} />
           {group.connections.length === 0 ? (
-            <SmallEmpty text={`No ${group.title.toLowerCase()} in this bounded view.`} />
+            <SmallEmpty text={`No ${Effect.pipe(group.title, EffectString.toLowerCase)} in this bounded view.`} />
           ) : null}
-          {group.connections.map((connection, index) => {
+          {EffectArray.map(group.connections, (connection, index) => {
             const node = connection.neighborMemoryId ? nodes.get(connection.neighborMemoryId) : undefined;
             return (
               <article
@@ -1337,15 +1419,25 @@ function ContextConnections(props: {
                 </small>
                 <footer>
                   {connection.neighborUri ? (
-                    <button onClick={() => props.onOpen(connection.neighborUri!)} type="button">
+                    <button
+                      onClick={() => {
+                        const uri = connection.neighborUri;
+                        if (uri !== undefined) props.onOpen(uri);
+                      }}
+                      type="button"
+                    >
                       Open neighbor
                     </button>
                   ) : null}
-                  {node?.codeCitations.map(citation => (
-                    <button key={citation.id} onClick={() => props.onInspectCode(citation)} type="button">
-                      Inspect {citation.target.kind === 'symbol' ? citation.target.name : citation.path}
-                    </button>
-                  ))}
+                  {EffectOption.getOrUndefined(
+                    EffectOption.map(EffectOption.fromNullishOr(node?.codeCitations), __effectArrayReceiver =>
+                      EffectArray.map(__effectArrayReceiver, citation => (
+                        <button key={citation.id} onClick={() => props.onInspectCode(citation)} type="button">
+                          Inspect {citation.target.kind === 'symbol' ? citation.target.name : citation.path}
+                        </button>
+                      )),
+                    ),
+                  )}
                 </footer>
               </article>
             );
@@ -1374,27 +1466,30 @@ function RelationEditor(props: {
 }): React.ReactElement {
   const [relations, setRelations] = useState<readonly MemoryRelation[]>(props.editor.relations);
   useEffect(() => setRelations(props.editor.relations), [props.editor.expectedContent, props.editor.relations]);
-  const invalid = relations.some(relation => !relation.uri.trim());
+  const invalid = EffectArray.some(relations, relation => !Effect.pipe(relation.uri, EffectString.trim));
   return (
     <section className="context-relation-editor" aria-busy={props.busy}>
       <SectionHeading count={relations.length} title="Structured relations" />
       <p>Targets are resolved to stable identities and checked again during the write.</p>
-      {relations.map((relation, index) => (
+      {EffectArray.map(relations, (relation, index) => (
         <div className="context-relation-row" key={`${index}:${relation.type}`}>
           <label>
             Type
             <select
               disabled={props.busy}
-              onChange={event =>
-                setRelations(current =>
-                  current.map((item, itemIndex) =>
-                    itemIndex === index ? {...item, type: event.target.value as MemoryRelation['type']} : item,
-                  ),
-                )
-              }
+              onChange={event => {
+                const selected = selectAllowedValue(event.target.value, MEMORY_RELATION_TYPES);
+                if (selected !== undefined) {
+                  setRelations(current =>
+                    EffectArray.map(current, (item, itemIndex) =>
+                      itemIndex === index ? {...item, type: selected} : item,
+                    ),
+                  );
+                }
+              }}
               value={relation.type}
             >
-              {MEMORY_RELATION_TYPES.map(type => (
+              {EffectArray.map(MEMORY_RELATION_TYPES, type => (
                 <option key={type} value={type}>
                   {type}
                 </option>
@@ -1407,7 +1502,9 @@ function RelationEditor(props: {
               disabled={props.busy}
               onChange={event =>
                 setRelations(current =>
-                  current.map((item, itemIndex) => (itemIndex === index ? {...item, uri: event.target.value} : item)),
+                  EffectArray.map(current, (item, itemIndex) =>
+                    itemIndex === index ? {...item, uri: event.target.value} : item,
+                  ),
                 )
               }
               placeholder="threadnote://memory/tn_…"
@@ -1416,7 +1513,9 @@ function RelationEditor(props: {
           </label>
           <button
             disabled={props.busy}
-            onClick={() => setRelations(current => current.filter((_item, itemIndex) => itemIndex !== index))}
+            onClick={() =>
+              setRelations(current => EffectArray.filter(current, (_item, itemIndex) => itemIndex !== index))
+            }
             type="button"
           >
             Remove
@@ -1449,7 +1548,7 @@ function MemoryEvidenceCard(props: {
     <article className="context-memory-card">
       <header>
         <span>{memory.kind}</span>
-        <strong>{memory.topic ?? memory.uri.split('/').at(-1)}</strong>
+        <strong>{memory.topic ?? Effect.pipe(memory.uri, EffectString.split('/')).at(-1)}</strong>
         <em className={`is-${memory.freshness}`}>{memory.preciseStatus ?? memory.freshness}</em>
       </header>
       <p>{memory.excerpt}</p>
@@ -1466,7 +1565,7 @@ function MemoryEvidenceCard(props: {
       </div>
       {memory.codeRelations && memory.codeRelations.length > 0 ? (
         <div className="context-memory-relations">
-          {memory.codeRelations.map(relation => (
+          {EffectArray.map(memory.codeRelations, relation => (
             <span key={`${relation.anchorOrdinal}:${relation.citationId}`}>
               {relation.kind} anchor {relation.anchorOrdinal + 1} · {relation.status}
             </span>
@@ -1543,7 +1642,12 @@ function FollowUpAction(props: {
 
 async function prepareWorksetForContext(workset: string, signal: AbortSignal): Promise<string> {
   let job = (
-    await api<{readonly job: ManagerWorksetPrepareJob}>('/api/worksets/prepare', {concurrency: 2, workset}, {signal})
+    await api<{readonly job: ManagerWorksetPrepareJob}>(
+      '/api/worksets/prepare',
+      {concurrency: 2, workset},
+      {signal},
+      isJobResponse,
+    )
   ).job;
   let polls = 0;
   while (job.status === 'running' || job.status === 'cancelling') {
@@ -1558,6 +1662,7 @@ async function prepareWorksetForContext(workset: string, signal: AbortSignal): P
         {
           signal,
         },
+        isJobResponse,
       )
     ).job;
     polls += 1;
@@ -1645,7 +1750,7 @@ function SmallEmpty(props: {readonly text: string}): React.ReactElement {
 }
 
 export function parseCodeRefs(value: string): readonly string[] {
-  return [...new Set(value.split(/[\n,]/u).filter(item => item.length > 0))];
+  return [...new Set(EffectArray.filter(Effect.pipe(value, EffectString.split(/[\n,]/u)), item => item.length > 0))];
 }
 
 function contextBriefRerunCodeRefs(ref: string): readonly string[] | undefined {
@@ -1654,4 +1759,11 @@ function contextBriefRerunCodeRefs(ref: string): readonly string[] | undefined {
   } catch {
     return undefined;
   }
+}
+
+function selectAllowedValue<const Values extends readonly string[]>(
+  value: string,
+  allowed: Values,
+): Values[number] | undefined {
+  return EffectOption.getOrUndefined(EffectArray.findFirst(allowed, candidate => candidate === value));
 }

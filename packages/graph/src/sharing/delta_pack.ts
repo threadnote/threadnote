@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import {
   decodeCodeGraphCheckpointPackV1,
@@ -77,7 +78,7 @@ export function composeGraphShareTargetRecords(
     readonly records: readonly CodeGraphCheckpointRecordV1[];
   }[],
 ): readonly CodeGraphCheckpointRecordV1[] {
-  return deltas.reduce(applyGraphShareDeltaPack, checkpointRecords);
+  return EffectArray.reduce(deltas, checkpointRecords, applyGraphShareDeltaPack);
 }
 
 export const putGraphShareDeltaArtifact = Effect.fn('codeGraph.sharing.putDeltaArtifact')(function* (

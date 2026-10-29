@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import {isJsonObject} from '@threadnote/platform/json';
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
@@ -7,6 +8,15 @@ import {ModelSetupProvider} from '../../src/model_setup_live.js';
 import {ManagerLiveProvider} from '../../src/live/provider.js';
 import {FakeManagerSocket} from './live-consumer-fixture.js';
 import type {RuntimeUpdates} from '../../src/update_contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Option as EffectOption} from 'effect';
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 let root: Root;
 let state: RuntimeUpdates;
@@ -14,7 +24,7 @@ let calls: {url: string; body?: Record<string, unknown>}[];
 let setupCalls: {url: string; body?: Record<string, unknown>}[];
 const onChanged = vi.fn();
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
   calls = [];
   setupCalls = [];
@@ -35,7 +45,7 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init: RequestInit) => {
-      const body = init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+      const body = init.body ? requireJsonObject(JSON.parse(String(init.body))) : undefined;
       if (url === '/api/live-session') return new Response(JSON.stringify({ticket: 'fixture'}));
       if (url === '/api/models/setup') {
         setupCalls.push({url, body});
@@ -56,7 +66,8 @@ beforeEach(() => {
         );
       }
       calls.push({url, body});
-      if (body?.action === 'policy') state = {...state, policy: body.policy as 'automatic' | 'notify'};
+      if (body?.action === 'policy' && (body.policy === 'automatic' || body.policy === 'notify'))
+        state = {...state, policy: body.policy};
       if (body?.action === 'update') state = {...state, job: {status: 'running', message: 'Installing…'}};
       return new Response(JSON.stringify(state));
     }),
@@ -82,7 +93,16 @@ async function render() {
   );
 }
 function button(label: string): HTMLButtonElement {
-  const value = [...document.querySelectorAll('button')].find(node => node.textContent?.includes(label));
+  const value = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(node =>
+          Effect.pipe(node.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(label)),
+          ))(__effectArrayValue),
+    ),
+  );
   if (!value) throw new Error('Missing button ' + label);
   return value;
 }
@@ -90,7 +110,7 @@ it('shows both release notes and persists an explicit automatic-update choice', 
   await render();
   expect(document.body.textContent).toContain('Existing capability');
   expect(document.body.textContent).toContain('New capability');
-  const toggle = document.querySelector('[role=switch][aria-label="Automatic updates"]') as HTMLButtonElement;
+  const toggle = document.querySelector<HTMLButtonElement>('button[role=switch][aria-label="Automatic updates"]')!;
   expect(toggle.getAttribute('aria-checked')).toBe('true');
   await act(async () => toggle.click());
   expect(toggle.getAttribute('aria-checked')).toBe('false');
@@ -136,9 +156,9 @@ it('exposes check failures without a false up-to-date badge and disables managed
   expect(document.body.textContent).not.toContain('Up to date');
   expect(button('Check for updates').disabled).toBe(false);
   expect(button('Update Threadnote').disabled).toBe(true);
-  expect((document.querySelector('[role=switch][aria-label="Automatic updates"]') as HTMLButtonElement).disabled).toBe(
-    true,
-  );
+  expect(
+    document.querySelector<HTMLButtonElement>('button[role=switch][aria-label="Automatic updates"]')!.disabled,
+  ).toBe(true);
 });
 it('renders release-note Markdown without executing embedded HTML', async () => {
   state = {
@@ -197,7 +217,7 @@ it('replaces cleared live errors/job and refreshes full notes once when automati
   expect(document.body.textContent).not.toContain('Old notes failure');
   expect(document.body.textContent).not.toContain('Old automatic failure');
   expect(document.body.textContent).not.toContain('Old job running');
-  const fullBefore = calls.filter(call => call.url === '/api/runtime/updates').length;
+  const fullBefore = EffectArray.filter(calls, call => call.url === '/api/runtime/updates').length;
   state = {
     ...state,
     automaticRunning: false,
@@ -208,13 +228,13 @@ it('replaces cleared live errors/job and refreshes full notes once when automati
   await act(async () => {
     for (let i = 0; i < 8; i++) await Promise.resolve();
   });
-  expect(calls.filter(call => call.url === '/api/runtime/updates')).toHaveLength(fullBefore + 1);
+  expect(EffectArray.filter(calls, call => call.url === '/api/runtime/updates')).toHaveLength(fullBefore + 1);
   expect(document.body.textContent).toContain('Automatic completion notes');
   expect(onChanged).toHaveBeenCalledOnce();
   await act(async () => socket.invalidate(3, {topic: 'runtime-updates', scope: 'account'}));
   await act(async () => {
     for (let i = 0; i < 8; i++) await Promise.resolve();
   });
-  expect(calls.filter(call => call.url === '/api/runtime/updates')).toHaveLength(fullBefore + 1);
+  expect(EffectArray.filter(calls, call => call.url === '/api/runtime/updates')).toHaveLength(fullBefore + 1);
   expect(onChanged).toHaveBeenCalledOnce();
 });

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {spawn} from '@threadnote/testing/node-child-process';
 import {createServer} from '@threadnote/testing/node-net';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -7,8 +8,32 @@ import {promisify} from '@threadnote/testing/node-util';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {describe, expect, it} from 'vitest';
 import {sha256HexFromDigest, sha256Digest} from '@threadnote/graph/sharing/digest';
+import * as EffectString from 'effect/String';
+import {Schema} from 'effect';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const execFilePromise = promisify(execFile);
+const initializedSchema = Schema.Struct({profileDigest: Schema.String, written: Schema.Boolean});
+const snapshotIdSchema = Schema.Struct({snapshot: Schema.Struct({id: Schema.String})});
+const contributionStatusSchema = Schema.Struct({mode: Schema.String});
+const coordinatorStatusSchema = Schema.Struct({
+  receipts: Schema.Array(Schema.Struct({resultManifestDigest: Schema.String})),
+});
+const sharedQuerySchema = Schema.Struct({
+  nodes: Schema.Array(Schema.Struct({name: Schema.String})),
+  source: Schema.optional(Schema.Struct({kind: Schema.String, profileDigest: Schema.String})),
+});
+const localOverlaySourceSchema = Schema.Struct({source: Schema.optional(Schema.Struct({kind: Schema.String}))});
+const publisherReadySchema = Schema.Struct({
+  coordinatorUrl: Schema.String,
+  generation: Schema.Finite,
+  listening: Schema.Boolean,
+});
+
+function parseJson<S extends Schema.ConstraintDecoder<unknown>>(schema: S, content: string): S['Type'] {
+  return Schema.decodeUnknownSync(schema)(JSON.parse(content));
+}
 
 describe('code graph sharing multi-contributor HTTP', () => {
   it('lets two homes build a remote graph over the coordinator and a third home use it', async () => {
@@ -32,7 +57,8 @@ describe('code graph sharing multi-contributor HTTP', () => {
       const port = await reservedPort();
       const coordinator = `http://127.0.0.1:${port}`;
       await runCli(['graph', 'index', '--home', publisherHome, '--cwd', repository, '--json']);
-      const initialized = JSON.parse(
+      const initialized = parseJson(
+        initializedSchema,
         (
           await runCli([
             'graph',
@@ -50,7 +76,7 @@ describe('code graph sharing multi-contributor HTTP', () => {
             '--json',
           ])
         ).stdout,
-      ) as {readonly profileDigest: string; readonly written: boolean};
+      );
       expect(initialized.written).toBe(true);
       await git(repository, ['add', '.threadnote/graph-share.json']);
       await commit(repository, 'enroll graph sharing');
@@ -94,18 +120,20 @@ describe('code graph sharing multi-contributor HTTP', () => {
         coordinator,
         '--json',
       ]);
-      const contributed = JSON.parse(
+      const contributed = parseJson(
+        snapshotIdSchema,
         (await runCli(['graph', 'index', '--home', contributorAHome, '--cwd', repository, '--json'])).stdout,
-      ) as {readonly snapshot: {readonly id: string}};
+      );
       expect(contributed.snapshot.id).toMatch(/^cgsn_/);
-      const contributeStatus = JSON.parse(
+      const contributeStatus = parseJson(
+        contributionStatusSchema,
         (await runCli(['graph', 'contribute', 'status', '--home', contributorAHome, '--cwd', repository, '--json']))
           .stdout,
-      ) as {readonly mode: string};
+      );
       expect(contributeStatus.mode).toBe('passive');
-      const afterA = (await (await fetch(`${coordinator}/v1/status`)).json()) as {
-        readonly receipts: ReadonlyArray<{readonly resultManifestDigest: string}>;
-      };
+      const afterA = Schema.decodeUnknownSync(coordinatorStatusSchema)(
+        await (await fetch(`${coordinator}/v1/status`)).json(),
+      );
       expect(afterA.receipts.length).toBeGreaterThan(0);
 
       await runCli([
@@ -136,18 +164,16 @@ describe('code graph sharing multi-contributor HTTP', () => {
         '--json',
       ]);
       await runCli(['graph', 'index', '--home', consumerHome, '--cwd', repository, '--json']);
-      const queried = JSON.parse(
+      const queried = parseJson(
+        sharedQuerySchema,
         (await runCli(['graph', 'query', '--home', consumerHome, '--cwd', repository, '--query', 'shared', '--json']))
           .stdout,
-      ) as {
-        readonly nodes: ReadonlyArray<{readonly name: string}>;
-        readonly source?: {readonly kind: string; readonly profileDigest: string};
-      };
+      );
       expect(queried.source).toMatchObject({
         kind: 'shared-base-plus-local-overlay',
         profileDigest: initialized.profileDigest,
       });
-      expect(queried.nodes.some(node => node.name === 'shared')).toBe(true);
+      expect(EffectArray.some(queried.nodes, node => node.name === 'shared')).toBe(true);
 
       const gitBlob = Buffer.from('blob 4\0test');
       const treeResponse = await fetch(`${coordinator}/v1/cas/sha256/${sha256HexFromDigest(sha256Digest(gitBlob))}`, {
@@ -155,16 +181,17 @@ describe('code graph sharing multi-contributor HTTP', () => {
         body: gitBlob,
       });
       expect(treeResponse.status).toBe(400);
-      const missing = await fetch(`${coordinator}/v1/cas/sha256/${'0'.repeat(64)}`);
+      const missing = await fetch(`${coordinator}/v1/cas/sha256/${Effect.pipe('0', EffectString.repeat(64))}`);
       expect(missing.status).toBe(404);
 
       listener.kill('SIGTERM');
       listener = undefined;
 
-      const afterDown = JSON.parse(
+      const afterDown = parseJson(
+        localOverlaySourceSchema,
         (await runCli(['graph', 'query', '--home', consumerHome, '--cwd', repository, '--query', 'shared', '--json']))
           .stdout,
-      ) as {readonly source?: {readonly kind: string}};
+      );
       expect(afterDown.source?.kind).toBe('shared-base-plus-local-overlay');
 
       const unenrolled = join(root, 'unenrolled');
@@ -175,9 +202,10 @@ describe('code graph sharing multi-contributor HTTP', () => {
       await git(unenrolled, ['remote', 'add', 'origin', 'https://github.com/acme/local-only.git']);
       await git(unenrolled, ['add', '.']);
       await commit(unenrolled, 'local');
-      const localIndex = JSON.parse(
+      const localIndex = parseJson(
+        snapshotIdSchema,
         (await runCli(['graph', 'index', '--home', localHome, '--cwd', unenrolled, '--json'])).stdout,
-      ) as {readonly snapshot: {readonly id: string}};
+      );
       expect(localIndex.snapshot.id).toMatch(/^cgsn_/);
     } finally {
       listener?.kill('SIGTERM');
@@ -187,6 +215,8 @@ describe('code graph sharing multi-contributor HTTP', () => {
 });
 
 function reservedPort(): Promise<number> {
+  // The plain async test awaits this OS net.Server listen/close callback boundary.
+
   return new Promise((resolve, reject) => {
     const server = createServer();
     server.listen(0, '127.0.0.1', () => {
@@ -198,11 +228,9 @@ function reservedPort(): Promise<number> {
   });
 }
 
-function waitForJson(child: ReturnType<typeof spawn>): Promise<{
-  readonly coordinatorUrl: string;
-  readonly generation: number;
-  readonly listening: boolean;
-}> {
+function waitForJson(child: ReturnType<typeof spawn>): Promise<typeof publisherReadySchema.Type> {
+  // The plain async test awaits child stdout/error/exit events and its watchdog timer.
+
   return new Promise((resolve, reject) => {
     let stdout = '';
     let stderr = '';
@@ -211,14 +239,21 @@ function waitForJson(child: ReturnType<typeof spawn>): Promise<{
     }, 120_000);
     child.stdout?.on('data', chunk => {
       stdout += String(chunk);
-      const line = stdout
-        .split('\n')
-        .map(value => value.trim())
-        .find(value => value.startsWith('{') && value.includes('coordinatorUrl'));
+      const line = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          EffectArray.map(Effect.pipe(stdout, EffectString.split('\n')), value =>
+            Effect.pipe(value, EffectString.trim),
+          ),
+          __effectArrayValue =>
+            !!(value =>
+              Effect.pipe(value, EffectString.startsWith('{')) &&
+              Effect.pipe(value, EffectString.includes('coordinatorUrl')))(__effectArrayValue),
+        ),
+      );
       if (line === undefined) return;
       try {
         clearTimeout(timer);
-        resolve(JSON.parse(line) as {coordinatorUrl: string; generation: number; listening: boolean});
+        resolve(parseJson(publisherReadySchema, line));
       } catch (cause) {
         clearTimeout(timer);
         reject(cause);

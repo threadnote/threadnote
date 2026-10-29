@@ -1,3 +1,6 @@
+import {Schema} from 'effect';
+import {isIntegrationResult} from '@threadnote/manager/api/response-guards';
+import {Array as EffectArray} from 'effect';
 import React, {useState} from 'react';
 import {AlertTriangle, Pause, Pencil, Play, RefreshCw, Unplug} from 'lucide-react';
 import {ActionMenu} from '@threadnote/manager/action-menu';
@@ -10,11 +13,16 @@ import type {IntegrationResult} from '@threadnote/integration-core/manager-contr
 import type {GitHubSource} from '../manager-contracts.js';
 import {GitHubConnectionForm} from './connection-form.js';
 import {product} from './catalog.js';
+import {Option as EffectOption} from 'effect';
 
 type Connections = {readonly sources: readonly GitHubSource[]};
 function matchingSources(data: Connections | undefined, query: string): readonly GitHubSource[] {
-  return (data?.sources ?? []).filter(source =>
-    matchesIntegrationQuery(product, query, source.id, source.project ?? '', ...source.repositories),
+  const sources = data?.sources ?? [];
+  return EffectArray.filter(
+    sources,
+    (source, __effectArrayIndex) =>
+      __effectArrayIndex in sources &&
+      matchesIntegrationQuery(product, query, source.id, source.project ?? '', ...source.repositories),
   );
 }
 
@@ -58,13 +66,18 @@ export function GitHubIntegrationView({
     setError('');
     setNotice('');
     try {
-      const result = await api<IntegrationResult>('/api/integrations/github', {
-        action,
-        id: source.id,
-        ...(action === 'set-enabled' ? {enabled: !source.enabled} : {}),
-        apply: true,
-        confirm: true,
-      });
+      const result = await api<IntegrationResult>(
+        '/api/integrations/github',
+        {
+          action,
+          id: source.id,
+          ...(action === 'set-enabled' ? {enabled: !source.enabled} : {}),
+          apply: true,
+          confirm: true,
+        },
+        undefined,
+        isIntegrationResult,
+      );
       if (action === 'sync-source') setGithubResult(result);
       if (!result.applied) throw new Error('Connection change was not applied.');
       await onChanged(
@@ -90,7 +103,7 @@ export function GitHubIntegrationView({
     <>
       {visible ? (
         <>
-          {repositories.map(source => (
+          {EffectArray.map(repositories, source => (
             <div className="integration-row" key={'github-' + source.id}>
               <IntegrationLogo product={product} decorative />
               <div className="integration-row-main">
@@ -106,7 +119,7 @@ export function GitHubIntegrationView({
                   </span>
                 </h4>
                 <p className="integration-path">
-                  GitHub · {source.repositories.join(', ')} · {source.project ?? 'Projectless'}
+                  GitHub · {EffectArray.join(source.repositories, ', ')} · {source.project ?? 'Projectless'}
                 </p>
                 <p className="muted">
                   {source.conversations} {source.conversations === 1 ? 'conversation' : 'conversations'} ·{' '}
@@ -158,7 +171,18 @@ export function GitHubIntegrationView({
       {connection ? (
         <GitHubConnectionForm
           source={connection.value}
-          reusableCredential={!connection.value && (data?.sources.some(source => source.credentialConfigured) ?? false)}
+          reusableCredential={
+            !connection.value &&
+            (EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(data?.sources), __effectArrayReceiver =>
+                EffectArray.some(
+                  __effectArrayReceiver,
+                  __effectArrayValue => !!(source => source.credentialConfigured)(__effectArrayValue),
+                ),
+              ),
+            ) ??
+              false)
+          }
           onClose={closeConnection}
           onSaved={async () => {
             closeConnection();
@@ -173,7 +197,7 @@ export function GitHubIntegrationView({
           </p>
           {githubResult.warnings?.length ? (
             <ul className="integration-warnings">
-              {githubResult.warnings.map((warning, index) => (
+              {EffectArray.map(githubResult.warnings, (warning, index) => (
                 <li key={index}>
                   <AlertTriangle /> {warning}
                 </li>
@@ -199,6 +223,39 @@ function integrationStatus(source: Pick<GitHubSource, 'enabled' | 'credentialCon
 
 export const githubIntegration = defineIntegration<Connections>({
   product,
+  isData: Schema.is(
+    Schema.Struct({
+      sources: Schema.Array(
+        Schema.Struct({
+          id: Schema.String,
+          enabled: Schema.Boolean,
+          project: Schema.Union([Schema.Null, Schema.String]),
+          repositories: Schema.Array(Schema.String),
+          credentialEnv: Schema.String,
+          credentialStorage: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Literal('local')])),
+          credentialConfigured: Schema.Boolean,
+          refreshIntervalMinutes: Schema.Finite,
+          maxStaleHours: Schema.Finite,
+          status: Schema.Union([
+            Schema.Literal('active'),
+            Schema.Literal('needs-sync'),
+            Schema.Literal('needs-attention'),
+          ]),
+          conversations: Schema.Finite,
+          chunks: Schema.Finite,
+          lastSyncedAt: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Finite])),
+          nextAttemptAt: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Finite])),
+          progress: Schema.optionalKey(
+            Schema.Union([
+              Schema.Undefined,
+              Schema.Struct({repository: Schema.String, page: Schema.Finite, offset: Schema.Finite}),
+            ]),
+          ),
+          lastReconciledAt: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Finite])),
+        }),
+      ),
+    }),
+  ),
   count: (data, query) => matchingSources(data, query).length,
   View: GitHubIntegrationView,
 });

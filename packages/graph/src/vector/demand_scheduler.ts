@@ -1,3 +1,7 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 /** One durable lane has one replaceable desired target and at most one active owner. */
 export interface CodeGraphEmbeddingDemandTarget {
   readonly snapshotId: string;
@@ -132,7 +136,10 @@ export function acknowledgeCodeGraphEmbeddingDemandLane(
   const {active: _active, ...unowned} = lane;
   if (!codeGraphEmbeddingDemandSameTarget(lane, claim))
     return {...unowned, state: lane.state === 'cancelled' ? 'cancelled' : 'queued'};
-  const reason = acknowledgement.reason?.slice(0, 512) || undefined;
+  const reason =
+    Effect.pipe(acknowledgement.reason, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.slice(0, 512)),
+    ) || undefined;
   if (acknowledgement.kind === 'rebind' && lane.state === 'cancelled')
     return {...unowned, state: 'cancelled', reason: lane.reason ?? 'removed'};
   if (acknowledgement.kind === 'rebind') return {...unowned, state: 'queued', attempt: 0, notBefore: 0, reason};
@@ -201,5 +208,8 @@ export function selectCodeGraphEmbeddingDemandLane<T extends {readonly key: stri
   after?: string,
 ): T | undefined {
   const sorted = [...lanes].sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
-  return sorted.find(lane => after === undefined || lane.key > after) ?? sorted[0];
+  return (
+    EffectOption.getOrUndefined(EffectArray.findFirst(sorted, lane => after === undefined || lane.key > after)) ??
+    sorted[0]
+  );
 }

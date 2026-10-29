@@ -1,5 +1,9 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_CODEX_TERMINAL_VERSION = 1 as const;
 export const CODE_MEMORY_LINK_CODEX_TERMINAL_MARKER = 'THREADNOTE_CODE_MEMORY_LINK_TERMINAL ' as const;
@@ -42,14 +46,14 @@ export interface CodeMemoryLinkCodexTerminalReceiptV1 {
   readonly version: typeof CODE_MEMORY_LINK_CODEX_TERMINAL_VERSION;
 }
 
-export class CodeMemoryLinkCodexTerminalError extends Schema.TaggedError<CodeMemoryLinkCodexTerminalError>()(
-  'CodeMemoryLinkCodexTerminalError',
-  {
-    diagnostics: Schema.NullOr(Schema.Any),
-    kind: Schema.Literals([...CODE_MEMORY_LINK_CODEX_TERMINAL_KINDS]),
-    message: Schema.String,
-  },
-) {
+export class CodeMemoryLinkCodexTerminalError extends Schema.TaggedError<
+  CodeMemoryLinkCodexTerminalError,
+  {readonly brand: unique symbol}
+>()('CodeMemoryLinkCodexTerminalError', {
+  diagnostics: Schema.NullOr(Schema.Any),
+  kind: Schema.Literals([...CODE_MEMORY_LINK_CODEX_TERMINAL_KINDS]),
+  message: Schema.String,
+}) {
   static of(
     kind: CodeMemoryLinkCodexTerminalKind,
     message: string,
@@ -101,27 +105,39 @@ export function formatCodeMemoryLinkCodexTerminalReceipt(error: unknown): string
   return `${CODE_MEMORY_LINK_CODEX_TERMINAL_MARKER}${JSON.stringify(receipt)}`;
 }
 
+function isCodeMemoryLinkCodexTerminalKind(value: unknown): value is CodeMemoryLinkCodexTerminalKind {
+  return typeof value === 'string' && EffectArray.some(CODE_MEMORY_LINK_CODEX_TERMINAL_KINDS, kind => kind === value);
+}
+
 export function parseCodeMemoryLinkCodexTerminalReceipt(stderr: string): CodeMemoryLinkCodexTerminalReceiptV1 | null {
-  const candidates = stderr.split(/\r?\n/u).filter(line => line.startsWith(CODE_MEMORY_LINK_CODEX_TERMINAL_MARKER));
+  const candidates = EffectArray.filter(
+    Effect.pipe(stderr, EffectString.split(/\r?\n/u)),
+    __effectArrayValue =>
+      !!(line => Effect.pipe(line, EffectString.startsWith(CODE_MEMORY_LINK_CODEX_TERMINAL_MARKER)))(
+        __effectArrayValue,
+      ),
+  );
   if (candidates.length !== 1) return null;
   let value: unknown;
   try {
-    value = JSON.parse(candidates[0].slice(CODE_MEMORY_LINK_CODEX_TERMINAL_MARKER.length)) as unknown;
+    value = JSON.parse(
+      Effect.pipe(candidates[0], EffectString.slice(CODE_MEMORY_LINK_CODEX_TERMINAL_MARKER.length)),
+    ) as unknown;
   } catch {
     return null;
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const receipt = value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) return null;
+  const receipt = value;
   if (
-    JSON.stringify(Object.keys(receipt).sort()) !== JSON.stringify(['diagnosticHash', 'kind', 'version']) ||
+    JSON.stringify(EffectRecord.keys(receipt).sort()) !== JSON.stringify(['diagnosticHash', 'kind', 'version']) ||
     receipt.version !== CODE_MEMORY_LINK_CODEX_TERMINAL_VERSION ||
     typeof receipt.kind !== 'string' ||
-    !CODE_MEMORY_LINK_CODEX_TERMINAL_KINDS.includes(receipt.kind as CodeMemoryLinkCodexTerminalKind) ||
+    !isCodeMemoryLinkCodexTerminalKind(receipt.kind) ||
     typeof receipt.diagnosticHash !== 'string' ||
     !/^[0-9a-f]{64}$/u.test(receipt.diagnosticHash)
   ) {
     return null;
   }
-  const expected = createCodeMemoryLinkCodexTerminalReceipt(receipt.kind as CodeMemoryLinkCodexTerminalKind);
+  const expected = createCodeMemoryLinkCodexTerminalReceipt(receipt.kind);
   return receipt.diagnosticHash === expected.diagnosticHash ? expected : null;
 }

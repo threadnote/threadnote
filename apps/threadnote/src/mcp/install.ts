@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {composeWorkflowSetup, setupWorkflowSelector} from '../setup/workflows.js';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {
@@ -55,6 +56,10 @@ import {
 } from '../utils.js';
 import {expandPath, getInvocationCwd} from '@threadnote/platform/paths';
 import {withSetupMutationLock} from '../setup/lock.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export function isPersonalThreadnoteHome(
   agentContextHome: string,
@@ -153,7 +158,10 @@ const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(func
           }),
   });
   const personalHome = yield* isPersonalThreadnoteHomeEffect(config);
-  const project = options.project?.trim() || (agent === 'claude' ? undefined : options.cwd);
+  const project =
+    Effect2.pipe(options.project, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || (agent === 'claude' ? undefined : options.cwd);
   if (attach && (agent === 'cursor' || agent === 'copilot') && !project) {
     return yield* McpOperationError.make({
       message:
@@ -344,10 +352,13 @@ const finishAgentIntegrationInstall = Effect.fn('mcp.finishAgentIntegrationInsta
   yield* installAgentIntegrationInTransaction(config, agent, receipt, false);
 });
 
-class McpOperationError extends Schema.TaggedError<McpOperationError>()('McpOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class McpOperationError extends Schema.TaggedError<McpOperationError, {readonly brand: unique symbol}>()(
+  'McpOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export const mcpConfigurationChecks = Effect.fn('mcp.configurationChecks')(function* (
   config: RuntimeConfig,
@@ -379,7 +390,9 @@ export const mcpConfigurationChecks = Effect.fn('mcp.configurationChecks')(funct
       continue;
     }
     if (!personalHome && (agent === 'cursor' || agent === 'copilot' || agent === 'omp')) {
-      const project = receipt?.mcp.cwd?.trim();
+      const project = Effect2.pipe(receipt?.mcp.cwd, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
       if (!project) continue;
       if (agent === 'omp') {
         checks.push(
@@ -509,14 +522,14 @@ function jsonMcpConfigurationCheck(
         : disabled
           ? repair
             ? `${configPath} has ${serverName} disabled; repair will re-enable it`
-            : `${configPath} has ${serverName} disabled; run threadnote mcp-install ${checkName.split(' ')[0]} --apply to manage it`
+            : `${configPath} has ${serverName} disabled; run threadnote mcp-install ${Effect2.pipe(checkName, EffectString.split(' '))[0]} --apply to manage it`
           : configured
             ? repair
               ? `${configPath} uses the legacy direct server command; repair will migrate it to the session broker`
-              : `${configPath} predates receipts; run threadnote mcp-install ${checkName.split(' ')[0]} --apply to manage it`
+              : `${configPath} predates receipts; run threadnote mcp-install ${Effect2.pipe(checkName, EffectString.split(' '))[0]} --apply to manage it`
             : repair
               ? `${configPath} missing entry`
-              : `${configPath} missing entry; run threadnote mcp-install ${checkName.split(' ')[0]} --apply to manage it`,
+              : `${configPath} missing entry; run threadnote mcp-install ${Effect2.pipe(checkName, EffectString.split(' '))[0]} --apply to manage it`,
       name: checkName,
       status: current ? ('ok' as const) : ('warn' as const),
     };
@@ -562,9 +575,12 @@ function isBrokerMcpCommandOutput(output: string): boolean {
 function isBrokerMcpServerConfig(server: JsonObject): boolean {
   const command = server.command;
   const arguments_ = server.args;
-  const values = [command, ...(Array.isArray(arguments_) ? arguments_ : [])];
-  return values.some(
-    value => typeof value === 'string' && /(?:^|[\\/])threadnote-mcp-server(?:\.cmd)?$/i.test(value.trim()),
+  const values = [command, ...(EffectArray.isArray(arguments_) ? arguments_ : [])];
+  return EffectArray.some(
+    values,
+    value =>
+      typeof value === 'string' &&
+      /(?:^|[\\/])threadnote-mcp-server(?:\.cmd)?$/i.test(Effect2.pipe(value, EffectString.trim)),
   );
 }
 
@@ -621,40 +637,70 @@ function claudeMcpConfigurationMatches(
   environment: JsonObject,
   scope: ClaudeMcpScope,
 ): boolean {
-  const lines = output.split(/\r?\n/);
+  const lines = Effect2.pipe(output, EffectString.split(/\r?\n/));
   const field = (name: string) =>
-    lines
-      .find(line => line.startsWith(`  ${name}:`))
-      ?.slice(name.length + 3)
-      .trim();
-  const environmentStart = lines.findIndex(line => line.trim() === 'Environment:');
+    Effect2.pipe(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          lines,
+          __effectArrayValue =>
+            !!(line => Effect2.pipe(line, EffectString.startsWith(`  ${name}:`)))(__effectArrayValue),
+        ),
+      ),
+      effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect2.pipe(effectOptionalString, EffectString.slice(name.length + 3)),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+  const environmentStart = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(lines, line => Effect2.pipe(line, EffectString.trim) === 'Environment:'),
+    () => -1,
+  );
   if (environmentStart < 0) return false;
   const actualEnvironment: Record<string, string> = {};
   for (const line of lines.slice(environmentStart + 1)) {
-    if (!line.startsWith('    ')) break;
-    const entry = line.trim();
-    const equalsAt = entry.indexOf('=');
+    if (!Effect2.pipe(line, EffectString.startsWith('    '))) break;
+    const entry = Effect2.pipe(line, EffectString.trim);
+    const equalsAt = Effect2.pipe(
+      entry,
+      EffectString.indexOf('='),
+      Effect2.Option.getOrElse(() => -1),
+    );
     if (equalsAt <= 0) return false;
-    actualEnvironment[entry.slice(0, equalsAt)] = entry.slice(equalsAt + 1);
+    actualEnvironment[Effect2.pipe(entry, EffectString.slice(0, equalsAt))] = Effect2.pipe(
+      entry,
+      EffectString.slice(equalsAt + 1),
+    );
   }
   const expectedScope = scope === 'user' ? 'User config' : scope === 'local' ? 'Local config' : 'Project config';
   return (
     field('Type') === 'stdio' &&
     field('Command') === command[0] &&
-    field('Args') === command.slice(1).join(' ') &&
-    field('Scope')?.startsWith(expectedScope) === true &&
+    field('Args') === EffectArray.join(command.slice(1), ' ') &&
+    Effect2.pipe(field('Scope'), effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.startsWith(expectedScope)),
+    ) === true &&
     managedMcpEnvironmentMatches(actualEnvironment, environment)
   );
 }
 
 function stringArrayEquals(value: unknown, expected: readonly string[]): boolean {
   return (
-    Array.isArray(value) && value.length === expected.length && value.every((entry, index) => entry === expected[index])
+    EffectArray.isArray(value) &&
+    value.length === expected.length &&
+    EffectArray.every(value, (entry, index) => entry === expected[index])
   );
 }
 
 function managedMcpEnvironmentMatches(value: unknown, expected: JsonObject): boolean {
-  return isJsonObject(value) && Object.entries(expected).every(([key, expectedValue]) => value[key] === expectedValue);
+  return (
+    isJsonObject(value) &&
+    EffectArray.every(EffectRecord.toEntries(expected), ([key, expectedValue]) => value[key] === expectedValue)
+  );
 }
 
 function jsonMcpConfigurationMatches(
@@ -673,8 +719,8 @@ function jsonMcpConfigurationMatches(
     actual === undefined ||
     (checkDisabled && ompMcpServerIsDisabled(parsed, name, actual)) ||
     typeof expected.command !== 'string' ||
-    !Array.isArray(expectedArgs) ||
-    !expectedArgs.every(argument => typeof argument === 'string') ||
+    !EffectArray.isArray(expectedArgs) ||
+    !EffectArray.every(expectedArgs, argument => typeof argument === 'string') ||
     !isJsonObject(expected.env)
   ) {
     return false;
@@ -688,8 +734,8 @@ function jsonMcpConfigurationMatches(
 }
 
 function ompMcpServerIsDisabled(config: JsonObject | undefined, name: string, server: JsonObject): boolean {
-  if (Array.isArray(config?.disabledServers) && config.disabledServers.includes(name)) return true;
-  if (Array.isArray(config?.enabledServers) && config.enabledServers.includes(name)) return false;
+  if (EffectArray.isArray(config?.disabledServers) && config.disabledServers.includes(name)) return true;
+  if (EffectArray.isArray(config?.enabledServers) && config.enabledServers.includes(name)) return false;
   return server.enabled === false;
 }
 
@@ -1003,12 +1049,21 @@ const buildMcpInstallCommand = Effect.fn('mcp.buildInstallCommand')(function* (
   if (agent === 'codex') {
     return {
       executable: agentExecutable,
-      args: ['mcp', 'add', ...env.flatMap(value => ['--env', value]), name, '--', ...command],
+      args: ['mcp', 'add', ...EffectArray.flatMap(env, value => ['--env', value]), name, '--', ...command],
     };
   }
   return {
     executable: agentExecutable,
-    args: ['mcp', 'add', '--scope', claudeScope, name, ...env.flatMap(value => ['--env', value]), '--', ...command],
+    args: [
+      'mcp',
+      'add',
+      '--scope',
+      claudeScope,
+      name,
+      ...EffectArray.flatMap(env, value => ['--env', value]),
+      '--',
+      ...command,
+    ],
     cwd: claudeCwd,
   };
 });
@@ -1143,7 +1198,7 @@ const buildOmpMcpServerConfig = Effect.fn('mcp.buildOmpServerConfig')(function* 
 });
 
 function isEmptyConfigContent(content: string | undefined): boolean {
-  return content === undefined || content.trim().length === 0;
+  return content === undefined || Effect2.pipe(content, EffectString.trim).length === 0;
 }
 
 function withoutManagedComposerEntry(servers: Record<string, unknown>, name: string): Record<string, unknown> {
@@ -1216,8 +1271,8 @@ function renderOmpMcpConfig(
   const mcpServers = isJsonObject(parsed.mcpServers) ? {...parsed.mcpServers} : {};
   mcpServers[name] = serverConfig;
   nextConfig.mcpServers = mcpServers;
-  if (Array.isArray(parsed.disabledServers)) {
-    nextConfig.disabledServers = parsed.disabledServers.filter(server => server !== name);
+  if (EffectArray.isArray(parsed.disabledServers)) {
+    nextConfig.disabledServers = EffectArray.filter(parsed.disabledServers, server => server !== name);
   }
   return `${JSON.stringify(nextConfig, null, 2)}\n`;
 }
@@ -1420,16 +1475,20 @@ const printOmpMcpSnippet = Effect.fn('mcp.printOmpSnippet')(function* (
 });
 
 const cursorMcpConfigPath = Effect.fn('mcp.cursorConfigPath')(function* (project?: string) {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Keep native optional chaining so TypeScript narrows the original project value in this branch.
   if (project?.trim()) {
     const path = yield* Path.Path;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This read relies on the optional-chain guard above.
     return path.join(path.resolve(project.trim()), '.cursor', 'mcp.json');
   }
   return yield* expandPath('~/.cursor/mcp.json');
 });
 
 const copilotMcpConfigPath = Effect.fn('mcp.copilotConfigPath')(function* (project?: string) {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Keep native optional chaining so TypeScript narrows the original project value in this branch.
   if (project?.trim()) {
     const path = yield* Path.Path;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This read relies on the optional-chain guard above.
     return path.join(path.resolve(project.trim()), '.vscode', 'mcp.json');
   }
   const fs = yield* FileSystem.FileSystem;
@@ -1459,8 +1518,10 @@ const copilotMcpConfigPath = Effect.fn('mcp.copilotConfigPath')(function* (proje
 });
 
 const ompMcpConfigPath = Effect.fn('mcp.ompConfigPath')(function* (project?: string, hostRoot?: string) {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Keep native optional chaining so TypeScript narrows the original project value in this branch.
   if (project?.trim()) {
     const path = yield* Path.Path;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This read relies on the optional-chain guard above.
     return path.join(path.resolve(project.trim()), '.omp', 'mcp.json');
   }
   return (yield* resolveAgentHostPaths('omp', hostRoot))!.mcpConfigPath;
@@ -1487,7 +1548,7 @@ export const resolveMcpClients = Effect.fn('mcp.resolveClients')(function* (
   action: 'remove' | 'repair',
   receipts: Readonly<Partial<Record<AgentClient, AgentIntegrationMcpReceipt>>> = {},
 ) {
-  const normalized = value.trim().toLowerCase();
+  const normalized = Effect2.pipe(value, EffectString.trim, EffectString.toLowerCase);
   if (normalized === 'none' || normalized === 'false' || normalized === 'off') {
     return [];
   }
@@ -1496,11 +1557,15 @@ export const resolveMcpClients = Effect.fn('mcp.resolveClients')(function* (
   if (normalized === 'available' || normalized === 'all') {
     requested = ['codex', 'claude', 'cursor', 'copilot', 'omp'];
   } else {
-    requested = normalized
-      .split(',')
-      .map(part => part.trim())
-      .filter(Boolean)
-      .map(parseAgentClient);
+    requested = EffectArray.map(
+      EffectArray.filter(
+        EffectArray.map(Effect2.pipe(normalized, EffectString.split(',')), part =>
+          Effect2.pipe(part, EffectString.trim),
+        ),
+        Boolean,
+      ),
+      parseAgentClient,
+    );
   }
 
   const clients: AgentClient[] = [];

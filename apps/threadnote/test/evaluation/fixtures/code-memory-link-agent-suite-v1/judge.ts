@@ -1,9 +1,13 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 
 /* oxlint-disable effecttsgo/node-builtin-import -- This copied sealed program must be self-contained. */
 import {createHash} from 'node:crypto';
 import {lstat, readFile, realpath} from 'node:fs/promises';
 import {isAbsolute, join, resolve, sep} from 'node:path';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const TASK_ID = /^tsk_[0-9a-f]{16,64}$/u;
 const MAXIMUM_RESULT_BYTES = 64 * 1_024;
@@ -49,7 +53,7 @@ function parseArguments(arguments_: readonly string[]): {
 
 function outputArtifactId(taskId: string, path: 'guard.json' | 'result.json'): string {
   const value = {path, scope: 'judge-output', taskId};
-  return `art_${sha256(`threadnote-code-memory-link-agent-suite-v1\0art\0${JSON.stringify(value)}\n`).slice(0, 32)}`;
+  return `art_${Effect.pipe(sha256(`threadnote-code-memory-link-agent-suite-v1\0art\0${JSON.stringify(value)}\n`), EffectString.slice(0, 32))}`;
 }
 
 function artifact(taskId: string, path: 'guard.json' | 'result.json', value: unknown) {
@@ -70,7 +74,8 @@ async function readRequiredSyntheticJson(root: string, relativePath: string): Pr
   }
   if (metadata.size > MAXIMUM_RESULT_BYTES) fail(`${relativePath} exceeds the sealed byte limit`);
   const canonical = await realpath(path);
-  if (canonical !== path || !canonical.startsWith(`${root}${sep}`)) fail(`${relativePath} escaped the repository`);
+  if (canonical !== path || !Effect.pipe(canonical, EffectString.startsWith(`${root}${sep}`)))
+    fail(`${relativePath} escaped the repository`);
   const raw = new TextDecoder('utf-8', {fatal: true}).decode(await readFile(canonical));
   let parsed: unknown;
   try {
@@ -126,16 +131,16 @@ function normalizeJson(value: unknown, depth = 0): unknown {
     if (!Number.isFinite(value)) fail('result.json contains a non-finite number');
     return value;
   }
-  if (Array.isArray(value)) return value.map(entry => normalizeJson(entry, depth + 1));
-  if (typeof value !== 'object' || value === null || Object.getPrototypeOf(value) !== Object.prototype) {
-    fail('result.json contains a non-JSON value');
-  }
-  const object = value as Record<string, unknown>;
-  return Object.fromEntries(
-    Object.keys(object)
-      .sort()
-      .map(key => [key, normalizeJson(object[key], depth + 1)]),
+  if (EffectArray.isArray(value)) return EffectArray.map(value, entry => normalizeJson(entry, depth + 1));
+  if (!isPlainJsonRecord(value)) fail('result.json contains a non-JSON value');
+  const object = value;
+  return EffectRecord.fromEntries(
+    EffectArray.map(EffectRecord.keys(object).sort(), key => [key, normalizeJson(object[key], depth + 1)]),
   );
+}
+
+function isPlainJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
 }
 
 function assertSyntheticJson(value: unknown): void {
@@ -144,17 +149,19 @@ function assertSyntheticJson(value: unknown): void {
     return;
   }
   if (value === null || typeof value === 'boolean' || typeof value === 'number') return;
-  if (Array.isArray(value)) {
-    value.forEach(assertSyntheticJson);
+  if (EffectArray.isArray(value)) {
+    EffectArray.forEach(value, assertSyntheticJson);
     return;
   }
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+  if (!isPlainJsonRecord(value)) fail('result.json contains a non-JSON value');
+  for (const [key, entry] of EffectRecord.toEntries(value)) {
     if (!/^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u.test(key)) fail('result.json contains a non-synthetic key');
     assertSyntheticJson(entry);
   }
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) fail(`${option} requires a value`);
   return value;
 }

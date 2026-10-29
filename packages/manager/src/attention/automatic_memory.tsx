@@ -1,3 +1,5 @@
+import {isManagerAutomaticMemoryStatus} from '../api/response_guards.js';
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
 import {Schema} from 'effect';
 import {
@@ -26,15 +28,19 @@ import type {
 import {AutomaticMemoryReviewDialog, automaticReviewIsVerified} from './automatic_review.js';
 import {AutomaticGenerate} from './automatic_generate.js';
 import {useManagerLiveQuery} from '../live/provider.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function reconcileAutomaticMemoryItems(
   items: readonly ManagerAutomaticMemoryItem[],
   project: string,
   applied: readonly ManagerAutomaticReview[],
 ) {
-  return items.filter(
+  return EffectArray.filter(
+    items,
     item =>
-      !applied.some(
+      !EffectArray.some(
+        applied,
         receipt =>
           automaticReviewIsVerified(receipt) &&
           receipt.project === project &&
@@ -74,17 +80,23 @@ const coverageScopes = {
 
 /** Stable, nonmutating grouping: an uncited backlog is one coverage item, never many alarms. */
 export function automaticMemoryGroups(items: readonly ManagerAutomaticMemoryItem[], detail = false) {
-  const coverage = items
-    .filter(item => !detail && item.legacyUncited && !item.reviewId && !['queued', 'generating'].includes(item.state))
-    .sort((a, b) => a.uri.localeCompare(b.uri));
-  const grouped = new Set(coverage.map(item => item.uri));
+  const coverage = EffectArray.filter(
+    items,
+    (item, __effectArrayIndex) =>
+      __effectArrayIndex in items &&
+      !detail &&
+      item.legacyUncited &&
+      !item.reviewId &&
+      !['queued', 'generating'].includes(item.state),
+  ).sort((a, b) => Effect.pipe(a.uri, EffectString.localeCompare(b.uri)));
+  const grouped = new Set(EffectArray.map(coverage, item => item.uri));
   const priority = (item: ManagerAutomaticMemoryItem) =>
     item.state === 'ready' || item.state === 'verification' ? 0 : 1;
   return {
     coverage,
-    items: items
-      .filter(item => !grouped.has(item.uri))
-      .sort((a, b) => priority(a) - priority(b) || a.uri.localeCompare(b.uri)),
+    items: EffectArray.filter(items, item => !grouped.has(item.uri)).sort(
+      (a, b) => priority(a) - priority(b) || Effect.pipe(a.uri, EffectString.localeCompare(b.uri)),
+    ),
   };
 }
 
@@ -126,7 +138,9 @@ export function AutomaticMemoryPanel(props: {
         `/api/attention/automatic-memory?project=${encodeURIComponent(props.project)}${props.uri ? `&uri=${encodeURIComponent(props.uri)}` : afterUri ? `&afterUri=${encodeURIComponent(afterUri)}` : ''}`,
         undefined,
         {signal},
+        isManagerAutomaticMemoryStatus,
       ),
+    isManagerAutomaticMemoryStatus,
   );
   const fallback = !live.active || live.snapshot.status === 'unsupported';
   const liveReadInvalid =
@@ -160,6 +174,7 @@ export function AutomaticMemoryPanel(props: {
           `/api/attention/automatic-memory?project=${encodeURIComponent(props.project)}${props.uri ? `&uri=${encodeURIComponent(props.uri)}` : afterUri ? `&afterUri=${encodeURIComponent(afterUri)}` : ''}`,
           undefined,
           {signal: controller.signal},
+          isManagerAutomaticMemoryStatus,
         );
         if (controller.signal.aborted || active.current !== requestSelection || epoch !== mutation.current) return;
         if (!validAutomaticStatus(result, props.project))
@@ -167,8 +182,11 @@ export function AutomaticMemoryPanel(props: {
         setStatus(result);
         const retained = reconcileAutomaticMemoryItems(result.items, props.project, applied);
         summary.current?.(props.project, {
-          ready: retained.filter(item => item.state === 'ready' || item.state === 'verification').length,
-          pending: result.incomplete === true || result.omitted > 0 || retained.some(item => item.state !== 'reviewed'),
+          ready: EffectArray.filter(retained, item => item.state === 'ready' || item.state === 'verification').length,
+          pending:
+            result.incomplete === true ||
+            result.omitted > 0 ||
+            EffectArray.some(retained, item => item.state !== 'reviewed'),
         });
         setError('');
       } catch (cause) {
@@ -217,8 +235,11 @@ export function AutomaticMemoryPanel(props: {
     setStatus(result);
     const retained = reconcileAutomaticMemoryItems(result.items, props.project, applied);
     summary.current?.(props.project, {
-      ready: retained.filter(item => item.state === 'ready' || item.state === 'verification').length,
-      pending: result.incomplete === true || result.omitted > 0 || retained.some(item => item.state !== 'reviewed'),
+      ready: EffectArray.filter(retained, item => item.state === 'ready' || item.state === 'verification').length,
+      pending:
+        result.incomplete === true ||
+        result.omitted > 0 ||
+        EffectArray.some(retained, item => item.state !== 'reviewed'),
     });
     setError('');
     setChecking(false);
@@ -263,7 +284,9 @@ export function AutomaticMemoryPanel(props: {
       ) : null}
       <div className="automatic-memory-refresh-status" style={{blockSize: '3.5rem', overflowY: 'auto'}}>
         {error ? (
-          <p role="alert">Automatic status unavailable: {error}</p>
+          <ReviewNotice title="Automatic status unavailable" tone="warning" role="alert">
+            {error}
+          </ReviewNotice>
         ) : !status || unconfirmed ? (
           <p role="status">
             <LoaderCircle className="automatic-memory-spinner" size={16} />{' '}
@@ -271,7 +294,8 @@ export function AutomaticMemoryPanel(props: {
           </p>
         ) : null}
       </div>
-      {groups.items.map(item => {
+      {EffectArray.map(groups.items, item => {
+        const reviewId = item.reviewId;
         const state = states[item.state];
         const Icon = state.icon;
         return (
@@ -299,7 +323,7 @@ export function AutomaticMemoryPanel(props: {
                 </span>
               ) : null}
             </div>
-            {item.reason ? <p>{item.reason.replaceAll('-', ' ')}</p> : null}
+            {item.reason ? <p>{Effect.pipe(item.reason, EffectString.replaceAll('-', ' '))}</p> : null}
             {item.nextEligibleAt !== undefined ? (
               <p className="muted">
                 Next eligible: {new Date(item.nextEligibleAt).toLocaleString()}
@@ -308,11 +332,14 @@ export function AutomaticMemoryPanel(props: {
             ) : null}
             {item.paragraphs.length ? (
               <div className="attention-tags">
-                {[...new Set(item.paragraphs.map(p => `${p.authority} ${p.role} · ${p.support}`))].map(label => (
-                  <ReviewBadge key={label} tone="neutral">
-                    {label}
-                  </ReviewBadge>
-                ))}
+                {EffectArray.map(
+                  [...new Set(EffectArray.map(item.paragraphs, p => `${p.authority} ${p.role} · ${p.support}`))],
+                  label => (
+                    <ReviewBadge key={label} tone="neutral">
+                      {label}
+                    </ReviewBadge>
+                  ),
+                )}
               </div>
             ) : (
               <p className="muted">Roles and source support have not been assessed.</p>
@@ -325,11 +352,11 @@ export function AutomaticMemoryPanel(props: {
             ) : item.route === 'read-only' ? (
               <p>Read-only source. Ask its authorized owner to review this memory.</p>
             ) : null}
-            {item.reviewId ? (
+            {reviewId ? (
               <button
                 type="button"
                 className={item.state === 'ready' || item.state === 'verification' ? 'primary' : undefined}
-                onClick={() => openReview(item.reviewId!)}
+                onClick={() => openReview(reviewId)}
               >
                 <Sparkles size={15} />
                 {item.state === 'verification'
@@ -368,7 +395,7 @@ export function AutomaticMemoryPanel(props: {
             Automatic checks continue during normal use. Missing or unknown support does not mean current or verified.
           </p>
           <ul>
-            {groups.coverage.map(item => (
+            {EffectArray.map(groups.coverage, item => (
               <li key={item.uri}>
                 {item.title} · {states[item.state].label} · {item.coverage.outcome}
               </li>
@@ -460,5 +487,5 @@ function automaticReadRequiresRedaction(cause: unknown): boolean {
 }
 
 function validAutomaticStatus(result: ManagerAutomaticMemoryStatus, project: string): boolean {
-  return !!result && result.version === 1 && result.project === project && Array.isArray(result.items);
+  return !!result && result.version === 1 && result.project === project && EffectArray.isArray(result.items);
 }

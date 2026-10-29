@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import {
   CodeGraphStore,
@@ -6,6 +7,8 @@ import {
   type CodeGraphSymbolCursor,
 } from './store.js';
 import type {CodeGraphEdge, CodeGraphProvenance, CodeGraphSnapshot, CodeGraphSymbol} from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_EXPORT_VERSION = 1 as const;
 export const CODE_GRAPH_EXPORT_SCHEMA = 'threadnote.code-graph-export' as const;
@@ -67,10 +70,13 @@ export interface CodeGraphExportSummary {
   readonly warnings: readonly string[];
 }
 
-export class CodeGraphExportError extends Schema.TaggedError<CodeGraphExportError>()('CodeGraphExportError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+export class CodeGraphExportError extends Schema.TaggedError<CodeGraphExportError, {readonly brand: unique symbol}>()(
+  'CodeGraphExportError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export const CODE_GRAPH_EXPORT_LIMIT_POLICY = {
   graphml: {defaultEdgeLimit: 'all', defaultNodeLimit: 'all'},
@@ -215,7 +221,7 @@ function renderJsonExport(
 ) {
   return Effect.gen(function* () {
     const write = request.write;
-    yield* write(`${JSON.stringify(metadata).slice(0, -1)},"nodes":[`);
+    yield* write(`${Effect2.pipe(JSON.stringify(metadata), EffectString.slice(0, -1))},"nodes":[`);
     let firstNode = true;
     const nodes = yield* streamNodes(store, request.databasePath, snapshot, limits, node =>
       Effect.gen(function* () {
@@ -732,7 +738,10 @@ function graphMlData(key: string, value: string | undefined): string {
 }
 
 function htmlStart(metadata: ExportMetadata): string {
-  const warnings = metadata.warnings.map(warning => `<li>${escapeHtmlText(warning)}</li>`).join('');
+  const warnings = EffectArray.join(
+    EffectArray.map(metadata.warnings, warning => `<li>${escapeHtmlText(warning)}</li>`),
+    '',
+  );
   return (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
@@ -766,9 +775,10 @@ function htmlStart(metadata: ExportMetadata): string {
 }
 
 function htmlNode(node: CodeGraphSymbol): string {
-  const details = [node.signature, node.documentation]
-    .filter((value): value is string => value !== undefined)
-    .join('\n\n');
+  const details = EffectArray.join(
+    EffectArray.filter([node.signature, node.documentation], (value): value is string => value !== undefined),
+    '\n\n',
+  );
   return (
     `<tr data-node-id="${escapeHtmlText(node.id)}"><td>${escapeHtmlText(node.kind)}</td>` +
     `<td><code>${escapeHtmlText(node.qualifiedName)}</code></td>` +
@@ -881,7 +891,7 @@ function renderOverviewSvg(
   const width = Math.max(480, columns * cellWidth + 48);
   const height = Math.max(180, headerHeight + rows * cellHeight + 36);
   const positions = new Map(
-    nodes.map((node, index) => [
+    EffectArray.map(nodes, (node, index) => [
       node.id,
       {
         x: 24 + (index % columns) * cellWidth + cellWidth / 2,
@@ -890,8 +900,8 @@ function renderOverviewSvg(
     ]),
   );
   const metadataJson = escapeGraphMarkup(JSON.stringify({metadata, summary}));
-  const lineMarkup = edges
-    .map(edge => {
+  const lineMarkup = EffectArray.join(
+    EffectArray.map(edges, edge => {
       const source = positions.get(edge.sourceId);
       const target = positions.get(edge.targetId);
       if (!source || !target) return '';
@@ -901,10 +911,11 @@ function renderOverviewSvg(
         `stroke="#526779" stroke-width="1.2" opacity=".55" marker-end="url(#arrow)"${dash}>` +
         `<title>${escapeGraphMarkup(edge.relation)} [${escapeGraphMarkup(edge.provenance)}]</title></line>`
       );
-    })
-    .join('');
-  const nodeMarkup = nodes
-    .map(node => {
+    }),
+    '',
+  );
+  const nodeMarkup = EffectArray.join(
+    EffectArray.map(nodes, node => {
       const position = positions.get(node.id)!;
       return (
         `<g transform="translate(${position.x} ${position.y})"><circle r="17" fill="${nodeColor(node.kind)}" ` +
@@ -914,8 +925,9 @@ function renderOverviewSvg(
           ellipsize(node.label, 24),
         )}</text></g>`
       );
-    })
-    .join('');
+    }),
+    '',
+  );
   const header = standalone
     ? `<text x="24" y="30" fill="#67e8c7" font-size="12" font-weight="700">DERIVED · NONCANONICAL · SOURCE-SENSITIVE</text>` +
       `<text x="24" y="58" fill="#eef6fb" font-size="22" font-weight="700">${escapeGraphMarkup(
@@ -945,7 +957,11 @@ function nodeColor(kind: string): string {
 function stableHash(value: string, seed: number): number {
   let hash = seed >>> 0;
   for (const character of value) {
-    hash ^= character.codePointAt(0)!;
+    hash ^= Effect2.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect2.Option.getOrElse(() => undefined),
+    )!;
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
   return hash;
@@ -953,7 +969,9 @@ function stableHash(value: string, seed: number): number {
 
 function ellipsize(value: string, maximumCharacters: number): string {
   const characters = Array.from(value);
-  return characters.length <= maximumCharacters ? value : `${characters.slice(0, maximumCharacters - 1).join('')}…`;
+  return characters.length <= maximumCharacters
+    ? value
+    : `${EffectArray.join(characters.slice(0, maximumCharacters - 1), '')}…`;
 }
 
 /** Replaces characters forbidden by XML 1.0 and applies a code-unit bound without splitting surrogate pairs. */
@@ -961,13 +979,21 @@ export function normalizeCodeGraphText(value: string, maximumCharacters: number)
   if (maximumCharacters <= 0) return '';
   let normalized = '';
   for (const character of value) {
-    const point = character.codePointAt(0)!;
+    const point = Effect2.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect2.Option.getOrElse(() => undefined),
+    )!;
     normalized += isXmlCharacter(point) ? character : '\uFFFD';
   }
   if (normalized.length <= maximumCharacters) return normalized;
-  let result = normalized.slice(0, Math.max(0, maximumCharacters - 1));
-  const last = result.charCodeAt(result.length - 1);
-  if (last >= 0xd800 && last <= 0xdbff) result = result.slice(0, -1);
+  let result = Effect2.pipe(normalized, EffectString.slice(0, Math.max(0, maximumCharacters - 1)));
+  const last = Effect2.pipe(
+    result,
+    EffectString.charCodeAt(result.length - 1),
+    Effect2.Option.getOrElse(() => NaN),
+  );
+  if (last >= 0xd800 && last <= 0xdbff) result = Effect2.pipe(result, EffectString.slice(0, -1));
   return `${result}…`;
 }
 
@@ -983,14 +1009,16 @@ function isXmlCharacter(point: number): boolean {
 }
 
 export function escapeGraphMarkup(value: string): string {
-  return normalizeCodeGraphText(value, Number.MAX_SAFE_INTEGER)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;');
+  return Effect2.pipe(
+    normalizeCodeGraphText(value, Number.MAX_SAFE_INTEGER),
+    EffectString.replaceAll('&', '&amp;'),
+    EffectString.replaceAll('<', '&lt;'),
+    EffectString.replaceAll('>', '&gt;'),
+    EffectString.replaceAll('"', '&quot;'),
+    EffectString.replaceAll("'", '&apos;'),
+  );
 }
 
 export function escapeHtmlText(value: string): string {
-  return escapeGraphMarkup(value).replaceAll('&apos;', '&#39;');
+  return Effect2.pipe(escapeGraphMarkup(value), EffectString.replaceAll('&apos;', '&#39;'));
 }

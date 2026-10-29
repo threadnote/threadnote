@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {isLinearSource} from './config.js';
 import {Clock, Effect, FileSystem, Path, Redacted, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -18,9 +19,14 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readSourceConfiguration, sourceConfigurationFingerprint, type LinearSourceConfig} from './config.js';
 import {resolveLinearCredential} from './credentials.js';
 import {LINEAR_RENDERER_VERSION, type LinearRenderedObject} from './render.js';
-export class LinearSourceError extends Schema.TaggedError<LinearSourceError>()('LinearSourceError', {
-  message: Schema.String,
-}) {}
+import * as EffectRecord from 'effect/Record';
+
+export class LinearSourceError extends Schema.TaggedError<LinearSourceError, {readonly brand: unique symbol}>()(
+  'LinearSourceError',
+  {
+    message: Schema.String,
+  },
+) {}
 export const sourceError = (message: string) => LinearSourceError.make({message});
 export const location = (config: RuntimeConfig) => ({
   account: config.account,
@@ -38,7 +44,9 @@ export const configFence = Effect.fn('linear.configFence')(function* (
   fingerprint: string,
   enabled = true,
 ) {
-  const source = (yield* readSourceConfiguration(config)).sources.find(s => s.id === id);
+  const source = EffectOption.getOrUndefined(
+    EffectArray.findFirst((yield* readSourceConfiguration(config)).sources, s => s.id === id),
+  );
   if (
     !source ||
     !isLinearSource(source) ||
@@ -97,9 +105,10 @@ export const listLocalDocuments = Effect.fn('linear.localDocuments')(function* (
   );
   if ((yield* fs.realPath(directory).pipe(Effect.orElseSucceed(() => undefined))) !== path.resolve(directory))
     return [];
-  return (yield* fs.readDirectory(directory).pipe(Effect.orElseSucceed(() => [] as string[])))
-    .filter(n => /^(issue|project|document|update)-[a-f0-9]{40}$/.test(n))
-    .sort();
+  return EffectArray.filter(
+    yield* fs.readDirectory(directory).pipe(Effect.orElseSucceed(() => [] as string[])),
+    __effectArrayValue => !!(n => /^(issue|project|document|update)-[a-f0-9]{40}$/.test(n))(__effectArrayValue),
+  ).sort();
 });
 export const writeObject = Effect.fn('linear.writeObject')(function* (
   config: RuntimeConfig,
@@ -109,7 +118,7 @@ export const writeObject = Effect.fn('linear.writeObject')(function* (
 ) {
   const fingerprint = sourceConfigurationFingerprint(source);
   const previous = yield* manifest(config, source.id, object.documentId);
-  const files = object.chunks.map(chunk => {
+  const files = EffectArray.map(object.chunks, chunk => {
     const metadata = {
       version: 1 as const,
       provider: 'linear' as const,
@@ -139,7 +148,7 @@ export const writeObject = Effect.fn('linear.writeObject')(function* (
     status: 'active',
     fetchedAt: yield* Clock.currentTimeMillis,
     maxStaleMilliseconds: source.maxStaleHours * 3600000,
-    chunks: Object.fromEntries(files.map(f => [f.uri, f.hash])),
+    chunks: EffectRecord.fromEntries(EffectArray.map(files, f => [f.uri, f.hash])),
     accessEpoch: access.accessEpoch,
   };
   const store = yield* ResourceStore;
@@ -166,8 +175,8 @@ export const writeObject = Effect.fn('linear.writeObject')(function* (
     }
     changes.push({type: 'write', uri: f.uri, content: f.content, options: {mode: 'upsert'}});
   }
-  const retained = new Set(files.map(f => f.uri));
-  for (const uri of Object.keys(previous?.chunks ?? {}))
+  const retained = new Set(EffectArray.map(files, f => f.uri));
+  for (const uri of EffectRecord.keys(previous?.chunks ?? {}))
     if (!retained.has(uri)) changes.push({type: 'remove', uri, ignoreMissing: true});
   changes.push({
     type: 'write',

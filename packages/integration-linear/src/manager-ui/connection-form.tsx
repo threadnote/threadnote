@@ -1,3 +1,5 @@
+import {isResolvedLinearSelection} from '@threadnote/manager/api/response-guards';
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useState} from 'react';
 import type {LinearSource, ResolvedLinearSelection} from '../manager-contracts.js';
 import {IntegrationLogo} from '@threadnote/manager/integration-catalog';
@@ -5,16 +7,21 @@ import {product} from './catalog.js';
 import {DetailModal} from '@threadnote/manager/detail-modal';
 import {useManagerDialogs} from '@threadnote/manager/dialog';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function parseLinearIds(value: string): readonly string[] {
   return [
     ...new Set(
-      value
-        .split(/[\s,]+/)
-        .map(part => part.trim().toLowerCase())
-        .filter(Boolean),
+      EffectArray.filter(
+        EffectArray.map(Effect.pipe(value, EffectString.split(/[\s,]+/)), part =>
+          Effect.pipe(part, EffectString.trim, EffectString.toLowerCase),
+        ),
+        Boolean,
+      ),
     ),
   ];
 }
@@ -39,9 +46,27 @@ export function LinearConnectionForm({
   const [credentialEnv, setCredentialEnv] = useState(source?.credentialEnv ?? 'THREADNOTE_LINEAR_API_KEY');
   const [organizationId, setOrganizationId] = useState(source?.organizationId ?? '');
   const [principalId, setPrincipalId] = useState(source?.principalId ?? '');
-  const [teamIds, setTeamIds] = useState(source?.teamIds.join('\n') ?? '');
-  const [projectIds, setProjectIds] = useState(source?.projectIds.join('\n') ?? '');
-  const [issueIds, setIssueIds] = useState(source?.issueIds.join('\n') ?? '');
+  const [teamIds, setTeamIds] = useState(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(source?.teamIds), __effectArrayJoinReceiver =>
+        EffectArray.join(__effectArrayJoinReceiver, '\n'),
+      ),
+    ) ?? '',
+  );
+  const [projectIds, setProjectIds] = useState(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(source?.projectIds), __effectArrayJoinReceiver =>
+        EffectArray.join(__effectArrayJoinReceiver, '\n'),
+      ),
+    ) ?? '',
+  );
+  const [issueIds, setIssueIds] = useState(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(source?.issueIds), __effectArrayJoinReceiver =>
+        EffectArray.join(__effectArrayJoinReceiver, '\n'),
+      ),
+    ) ?? '',
+  );
   const [project, setProject] = useState(source?.project ?? '');
   const [refreshIntervalMinutes, setRefreshIntervalMinutes] = useState(source?.refreshIntervalMinutes ?? 60);
   const [maxStaleHours, setMaxStaleHours] = useState(source?.maxStaleHours ?? 24);
@@ -55,7 +80,7 @@ export function LinearConnectionForm({
   const validIds =
     teams.length > 0 &&
     projects.length + issues.length > 0 &&
-    [...teams, ...projects, ...issues].every(value => uuid.test(value)) &&
+    EffectArray.every([...teams, ...projects, ...issues], value => uuid.test(value)) &&
     (!organizationId || uuid.test(organizationId)) &&
     (!principalId || uuid.test(principalId));
   const credentialReady =
@@ -64,7 +89,7 @@ export function LinearConnectionForm({
       : credentialMode === 'environment'
         ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
         : !!token || (source?.credentialStorage === 'local' && source.credentialConfigured);
-  const ready = validIds && credentialReady && /^[a-z0-9][a-z0-9._-]*$/.test(project.trim());
+  const ready = validIds && credentialReady && /^[a-z0-9][a-z0-9._-]*$/.test(Effect.pipe(project, EffectString.trim));
 
   useEffect(() => {
     if (!dirty && !busy) return;
@@ -105,10 +130,15 @@ export function LinearConnectionForm({
     setError('');
     setSelection(undefined);
     try {
-      const resolved = await api<ResolvedLinearSelection>('/api/integrations/linear', {
-        action: 'resolve-selection',
-        ...requestFields(),
-      });
+      const resolved = await api<ResolvedLinearSelection>(
+        '/api/integrations/linear',
+        {
+          action: 'resolve-selection',
+          ...requestFields(),
+        },
+        undefined,
+        isResolvedLinearSelection,
+      );
       setOrganizationId(resolved.organizationId);
       setPrincipalId(resolved.principalId);
       setSelection(resolved);
@@ -131,7 +161,7 @@ export function LinearConnectionForm({
         organizationId: selection.organizationId,
         principalId: selection.principalId,
         editing: !!source,
-        project: project.trim(),
+        project: Effect.pipe(project, EffectString.trim),
         refreshIntervalMinutes,
         maxStaleHours,
         apply: true,
@@ -324,12 +354,15 @@ export function LinearConnectionForm({
             <div role="status" className="workspace-note">
               <p>Verified for this Linear account:</p>
               <p>
-                {selection.teams.map(item => item.name).join(', ')} · {selection.projects.length} projects ·{' '}
-                {selection.issues.length} issues
+                {EffectArray.join(
+                  EffectArray.map(selection.teams, item => item.name),
+                  ', ',
+                )}{' '}
+                · {selection.projects.length} projects · {selection.issues.length} issues
               </p>
               {selection.issues.length ? (
                 <ul>
-                  {selection.issues.map(item => (
+                  {EffectArray.map(selection.issues, item => (
                     <li key={item.id}>
                       {item.identifier}: {item.title}
                     </li>

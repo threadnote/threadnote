@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -13,6 +14,7 @@ import {homeIndexPath, journalPath, receiptPath, runtimeIndexPath} from '../../s
 import {devSkillsReleaseFixture, devSkillsTestLayer, fixture, snapshot} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {refreshPropertyDiagnostics} from './service-refresh-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
 
 const selector = {agent: 'codex'};
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -74,7 +76,11 @@ const removalRecovery = (
     const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
     diagnostics?.phase('assertions-status');
     expect(result.repairRequired).toBe(false);
-    expect(result.targets.find(target => target.consumerId === installed.consumerId)?.outcome.state).toBe('skipped');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(result.targets, target => target.consumerId === installed.consumerId),
+      )?.outcome.state,
+    ).toBe('skipped');
     expect(yield* f.fs.exists(files.journal)).toBe(false);
     const home = JSON.parse(yield* f.fs.readFileString(files.home));
     const runtime = JSON.parse(yield* f.fs.readFileString(files.runtime));
@@ -82,10 +88,10 @@ const removalRecovery = (
     expect(runtime.enrollments[installed.consumerId]).toEqual(home.targets[installed.consumerId]);
     const receipt = JSON.parse(yield* f.fs.readFileString(files.receipt));
     expect(receipt.consumers[installed.consumerId]).toBeUndefined();
-    expect(Object.keys(receipt.consumers)).toHaveLength(shared ? 1 : 0);
+    expect(EffectRecord.keys(receipt.consumers)).toHaveLength(shared ? 1 : 0);
     expect(receipt.generations[installed.bundleDigest]).toEqual(JSON.parse(originalReceipt).manifest);
     if (shared) {
-      expect(result.targets.map(target => target.outcome.state).sort()).toEqual(['current', 'skipped']);
+      expect(EffectArray.map(result.targets, target => target.outcome.state).sort()).toEqual(['current', 'skipped']);
       expect(receipt.manifest.digest).toBe(release.bundle.manifest.digest);
     } else {
       expect(receipt.manifest).toEqual(JSON.parse(originalReceipt).manifest);

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {afterEach, describe, expect, it} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -20,12 +21,14 @@ import {
 } from '@threadnote/graph/workset/router';
 import {mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph workset catalog candidate source', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('uses normalized indexed exact keys for every routing surface with complete coverage', async () => {
@@ -62,7 +65,7 @@ describe('code graph workset catalog candidate source', () => {
         source.readExactCandidates(request(generation!.id, query, {limit: 8, maximumHitsPerMember: 4})),
       );
       expect(page.coverage).toEqual({consideredMemberCount: 2, eligibleMemberCount: 2, state: 'complete'});
-      expect(page.hits.map(hit => hit.symbol.nodeId)).toContain(nodeId(nodeSeed));
+      expect(EffectArray.map(page.hits, hit => hit.symbol.nodeId)).toContain(nodeId(nodeSeed));
     }
   });
 
@@ -75,7 +78,7 @@ describe('code graph workset catalog candidate source', () => {
         Array.from({length: 5}, (_, index) =>
           symbol(10 + index, {
             name: `Many${String(index)}`,
-            terms: lexicalTerms.map(term => ({term, weight: 10 - index})),
+            terms: EffectArray.map(lexicalTerms, term => ({term, weight: 10 - index})),
           }),
         ),
       ),
@@ -85,7 +88,7 @@ describe('code graph workset catalog candidate source', () => {
         Array.from({length: 2}, (_, index) =>
           symbol(20 + index, {
             name: `Few${String(index)}`,
-            terms: lexicalTerms.map(term => ({term, weight: 4 - index})),
+            terms: EffectArray.map(lexicalTerms, term => ({term, weight: 4 - index})),
           }),
         ),
       ),
@@ -98,7 +101,7 @@ describe('code graph workset catalog candidate source', () => {
     );
 
     expect(page.hits).toHaveLength(4);
-    expect(countBy(page.hits.map(hit => hit.symbol.repositoryKey))).toEqual(
+    expect(countBy(EffectArray.map(page.hits, hit => hit.symbol.repositoryKey))).toEqual(
       new Map([
         ['few', 2],
         ['many', 2],
@@ -110,9 +113,11 @@ describe('code graph workset catalog candidate source', () => {
       query: normalizeCodeGraphWorksetRouterQuery(query),
     });
     expect(
-      ranked.symbols.every(entry => entry.scoreReceipt.signals.some(signal => signal.feature === 'lexical-coverage')),
+      EffectArray.every(ranked.symbols, entry =>
+        EffectArray.some(entry.scoreReceipt.signals, signal => signal.feature === 'lexical-coverage'),
+      ),
     ).toBe(true);
-    expect(ranked.symbols.every(entry => entry.score > 0)).toBe(true);
+    expect(EffectArray.every(ranked.symbols, entry => entry.score > 0)).toBe(true);
   });
 
   it('keeps lane ranks and results invariant across keyset page sizes', async () => {
@@ -138,10 +143,12 @@ describe('code graph workset catalog candidate source', () => {
       fc.asyncProperty(fc.integer({min: 2, max: 5}), async limit => {
         const actual = await collectLane(source, request(generation.id, 'service', {limit, maximumHitsPerMember: 2}));
         expect(actual).toEqual(expected);
-        expect(actual.map(hit => hit.catalogRank)).toEqual(
+        expect(EffectArray.map(actual, hit => hit.catalogRank)).toEqual(
           Array.from({length: actual.length}, (_, index) => index + 1),
         );
-        expect(Math.max(...countBy(actual.map(hit => hit.symbol.repositoryKey)).values())).toBeLessThanOrEqual(2);
+        expect(
+          Math.max(...countBy(EffectArray.map(actual, hit => hit.symbol.repositoryKey)).values()),
+        ).toBeLessThanOrEqual(2);
       }),
       {numRuns: 40},
     );
@@ -193,13 +200,13 @@ function member(
   return {
     projection: createCodeGraphWorksetRoutingProjection({
       checkoutId: digest(`checkout-${String(seed)}`),
-      commitId: digest(`commit-${String(seed)}`).slice(0, 40),
+      commitId: Effect.pipe(digest(`commit-${String(seed)}`), EffectString.slice(0, 40)),
       componentCount: 1,
       extractorGeneration: 1,
       projectorVersion: CODE_GRAPH_WORKSET_CATALOG_PROJECTOR_VERSION,
       repositoryId: digest(`repository-${String(seed)}`),
       snapshotDigest: digest(`snapshot-digest-${String(seed)}`),
-      snapshotId: `cgsn_${digest(`snapshot-${String(seed)}`).slice(0, 40)}`,
+      snapshotId: `cgsn_${Effect.pipe(digest(`snapshot-${String(seed)}`), EffectString.slice(0, 40))}`,
       symbols,
       worktreeId: digest(`worktree-${String(seed)}`),
     }),
@@ -261,7 +268,7 @@ function countBy(values: readonly string[]): Map<string, number> {
 }
 
 function nodeId(seed: number): string {
-  return `cgs_${digest(`node-${String(seed)}`).slice(0, 32)}`;
+  return `cgs_${Effect.pipe(digest(`node-${String(seed)}`), EffectString.slice(0, 32))}`;
 }
 
 function digest(value: string): string {

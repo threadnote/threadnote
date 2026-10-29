@@ -1,42 +1,84 @@
 import {JSON_SCHEMA, load} from 'js-yaml';
 import {describe, expect, it} from 'vitest';
+import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
-interface WorkflowStep {
-  readonly env?: Readonly<Record<string, string>>;
-  readonly if?: string;
-  readonly name?: string;
-  readonly run?: string;
-  readonly uses?: string;
-  readonly with?: Readonly<Record<string, unknown>>;
-}
+const workflowSchema = Schema.Struct({
+  jobs: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      if: Schema.optionalKey(Schema.String),
+      'runs-on': Schema.optionalKey(Schema.String),
+      steps: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+            if: Schema.optionalKey(Schema.String),
+            name: Schema.optionalKey(Schema.String),
+            run: Schema.optionalKey(Schema.String),
+            uses: Schema.optionalKey(Schema.String),
+            with: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+          }),
+        ),
+      ),
+      'timeout-minutes': Schema.optionalKey(Schema.Finite),
+    }),
+  ),
+  on: Schema.Struct({
+    pull_request: Schema.optionalKey(
+      Schema.Union([Schema.Literal(''), Schema.Struct({paths: Schema.optionalKey(Schema.Array(Schema.String))})]),
+    ),
+    workflow_dispatch: Schema.optionalKey(
+      Schema.Struct({inputs: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown))}),
+    ),
+  }),
+});
 
 describe('code-memory-link inverse-selector scale workflow', () => {
   it('runs the fixed 100k profile only on the release macOS class and stages a content-addressed G artifact', async () => {
-    const workflow = load(await Bun.file('.github/workflows/benchmarks.yml').text(), {schema: JSON_SCHEMA}) as {
-      readonly jobs: Readonly<
-        Record<
-          string,
-          {
-            readonly if?: string;
-            readonly 'runs-on'?: string;
-            readonly steps?: readonly WorkflowStep[];
-            readonly 'timeout-minutes'?: number;
-          }
-        >
-      >;
-      readonly on: {
-        readonly pull_request?: {readonly paths?: readonly string[]};
-        readonly workflow_dispatch?: {readonly inputs?: Readonly<Record<string, unknown>>};
-      };
-    };
+    const workflow = Schema.decodeUnknownSync(workflowSchema)(
+      load(await Bun.file('.github/workflows/benchmarks.yml').text(), {schema: JSON_SCHEMA}),
+    );
     const job = workflow.jobs['code-memory-link-inverse-scale'];
-    const benchmark = job.steps?.find(step => step.run?.includes('bench:code-memory-link-scale'));
-    const stage = job.steps?.find(step => step.name === 'Stage the exact content-addressed G artifact');
-    const upload = job.steps?.find(step => step.uses === 'actions/upload-artifact@v7');
+    const benchmark = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(job.steps), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(step =>
+                Effect.pipe(step.run, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.includes('bench:code-memory-link-scale')),
+                ))(__effectArrayValue),
+          ),
+        ),
+      ),
+    );
+    const stage = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(job.steps), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            step => step.name === 'Stage the exact content-addressed G artifact',
+          ),
+        ),
+      ),
+    );
+    const upload = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(job.steps), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver, step => step.uses === 'actions/upload-artifact@v7'),
+        ),
+      ),
+    );
     const command = benchmark?.run ?? '';
 
     expect(workflow.on.workflow_dispatch?.inputs).toHaveProperty('include_code_memory_link_scale');
-    expect(workflow.on.pull_request?.paths).toBeUndefined();
+    expect(typeof workflow.on.pull_request === 'object' ? workflow.on.pull_request.paths : undefined).toBeUndefined();
     expect(job.if).toContain("github.event_name == 'schedule'");
     expect(job.if).toContain('inputs.include_code_memory_link_scale');
     expect(job.if).not.toContain("github.event_name == 'pull_request'");
@@ -57,9 +99,9 @@ describe('code-memory-link inverse-selector scale workflow', () => {
   });
 
   it('exposes the built-target wrapper as a dedicated package command', async () => {
-    const manifest = JSON.parse(await Bun.file('package.json').text()) as {
-      readonly scripts?: Readonly<Record<string, string>>;
-    };
+    const manifest = Schema.decodeUnknownSync(
+      Schema.Struct({scripts: Schema.optionalKey(Schema.Record(Schema.String, Schema.String))}),
+    )(JSON.parse(await Bun.file('package.json').text()));
     expect(manifest.scripts?.['bench:code-memory-link-scale']).toBe('bun scripts/benchmark-code-memory-link-scale.ts');
   });
 });

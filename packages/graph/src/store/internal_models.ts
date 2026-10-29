@@ -91,29 +91,29 @@ interface DeferredVisualizationComponentRow {
   readonly workspace_id: string;
 }
 
-class CodeGraphPromotionCapacityPlanChanged extends Schema.TaggedError<CodeGraphPromotionCapacityPlanChanged>()(
-  'CodeGraphPromotionCapacityPlanChanged',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String.pipe(
-      Schema.withConstructorDefault(
-        Effect.succeed('Code graph promotion capacity plan changed during the write; retry the operation.'),
-      ),
+class CodeGraphPromotionCapacityPlanChanged extends Schema.TaggedError<
+  CodeGraphPromotionCapacityPlanChanged,
+  {readonly brand: unique symbol}
+>()('CodeGraphPromotionCapacityPlanChanged', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String.pipe(
+    Schema.withConstructorDefault(
+      Effect.succeed('Code graph promotion capacity plan changed during the write; retry the operation.'),
     ),
-  },
-) {}
+  ),
+}) {}
 
-class CodeGraphCacheCapacityPlanChanged extends Schema.TaggedError<CodeGraphCacheCapacityPlanChanged>()(
-  'CodeGraphCacheCapacityPlanChanged',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String.pipe(
-      Schema.withConstructorDefault(
-        Effect.succeed('Code graph cache capacity plan changed during the write; retry the operation.'),
-      ),
+class CodeGraphCacheCapacityPlanChanged extends Schema.TaggedError<
+  CodeGraphCacheCapacityPlanChanged,
+  {readonly brand: unique symbol}
+>()('CodeGraphCacheCapacityPlanChanged', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String.pipe(
+    Schema.withConstructorDefault(
+      Effect.succeed('Code graph cache capacity plan changed during the write; retry the operation.'),
     ),
-  },
-) {}
+  ),
+}) {}
 
 export {
   CodeGraphTraversalEdge,

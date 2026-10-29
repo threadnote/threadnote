@@ -1,15 +1,27 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, PlatformError} from 'effect';
+import {Effect, FileSystem, PlatformError, Schema} from 'effect';
 import {afterEach, describe, expect, it} from 'vitest';
 import {
   codeGraphLifecycleDiagnosticIssue,
   inspectAllCodeGraphs,
   inspectAllCodeGraphsLocal,
   renderCodeGraphDiagnostics,
-  type CodeGraphLocalDiagnosticsReport,
 } from '@threadnote/graph/diagnostics';
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const diagnosticsProjectionSchema = Schema.StructWithRest(
+  Schema.Struct({
+    databases: Schema.Array(Schema.StructWithRest(Schema.Struct({checkoutId: Schema.String}), [JsonRecordSchema])),
+    mode: Schema.Unknown,
+    summary: Schema.Unknown,
+    type: Schema.String,
+    version: Schema.Finite,
+  }),
+  [JsonRecordSchema],
+);
+
 import {runCodeGraphDiagnostics} from '@threadnote/threadnote/code_graph/commands';
 import {deepDiagnosticsWorkerEnvironment} from '@threadnote/graph/deep_diagnostics';
 import {CodeGraphStore} from '@threadnote/graph/store';
@@ -32,7 +44,7 @@ describe('all-code-graph diagnostics', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('passes only bounded bootstrap variables and the exact Threadnote home to the deep worker', () => {
@@ -57,7 +69,7 @@ describe('all-code-graph diagnostics', () => {
   it('projects cursor recovery as one fixed path-free diagnostics issue', () => {
     const privateMarker = '/private/repository/malformed-cursor-value';
     const lifecycle = {
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
       opportunity: 'diagnostics',
       result: {
         cleanup: 'none',
@@ -85,8 +97,8 @@ describe('all-code-graph diagnostics', () => {
     Effect.gen(function* () {
       const home = yield* Effect.promise(() => mkdtemp('threadnote-graph-diagnostics-'));
       homes.push(home);
-      const healthyCheckoutId = '1'.repeat(64);
-      const unreadableCheckoutId = '2'.repeat(64);
+      const healthyCheckoutId = Effect2.pipe('1', EffectString.repeat(64));
+      const unreadableCheckoutId = Effect2.pipe('2', EffectString.repeat(64));
       const healthyRoot = join(home, 'indexes', 'code-graph', 'repositories', healthyCheckoutId);
       const healthyDatabase = join(healthyRoot, `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`);
       const unreadableRoot = join(home, 'indexes', 'code-graph', 'repositories', unreadableCheckoutId);
@@ -109,7 +121,11 @@ describe('all-code-graph diagnostics', () => {
         viewCount: 1,
       });
       expect(report.obsoleteStores).toMatchObject({fileCount: 1, unsafeEntryCount: 0});
-      expect(report.databases.find(database => database.checkoutId === healthyCheckoutId)).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(report.databases, database => database.checkoutId === healthyCheckoutId),
+        ),
+      ).toMatchObject({
         health: {integrity: 'ok', readySnapshots: 1},
         healthState: 'checked',
         views: [
@@ -123,13 +139,23 @@ describe('all-code-graph diagnostics', () => {
           },
         ],
       });
-      const unreadable = report.databases.find(database => database.checkoutId === unreadableCheckoutId);
+      const unreadable = EffectOption.getOrUndefined(
+        EffectArray.findFirst(report.databases, database => database.checkoutId === unreadableCheckoutId),
+      );
       expect(unreadable?.healthState).toBe('unreadable');
-      expect(unreadable?.issues.map(issue => issue.code)).toContain('health-check-failed');
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(unreadable?.issues), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, issue => issue.code),
+          ),
+        ),
+      ).toContain('health-check-failed');
       expect(unreadable?.lifecycle).toContainEqual(
         expect.objectContaining({action: 'retry-observation', disposition: 'observe', state: 'unreadable-store'}),
       );
-      const ordinaryStorage = report.databases.find(database => database.checkoutId === healthyCheckoutId)?.storage;
+      const ordinaryStorage = EffectOption.getOrUndefined(
+        EffectArray.findFirst(report.databases, database => database.checkoutId === healthyCheckoutId),
+      )?.storage;
       if (ordinaryStorage?.state !== 'available')
         throw TestError.make({message: 'missing ordinary storage diagnostics'});
       expect(ordinaryStorage.pageStorage).not.toHaveProperty('attribution');
@@ -137,9 +163,9 @@ describe('all-code-graph diagnostics', () => {
       expect(renderCodeGraphDiagnostics(report)).toContain('Native code graph diagnostics');
       const partialReport = {
         ...report,
-        databases: report.databases.map(database => ({
+        databases: EffectArray.map(report.databases, database => ({
           ...database,
-          views: database.views.map(view =>
+          views: EffectArray.map(database.views, view =>
             view.analysis
               ? {
                   ...view,
@@ -161,7 +187,9 @@ describe('all-code-graph diagnostics', () => {
       );
 
       const deepReport = yield* inspectAllCodeGraphs(home, {deep: true});
-      const deepStorage = deepReport.databases.find(database => database.checkoutId === healthyCheckoutId)?.storage;
+      const deepStorage = EffectOption.getOrUndefined(
+        EffectArray.findFirst(deepReport.databases, database => database.checkoutId === healthyCheckoutId),
+      )?.storage;
       if (deepStorage?.state !== 'available') throw TestError.make({message: 'missing deep storage diagnostics'});
       expect(deepStorage.pageStorage).toMatchObject({state: 'available'});
       if (deepStorage.pageStorage.state !== 'available')
@@ -178,14 +206,18 @@ describe('all-code-graph diagnostics', () => {
         user: 'tester',
       };
       const output = yield* captureConsole(runCodeGraphDiagnostics(config, {analyze: true, json: true}));
-      const commandReport = JSON.parse(output.output) as CodeGraphLocalDiagnosticsReport;
+      const commandReport = yield* Schema.decodeUnknownEffect(diagnosticsProjectionSchema)(JSON.parse(output.output));
       expect(commandReport).toMatchObject({
         mode: {analyze: true, deep: false},
         summary: {analysisCompleteCount: 1, databaseCount: 2},
         type: 'code-graph-diagnostics',
         version: 2,
       });
-      expect(commandReport.databases.find(database => database.checkoutId === healthyCheckoutId)).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(commandReport.databases, database => database.checkoutId === healthyCheckoutId),
+        ),
+      ).toMatchObject({
         views: [
           {
             analysis: {coverage: {complete: true, topology: {state: 'complete'}}},
@@ -230,30 +262,22 @@ describe('all-code-graph diagnostics', () => {
 
         let gitInvocationCount = 0;
         const command = yield* CommandExecutor;
-        const mutableCommand = command as {execute: typeof command.execute};
-        const execute = command.execute;
-        const repeatedLocalRefreshes = yield* Effect.acquireUseRelease(
-          Effect.sync(() => {
-            mutableCommand.execute = (executable, args, options) => {
-              if (executable === 'git') gitInvocationCount += 1;
-              return execute(executable, args, options);
-            };
-          }),
-          () =>
-            Effect.all(
-              [
-                inspectAllCodeGraphsLocal(home),
-                managerGraphCatalog(home),
-                inspectAllCodeGraphsLocal(home),
-                managerGraphCatalog(home),
-              ],
-              {concurrency: 1},
-            ),
-          () =>
-            Effect.sync(() => {
-              mutableCommand.execute = execute;
-            }),
-        );
+        const measuredCommand = {
+          ...command,
+          execute: (executable: string, args: readonly string[], options?: Parameters<typeof command.execute>[2]) => {
+            if (executable === 'git') gitInvocationCount += 1;
+            return command.execute(executable, args, options);
+          },
+        };
+        const repeatedLocalRefreshes = yield* Effect.all(
+          [
+            inspectAllCodeGraphsLocal(home),
+            managerGraphCatalog(home),
+            inspectAllCodeGraphsLocal(home),
+            managerGraphCatalog(home),
+          ],
+          {concurrency: 1},
+        ).pipe(Effect.provideService(CommandExecutor, measuredCommand));
         expect(repeatedLocalRefreshes[0].databases[0]?.views[0]?.localAssociation).toMatchObject({
           available: true,
           path: identity.repoRoot,
@@ -294,7 +318,7 @@ describe('all-code-graph diagnostics', () => {
           repositories: [{views: [{localAssociation: {available: false, state: 'invalid'}}]}],
         });
         const jsonOutput = yield* captureConsole(runCodeGraphDiagnostics(config, {json: true}));
-        const localReport = JSON.parse(jsonOutput.output) as CodeGraphLocalDiagnosticsReport;
+        const localReport = yield* Schema.decodeUnknownEffect(JsonRecordSchema)(JSON.parse(jsonOutput.output));
         expect(localReport).toMatchObject({
           databases: [
             {
@@ -430,8 +454,8 @@ function repositoryIdentity(root: string, checkoutId: string): RepositoryIdentit
     headCommit: 'abcdef0123456789abcdef0123456789abcdef01',
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: '3'.repeat(64),
-    worktreeId: '4'.repeat(64),
+    repositoryId: Effect2.pipe('3', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('4', EffectString.repeat(64)),
   };
 }
 
@@ -443,7 +467,7 @@ function readySnapshot(identity: RepositoryIdentity, id = 'd'): CodeGraphSnapsho
     edgeCount: 0,
     extractorSet: 'diagnostics-test',
     fileCount: 0,
-    id: `cgsn_${id.repeat(40)}`,
+    id: `cgsn_${Effect2.pipe(id, EffectString.repeat(40))}`,
     repositoryId: identity.repositoryId,
     state: 'ready',
     symbolCount: 0,
@@ -453,3 +477,5 @@ function readySnapshot(identity: RepositoryIdentity, id = 'd'): CodeGraphSnapsho
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdtempSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';

@@ -5,6 +5,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {parseBenchmarkArtifactV1, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
 import {createCodeGraphProductionRatchet} from './benchmark-code-graph.js';
 import {atomicWrite, printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const generate = Effect.gen(function* () {
   const {artifacts, outputPath} = parseArguments(yield* scriptArguments());
@@ -24,9 +26,14 @@ function parseArguments(args: readonly string[]): {readonly artifacts: readonly 
     const argument = args[index];
     if (argument === '--output') {
       const value = args[++index];
-      if (!value?.trim()) throw ScriptError.make({message: '--output requires a path.'});
+      if (
+        !Effect2.pipe(value, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        )
+      )
+        throw ScriptError.make({message: '--output requires a path.'});
       outputPath = value;
-    } else if (argument.startsWith('-')) {
+    } else if (Effect2.pipe(argument, EffectString.startsWith('-'))) {
       throw ScriptError.make({message: `Unknown production ratchet generator option: ${argument}`});
     } else {
       artifacts.push(argument);

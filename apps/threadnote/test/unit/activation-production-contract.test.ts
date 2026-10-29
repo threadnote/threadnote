@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Exit, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -59,6 +60,8 @@ import {
 import {initializeActivationProposalEvidenceV1} from '@threadnote/threadnote/activation/production/proposal_store';
 import type {ActivationPlanV1} from '@threadnote/threadnote/activation/contract';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const request = {
   adrPaths: ['docs/adr/0001.md'],
@@ -103,7 +106,7 @@ describe('activation production request', () => {
   it('canonicalizes replacement target identity aliases before hashing', () => {
     fc.assert(
       fc.property(fc.array(fc.stringMatching(/^[a-z][a-z0-9_-]{0,12}$/u), {maxLength: 5, minLength: 1}), segments => {
-        const path = segments.join('/');
+        const path = EffectArray.join(segments, '/');
         expect(activationReplacementTargetIdentityHashV1(`viking://user/${path}`)).toBe(
           activationReplacementTargetIdentityHashV1(`threadnote://user/${path}`),
         );
@@ -114,7 +117,11 @@ describe('activation production request', () => {
 
   it('renders the real request path as one shell-safe continuation argument', () => {
     const requestPath = "/tmp/activation request;$(touch should-not-run)'s.json";
-    const command = activationContinuationCommandV1('a'.repeat(64), requestPath, 'b'.repeat(64));
+    const command = activationContinuationCommandV1(
+      Effect2.pipe('a', EffectString.repeat(64)),
+      requestPath,
+      Effect2.pipe('b', EffectString.repeat(64)),
+    );
     expect(command).toContain(`--request '/tmp/activation request;$(touch should-not-run)'"'"'s.json'`);
     expect(command).not.toContain('<request.json>');
   });
@@ -129,10 +136,10 @@ describe('activation production request', () => {
             baseUndoPlanHash,
             operations: [
               {
-                inputHash: '1'.repeat(64),
+                inputHash: Effect2.pipe('1', EffectString.repeat(64)),
                 operationId: 'decision-apply',
-                outcomeHash: '2'.repeat(64),
-                subsystemReceiptHash: '3'.repeat(64),
+                outcomeHash: Effect2.pipe('2', EffectString.repeat(64)),
+                subsystemReceiptHash: Effect2.pipe('3', EffectString.repeat(64)),
               },
             ],
             publicationEvidenceHash,
@@ -176,20 +183,20 @@ describe('activation production request', () => {
     const applied = activationDecision('personal', 'tn_activation_source');
     const published = activationDecision('shared', 'tn_existing_shared_target');
     const evidence = {
-      activationId: 'a'.repeat(64),
+      activationId: Effect2.pipe('a', EffectString.repeat(64)),
       approvedProjectionHash: activationApprovedProjectionEvidenceHashV1(applied),
       branchName: 'threadnote/knowledge-delta/review-0000000000000000-deadbeefcafe',
       candidateId: applied.candidate.candidateId,
       finalContentHash: sha256HexSync(canonicalMemoryDocumentContent(published.record.content)),
       operation: 'replace' as const,
-      proposalHash: 'b'.repeat(64),
-      repositoryId: 'c'.repeat(64),
+      proposalHash: Effect2.pipe('b', EffectString.repeat(64)),
+      repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
       reviewId: applied.review.reviewId,
       reviewRevision: applied.review.revision,
-      revision: 'd'.repeat(64),
+      revision: Effect2.pipe('d', EffectString.repeat(64)),
       sourceMemoryId: applied.record.metadata.memoryId!,
       targetMemoryId: published.record.metadata.memoryId!,
-      targetPreconditionHash: 'e'.repeat(64),
+      targetPreconditionHash: Effect2.pipe('e', EffectString.repeat(64)),
       team: 'default',
       type: 'threadnote-activation-proposal-evidence' as const,
       version: 1 as const,
@@ -338,7 +345,7 @@ describe('activation production request', () => {
         expect(
           activationImportedMemoriesEvidenceHashV1(
             observation.imports.sourceSetHash,
-            imported.map(decision => decision.review),
+            EffectArray.map(imported, decision => decision.review),
           ),
         ).toMatch(/^[0-9a-f]{64}$/u);
       }),
@@ -706,7 +713,7 @@ describe('activation production request', () => {
           project: 'threadnote',
           sourceAgentClient: 'test',
           text: duplicateGuidance,
-          topic: `activation-import-${importedCandidate.candidateId.slice(-24)}`,
+          topic: `activation-import-${Effect2.pipe(importedCandidate.candidateId, EffectString.slice(-24))}`,
         });
         const [review] = yield* findOrCreateActivationImportReviewsV1(config, observation);
         const candidate = onlyDecisionCandidate(review);
@@ -728,12 +735,12 @@ describe('activation production request', () => {
         expect(
           activationImportedMemoriesEvidenceHashV1(
             observation.imports.sourceSetHash,
-            first.map(decision => decision.review),
+            EffectArray.map(first, decision => decision.review),
           ),
         ).toBe(
           activationImportedMemoriesEvidenceHashV1(
             observation.imports.sourceSetHash,
-            retried.map(decision => decision.review),
+            EffectArray.map(retried, decision => decision.review),
           ),
         );
       }),
@@ -746,18 +753,18 @@ describe('activation production request', () => {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-activation-intent-home-'});
         const config = {agentContextHome: home};
-        const activationId = 'a'.repeat(64);
-        const targetHash = 'b'.repeat(64);
+        const activationId = Effect2.pipe('a', EffectString.repeat(64));
+        const targetHash = Effect2.pipe('b', EffectString.repeat(64));
         const prepared = yield* prepareActivationMutationIntentV1(config, {
           activationId,
-          beforeStateHash: 'c'.repeat(64),
+          beforeStateHash: Effect2.pipe('c', EffectString.repeat(64)),
           operationId: 'surface-primary',
           ownership: 'activation-created',
           targetHash,
         });
         const recovered = yield* prepareActivationMutationIntentV1(config, {
           activationId,
-          beforeStateHash: 'd'.repeat(64),
+          beforeStateHash: Effect2.pipe('d', EffectString.repeat(64)),
           operationId: 'surface-primary',
           ownership: 'preexisting',
           targetHash,
@@ -766,7 +773,7 @@ describe('activation production request', () => {
         expect(recovered.phase).toBe('disowned');
         expect(recovered.ownership).toBe('preexisting');
         expect(recovered.beforeStateHash).toBe(prepared.beforeStateHash);
-        expect(recovered.afterStateHash).toBe('d'.repeat(64));
+        expect(recovered.afterStateHash).toBe(Effect2.pipe('d', EffectString.repeat(64)));
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -777,18 +784,18 @@ describe('activation production request', () => {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-activation-intent-complete-home-'});
         const config = {agentContextHome: home};
-        const activationId = 'e'.repeat(64);
-        const targetHash = 'f'.repeat(64);
+        const activationId = Effect2.pipe('e', EffectString.repeat(64));
+        const targetHash = Effect2.pipe('f', EffectString.repeat(64));
         const prepared = yield* prepareActivationMutationIntentV1(config, {
           activationId,
-          beforeStateHash: '0'.repeat(64),
+          beforeStateHash: Effect2.pipe('0', EffectString.repeat(64)),
           operationId: 'surface-primary',
           ownership: 'activation-created',
           targetHash,
         });
         const completed = yield* completeActivationMutationIntentV1(config, {
           activationId,
-          afterStateHash: '1'.repeat(64),
+          afterStateHash: Effect2.pipe('1', EffectString.repeat(64)),
           expectedRevision: prepared.revision,
           operationId: 'surface-primary',
         });
@@ -797,7 +804,7 @@ describe('activation production request', () => {
             Array.from({length: 8}, (_, index) =>
               prepareActivationMutationIntentV1(config, {
                 activationId,
-                beforeStateHash: (index + 2).toString(16).padStart(64, '0'),
+                beforeStateHash: Effect2.pipe((index + 2).toString(16), EffectString.padStart(64, '0')),
                 operationId: 'surface-primary',
                 ownership: 'preexisting',
                 targetHash,
@@ -807,9 +814,9 @@ describe('activation production request', () => {
           ),
         );
         expect(completed.phase).toBe('completed');
-        expect(completed.afterStateHash).toBe('1'.repeat(64));
-        expect(concurrent.every(intent => intent.revision === completed.revision)).toBe(true);
-        expect(concurrent.every(intent => intent.ownership === 'activation-created')).toBe(true);
+        expect(completed.afterStateHash).toBe(Effect2.pipe('1', EffectString.repeat(64)));
+        expect(EffectArray.every(concurrent, intent => intent.revision === completed.revision)).toBe(true);
+        expect(EffectArray.every(concurrent, intent => intent.ownership === 'activation-created')).toBe(true);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -821,7 +828,7 @@ function receiptThroughDecisionApply(plan: ActivationPlanV1) {
     const approval =
       operation.approvalKind === undefined
         ? undefined
-        : bindActivationApprovalV1(plan, receipt, operation.id, 'a'.repeat(64));
+        : bindActivationApprovalV1(plan, receipt, operation.id, Effect2.pipe('a', EffectString.repeat(64)));
     const transition = recordActivationOutcomeV1({
       approval,
       now: new Date(Date.parse(receipt.updatedAt) + 1_000).toISOString(),
@@ -829,7 +836,7 @@ function receiptThroughDecisionApply(plan: ActivationPlanV1) {
       outcome: {
         ownership: operation.reversible ? 'activation-created' : 'preexisting',
         status: operation.expectedOutcome,
-        subsystemReceiptHash: 'b'.repeat(64),
+        subsystemReceiptHash: Effect2.pipe('b', EffectString.repeat(64)),
         undoEligible: operation.reversible,
       },
       plan,
@@ -849,7 +856,7 @@ const prepareSharedWorktreeForCommits = Effect.fn('test.activation.prepareShared
   yield* command.execute('git', ['-C', worktree, 'config', 'user.email', 'activation@example.test']);
   yield* command.execute('git', ['-C', worktree, 'config', 'user.name', 'Activation Test']);
   const status = yield* command.execute('git', ['-C', worktree, 'status', '--porcelain=v1', '--untracked-files=all']);
-  const pending = status.stdout.trim();
+  const pending = Effect2.pipe(status.stdout, EffectString.trim);
   if (pending === '') return;
   if (pending !== 'A  .gitignore') {
     throw new Error(`Unexpected dirty activation team fixture: ${pending}`);
@@ -865,29 +872,32 @@ const prepareSharedWorktreeForCommits = Effect.fn('test.activation.prepareShared
 });
 
 function flipDigest(value: string): string {
-  return `${value[0] === '0' ? '1' : '0'}${value.slice(1)}`;
+  return `${value[0] === '0' ? '1' : '0'}${Effect2.pipe(value, EffectString.slice(1))}`;
 }
 
 function activationDecision(visibility: 'personal' | 'shared', memoryId: string): AppliedActivationDecisionV1 {
   const reviewId = 'review-0000000000000000';
   const candidateId = `${reviewId}-1`;
   const body = '# Decision\nKeep Git as the shared source of truth.';
-  const content = [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    'topic: activation-decision',
-    'source_agent_client: codex',
-    'timestamp: 2026-09-18T00:00:00.000Z',
-    `memory_id: ${memoryId}`,
-    `visibility: ${visibility}`,
-    'authority: user_approved',
-    'trust: approved',
-    ...(visibility === 'personal' ? [`candidate_id: ${candidateId}`, 'source_session_id: activation-session'] : []),
-    '',
-    body,
-  ].join('\n');
+  const content = EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      'topic: activation-decision',
+      'source_agent_client: codex',
+      'timestamp: 2026-09-18T00:00:00.000Z',
+      `memory_id: ${memoryId}`,
+      `visibility: ${visibility}`,
+      'authority: user_approved',
+      'trust: approved',
+      ...(visibility === 'personal' ? [`candidate_id: ${candidateId}`, 'source_session_id: activation-session'] : []),
+      '',
+      body,
+    ],
+    '\n',
+  );
   const uri =
     visibility === 'personal'
       ? 'threadnote://user/test/projects/threadnote/durable/activation-decision.md'
@@ -897,7 +907,9 @@ function activationDecision(visibility: 'personal' | 'shared', memoryId: string)
   const candidate = {
     applyBodyText: body,
     applyContentHash: sha256HexSync(
-      canonicalMemoryDocumentContent(content.replace('visibility: shared', 'visibility: personal')),
+      canonicalMemoryDocumentContent(
+        Effect2.pipe(content, EffectString.replace('visibility: shared', 'visibility: personal')),
+      ),
     ),
     applyOperation: 'create',
     applyStage: 'written',

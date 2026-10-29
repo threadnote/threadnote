@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import fc from 'fast-check';
@@ -8,12 +9,15 @@ import {consumerId, parseHomeIndex, parseRuntimeIndex, parseReceipt} from '../..
 import type {DevSkillsTarget} from '../../src/dev_skills/contract.js';
 import {devSkillsTestLayer, fixture, snapshot} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('runtime development bundle manifest', () => {
   it('rejects every traversal/absolute/Windows reserved suffix under generated prefixes', () => {
     fc.assert(
       fc.property(fc.array(fc.constantFrom('scripts', 'references', 'nested'), {maxLength: 4}), parts => {
-        const prefix = parts.length ? `${parts.join('/')}/` : '';
+        const prefix = parts.length ? `${EffectArray.join(parts, '/')}/` : '';
         for (const invalid of ['../file', './file', '/file', 'C:\\file', 'con.py', 'nul', 'a//b', 'file.'])
           expect(validDevSkillPath(prefix + invalid)).toBe(false);
         expect(validDevSkillPath(prefix + 'helper.py')).toBe(true);
@@ -43,7 +47,9 @@ describe('runtime development bundle manifest', () => {
       });
       expect(yield* loadDevSkillsBundleAt(f.source, '5.2.0').pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
       const bundle = yield* loadDevSkillsBundleAt(f.source, '5.3.0-beta.4');
-      expect(() => parseDevSkillsManifest({...bundle.manifest, digest: '0'.repeat(64)})).toThrow();
+      expect(() =>
+        parseDevSkillsManifest({...bundle.manifest, digest: Effect2.pipe('0', EffectString.repeat(64))}),
+      ).toThrow();
       yield* f.fs.writeFileString(f.manifest, JSON.stringify(bundle.manifest));
       const file = f.path.join(f.source, 'config/agent-skills/dev-plan/scripts/helper.py');
       yield* f.fs.writeFileString(file, 'corrupted');
@@ -88,7 +94,9 @@ describe('runtime development bundle manifest', () => {
         manifest: bundle.manifest,
         generations: {[bundle.manifest.digest]: bundle.manifest},
         consumers: {[id]: consumer},
-        entrypoints: Object.fromEntries(bundle.manifest.skills.map(skill => [`${skill.id}/SKILL.md`, 'owned content'])),
+        entrypoints: EffectRecord.fromEntries(
+          EffectArray.map(bundle.manifest.skills, skill => [`${skill.id}/SKILL.md`, 'owned content']),
+        ),
       };
       for (const state of ['enrolled', 'removed'] as const) {
         const enrollment = {...consumer, state};

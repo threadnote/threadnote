@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import type {StandaloneActiveRelease} from '../process/standalone_lease.js';
 import {Predicate, Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const MCP_BROKER_MAX_LINE_BYTES = 32 * 1024 * 1024;
 const MCP_BROKER_REPLAY_TIMEOUT_MILLISECONDS = 10_000;
@@ -17,11 +20,14 @@ const MCP_BROKER_STARTUP_ERROR =
 
 type McpBrokerStartupFailure = 'no-active-release' | 'startup-failed';
 
-export class McpBrokerError extends Schema.TaggedError<McpBrokerError>()('McpBrokerError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-  reason: Schema.optionalKey(Schema.Literal('no-active-release')),
-}) {}
+export class McpBrokerError extends Schema.TaggedError<McpBrokerError, {readonly brand: unique symbol}>()(
+  'McpBrokerError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+    reason: Schema.optionalKey(Schema.Literal('no-active-release')),
+  },
+) {}
 
 interface McpBrokerChildInput {
   end(): Promise<unknown> | unknown;
@@ -585,22 +591,26 @@ async function* ndjsonLines(input: AsyncIterable<Uint8Array>): AsyncGenerator<st
       throw McpBrokerError.make({message: 'Threadnote MCP broker received an oversized protocol line.'});
     }
     for (;;) {
-      const newline = buffered.indexOf('\n');
+      const newline = Effect.pipe(
+        buffered,
+        EffectString.indexOf('\n'),
+        Effect.Option.getOrElse(() => -1),
+      );
       if (newline < 0) break;
-      const line = buffered.slice(0, newline).replace(/\r$/u, '');
-      buffered = buffered.slice(newline + 1);
+      const line = Effect.pipe(buffered, EffectString.slice(0, newline), EffectString.replace(/\r$/u, ''));
+      buffered = Effect.pipe(buffered, EffectString.slice(newline + 1));
       if (line.length > 0) yield line;
     }
   }
   buffered += decoder.decode();
-  const line = buffered.replace(/\r$/u, '');
+  const line = Effect.pipe(buffered, EffectString.replace(/\r$/u, ''));
   if (line.length > 0) yield line;
 }
 
 function parseJsonRpcEnvelope(line: string): JsonRpcEnvelope | undefined {
   try {
     const value = JSON.parse(line) as unknown;
-    return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : undefined;
+    return typeof value === 'object' && value !== null && !EffectArray.isArray(value) ? value : undefined;
   } catch {
     return undefined;
   }
@@ -626,14 +636,14 @@ function replaceCancelledRequestId(line: string, requestId: string | number): st
   const parsed: unknown = JSON.parse(line);
   const envelope = Predicate.isObject(parsed) ? parsed : {};
   const params =
-    typeof envelope.params === 'object' && envelope.params !== null && !Array.isArray(envelope.params)
+    typeof envelope.params === 'object' && envelope.params !== null && !EffectArray.isArray(envelope.params)
       ? envelope.params
       : {};
   return JSON.stringify({...envelope, params: {...params, requestId}});
 }
 
 function cancelledRequestId(params: unknown): string | number | undefined {
-  if (typeof params !== 'object' || params === null || Array.isArray(params) || !('requestId' in params)) {
+  if (typeof params !== 'object' || params === null || EffectArray.isArray(params) || !('requestId' in params)) {
     return undefined;
   }
   return isJsonRpcId(params.requestId) ? params.requestId : undefined;

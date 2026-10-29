@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Clock, DateTime, Effect, FileSystem, Path, Schema} from 'effect';
@@ -16,6 +17,8 @@ import {
 } from './benchmark-code-graph.js';
 import {atomicWrite, printJson, readJsonFile, scriptArguments} from './effect/script.js';
 import {generatedStaticReexportControlStatement, prepareGeneratedCodeGraphFixture} from './code-graph-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
@@ -116,10 +119,12 @@ const benchmarkCodeGraphDirtyOverlay = Effect.scoped(
       }
     }
 
-    const incrementalDuration = summarize(incremental.map(sample => sample.durationMilliseconds));
-    const fullDuration = summarize(full.map(sample => sample.durationMilliseconds));
-    const incrementalMaterialization = summarize(incremental.map(sample => sample.materializationMilliseconds));
-    const fullMaterialization = summarize(full.map(sample => sample.materializationMilliseconds));
+    const incrementalDuration = summarize(EffectArray.map(incremental, sample => sample.durationMilliseconds));
+    const fullDuration = summarize(EffectArray.map(full, sample => sample.durationMilliseconds));
+    const incrementalMaterialization = summarize(
+      EffectArray.map(incremental, sample => sample.materializationMilliseconds),
+    );
+    const fullMaterialization = summarize(EffectArray.map(full, sample => sample.materializationMilliseconds));
     const finalRuntimeProvenance = governance ? yield* validateBenchmarkRuntimeProvenance(sourceRoot) : undefined;
     if (
       governance !== undefined &&
@@ -178,7 +183,7 @@ const benchmarkCodeGraphDirtyOverlay = Effect.scoped(
       },
       measurements: {
         full: {
-          cpuMilliseconds: summarize(full.map(sample => sample.cpuMilliseconds)),
+          cpuMilliseconds: summarize(EffectArray.map(full, sample => sample.cpuMilliseconds)),
           durationMilliseconds: fullDuration,
           ...(options.scenario !== 'body-only'
             ? {
@@ -192,7 +197,7 @@ const benchmarkCodeGraphDirtyOverlay = Effect.scoped(
           stagedFiles: full[0]?.stagedFiles ?? 0,
         },
         incremental: {
-          cpuMilliseconds: summarize(incremental.map(sample => sample.cpuMilliseconds)),
+          cpuMilliseconds: summarize(EffectArray.map(incremental, sample => sample.cpuMilliseconds)),
           durationMilliseconds: incrementalDuration,
           ...(options.scenario !== 'body-only'
             ? {
@@ -281,51 +286,54 @@ export function dirtyOverlayRatchetArtifact(input: {
   readonly runtimeVersion: string;
 }): BenchmarkArtifactV1 {
   const fixtureHash = `generated-code-graph-dirty-overlay-v2:${input.options.scenario}:${input.options.scaleSymbols}`;
-  const runnerClass = process.env.THREADNOTE_BENCHMARK_RUNNER_CLASS?.trim() || 'local-unclassified';
+  const runnerClass =
+    Effect2.pipe(process.env.THREADNOTE_BENCHMARK_RUNNER_CLASS, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || 'local-unclassified';
   const firstIncremental = input.incremental[0];
   const firstFull = input.full[0];
   const measurements = [
     benchmarkMeasurement(
       'incremental-duration',
       'milliseconds',
-      input.incremental.map(sample => sample.durationMilliseconds),
+      EffectArray.map(input.incremental, sample => sample.durationMilliseconds),
     ),
     benchmarkMeasurement(
       'incremental-cpu',
       'milliseconds',
-      input.incremental.map(sample => sample.cpuMilliseconds),
+      EffectArray.map(input.incremental, sample => sample.cpuMilliseconds),
     ),
     benchmarkMeasurement(
       'incremental-materialization',
       'milliseconds',
-      input.incremental.map(sample => sample.materializationMilliseconds),
+      EffectArray.map(input.incremental, sample => sample.materializationMilliseconds),
     ),
     benchmarkMeasurement(
       'full-duration',
       'milliseconds',
-      input.full.map(sample => sample.durationMilliseconds),
+      EffectArray.map(input.full, sample => sample.durationMilliseconds),
     ),
     benchmarkMeasurement(
       'full-cpu',
       'milliseconds',
-      input.full.map(sample => sample.cpuMilliseconds),
+      EffectArray.map(input.full, sample => sample.cpuMilliseconds),
     ),
     benchmarkMeasurement(
       'full-materialization',
       'milliseconds',
-      input.full.map(sample => sample.materializationMilliseconds),
+      EffectArray.map(input.full, sample => sample.materializationMilliseconds),
     ),
     benchmarkMeasurement(
       'incremental-duration-reduction',
       'percent',
-      input.incremental.map((sample, index) =>
+      EffectArray.map(input.incremental, (sample, index) =>
         Math.max(0, percentReduction(input.full[index].durationMilliseconds, sample.durationMilliseconds)),
       ),
     ),
     benchmarkMeasurement(
       'incremental-materialization-reduction',
       'percent',
-      input.incremental.map((sample, index) =>
+      EffectArray.map(input.incremental, (sample, index) =>
         Math.max(
           0,
           percentReduction(input.full[index].materializationMilliseconds, sample.materializationMilliseconds),
@@ -399,15 +407,18 @@ function dirtyOverlayObservationMeasurements(
     ['raw-fact-replay-bytes', 'rawFactReplayBytes', 'bytes'],
   ] as const;
   return [
-    ...numericFields.flatMap(([name, field, unit]) => {
-      const values = observations.map(observation => observation[field]).filter(value => value !== undefined);
+    ...EffectArray.flatMap(numericFields, ([name, field, unit]) => {
+      const values = EffectArray.filter(
+        EffectArray.map(observations, observation => observation[field]),
+        value => value !== undefined,
+      );
       return values.length === observations.length ? [benchmarkMeasurement(`${prefix}-${name}`, unit, values)] : [];
     }),
-    ...replayFields.map(([name, field, unit]) =>
+    ...EffectArray.map(replayFields, ([name, field, unit]) =>
       benchmarkMeasurement(
         `${prefix}-${name}`,
         unit,
-        observations.map(observation => observation.replay[field]),
+        EffectArray.map(observations, observation => observation.replay[field]),
       ),
     ),
   ];
@@ -586,18 +597,18 @@ export function dirtyOverlayAmplificationEvidence(input: {
 
 export function dirtyOverlayChangedSource(scenario: DirtyOverlayBenchmarkScenario, committed: string): string {
   if (scenario === 'body-only') {
-    if (!committed.includes('return 0;')) {
+    if (!Effect2.pipe(committed, EffectString.includes('return 0;'))) {
       throw ScriptError.make({message: 'Dirty-overlay benchmark fixture lost its body-only edit marker.'});
     }
-    return committed.replace('return 0;', 'return 1000000;');
+    return Effect2.pipe(committed, EffectString.replace('return 0;', 'return 1000000;'));
   }
   if (scenario === 'changed-export') {
-    if (!committed.includes('export function dependencySurfaceControl()')) {
+    if (!Effect2.pipe(committed, EffectString.includes('export function dependencySurfaceControl()'))) {
       throw ScriptError.make({message: 'Dirty-overlay benchmark fixture lost its dependency-surface edit marker.'});
     }
-    return `${committed}${committed.endsWith('\n') ? '' : '\n'}export function publishedDependencySurfaceControl(): number { return 2; }\n`;
+    return `${committed}${Effect2.pipe(committed, EffectString.endsWith('\n')) ? '' : '\n'}export function publishedDependencySurfaceControl(): number { return 2; }\n`;
   }
-  if (!committed.includes(generatedStaticReexportControlStatement())) {
+  if (!Effect2.pipe(committed, EffectString.includes(generatedStaticReexportControlStatement()))) {
     throw ScriptError.make({message: 'Dirty-overlay benchmark fixture lost its static re-export control.'});
   }
   return `// Span-only benchmark edit; resolver input below is byte-identical.\n${committed}`;
@@ -648,7 +659,7 @@ function summarize(values: readonly number[]): {
     throw ScriptError.make({message: 'Dirty-overlay benchmark requires at least one observation.'});
   return {
     maximum: Math.max(...values),
-    mean: values.reduce((total, value) => total + value, 0) / values.length,
+    mean: EffectArray.reduce(values, 0, (total, value) => total + value) / values.length,
     minimum: Math.min(...values),
   };
 }
@@ -714,6 +725,7 @@ function integer(value: string | undefined, option: string, minimum: number): nu
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }

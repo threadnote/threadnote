@@ -1,7 +1,10 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {afterEach, expect, it, vi} from 'vitest';
 import type {TreeNode} from '../../src/ui/contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 vi.mock('../../src/memory_editor.js', () => ({MemoryEditor: () => <div>Editor</div>}));
 afterEach(() => {
@@ -55,20 +58,30 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
       return Promise.resolve(
         new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404}),
       );
-    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+    const body = init?.body
+      ? Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(JSON.parse(String(init.body)))
+      : {};
     if (init?.body) posts.push({path: url.pathname, body});
     if (url.pathname === '/api/state')
       return Promise.resolve(
         json({
           agents: [{id: 'codex', label: 'Codex', available: true}],
-          config: {user: 'test', account: 'local'},
+          config: {user: 'test', account: 'local', agentContextHome: '/tmp/threadnote-context'},
           autoUpdate: {effectivePolicy: 'notify'},
+          updateAvailable: false,
           version: 'fixture',
         }),
       );
     if (url.pathname === '/api/tree')
       return Promise.resolve(
         json({
+          resourcesTree: {
+            ...leaf('memories'),
+            uri: prefix,
+            relativePath: '',
+            isDir: true,
+            children: [{...leaf('project'), relativePath: 'durable/projects/project', isDir: true, children: leaves}],
+          },
           tree: {
             ...leaf('memories'),
             uri: prefix,
@@ -78,8 +91,17 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
           },
         }),
       );
+    if (url.pathname === '/api/shares/conflicts') return Promise.resolve(json({conflicts: []}));
+    if (url.pathname === '/api/attention/context-maintenance')
+      return Promise.resolve(
+        json({version: 2, paused: false, state: 'idle', generation: 'fixture', projects: [], cases: [], receipts: []}),
+      );
     if (url.pathname === '/api/graphs')
-      return Promise.resolve(json({repositories: [], builds: [], diagnostics: [], views: []}));
+      return Promise.resolve(
+        json({repositories: [], builds: [], diagnostics: [], views: [], waiterCount: 0, waiters: []}),
+      );
+    if (url.pathname === '/api/processes')
+      return Promise.resolve(json({processes: [], schemaVersion: 1, truncated: false}));
     if (url.pathname === '/api/consolidation-models')
       return Promise.resolve(
         failModels
@@ -96,7 +118,9 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
       return Promise.resolve(json({version: 1, project: 'project', lanes: [], handoffs: [], stats: {memories: 2}}));
     if (url.pathname === '/api/memory') {
       memoryReads++;
-      const node = leaves.find(l => l.uri === url.searchParams.get('uri'));
+      const node = EffectOption.getOrUndefined(
+        EffectArray.findFirst(leaves, l => l.uri === url.searchParams.get('uri')),
+      );
       return Promise.resolve(
         json({
           node,
@@ -105,13 +129,16 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
         }),
       );
     }
-    if (url.pathname === '/api/consolidations')
+    if (url.pathname === '/api/consolidations') {
+      const sourceUris = Schema.decodeUnknownSync(Schema.Array(Schema.String))(body.uris);
       return Promise.resolve(
         json({
           ...(failDraft
             ? {
                 job: {
                   id: 'failed-job',
+                  agent: 'codex',
+                  sourceUris,
                   status: 'failed',
                   error: 'Codex model is not supported.\n\nERROR: generation failed.',
                 },
@@ -119,22 +146,25 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
             : {
                 job: {
                   id: 'job',
+                  agent: 'codex',
                   status: 'completed',
                   draft: 'Final claim.',
-                  sourceUris: body.uris,
-                  sources: leaves
-                    .filter(l => (body.uris as string[]).includes(l.uri))
-                    .map(l => ({
+                  sourceUris,
+                  sources: EffectArray.map(
+                    EffectArray.filter(leaves, l => sourceUris.includes(l.uri)),
+                    l => ({
                       uri: l.uri,
-                      revision: 'a'.repeat(64),
+                      revision: Effect.pipe('a', EffectString.repeat(64)),
                       fragments: ['Claim.'],
                       codeCitations: [],
                       relations: [],
-                    })),
+                    }),
+                  ),
                 },
               }),
         }),
       );
+    }
     if (url.pathname === '/api/consolidations/job/apply')
       return Promise.resolve(
         json({output: 'Applied', resultUri: `${prefix}/durable/projects/project/consolidation-job.md`}),
@@ -153,8 +183,14 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
     project.dispatchEvent(new Event('change', {bubbles: true}));
   });
   const button = (text: string) =>
-    [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-      b => b.textContent?.trim() === text || b.querySelector('strong')?.textContent === text,
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('button')],
+        b =>
+          Effect.pipe(b.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+          ) === text || b.querySelector('strong')?.textContent === text,
+      ),
     )!;
   await act(async () => button('Library').click());
   const selectSource = async (name: string) =>
@@ -186,7 +222,7 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
   expect(container.querySelectorAll('fieldset')).toHaveLength(0);
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Codex model is not supported.');
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Choose another model');
-  expect(posts.filter(p => p.path === '/api/consolidations').at(-1)?.body.model).toBe('test-fast');
+  expect(EffectArray.filter(posts, p => p.path === '/api/consolidations').at(-1)?.body.model).toBe('test-fast');
   expect(button('Save memory')).toBeUndefined();
   failDraft = false;
   await act(async () => button('Generate draft').click());
@@ -198,7 +234,10 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
   expect(container.querySelector('[aria-label="Consolidation draft"]')).toBeNull();
   expect(button('Save memory')).toBeUndefined();
   await act(async () => button('Generate draft').click());
-  expect(posts.filter(p => p.path === '/api/consolidations').at(-1)?.body.uris).toEqual([leaves[0].uri, leaves[2].uri]);
+  expect(EffectArray.filter(posts, p => p.path === '/api/consolidations').at(-1)?.body.uris).toEqual([
+    leaves[0].uri,
+    leaves[2].uri,
+  ]);
   const editDraft = async (value: string) =>
     act(async () => {
       const textarea = container.querySelector<HTMLTextAreaElement>('[aria-label="Consolidation draft"]')!;
@@ -209,7 +248,9 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
   expect(container.querySelector('[aria-label="Consolidation draft"]')).not.toBeNull();
   expect(button('Save memory').disabled).toBe(true);
   await editDraft('Final claim.');
-  expect(posts.find(p => p.path === '/api/consolidations')?.body).toMatchObject({
+  expect(
+    EffectOption.getOrUndefined(EffectArray.findFirst(posts, p => p.path === '/api/consolidations'))?.body,
+  ).toMatchObject({
     topic: '',
     kind: 'durable',
     status: 'active',
@@ -223,7 +264,12 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
   await act(async () =>
     [...document.querySelectorAll<HTMLButtonElement>('dialog button[type="submit"]')].at(-1)!.click(),
   );
-  const applied = posts.find(p => p.path.endsWith('/apply'))?.body;
+  const applied = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      posts,
+      __effectArrayValue => !!(p => Effect.pipe(p.path, EffectString.endsWith('/apply')))(__effectArrayValue),
+    ),
+  )?.body;
   expect(applied).toMatchObject({
     topic: '',
     project: 'project',

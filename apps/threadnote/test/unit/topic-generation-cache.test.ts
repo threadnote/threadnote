@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
 import {decodeTopicDraftWire} from '../../src/manager/topic_draft_schema.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -11,6 +12,7 @@ import {
   type TopicGenerationReceiptV1,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {maintenanceContentHash} from '../../src/memory/context/maintenance_policy.js';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 import {expect, vi} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseTopicMaintenanceDraft} from '@threadnote/memory/topic-maintenance-draft';
@@ -23,6 +25,8 @@ import {
   TopicDraftError,
 } from '../../src/memory/context/maintenance_draft.js';
 import {TOPIC_DRAFT_PROMPT_VERSION} from '../../src/effect/ai/selected_generation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const mocks = vi.hoisted(() => ({
   packet: vi.fn(),
@@ -70,17 +74,17 @@ vi.mock('../../src/memory/context/maintenance_inventory.js', async original => (
 function fixture() {
   const body = 'Preserve this policy.';
   // Two declared sources let [0,0] pass cardinality preflight and reach the duplicate application guard.
-  const citations = ['source.ts', 'other.ts'].map(path =>
+  const citations = EffectArray.map(['source.ts', 'other.ts'], path =>
     createMemoryCodeCitation({
       evidenceRetention: 'capsule-retained',
       extractorSet: 'test',
-      fileContentHash: {algorithm: 'sha256', value: '2'.repeat(64)},
+      fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('2', EffectString.repeat(64))},
       path,
-      repositoryId: '3'.repeat(64),
+      repositoryId: Effect2.pipe('3', EffectString.repeat(64)),
       repositoryIdentityKind: 'local',
-      sourceCommit: '1'.repeat(40),
+      sourceCommit: Effect2.pipe('1', EffectString.repeat(40)),
       sourceDirty: false,
-      sourceSnapshotId: 'cgsn_' + '1'.repeat(40),
+      sourceSnapshotId: 'cgsn_' + Effect2.pipe('1', EffectString.repeat(40)),
       target: {kind: 'file'},
       version: 1,
     }),
@@ -88,7 +92,7 @@ function fixture() {
   const excerpt = (citation: (typeof citations)[number]) => ({
     content: 'const value = 1;',
     excerptHash: sha256HexSync('const value = 1;'),
-    fileBytesHash: '2'.repeat(64),
+    fileBytesHash: Effect2.pipe('2', EffectString.repeat(64)),
     startLine: 1,
     endLine: 1,
     source: {
@@ -109,7 +113,7 @@ function fixture() {
     outcome: 'ready',
     targetUri: 'threadnote://user/tester/memories/durable/policy.md',
     targetHash: maintenanceContentHash(body),
-    observationRevision: 'b'.repeat(64),
+    observationRevision: Effect2.pipe('b', EffectString.repeat(64)),
     body,
     paragraphs: [
       {
@@ -117,17 +121,18 @@ function fixture() {
         hash: sha256HexSync(body),
         role: 'normative',
         support: 'direct',
-        citationIds: citations.map(citation => citation.id),
+        citationIds: EffectArray.map(citations, citation => citation.id),
       },
     ],
-    sources: citations.map(citation => ({
+    sources: EffectArray.map(citations, citation => ({
       citationId: citation.id,
+      status: 'exact',
       original: citation,
       current: citation,
       oldExcerpt: {...excerpt(citation), provenance: 'historical-verified'},
       newExcerpt: {...excerpt(citation), provenance: 'current-verified'},
     })),
-  } as never);
+  } satisfies Parameters<typeof readyEvidence>[0]);
   if (packet.version !== 1) throw new Error('Expected code packet fixture.');
   const basis = basisFromPacket(packet);
   const identity = {
@@ -186,8 +191,8 @@ effectIt.effect('returns a matching cached review without allocating any generat
     mocks.identity.mockReturnValue(Effect.succeed(identity));
     let generated = false;
     const actual = yield* requestTopicMaintenanceDraft(
-      {agentContextHome: '/unused'} as never,
-      {caseId: 'health-case-' + 'c'.repeat(40), backend: 'local-ai', modelId: 'fixture'},
+      runtimeConfigForTest({agentContextHome: '/unused'}),
+      {caseId: 'health-case-' + Effect2.pipe('c', EffectString.repeat(40)), backend: 'local-ai', modelId: 'fixture'},
       () =>
         Effect.sync(() => {
           generated = true;
@@ -229,8 +234,8 @@ for (const legacy of ['temperature-zero', 'prompt-v23'] as const) {
       mocks.identity.mockReturnValue(Effect.succeed(selected));
       let calls = 0;
       const error = yield* requestTopicMaintenanceDraft(
-        {agentContextHome: '/unused'} as never,
-        {caseId: 'health-case-' + 'c'.repeat(40), backend: 'local-ai', modelId: 'fixture'},
+        runtimeConfigForTest({agentContextHome: '/unused'}),
+        {caseId: 'health-case-' + Effect2.pipe('c', EffectString.repeat(40)), backend: 'local-ai', modelId: 'fixture'},
         () =>
           Effect.sync(() => {
             calls++;
@@ -270,11 +275,15 @@ function requestFixture() {
         return input.receiptId;
       }),
     );
-    const config = {
+    const config = runtimeConfigForTest({
       account: 'local',
       agentContextHome: yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped(),
-    } as never;
-    const input = {caseId: 'health-case-' + 'c'.repeat(40), backend: 'local-ai' as const, modelId: 'fixture'};
+    });
+    const input = {
+      caseId: 'health-case-' + Effect2.pipe('c', EffectString.repeat(40)),
+      backend: 'local-ai' as const,
+      modelId: 'fixture',
+    };
     return {...value, receipts, config, input};
   });
 }
@@ -303,7 +312,7 @@ effectIt.effect('wires a repaired request to a saved safe summary and all-attemp
     expect(actual.maintenance?.generation.origin).not.toBe('manual');
     const last = value.receipts.at(-1)!;
     expect(last.state).toBe('completed');
-    expect(last.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'accepted']);
+    expect(EffectArray.map(last.attempts, attempt => attempt.status)).toEqual(['draft-invalid', 'accepted']);
     expect(last.firstFailedOutput).toMatchObject({
       text: firstText,
       hash: sha256HexSync(firstText),
@@ -321,7 +330,9 @@ effectIt.effect('persists the accepted attempt when the closing source fence ref
     const value = yield* requestFixture();
     mocks.packet
       .mockReturnValueOnce(Effect.succeed({topicEvidence: value.packet}))
-      .mockReturnValue(Effect.succeed({topicEvidence: {...value.packet, targetHash: 'f'.repeat(64)}}));
+      .mockReturnValue(
+        Effect.succeed({topicEvidence: {...value.packet, targetHash: Effect2.pipe('f', EffectString.repeat(64))}}),
+      );
     const failure = yield* requestTopicMaintenanceDraft(value.config, value.input, () =>
       Effect.succeed({
         text: JSON.stringify(decodeTopicDraftWire(value.basis, value.wire)),

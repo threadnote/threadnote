@@ -1,9 +1,13 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {it} from '@effect/vitest';
 import {Cause, Effect, Exit} from 'effect';
 import {expect, vi} from 'vitest';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
+import {isJsonObject} from '@threadnote/platform/json';
 import {nativeCloseoutFixture} from './native-closeout-fixture.js';
 import {runCloseout} from './native-closeout-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
 
 // P0 Windows allowance for three real archive/recovery paths beyond 30s; revisit with performance data.
 const windowsArchiveTimeout = process.platform === 'win32' ? {timeout: 120_000} : undefined;
@@ -50,15 +54,33 @@ vi.mock('@threadnote/store/resource/recall-invalidation', async importOriginal =
 });
 
 const object = (value: unknown): Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) throw new Error('Expected an object response.');
-  return value as Record<string, unknown>;
+  if (!isJsonObject(value)) throw new Error('Expected an object response.');
+  return value;
+};
+const string = (value: unknown): string => {
+  if (typeof value !== 'string') throw new Error('Expected a string response field.');
+  return value;
+};
+const objectArray = (value: unknown): Record<string, unknown>[] => {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array response field.');
+  return EffectArray.map(value, object);
+};
+const stringArray = (value: unknown): string[] => {
+  if (!EffectArray.isArray(value)) throw new Error('Expected a string array response field.');
+  return EffectArray.map(value, string);
 };
 const validationShape = (value: unknown) => {
   const result = object(value);
   return {
-    phases: result.phases as readonly {id: string; acceptanceCriteria: readonly string[]}[],
-    scenarios: result.scenarios as readonly {id: string}[],
-    decisions: result.decisions as readonly {id: string; selected: string}[],
+    phases: EffectArray.map(objectArray(result.phases), item => ({
+      acceptanceCriteria: stringArray(item.acceptanceCriteria),
+      id: string(item.id),
+    })),
+    scenarios: EffectArray.map(objectArray(result.scenarios), item => ({id: string(item.id)})),
+    decisions: EffectArray.map(objectArray(result.decisions), item => ({
+      id: string(item.id),
+      selected: string(item.selected),
+    })),
   };
 };
 const proposalFor = (value: unknown, includeCodeRefs = true) => {
@@ -78,16 +100,19 @@ const proposalFor = (value: unknown, includeCodeRefs = true) => {
     combinedChecks: [
       {command: 'private combined fixture check', result: 'passed' as const, evidence: 'All fixture checks passed.'},
     ],
-    phaseEvidence: input.phases.map(phase => ({
+    phaseEvidence: EffectArray.map(input.phases, phase => ({
       id: phase.id,
-      acceptance: phase.acceptanceCriteria.map(criterion => ({criterion, evidence: 'Observed ' + criterion})),
+      acceptance: EffectArray.map(phase.acceptanceCriteria, criterion => ({
+        criterion,
+        evidence: 'Observed ' + criterion,
+      })),
     })),
-    scenarios: input.scenarios.map(scenario => ({
+    scenarios: EffectArray.map(input.scenarios, scenario => ({
       id: scenario.id,
       evidence: 'Observed complete scenario ' + scenario.id,
     })),
     ...(input.scenarios.length > 0 ? {behaviorVerification: 'Verified each approved behavior scenario.'} : {}),
-    decisions: input.decisions.map(item => ({
+    decisions: EffectArray.map(input.decisions, item => ({
       id: item.id,
       implemented: item.selected,
       rationale: 'Applied the approved choice and preserved its complete rationale: ' + item.id,
@@ -138,7 +163,7 @@ for (const outcome of ['success', 'lost-response', 'interrupted'] as const) {
       };
       const result = yield* f.closeout('finish').pipe(Effect.provideService(ResourceStore, intercepted), Effect.exit);
       const archiveRefreshes = () =>
-        samples.refreshes.filter(sample => loaded.owned.some(item => sample.uris.includes(item.uri)));
+        EffectArrayPipe(samples.refreshes, __effectArrayValues2 => EffectArray.filter(__effectArrayValues2, (sample, __effectArrayIndex2) => __effectArrayIndex2 in __effectArrayValues2 && (EffectArray.some(loaded.owned, item => sample.uris.includes(item.uri)))));
       expect(archiveRefreshes()).toHaveLength(1);
       if (outcome === 'success') {
         expect(Exit.isSuccess(result)).toBe(true);
@@ -147,7 +172,7 @@ for (const outcome of ['success', 'lost-response', 'interrupted'] as const) {
           state: 'complete',
           archived: loaded.owned.length,
         });
-        expect(removed).toEqual(loaded.owned.map(item => item.uri));
+        expect(removed).toEqual(EffectArray.map(loaded.owned, item => item.uri));
       } else {
         expect(Exit.isFailure(result)).toBe(true);
         if (Exit.isFailure(result)) {
@@ -155,14 +180,11 @@ for (const outcome of ['success', 'lost-response', 'interrupted'] as const) {
           else expect(Cause.pretty(result.cause)).toContain('Lost batch archive response.');
         }
         expect(injected).toBe(true);
-        expect(removed).toEqual(loaded.owned.slice(0, 2).map(item => item.uri));
+        expect(removed).toEqual(EffectArray.map(loaded.owned.slice(0, 2), item => item.uri));
         expect(archiveRefreshes()[0].receipt).toBe(false);
-        const partial = JSON.parse(yield* f.fs.readFileString(f.statePath(f.controllerRunId) + '.closeout.json')) as {
-          status: string;
-          archives: Record<string, unknown>;
-        };
+        const partial = object(JSON.parse(yield* f.fs.readFileString(f.statePath(f.controllerRunId) + '.closeout.json')));
         expect(partial.status).toBe('archiving');
-        expect(Object.keys(partial.archives)).toEqual([loaded.owned[0].uri]);
+        expect(EffectRecord.keys(object(partial.archives))).toEqual([loaded.owned[0].uri]);
         const resumed = object(yield* f.closeout('finish'));
         expect(resumed.closeout).toMatchObject({state: 'complete', archived: loaded.owned.length});
       }
@@ -170,24 +192,22 @@ for (const outcome of ['success', 'lost-response', 'interrupted'] as const) {
       for (const item of loaded.owned) {
         for (const inactive of [false, true])
           expect(
-            samples.acknowledgements.some(
-              ack => ack.uris.includes(item.uri) && ack.inactive === inactive && ack.succeeded,
-            ),
+            EffectArray.some(samples.acknowledgements, ack => ack.uris.includes(item.uri) && ack.inactive === inactive && ack.succeeded),
           ).toBe(true);
       }
-      const complete = JSON.parse(yield* f.fs.readFileString(f.statePath(f.controllerRunId) + '.closeout.json')) as {
-        archives: Record<string, {uri: string; memoryId: string; revision: string}>;
-      };
-      expect(Object.keys(complete.archives)).toHaveLength(loaded.owned.length);
+      const complete = object(JSON.parse(yield* f.fs.readFileString(f.statePath(f.controllerRunId) + '.closeout.json')));
+      const archives = object(complete.archives);
+      expect(EffectRecord.keys(archives)).toHaveLength(loaded.owned.length);
       for (const item of loaded.owned) {
-        const archive = complete.archives[item.uri];
+        const archive = object(archives[item.uri]);
+        const archiveUri = string(archive.uri);
         if (outcome === 'success') {
-          expect(archiveRefreshes()[0].uris).toContain(archive.uri);
-          for (const uri of [item.uri, archive.uri]) {
-            expect(samples.acknowledgements.filter(ack => ack.uris.includes(uri))).toHaveLength(2);
+          expect(archiveRefreshes()[0].uris).toContain(archiveUri);
+          for (const uri of [item.uri, archiveUri]) {
+            expect(EffectArrayPipe(samples.acknowledgements, __effectArrayValues => EffectArray.filter(__effectArrayValues, (ack, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && (ack.uris.includes(uri))))).toHaveLength(2);
           }
         }
-        const response = object(yield* f.call({...f.base('read', item.runId), uri: archive.uri}));
+        const response = object(yield* f.call({...f.base('read', item.runId), uri: archiveUri}));
         expect(object(response.artifact)).toMatchObject({
           uri: archive.uri,
           memoryId: item.memoryId,

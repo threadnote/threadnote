@@ -1,4 +1,5 @@
-import type {TransactionSql} from 'postgres';
+import {Array as EffectArray} from 'effect';
+import type {ISql} from 'postgres';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import type {RemoteRecallInputV1} from '@threadnote/memory/remote/contracts';
@@ -16,6 +17,8 @@ import {requireJsonValue} from '../json.js';
 import type {RemoteMemoryRecallResult} from '../postgres/repository.js';
 import {requireActiveProject, requireShareState, type ShareStateRow} from '../repository_policy.js';
 import {remoteMemoryExcerpt} from '../recall/text.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface ContextBriefHeadRow {
   readonly canonical_uri: string;
@@ -52,7 +55,7 @@ interface CompileRemoteContextBriefDependencies {
   readonly revisionBody: (
     head: Pick<ContextBriefHeadRow, 'git_commit' | 'git_path' | 'markdown_body'>,
   ) => Promise<string>;
-  readonly withTenant: <A>(use: (transaction: TransactionSql) => Promise<A>) => Promise<A>;
+  readonly withTenant: <A>(use: (transaction: ISql) => Promise<A>) => Promise<A>;
 }
 
 export interface RemoteMemoryContextBriefResult {
@@ -140,7 +143,7 @@ export async function compileRemoteContextBrief(
     }
     const anchorOrdinals = [
       ...new Set(
-        rows.flatMap(candidate => {
+        EffectArray.flatMap(rows, candidate => {
           const citation = record.metadata.codeCitations?.[candidate.citation_ordinal];
           return citation !== undefined &&
             citationMatchesRemoteBacklink(citation, candidate.selector_kind, candidate.selector_digest)
@@ -190,15 +193,15 @@ export async function compileRemoteContextBrief(
       return undefined;
     }
     if (directHeads.size === 0) return {repairState, state};
-    const headIds = [...directHeads.values()].map(selected => selected.row.head_id);
+    const headIds = EffectArray.map([...directHeads.values()], selected => selected.row.head_id);
     const current = await transaction<{current_revision_id: string; id: string; project: string; status: string}[]>`
       SELECT id, current_revision_id, project, status
       FROM remote_memory.memory_heads
       WHERE tenant_id = ${principal.tenantId} AND share_id = ${principal.shareId}
         AND id = ANY(${transaction.array(headIds)})
     `;
-    const currentById = new Map(current.map(head => [head.id, head]));
-    return [...directHeads.values()].every(({row}) => {
+    const currentById = new Map(EffectArray.map(current, head => [head.id, head]));
+    return EffectArray.every([...directHeads.values()], ({row}) => {
       const head = currentById.get(row.head_id);
       return (
         head?.current_revision_id === row.current_revision_id &&
@@ -223,7 +226,7 @@ export async function compileRemoteContextBrief(
 }
 
 async function codeLinkRepairState(
-  transaction: TransactionSql,
+  transaction: ISql,
   principal: Pick<AuthorizedRemotePrincipal, 'shareId' | 'tenantId'>,
 ): Promise<CodeLinkRepairState> {
   const rows = await transaction<{processed: string | number; total: string | number}[]>`
@@ -239,7 +242,7 @@ function compareBacklinkRows(left: BacklinkRow, right: BacklinkRow): number {
   return (
     left.anchor_ordinal - right.anchor_ordinal ||
     (left.kind === right.kind ? 0 : left.kind === 'durable' ? -1 : 1) ||
-    left.canonical_uri.localeCompare(right.canonical_uri) ||
+    Effect.pipe(left.canonical_uri, EffectString.localeCompare(right.canonical_uri)) ||
     left.citation_ordinal - right.citation_ordinal
   );
 }

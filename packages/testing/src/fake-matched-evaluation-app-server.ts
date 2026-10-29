@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
 
 import {readFileSync} from 'node:fs';
+import {Schema} from 'effect';
 import {join} from 'node:path';
 import {createInterface} from 'node:readline';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 if (process.argv[2] === '--version') {
   process.stdout.write('codex-cli matched-evaluation-test-v1\n');
@@ -13,6 +16,21 @@ if (process.argv[2] !== 'app-server') {
   process.exit(2);
 }
 
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const isJsonRecord = Schema.is(JsonRecordSchema);
+const AppServerMessageSchema = Schema.StructWithRest(
+  Schema.Struct({
+    id: Schema.optionalKey(Schema.Finite),
+    method: Schema.optionalKey(Schema.String),
+    params: Schema.optionalKey(JsonRecordSchema),
+    result: Schema.optionalKey(
+      Schema.StructWithRest(Schema.Struct({decision: Schema.optionalKey(Schema.String)}), [JsonRecordSchema]),
+    ),
+  }),
+  [JsonRecordSchema],
+);
+const decodeAppServerMessage = Schema.decodeUnknownSync(AppServerMessageSchema);
+
 const scratchDirectory = process.env.TMPDIR;
 const codexHome = process.env.CODEX_HOME;
 if (scratchDirectory === undefined || codexHome === undefined) {
@@ -20,7 +38,7 @@ if (scratchDirectory === undefined || codexHome === undefined) {
   process.exit(2);
 }
 const codexConfig = readFileSync(join(codexHome, 'config.toml'), 'utf8');
-if (!codexConfig.includes(`TMPDIR = ${JSON.stringify(scratchDirectory)}`)) {
+if (!Effect.pipe(codexConfig, EffectString.includes(`TMPDIR = ${JSON.stringify(scratchDirectory)}`))) {
   process.stderr.write('expected isolated TMPDIR in shell environment policy\n');
   process.exit(2);
 }
@@ -39,7 +57,7 @@ let pendingApproval:
   | undefined;
 
 lines.on('line', line => {
-  const request = JSON.parse(line) as {id?: number; method?: string; params?: Record<string, unknown>};
+  const request = decodeAppServerMessage(JSON.parse(line));
   if (pendingApproval && request.id === pendingApproval.requestId && request.method === undefined) {
     const decision = (request as {result?: {decision?: string}}).result?.decision;
     if (decision !== 'accept') {
@@ -127,8 +145,10 @@ lines.on('line', line => {
   }
   if (request.method === 'turn/start') {
     const params = request.params ?? {};
-    const sandboxPolicy = params.sandboxPolicy as Record<string, unknown> | undefined;
-    const workspaceRoots = params.runtimeWorkspaceRoots as readonly unknown[] | undefined;
+    const sandboxPolicy = isJsonRecord(params.sandboxPolicy) ? params.sandboxPolicy : undefined;
+    const workspaceRoots = Schema.is(Schema.Array(Schema.Unknown))(params.runtimeWorkspaceRoots)
+      ? params.runtimeWorkspaceRoots
+      : undefined;
     if (
       JSON.stringify(workspaceRoots) !== JSON.stringify([params.cwd, scratchDirectory]) ||
       sandboxPolicy === undefined ||
@@ -143,9 +163,11 @@ lines.on('line', line => {
     }
     const threadId = String(params.threadId);
     const turnId = `turn_matched_${turnIndex++}`;
-    const schema = params.outputSchema as {properties?: Record<string, unknown>} | undefined;
-    const judge = schema?.properties !== undefined && 'scoreMilli' in schema.properties;
-    const taskFailure = judge && JSON.stringify(params.input).includes('provider-token-budget');
+    const schema = isJsonRecord(params.outputSchema) ? params.outputSchema : undefined;
+    const properties = schema && isJsonRecord(schema.properties) ? schema.properties : undefined;
+    const judge = properties !== undefined && 'scoreMilli' in properties;
+    const taskFailure =
+      judge && Effect.pipe(JSON.stringify(params.input), EffectString.includes('provider-token-budget'));
     const final = judge
       ? {
           authorizationLeaks: 0,

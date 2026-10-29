@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Path} from 'effect';
 import {USER_MANIFEST_NAME} from '@threadnote/workspace/constants';
 import type {ProjectManifest} from '@threadnote/workspace/config';
@@ -27,6 +28,8 @@ import type {
   CodeGraphSnapshot,
   RepositoryIdentity,
 } from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface CodeGraphQueryScope {
   readonly project: Pick<ProjectManifest, 'name' | 'graph' | 'uri'>;
@@ -206,13 +209,17 @@ export function outsideCodeGraphProjectPaths(
   const selectors = options.operation === 'path' ? [options.from, options.to] : [options.query, options.symbol];
   return [
     ...new Set(
-      selectors.flatMap(selector => {
+      EffectArray.flatMap(selectors, selector => {
         if (selector === undefined || /\s/u.test(selector)) return [];
-        const candidate = selector.split('#')[0].replaceAll('\\', '/').replace(/^\.\//u, '');
+        const candidate = Effect2.pipe(
+          Effect2.pipe(selector, EffectString.split('#'))[0],
+          EffectString.replaceAll('\\', '/'),
+          EffectString.replace(/^\.\//u, ''),
+        );
         if (
-          (!candidate.includes('/') && !/\.[A-Za-z0-9]+$/u.test(candidate)) ||
-          candidate.startsWith('/') ||
-          candidate.split('/').some(part => part === '..' || part === '.')
+          (!Effect2.pipe(candidate, EffectString.includes('/')) && !/\.[A-Za-z0-9]+$/u.test(candidate)) ||
+          Effect2.pipe(candidate, EffectString.startsWith('/')) ||
+          EffectArray.some(Effect2.pipe(candidate, EffectString.split('/')), part => part === '..' || part === '.')
         )
           return [];
         return codeGraphScopeAdmitsPath(scope, candidate) ? [] : [candidate];

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {
   createMemoryCodeCitation,
@@ -25,6 +26,8 @@ import type {
   ManagerContextMaintenanceStatusV2,
   ManagerContextHealthResponseV1,
 } from '@threadnote/manager/attention/contracts';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const caseAt = (index: number): ManagerContextMaintenanceCaseV2 => ({
   caseId: `case-${index}`,
@@ -33,7 +36,7 @@ const caseAt = (index: number): ManagerContextMaintenanceCaseV2 => ({
   family: 'citation',
   slot: `${index}`,
   disposition: 'waiting-evidence',
-  evidenceRevision: 'a'.repeat(64),
+  evidenceRevision: Effect.pipe('a', EffectString.repeat(64)),
   reason: 'repository-unavailable',
   repositoryId: 'repo-one',
   firstSeen: '2026-10-03',
@@ -43,7 +46,7 @@ const caseAt = (index: number): ManagerContextMaintenanceCaseV2 => ({
   events: [],
 });
 
-const automaticCompletion = (hash = 'a'.repeat(64)): ManagerAutomaticReview => {
+const automaticCompletion = (hash = Effect.pipe('a', EffectString.repeat(64))): ManagerAutomaticReview => {
   const body = 'The current limit is 9.';
   const source = {
     kind: 'code' as const,
@@ -52,11 +55,11 @@ const automaticCompletion = (hash = 'a'.repeat(64)): ManagerAutomaticReview => {
       extractorSet: 'test',
       fileContentHash: {algorithm: 'sha256', value: hash},
       path: 'limit.ts',
-      repositoryId: 'b'.repeat(64),
+      repositoryId: Effect.pipe('b', EffectString.repeat(64)),
       repositoryIdentityKind: 'local',
-      sourceCommit: 'c'.repeat(40),
+      sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
       sourceDirty: false,
-      sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+      sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
       target: {kind: 'file'},
     }),
   };
@@ -153,14 +156,19 @@ describe('maintenance presentation', () => {
           const review = automaticCompletion();
           const source = review.approval!.reviewedSupport.active.sources[0].source;
           if (source.kind !== 'code') throw new Error('Fixture requires actual active code support.');
-          const oldId = `tncc_${'1'.repeat(40)}`;
+          const oldId = `tncc_${Effect.pipe('1', EffectString.repeat(40))}`;
           const citationId = flags.activeAnchor ? source.citation.id : oldId;
           const observed: ManagerContextMaintenanceCaseV2 = {
             ...caseAt(0),
             project: flags.sameProject ? review.project : 'other',
             memoryId: flags.sameMemory ? 'memory-0' : 'other-memory',
             subjectUri: flags.sameUri ? review.targetUri : 'threadnote://memory/other',
-            subjectContentHashes: [{uri: review.targetUri, hash: flags.sameHash ? review.targetHash : 'f'.repeat(64)}],
+            subjectContentHashes: [
+              {
+                uri: review.targetUri,
+                hash: flags.sameHash ? review.targetHash : Effect.pipe('f', EffectString.repeat(64)),
+              },
+            ],
             slot: `anchor:${citationId}`,
             disposition: 'needs-decision',
             reason: 'source-changed',
@@ -182,7 +190,7 @@ describe('maintenance presentation', () => {
           const newerTarget = {
             ...observed,
             caseId: 'same-uri-new-target',
-            subjectContentHashes: [{uri: review.targetUri, hash: 'e'.repeat(64)}],
+            subjectContentHashes: [{uri: review.targetUri, hash: Effect.pipe('e', EffectString.repeat(64))}],
           };
           const frozen = [observed, activeCase, unrelated, newerTarget];
           const current = {
@@ -190,7 +198,7 @@ describe('maintenance presentation', () => {
             evidenceRevision: flags.newer ? 'new-source-revision' : observed.evidenceRevision,
             subjectContentHashes: flags.sameTargetAtReply
               ? observed.subjectContentHashes
-              : [{uri: review.targetUri, hash: 'd'.repeat(64)}],
+              : [{uri: review.targetUri, hash: Effect.pipe('d', EffectString.repeat(64))}],
           };
           const cases = [current, activeCase, unrelated, newerTarget];
           const status: ManagerContextMaintenanceStatusV2 = {
@@ -202,7 +210,10 @@ describe('maintenance presentation', () => {
             cases,
             receipts: [],
             omittedCases: flags.partial ? 1 : 0,
-            counts: {'needs-decision': cases.length, decisionMemories: new Set(cases.map(item => item.memoryId)).size},
+            counts: {
+              'needs-decision': cases.length,
+              decisionMemories: new Set(EffectArray.map(cases, item => item.memoryId)).size,
+            },
           };
           const before = JSON.stringify({completed, frozen, status});
           const receipts = automaticReviewMaintenanceReceipts(
@@ -217,7 +228,7 @@ describe('maintenance presentation', () => {
             !flags.activeAnchor &&
             flags.verified &&
             flags.written;
-          expect(receipts.map(item => item.caseId)).toEqual(resolves ? [observed.caseId] : []);
+          expect(EffectArray.map(receipts, item => item.caseId)).toEqual(resolves ? [observed.caseId] : []);
           expect(automaticReviewMaintenanceReceipts(completed, [...frozen].reverse())).toEqual(receipts);
           const next = reconcileAppliedMaintenanceCases(status, receipts);
           expect(next.cases).toEqual(resolves && !flags.newer && flags.sameTargetAtReply ? cases.slice(1) : cases);
@@ -258,11 +269,11 @@ describe('maintenance presentation', () => {
               extractorSet: 'test',
               fileContentHash: {algorithm: 'sha256', value: sha256HexSync(`const limit = ${n};`)},
               path: 'limit.ts',
-              repositoryId: 'b'.repeat(64),
+              repositoryId: Effect.pipe('b', EffectString.repeat(64)),
               repositoryIdentityKind: 'local',
-              sourceCommit: 'c'.repeat(40),
+              sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
               sourceDirty: false,
-              sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+              sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
               target: {kind: 'file'},
             });
           const first = capture(value);
@@ -329,11 +340,11 @@ describe('maintenance presentation', () => {
           if (mismatch === 'uri' || mismatch === 'hash' || mismatch === 'capture' || mismatch === 'finding')
             proof = {
               ...base,
-              recordPreviews: base.recordPreviews.map(item => ({
+              recordPreviews: EffectArray.map(base.recordPreviews, item => ({
                 ...item,
                 ...(mismatch === 'uri' ? {uri: 'threadnote://memory/other'} : {}),
-                ...(mismatch === 'hash' ? {contentHash: 'e'.repeat(64)} : {}),
-                code: item.code.map(code => ({
+                ...(mismatch === 'hash' ? {contentHash: Effect.pipe('e', EffectString.repeat(64))} : {}),
+                code: EffectArray.map(item.code, code => ({
                   ...code,
                   ...(mismatch === 'capture' ? {citationId: first.id} : {}),
                   ...(mismatch === 'finding' ? {findingIds: ['another-finding']} : {}),
@@ -343,7 +354,7 @@ describe('maintenance presentation', () => {
           if (['case', 'memory', 'family', 'anchor', 'missing-identity'].includes(mismatch))
             proof = {
               ...base,
-              findings: base.findings.map(item => ({
+              findings: EffectArray.map(base.findings, item => ({
                 ...item,
                 ...(mismatch === 'case' ? {caseId: 'other-case'} : {}),
                 caseIdentity:
@@ -365,7 +376,7 @@ describe('maintenance presentation', () => {
                 ...base.findings,
                 {...finding, id: 'ambiguous-capture', repair: {...finding.repair, targetUri: `${uri}#${other.id}`}},
               ],
-              recordPreviews: base.recordPreviews.map(item => ({
+              recordPreviews: EffectArray.map(base.recordPreviews, item => ({
                 ...item,
                 code: [...item.code, {citationId: other.id, path: other.path, findingIds: ['ambiguous-capture']}],
               })),
@@ -375,9 +386,10 @@ describe('maintenance presentation', () => {
             ? {
                 ...proof,
                 findings: [...proof.findings].reverse(),
-                recordPreviews: [...proof.recordPreviews]
-                  .reverse()
-                  .map(item => ({...item, code: [...item.code].reverse()})),
+                recordPreviews: EffectArray.map([...proof.recordPreviews].reverse(), item => ({
+                  ...item,
+                  code: [...item.code].reverse(),
+                })),
               }
             : proof;
           const before = JSON.stringify({review, observed, proof, ordered});
@@ -397,7 +409,7 @@ describe('maintenance presentation', () => {
   });
   it('refuses malformed or misbound automatic written proof and retains unloaded attention counts', () => {
     const review = automaticCompletion();
-    const citationId = `tncc_${'1'.repeat(40)}`;
+    const citationId = `tncc_${Effect.pipe('1', EffectString.repeat(40))}`;
     const observed: ManagerContextMaintenanceCaseV2 = {
       ...caseAt(0),
       subjectUri: review.targetUri,
@@ -408,8 +420,8 @@ describe('maintenance presentation', () => {
     const receipts = automaticReviewMaintenanceReceipts(review, [observed]);
     expect(receipts).toHaveLength(1);
     for (const changed of [
-      {...observed, subjectContentHashes: [{uri: review.targetUri, hash: 'c'.repeat(64)}]},
-      {...observed, slot: `anchor:tncc_${'2'.repeat(40)}`},
+      {...observed, subjectContentHashes: [{uri: review.targetUri, hash: Effect.pipe('c', EffectString.repeat(64))}]},
+      {...observed, slot: `anchor:tncc_${Effect.pipe('2', EffectString.repeat(40))}`},
       {...observed, memoryId: 'new-memory'},
       {...observed, family: 'relation'},
     ]) {
@@ -428,8 +440,8 @@ describe('maintenance presentation', () => {
     for (const bad of [
       {...review, state: 'applying' as const},
       {...review, reviewId: 'review-other'},
-      {...review, targetHash: 'b'.repeat(64)},
-      {...review, approval: {...review.approval!, contentHash: '0'.repeat(64)}},
+      {...review, targetHash: Effect.pipe('b', EffectString.repeat(64))},
+      {...review, approval: {...review.approval!, contentHash: Effect.pipe('0', EffectString.repeat(64))}},
       {
         ...review,
         approval: {
@@ -495,7 +507,7 @@ describe('maintenance presentation', () => {
                 kind: 'durable',
                 excerpt: 'Claim',
                 contentHash: sameHash ? 'old-hash' : 'new-hash',
-                code: findings.map((item, index) => ({
+                code: EffectArray.map(findings, (item, index) => ({
                   citationId: `citation-${index}`,
                   path: 'source.ts',
                   findingIds: [item.id],
@@ -506,7 +518,7 @@ describe('maintenance presentation', () => {
             maintenance: {
               ...base.maintenance!,
               actionableFindings: findings.length,
-              affectedMemories: new Set(findings.flatMap(item => item.uris)).size,
+              affectedMemories: new Set(EffectArray.flatMap(findings, item => item.uris)).size,
             },
           };
           const before = JSON.stringify(original);
@@ -534,13 +546,13 @@ describe('maintenance presentation', () => {
           expect(next.findings).toEqual(resolves ? findings.slice(1) : findings);
           expect(next.maintenance?.actionableFindings).toBe(findings.length - Number(resolves));
           expect(next.maintenance?.affectedMemories).toBe(
-            new Set((resolves ? findings.slice(1) : findings).flatMap(item => item.uris)).size,
+            new Set(EffectArray.flatMap(resolves ? findings.slice(1) : findings, item => item.uris)).size,
           );
           expect(reconcileAppliedHealthReport(next, receipts, status)).toEqual(next);
           expect(reconcileAppliedHealthReport(original, [{...receipts[0], caseId: undefined}], status)).toBe(original);
           const missingHash = {
             ...original,
-            recordPreviews: original.recordPreviews.map(preview => ({...preview, contentHash: undefined})),
+            recordPreviews: EffectArray.map(original.recordPreviews, preview => ({...preview, contentHash: undefined})),
           };
           expect(reconcileAppliedHealthReport(missingHash, receipts, status)).toBe(missingHash);
           expect(JSON.stringify(original)).toBe(before);
@@ -556,7 +568,7 @@ describe('maintenance presentation', () => {
           maxLength: 40,
         }),
         values => {
-          const cases = values.map(({id, revision}) => ({
+          const cases = EffectArray.map(values, ({id, revision}) => ({
             ...caseAt(id),
             disposition: 'needs-decision' as const,
             evidenceRevision: `revision-${revision}`,
@@ -569,16 +581,19 @@ describe('maintenance presentation', () => {
             projects: [],
             cases,
             receipts: [],
-            counts: {'needs-decision': cases.length, decisionMemories: new Set(cases.map(item => item.memoryId)).size},
+            counts: {
+              'needs-decision': cases.length,
+              decisionMemories: new Set(EffectArray.map(cases, item => item.memoryId)).size,
+            },
           };
           const before = JSON.stringify(original);
           const applied = [{project: 'threadnote', caseId: 'case-2', evidenceRevision: 'revision-1'}];
           const next = reconcileAppliedMaintenanceCases(original, applied);
           expect(next.cases).toEqual(
-            cases.filter(item => item.caseId !== 'case-2' || item.evidenceRevision !== 'revision-1'),
+            EffectArray.filter(cases, item => item.caseId !== 'case-2' || item.evidenceRevision !== 'revision-1'),
           );
           expect(next.counts?.['needs-decision']).toBe(next.cases.length);
-          expect(next.counts?.decisionMemories).toBe(new Set(next.cases.map(item => item.memoryId)).size);
+          expect(next.counts?.decisionMemories).toBe(new Set(EffectArray.map(next.cases, item => item.memoryId)).size);
           expect(reconcileAppliedMaintenanceCases(next, applied)).toEqual(next);
           expect(JSON.stringify(original)).toBe(before);
           expect(reconcileAppliedMaintenanceCases(original, [{...applied[0], project: 'another'}])).toBe(original);
@@ -667,7 +682,7 @@ describe('maintenance presentation', () => {
       receiptId: `receipt-${index}`,
       project: 'threadnote',
       subjectUri: `threadnote://user/tester/memories/handoffs/active/threadnote/record-${index}.md`,
-      postHash: 'a'.repeat(64),
+      postHash: Effect.pipe('a', EffectString.repeat(64)),
       timestamp: '2026-10-03',
       state: 'applied',
     }));

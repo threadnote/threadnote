@@ -12,6 +12,8 @@ import {
 import {startRepositoryWorktreeObservation} from '@threadnote/graph/repository';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const modes = [
   'clean',
@@ -39,17 +41,20 @@ const scenario = (mode: Mode, objectFormat: 'sha1' | 'sha256') =>
     const other = path.join(repoRoot, 'other');
     yield* fs.makeDirectory(common);
     yield* fs.makeDirectory(other);
-    const head = (mode.startsWith('unborn') ? '0' : 'a').repeat(objectFormat === 'sha1' ? 40 : 64);
+    const head = Effect2.pipe(
+      Effect2.pipe(mode, EffectString.startsWith('unborn')) ? '0' : 'a',
+      EffectString.repeat(objectFormat === 'sha1' ? 40 : 64),
+    );
     const identity = {
       caseMode: 'sensitive',
-      checkoutId: 'c'.repeat(64),
+      checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
       displayName: 'fixture',
       gitCommonDirectory: common,
       headCommit: head,
       objectFormat,
       repoRoot,
-      repositoryId: 'r'.repeat(64),
-      worktreeId: 'w'.repeat(64),
+      repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+      worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
     } satisfies RepositoryIdentity;
     const before = structuredClone(identity);
     const prefix = '00:00:00.000000 trace.c:1 setup: ';
@@ -60,12 +65,14 @@ const scenario = (mode: Mode, objectFormat: 'sha1' | 'sha256') =>
         expect(args).toContain('--no-optional-locks');
         expect(args).toContain('--porcelain=v2');
         const fields = {executable: 'git', args, message: 'Synthetic optional probe failure'};
-        if (mode.endsWith('limit')) return CommandOutputLimitExceeded.make({...fields, maxOutputBytes: 65_536});
+        if (Effect2.pipe(mode, EffectString.endsWith('limit')))
+          return CommandOutputLimitExceeded.make({...fields, maxOutputBytes: 65_536});
         if (mode === 'timeout') return CommandTimedOut.make({...fields, timeoutMs: 10_000});
         if (mode === 'spawn') return CommandSpawnFailed.make({...fields, cause: new Error('synthetic')});
         return Effect.succeed({
           exitCode: 0,
-          stdout: `# branch.oid ${mode.startsWith('unborn') ? '(initial)' : mode === 'head' ? 'b'.repeat(head.length) : head}\0# branch.head main\0${mode === 'dirty' ? '? changed.ts\0' : ''}`,
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
+          stdout: `# branch.oid ${Effect2.pipe(mode, EffectString.startsWith('unborn')) ? '(initial)' : mode === 'head' ? 'b'.repeat(head.length) : head}\0# branch.head main\0${mode === 'dirty' ? '? changed.ts\0' : ''}`,
           stderr: mode === 'missing' ? '' : mode === 'duplicate' ? setup + setup : setup,
         });
       },

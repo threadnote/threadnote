@@ -4,14 +4,17 @@ import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {CODE_GRAPH_DEEP_DIAGNOSTICS_WORKER_ARGUMENT} from '@threadnote/graph/worker_protocol';
 import {type CodeGraphDatabaseHealth} from './store/models.js';
 import {diagnoseCodeGraphDatabaseReadOnly} from './store/health.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
-class CodeGraphDeepDiagnosticsError extends Schema.TaggedError<CodeGraphDeepDiagnosticsError>()(
-  'CodeGraphDeepDiagnosticsError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphDeepDiagnosticsError extends Schema.TaggedError<
+  CodeGraphDeepDiagnosticsError,
+  {readonly brand: unique symbol}
+>()('CodeGraphDeepDiagnosticsError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const CODE_GRAPH_DEEP_DIAGNOSTICS_PROTOCOL = 1;
 const NonNegativeInteger = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
@@ -174,13 +177,13 @@ function readBoundedWorkerInput(stdio: Stdio.Stdio): Effect.Effect<string, Error
         return Effect.succeed({chunks: state.chunks, size});
       },
     ),
-    Effect.map(state => state.chunks.join('')),
+    Effect.map(state => EffectArray.join(state.chunks, '')),
   );
 }
 
 function decodeDeepDiagnosticsRequest(content: string): CodeGraphDeepDiagnosticsRequest | undefined {
   try {
-    const parsed: unknown = JSON.parse(content.trim());
+    const parsed: unknown = JSON.parse(Effect2.pipe(content, EffectString.trim));
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
@@ -189,7 +192,7 @@ function decodeDeepDiagnosticsRequest(content: string): CodeGraphDeepDiagnostics
       !('databasePath' in parsed) ||
       typeof parsed.databasePath !== 'string' ||
       parsed.databasePath.length === 0 ||
-      parsed.databasePath.includes('\0')
+      Effect2.pipe(parsed.databasePath, EffectString.includes('\0'))
     ) {
       return undefined;
     }
@@ -201,7 +204,7 @@ function decodeDeepDiagnosticsRequest(content: string): CodeGraphDeepDiagnostics
 
 function decodeDeepDiagnosticsResponse(content: string): CodeGraphDeepDiagnosticsResponse | undefined {
   try {
-    const parsed: unknown = JSON.parse(content.trim());
+    const parsed: unknown = JSON.parse(Effect2.pipe(content, EffectString.trim));
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
@@ -229,7 +232,11 @@ function deepDiagnosticsWorkerInvocation(system: SystemInfoShape): {
   readonly arguments: readonly string[];
   readonly executable: string;
 } {
-  const executableName = system.executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  const executableName = Effect2.pipe(
+    Effect2.pipe(system.executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   if (executableName !== 'bun' && executableName !== 'bun.exe') {
     return {arguments: [CODE_GRAPH_DEEP_DIAGNOSTICS_WORKER_ARGUMENT], executable: system.executablePath};
   }

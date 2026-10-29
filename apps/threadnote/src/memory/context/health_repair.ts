@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   assertMemoryDocumentSchemaWritable,
@@ -28,6 +29,8 @@ import {
 } from '@threadnote/memory/code/citation';
 import type {ContextHealthSelectorV1} from './health_selector.js';
 import {hasTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CONTEXT_HEALTH_REPAIR_VERSION = 1 as const;
 export const DEFAULT_CONTEXT_HEALTH_REPAIR_PROPOSAL_LIMIT = 100 as const;
@@ -188,9 +191,9 @@ export function previewContextHealthRepairPlanV1(
   const absentTargetUris = new Set(options.absentTargetUris ?? []);
   const reportRevision = contextHealthReportRevisionV1(report);
   const semanticDirection = validateSemanticDirection(report, reportRevision, options.semanticDirection);
-  const proposals = [...report.findings]
-    .sort((left, right) => compareText(left.id, right.id))
-    .map(finding =>
+  const proposals = EffectArray.map(
+    [...report.findings].sort((left, right) => compareText(left.id, right.id)),
+    finding =>
       proposalForFinding(
         report.project,
         finding,
@@ -200,8 +203,7 @@ export function previewContextHealthRepairPlanV1(
         semanticDirection,
         options.selector,
       ),
-    )
-    .sort((left, right) => compareText(left.proposalId, right.proposalId));
+  ).sort((left, right) => compareText(left.proposalId, right.proposalId));
   const limit = proposalLimit(options.limit);
   const selected = proposals.slice(0, limit);
   return {
@@ -274,7 +276,11 @@ export function applyContextHealthRepairProposalV1(
   if (mutation.kind === 'remove-relations' && subject !== undefined) {
     const resultContent = relationRepairContent(subject, mutation.targetUri);
     if (
-      subject.metadata.relations?.some(relation => relation.uri === mutation.targetUri) !== true &&
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(subject.metadata.relations), __effectArrayReceiver =>
+          EffectArray.some(__effectArrayReceiver, relation => relation.uri === mutation.targetUri),
+        ),
+      ) !== true &&
       memoryContentHash(subject.content) === mutation.expectedResultContentHash &&
       resultContent !== undefined
     ) {
@@ -288,8 +294,8 @@ export function applyContextHealthRepairProposalV1(
   if (mutation.kind === 'replace-citation' && subject !== undefined) {
     const citations = subject.metadata.codeCitations ?? [];
     if (
-      !citations.some(citation => citation.id === mutation.citationId) &&
-      citations.some(citation => citation.id === mutation.replacement.id) &&
+      !EffectArray.some(citations, citation => citation.id === mutation.citationId) &&
+      EffectArray.some(citations, citation => citation.id === mutation.replacement.id) &&
       memoryContentHash(subject.content) === mutation.expectedResultContentHash
     ) {
       return {
@@ -304,10 +310,10 @@ export function applyContextHealthRepairProposalV1(
   }
 
   const observed = observedPreconditionHashes(records, proposal.preconditions);
-  if (observed.some(item => item.project !== null && item.project !== item.expectedProject)) {
+  if (EffectArray.some(observed, item => item.project !== null && item.project !== item.expectedProject)) {
     return conflict(input, 'project-mismatch', 'A repair precondition resolved outside the proposal project.');
   }
-  if (observed.some(item => item.contentHash !== item.expectedContentHash)) {
+  if (EffectArray.some(observed, item => item.contentHash !== item.expectedContentHash)) {
     return conflict(input, 'precondition-failed', 'Memory content changed after the repair proposal was previewed.');
   }
 
@@ -323,7 +329,7 @@ export function applyContextHealthRepairProposalV1(
   }
 
   if (mutation.kind === 'archive-memory') {
-    const nextRecords = records.filter(record => record.uri !== mutation.subjectUri);
+    const nextRecords = EffectArray.filter(records, record => record.uri !== mutation.subjectUri);
     return {
       records: nextRecords,
       receipt: applyReceipt(proposal, memoryContentHash(subject.content)),
@@ -351,7 +357,7 @@ export function applyContextHealthRepairProposalV1(
     return conflict(input, 'invalid-proposal', 'The repair would produce an invalid project memory.');
   }
   return {
-    records: records.map(record => (record === subject ? nextRecord : record)),
+    records: EffectArray.map(records, record => (record === subject ? nextRecord : record)),
     receipt: applyReceipt(proposal, mutation.expectedResultContentHash),
     status: 'applied',
   };
@@ -360,9 +366,9 @@ export function applyContextHealthRepairProposalV1(
 export function contextHealthReportRevisionV1(report: ContextHealthReportV1): string {
   return sha256HexSync(
     JSON.stringify({
-      findings: [...report.findings]
-        .sort((left, right) => compareText(left.id, right.id))
-        .map(finding => ({
+      findings: EffectArray.map(
+        [...report.findings].sort((left, right) => compareText(left.id, right.id)),
+        finding => ({
           category: finding.category,
           confidence: finding.confidence,
           id: finding.id,
@@ -386,7 +392,8 @@ export function contextHealthReportRevisionV1(report: ContextHealthReportV1): st
           severity: finding.severity,
           summary: finding.summary,
           uris: [...finding.uris].sort(compareText),
-        })),
+        }),
+      ),
       limit: report.limit,
       nextCursor: report.nextCursor ?? null,
       omittedFindings: report.omittedFindings,
@@ -422,7 +429,8 @@ function validateSemanticDirection(
   if (direction.reportRevision !== reportRevision) {
     throw new Error('Semantic direction belongs to another context-health report revision.');
   }
-  const matching = report.findings.filter(
+  const matching = EffectArray.filter(
+    report.findings,
     finding =>
       finding.category === 'semantic-contradiction' &&
       finding.repair.kind === 'review-memory' &&
@@ -597,7 +605,13 @@ function mutationForFinding(
   ) {
     const citationId = citationIdFromTargetUri(targetUri);
     const replacement = citationReplacements.get(finding.id);
-    const current = subject.metadata.codeCitations?.find(citation => citation.id === citationId);
+    const current = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(subject.metadata.codeCitations), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver, citation => citation.id === citationId),
+        ),
+      ),
+    );
     if (
       citationId !== undefined &&
       replacement !== undefined &&
@@ -673,14 +687,18 @@ function mutationForFinding(
     isAutomaticRelationRepairTargetV1(subjectUri, targetUri) &&
     subject?.metadata.project === project &&
     subject.metadata.status === 'active' &&
-    subject.metadata.relations?.some(relation => relation.uri === targetUri) === true
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(subject.metadata.relations), __effectArrayReceiver =>
+        EffectArray.some(__effectArrayReceiver, relation => relation.uri === targetUri),
+      ),
+    ) === true
   ) {
     const target = relationTargetRecord(recordsByUri, targetUri);
     const targetAliasMemoryId = memoryIdFromIdentityAlias(targetUri);
     const targetIdentityIsAbsent =
       targetAliasMemoryId === undefined
         ? !recordsByUri.has(targetUri)
-        : ![...recordsByUri.values()].some(record => record?.metadata.memoryId === targetAliasMemoryId);
+        : !EffectArray.some([...recordsByUri.values()], record => record?.metadata.memoryId === targetAliasMemoryId);
     const targetPrecondition =
       finding.category === 'relation-target-missing' && targetIdentityIsAbsent && absentTargetUris.has(targetUri)
         ? ({state: 'absent'} as const)
@@ -719,7 +737,7 @@ function mutationForFinding(
     reason:
       finding.repairability === 'reviewable'
         ? 'The supplied project snapshot does not contain enough exact evidence for an automatic mutation.'
-        : `The finding is ${finding.repairability.replace('-', ' ')}.`,
+        : `The finding is ${Effect.pipe(finding.repairability, EffectString.replace('-', ' '))}.`,
     repairKind: finding.repair.kind,
     ...(subjectUri === undefined ? {} : {subjectUri}),
     ...(targetUri === undefined ? {} : {targetUri}),
@@ -739,14 +757,15 @@ function mutationPreconditions(
 ): readonly ContextHealthRepairRecordPreconditionV1[] {
   if (mutation.kind === 'review-only') {
     if (mutation.suggestedMutation?.kind !== 'supersede-memory') return [];
-    return [mutation.suggestedMutation.subjectUri, mutation.suggestedMutation.supersededByUri]
-      .flatMap(uri => {
+    return EffectArray.flatMap(
+      [mutation.suggestedMutation.subjectUri, mutation.suggestedMutation.supersededByUri],
+      uri => {
         const record = recordsByUri.get(uri);
         return record === undefined
           ? []
           : [{expectedContentHash: memoryContentHash(record.content), expectedProject: project, uri}];
-      })
-      .sort((left, right) => compareText(left.uri, right.uri));
+      },
+    ).sort((left, right) => compareText(left.uri, right.uri));
   }
   const inactiveRelationTarget =
     mutation.kind === 'remove-relations' && mutation.targetPrecondition.state === 'inactive'
@@ -757,14 +776,12 @@ function mutationPreconditions(
     ...(mutation.kind === 'archive-memory' && mutation.survivorUri !== undefined ? [mutation.survivorUri] : []),
     ...(inactiveRelationTarget === undefined ? [] : [inactiveRelationTarget]),
   ];
-  return uris
-    .flatMap(uri => {
-      const record = recordsByUri.get(uri);
-      return record === undefined
-        ? []
-        : [{expectedContentHash: memoryContentHash(record.content), expectedProject: project, uri}];
-    })
-    .sort((left, right) => compareText(left.uri, right.uri));
+  return EffectArray.flatMap(uris, uri => {
+    const record = recordsByUri.get(uri);
+    return record === undefined
+      ? []
+      : [{expectedContentHash: memoryContentHash(record.content), expectedProject: project, uri}];
+  }).sort((left, right) => compareText(left.uri, right.uri));
 }
 
 function uniqueRecordsByUri(records: readonly MemoryRecord[]): ReadonlyMap<string, MemoryRecord | undefined> {
@@ -772,7 +789,9 @@ function uniqueRecordsByUri(records: readonly MemoryRecord[]): ReadonlyMap<strin
   for (const record of records) {
     grouped.set(record.uri, [...(grouped.get(record.uri) ?? []), record]);
   }
-  return new Map([...grouped].map(([uri, matches]) => [uri, matches.length === 1 ? matches[0] : undefined]));
+  return new Map(
+    EffectArray.map([...grouped], ([uri, matches]) => [uri, matches.length === 1 ? matches[0] : undefined]),
+  );
 }
 
 function relationTargetRecord(
@@ -783,11 +802,13 @@ function relationTargetRecord(
   if (direct !== undefined) return direct;
   const targetMemoryId = memoryIdFromIdentityAlias(targetUri);
   if (targetMemoryId === undefined) return undefined;
-  return [...recordsByUri.values()].find(record => record?.metadata.memoryId === targetMemoryId);
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst([...recordsByUri.values()], record => record?.metadata.memoryId === targetMemoryId),
+  );
 }
 
 function memoryContentWithoutTargetRelations(record: MemoryRecord, targetUri: string): string {
-  const relations = (record.metadata.relations ?? []).filter(relation => relation.uri !== targetUri);
+  const relations = EffectArray.filter(record.metadata.relations ?? [], relation => relation.uri !== targetUri);
   if (relations.length === (record.metadata.relations ?? []).length)
     return canonicalMemoryDocumentContent(record.content);
   return memoryContentWithRelations(record.content, relations);
@@ -809,8 +830,12 @@ function relationRepairContent(record: MemoryRecord, targetUri: string): string 
 }
 
 function citationIdFromTargetUri(targetUri: string): string | undefined {
-  const marker = targetUri.lastIndexOf('#');
-  const citationId = marker === -1 ? '' : targetUri.slice(marker + 1);
+  const marker = Effect.pipe(
+    targetUri,
+    EffectString.lastIndexOf('#'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const citationId = marker === -1 ? '' : Effect.pipe(targetUri, EffectString.slice(marker + 1));
   return /^tncc_[0-9a-f]{40}$/u.test(citationId) ? citationId : undefined;
 }
 
@@ -825,25 +850,36 @@ function citationRepairContent(
     if (consolidationEvidenceRepairBlocker(record) !== undefined) return undefined;
     if ((record.metadata.citationErrors?.length ?? 0) > 0) return undefined;
     const citations = record.metadata.codeCitations ?? [];
-    if (citations.filter(citation => citation.id === citationId).length !== 1) return undefined;
-    const current = citations.find(citation => citation.id === citationId);
+    if (EffectArray.filter(citations, citation => citation.id === citationId).length !== 1) return undefined;
+    const current = EffectOption.getOrUndefined(
+      EffectArray.findFirst(citations, citation => citation.id === citationId),
+    );
     if (current === undefined) return undefined;
     const anchoredReplacement = preserveMemoryCodeCitationAnchor(current, replacement);
-    const next = citations.map(citation => (citation.id === citationId ? anchoredReplacement : citation));
+    const next = EffectArray.map(citations, citation => (citation.id === citationId ? anchoredReplacement : citation));
     formatMemoryCodeCitationLines(next);
-    const canonical = canonicalMemoryDocumentContent(record.content).replace(/\r\n?/gu, '\n');
-    const separatorIndex = canonical.indexOf('\n\n');
-    const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
-    const body = separatorIndex === -1 ? '' : canonical.slice(separatorIndex + 2);
+    const canonical = Effect.pipe(
+      canonicalMemoryDocumentContent(record.content),
+      EffectString.replace(/\r\n?/gu, '\n'),
+    );
+    const separatorIndex = Effect.pipe(
+      canonical,
+      EffectString.indexOf('\n\n'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    const header = separatorIndex === -1 ? canonical : Effect.pipe(canonical, EffectString.slice(0, separatorIndex));
+    const body = separatorIndex === -1 ? '' : Effect.pipe(canonical, EffectString.slice(separatorIndex + 2));
     const currentLine = `code_citation: ${formatMemoryCodeCitation(current)}`;
     const replacementLine = `code_citation: ${formatMemoryCodeCitation(anchoredReplacement)}`;
     let replacements = 0;
-    const headerLines = header.split('\n').map(line => {
+    const headerLines = EffectArray.map(Effect.pipe(header, EffectString.split('\n')), line => {
       if (line !== currentLine) return line;
       replacements += 1;
       return replacementLine;
     });
-    return replacements === 1 ? [...headerLines, '', body].join('\n').trim() : undefined;
+    return replacements === 1
+      ? Effect.pipe(EffectArray.join([...headerLines, '', body], '\n'), EffectString.trim)
+      : undefined;
   } catch {
     return undefined;
   }
@@ -860,9 +896,16 @@ export function memoryContentWithCitationReplacementsV1(
     if (consolidationEvidenceRepairBlocker(record) !== undefined) return undefined;
     if (replacements.length === 0 || (record.metadata.citationErrors?.length ?? 0) > 0) return undefined;
     const citations = record.metadata.codeCitations ?? [];
-    const replacementById = new Map(replacements.map(item => [item.citationId, item.replacement] as const));
+    const replacementById = new Map(
+      EffectArray.map(replacements, item => [item.citationId, item.replacement] as const),
+    );
     if (replacementById.size !== replacements.length) return undefined;
-    if ([...replacementById.keys()].some(id => citations.filter(citation => citation.id === id).length !== 1)) {
+    if (
+      EffectArray.some(
+        [...replacementById.keys()],
+        id => EffectArray.filter(citations, citation => citation.id === id).length !== 1,
+      )
+    ) {
       return undefined;
     }
     for (const citation of citations) {
@@ -870,14 +913,21 @@ export function memoryContentWithCitationReplacementsV1(
       if (replacement !== undefined)
         replacementById.set(citation.id, preserveMemoryCodeCitationAnchor(citation, replacement));
     }
-    const next = citations.map(citation => replacementById.get(citation.id) ?? citation);
+    const next = EffectArray.map(citations, citation => replacementById.get(citation.id) ?? citation);
     formatMemoryCodeCitationLines(next);
-    const canonical = canonicalMemoryDocumentContent(record.content).replace(/\r\n?/gu, '\n');
-    const separatorIndex = canonical.indexOf('\n\n');
-    const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
-    const body = separatorIndex === -1 ? '' : canonical.slice(separatorIndex + 2);
+    const canonical = Effect.pipe(
+      canonicalMemoryDocumentContent(record.content),
+      EffectString.replace(/\r\n?/gu, '\n'),
+    );
+    const separatorIndex = Effect.pipe(
+      canonical,
+      EffectString.indexOf('\n\n'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    const header = separatorIndex === -1 ? canonical : Effect.pipe(canonical, EffectString.slice(0, separatorIndex));
+    const body = separatorIndex === -1 ? '' : Effect.pipe(canonical, EffectString.slice(separatorIndex + 2));
     const currentLines = new Map<string, string>(
-      citations.flatMap(citation => {
+      EffectArray.flatMap(citations, citation => {
         const replacement = replacementById.get(citation.id);
         return replacement === undefined
           ? []
@@ -890,13 +940,15 @@ export function memoryContentWithCitationReplacementsV1(
       }),
     );
     const seen = new Set<string>();
-    const headerLines = header.split('\n').map(line => {
+    const headerLines = EffectArray.map(Effect.pipe(header, EffectString.split('\n')), line => {
       const replacement = currentLines.get(line);
       if (replacement === undefined) return line;
       seen.add(line);
       return replacement;
     });
-    return seen.size === currentLines.size ? [...headerLines, '', body].join('\n').trim() : undefined;
+    return seen.size === currentLines.size
+      ? Effect.pipe(EffectArray.join([...headerLines, '', body], '\n'), EffectString.trim)
+      : undefined;
   } catch {
     return undefined;
   }
@@ -904,53 +956,64 @@ export function memoryContentWithCitationReplacementsV1(
 
 function memoryContentWithRelations(content: string, relations: readonly MemoryRelation[]): string {
   assertMemoryDocumentSchemaWritable(content);
-  const canonical = canonicalMemoryDocumentContent(content).replace(/\r\n?/gu, '\n');
-  const separatorIndex = canonical.indexOf('\n\n');
-  const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
-  const body = separatorIndex === -1 ? '' : canonical.slice(separatorIndex + 2);
-  const headerLines = header.split('\n').filter(line => !/^relation\s*:/u.test(line));
-  const relationLines = [...relations]
-    .sort((left, right) => compareText(`${left.type}\0${left.uri}`, `${right.type}\0${right.uri}`))
-    .map(relation => `relation: ${relation.type} ${relation.uri}`);
-  return [...headerLines, ...relationLines, '', body].join('\n').trim();
+  const canonical = Effect.pipe(canonicalMemoryDocumentContent(content), EffectString.replace(/\r\n?/gu, '\n'));
+  const separatorIndex = Effect.pipe(
+    canonical,
+    EffectString.indexOf('\n\n'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const header = separatorIndex === -1 ? canonical : Effect.pipe(canonical, EffectString.slice(0, separatorIndex));
+  const body = separatorIndex === -1 ? '' : Effect.pipe(canonical, EffectString.slice(separatorIndex + 2));
+  const headerLines = EffectArray.filter(
+    Effect.pipe(header, EffectString.split('\n')),
+    line => !/^relation\s*:/u.test(line),
+  );
+  const relationLines = EffectArray.map(
+    [...relations].sort((left, right) => compareText(`${left.type}\0${left.uri}`, `${right.type}\0${right.uri}`)),
+    relation => `relation: ${relation.type} ${relation.uri}`,
+  );
+  return Effect.pipe(EffectArray.join([...headerLines, ...relationLines, '', body], '\n'), EffectString.trim);
 }
 
 function contextHealthRepairProposalIdV1(
   proposal: Omit<ContextHealthRepairProposalV1, 'revision'> | ContextHealthRepairProposalV1,
 ): string {
   const mutation = proposal.mutation;
-  return `health-repair-${sha256HexSync(
-    JSON.stringify({
-      category: proposal.category,
-      findingId: proposal.findingId,
-      mutation:
-        mutation.kind === 'review-only'
-          ? {
-              kind: mutation.kind,
-              repairKind: mutation.repairKind,
-              suggestedMutation: mutation.suggestedMutation ?? null,
-              subjectUri: mutation.subjectUri ?? null,
-              targetUri: mutation.targetUri ?? null,
-            }
-          : mutation.kind === 'archive-memory'
+  return `health-repair-${Effect.pipe(
+    sha256HexSync(
+      JSON.stringify({
+        category: proposal.category,
+        findingId: proposal.findingId,
+        mutation:
+          mutation.kind === 'review-only'
             ? {
                 kind: mutation.kind,
-                subjectUri: mutation.subjectUri,
-                survivorUri: mutation.survivorUri ?? null,
+                repairKind: mutation.repairKind,
+                suggestedMutation: mutation.suggestedMutation ?? null,
+                subjectUri: mutation.subjectUri ?? null,
+                targetUri: mutation.targetUri ?? null,
               }
-            : mutation.kind === 'remove-relations'
-              ? {kind: mutation.kind, subjectUri: mutation.subjectUri, targetUri: mutation.targetUri}
-              : {
-                  citationId: mutation.citationId,
+            : mutation.kind === 'archive-memory'
+              ? {
                   kind: mutation.kind,
-                  replacementId: mutation.replacement.id,
                   subjectUri: mutation.subjectUri,
-                },
-      project: proposal.project,
-      selector: proposal.selector ?? null,
-      version: proposal.version,
-    }),
-  ).slice(0, 40)}`;
+                  survivorUri: mutation.survivorUri ?? null,
+                }
+              : mutation.kind === 'remove-relations'
+                ? {kind: mutation.kind, subjectUri: mutation.subjectUri, targetUri: mutation.targetUri}
+                : {
+                    citationId: mutation.citationId,
+                    kind: mutation.kind,
+                    replacementId: mutation.replacement.id,
+                    subjectUri: mutation.subjectUri,
+                  },
+        project: proposal.project,
+        selector: proposal.selector ?? null,
+        version: proposal.version,
+      }),
+    ),
+    EffectString.slice(0, 40),
+  )}`;
 }
 
 function proposalRevisionPayload(
@@ -960,13 +1023,14 @@ function proposalRevisionPayload(
     category: proposal.category,
     findingId: proposal.findingId,
     mutation: canonicalMutation(proposal.mutation),
-    preconditions: [...proposal.preconditions]
-      .sort((left, right) => compareText(left.uri, right.uri))
-      .map(precondition => ({
+    preconditions: EffectArray.map(
+      [...proposal.preconditions].sort((left, right) => compareText(left.uri, right.uri)),
+      precondition => ({
         expectedContentHash: precondition.expectedContentHash,
         expectedProject: precondition.expectedProject,
         uri: precondition.uri,
-      })),
+      }),
+    ),
     project: proposal.project,
     proposalId: proposal.proposalId,
     selector: proposal.selector ?? null,
@@ -1021,14 +1085,15 @@ function projectContextHealthRepairKnowledgeDeltaV1(
     .slice(0, KNOWLEDGE_DELTA_V1_MAX_ITEMS);
   const authorizationHash = sha256HexSync(
     JSON.stringify({
-      proposals: selected.map(proposal => ({
-        preconditions: [...proposal.preconditions]
-          .sort((left, right) => compareText(left.uri, right.uri))
-          .map(precondition => ({
+      proposals: EffectArray.map(selected, proposal => ({
+        preconditions: EffectArray.map(
+          [...proposal.preconditions].sort((left, right) => compareText(left.uri, right.uri)),
+          precondition => ({
             expectedContentHash: precondition.expectedContentHash,
             expectedProject: precondition.expectedProject,
             uri: precondition.uri,
-          })),
+          }),
+        ),
         proposalId: proposal.proposalId,
         revision: proposal.revision,
       })),
@@ -1036,12 +1101,15 @@ function projectContextHealthRepairKnowledgeDeltaV1(
       version: CONTEXT_HEALTH_REPAIR_VERSION,
     }),
   );
-  const reviewId = `review-${authorizationHash.slice(0, 16)}`;
-  const revision = selected.length === 0 ? 1 : Number.parseInt(authorizationHash.slice(16, 28), 16) + 1;
-  const items: readonly KnowledgeDeltaItemV1[] = selected.map((proposal, index) => {
+  const reviewId = `review-${Effect.pipe(authorizationHash, EffectString.slice(0, 16))}`;
+  const revision =
+    selected.length === 0 ? 1 : Number.parseInt(Effect.pipe(authorizationHash, EffectString.slice(16, 28)), 16) + 1;
+  const items: readonly KnowledgeDeltaItemV1[] = EffectArray.map(selected, (proposal, index) => {
     const subjectUri = proposal.mutation.subjectUri;
     const subject = subjectUri === undefined ? undefined : recordsByUri.get(subjectUri);
-    const expectedTargetContentHash = proposal.preconditions.find(item => item.uri === subjectUri)?.expectedContentHash;
+    const expectedTargetContentHash = EffectOption.getOrUndefined(
+      EffectArray.findFirst(proposal.preconditions, item => item.uri === subjectUri),
+    )?.expectedContentHash;
     const supersede = proposal.mutation.kind === 'review-only' ? proposal.mutation.suggestedMutation : undefined;
     return {
       candidateId: `${reviewId}-${index + 1}`,
@@ -1102,8 +1170,12 @@ function expectedReceiptResultHash(proposal: ContextHealthRepairProposalV1): str
     return proposal.mutation.expectedResultContentHash;
   if (proposal.mutation.kind === 'archive-memory') {
     return (
-      proposal.preconditions.find(precondition => precondition.uri === proposal.mutation.subjectUri)
-        ?.expectedContentHash ?? ''
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          proposal.preconditions,
+          precondition => precondition.uri === proposal.mutation.subjectUri,
+        ),
+      )?.expectedContentHash ?? ''
     );
   }
   return '';
@@ -1118,20 +1190,23 @@ function conflict(
   return {
     conflict: {
       code,
-      conflictId: `health-repair-conflict-${sha256HexSync(
-        JSON.stringify({
-          code,
-          expectedRevision: input.expectedRevision,
-          observed,
-          observedRelationTarget:
-            input.proposal.mutation.kind === 'remove-relations'
-              ? observedRelationTarget(input.proposal.mutation.targetUri, input.records)
-              : null,
-          proposalId: input.proposal.proposalId,
-          revision: input.proposal.revision,
-          version: CONTEXT_HEALTH_REPAIR_VERSION,
-        }),
-      ).slice(0, 40)}`,
+      conflictId: `health-repair-conflict-${Effect.pipe(
+        sha256HexSync(
+          JSON.stringify({
+            code,
+            expectedRevision: input.expectedRevision,
+            observed,
+            observedRelationTarget:
+              input.proposal.mutation.kind === 'remove-relations'
+                ? observedRelationTarget(input.proposal.mutation.targetUri, input.records)
+                : null,
+            proposalId: input.proposal.proposalId,
+            revision: input.proposal.revision,
+            version: CONTEXT_HEALTH_REPAIR_VERSION,
+          }),
+        ),
+        EffectString.slice(0, 40),
+      )}`,
       message,
     },
     records: input.records,
@@ -1145,12 +1220,14 @@ function relationTargetPreconditionMatches(
   absentTargetUris: ReadonlySet<string>,
 ): boolean {
   const targetMemoryId = memoryIdFromIdentityAlias(mutation.targetUri);
-  const matches = records.filter(record =>
+  const matches = EffectArray.filter(records, record =>
     targetMemoryId === undefined ? record.uri === mutation.targetUri : record.metadata.memoryId === targetMemoryId,
   );
   if (mutation.targetPrecondition.state === 'absent') {
     const identityMatches =
-      targetMemoryId === undefined ? matches : records.filter(record => record.metadata.memoryId === targetMemoryId);
+      targetMemoryId === undefined
+        ? matches
+        : EffectArray.filter(records, record => record.metadata.memoryId === targetMemoryId);
     return identityMatches.length === 0 && absentTargetUris.has(mutation.targetUri);
   }
   if (matches.length !== 1) return false;
@@ -1164,11 +1241,11 @@ function relationTargetPreconditionMatches(
 
 function observedRelationTarget(targetUri: string, records: readonly MemoryRecord[]) {
   const targetMemoryId = memoryIdFromIdentityAlias(targetUri);
-  const matches = records.filter(record =>
+  const matches = EffectArray.filter(records, record =>
     targetMemoryId === undefined ? record.uri === targetUri : record.metadata.memoryId === targetMemoryId,
   );
   return {
-    matches: matches.map(record => ({
+    matches: EffectArray.map(matches, record => ({
       contentHash: memoryContentHash(record.content),
       project: record.metadata.project ?? null,
       status: record.metadata.status,
@@ -1214,9 +1291,9 @@ function observedPreconditionHashes(
   records: readonly MemoryRecord[],
   preconditions: readonly ContextHealthRepairRecordPreconditionV1[],
 ) {
-  return [...preconditions]
-    .sort((left, right) => compareText(left.uri, right.uri))
-    .map(precondition => {
+  return EffectArray.map(
+    [...preconditions].sort((left, right) => compareText(left.uri, right.uri)),
+    precondition => {
       const record = uniqueRecord(records, precondition.uri);
       return {
         contentHash: record === undefined ? null : memoryContentHash(record.content),
@@ -1225,11 +1302,12 @@ function observedPreconditionHashes(
         project: record?.metadata.project ?? null,
         uri: precondition.uri,
       };
-    });
+    },
+  );
 }
 
 function uniqueRecord(records: readonly MemoryRecord[], uri: string): MemoryRecord | undefined {
-  const matches = records.filter(record => record.uri === uri);
+  const matches = EffectArray.filter(records, record => record.uri === uri);
   return matches.length === 1 ? matches[0] : undefined;
 }
 
@@ -1245,7 +1323,7 @@ function proposalLimit(input: number | undefined): number {
 function boundedSummary(value: string): string {
   return value.length <= MAXIMUM_CONTEXT_HEALTH_REPAIR_SUMMARY_CHARACTERS
     ? value
-    : value.slice(0, MAXIMUM_CONTEXT_HEALTH_REPAIR_SUMMARY_CHARACTERS);
+    : Effect.pipe(value, EffectString.slice(0, MAXIMUM_CONTEXT_HEALTH_REPAIR_SUMMARY_CHARACTERS));
 }
 
 function compareText(left: string, right: string): number {

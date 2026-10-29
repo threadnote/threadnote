@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Context, Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {workflowMemoryStem} from '@threadnote/workflow-automations/naming';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
@@ -7,6 +9,7 @@ import {
   parseMemoryDocument,
   type MemoryRelation,
 } from '@threadnote/memory/document';
+import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {
   memoryCodeCitationSharingBlocker,
@@ -29,6 +32,7 @@ import {resolveTeam, resourceUriToWorktreeRelative} from '../share/core.js';
 import {
   assertShareGitPublicationImages,
   assertShareGitPublicationTarget,
+  type ShareGitCommitReceipt,
   type ShareGitPublicationReceipt,
 } from '../share/git.js';
 import {loadWorkflowJournal, readOptionalResource} from './journal.js';
@@ -46,6 +50,7 @@ import {
   publicationDigest,
   PublicationWriterReasonSchema,
   publicationPreview,
+  WorkflowPublicationNodeSchema,
   WorkflowPublicationRequestSchema,
   type PublicationIntent,
   type PublicationJournal,
@@ -54,6 +59,9 @@ import {
   type PublicationStage,
   type WorkflowPublicationRequest,
 } from './publication_contract.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const invalidProjection = (cause: unknown) =>
   Schema.is(WorkflowMemoryError)(cause)
@@ -62,6 +70,163 @@ const invalidProjection = (cause: unknown) =>
         'invalid-publication-graph',
         cause instanceof Error ? cause.message : 'Publication projection is invalid.',
       );
+
+function isMemoryRelationType(value: string): value is MemoryRelation['type'] {
+  return (
+    value === 'depends_on' ||
+    value === 'evidence_for' ||
+    value === 'references' ||
+    value === 'related_to' ||
+    value === 'supersedes'
+  );
+}
+
+function publicationRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
+function optionalPublicationField(
+  value: Record<string, unknown>,
+  key: string,
+  predicate: (field: unknown) => boolean,
+): boolean {
+  return !(key in value) || value[key] === undefined || predicate(value[key]);
+}
+
+function isCommitReceipt(value: unknown): value is ShareGitCommitReceipt {
+  return (
+    publicationRecord(value) &&
+    value.version === 1 &&
+    typeof value.commit === 'string' &&
+    typeof value.remote === 'string' &&
+    typeof value.branch === 'string' &&
+    typeof value.path === 'string' &&
+    typeof value.contentHash === 'string'
+  );
+}
+
+function isMemoryCitation(value: unknown): value is MemoryCodeCitationV1 {
+  try {
+    assertMemoryCodeCitation(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isPreparedWrite(value: unknown): value is PreparedSharedMemoryWrite {
+  if (
+    !publicationRecord(value) ||
+    typeof value.memoryUri !== 'string' ||
+    typeof value.memory !== 'string' ||
+    !optionalPublicationField(value, 'expectedReplaceContent', field => typeof field === 'string') ||
+    !publicationRecord(value.finalMetadata)
+  )
+    return false;
+  const record = parseMemoryDocument(value.memoryUri, value.memory);
+  return record !== undefined && stableJson(record.metadata) === stableJson(value.finalMetadata);
+}
+
+function isExternalTarget(value: unknown): boolean {
+  return (
+    publicationRecord(value) &&
+    typeof value.uri === 'string' &&
+    typeof value.content === 'string' &&
+    optionalPublicationField(value, 'memoryId', field => typeof field === 'string') &&
+    optionalPublicationField(
+      value,
+      'allowedUriScopes',
+      field => EffectArray.isArray(field) && EffectArray.every(field, (scope: unknown) => typeof scope === 'string'),
+    )
+  );
+}
+
+function isPublicationNode(value: unknown): boolean {
+  return (
+    publicationRecord(value) &&
+    'input' in value &&
+    Schema.is(WorkflowPublicationNodeSchema)(value.input) &&
+    'prepared' in value &&
+    isPreparedWrite(value.prepared) &&
+    'citations' in value &&
+    EffectArray.isArray(value.citations) &&
+    EffectArray.every(value.citations, isMemoryCitation) &&
+    'externalTargets' in value &&
+    EffectArray.isArray(value.externalTargets) &&
+    EffectArray.every(value.externalTargets, isExternalTarget)
+  );
+}
+
+function isPublicationStage(value: unknown): boolean {
+  return (
+    publicationRecord(value) &&
+    typeof value.key === 'string' &&
+    typeof value.nodeKey === 'string' &&
+    'prepared' in value &&
+    isPreparedWrite(value.prepared) &&
+    (value.operation === 'create' || value.operation === 'replace') &&
+    'sources' in value &&
+    EffectArray.isArray(value.sources) &&
+    EffectArray.every(value.sources, isExternalTarget)
+  );
+}
+
+function isPublicationProgress(value: unknown): boolean {
+  return (
+    publicationRecord(value) &&
+    value.started === true &&
+    optionalPublicationField(value, 'committed', isCommitReceipt) &&
+    optionalPublicationField(value, 'verified', isShareGitPublicationReceipt)
+  );
+}
+
+function isPublicationJournal(value: unknown): value is PublicationJournal {
+  if (!publicationRecord(value) || !('intent' in value) || !publicationRecord(value.intent)) return false;
+  const intent = value.intent;
+  return (
+    intent.version === 1 &&
+    typeof intent.bindingId === 'string' &&
+    typeof intent.sourceCommit === 'string' &&
+    typeof intent.requestDigest === 'string' &&
+    EffectArray.isArray(intent.nodes) &&
+    EffectArray.every(intent.nodes, isPublicationNode) &&
+    EffectArray.isArray(intent.stages) &&
+    EffectArray.every(intent.stages, isPublicationStage) &&
+    typeof value.approvalDigest === 'string' &&
+    optionalPublicationField(
+      value,
+      'decision',
+      field => field === 'approve' || field === 'defer' || field === 'reject',
+    ) &&
+    optionalPublicationField(value, 'approvalEvidence', field => typeof field === 'string') &&
+    'progress' in value &&
+    publicationRecord(value.progress) &&
+    EffectArray.every(EffectRecord.toEntries(value.progress), ([, progress]) => isPublicationProgress(progress))
+  );
+}
+
+function isShareGitPublicationReceipt(value: unknown): value is ShareGitPublicationReceipt {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'version' in value &&
+    value.version === 1 &&
+    'commit' in value &&
+    typeof value.commit === 'string' &&
+    'remote' in value &&
+    typeof value.remote === 'string' &&
+    'branch' in value &&
+    typeof value.branch === 'string' &&
+    'path' in value &&
+    typeof value.path === 'string' &&
+    'contentHash' in value &&
+    typeof value.contentHash === 'string' &&
+    'remoteCommit' in value &&
+    typeof value.remoteCommit === 'string' &&
+    'verified' in value &&
+    value.verified === true
+  );
+}
 
 const nativeWriterErrorCodes = new Set([
   'EACCES',
@@ -86,9 +251,30 @@ const nativeWriterErrorCodes = new Set([
 // Only fixed share/git.ts diagnostics may cross this privacy boundary.
 const pendingWriterReason = (text: string | undefined): typeof PublicationWriterReasonSchema.Type | undefined => {
   if (text === 'Shared publication commit content changed.') return 'commit-content-changed';
-  if (text?.startsWith('Shared commit readback failed:')) return 'commit-readback-failed';
-  if (text?.startsWith('Shared publication verification failed:')) return 'git-verification-failed';
-  if (text?.startsWith('git commit failed:')) return 'git-commit-failed';
+  if (
+    Effect2.pipe(text, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.startsWith('Shared commit readback failed:')),
+    )
+  )
+    return 'commit-readback-failed';
+  if (
+    Effect2.pipe(text, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.startsWith('Shared publication verification failed:')),
+    )
+  )
+    return 'git-verification-failed';
+  if (
+    Effect2.pipe(text, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.startsWith('git commit failed:')),
+    )
+  )
+    return 'git-commit-failed';
   return undefined;
 };
 const pendingWriterCause = (result: {
@@ -96,14 +282,41 @@ const pendingWriterCause = (result: {
   readonly content?: readonly {readonly type: string; readonly text?: string}[];
 }) => {
   const diagnostic = readAnonymousTelemetryDiagnostic(result);
-  const boundedErrorCode = result.content
-    ?.filter(item => item.type === 'text')
-    .flatMap(item => item.text?.match(/\bE[A-Z0-9]{2,12}\b/gu) ?? [])
-    .find(code => nativeWriterErrorCodes.has(code));
-  const reason = result.content
-    ?.filter(item => item.type === 'text')
-    .map(item => pendingWriterReason(item.text))
-    .find(value => value !== undefined);
+  const textItems = Option.getOrUndefined(
+    Option.map(Option.fromNullishOr(result.content), content =>
+      EffectArray.filter(content, (item, index) => index in content && item.type === 'text'),
+    ),
+  );
+  const boundedErrorCode =
+    textItems === undefined
+      ? undefined
+      : Option.getOrUndefined(
+          EffectArray.findFirst(
+            EffectArray.flatMap(
+              textItems,
+              item =>
+                Effect2.pipe(item.text, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect2.pipe(
+                        effectOptionalString,
+                        EffectString.match(/\bE[A-Z0-9]{2,12}\b/gu),
+                        Effect2.Option.getOrElse(() => null),
+                      ),
+                ) ?? [],
+            ),
+            code => nativeWriterErrorCodes.has(code),
+          ),
+        );
+  const reason =
+    textItems === undefined
+      ? undefined
+      : Option.getOrUndefined(
+          EffectArray.findFirst(
+            EffectArray.map(textItems, item => pendingWriterReason(item.text)),
+            value => value !== undefined,
+          ),
+        );
   return {
     kind: 'shared-writer-error' as const,
     errorType: diagnostic?.errorType ?? 'UnknownError',
@@ -126,7 +339,10 @@ const assertSourceCommit = Effect.fn('workflowPublication.sourceCommit')(functio
 ) {
   if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(expected))
     return yield* workflowError('invalid-source-commit', 'Publication requires the full current source commit.');
-  const head = (yield* runCommandEffect('git', ['-C', binding.repo, 'rev-parse', '--verify', 'HEAD'])).stdout.trim();
+  const head = Effect2.pipe(
+    (yield* runCommandEffect('git', ['-C', binding.repo, 'rev-parse', '--verify', 'HEAD'])).stdout,
+    EffectString.trim,
+  );
   if (head !== expected)
     return yield* workflowError(
       'publication-source-changed',
@@ -162,8 +378,9 @@ const readPublication = Effect.fn('workflowPublication.readJournal')(function* (
   const content = yield* fs.readFileString(file);
   return yield* Effect.try({
     try: () => {
-      const journal = JSON.parse(content) as PublicationJournal;
+      const journal: unknown = JSON.parse(content);
       if (
+        !isPublicationJournal(journal) ||
         journal.intent.version !== 1 ||
         journal.intent.bindingId !== binding.bindingId ||
         publicationDigest(journal.intent) !== journal.approvalDigest ||
@@ -172,7 +389,7 @@ const readPublication = Effect.fn('workflowPublication.readJournal')(function* (
         journal.intent.stages.length > 3
       )
         throw workflowError('invalid-journal', 'Publication intent is invalid.');
-      normalizePublicationNodes(journal.intent.nodes.map(node => node.input));
+      normalizePublicationNodes(EffectArray.map(journal.intent.nodes, node => node.input));
       const scope = publicationScope(binding);
       for (const stage of journal.intent.stages) {
         const record = parseMemoryDocument(stage.prepared.memoryUri, stage.prepared.memory);
@@ -180,7 +397,8 @@ const readPublication = Effect.fn('workflowPublication.readJournal')(function* (
           !record ||
           record.metadata.kind !== 'durable' ||
           record.metadata.visibility !== 'shared' ||
-          !journal.intent.nodes.some(
+          !EffectArray.some(
+            journal.intent.nodes,
             node => node.input.key === stage.nodeKey && node.prepared.memoryUri === stage.prepared.memoryUri,
           )
         )
@@ -228,7 +446,7 @@ const captureCitations = Effect.fn('workflowPublication.captureCitations')(funct
   const blocker = memoryCodeCitationSharingBlocker({codeCitations: citations});
   if (blocker)
     return yield* workflowError('publication-citations-blocked', memoryCodeCitationSharingBlockerMessage(blocker));
-  if (citations.some(citation => citation.sourceCommit !== sourceCommit))
+  if (EffectArray.some(citations, citation => citation.sourceCommit !== sourceCommit))
     return yield* workflowError(
       'publication-source-changed',
       'All shared citations must describe the approved current source commit.',
@@ -280,7 +498,7 @@ const preparePublication = Effect.fn('workflowPublication.prepare')(function* (
     )
       return yield* validation.failure;
   }
-  if (existing && Object.keys(existing.progress).length > 0)
+  if (existing && EffectRecord.keys(existing.progress).length > 0)
     return yield* workflowError(
       'publication-intent-conflict',
       'Publication has started; resume its exact approved graph before starting another.',
@@ -300,14 +518,22 @@ const preparePublication = Effect.fn('workflowPublication.prepare')(function* (
     const citations = yield* captureCitations(config, binding, input.codeRefs, request.sourceCommit, true);
     const external = yield* resolveAuthoredMemoryRelations(
       config,
-      input.relations.flatMap(relation => (relation.uri ? [{type: relation.type, uri: relation.uri}] : [])),
+      EffectArrayPipe(input.relations, __effectFlatMapValues =>
+        EffectArray.flatMap(__effectFlatMapValues, (relation, __effectFlatMapIndex) =>
+          __effectFlatMapIndex in __effectFlatMapValues
+            ? relation.uri
+              ? [{type: relation.type, uri: relation.uri}]
+              : []
+            : [],
+        ),
+      ),
       {allowedUriScopes: [scope.root]},
     );
     const topic = yield* Effect.try({
       try: () =>
         binding.naming
           ? workflowMemoryStem(binding.naming, input.topic)
-          : `${input.topic}-${binding.bindingId.slice(0, 16)}`,
+          : `${input.topic}-${Effect2.pipe(binding.bindingId, EffectString.slice(0, 16))}`,
       catch: invalidProjection,
     });
     const prepared = yield* prepareCursorCloudSharedMemory(config, scope, {
@@ -319,7 +545,7 @@ const preparePublication = Effect.fn('workflowPublication.prepare')(function* (
         project: binding.project,
         topic,
         timestamp,
-        memoryId: `tn_${sha256HexSync(`${binding.bindingId}\n${input.key}`).slice(0, 20)}`,
+        memoryId: `tn_${Effect2.pipe(sha256HexSync(`${binding.bindingId}\n${input.key}`), EffectString.slice(0, 20))}`,
         sourceAgentClient: 'threadnote',
         codeCitations: citations,
         relations: external.relations,
@@ -332,25 +558,29 @@ const preparePublication = Effect.fn('workflowPublication.prepare')(function* (
       );
     nodes.push({input, prepared, citations, externalTargets: external.targets});
   }
-  if (new Set(nodes.map(node => node.prepared.memoryUri)).size !== nodes.length)
+  if (new Set(EffectArray.map(nodes, node => node.prepared.memoryUri)).size !== nodes.length)
     return yield* workflowError(
       'invalid-publication-graph',
       'Publication node topics must select distinct destinations.',
     );
   const finalNodes = yield* Effect.try({
     try: () =>
-      nodes.map(node => {
+      EffectArray.map(nodes, node => {
         const relations = [...(node.prepared.finalMetadata.relations ?? [])];
         for (const relation of node.input.relations)
           if (relation.nodeKey) {
-            const target = nodes.find(item => item.input.key === relation.nodeKey)!;
+            const target = Option.getOrUndefined(
+              EffectArray.findFirst(nodes, item => item.input.key === relation.nodeKey),
+            )!;
+            if (!isMemoryRelationType(relation.type))
+              throw workflowError('invalid-publication-graph', 'Publication relation type is invalid.');
             relations.push({
-              type: relation.type as MemoryRelation['type'],
+              type: relation.type,
               uri: memoryIdentityAlias(target.prepared.finalMetadata.memoryId!),
             });
           }
-        if (nodes.length === 2 && !node.input.relations.some(relation => relation.nodeKey)) {
-          const other = nodes.find(item => item !== node)!;
+        if (nodes.length === 2 && !EffectArray.some(node.input.relations, relation => Boolean(relation.nodeKey))) {
+          const other = Option.getOrUndefined(EffectArray.findFirst(nodes, item => item !== node))!;
           relations.push({type: 'references', uri: memoryIdentityAlias(other.prepared.finalMetadata.memoryId!)});
         }
         return {
@@ -371,9 +601,13 @@ const preparePublication = Effect.fn('workflowPublication.prepare')(function* (
       sources: node.externalTargets,
     });
   } else {
-    const architecture = finalNodes.find(node => node.input.role === 'architecture')!;
-    const spec = finalNodes.find(node => node.input.role === 'spec')!;
-    const architectureInitial = nodes.find(node => node.input.key === architecture.input.key)!.prepared;
+    const architecture = Option.getOrUndefined(
+      EffectArray.findFirst(finalNodes, node => node.input.role === 'architecture'),
+    )!;
+    const spec = Option.getOrUndefined(EffectArray.findFirst(finalNodes, node => node.input.role === 'spec'))!;
+    const architectureInitial = Option.getOrUndefined(
+      EffectArray.findFirst(nodes, node => node.input.key === architecture.input.key),
+    )!.prepared;
     stages.push({
       key: `${architecture.input.key}:create`,
       nodeKey: architecture.input.key,
@@ -457,10 +691,15 @@ const verifyFinalGraph = Effect.fn('workflowPublication.verifyFinalGraph')(funct
       yield* assertShareGitPublicationTarget(selected.config.worktree, binding.remote!, binding.branch!);
       const git = (args: readonly string[]) => runCommandEffect('git', ['-C', selected.config.worktree, ...args]);
       yield* git(['fetch', '--no-tags', 'origin', `refs/heads/${binding.branch!}`]);
-      const remoteCommit = (yield* git(['rev-parse', '--verify', 'FETCH_HEAD'])).stdout.trim();
+      const remoteCommit = Effect2.pipe(
+        (yield* git(['rev-parse', '--verify', 'FETCH_HEAD'])).stdout,
+        EffectString.trim,
+      );
       const results = [];
       for (const node of journal.intent.nodes) {
-        const final = [...journal.intent.stages].reverse().find(stage => stage.nodeKey === node.input.key)!;
+        const final = Option.getOrUndefined(
+          EffectArray.findFirst([...journal.intent.stages].reverse(), stage => stage.nodeKey === node.input.key),
+        )!;
         const receipt = journal.progress[final.key]?.verified;
         const path = resourceUriToWorktreeRelative(config, node.prepared.memoryUri, scope.team);
         if (
@@ -578,17 +817,17 @@ export const runWorkflowPublication = Effect.fn('workflowPublication.run')(funct
     );
   // Reserve every remaining receipt before any native mutation. A write that
   // fits the prepared state must also fit its largest committed/verified state.
-  const finalProgress = Object.fromEntries(
-    journal.intent.stages.map(stage => {
+  const finalProgress = EffectRecord.fromEntries(
+    EffectArray.map(journal.intent.stages, stage => {
       const receipt = {
         version: 1 as const,
-        commit: 'f'.repeat(64),
+        commit: Effect2.pipe('f', EffectString.repeat(64)),
         remote: binding.remote!,
         branch: binding.branch!,
         path: resourceUriToWorktreeRelative(config, stage.prepared.memoryUri, scope.team),
-        contentHash: 'f'.repeat(64),
+        contentHash: Effect2.pipe('f', EffectString.repeat(64)),
       };
-      const verified = {...receipt, remoteCommit: 'f'.repeat(64), verified: true as const};
+      const verified = {...receipt, remoteCommit: Effect2.pipe('f', EffectString.repeat(64)), verified: true as const};
       return [stage.key, {started: true as const, committed: verified, verified}];
     }),
   );
@@ -598,46 +837,53 @@ export const runWorkflowPublication = Effect.fn('workflowPublication.run')(funct
   for (const stage of journal.intent.stages) {
     if (journal.progress[stage.key]?.verified) continue;
     yield* assertSourceCommit(binding, journal.intent.sourceCommit);
-    const node = journal.intent.nodes.find(item => item.input.key === stage.nodeKey)!;
+    const node: PublicationNode = Option.getOrUndefined(
+      EffectArray.findFirst(journal.intent.nodes, item => item.input.key === stage.nodeKey),
+    )!;
     const previous: PublicationProgress | undefined = journal.progress[stage.key];
     journal = {...journal, progress: {...journal.progress, [stage.key]: {...previous, started: true}}};
     yield* writePublication(config, journal);
-    const result = yield* writeCursorCloudSharedMemory(config, scope, {
-      operation: stage.operation,
-      bodyText: node.input.body,
-      metadata: stage.prepared.finalMetadata,
-      ...(stage.operation === 'replace'
-        ? {
-            replaceUri: stage.prepared.memoryUri,
-            expectedReplaceContent: stage.prepared.expectedReplaceContent,
-            expectedReplaceMemoryId: stage.prepared.finalMetadata.memoryId,
-            expectedReplaceContentHash: sha256HexSync(
-              canonicalMemoryDocumentContent(stage.prepared.expectedReplaceContent!),
-            ),
-          }
-        : {}),
-      expectedSourceContent: stage.sources,
-      sharedPublication: {
-        prepared: stage.prepared,
-        expectedRemote: binding.remote!,
-        expectedBranch: binding.branch!,
-        resume: previous?.started === true,
-        committed: previous?.committed,
-        onCommitted: receipt =>
-          Effect.gen(function* () {
-            journal = {...journal!, progress: {...journal!.progress, [stage.key]: {started: true, committed: receipt}}};
-            yield* writePublication(config, journal);
-          }).pipe(Effect.provide(journalServices)),
-      },
-    });
-    if (result.isError || !result.structuredContent?.publication) {
+    const result: Effect2.Effect.Success<ReturnType<typeof writeCursorCloudSharedMemory>> =
+      yield* writeCursorCloudSharedMemory(config, scope, {
+        operation: stage.operation,
+        bodyText: node.input.body,
+        metadata: stage.prepared.finalMetadata,
+        ...(stage.operation === 'replace'
+          ? {
+              replaceUri: stage.prepared.memoryUri,
+              expectedReplaceContent: stage.prepared.expectedReplaceContent,
+              expectedReplaceMemoryId: stage.prepared.finalMetadata.memoryId,
+              expectedReplaceContentHash: sha256HexSync(
+                canonicalMemoryDocumentContent(stage.prepared.expectedReplaceContent!),
+              ),
+            }
+          : {}),
+        expectedSourceContent: stage.sources,
+        sharedPublication: {
+          prepared: stage.prepared,
+          expectedRemote: binding.remote!,
+          expectedBranch: binding.branch!,
+          resume: previous?.started === true,
+          committed: previous?.committed,
+          onCommitted: receipt =>
+            Effect.gen(function* () {
+              journal = {
+                ...journal!,
+                progress: {...journal!.progress, [stage.key]: {started: true, committed: receipt}},
+              };
+              yield* writePublication(config, journal);
+            }).pipe(Effect.provide(journalServices)),
+        },
+      });
+    const publication: unknown = result.structuredContent?.publication;
+    if (result.isError || !isShareGitPublicationReceipt(publication)) {
       const writerCause = result.isError ? pendingWriterCause(result) : undefined;
       const cause = writerCause ?? {kind: 'publication-receipt-missing' as const};
       return {
         protocolVersion: 1 as const,
         status: 'pending' as const,
         approvalDigest: journal.approvalDigest,
-        stage: stage.key.slice(0, 128),
+        stage: Effect2.pipe(stage.key, EffectString.slice(0, 128)),
         committed: journal.progress[stage.key]?.committed,
         cause,
         message: writerCause
@@ -645,7 +891,7 @@ export const runWorkflowPublication = Effect.fn('workflowPublication.run')(funct
           : 'The shared writer returned no publication receipt.',
       };
     }
-    const receipt = result.structuredContent.publication as ShareGitPublicationReceipt;
+    const receipt: ShareGitPublicationReceipt = publication;
     journal = {
       ...journal,
       progress: {...journal.progress, [stage.key]: {started: true, committed: receipt, verified: receipt}},

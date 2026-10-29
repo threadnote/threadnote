@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
@@ -27,6 +28,9 @@ import {
 } from '@threadnote/threadnote/telemetry/diagnostic';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface CapturedSpan {
   readonly root: boolean;
@@ -59,7 +63,7 @@ describe('anonymous telemetry runtime', () => {
       }
 
       expect(capture.spans).toHaveLength(2);
-      expect(capture.spans.map(span => spanAttributes(span))).toEqual([
+      expect(EffectArray.map(capture.spans, span => spanAttributes(span))).toEqual([
         expect.objectContaining({
           'error.type': 'HttpRequestFailed',
           'threadnote.auto_update.result': 'failed',
@@ -73,7 +77,7 @@ describe('anonymous telemetry runtime', () => {
           'threadnote.outcome': 'failure',
         }),
       ]);
-      expect(JSON.stringify(capture.spans.map(span => spanAttributes(span)))).not.toContain('private');
+      expect(JSON.stringify(EffectArray.map(capture.spans, span => spanAttributes(span)))).not.toContain('private');
     }).pipe(provideTestLayer(anonymousTelemetryTestLayer({system: systemInfoStub(), tracer: capture.tracer})));
   });
 
@@ -241,8 +245,10 @@ describe('anonymous telemetry runtime', () => {
         expect(returned).toBe(result);
       }
 
-      expect(capture.spans.map(span => spanAttributes(span)['threadnote.outcome'])).toEqual(cases);
-      expect(JSON.stringify(capture.spans.map(spanAttributes))).not.toContain('private user-facing retry detail');
+      expect(EffectArray.map(capture.spans, span => spanAttributes(span)['threadnote.outcome'])).toEqual(cases);
+      expect(JSON.stringify(EffectArray.map(capture.spans, spanAttributes))).not.toContain(
+        'private user-facing retry detail',
+      );
     }).pipe(provideTestLayer(anonymousTelemetryTestLayer({system: systemInfoStub(), tracer: capture.tracer})));
   });
 
@@ -263,9 +269,11 @@ describe('anonymous telemetry runtime', () => {
         if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBe(error);
       }
 
-      expect(capture.spans.map(span => spanAttributes(span)['threadnote.outcome'])).toEqual(cases);
-      expect(capture.spans.map(span => spanAttributes(span)['error.type'])).toEqual(cases.map(() => 'UnknownError'));
-      expect(JSON.stringify(capture.spans.map(spanAttributes))).not.toContain('private');
+      expect(EffectArray.map(capture.spans, span => spanAttributes(span)['threadnote.outcome'])).toEqual(cases);
+      expect(EffectArray.map(capture.spans, span => spanAttributes(span)['error.type'])).toEqual(
+        EffectArray.map(cases, () => 'UnknownError'),
+      );
+      expect(JSON.stringify(EffectArray.map(capture.spans, spanAttributes))).not.toContain('private');
     }).pipe(provideTestLayer(anonymousTelemetryTestLayer({system: systemInfoStub(), tracer: capture.tracer})));
   });
 
@@ -301,15 +309,15 @@ describe('anonymous telemetry runtime', () => {
         'threadnote.memory.rss.end_bucket': '512MiB-1GiB',
         'threadnote.memory.rss.start_bucket': '32-64MiB',
       });
-      for (const value of Object.values(attributes)) {
-        expect(samples.flatMap(sample => Object.values(sample))).not.toContain(value);
+      for (const value of EffectRecord.values(attributes)) {
+        expect(EffectArray.flatMap(samples, sample => EffectRecord.values(sample))).not.toContain(value);
       }
     }).pipe(provideTestLayer(anonymousTelemetryTestLayer({system, tracer: capture.tracer})));
   });
 
   effectIt.effect('bounds runtime version metadata before it reaches the private span', () => {
     const capture = capturingTracer();
-    const system = systemInfoStub({runtimeVersion: `4.${'1'.repeat(120)}`});
+    const system = systemInfoStub({runtimeVersion: `4.${Effect2.pipe('1', EffectString.repeat(120))}`});
 
     return Effect.gen(function* () {
       yield* withAnonymousTelemetry({component: 'cli', operation: 'version'}, Effect.void);
@@ -394,7 +402,7 @@ describe('anonymous telemetry runtime', () => {
         emitAnonymousTelemetryEvent({component: 'cli', event: 'checkpoint', operation: 'graph-build'}),
       );
 
-      const ids = capture.spans.map(span => spanAttributes(span)['threadnote.invocation.id']);
+      const ids = EffectArray.map(capture.spans, span => spanAttributes(span)['threadnote.invocation.id']);
       expect(ids).toHaveLength(2);
       expect(ids[0]).toMatch(/^tni_[\da-f]{24}$/u);
       expect(ids[1]).toBe(ids[0]);
@@ -426,7 +434,7 @@ describe('anonymous telemetry runtime', () => {
 
       expect(capture.spans).toHaveLength(cases.length);
       expect(
-        capture.spans.map(span => {
+        EffectArray.map(capture.spans, span => {
           const attributes = spanAttributes(span);
           return {
             repairRequired: attributes['threadnote.auto_update.repair_required'],
@@ -459,7 +467,8 @@ describe('anonymous telemetry runtime', () => {
           {component: 'cli', operation: 'auto-update-worker'},
           recordAnonymousTelemetryFields({
             autoUpdateRepairRequired: true,
-            autoUpdateResult: result as AnonymousTelemetryFields['autoUpdateResult'],
+            // @ts-expect-error -- Deliberately test an out-of-vocabulary result is omitted from telemetry.
+            autoUpdateResult: result,
           }),
         );
 
@@ -617,7 +626,7 @@ function endedSpanExit(captured: CapturedSpan): Exit.Exit<unknown, unknown> {
 }
 
 function spanAttributes(captured: CapturedSpan): Record<string, unknown> {
-  return Object.fromEntries(captured.span.attributes);
+  return EffectRecord.fromEntries(captured.span.attributes);
 }
 
 function systemInfoStub(overrides: Partial<SystemInfoShape> = {}): SystemInfoShape {

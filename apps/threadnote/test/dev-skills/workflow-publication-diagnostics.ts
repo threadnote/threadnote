@@ -1,5 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {isGitExecutable} from '@threadnote/platform/command';
+import * as EffectRecord from 'effect/Record';
 
 type Phase =
   | 'provisioning'
@@ -82,15 +84,15 @@ export const publicationDiagnostics = (now = () => performance.now()) => {
     phase: (phase: Phase) => {
       const at = elapsed();
       const operations: Record<string, {count: number; durationMs: number}> = Object.create(null);
-      for (const [name, totals] of Object.entries(operationTotals)) {
+      for (const [name, totals] of EffectRecord.toEntries(operationTotals)) {
         const previous = phaseOperationTotals[name] ?? {count: 0, durationMs: 0};
         const delta = {count: totals.count - previous.count, durationMs: totals.durationMs - previous.durationMs};
         if (delta.count > 0) operations[name] = delta;
       }
       phases.push({phase: currentPhase, startedMs: phaseStart, elapsedMs: at - phaseStart, operations});
       if (phases.length > 16) phases.shift();
-      phaseOperationTotals = Object.fromEntries(
-        Object.entries(operationTotals).map(([name, totals]) => [name, {...totals}]),
+      phaseOperationTotals = EffectRecord.fromEntries(
+        EffectArray.map(EffectRecord.toEntries(operationTotals), ([name, totals]) => [name, {...totals}]),
       );
       currentPhase = phase;
       phaseStart = at;
@@ -123,15 +125,15 @@ export const publicationDiagnostics = (now = () => performance.now()) => {
         elapsedMs: at,
         phase: currentPhase,
         phaseElapsedMs: at - phaseStart,
-        phases: phases.map(entry => ({...entry})),
+        phases: EffectArray.map(phases, entry => ({...entry})),
         commandCount,
-        operationTotals: Object.fromEntries(
-          Object.entries(operationTotals).map(([name, totals]) => [name, {...totals}]),
+        operationTotals: EffectRecord.fromEntries(
+          EffectArray.map(EffectRecord.toEntries(operationTotals), ([name, totals]) => [name, {...totals}]),
         ),
         activeCount,
         unlistedActiveCount: activeCount - active.size,
-        active: [...active.values()].map(entry => ({...entry, elapsedMs: at - entry.startedMs})),
-        recent: recent.map(entry => ({...entry})),
+        active: EffectArray.map([...active.values()], entry => ({...entry, elapsedMs: at - entry.startedMs})),
+        recent: EffectArray.map(recent, entry => ({...entry})),
       };
     },
   };

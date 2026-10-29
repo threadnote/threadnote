@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import type {RemoteMemoryReceiptV1} from '@threadnote/memory/remote/receipts';
 import type {RemoteMemoryRecallResult} from '../postgres/repository.js';
@@ -49,13 +50,13 @@ export interface RemoteRecallProjection {
   readonly text: string;
 }
 
-export class RemoteRecallProjectionError extends Schema.TaggedError<RemoteRecallProjectionError>()(
-  'RemoteRecallProjectionError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class RemoteRecallProjectionError extends Schema.TaggedError<
+  RemoteRecallProjectionError,
+  {readonly brand: unique symbol}
+>()('RemoteRecallProjectionError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export function projectRemoteRecallResponse(
   input: {
@@ -103,11 +104,11 @@ function responseForPrefix(
     confidence: aggregateConfidence(input.results[0]?.score),
     estimatedTokens: budgetTokens,
     explain,
-    nextAction: {tool: 'read_context', uris: prefix.slice(0, NEXT_ACTION_LIMIT).map(result => result.uri)},
+    nextAction: {tool: 'read_context', uris: EffectArray.map(prefix.slice(0, NEXT_ACTION_LIMIT), result => result.uri)},
     omittedResults: input.results.length - count,
     rankerVersion: REMOTE_RECALL_RANKER_VERSION,
     receipt: input.receipt,
-    results: prefix.map(result => projectedResult(result, explain)),
+    results: EffectArray.map(prefix, result => projectedResult(result, explain)),
     totalResults: input.results.length,
     type: 'threadnote-remote-recall',
     version: 1,

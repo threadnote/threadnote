@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {stopModelSetup} from '../models/setup.js';
 import {Console, Effect, Predicate, Schema} from 'effect';
 import {BUILTIN_MODEL_MANIFESTS, CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
@@ -7,14 +8,21 @@ import {resolveSelectedLocalModel, type SelectedLocalModel} from '@threadnote/in
 import {clearLocalModelSelection, readModelSelection, selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class LocalAiOperationError extends Schema.TaggedError<LocalAiOperationError>()('LocalAiOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class LocalAiOperationError extends Schema.TaggedError<LocalAiOperationError, {readonly brand: unique symbol}>()(
+  'LocalAiOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const COMPATIBILITY_MODEL_ID = 'gemma-4-e4b-it-q4';
-const compatibilityModel = BUILTIN_MODEL_MANIFESTS.find(model => model.id === COMPATIBILITY_MODEL_ID)!;
+const compatibilityModel = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === COMPATIBILITY_MODEL_ID),
+)!;
 
 export const LOCAL_AI_MODEL_ID = compatibilityModel.id;
 export const LOCAL_AI_MODEL_FILE = compatibilityModel.file;
@@ -263,7 +271,7 @@ function installedGenerationModels(config: LocalAiRuntimeConfig) {
       (left, right) =>
         Number(right.definition.id === current.roles.generation) -
           Number(left.definition.id === current.roles.generation) ||
-        left.definition.id.localeCompare(right.definition.id),
+        Effect2.pipe(left.definition.id, EffectString.localeCompare(right.definition.id)),
     );
   });
 }

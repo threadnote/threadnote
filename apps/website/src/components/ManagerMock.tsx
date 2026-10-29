@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {lazy, Suspense, useMemo, useState} from 'react';
 
 import {
@@ -13,6 +14,8 @@ import {
   type ManagerDemoTabId,
 } from '../content/managerDemo';
 import {docsArticleHref, siteHref} from '../lib/site';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const ManagerGraphScene = lazy(() => import('../visuals/ManagerGraphScene'));
 const DEMO_ONLY = 'Available in the real Threadnote Manager';
@@ -34,17 +37,20 @@ function panelId(tab: ManagerDemoTabId): string {
 }
 
 function NodeInspector({node}: {readonly node: ManagerDemoGraphNode}): React.ReactElement {
-  const relationships = managerDemoEdges
-    .filter(edge => edge.source === node.id || edge.target === node.id)
-    .map(edge => {
+  const relationships = EffectArray.map(
+    EffectArray.filter(managerDemoEdges, edge => edge.source === node.id || edge.target === node.id),
+    edge => {
       const outgoing = edge.source === node.id;
       const relatedId = outgoing ? edge.target : edge.source;
       return {
         ...edge,
         direction: outgoing ? 'outgoing' : 'incoming',
-        related: managerDemoNodes.find(candidate => candidate.id === relatedId),
+        related: EffectOption.getOrUndefined(
+          EffectArray.findFirst(managerDemoNodes, candidate => candidate.id === relatedId),
+        ),
       } as const;
-    });
+    },
+  );
 
   return (
     <aside aria-label={`Details for ${node.label}`} className="manager-demo-inspector">
@@ -78,7 +84,7 @@ function NodeInspector({node}: {readonly node: ManagerDemoGraphNode}): React.Rea
           <span>{relationships.length}</span>
         </div>
         <ul>
-          {relationships.map(relationship => (
+          {EffectArray.map(relationships, relationship => (
             <li key={`${relationship.source}:${relationship.relation}:${relationship.target}`}>
               <span
                 aria-label={`${relationship.provenance} relationship`}
@@ -104,23 +110,28 @@ function GraphPanel(): React.ReactElement {
   const [project, setProject] = useState('all');
   const [relation, setRelation] = useState<ManagerDemoGraphEdge['relation'] | 'all'>('all');
   const [nodeQuery, setNodeQuery] = useState('');
-  const selectedNode = managerDemoNodes.find(node => node.id === selectedNodeId) ?? managerDemoNodes[0];
+  const selectedNode =
+    EffectOption.getOrUndefined(EffectArray.findFirst(managerDemoNodes, node => node.id === selectedNodeId)) ??
+    managerDemoNodes[0];
   const visibleNodes = useMemo(() => {
-    const normalizedQuery = nodeQuery.trim().toLocaleLowerCase();
-    return managerDemoNodes.filter(node => {
+    const normalizedQuery = Effect.pipe(nodeQuery, EffectString.trim, EffectString.toLocaleLowerCase());
+    return EffectArray.filter(managerDemoNodes, node => {
       if (project !== 'all' && node.project !== project) return false;
       if (!normalizedQuery) return true;
-      return [node.label, node.path, node.kind, node.language, node.project, node.signature]
-        .join(' ')
-        .toLocaleLowerCase()
-        .includes(normalizedQuery);
+      return Effect.pipe(
+        EffectArray.join([node.label, node.path, node.kind, node.language, node.project, node.signature], ' '),
+        EffectString.toLocaleLowerCase(),
+        EffectString.includes(normalizedQuery),
+      );
     });
   }, [nodeQuery, project]);
-  const projects = [...new Set(managerDemoNodes.map(node => node.project))];
+  const projects = [...new Set(EffectArray.map(managerDemoNodes, node => node.project))];
   const chooseProject = (nextProject: string): void => {
     setProject(nextProject);
     if (nextProject === 'all') return;
-    const firstNode = managerDemoNodes.find(node => node.project === nextProject);
+    const firstNode = EffectOption.getOrUndefined(
+      EffectArray.findFirst(managerDemoNodes, node => node.project === nextProject),
+    );
     if (firstNode) setSelectedNodeId(firstNode.id);
   };
 
@@ -148,7 +159,7 @@ function GraphPanel(): React.ReactElement {
           <span>Project</span>
           <select onChange={event => chooseProject(event.target.value)} value={project}>
             <option value="all">All projects</option>
-            {projects.map(item => (
+            {EffectArray.map(projects, item => (
               <option key={item} value={item}>
                 {item}
               </option>
@@ -174,7 +185,7 @@ function GraphPanel(): React.ReactElement {
 
       <div className="manager-demo-filterbar">
         <span>Relationship</span>
-        {(['all', 'calls', 'conforms_to', 'implements', 'imports', 'uses'] as const).map(item => (
+        {EffectArray.map(['all', 'calls', 'conforms_to', 'implements', 'imports', 'uses'] as const, item => (
           <button aria-pressed={relation === item} key={item} onClick={() => setRelation(item)} type="button">
             {item === 'all' ? 'All' : RELATION_LABELS[item]}
           </button>
@@ -202,7 +213,7 @@ function GraphPanel(): React.ReactElement {
             id="manager-demo-node-results"
           >
             {visibleNodes.length ? (
-              visibleNodes.map(node => (
+              EffectArray.map(visibleNodes, node => (
                 <button
                   aria-pressed={node.id === selectedNode.id}
                   className={`manager-demo-node-button manager-demo-node-${node.tone}`}
@@ -274,7 +285,7 @@ function MemoryPanel(): React.ReactElement {
           <span>Status</span>
           <span>Updated</span>
         </div>
-        {managerDemoMemories.map(memory => (
+        {EffectArray.map(managerDemoMemories, memory => (
           <article key={memory.uri}>
             <div>
               <strong>{memory.topic}</strong>
@@ -305,7 +316,7 @@ function SharesPanel(): React.ReactElement {
         </button>
       </div>
       <div className="manager-demo-share-grid">
-        {managerDemoShares.map(share => (
+        {EffectArray.map(managerDemoShares, share => (
           <article key={share.label}>
             <header>
               <span className="manager-demo-share-mark" />
@@ -355,7 +366,7 @@ function DoctorPanel(): React.ReactElement {
         </div>
       </div>
       <ul className="manager-demo-check-list">
-        {managerDemoChecks.map(check => (
+        {EffectArray.map(managerDemoChecks, check => (
           <li key={check.label}>
             <span className="manager-demo-check-icon">✓</span>
             <div>
@@ -384,7 +395,7 @@ function ToolsPanel(): React.ReactElement {
         </button>
       </div>
       <div className="manager-demo-tools-grid">
-        {managerDemoTools.map(tool => (
+        {EffectArray.map(managerDemoTools, tool => (
           <article key={tool.name}>
             <span>{tool.surface}</span>
             <code>{tool.name}</code>
@@ -416,7 +427,10 @@ export function ManagerMock(): React.ReactElement {
   const [activeTab, setActiveTab] = useState<ManagerDemoTabId>('graph');
 
   const moveTab = (direction: -1 | 1): void => {
-    const current = managerDemoTabs.findIndex(tab => tab.id === activeTab);
+    const current = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(managerDemoTabs, tab => tab.id === activeTab),
+      () => -1,
+    );
     const next = (current + direction + managerDemoTabs.length) % managerDemoTabs.length;
     const nextTab = managerDemoTabs[next];
     setActiveTab(nextTab.id);
@@ -440,7 +454,7 @@ export function ManagerMock(): React.ReactElement {
           </div>
           <p className="manager-demo-sidebar-label">Workspace</p>
           <div aria-label="Manager sections" className="manager-demo-tabs" role="tablist">
-            {managerDemoTabs.map(tab => (
+            {EffectArray.map(managerDemoTabs, tab => (
               <button
                 aria-controls={panelId(tab.id)}
                 aria-label={`${tab.label}, ${tab.count}`}
@@ -488,7 +502,12 @@ export function ManagerMock(): React.ReactElement {
             <div>
               <span className="manager-demo-breadcrumb">~/.threadnote</span>
               <span>/</span>
-              <strong>{managerDemoTabs.find(tab => tab.id === activeTab)?.label}</strong>
+              <strong>
+                {
+                  EffectOption.getOrUndefined(EffectArray.findFirst(managerDemoTabs, tab => tab.id === activeTab))
+                    ?.label
+                }
+              </strong>
             </div>
             <div>
               <span className="manager-demo-index-state">Indexes current</span>

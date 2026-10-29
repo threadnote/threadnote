@@ -1,3 +1,5 @@
+import type {ISql} from 'postgres';
+import {parseRemoteShareAddress} from '@threadnote/memory/remote/address';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {inspectRemoteMemoryContent} from '@threadnote/memory/remote/content';
@@ -113,4 +115,29 @@ export function mutationActor(
         ...(attestation.turnId ? {turnId: attestation.turnId} : {}),
       }
     : {principalId: principal.principalId};
+}
+
+export async function resolveCanonicalUri(
+  transaction: ISql,
+  principal: AuthorizedRemotePrincipal,
+  inputUri: string,
+): Promise<string> {
+  try {
+    const address = parseRemoteShareAddress(inputUri);
+    if (address.shareId !== principal.shareId)
+      throw remoteMemoryError('forbidden', 'The URI belongs to another share.');
+    return address.canonicalUri;
+  } catch (cause) {
+    if (cause instanceof Error && cause.name === 'RemoteMemoryError') throw cause;
+  }
+  const aliases = await transaction<{canonical_uri: string}[]>`
+    SELECT canonical_uri FROM remote_memory.uri_aliases
+    WHERE tenant_id = ${principal.tenantId} AND share_id = ${principal.shareId} AND alias_uri = ${inputUri}
+      AND (expires_at IS NULL OR expires_at > now())
+  `;
+  const canonicalUri = aliases[0]?.canonical_uri;
+  if (!canonicalUri || parseRemoteShareAddress(canonicalUri).shareId !== principal.shareId) {
+    throw remoteMemoryError('not_found', 'The remote memory was not found.');
+  }
+  return canonicalUri;
 }

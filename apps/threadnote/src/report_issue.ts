@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, FileSystem, Schema} from 'effect';
 import {applyScrubber, type ScrubberResult} from '@threadnote/platform/scrubber';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -6,6 +7,8 @@ import {sha256Hex} from '@threadnote/platform/digest';
 import {productionLogSupportExcerpt, type ProductionLogSupportExcerpt} from './effect/production_log.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const THREADNOTE_GITHUB_REPOSITORY = 'threadnote/threadnote';
 const THREADNOTE_GITHUB_ISSUES_ENDPOINT = `repos/${THREADNOTE_GITHUB_REPOSITORY}/issues`;
@@ -40,11 +43,17 @@ interface PreparedIssue {
   readonly title: string;
 }
 
-export class ReportIssueInvalid extends Schema.TaggedError<ReportIssueInvalid>()('ReportIssueInvalid', {
-  message: Schema.String,
-}) {}
+export class ReportIssueInvalid extends Schema.TaggedError<ReportIssueInvalid, {readonly brand: unique symbol}>()(
+  'ReportIssueInvalid',
+  {
+    message: Schema.String,
+  },
+) {}
 
-export class ReportIssueCreateFailed extends Schema.TaggedError<ReportIssueCreateFailed>()('ReportIssueCreateFailed', {
+export class ReportIssueCreateFailed extends Schema.TaggedError<
+  ReportIssueCreateFailed,
+  {readonly brand: unique symbol}
+>()('ReportIssueCreateFailed', {
   message: Schema.String,
 }) {}
 
@@ -88,8 +97,8 @@ const prepareReportIssue = Effect.fn('reportIssue.prepareReportIssue')(function*
       message: `Refusing to report an issue containing a possible ${titleResult.blocker ?? bodyResult.blocker}. Remove it and retry.`,
     });
   }
-  const title = titleResult.cleaned.trim();
-  const description = bodyResult.cleaned.trim();
+  const title = Effect2.pipe(titleResult.cleaned, EffectString.trim);
+  const description = Effect2.pipe(bodyResult.cleaned, EffectString.trim);
   if (title.length === 0) {
     return yield* ReportIssueInvalid.make({message: 'Issue title must not be empty.'});
   }
@@ -139,7 +148,7 @@ const prepareReportIssue = Effect.fn('reportIssue.prepareReportIssue')(function*
       );
     }
   }
-  const body = `${description}\n\n---\n\n${diagnostics.join('\n')}`;
+  const body = `${description}\n\n---\n\n${EffectArray.join(diagnostics, '\n')}`;
   if (body.length > REPORT_ISSUE_BODY_MAX_CHARACTERS) {
     return yield* ReportIssueInvalid.make({
       message: `Prepared issue body exceeds the ${REPORT_ISSUE_BODY_MAX_CHARACTERS}-character safety limit.`,
@@ -202,7 +211,7 @@ const createGitHubIssue = Effect.fn('reportIssue.createGitHubIssue')(function* (
           timeoutMs: REPORT_ISSUE_COMMAND_TIMEOUT_MILLISECONDS,
         },
       ).pipe(Effect.mapError(cause => reportIssueCreateFailure(cause, system.platform)));
-      const issueUrl = result.stdout.trim();
+      const issueUrl = Effect2.pipe(result.stdout, EffectString.trim);
       if (!isThreadnoteIssueUrl(issueUrl)) {
         return yield* ReportIssueCreateFailed.make({
           message: 'GitHub returned an invalid issue URL. Check the repository before retrying.',
@@ -249,7 +258,11 @@ function scrubPublicText(content: string): ScrubberResult {
 
 function hasUnsafePublicControl(content: string, allowFormattingWhitespace: boolean): boolean {
   for (const character of content) {
-    const code = character.codePointAt(0);
+    const code = Effect2.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect2.Option.getOrElse(() => undefined),
+    );
     if (code === undefined) {
       continue;
     }
@@ -274,15 +287,16 @@ function mergeRedactions(
       counts.set(redaction.name, (counts.get(redaction.name) ?? 0) + redaction.count);
     }
   }
-  return [...counts.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([name, count]) => ({count, name}));
+  return EffectArray.map(
+    [...counts.entries()].sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right))),
+    ([name, count]) => ({count, name}),
+  );
 }
 
 function isThreadnoteIssueUrl(value: string): boolean {
-  if (!value.startsWith(THREADNOTE_GITHUB_ISSUE_URL_PREFIX)) {
+  if (!Effect2.pipe(value, EffectString.startsWith(THREADNOTE_GITHUB_ISSUE_URL_PREFIX))) {
     return false;
   }
-  const issueNumber = value.slice(THREADNOTE_GITHUB_ISSUE_URL_PREFIX.length);
+  const issueNumber = Effect2.pipe(value, EffectString.slice(THREADNOTE_GITHUB_ISSUE_URL_PREFIX.length));
   return /^[1-9]\d*$/.test(issueNumber);
 }

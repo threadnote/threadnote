@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
@@ -54,6 +55,8 @@ import {GraphSharingError} from '@threadnote/graph/sharing/errors';
 import {graphSharingFrontierPointerPath, graphSharingLayout} from '@threadnote/graph/sharing/layout';
 import {graphShareFrontierDiscoveryTag} from '@threadnote/graph/sharing/namespace';
 import {GRAPH_SHARE_HTTP_CAS_MAX_BYTES, graphSharePayloadLooksLikeGitObject} from '@threadnote/graph/sharing/oci';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const sharingLayer = Layer.mergeAll(BunServices.layer, BunHttpClient.layer, TestSystemInfoLayer);
 
@@ -73,7 +76,7 @@ describe('graph share live coordinator and digest CAS', () => {
             listen: {hostname: '127.0.0.1', port: 0},
             onListening: info => Deferred.succeed(ready, info).pipe(Effect.asVoid),
             organization: 'acme',
-            repositoryId: 'a'.repeat(64),
+            repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
             threadnoteHome: home,
           }),
         );
@@ -125,7 +128,7 @@ describe('graph share live coordinator and digest CAS', () => {
     {
       generation: FC.integer({max: 10_000, min: 0}),
       organization: FC.array(FC.constantFrom(...'0123456789abcdef'), {maxLength: 16, minLength: 1}).map(characters =>
-        characters.join(''),
+        EffectArray.join(characters, ''),
       ),
     },
     ({generation, organization}) =>
@@ -152,15 +155,15 @@ describe('graph share live coordinator and digest CAS', () => {
             listen: {hostname: '127.0.0.1', port: 0},
             onListening: info => Deferred.succeed(ready, info).pipe(Effect.asVoid),
             organization: 'acme',
-            repositoryId: 'a'.repeat(64),
+            repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
             threadnoteHome: home,
           }),
         );
         const info = yield* Deferred.await(ready);
-        const announcements = [0, 1, 2, 3, 4, 5, 6, 7].map(index => ({
-          actionKey: index.toString(16).repeat(64).slice(0, 64),
+        const announcements = EffectArray.map([0, 1, 2, 3, 4, 5, 6, 7], index => ({
+          actionKey: Effect2.pipe(index.toString(16), EffectString.repeat(64), EffectString.slice(0, 64)),
           attestationDigest: sha256Digest(`att-${index}`),
-          batchId: 'b'.repeat(40),
+          batchId: Effect2.pipe('b', EffectString.repeat(40)),
           resultManifestDigest: sha256Digest(`res-${index}`),
           semanticDigest: sha256Digest(`sem-${index}`),
         }));
@@ -171,9 +174,9 @@ describe('graph share live coordinator and digest CAS', () => {
         );
         const status = yield* graphShareControlGetStatus(info.url);
         expect(status.receipts).toHaveLength(announcements.length);
-        const persisted = (yield* readJsonFile(graphSharingLayout(path, home).coordinatorStatePath)) as {
-          readonly receipts: {readonly receipts: readonly unknown[]};
-        };
+        const persisted = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({receipts: Schema.Struct({receipts: Schema.Array(Schema.Unknown)})}),
+        )(yield* readJsonFile(graphSharingLayout(path, home).coordinatorStatePath));
         expect(persisted.receipts.receipts).toHaveLength(announcements.length);
       }).pipe(provideTestLayer(sharingLayer)),
     ),
@@ -194,7 +197,7 @@ describe('graph share live coordinator and digest CAS', () => {
             listen: {hostname: '127.0.0.1', port: 0},
             onListening: info => Deferred.succeed(ready, info).pipe(Effect.asVoid),
             organization: 'acme',
-            repositoryId: 'a'.repeat(64),
+            repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
             threadnoteHome: home,
           }),
         );
@@ -266,7 +269,7 @@ describe('graph share live coordinator and digest CAS', () => {
             listen: {hostname: '127.0.0.1', port: 0},
             onListening: info => Deferred.succeed(ready, info).pipe(Effect.asVoid),
             organization: 'acme',
-            repositoryId: 'a'.repeat(64),
+            repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
             threadnoteHome: home,
           }),
         );
@@ -310,7 +313,7 @@ describe('graph share live coordinator and digest CAS', () => {
         yield* fs.writeFile(artifactPath, pack.bytes);
         const artifactDigest = yield* putCasFile(publisherCas, artifactPath);
         const layers = yield* putGraphShareCheckpointLayers(publisherCas, artifactDigest);
-        const repositoryId = 'a'.repeat(64);
+        const repositoryId = Effect2.pipe('a', EffectString.repeat(64));
         const sourceCommit = HTTP_SHA1_ZERO;
         const manifest: GraphShareFrontierManifestV1 = {
           branch: 'refs/heads/main',
@@ -322,8 +325,8 @@ describe('graph share live coordinator and digest CAS', () => {
           },
           deltas: [],
           generation: 1,
-          graphAbi: 'c'.repeat(64),
-          graphContentId: 'cgc_' + 'd'.repeat(40),
+          graphAbi: Effect2.pipe('c', EffectString.repeat(64)),
+          graphContentId: 'cgc_' + Effect2.pipe('d', EffectString.repeat(40)),
           logicalGraphDigest: sha256Digest('logical'),
           previousManifestDigest: null,
           profileDigest: sha256Digest('profile'),
@@ -400,16 +403,23 @@ describe('graph share live coordinator and digest CAS', () => {
         const assembledDigest = yield* assembleGraphShareCheckpointLayers(clientCas, metadata, assembled);
         expect(assembledDigest).toBe(artifactDigest);
         expect(assembledDigest).toBe(manifest.checkpoint.manifestDigest);
-        const latest = (yield* readJsonFile(
-          graphSharingFrontierPointerPath(
-            path,
-            graphSharingLayout(path, home, publisherCas).frontiersRoot,
-            repositoryId,
+        const latest = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({envelopeDigest: Schema.String, manifestDigest: Schema.String}),
+        )(
+          yield* readJsonFile(
+            graphSharingFrontierPointerPath(
+              path,
+              graphSharingLayout(path, home, publisherCas).frontiersRoot,
+              repositoryId,
+            ),
           ),
-        )) as {readonly envelopeDigest: string; readonly manifestDigest: string};
+        );
         expect(latest.manifestDigest).toBe(published.manifestDigest);
         expect(latest.envelopeDigest).toBe(published.envelopeDigest);
-        const frontier = yield* graphShareControlGetFrontier(info.url, tagName.slice('tn-frontier-'.length));
+        const frontier = yield* graphShareControlGetFrontier(
+          info.url,
+          Effect2.pipe(tagName, EffectString.slice('tn-frontier-'.length)),
+        );
         expect(frontier.manifestDigest).toBe(published.manifestDigest);
         expect(frontier.envelopeDigest).toBe(published.envelopeDigest);
       }).pipe(provideTestLayer(sharingLayer)),
@@ -424,8 +434,8 @@ describe('graph share live coordinator and digest CAS', () => {
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-share-status-'});
         const casRoot = path.join(home, 'cas');
         yield* fs.makeDirectory(casRoot, {recursive: true, mode: 0o700});
-        const repositoryId = 'a'.repeat(64);
-        const sourceCommit = 'b'.repeat(40);
+        const repositoryId = Effect2.pipe('a', EffectString.repeat(64));
+        const sourceCommit = Effect2.pipe('b', EffectString.repeat(40));
         const manifestDigest = sha256Digest('frontier-manifest');
         yield* recordPublishedFrontier(
           {casRoot, organization: 'acme', repositoryId, threadnoteHome: home},
@@ -460,8 +470,8 @@ describe('graph share live coordinator and digest CAS', () => {
   );
 });
 
-const HTTP_SHA256_ZERO = '0'.repeat(64);
-const HTTP_SHA1_ZERO = '0'.repeat(40);
+const HTTP_SHA256_ZERO = Effect2.pipe('0', EffectString.repeat(64));
+const HTTP_SHA1_ZERO = Effect2.pipe('0', EffectString.repeat(40));
 const HTTP_UTF8 = new TextEncoder();
 
 function httpCheckpointMetadata(eligibleFiles: number): CodeGraphCheckpointMetadataV1 {
@@ -492,7 +502,7 @@ function httpCheckpointMetadata(eligibleFiles: number): CodeGraphCheckpointMetad
 }
 
 function httpCheckpointRecords(paths: readonly string[]): CodeGraphCheckpointRecordV1[] {
-  return paths.flatMap(filePath => [httpFileRecord(filePath), httpFactRecord(filePath)]);
+  return EffectArray.flatMap(paths, filePath => [httpFileRecord(filePath), httpFactRecord(filePath)]);
 }
 
 function httpFileRecord(filePath: string): CodeGraphCheckpointFileRecordV1 {

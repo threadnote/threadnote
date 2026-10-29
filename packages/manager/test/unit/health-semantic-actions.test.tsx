@@ -9,8 +9,11 @@ import {buildContextHealthReport} from '@threadnote/context/health';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import {SemanticResolutionReview} from '../../src/attention/semantic_comparison.js';
 import {HealthDetail} from '../../src/attention_details.js';
+import {Array as EffectArray, String as EffectString, pipe as EffectPipe, Option as EffectOption} from 'effect';
+
 import {retryEvidenceRead} from '../../src/attention/evidence_refresh.js';
 import {ManagerApiError} from '../../src/ui/support.js';
+import type {ManagerContextMaintenanceStatusV2} from '../../src/attention/contracts.js';
 
 const record = (name: string, body: string): MemoryRecord => ({
   uri: `threadnote://memory/${name}`,
@@ -43,14 +46,27 @@ const preview = {
   keptUri: evidence.left.recordUri,
   archivedUri: evidence.right.recordUri,
   archivedContent: '# Timeout policy\nTimeout must be 30 seconds.\n\nOther important advice stays in history.',
+  constraints: [],
 };
 const response = (data: unknown, status = 200) => new Response(JSON.stringify(data), {status});
+function maintenanceStatus(cases: ManagerContextMaintenanceStatusV2['cases']): ManagerContextMaintenanceStatusV2 {
+  return {
+    version: 2,
+    paused: false,
+    state: 'needs-decision',
+    generation: 'fixture-generation',
+    projects: [],
+    cases,
+    receipts: [],
+  };
+}
+
 let root: Root;
 let host: HTMLDivElement;
 const resolved = vi.fn();
 const refresh = vi.fn();
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
@@ -78,26 +94,49 @@ async function render() {
   );
 }
 async function click(label: string) {
-  const button = [...host.querySelectorAll('button')].find(item => item.textContent?.trim() === label);
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...host.querySelectorAll('button')],
+      item =>
+        EffectPipe(item.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : EffectPipe(effectOptionalString, EffectString.trim),
+        ) === label,
+    ),
+  );
   expect(button).toBeDefined();
   await act(async () => button!.click());
 }
+function requestBodyText(init: RequestInit | undefined): string {
+  if (typeof init?.body !== 'string') throw new Error('Expected a JSON request body.');
+  return init.body;
+}
+
 async function choose(value: string) {
   await act(async () => host.querySelector<HTMLInputElement>(`input[value="${value}"]`)!.click());
 }
 
 it('previews the exact chosen pair, requires whole-memory acknowledgement and confirms only that revision', async () => {
   const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
-    response(path.endsWith('/preview') ? {preview} : {result: {status: 'applied'}}),
+    response(
+      EffectPipe(path, EffectString.endsWith('/preview')) ? {preview} : {result: {status: 'applied', choice: 'left'}},
+    ),
   );
   vi.stubGlobal('fetch', fetch);
   await render();
-  const button = [...host.querySelectorAll('button')].find(item => item.textContent?.trim() === 'Preview my choice');
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...host.querySelectorAll('button')],
+      item =>
+        EffectPipe(item.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : EffectPipe(effectOptionalString, EffectString.trim),
+        ) === 'Preview my choice',
+    ),
+  );
   expect(button?.disabled).toBe(true);
   await choose('left');
   expect(fetch).not.toHaveBeenCalled();
   await click('Preview my choice');
-  expect(JSON.parse(fetch.mock.calls[0][1]!.body as string)).toEqual({
+  expect(JSON.parse(requestBodyText(fetch.mock.calls[0][1]))).toEqual({
     project: 'threadnote',
     contradictionId: evidence.contradictionId,
     left: {
@@ -114,14 +153,23 @@ it('previews the exact chosen pair, requires whole-memory acknowledgement and co
   });
   expect(host.textContent).toContain('whole memory');
   expect(host.textContent).toContain('Other important advice stays in history.');
-  const confirm = [...host.querySelectorAll('button')].find(item =>
-    item.textContent?.includes('Confirm and move memory B to history'),
+  const confirm = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...host.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          EffectPipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : EffectPipe(effectOptionalString, EffectString.includes('Confirm and move memory B to history')),
+          ))(__effectArrayValue),
+    ),
   );
   expect(confirm?.disabled).toBe(true);
   await act(async () => host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
   await click('Confirm and move memory B to history');
   expect(fetch.mock.calls[1][0]).toBe('/api/context-health/semantic/apply');
-  expect(JSON.parse(fetch.mock.calls[1][1]!.body as string)).toEqual({
+  expect(JSON.parse(requestBodyText(fetch.mock.calls[1][1]))).toEqual({
     project: 'threadnote',
     previewId: 'preview-one',
     revision: 'revision-one',
@@ -179,7 +227,7 @@ it('shows an honest review-only reason with no approval control', async () => {
 
 it('clears a stale preview and offers refresh without reporting a successful change', async () => {
   const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
-    path.endsWith('/preview')
+    EffectPipe(path, EffectString.endsWith('/preview'))
       ? response({preview})
       : response(
           {
@@ -211,7 +259,7 @@ it('clears a stale preview and offers refresh without reporting a successful cha
 it('confirms keep-both without an archive acknowledgment and accepts an idempotent result', async () => {
   const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
     response(
-      path.endsWith('/preview')
+      EffectPipe(path, EffectString.endsWith('/preview'))
         ? {preview: {...preview, choice: 'both', mode: 'keep-both', summary: 'Keep both memories current.'}}
         : {result: {status: 'already-applied', choice: 'both'}},
     ),
@@ -234,7 +282,18 @@ it('blocks confirmation when an archive preview is incomplete or names the wrong
   await click('Preview my choice');
   expect(host.querySelector('[role="alert"]')?.textContent).toContain('preview is incomplete');
   expect(host.querySelector('input[type="checkbox"]')).toBeNull();
-  const confirm = [...host.querySelectorAll('button')].find(item => item.textContent?.includes('Confirm and move'));
+  const confirm = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...host.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          EffectPipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : EffectPipe(effectOptionalString, EffectString.includes('Confirm and move')),
+          ))(__effectArrayValue),
+    ),
+  );
   expect(confirm?.disabled).toBe(true);
   await act(async () => confirm!.click());
   expect(fetch).toHaveBeenCalledTimes(1);
@@ -249,7 +308,15 @@ it('ignores a late preview after the comparison changes', async () => {
   );
   await render();
   await choose('left');
-  const button = [...host.querySelectorAll('button')].find(item => item.textContent?.trim() === 'Preview my choice');
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...host.querySelectorAll('button')],
+      item =>
+        EffectPipe(item.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : EffectPipe(effectOptionalString, EffectString.trim),
+        ) === 'Preview my choice',
+    ),
+  );
   await act(async () => button!.click());
   await act(async () =>
     root.render(
@@ -264,7 +331,9 @@ it('ignores a late preview after the comparison changes', async () => {
   );
   await act(async () => pending.resolve(response({preview})));
   expect(host.textContent).not.toContain('Keep memory A current');
-  expect([...host.querySelectorAll<HTMLInputElement>('input[type="radio"]')].every(input => !input.checked)).toBe(true);
+  expect(
+    EffectArray.every([...host.querySelectorAll<HTMLInputElement>('input[type="radio"]')], input => !input.checked),
+  ).toBe(true);
   expect(resolved).not.toHaveBeenCalled();
 });
 
@@ -292,9 +361,9 @@ it('keeps a non-conflict operational error retryable without claiming that the m
 
 it('revalidates a stale finding in place and retains the human choice', async () => {
   const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
-    path.endsWith('/semantic/preview')
+    EffectString.endsWith('/semantic/preview')(path)
       ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
-      : path.endsWith('/semantic/apply')
+      : EffectString.endsWith('/semantic/apply')(path)
         ? response({result: {status: 'applied', choice: 'both'}})
         : response({outcome: 'ready', evidence}),
   );
@@ -322,7 +391,9 @@ it('revalidates a stale finding in place and retains the human choice', async ()
   expect(host.textContent).not.toContain('paused because');
   expect(host.textContent).toContain('Keep memory A current');
   await click('Confirm both apply');
-  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/semantic/apply'))).toHaveLength(1);
+  expect(EffectArray.filter(fetch.mock.calls, ([path]) => EffectString.endsWith('/semantic/apply')(path))).toHaveLength(
+    1,
+  );
   expect(resolved).toHaveBeenCalledOnce();
   expect(close).toHaveBeenCalledOnce();
 });
@@ -357,9 +428,9 @@ it('keeps a retained semantic preview through unrelated invalidation and adopts 
   };
   const adopted = vi.fn();
   const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
-    path.endsWith('/semantic/preview')
+    EffectString.endsWith('/semantic/preview')(path)
       ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
-      : path.endsWith('/semantic/apply')
+      : EffectString.endsWith('/semantic/apply')(path)
         ? response({result: {status: 'applied', choice: 'both'}})
         : _init?.method === 'POST'
           ? response({
@@ -367,8 +438,8 @@ it('keeps a retained semantic preview through unrelated invalidation and adopts 
               item: {...item, evidenceRevision: 'scan-two'},
               packet: {...packet, evidenceRevision: 'scan-two'},
             })
-          : path.includes('view=status')
-            ? response({version: 2, cases: [item]})
+          : EffectString.includes('view=status')(path)
+            ? response(maintenanceStatus([item]))
             : response(packet),
   );
   vi.stubGlobal('fetch', fetch);
@@ -394,13 +465,15 @@ it('keeps a retained semantic preview through unrelated invalidation and adopts 
   expect(adopted).toHaveBeenLastCalledWith(expect.objectContaining({evidenceRevision: 'scan-two'}), 'case-one');
   await click('Confirm both apply');
   expect(resolved).toHaveBeenCalledOnce();
-  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/semantic/apply'))).toHaveLength(1);
+  expect(EffectArray.filter(fetch.mock.calls, ([path]) => EffectString.endsWith('/semantic/apply')(path))).toHaveLength(
+    1,
+  );
 });
 
 it('retains a URI choice after source changes and requires a fresh preview before confirmation', async () => {
   let revision = 'first';
   const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
-    path.endsWith('/preview')
+    EffectString.endsWith('/preview')(path)
       ? response({preview: {...preview, choice: 'both', mode: 'keep-both', revision}})
       : response({result: {status: 'applied', choice: 'both'}}),
   );
@@ -429,7 +502,7 @@ it('retains a URI choice after source changes and requires a fresh preview befor
   expect(host.textContent).not.toContain('Confirm both apply');
   await click('Preview my choice');
   await click('Confirm both apply');
-  const applied = fetch.mock.calls.filter(([path]) => path.endsWith('/apply'));
+  const applied = EffectArray.filter(fetch.mock.calls, ([path]) => EffectString.endsWith('/apply')(path));
   expect(applied).toHaveLength(1);
   expect(JSON.parse(String(applied[0][1]?.body)).revision).toBe('second');
 });
@@ -438,7 +511,7 @@ it('preserves source identity through bounded arbitrary refresh and ordering seq
   fc.assert(
     fc.property(fc.constantFrom('left', 'right', 'both'), fc.array(fc.boolean(), {maxLength: 24}), (initial, swaps) => {
       let current = evidence;
-      let choice = initial as 'left' | 'right' | 'both' | undefined;
+      let choice: 'left' | 'right' | 'both' | undefined = initial;
       const selectedUri = initial === 'both' ? undefined : evidence[initial].recordUri;
       for (const swap of swaps) {
         const next = swap ? {...current, left: current.right, right: current.left} : {...current};
@@ -474,13 +547,20 @@ it('redacts selected semantic evidence after source access is revoked and sends 
   const fetch = vi.fn(async (path: string, init?: RequestInit) =>
     init?.method === 'POST'
       ? response({error: 'Source access is unavailable.'}, 403)
-      : path.includes('view=status')
-        ? response({version: 2, cases: [item]})
+      : EffectString.includes('view=status')(path)
+        ? response(maintenanceStatus([item]))
         : response({
             version: 2,
             project: 'threadnote',
             caseId: item.caseId,
+            memoryUri: 'threadnote://memory/a',
+            expectedContentHash: 'hash',
             evidenceRevision: 'scan',
+            reason: item.reason,
+            choices: [],
+            allowedOperations: [],
+            instructions: 'Compare the current statements.',
+            family: item.family,
             semanticEvidence: evidence,
           }),
   );
@@ -503,28 +583,32 @@ it('redacts selected semantic evidence after source access is revoked and sends 
   await act(async () => root.render(element(true)));
   expect(host.textContent).not.toContain(evidence.left.text);
   expect(host.textContent).not.toContain('Confirm both apply');
-  expect(fetch.mock.calls.some(([path]) => path.endsWith('/semantic/apply'))).toBe(false);
+  expect(EffectArray.some(fetch.mock.calls, ([path]) => EffectString.endsWith('/semantic/apply')(path))).toBe(false);
 });
 
 it('revalidates a real duplicate finding through current health evidence despite its projected caseId', async () => {
   const health = buildContextHealthReport({
     project: 'threadnote',
-    records: [
-      record('duplicate-a', 'Identical retained advice.'),
-      record('duplicate-b', 'Identical retained advice.'),
-    ].map(value => ({
-      ...value,
-      uri:
-        value.uri.replace('threadnote://memory/', 'threadnote://user/tester/memories/durable/projects/threadnote/') +
-        '.md',
-      metadata: {...value.metadata, topic: 'same-advice'},
-    })),
+    records: EffectArray.map(
+      [record('duplicate-a', 'Identical retained advice.'), record('duplicate-b', 'Identical retained advice.')],
+      value => ({
+        ...value,
+        uri:
+          EffectString.replace(
+            'threadnote://memory/',
+            'threadnote://user/tester/memories/durable/projects/threadnote/',
+          )(value.uri) + '.md',
+        metadata: {...value.metadata, topic: 'same-advice'},
+      }),
+    ),
     now: new Date('2026-06-01'),
   });
-  const duplicate = health.findings.find(item => item.category === 'exact-duplicate')!;
+  const duplicate = EffectOption.getOrUndefined(
+    EffectArray.findFirst(health.findings, item => item.category === 'exact-duplicate'),
+  )!;
   expect(duplicate.caseId).toBeTruthy();
   const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
-    path.startsWith('/api/context-health?')
+    EffectString.startsWith('/api/context-health?')(path)
       ? response({...health, recordPreviews: [], repositoryEvidence: {state: 'available'}})
       : path === '/api/context-health/preview'
         ? response({
@@ -556,20 +640,20 @@ it('revalidates a real duplicate finding through current health evidence despite
   await act(async () => root.render(element(false)));
   await click('Preview repair');
   expect(host.textContent).toContain('Archive the duplicate.');
-  expect(fetch.mock.calls.some(([path]) => path === '/api/attention/context-maintenance')).toBe(false);
+  expect(EffectArray.some(fetch.mock.calls, ([path]) => path === '/api/attention/context-maintenance')).toBe(false);
 });
 
 it('keeps comparison DOM, scroll, choice and preview stable through busy retries and recovers automatically', async () => {
   vi.useFakeTimers();
   let attempts = 0;
   const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
-    path.endsWith('/semantic/preview')
+    EffectString.endsWith('/semantic/preview')(path)
       ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
-      : path.endsWith('/semantic/refresh')
+      : EffectString.endsWith('/semantic/refresh')(path)
         ? ++attempts < 3
           ? response({error: 'Timed out waiting for local lock /private/state.lock.'}, 503)
           : response({outcome: 'ready', evidence})
-        : response({result: {status: 'applied'}}),
+        : response({result: {status: 'applied', choice: 'both'}}),
   );
   vi.stubGlobal('fetch', fetch);
   vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
@@ -596,7 +680,9 @@ it('keeps comparison DOM, scroll, choice and preview stable through busy retries
   expect(host.querySelector('.semantic-memory-card')).toBe(card);
   expect(dialog.scrollTop).toBe(91);
   expect(host.textContent).not.toContain('/private/state.lock');
-  const confirm = [...host.querySelectorAll('button')].find(button => button.textContent === 'Confirm both apply')!;
+  const confirm = EffectOption.getOrUndefined(
+    EffectArray.findFirst([...host.querySelectorAll('button')], button => button.textContent === 'Confirm both apply'),
+  )!;
   expect(confirm.disabled).toBe(true);
   expect(host.querySelector<HTMLInputElement>('input[value="both"]')!.checked).toBe(true);
   await act(async () => vi.advanceTimersByTimeAsync(1500));
@@ -605,8 +691,10 @@ it('keeps comparison DOM, scroll, choice and preview stable through busy retries
   expect(host.querySelector('.semantic-resolution-footer p')).toBe(status);
   expect(dialog.scrollTop).toBe(91);
   expect(confirm.disabled).toBe(false);
-  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/semantic/preview'))).toHaveLength(1);
-  expect(fetch.mock.calls.some(([path]) => path.endsWith('/semantic/apply'))).toBe(false);
+  expect(
+    EffectArray.filter(fetch.mock.calls, ([path]) => EffectString.endsWith('/semantic/preview')(path)),
+  ).toHaveLength(1);
+  expect(EffectArray.some(fetch.mock.calls, ([path]) => EffectString.endsWith('/semantic/apply')(path))).toBe(false);
 });
 
 it.each([401, 403, 404])(
@@ -696,7 +784,7 @@ it('retains a completed failure banner until a later current check succeeds with
   let failed = true;
   const pending = Promise.withResolvers<Response>();
   const fetch = vi.fn(async (path: string) =>
-    path.endsWith('/semantic/preview')
+    EffectString.endsWith('/semantic/preview')(path)
       ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
       : failed
         ? response({error: 'Busy'}, 503)
@@ -731,7 +819,9 @@ it('retains a completed failure banner until a later current check succeeds with
   await act(async () => pending.resolve(response({outcome: 'ready', evidence})));
   expect(banner.isConnected).toBe(true);
   expect(banner.style.visibility).toBe('hidden');
-  const confirm = [...host.querySelectorAll('button')].find(button => button.textContent === 'Confirm both apply')!;
+  const confirm = EffectOption.getOrUndefined(
+    EffectArray.findFirst([...host.querySelectorAll('button')], button => button.textContent === 'Confirm both apply'),
+  )!;
   expect(confirm.disabled).toBe(false);
 });
 
@@ -742,7 +832,7 @@ it('F007 preserves choice and preview through incomplete analysis while blocking
     'The bounded comparison check could not review every statement. Your choice is saved; check current evidence after reviewing the source memories.';
   const changed = {...evidence, left: {...evidence.left, recordContentFingerprint: 'changed-source'}};
   const fetch = vi.fn(async (path: string) =>
-    path.endsWith('/semantic/preview')
+    EffectString.endsWith('/semantic/preview')(path)
       ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
       : (++checks,
         incomplete ? response({outcome: 'incomplete', reason}) : response({outcome: 'ready', evidence: changed})),
@@ -769,10 +859,12 @@ it('F007 preserves choice and preview through incomplete analysis while blocking
   expect(host.querySelector<HTMLInputElement>('input[value="both"]')!.checked).toBe(true);
   expect(host.textContent).toContain(reason);
   expect(checks).toBe(1);
-  const confirm = [...host.querySelectorAll('button')].find(button => button.textContent === 'Confirm both apply')!;
+  const confirm = EffectOption.getOrUndefined(
+    EffectArray.findFirst([...host.querySelectorAll('button')], button => button.textContent === 'Confirm both apply'),
+  )!;
   expect(confirm.disabled).toBe(true);
   await click('Confirm both apply');
-  expect(fetch.mock.calls.some(([path]) => path.endsWith('/semantic/apply'))).toBe(false);
+  expect(EffectArray.some(fetch.mock.calls, ([path]) => EffectString.endsWith('/semantic/apply')(path))).toBe(false);
   incomplete = false;
   await click('Check current evidence');
   expect(checks).toBe(2);
@@ -815,7 +907,7 @@ it.each(['body-limit', 'claim-limit', 'partial-unique'])(
     const adopted = vi.fn();
     let checks = 0;
     const fetch = vi.fn(async (path: string, init?: RequestInit) => {
-      if (path.endsWith('/semantic/preview'))
+      if (EffectString.endsWith('/semantic/preview')(path))
         return response({preview: {...preview, choice: 'both', mode: 'keep-both'}});
       if (init?.method === 'POST') {
         expect(JSON.parse(String(init.body))).toMatchObject({
@@ -826,7 +918,7 @@ it.each(['body-limit', 'claim-limit', 'partial-unique'])(
         checks++;
         return response({outcome: 'incomplete', reason});
       }
-      return response(path.includes('view=status') ? {version: 2, cases: [item]} : packet);
+      return response(EffectString.includes('view=status')(path) ? maintenanceStatus([item]) : packet);
     });
     vi.stubGlobal('fetch', fetch);
     vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
@@ -854,12 +946,17 @@ it.each(['body-limit', 'claim-limit', 'partial-unique'])(
     expect(host.querySelector('.semantic-memory-card')).toBe(card);
     expect(body.scrollTop).toBe(87);
     expect(host.querySelector<HTMLInputElement>('input[value="both"]')!.checked).toBe(true);
-    const confirm = [...host.querySelectorAll('button')].find(button => button.textContent === 'Confirm both apply')!;
+    const confirm = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...host.querySelectorAll('button')],
+        button => button.textContent === 'Confirm both apply',
+      ),
+    )!;
     expect(confirm.disabled).toBe(true);
     await click('Confirm both apply');
     expect(checks).toBe(1);
     expect(adopted).not.toHaveBeenCalled();
-    expect(fetch.mock.calls.some(([path]) => path.endsWith('/semantic/apply'))).toBe(false);
+    expect(EffectArray.some(fetch.mock.calls, ([path]) => EffectString.endsWith('/semantic/apply')(path))).toBe(false);
     expect(host.textContent).not.toContain('no longer conflict');
   },
 );

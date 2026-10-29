@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect} from 'effect';
 import {isGitExecutable} from '@threadnote/platform/command';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const actions = new Set([
   'provisioning',
@@ -67,7 +70,7 @@ export const cycleDiagnostics = () => {
     Effect.suspend(() => {
       const entry = {sequence: (sequence = bounded(sequence + 1)), name, startedMs: elapsed()};
       lastStarted = entry;
-      if (name.startsWith('action:')) lastAction = entry;
+      if (Effect2.pipe(name, EffectString.startsWith('action:'))) lastAction = entry;
       else lastCommand = entry;
       activeCount = bounded(activeCount + 1);
       if (active.size < 8) active.set(entry.sequence, entry);
@@ -127,7 +130,7 @@ export const cycleDiagnostics = () => {
               lastStarted: lastStarted && {...lastStarted, elapsedMs: at - lastStarted.startedMs},
               lastAction,
               lastCommand,
-              active: [...active.values()].map(entry => ({...entry, elapsedMs: at - entry.startedMs})),
+              active: EffectArray.map([...active.values()], entry => ({...entry, elapsedMs: at - entry.startedMs})),
               recent,
             }) +
             '\n',

@@ -1,5 +1,8 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Clock, Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
+import {Cause, Clock, Deferred, Effect, Fiber, FileSystem, Path, Result, Schema} from 'effect';
 import {AiError} from 'effect/ai';
 import {TestClock} from 'effect/testing';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -22,6 +25,8 @@ import {
 import {loadTopicGenerationReceipt} from '@threadnote/memory/candidate-generation';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import type {AutomaticMaintenanceDraftV2} from '@threadnote/memory/topic-maintenance-draft';
+import {validateAutomaticMaintenanceDraftBasis} from '@threadnote/memory/topic-maintenance-draft';
+import {assertApprovedSourceDescriptor} from '@threadnote/memory/reviewed-support';
 import {sha256HexSync as hash} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
@@ -59,23 +64,160 @@ import {
 import {readPreparedMemory} from '../../src/memory/context/maintenance_preparation_state.js';
 import {readDraftQueueStatus, readDraftQueueTarget} from '../../src/memory/context/maintenance_draft_queue.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
 
 function object(value: unknown): Record<string, unknown> {
   expect(value).not.toBeNull();
   expect(typeof value).toBe('object');
-  expect(Array.isArray(value)).toBe(false);
-  return value as Record<string, unknown>;
+  expect(EffectArray.isArray(value)).toBe(false);
+  return Schema.decodeUnknownSync(JsonRecordSchema)(value);
 }
-function automaticPacketFixtureFromPrompt(prompt: string) {
-  const packet = JSON.parse(prompt.split('\n').at(-1)!) as ReturnType<typeof automaticReviewPacket> & {
-    targetParagraphs: readonly {ordinal: number; text: string}[];
-    currentSources: ReturnType<typeof automaticReviewPacket>['reviewEvidence'];
+const LegacyPromptPacketSchema = Schema.StructWithRest(
+  Schema.Struct({
+    basis: JsonRecordSchema,
+    reviewEvidence: Schema.Array(Schema.Unknown),
+  }),
+  [JsonRecordSchema],
+);
+const PromptPacketProjectionSchema = Schema.StructWithRest(
+  Schema.Struct({
+    basis: JsonRecordSchema,
+    targetParagraphs: Schema.Array(
+      Schema.StructWithRest(Schema.Struct({ordinal: Schema.Finite, text: Schema.String}), [JsonRecordSchema]),
+    ),
+    currentSources: Schema.Array(Schema.Unknown),
+  }),
+  [JsonRecordSchema],
+);
+const PromptEvidenceTablesSchema = Schema.StructWithRest(
+  Schema.Struct({
+    evidenceIds: Schema.Array(
+      Schema.StructWithRest(Schema.Struct({evidenceIndex: Schema.Finite, id: Schema.String}), [JsonRecordSchema]),
+    ),
+    currentHandles: Schema.Array(
+      Schema.StructWithRest(
+        Schema.Struct({currentSourceIndex: Schema.Finite, handle: Schema.String, matchingEvidenceIndex: Schema.Finite}),
+        [JsonRecordSchema],
+      ),
+    ),
+  }),
+  [JsonRecordSchema],
+);
+const PromptCodeExcerptSchema = Schema.StructWithRest(
+  Schema.Struct({
+    startLine: Schema.Finite,
+    endLine: Schema.Finite,
+    fileBytesHash: Schema.String,
+  }),
+  [JsonRecordSchema],
+);
+const PromptAutomaticModelWireSchema = Schema.StructWithRest(
+  Schema.Struct({
+    version: Schema.Literal(1),
+    kind: Schema.Literal('automatic-model'),
+    targetHash: Schema.String,
+    observationRevision: Schema.String,
+    packetDigest: Schema.String,
+    rationale: Schema.String,
+    unresolvedQuestions: Schema.Array(Schema.String),
+    paragraphDecisions: Schema.Array(
+      Schema.StructWithRest(
+        Schema.Struct({
+          ordinal: Schema.Finite,
+          role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
+          support: Schema.Literals(['direct', 'contextual', 'unresolved']),
+          evidenceIndices: Schema.Array(Schema.Finite),
+        }),
+        [JsonRecordSchema],
+      ),
+    ),
+    outcome: Schema.Literals(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence']),
+    operations: Schema.Array(
+      Schema.StructWithRest(
+        Schema.Struct({
+          ordinal: Schema.Finite,
+          supportIndices: Schema.Array(Schema.Finite),
+          rationale: Schema.String,
+          text: Schema.String,
+        }),
+        [JsonRecordSchema],
+      ),
+    ),
+    currentSourceIndices: Schema.Array(Schema.Finite),
+    removedClaims: Schema.Array(Schema.String),
+  }),
+  [JsonRecordSchema],
+);
+
+function promptAutomaticModelWire(value: unknown): AutomaticTopicDraftModelWire {
+  return Schema.decodeUnknownSync(PromptAutomaticModelWireSchema)(value);
+}
+
+function promptReviewEvidence(value: unknown): ReturnType<typeof automaticReviewPacket>['reviewEvidence'][number] {
+  const entry = object(value);
+  assertApprovedSourceDescriptor(entry.descriptor);
+  if (
+    typeof entry.handleId !== 'string' ||
+    typeof entry.content !== 'string' ||
+    typeof entry.contentHash !== 'string'
+  ) {
+    throw new Error('Expected a complete automatic review evidence entry.');
+  }
+  const codeExcerpt =
+    entry.codeExcerpt === undefined ? undefined : Schema.decodeUnknownSync(PromptCodeExcerptSchema)(entry.codeExcerpt);
+  return {
+    ...entry,
+    handleId: entry.handleId,
+    descriptor: entry.descriptor,
+    content: entry.content,
+    contentHash: entry.contentHash,
+    ...(codeExcerpt === undefined ? {} : {codeExcerpt}),
   };
-  if (packet.basis.body !== undefined) return packet;
+}
+
+const AutomaticReviewPacketToolProjectionSchema = Schema.StructWithRest(
+  Schema.Struct({
+    basis: Schema.Unknown,
+    draftRequest: Schema.StructWithRest(Schema.Struct({available: Schema.Boolean}), [JsonRecordSchema]),
+    reviewEvidence: Schema.Array(Schema.Unknown),
+  }),
+  [JsonRecordSchema],
+);
+
+function automaticReviewPacketFromTool(value: unknown) {
+  const packet = Schema.decodeUnknownSync(AutomaticReviewPacketToolProjectionSchema)(value);
   return {
     ...packet,
-    reviewEvidence: packet.currentSources,
-    basis: {...packet.basis, body: packet.targetParagraphs.map(paragraph => paragraph.text).join('\n\n')},
+    basis: validateAutomaticMaintenanceDraftBasis(packet.basis),
+    reviewEvidence: EffectArray.map(packet.reviewEvidence, promptReviewEvidence),
+  };
+}
+
+function automaticPacketFixtureFromPrompt(
+  prompt: string,
+): Pick<ReturnType<typeof automaticReviewPacket>, 'basis' | 'reviewEvidence'> {
+  const serialized = Effect2.pipe(prompt, EffectString.split('\n')).at(-1);
+  if (serialized === undefined) throw new Error('Expected a serialized automatic review packet.');
+  const value: unknown = JSON.parse(serialized);
+  if (Schema.is(LegacyPromptPacketSchema)(value) && value.basis.body !== undefined) {
+    return {
+      basis: validateAutomaticMaintenanceDraftBasis(value.basis),
+      reviewEvidence: EffectArray.map(value.reviewEvidence, promptReviewEvidence),
+    };
+  }
+  const packet = Schema.decodeUnknownSync(PromptPacketProjectionSchema)(value);
+  const paragraphBody = EffectArray.join(
+    EffectArray.map(packet.targetParagraphs, paragraph => paragraph.text),
+    '\n\n',
+  );
+  const basis = validateAutomaticMaintenanceDraftBasis({...packet.basis, body: paragraphBody});
+  return {
+    basis,
+    reviewEvidence: EffectArray.map(packet.currentSources, promptReviewEvidence),
   };
 }
 
@@ -138,14 +280,16 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* (body =
         verified: true,
       }),
   });
-  const reviewId = `review-${hash(`topic-maintenance\0${uri}`).slice(0, 24)}`;
+  const reviewId = `review-${Effect2.pipe(hash(`topic-maintenance\0${uri}`), EffectString.slice(0, 24))}`;
   const generate = (...args: Parameters<typeof runSelectedDraft>) =>
     Effect.sync(() => {
       const prompt = args[3];
       const basis = args[5];
       expect(basis?.version).toBe(3);
       const packet = automaticPacketFixtureFromPrompt(prompt);
-      const handle = packet.reviewEvidence.find(entry => entry.descriptor.source.kind === 'memory');
+      const handle = EffectOption.getOrUndefined(
+        EffectArray.findFirst(packet.reviewEvidence, entry => entry.descriptor.source.kind === 'memory'),
+      );
       const text = handle?.content ?? packet.basis.body;
       return {
         text: JSON.stringify(
@@ -177,7 +321,7 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* (body =
                   },
                 ]
               : [],
-            reviewedHandles: packet.reviewEvidence.map(entry => entry.handleId),
+            reviewedHandles: EffectArray.map(packet.reviewEvidence, entry => entry.handleId),
             rationale: 'Explicit provisional factual paragraph review.',
             unresolvedQuestions: [],
             removedClaims: [],
@@ -242,7 +386,10 @@ describe('automatic ordinary-memory background controls', () => {
           expect(first.maintenance?.proposal.body).toBe('The timeout is 60 seconds.');
           const file = f.path.join(f.home, 'threadnote/candidates/v1/reviews', `${f.reviewId}.json`);
           const firstBytes = yield* f.fs.readFileString(file);
-          yield* f.fs.writeFileString(f.sourcePath, f.source.replace('60 seconds', '90 seconds'));
+          yield* f.fs.writeFileString(
+            f.sourcePath,
+            Effect2.pipe(f.source, EffectString.replace('60 seconds', '90 seconds')),
+          );
           const successor = yield* requestAutomaticMemoryDraft(f.config, input, generate);
           expect(successor.revision).toBe(first.revision + 1);
           expect(successor.maintenance?.proposal.body).toBe('The timeout is 90 seconds.');
@@ -291,10 +438,10 @@ describe('automatic ordinary-memory background controls', () => {
   for (const paragraphs of [64, 65]) {
     effectIt.effect(`checks the ${paragraphs}-paragraph admission boundary before queueing or spending quota`, () =>
       Effect.gen(function* () {
-        const body = Array.from(
-          {length: paragraphs},
-          (_, ordinal) => `Component ${ordinal} has a timeout of 30 seconds.`,
-        ).join('\n\n');
+        const body = EffectArray.join(
+          Array.from({length: paragraphs}, (_, ordinal) => `Component ${ordinal} has a timeout of 30 seconds.`),
+          '\n\n',
+        );
         const f = yield* fixture(body);
         yield* Effect.gen(function* () {
           yield* f.prepare;
@@ -306,7 +453,11 @@ describe('automatic ordinary-memory background controls', () => {
           if ('reviewId' in packet) return;
           expect(packet.basis.body).toBe(body);
           expect(packet.basis.paragraphs).toHaveLength(paragraphs === 64 ? 64 : 0);
-          expect(packet.reviewEvidence.some(entry => entry.handleId.startsWith('current:'))).toBe(true);
+          expect(
+            EffectArray.some(packet.reviewEvidence, entry =>
+              Effect2.pipe(entry.handleId, EffectString.startsWith('current:')),
+            ),
+          ).toBe(true);
           expect(packet.draftRequest.available).toBe(paragraphs === 64);
           if (paragraphs > 64) {
             expect(packet.basis.assessment.target.paragraphCount).toBeNull();
@@ -344,31 +495,52 @@ describe('automatic ordinary-memory background controls', () => {
         if ('reviewId' in packet) return yield* Effect.die('Expected a source packet.');
         const before = JSON.stringify(packet);
         const prompt = automaticMemoryDraftPrompt(packet);
-        const projected = JSON.parse(prompt.split('\n').at(-1)!) as {
-          basis: Record<string, unknown>;
-          targetParagraphs: readonly {ordinal: number; text: string}[];
-          currentSources: ReturnType<typeof automaticReviewPacket>['reviewEvidence'];
+        const projectedLine = Effect2.pipe(prompt, EffectString.split('\n')).at(-1);
+        if (projectedLine === undefined) throw new Error('Expected a serialized automatic review packet.');
+        const rawProjected = yield* Schema.decodeUnknownEffect(PromptPacketProjectionSchema)(
+          JSON.parse(projectedLine),
+        ).pipe(Effect.orDie);
+        const projected = {
+          ...rawProjected,
+          currentSources: EffectArray.map(rawProjected.currentSources, promptReviewEvidence),
         };
         expect(projected.basis).not.toHaveProperty('body');
         expect(projected).not.toHaveProperty('reviewEvidence');
-        expect(projected.currentSources.map(source => source.content)).toEqual(
-          packet.reviewEvidence.filter(source => source.handleId.startsWith('current:')).map(source => source.content),
+        expect(EffectArray.map(projected.currentSources, source => source.content)).toEqual(
+          EffectArray.map(
+            EffectArray.filter(packet.reviewEvidence, source =>
+              Effect2.pipe(source.handleId, EffectString.startsWith('current:')),
+            ),
+            source => source.content,
+          ),
         );
-        expect(projected.targetParagraphs.map(({ordinal, text}) => ({ordinal, text}))).toEqual(
-          body.split('\n\n').map((text, ordinal) => ({ordinal, text})),
+        expect(EffectArray.map(projected.targetParagraphs, ({ordinal, text}) => ({ordinal, text}))).toEqual(
+          EffectArray.map(Effect2.pipe(body, EffectString.split('\n\n')), (text, ordinal) => ({ordinal, text})),
         );
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
         for (const paragraph of projected.targetParagraphs) expect(prompt.split(paragraph.text)).toHaveLength(2);
-        const tableLine = prompt.split('\n').find(line => line.startsWith('Index tables ('))!;
-        const tables = JSON.parse(tableLine.slice(tableLine.indexOf(': ') + 2)) as {
-          evidenceIds: readonly {evidenceIndex: number; id: string}[];
-          currentHandles: readonly {currentSourceIndex: number; handle: string; matchingEvidenceIndex: number}[];
-        };
+        const tableLine = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            Effect2.pipe(prompt, EffectString.split('\n')),
+            __effectArrayValue =>
+              !!(line => Effect2.pipe(line, EffectString.startsWith('Index tables (')))(__effectArrayValue),
+          ),
+        )!;
+        const tablesStart =
+          Effect2.pipe(
+            tableLine,
+            EffectString.indexOf(': '),
+            Effect2.Option.getOrElse(() => -1),
+          ) + 2;
+        const tables = yield* Schema.decodeUnknownEffect(PromptEvidenceTablesSchema)(
+          JSON.parse(Effect2.pipe(tableLine, EffectString.slice(tablesStart))),
+        ).pipe(Effect.orDie);
         expect(tables.currentHandles.length).toBeGreaterThan(0);
         for (const [index, source] of tables.currentHandles.entries()) {
           expect(source.currentSourceIndex).toBe(index);
           expect(tables.evidenceIds[source.matchingEvidenceIndex]).toEqual({
             evidenceIndex: source.matchingEvidenceIndex,
-            id: source.handle.slice('current:'.length),
+            id: Effect2.pipe(source.handle, EffectString.slice('current:'.length)),
           });
         }
         expect(JSON.stringify(packet)).toBe(before);
@@ -383,8 +555,9 @@ describe('automatic ordinary-memory background controls', () => {
       yield* f.prepare.pipe(Effect.provideService(LocalModelStore, f.installed));
       const packet = yield* requestAutomaticMemoryReview(f.config, {uri: f.uri, expectedContentHash: hash(f.content)});
       if ('reviewId' in packet) return yield* Effect.die('Expected ordinary packet.');
-      expect(packet.basis.paragraphs.map(p => p.role)).toEqual(['unknown', 'normative', 'historical']);
-      expect(packet.basis.paragraphs.every(p => p.currentEvidenceIds.length === 0)).toBe(true);
+      expect(EffectArray.map(packet.basis.paragraphs, p => p.role)).toEqual(['unknown', 'normative', 'historical']);
+      const paragraphs: readonly {readonly currentEvidenceIds: readonly string[]}[] = [...packet.basis.paragraphs];
+      expect(EffectArray.every(paragraphs, p => p.currentEvidenceIds.length === 0)).toBe(true);
       const source = packet.reviewEvidence[0];
       let calls = 0;
       const generate: typeof runSelectedDraft = (...args) =>
@@ -399,7 +572,7 @@ describe('automatic ordinary-memory background controls', () => {
               observationRevision: packet.basis.observationRevision,
               packetDigest: packet.basis.packetDigest,
               outcome: 'propose-update',
-              paragraphDecisions: packet.basis.paragraphs.map(p => ({
+              paragraphDecisions: EffectArray.map(packet.basis.paragraphs, p => ({
                 ordinal: p.ordinal,
                 beforeHash: p.hash,
                 role: p.ordinal === 0 ? 'descriptive' : p.role,
@@ -437,7 +610,7 @@ describe('automatic ordinary-memory background controls', () => {
       expect(review.maintenance?.proposal.body).toBe(`The timeout is 60 seconds.\n\n${policy}\n\n${history}`);
       expect(review.maintenance?.proposal.changedOrdinals).toEqual([0]);
       if (review.maintenance?.version !== 3) return yield* Effect.die('Expected automatic review.');
-      expect(review.maintenance.proposal.draft.paragraphDecisions.map(p => [p.role, p.support])).toEqual([
+      expect(EffectArray.map(review.maintenance.proposal.draft.paragraphDecisions, p => [p.role, p.support])).toEqual([
         ['descriptive', 'direct'],
         ['normative', 'unresolved'],
         ['historical', 'unresolved'],
@@ -458,13 +631,13 @@ describe('automatic ordinary-memory background controls', () => {
           f.generate(...args).pipe(
             Effect.map(result => {
               calls++;
-              const wire = JSON.parse(result.text) as AutomaticTopicDraftModelWire;
               const basis = args[5];
               if (basis?.version !== 3) throw new Error('Expected automatic basis.');
+              const wire = promptAutomaticModelWire(JSON.parse(result.text));
               const repeat = {...wire.operations[0], ordinal: 1, text: unchanged};
               raw = JSON.stringify({
                 ...wire,
-                paragraphDecisions: basis.paragraphs.map(p => ({
+                paragraphDecisions: EffectArray.map(basis.paragraphs, p => ({
                   ...wire.paragraphDecisions[0],
                   ordinal: p.ordinal,
                   support: mode === 'contextual' && p.ordinal === 1 ? 'contextual' : 'direct',
@@ -481,7 +654,10 @@ describe('automatic ordinary-memory background controls', () => {
         ).pipe(Effect.provideService(LocalModelStore, f.installed), Effect.result);
         const files = yield* f.fs.readDirectory(f.path.join(f.home, 'threadnote/candidates/v1/topic-generation'));
         expect(files).toHaveLength(1);
-        const receipt = yield* loadTopicGenerationReceipt(f.home, files[0].replace(/\.json$/u, ''));
+        const receipt = yield* loadTopicGenerationReceipt(
+          f.home,
+          Effect2.pipe(files[0], EffectString.replace(/\.json$/u, '')),
+        );
         expect(receipt.promptVersion).toBe(AUTOMATIC_DRAFT_PROMPT_VERSION);
         expect(receipt.attempts.at(-1)?.output).toMatchObject({
           hash: hash(raw),
@@ -494,7 +670,7 @@ describe('automatic ordinary-memory background controls', () => {
             Result.isSuccess(outcome),
             JSON.stringify({
               calls,
-              attempts: receipt.attempts.map(attempt => attempt.status),
+              attempts: EffectArray.map(receipt.attempts, attempt => attempt.status),
               error: Result.isFailure(outcome) ? String(outcome.failure) : undefined,
             }),
           ).toBe(true);
@@ -503,12 +679,15 @@ describe('automatic ordinary-memory background controls', () => {
           expect(outcome.success.maintenance?.proposal.body).toBe(`${unchanged}\n\n${unchanged}`);
           expect(outcome.success.maintenance?.proposal.changedOrdinals).toEqual([0]);
           expect(outcome.success.maintenance?.proposal.draft.operations).toHaveLength(1);
-          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['accepted']);
+          expect(EffectArray.map(receipt.attempts, attempt => attempt.status)).toEqual(['accepted']);
           expect(receipt.firstFailedOutput).toBeUndefined();
         } else {
           expect(Result.isFailure(outcome)).toBe(true);
           expect(calls).toBe(2);
-          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'draft-invalid']);
+          expect(EffectArray.map(receipt.attempts, attempt => attempt.status)).toEqual([
+            'draft-invalid',
+            'draft-invalid',
+          ]);
           expect(receipt.firstFailedOutput).toMatchObject({text: raw, hash: hash(raw)});
           expect(yield* f.fs.exists(f.path.join(f.home, `threadnote/candidates/v1/reviews/${f.reviewId}.json`))).toBe(
             false,
@@ -529,11 +708,16 @@ describe('automatic ordinary-memory background controls', () => {
       const schema = topicDraftModelSchema(packet.basis);
       const native = topicDraftNativeJsonSchema(schema, packet.basis);
       const fields = object(native.properties);
-      expect(Object.keys(fields).indexOf('paragraphDecisions')).toBeLessThan(Object.keys(fields).indexOf('operations'));
+      expect(EffectRecord.keys(fields).indexOf('paragraphDecisions')).toBeLessThan(
+        EffectRecord.keys(fields).indexOf('operations'),
+      );
       const item = object(object(fields.operations).items);
-      const variants = 'oneOf' in item ? (item.oneOf as readonly Record<string, unknown>[]) : [item];
+      const variants =
+        'oneOf' in item
+          ? yield* Schema.decodeUnknownEffect(Schema.Array(JsonRecordSchema))(item.oneOf).pipe(Effect.orDie)
+          : [item];
       for (const variant of variants) {
-        const keys = Object.keys(object(variant.properties));
+        const keys = EffectRecord.keys(object(variant.properties));
         expect(keys).not.toContain('beforeHash');
         expect(keys.indexOf('supportIndices')).toBeLessThan(keys.indexOf('text'));
         expect(keys.indexOf('rationale')).toBeLessThan(keys.indexOf('text'));
@@ -643,7 +827,9 @@ describe('automatic ordinary-memory background controls', () => {
               .get(id)
               .pipe(
                 Effect.map(manifest =>
-                  manifestDrift ? {...manifest, revision: hash('changed-manifest').slice(0, 40)} : manifest,
+                  manifestDrift
+                    ? {...manifest, revision: Effect2.pipe(hash('changed-manifest'), EffectString.slice(0, 40))}
+                    : manifest,
                 ),
               ),
         });
@@ -658,7 +844,10 @@ describe('automatic ordinary-memory background controls', () => {
           const fs = FileSystem.FileSystem.of({
             ...f.fs,
             rename: (from, to) => {
-              if (!['receipt-save', 'repair-manifest-drift'].includes(scenario) || !to.startsWith(receiptRoot))
+              if (
+                !['receipt-save', 'repair-manifest-drift'].includes(scenario) ||
+                !Effect2.pipe(to, EffectString.startsWith(receiptRoot))
+              )
                 return f.fs.rename(from, to);
               return f.fs.readFileString(from).pipe(
                 Effect.flatMap(text => {
@@ -666,11 +855,12 @@ describe('automatic ordinary-memory background controls', () => {
                     return f.fs.rename(from, to).pipe(
                       Effect.tap(() =>
                         Effect.sync(() => {
-                          if (text.includes('"status":"draft-invalid"')) manifestDrift = true;
+                          if (Effect2.pipe(text, EffectString.includes('"status":"draft-invalid"')))
+                            manifestDrift = true;
                         }),
                       ),
                     );
-                  if (!saveFailed && text.includes('"status":"draft-invalid"')) {
+                  if (!saveFailed && Effect2.pipe(text, EffectString.includes('"status":"draft-invalid"'))) {
                     saveFailed = true;
                     return f.fs.rename(from, f.path.join(f.home, 'absent-directory', 'receipt.json'));
                   }
@@ -694,7 +884,10 @@ describe('automatic ordinary-memory background controls', () => {
                   'topic-maintenance',
                   packet.basis,
                 );
-                let wire = JSON.parse(result.text) as AutomaticTopicDraftModelWire;
+                const wire = yield* Schema.decodeUnknownEffect(PromptAutomaticModelWireSchema)(
+                  JSON.parse(result.text),
+                ).pipe(Effect.orDie);
+                let mutableWire: AutomaticTopicDraftModelWire = wire;
                 if (calls === 2) {
                   // Exact repeats are validated first; a refusal with operations still violates its outcome.
                   expect(request.prompt).toContain('automatic outcome differs from its operations');
@@ -716,13 +909,13 @@ describe('automatic ordinary-memory background controls', () => {
                       'no-change',
                     ].includes(scenario)
                   ) {
-                    wire = {
-                      ...wire,
+                    mutableWire = {
+                      ...mutableWire,
                       outcome: 'insufficient-evidence',
                       operations:
                         scenario === 'no-change'
                           ? []
-                          : wire.operations.map(operation => ({
+                          : EffectArray.map(mutableWire.operations, operation => ({
                               ...operation,
                               text: packet.basis.body,
                               rationale:
@@ -731,88 +924,113 @@ describe('automatic ordinary-memory background controls', () => {
                       rationale: 'The memory is retained as is, but the conflict is noted.',
                       paragraphDecisions:
                         scenario === 'no-change'
-                          ? wire.paragraphDecisions.map(decision => ({
+                          ? EffectArray.map(mutableWire.paragraphDecisions, decision => ({
                               ...decision,
                               role: 'unknown',
                               support: 'unresolved',
                               evidenceIndices: [],
                             }))
-                          : wire.paragraphDecisions,
+                          : mutableWire.paragraphDecisions,
                     };
                   }
-                  if (scenario === 'target-identity') wire = {...wire, targetHash: hash('stale')};
-                  if (scenario === 'missing-coverage') wire = {...wire, paragraphDecisions: []};
+                  if (scenario === 'target-identity') mutableWire = {...mutableWire, targetHash: hash('stale')};
+                  if (scenario === 'missing-coverage') mutableWire = {...mutableWire, paragraphDecisions: []};
                   if (scenario === 'duplicate-coverage')
-                    wire = {...wire, paragraphDecisions: [...wire.paragraphDecisions, ...wire.paragraphDecisions]};
+                    mutableWire = {
+                      ...mutableWire,
+                      paragraphDecisions: [...mutableWire.paragraphDecisions, ...mutableWire.paragraphDecisions],
+                    };
                   if (scenario === 'wrong-ordinal')
-                    wire = {...wire, operations: wire.operations.map(operation => ({...operation, ordinal: -1}))};
+                    mutableWire = {
+                      ...mutableWire,
+                      operations: EffectArray.map(mutableWire.operations, operation => ({...operation, ordinal: -1})),
+                    };
                   if (scenario === 'decision-ordinal')
-                    wire = {
-                      ...wire,
-                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({...decision, ordinal: -1})),
+                    mutableWire = {
+                      ...mutableWire,
+                      paragraphDecisions: EffectArray.map(mutableWire.paragraphDecisions, decision => ({
+                        ...decision,
+                        ordinal: -1,
+                      })),
                     };
                   if (scenario === 'duplicate-operation')
-                    wire = {...wire, operations: [...wire.operations, ...wire.operations]};
+                    mutableWire = {...mutableWire, operations: [...mutableWire.operations, ...mutableWire.operations]};
                   if (scenario === 'split-paragraph')
-                    wire = {
-                      ...wire,
-                      operations: wire.operations.map(operation => ({
+                    mutableWire = {
+                      ...mutableWire,
+                      operations: EffectArray.map(mutableWire.operations, operation => ({
                         ...operation,
                         text: operation.text + '\n\nAnother paragraph.',
                       })),
                     };
                   if (scenario === 'before-hash')
-                    wire = {
-                      ...wire,
-                      operations: wire.operations.map(operation => ({...operation, beforeHash: hash('stale')})),
+                    mutableWire = {
+                      ...mutableWire,
+                      operations: EffectArray.map(mutableWire.operations, operation => ({
+                        ...operation,
+                        beforeHash: hash('stale'),
+                      })),
                     };
-                  if (scenario === 'unknown-handle') wire = {...wire, currentSourceIndices: [999]};
+                  if (scenario === 'unknown-handle') mutableWire = {...mutableWire, currentSourceIndices: [999]};
                   if (scenario === 'unknown-support-handle')
-                    wire = {
-                      ...wire,
-                      operations: wire.operations.map(operation => ({
+                    mutableWire = {
+                      ...mutableWire,
+                      operations: EffectArray.map(mutableWire.operations, operation => ({
                         ...operation,
                         supportIndices: [999],
                       })),
                     };
                   if (scenario === 'empty-direct-indices')
-                    wire = {
-                      ...wire,
-                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({...decision, evidenceIndices: []})),
+                    mutableWire = {
+                      ...mutableWire,
+                      paragraphDecisions: EffectArray.map(mutableWire.paragraphDecisions, decision => ({
+                        ...decision,
+                        evidenceIndices: [],
+                      })),
                     };
                   if (scenario === 'empty-operation-indices')
-                    wire = {
-                      ...wire,
-                      operations: wire.operations.map(operation => ({...operation, supportIndices: []})),
+                    mutableWire = {
+                      ...mutableWire,
+                      operations: EffectArray.map(mutableWire.operations, operation => ({
+                        ...operation,
+                        supportIndices: [],
+                      })),
                     };
                   if (scenario === 'unknown-evidence-id')
-                    wire = {
-                      ...wire,
-                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({
+                    mutableWire = {
+                      ...mutableWire,
+                      paragraphDecisions: EffectArray.map(mutableWire.paragraphDecisions, decision => ({
                         ...decision,
                         evidenceIndices: [999],
                       })),
                     };
-                  if (scenario === 'nv003-prefixed-decision-id')
-                    wire = {
-                      ...wire,
-                      operations: wire.operations.map(operation => ({...operation, text: packet.basis.body})),
-                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({
-                        ...decision,
-                        evidenceIndices: [`current:ame_${hash('wrong-namespace')}`] as unknown as number[],
-                      })),
-                    };
                   if (scenario === 'nv004-duplicate-decision-id')
-                    wire = {
-                      ...wire,
-                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({
+                    mutableWire = {
+                      ...mutableWire,
+                      paragraphDecisions: EffectArray.map(mutableWire.paragraphDecisions, decision => ({
                         ...decision,
                         evidenceIndices: [...decision.evidenceIndices, ...decision.evidenceIndices],
                       })),
                     };
-                  if (scenario === 'rationale-bound') wire = {...wire, rationale: 'x'.repeat(2049)};
+                  if (scenario === 'rationale-bound')
+                    mutableWire = {...mutableWire, rationale: Effect2.pipe('x', EffectString.repeat(2049))};
                 }
-                const output = scenario === 'excess-field' ? {...wire, invented: true} : wire;
+                const output: unknown =
+                  scenario === 'nv003-prefixed-decision-id'
+                    ? {
+                        ...mutableWire,
+                        operations: EffectArray.map(mutableWire.operations, operation => ({
+                          ...operation,
+                          text: packet.basis.body,
+                        })),
+                        paragraphDecisions: EffectArray.map(mutableWire.paragraphDecisions, decision => ({
+                          ...decision,
+                          evidenceIndices: [`current:ame_${hash('wrong-namespace')}`],
+                        })),
+                      }
+                    : scenario === 'excess-field'
+                      ? {...mutableWire, invented: true}
+                      : mutableWire;
                 lastText = JSON.stringify(output);
                 if (calls === 1) firstText = lastText;
                 return output;
@@ -843,9 +1061,12 @@ describe('automatic ordinary-memory background controls', () => {
           expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
           const files = yield* f.fs.readDirectory(receiptRoot);
           expect(files).toHaveLength(1);
-          const receipt = yield* loadTopicGenerationReceipt(f.home, files[0].replace(/\.json$/u, ''));
+          const receipt = yield* loadTopicGenerationReceipt(
+            f.home,
+            Effect2.pipe(files[0], EffectString.replace(/\.json$/u, '')),
+          );
           expect(receipt.promptVersion).toBe(AUTOMATIC_DRAFT_PROMPT_VERSION);
-          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(
+          expect(EffectArray.map(receipt.attempts, attempt => attempt.status)).toEqual(
             scenario === 'repair'
               ? ['draft-invalid', 'accepted']
               : scenario === 'invalid-second'
@@ -1039,7 +1260,10 @@ describe('automatic ordinary-memory background controls', () => {
               }),
             writeFileString: (file, text, options) =>
               Effect.gen(function* () {
-                if (file.includes('/topic-generation/') && JSON.parse(text).state === 'completed') {
+                if (
+                  Effect2.pipe(file, EffectString.includes('/topic-generation/')) &&
+                  JSON.parse(text).state === 'completed'
+                ) {
                   yield* Deferred.succeed(beforeCleanup, undefined);
                   yield* Deferred.await(releaseCleanup);
                 }
@@ -1053,7 +1277,12 @@ describe('automatic ordinary-memory background controls', () => {
                 .writeFileString(file, text, options)
                 .pipe(
                   Effect.tapError(() =>
-                    file.endsWith(invalidation === 'all-maintenance-pause' ? 'state-v2.json.lock' : 'queue.lock')
+                    Effect2.pipe(
+                      file,
+                      EffectString.endsWith(
+                        invalidation === 'all-maintenance-pause' ? 'state-v2.json.lock' : 'queue.lock',
+                      ),
+                    )
                       ? Deferred.succeed(policyBoundary, 'contended').pipe(Effect.asVoid)
                       : Effect.void,
                   ),
@@ -1260,8 +1489,7 @@ describe('automatic ordinary-memory background controls', () => {
               expectedContentHash: hash(f.content),
             });
             expect(packetResult.isError).not.toBe(true);
-            // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
-            const packet = packetResult.structuredContent as ReturnType<typeof automaticReviewPacket>;
+            const packet = automaticReviewPacketFromTool(packetResult.structuredContent);
             const authored = yield* f.generate(
               f.config,
               'local-ai',
@@ -1598,8 +1826,7 @@ describe('automatic ordinary-memory background controls', () => {
             expectedContentHash: hash(f.content),
           });
           expect(manual.isError).not.toBe(true);
-          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
-          const packet = manual.structuredContent as ReturnType<typeof automaticReviewPacket>;
+          const packet = automaticReviewPacketFromTool(manual.structuredContent);
           const proposal = yield* f.generate(
             f.config,
             'local-ai',
@@ -1802,8 +2029,7 @@ describe('automatic ordinary-memory background controls', () => {
             expectedContentHash: hash(f.content),
           });
           expect(inspected.isError).not.toBe(true);
-          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
-          const packet = inspected.structuredContent as ReturnType<typeof automaticReviewPacket>;
+          const packet = automaticReviewPacketFromTool(inspected.structuredContent);
           expect(packet.draftRequest.available).toBe(true);
           expect(packet.reviewEvidence).toHaveLength(1);
           expect(yield* readPreparedMemory(f.config, f.uri)).toBeDefined();
@@ -2013,7 +2239,7 @@ try {
             ...f.fs,
             rename: (from, to) =>
               Effect.gen(function* () {
-                if (!injected && to.endsWith(`${draft.reviewId}.json`)) {
+                if (!injected && Effect2.pipe(to, EffectString.endsWith(`${draft.reviewId}.json`))) {
                   injected = true;
                   return yield* f.fs.rename(`${from}.missing`, to);
                 }
@@ -2033,7 +2259,15 @@ try {
             expect(object(recovered.structuredContent).state).toBe('rejected');
           }
           const current = yield* loadCandidateReview(f.home, draft.reviewId);
-          expect(current.auditEvents.filter(event => event.action === 'reject')).toHaveLength(1);
+          expect(
+            EffectArrayPipe(current.auditEvents, __effectFilterValues =>
+              EffectArray.filter(
+                __effectFilterValues,
+                (event, __effectFilterIndex) =>
+                  __effectFilterIndex in __effectFilterValues && event.action === 'reject',
+              ),
+            ),
+          ).toHaveLength(1);
           expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
         }).pipe(Effect.provideService(LocalModelStore, f.installed));
       }).pipe(provideTestLayer(ApplicationLayer)),
@@ -2061,8 +2295,7 @@ try {
             expectedContentHash: hash(f.source),
           });
           expect(read.isError).not.toBe(true);
-          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
-          const packet = read.structuredContent as ReturnType<typeof automaticReviewPacket>;
+          const packet = automaticReviewPacketFromTool(read.structuredContent);
           expect(packet.reviewEvidence).toEqual([]);
           expect(packet.draftRequest.available).toBe(false);
           expect((yield* readDraftQueueStatus(f.config)).backgroundReservations).toHaveLength(1);

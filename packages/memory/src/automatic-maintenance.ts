@@ -1,3 +1,5 @@
+import {isSafeInteger as checkedIsSafeInteger, isOneOf as checkedIsOneOf} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {
@@ -28,6 +30,9 @@ import {
 import {reviewedMemorySupportDigest, validateReviewedMemorySupport} from './reviewed-support.js';
 import {memoryCodeCitationSharingBlocker} from './code/citation-policy.js';
 import type {MemoryKind, MemoryStatus} from './types.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const AUTOMATIC_MAINTENANCE_VERSION = 1 as const;
 export const AUTOMATIC_MAINTENANCE_PREPARATION_VERSION = 1 as const;
@@ -153,6 +158,62 @@ export interface AutomaticMaintenanceAssessmentV2 extends Omit<
 export type AutomaticMaintenanceAssessment = AutomaticMaintenanceAssessmentV1 | AutomaticMaintenanceAssessmentV2;
 export type AutomaticMaintenanceParagraph = AutomaticMaintenanceParagraphV1 | AutomaticMaintenanceParagraphV2;
 
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.Struct.Fields>(fields: S) =>
+  Schema.StructWithRest(Schema.Struct(fields), [JsonRecordSchema]);
+const AutomaticMaintenanceTargetSchema = withRest({
+  artifact: Schema.Boolean,
+  bodyHash: Schema.String,
+  canonicalHash: Schema.String,
+  kind: Schema.Literals(['durable', 'handoff', 'incident', 'preference', 'smoke']),
+  memoryId: Schema.optionalKey(Schema.String),
+  paragraphCount: Schema.NullOr(Schema.Finite),
+  readOnly: Schema.Boolean,
+  schemaVersion: Schema.optionalKey(Schema.Finite),
+  status: Schema.Literals(['active', 'archived', 'expired', 'superseded']),
+  uri: Schema.String,
+  visibility: Schema.Literals(['personal', 'shared', 'external']),
+});
+const automaticMaintenanceParagraphFields = {
+  acceptedEvidenceIds: Schema.Array(Schema.String),
+  currentEvidenceIds: Schema.Array(Schema.String),
+  currentSupport: Schema.Literals(['direct', 'contextual', 'unresolved']),
+  currentSupportAuthority: Schema.Literal('provisional'),
+  hash: Schema.String,
+  historicalEvidenceIds: Schema.Array(Schema.String),
+  ordinal: Schema.Finite,
+  role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
+  scope: Schema.optionalKey(Schema.String),
+  support: Schema.Literals(['direct', 'contextual', 'unresolved']),
+  validity: Schema.optionalKey(Schema.String),
+};
+const AutomaticMaintenanceParagraphSchema = Schema.Union([
+  withRest({
+    ...automaticMaintenanceParagraphFields,
+    roleAuthority: Schema.Literals(['legacy-approved', 'provisional']),
+    supportAuthority: Schema.Literals(['legacy-approved', 'provisional']),
+  }),
+  withRest({
+    ...automaticMaintenanceParagraphFields,
+    roleAuthority: Schema.Literal('reviewed'),
+    supportAuthority: Schema.Literal('reviewed'),
+  }),
+]);
+const AutomaticMaintenanceCoverageSchema = withRest({
+  omittedParagraphs: Schema.NullOr(Schema.Finite),
+  omittedSources: Schema.Finite,
+  outcome: Schema.Literals(['complete', 'partial', 'unknown']),
+  scope: Schema.Literals(['recorded-only', 'bounded-search', 'none']),
+  searchedScopes: Schema.Array(Schema.String),
+});
+function decodeValidated<S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown): S['Type'] {
+  try {
+    return Schema.decodeUnknownSync(schema)(input);
+  } catch {
+    return refuse();
+  }
+}
+
 const HASH = /^[a-f0-9]{64}$/u;
 const MEMORY_ID = /^tn_[a-z0-9_]{1,128}$/u;
 const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
@@ -167,21 +228,23 @@ function shape(
   if (
     typeof value !== 'object' ||
     value === null ||
-    Array.isArray(value) ||
-    !required.every(key => Object.hasOwn(value, key)) ||
-    Object.keys(value).some(
+    EffectArray.isArray(value) ||
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    !EffectArray.every(required, key => Object.hasOwn(value, key)) ||
+    EffectArray.some(
+      EffectRecord.keys(value),
       key =>
         (!required.includes(key) && !optional.includes(key)) ||
-        (optional.includes(key) && (value as Record<string, unknown>)[key] === undefined),
+        (optional.includes(key) && Reflect.get(value, key) === undefined),
     )
   )
     refuse();
 }
 function oneOf<T extends string>(value: unknown, values: readonly T[]): asserts value is T {
-  if (typeof value !== 'string' || !values.includes(value as T)) refuse();
+  if (typeof value !== 'string' || !EffectArray.some(values, candidate => candidate === value)) refuse();
 }
 function count(value: unknown): asserts value is number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0 || Object.is(value, -0)) refuse();
+  if (!checkedIsSafeInteger(value) || value < 0 || Object.is(value, -0)) refuse();
 }
 function hash(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !HASH.test(value)) refuse();
@@ -191,7 +254,20 @@ function text(value: unknown, max = 4096): asserts value is string {
     typeof value !== 'string' ||
     !value.length ||
     bytes(value) > max ||
-    [...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+    EffectArray.some(
+      [...value],
+      character =>
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) < 32 ||
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) === 127,
+    )
   )
     refuse();
 }
@@ -204,11 +280,11 @@ function memoryId(value: unknown): void {
   if (value !== undefined && (typeof value !== 'string' || !MEMORY_ID.test(value))) refuse();
 }
 function list(value: unknown, max: number): asserts value is unknown[] {
-  if (!Array.isArray(value) || value.length > max) refuse();
+  if (!EffectArray.isArray(value) || value.length > max) refuse();
 }
 function uniqueStrings(value: unknown, max: number): asserts value is string[] {
   list(value, max);
-  value.forEach(item => text(item));
+  EffectArray.forEach(value, item => text(item));
   if (new Set(value).size !== value.length) refuse();
 }
 
@@ -301,6 +377,11 @@ export function assertAutomaticMaintenanceEvidence(value: unknown): asserts valu
   if (value.scope !== scope) refuse();
 }
 
+function validatedEvidence(value: unknown): AutomaticMaintenanceEvidenceV1 {
+  assertAutomaticMaintenanceEvidence(value);
+  return value;
+}
+
 /** This eligibility calculation is advisory; later exact review/apply owns all authority checks. */
 export function automaticMaintenanceCapabilities(
   target: AutomaticMaintenanceTargetV1,
@@ -317,13 +398,22 @@ export function automaticMaintenanceCapabilities(
   if ((target.schemaVersion ?? 1) > MAX_SUPPORTED_MEMORY_SCHEMA_VERSION) reasons.push('unsupported-schema');
   if (coverage.outcome !== 'complete' || coverage.omittedParagraphs || coverage.omittedSources)
     reasons.push('coverage-gap');
-  const eligible = paragraphs.filter(
+  const eligible = EffectArray.filter(
+    paragraphs,
     paragraph => paragraph.role === 'descriptive' && paragraph.currentSupport === 'direct',
   );
   if (!eligible.length) reasons.push('protected-role');
-  const available = new Set(evidence.filter(item => item.availability === 'available').map(item => item.id));
-  const supported = eligible.some(
-    paragraph => paragraph.currentEvidenceIds.length > 0 && paragraph.currentEvidenceIds.every(id => available.has(id)),
+  const available = new Set(
+    EffectArray.map(
+      EffectArray.filter(evidence, item => item.availability === 'available'),
+      item => item.id,
+    ),
+  );
+  const supported = EffectArray.some(
+    eligible,
+    paragraph =>
+      paragraph.currentEvidenceIds.length > 0 &&
+      EffectArray.every(paragraph.currentEvidenceIds, id => available.has(id)),
   );
   if (!supported) reasons.push('evidence-unavailable');
   const assess = target.status === 'active' && !target.artifact;
@@ -375,7 +465,7 @@ export function assertAutomaticMaintenanceAssessment(value: unknown): asserts va
     if (value.preparation.kind === 'derived') shape(value.preparation, ['version', 'kind']);
     else if (value.preparation.kind === 'legacy-approved') {
       shape(value.preparation, ['version', 'kind', 'manifestVersion', 'manifestHash']);
-      if (![1, 2, 3].includes(value.preparation.manifestVersion as number)) refuse();
+      if (!checkedIsOneOf([1, 2, 3], value.preparation.manifestVersion)) refuse();
       hash(value.preparation.manifestHash);
     } else refuse();
   }
@@ -407,9 +497,9 @@ export function assertAutomaticMaintenanceAssessment(value: unknown): asserts va
     if (!target.schemaVersion) refuse();
   }
   list(value.evidence, value.version === 2 ? MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE : MAX_MEMORY_CODE_CITATIONS);
-  value.evidence.forEach(assertAutomaticMaintenanceEvidence);
-  const evidence = value.evidence as AutomaticMaintenanceEvidenceV1[];
-  const ids = new Set(evidence.map(item => item.id));
+  EffectArray.forEach(value.evidence, assertAutomaticMaintenanceEvidence);
+  const evidence = EffectArray.map(value.evidence, item => validatedEvidence(item));
+  const ids = new Set(EffectArray.map(evidence, item => item.id));
   if (ids.size !== evidence.length) refuse();
   list(value.paragraphs, MAX_TOPIC_MAINTENANCE_PARAGRAPHS);
   let previous = -1;
@@ -446,7 +536,8 @@ export function assertAutomaticMaintenanceAssessment(value: unknown): asserts va
     oneOf(paragraph.roleAuthority, value.version === 2 ? ['reviewed'] : ['legacy-approved', 'provisional']);
     oneOf(paragraph.supportAuthority, value.version === 2 ? ['reviewed'] : ['legacy-approved', 'provisional']);
     if (
-      [...paragraph.historicalEvidenceIds, ...paragraph.acceptedEvidenceIds, ...paragraph.currentEvidenceIds].some(
+      EffectArray.some(
+        [...paragraph.historicalEvidenceIds, ...paragraph.acceptedEvidenceIds, ...paragraph.currentEvidenceIds],
         id => !ids.has(id),
       )
     )
@@ -462,8 +553,11 @@ export function assertAutomaticMaintenanceAssessment(value: unknown): asserts va
     )
       refuse();
     if (
-      [...paragraph.historicalEvidenceIds, ...paragraph.acceptedEvidenceIds].some(
-        id => evidence.find(item => item.id === id)!.authority === 'provisional',
+      EffectArray.some(
+        [...paragraph.historicalEvidenceIds, ...paragraph.acceptedEvidenceIds],
+        id =>
+          EffectOption.getOrUndefined(EffectArray.findFirst(evidence, item => item.id === id))!.authority ===
+          'provisional',
       )
     )
       refuse();
@@ -516,14 +610,15 @@ export function assertAutomaticMaintenanceAssessment(value: unknown): asserts va
   const capabilities = value.capabilities;
   shape(capabilities, ['assess', 'draft', 'apply', 'publish', 'reviewRoute', 'reasons']);
   const expected = automaticMaintenanceCapabilities(
-    target as unknown as AutomaticMaintenanceTargetV1,
-    value.paragraphs as AutomaticMaintenanceParagraph[],
+    decodeValidated(AutomaticMaintenanceTargetSchema, target),
+    decodeValidated(Schema.Array(AutomaticMaintenanceParagraphSchema), value.paragraphs),
     evidence,
-    value.coverage as unknown as AutomaticMaintenanceCoverageV1,
+    decodeValidated(AutomaticMaintenanceCoverageSchema, value.coverage),
   );
   if (
-    Object.keys(expected).some(
-      key => JSON.stringify(capabilities[key]) !== JSON.stringify(expected[key as keyof typeof expected]),
+    EffectArray.some(
+      EffectRecord.keys(expected),
+      key => JSON.stringify(capabilities[key]) !== JSON.stringify(expected[key]),
     )
   )
     refuse();
@@ -557,6 +652,7 @@ export function assertAutomaticMaintenanceTarget(
 ): void {
   assertAutomaticMaintenanceAssessment(assessment);
   const target = assessment.target;
+  const paragraphs: readonly AutomaticMaintenanceParagraph[] = assessment.paragraphs;
   const sections = automaticMaintenanceSections(record.body);
   if (
     target.uri !== record.uri ||
@@ -567,7 +663,7 @@ export function assertAutomaticMaintenanceTarget(
     target.canonicalHash !== sha256HexSync(canonicalMemoryDocumentContent(record.content)) ||
     target.bodyHash !== consolidationRevision(record.body) ||
     target.paragraphCount !== (sections?.length ?? null) ||
-    assessment.paragraphs.some(item => item.hash !== consolidationRevision(sections![item.ordinal]))
+    EffectArray.some(paragraphs, item => item.hash !== consolidationRevision(sections![item.ordinal]))
   )
     refuse();
   if (record.metadata.reviewedSupportError) refuse();
@@ -592,9 +688,11 @@ export function assertAutomaticMaintenanceTarget(
     }
     if (
       assessment.dependencies.length ||
-      support.active.sources.some(
+      EffectArray.some(
+        support.active.sources,
         source =>
-          !assessment.evidence.some(
+          !EffectArray.some(
+            assessment.evidence,
             item =>
               item.id === source.id &&
               item.authority !== 'provisional' &&
@@ -629,11 +727,13 @@ export function assertAutomaticMaintenanceTarget(
         paragraph.validity !== approved.validity
       )
         refuse();
-      const originalIds = approved.citationIds.map(id => {
+      const originalIds = EffectArray.map(approved.citationIds, id => {
         if (isCodeTopicMaintenanceManifest(manifest))
           return automaticMaintenanceEvidenceId({
             kind: 'code',
-            citation: record.metadata.codeCitations!.find(item => item.id === id)!,
+            citation: EffectOption.getOrUndefined(
+              EffectArray.findFirst(record.metadata.codeCitations!, item => item.id === id),
+            )!,
           });
         const origin = record.metadata.obsidianEvidence!;
         return automaticMaintenanceEvidenceId({
@@ -643,7 +743,7 @@ export function assertAutomaticMaintenanceTarget(
       });
       const acceptedIds = [
         ...new Set(
-          approved.citationIds.map(id =>
+          EffectArray.map(approved.citationIds, id =>
             isCodeTopicMaintenanceManifest(manifest)
               ? automaticMaintenanceEvidenceId({kind: 'code', citation: topicMaintenanceAcceptedCitation(record, id)})
               : automaticMaintenanceEvidenceId({kind: 'obsidian', evidence: manifest.activeEvidence}),
@@ -656,26 +756,33 @@ export function assertAutomaticMaintenanceTarget(
       )
         refuse();
     }
-    const expectedDependencies = manifest.additionalDependencies.map(item => ({
+    const expectedDependencies = EffectArray.map(manifest.additionalDependencies, item => ({
       kind: item.kind,
       evidenceId: automaticMaintenanceEvidenceId({
         kind: 'code',
-        citation: record.metadata.codeCitations!.find(citation => citation.id === item.citationId)!,
+        citation: EffectOption.getOrUndefined(
+          EffectArray.findFirst(record.metadata.codeCitations!, citation => citation.id === item.citationId),
+        )!,
       }),
     }));
     if (JSON.stringify(assessment.dependencies) !== JSON.stringify(expectedDependencies)) refuse();
-    const requiredSources: AutomaticMaintenanceSourceV1[] = (record.metadata.codeCitations ?? []).map(citation => ({
-      kind: 'code',
-      citation,
-    }));
+    const requiredSources: AutomaticMaintenanceSourceV1[] = EffectArray.map(
+      record.metadata.codeCitations ?? [],
+      citation => ({
+        kind: 'code',
+        citation,
+      }),
+    );
     if (record.metadata.obsidianEvidence)
       requiredSources.push({kind: 'obsidian', evidence: record.metadata.obsidianEvidence});
     if (!isCodeTopicMaintenanceManifest(manifest))
       requiredSources.push({kind: 'obsidian', evidence: manifest.activeEvidence});
     if (
-      requiredSources.some(
+      EffectArray.some(
+        requiredSources,
         source =>
-          !assessment.evidence.some(
+          !EffectArray.some(
+            assessment.evidence,
             item => item.id === automaticMaintenanceEvidenceId(source) && item.authority !== 'provisional',
           ),
       )
@@ -691,12 +798,13 @@ export function projectShareableAutomaticMaintenanceAssessment(
   assertAutomaticMaintenanceAssessment(assessment);
   if (
     assessment.target.visibility !== 'shared' ||
-    assessment.evidence.some(
+    EffectArray.some(
+      assessment.evidence,
       item => item.source.kind === 'obsidian' || item.scope === 'personal' || item.scope === 'external',
     )
   )
     return undefined;
-  const codeCitations = assessment.evidence.flatMap(item =>
+  const codeCitations = EffectArray.flatMap(assessment.evidence, item =>
     item.source.kind === 'code' ? [item.source.citation] : [],
   );
   if (memoryCodeCitationSharingBlocker({codeCitations})) return undefined;

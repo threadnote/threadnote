@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   codeGraphUtf8ByteLength,
   saturatingCapacityAdd,
@@ -15,6 +16,7 @@ import {
   type CodeGraphReference,
   type CodeGraphSymbol,
 } from '../types.js';
+import * as EffectRecord from 'effect/Record';
 
 export interface CodeGraphTemporaryPublicationCounts {
   readonly edges: number;
@@ -39,15 +41,13 @@ export function temporaryActivationInventoryCapacity(
 export function temporaryActivationWorkspaceCapacity(
   workspace: CodeGraphWorkspace,
 ): CodeGraphDirectPersistentCapacityBoundary {
-  const dependencyRows = workspace.projects.reduce(
-    (total, project) =>
-      saturatingCapacityAdd(
-        total,
-        project.dependencyDetails.length,
-        project.externalDependencies?.length ?? 0,
-        project.monikers?.length ?? 0,
-      ),
-    0,
+  const dependencyRows = EffectArray.reduce(workspace.projects, 0, (total, project) =>
+    saturatingCapacityAdd(
+      total,
+      project.dependencyDetails.length,
+      project.externalDependencies?.length ?? 0,
+      project.monikers?.length ?? 0,
+    ),
   );
   return temporaryBoundary(
     'stage temporary code graph workspace',
@@ -62,16 +62,22 @@ export function temporaryActivationFactsCapacity(
   references: readonly CodeGraphReference[],
   monikers: readonly CodeGraphMonikerV1[] = [],
 ): CodeGraphDirectPersistentCapacityBoundary {
-  const boundedReferences = references.filter(isCodeGraphReferenceWithinCandidateBudget);
-  const lookupRows = symbols.reduce((total, symbol) => saturatingCapacityAdd(total, symbol.lookupKeys?.length ?? 0), 0);
-  const termRows = symbols.reduce((total, symbol) => saturatingCapacityAdd(total, symbolTerms(symbol).length), 0);
-  const candidateRows = boundedReferences.reduce(
-    (total, reference) =>
-      saturatingCapacityAdd(
-        total,
-        reference.lookupTiers.reduce((tierTotal, tier) => saturatingCapacityAdd(tierTotal, tier.length), 0),
-      ),
-    0,
+  const boundedReferences = EffectArray.filter(
+    references,
+    (__effectFilterValue: (typeof references)[number], __effectFilterIndex: number) =>
+      __effectFilterIndex in references && isCodeGraphReferenceWithinCandidateBudget(__effectFilterValue),
+  );
+  const lookupRows = EffectArray.reduce(symbols, 0, (total, symbol) =>
+    saturatingCapacityAdd(total, symbol.lookupKeys?.length ?? 0),
+  );
+  const termRows = EffectArray.reduce(symbols, 0, (total, symbol) =>
+    saturatingCapacityAdd(total, symbolTerms(symbol).length),
+  );
+  const candidateRows = EffectArray.reduce(boundedReferences, 0, (total, reference) =>
+    saturatingCapacityAdd(
+      total,
+      EffectArray.reduce(reference.lookupTiers, 0, (tierTotal, tier) => saturatingCapacityAdd(tierTotal, tier.length)),
+    ),
   );
   const rowCount = saturatingCapacityAdd(
     symbols.length,
@@ -99,10 +105,10 @@ export function temporaryIncrementalActivationCapacity(
   carried?: {readonly stagedPayloadBytes: number; readonly stagedRows: number},
 ): CodeGraphDirectPersistentCapacityBoundary {
   const factsCapacity = temporaryActivationFactsCapacity(
-    facts.flatMap(fact => fact.symbols),
-    facts.flatMap(fact => fact.edges),
-    facts.flatMap(fact => fact.references ?? []),
-    facts.flatMap(fact => fact.monikers ?? []),
+    EffectArray.flatMap(facts, fact => fact.symbols),
+    EffectArray.flatMap(facts, fact => fact.edges),
+    EffectArray.flatMap(facts, fact => fact.references ?? []),
+    EffectArray.flatMap(facts, fact => fact.monikers ?? []),
   );
   return temporaryBoundary(
     'prepare temporary incremental code graph activation',
@@ -127,9 +133,11 @@ export function temporaryIncrementalActivationCapacity(
 export function temporaryActivationPublicationCapacity(
   counts: CodeGraphTemporaryPublicationCounts,
 ): CodeGraphDirectPersistentCapacityBoundary {
-  const values = Object.values(counts);
-  const valid = values.every(value => Number.isSafeInteger(value) && value >= 0);
-  const sourceRows = valid ? values.reduce((total, value) => saturatingCapacityAdd(total, value), 0) : Number.NaN;
+  const values = EffectRecord.values(counts);
+  const valid = EffectArray.every(values, value => Number.isSafeInteger(value) && value >= 0);
+  const sourceRows = valid
+    ? EffectArray.reduce(values, 0, (total, value) => saturatingCapacityAdd(total, value))
+    : Number.NaN;
   return {
     finalFactBytes: 0,
     operation: 'publish temporary code graph snapshot',
@@ -172,6 +180,6 @@ function encodedBytes(value: unknown): number {
 function maximumRetainedRawAliasBytes(files: readonly CodeGraphInventoryFile[]): number {
   return saturatingCapacityMultiply(
     64,
-    files.reduce((count, file) => count + (file.rawContentHash === undefined ? 1 : 0), 0),
+    EffectArray.reduce(files, 0, (count, file) => count + (file.rawContentHash === undefined ? 1 : 0)),
   );
 }

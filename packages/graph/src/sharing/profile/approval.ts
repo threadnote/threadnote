@@ -20,6 +20,8 @@ import {
   type GraphShareProfileV1,
 } from '../profile.js';
 import {isGraphShareRegistryReference, parseGraphShareRegistryTarget} from '../registry/reference.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const STRICT = {errors: 'all', onExcessProperty: 'error'} as const;
 const APPROVAL_MAX_BYTES = 16_384;
@@ -220,7 +222,12 @@ function inspectApprovalPath(
 
 function withinPath(path: Path.Path, parent: string, target: string): boolean {
   const relative = path.relative(parent, target);
-  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  return (
+    relative === '' ||
+    (relative !== '..' &&
+      !Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)) &&
+      !path.isAbsolute(relative))
+  );
 }
 
 function sameFile(left: RuntimeBigIntStats, right: RuntimeBigIntStats): boolean {

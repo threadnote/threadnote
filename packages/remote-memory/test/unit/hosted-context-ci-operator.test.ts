@@ -6,6 +6,8 @@ import {
   type HostedContextCiReadIdentityV1,
   type HostedContextCiPublicationIdentityV1,
 } from '@threadnote/remote-memory/hosted/context_ci_operator';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const policy = buildHostedContextCiPolicyV1({
   tenantId: 'tenant',
@@ -31,8 +33,8 @@ const event = {
   headRepositoryId: 'repository',
   ref: 'refs/heads/feature',
   baseRef: 'refs/heads/main',
-  headCommit: 'a'.repeat(40),
-  baseCommit: 'b'.repeat(40),
+  headCommit: Effect.pipe('a', EffectString.repeat(40)),
+  baseCommit: Effect.pipe('b', EffectString.repeat(40)),
 };
 const body = JSON.stringify(event);
 const timestamp = '1800000000000';
@@ -88,7 +90,11 @@ describe('hosted Context CI staged operator', () => {
   });
 
   it('never evaluates a moved head/base or publishes evidence after either ref moves', async () => {
-    for (const changed of [{headCommit: 'c'.repeat(40)}, {baseCommit: 'd'.repeat(40)}, {repositoryId: 'other'}]) {
+    for (const changed of [
+      {headCommit: Effect.pipe('c', EffectString.repeat(40))},
+      {baseCommit: Effect.pipe('d', EffectString.repeat(40))},
+      {repositoryId: 'other'},
+    ]) {
       const {reader, publisher} = identities();
       const evaluated = await evaluateHostedContextCiJobV1(policy, job, reader);
       if (evaluated.status !== 'evaluated') throw new Error('missing evaluation');
@@ -115,7 +121,9 @@ describe('hosted Context CI staged operator', () => {
       status: 'retry',
       reason: 'publication-unavailable',
     });
-    vi.mocked(reader.evaluate).mockResolvedValue(raw.replace('"project"', '"privateMemory":"secret","project"'));
+    vi.mocked(reader.evaluate).mockResolvedValue(
+      Effect.pipe(raw, EffectString.replace('"project"', '"privateMemory":"secret","project"')),
+    );
     expect(await evaluateHostedContextCiJobV1(policy, job, reader)).toEqual({
       status: 'retry',
       reason: 'evaluation-unavailable',
@@ -125,14 +133,17 @@ describe('hosted Context CI staged operator', () => {
   it('rejects extra credential authority before invoking adapters', async () => {
     const {reader} = identities();
     await expect(
-      evaluateHostedContextCiJobV1(policy, job, {
-        ...reader,
-        capabilities: [
-          'repository:read',
-          'context:check',
-          'repository:write',
-        ] as unknown as HostedContextCiReadIdentityV1['capabilities'],
-      }),
+      (() => {
+        const readerWithUnexpectedCapability = {...reader};
+        expect(
+          Reflect.set(readerWithUnexpectedCapability, 'capabilities', [
+            'repository:read',
+            'context:check',
+            'repository:write',
+          ]),
+        ).toBe(true);
+        return evaluateHostedContextCiJobV1(policy, job, readerWithUnexpectedCapability);
+      })(),
     ).rejects.toThrow(/identity/);
     expect(reader.resolve).not.toHaveBeenCalled();
     expect(reader.evaluate).not.toHaveBeenCalled();

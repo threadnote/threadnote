@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {DateTime, Effect} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import type {ContextBriefGraphReadBudget} from './graph/evidence.js';
@@ -110,9 +111,17 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
         anchored.citationValidationFence?.kind === 'repository' &&
         initialGraph.citationValidationFence?.kind === 'repository' &&
         anchored.citationValidationFence.repositoryId === initialGraph.citationValidationFence.repositoryId &&
-        anchored.resolvedSnapshots.some(snapshot => snapshot.freshness === 'fresh') &&
-        anchored.cards.some(card => codeRefs.includes(card.symbol.path)) &&
-        (plan.graph.detail !== 'source' || anchored.sourceExcerpts?.some(source => codeRefs.includes(source.path)))
+        EffectArray.some(anchored.resolvedSnapshots, snapshot => snapshot.freshness === 'fresh') &&
+        EffectArray.some(anchored.cards, card => codeRefs.includes(card.symbol.path)) &&
+        (plan.graph.detail !== 'source' ||
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(anchored.sourceExcerpts), __effectArrayReceiver =>
+              EffectArray.some(
+                __effectArrayReceiver,
+                __effectArrayValue => !!(source => codeRefs.includes(source.path))(__effectArrayValue),
+              ),
+            ),
+          ))
       ) {
         graph = anchored;
         if (!sameGraphValidationFence(initialGraph, graph)) {
@@ -137,7 +146,9 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
       verifiedProcedureGaps: procedureEvidence.gaps,
       verifiedProcedures: procedureEvidence.procedures,
     });
-    const selected = memory.candidates.find(candidate => candidate.uri === initialLogical.activeHandoffs[0]?.uri);
+    const selected = EffectOption.getOrUndefined(
+      EffectArray.findFirst(memory.candidates, candidate => candidate.uri === initialLogical.activeHandoffs[0]?.uri),
+    );
     const selectedPlan = withSelectedResumeGraphAnchors(plan.graph, selected, plan.codeAnchors.candidateLimit);
     const initialPlan = withResumeMemoryGraphAnchors(plan.graph, lexicalMemory, plan.codeAnchors.candidateLimit);
     if (!sameCodeRefs(selectedPlan.codeRefs, initialPlan.codeRefs)) {
@@ -159,8 +170,11 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
         verifiedProcedureGaps: procedureEvidence.gaps,
         verifiedProcedures: procedureEvidence.procedures,
       });
-      const refreshedSelected = memory.candidates.find(
-        candidate => candidate.uri === refreshedLogical.activeHandoffs[0]?.uri,
+      const refreshedSelected = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          memory.candidates,
+          candidate => candidate.uri === refreshedLogical.activeHandoffs[0]?.uri,
+        ),
       );
       if (
         !sameCodeRefs(
@@ -200,15 +214,16 @@ function withResumeMemoryGraphAnchors(
   maximumRefs: number,
 ): ContextBriefPlanV1['graph'] {
   if (graphPlan.codeRefs.length > 0) return graphPlan;
-  const handoff = [...memory.candidates]
-    .filter(candidate => candidate.kind === 'handoff' && candidate.continuationCard !== undefined)
-    .sort(
-      (left, right) =>
-        contextBriefResumeTaskAlignmentScore(graphPlan.query, right) -
-          contextBriefResumeTaskAlignmentScore(graphPlan.query, left) ||
-        left.rank - right.rank ||
-        (left.uri === right.uri ? 0 : left.uri < right.uri ? -1 : 1),
-    )[0];
+  const handoff = EffectArray.filter(
+    [...memory.candidates],
+    candidate => candidate.kind === 'handoff' && candidate.continuationCard !== undefined,
+  ).sort(
+    (left, right) =>
+      contextBriefResumeTaskAlignmentScore(graphPlan.query, right) -
+        contextBriefResumeTaskAlignmentScore(graphPlan.query, left) ||
+      left.rank - right.rank ||
+      (left.uri === right.uri ? 0 : left.uri < right.uri ? -1 : 1),
+  )[0];
   return withSelectedResumeGraphAnchors(graphPlan, handoff, maximumRefs);
 }
 
@@ -220,7 +235,7 @@ function withSelectedResumeGraphAnchors(
   if (handoff === undefined || graphPlan.codeRefs.length > 0) return graphPlan;
   const codeRefs = [
     ...new Set(
-      handoff.codeCitations.map(citation =>
+      EffectArray.map(handoff.codeCitations, citation =>
         citation.target.kind === 'symbol' && /^cgs_[0-9a-f]{32}$/u.test(citation.target.nodeId)
           ? citation.target.nodeId
           : citation.path,
@@ -231,7 +246,7 @@ function withSelectedResumeGraphAnchors(
 }
 
 function sameCodeRefs(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((ref, index) => ref === right[index]);
+  return left.length === right.length && EffectArray.every(left, (ref, index) => ref === right[index]);
 }
 
 function sameGraphValidationFence(left: ContextBriefGraphEvidenceV1, right: ContextBriefGraphEvidenceV1): boolean {

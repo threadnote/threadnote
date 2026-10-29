@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
-import {Redacted} from 'effect';
+import {Redacted, Schema} from 'effect';
 import {probeSuperhumanRestPage, RestProbeError, SUPERHUMAN_REST_URL} from '../src/rest-probe.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const token = Redacted.make('synthetic-secret-token');
 const selected = 'https://docs.superhuman.com/d/_dDoc/Selected_sPage#_selected';
@@ -40,7 +43,7 @@ function harness(
     options.onRequest?.(url, init);
     if (url.searchParams.has('pageToken') && [...url.searchParams.keys()].length !== 1)
       return new Response('Pagination continuation cannot repeat initial query options', {status: 400});
-    if (url.pathname.endsWith('/resolveBrowserLink'))
+    if (Effect.pipe(url.pathname, EffectString.endsWith('/resolveBrowserLink')))
       return Response.json({
         type: 'apiLink',
         href: url.href,
@@ -52,7 +55,7 @@ function harness(
       const items = pages.slice(index, index + 2);
       return Response.json({items, nextPageToken: index + 2 < pages.length ? String(index + 2) : undefined});
     }
-    if (url.pathname.endsWith('/content')) {
+    if (Effect.pipe(url.pathname, EffectString.endsWith('/content'))) {
       const continuation = contentTokens.get(url.searchParams.get('pageToken') ?? '');
       const index = continuation?.index ?? 0;
       const limit = continuation?.limit ?? Number(url.searchParams.get('limit'));
@@ -75,7 +78,8 @@ async function code(work: Promise<unknown>): Promise<string> {
     await work;
   } catch (error) {
     expect(error).toBeInstanceOf(RestProbeError);
-    return (error as RestProbeError).code;
+    if (!Schema.is(RestProbeError)(error)) throw error;
+    return error.code;
   }
   throw new Error('expected failure');
 }
@@ -164,7 +168,8 @@ describe('Superhuman Docs REST selected-page contract probe', () => {
     const fetchImpl = harness([], {
       pages: [page('canvas-Page')],
       onRequest(url) {
-        if (url.pathname.endsWith('/resolveBrowserLink')) resolvedUrls.push(url.searchParams.get('url') ?? '');
+        if (Effect.pipe(url.pathname, EffectString.endsWith('/resolveBrowserLink')))
+          resolvedUrls.push(url.searchParams.get('url') ?? '');
       },
     });
     const unanchored = 'https://docs.superhuman.com/d/_dDoc/Selected_sPage';
@@ -231,7 +236,10 @@ describe('Superhuman Docs REST selected-page contract probe', () => {
     expect(
       await code(
         probeSuperhumanRestPage(token, selected, {
-          fetch: async () => new Response('x'.repeat(256 * 1024 + 1), {headers: {'content-type': 'application/json'}}),
+          fetch: async () =>
+            new Response(Effect.pipe('x', EffectString.repeat(256 * 1024 + 1)), {
+              headers: {'content-type': 'application/json'},
+            }),
         }),
       ),
     ).toBe('response-too-large');
@@ -314,7 +322,7 @@ describe('Superhuman Docs REST selected-page contract probe', () => {
     const base = harness([line('cl-1', 'private original body')], {pages: [page('canvas-Page')]});
     const result = await probeSuperhumanRestPage(token, selected, {
       fetch: async (url, init) => {
-        if (url.pathname.endsWith('/content') && url.searchParams.get('limit') === '1')
+        if (Effect.pipe(url.pathname, EffectString.endsWith('/content')) && url.searchParams.get('limit') === '1')
           return Response.json({items: [line('cl-1', 'private changed body')], href: url.href});
         return base(url, init);
       },
@@ -326,7 +334,7 @@ describe('Superhuman Docs REST selected-page contract probe', () => {
   it('preserves ordered equality across arbitrary content pagination without leaking generated text', async () => {
     await fc.assert(
       fc.asyncProperty(fc.array(fc.string({maxLength: 20}), {maxLength: 10}), async values => {
-        const lines = values.map((value, index) => line(`cl-${index}`, `private-line-${index}-${value}`));
+        const lines = EffectArray.map(values, (value, index) => line(`cl-${index}`, `private-line-${index}-${value}`));
         const result = await probeSuperhumanRestPage(token, selected, {
           fetch: harness(lines, {pages: [page('canvas-Page')]}),
         });

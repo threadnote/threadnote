@@ -1,3 +1,10 @@
+import {
+  isContentResponse,
+  isManagerContextMaintenancePacketV2,
+  isManagerContextMaintenanceStatusV2,
+  isManagerMaintenanceRefreshResultV1,
+} from '../api/response_guards.js';
+import {Array as EffectArray} from 'effect';
 import {HealthDetail} from '../attention_details.js';
 import {SemanticResolutionReview} from './semantic_comparison.js';
 import {TopicReviewContent} from './topic_review.js';
@@ -10,6 +17,7 @@ import {MemoryExcerpt} from '../review_presentation.js';
 import {SourceExcerpt} from '../source_code.js';
 import {memoryDocumentParts} from '../library_model.js';
 import {api, ManagerApiError} from '../ui/support.js';
+import type {ApiResponseGuard} from '../api/response_guard.js';
 import {evidenceReadError, maintenanceEvidenceBusy, retryEvidenceRead} from './evidence_refresh.js';
 import type {
   ManagerContextMaintenanceCaseV2,
@@ -24,6 +32,7 @@ import {
   maintenanceDecisionLabel,
   maintenanceMemoryTitle,
 } from './maintenance.js';
+import {Option as EffectOption} from 'effect';
 
 export function MaintenanceTaskDialog(props: {
   readonly task: string;
@@ -113,21 +122,25 @@ export function MaintenanceCaseDialog(props: {
     setLoading(true);
     const current = () => !controller.signal.aborted;
     const options = {signal: controller.signal, timeoutMilliseconds: 30_000};
-    const read = <A,>(path: string, body?: Record<string, unknown>) =>
-      retryEvidenceRead(() => api<A>(path, body, options), controller.signal);
+    const read = <A,>(path: string, body: Record<string, unknown> | undefined, guard: ApiResponseGuard<A>) =>
+      retryEvidenceRead(() => api<A>(path, body, options, guard), controller.signal);
     const selectedUri =
       selection?.memoryUri ??
       (props.initialCase?.family === 'topic-maintenance' || item?.family === 'topic-maintenance'
         ? undefined
         : props.memoryUri);
     async function refreshSelected() {
-      const result = await read<ManagerMaintenanceRefreshResultV1>('/api/attention/context-maintenance', {
-        action: 'refresh-case',
-        project: props.project,
-        caseId,
-        ...(selectedUri ? {memoryUri: selectedUri} : {}),
-        ...(selection ? {citationId: selection.citationId} : {}),
-      });
+      const result = await read<ManagerMaintenanceRefreshResultV1>(
+        '/api/attention/context-maintenance',
+        {
+          action: 'refresh-case',
+          project: props.project,
+          caseId,
+          ...(selectedUri ? {memoryUri: selectedUri} : {}),
+          ...(selection ? {citationId: selection.citationId} : {}),
+        },
+        isManagerMaintenanceRefreshResultV1,
+      );
       if (!current()) return;
       if (!['ready', 'resolved', 'unavailable', 'changing', 'incomplete', 'superseded'].includes(result.outcome))
         throw new Error('The selected evidence check returned an incomplete response. Check again.');
@@ -183,12 +196,22 @@ export function MaintenanceCaseDialog(props: {
           return;
         }
         const path = `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}&caseId=${encodeURIComponent(caseId)}`;
-        const details = await read<ManagerContextMaintenanceStatusV2>(`${path}&view=status`);
+        const details = await read<ManagerContextMaintenanceStatusV2>(
+          path + '&view=status',
+          undefined,
+          isManagerContextMaintenanceStatusV2,
+        );
         if (!current()) return;
-        const currentCase = details.cases?.find(value => value.caseId === caseId);
+        const currentCase = EffectOption.getOrUndefined(
+          EffectOption.flatMap(EffectOption.fromNullishOr(details.cases), cases =>
+            EffectArray.findFirst(cases, value => value.caseId === caseId),
+          ),
+        );
         if (currentCase) setItem(currentCase);
         const result = await read<ManagerContextMaintenancePacketV2>(
           `${path}${selectedUri ? `&memoryUri=${encodeURIComponent(selectedUri)}` : ''}${selection ? `&citationId=${encodeURIComponent(selection.citationId)}` : ''}`,
+          undefined,
+          isManagerContextMaintenancePacketV2,
         );
         if (!current()) return;
         if (result.version !== 2 || result.project !== props.project || result.caseId !== caseId)
@@ -335,14 +358,26 @@ export function MaintenanceCaseDialog(props: {
               setPacket(undefined);
               setBlocked(false);
               setCaseId(event.target.value);
-              setItem(props.relatedCases?.find(value => value.caseId === event.target.value));
+              setItem(
+                EffectOption.getOrUndefined(
+                  EffectOption.map(EffectOption.fromNullishOr(props.relatedCases), __effectArrayReceiver =>
+                    EffectOption.getOrUndefined(
+                      EffectArray.findFirst(__effectArrayReceiver, value => value.caseId === event.target.value),
+                    ),
+                  ),
+                ),
+              );
             }}
           >
-            {props.relatedCases?.map((value, index) => (
-              <option key={value.caseId} value={value.caseId}>
-                {maintenanceDecisionLabel(value.reason)} · check {index + 1}
-              </option>
-            ))}
+            {EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(props.relatedCases), __effectArrayReceiver =>
+                EffectArray.map(__effectArrayReceiver, (value, index) => (
+                  <option key={value.caseId} value={value.caseId}>
+                    {maintenanceDecisionLabel(value.reason)} · check {index + 1}
+                  </option>
+                )),
+              ),
+            )}
           </select>
         </label>
       ) : null}
@@ -389,19 +424,23 @@ export function MaintenanceCaseDialog(props: {
         {packet ? (
           <>
             <div className="health-evidence-selectors">
-              {packet.evidenceSelectors?.map((selector, index) => (
-                <button
-                  type="button"
-                  key={`${selector.memoryUri}:${selector.citationId}`}
-                  title={selector.citationId}
-                  aria-pressed={
-                    selection?.citationId === selector.citationId && selection.memoryUri === selector.memoryUri
-                  }
-                  onClick={() => setSelection(selector)}
-                >
-                  Reference {index + 1}
-                </button>
-              ))}
+              {EffectOption.getOrUndefined(
+                EffectOption.map(EffectOption.fromNullishOr(packet.evidenceSelectors), __effectArrayReceiver =>
+                  EffectArray.map(__effectArrayReceiver, (selector, index) => (
+                    <button
+                      type="button"
+                      key={`${selector.memoryUri}:${selector.citationId}`}
+                      title={selector.citationId}
+                      aria-pressed={
+                        selection?.citationId === selector.citationId && selection.memoryUri === selector.memoryUri
+                      }
+                      onClick={() => setSelection(selector)}
+                    >
+                      Reference {index + 1}
+                    </button>
+                  )),
+                ),
+              )}
             </div>
             {(packet.omittedEvidenceSelectors ?? 0) > 0 ? (
               <p className="muted">More references are available in the full memory in Library.</p>
@@ -423,24 +462,28 @@ export function MaintenanceCaseDialog(props: {
               />
             ) : null}
             <div className="health-evidence-comparison">
-              {packet.evidence?.excerpts.map(excerpt => (
-                <section className="health-code-preview" key={`${excerpt.provenance}:${excerpt.excerptHash}`}>
-                  <h4>{excerpt.provenance === 'historical-verified' ? 'Historical source' : 'Current source'}</h4>
-                  <p className="muted">
-                    {excerpt.provenance === 'historical-verified'
-                      ? 'Preserves the original evidence; does not verify today’s claim.'
-                      : excerpt.supportsCitation
-                        ? 'Citation support verified. Review whether the advice still matches.'
-                        : 'Source changed. Review the claim before updating its citation.'}
-                  </p>
-                  <p>
-                    <code>
-                      {excerpt.source.path}:{excerpt.startLine}
-                    </code>
-                  </p>
-                  <SourceExcerpt content={excerpt.content} path={excerpt.source.path} />
-                </section>
-              ))}
+              {EffectOption.getOrUndefined(
+                EffectOption.map(EffectOption.fromNullishOr(packet.evidence?.excerpts), __effectArrayReceiver =>
+                  EffectArray.map(__effectArrayReceiver, excerpt => (
+                    <section className="health-code-preview" key={`${excerpt.provenance}:${excerpt.excerptHash}`}>
+                      <h4>{excerpt.provenance === 'historical-verified' ? 'Historical source' : 'Current source'}</h4>
+                      <p className="muted">
+                        {excerpt.provenance === 'historical-verified'
+                          ? 'Preserves the original evidence; does not verify today’s claim.'
+                          : excerpt.supportsCitation
+                            ? 'Citation support verified. Review whether the advice still matches.'
+                            : 'Source changed. Review the claim before updating its citation.'}
+                      </p>
+                      <p>
+                        <code>
+                          {excerpt.source.path}:{excerpt.startLine}
+                        </code>
+                      </p>
+                      <SourceExcerpt content={excerpt.content} path={excerpt.source.path} />
+                    </section>
+                  )),
+                ),
+              )}
             </div>
             {!packet.evidence?.excerpts.length && !packet.semanticEvidence ? (
               <p>No source excerpt is available for this case. Review the memory and the choices below.</p>
@@ -471,7 +514,7 @@ export function MaintenanceCaseDialog(props: {
                 ) : null}
                 <h3>What you can do</h3>
                 <ul>
-                  {packet.choices.map(choice => (
+                  {EffectArray.map(packet.choices, choice => (
                     <li key={choice}>{choice}</li>
                   ))}
                 </ul>
@@ -480,7 +523,7 @@ export function MaintenanceCaseDialog(props: {
             {packet.ownerProposal && !packet.semanticEvidence ? (
               <section aria-label="Shared owner proposal">
                 <h4>Proposed changes for the team owner</h4>
-                {packet.ownerProposal.selectedEdits.map((edit, index) => (
+                {EffectArray.map(packet.ownerProposal.selectedEdits, (edit, index) => (
                   <p key={index}>
                     {edit.operation}: {edit.relation.type} → {edit.relation.uri}
                   </p>
@@ -504,11 +547,15 @@ export function MaintenanceCaseDialog(props: {
             <p>
               Evidence revision: <code>{packet?.evidenceRevision ?? item?.evidenceRevision}</code>
             </p>
-            {item?.events.map((event, index) => (
-              <p key={index}>
-                {event.at} — {event.reason}
-              </p>
-            ))}
+            {EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(item?.events), __effectArrayReceiver =>
+                EffectArray.map(__effectArrayReceiver, (event, index) => (
+                  <p key={index}>
+                    {event.at} — {event.reason}
+                  </p>
+                )),
+              ),
+            )}
           </details>
         ) : null}
       </section>
@@ -539,10 +586,15 @@ function CaseMemory(props: {readonly uri: string; readonly refresh: number}): Re
     }
     void retryEvidenceRead(
       () =>
-        api<{content: string}>(`/api/memory?uri=${encodeURIComponent(props.uri)}`, undefined, {
-          signal: controller.signal,
-          timeoutMilliseconds: 30_000,
-        }),
+        api<{content: string}>(
+          `/api/memory?uri=${encodeURIComponent(props.uri)}`,
+          undefined,
+          {
+            signal: controller.signal,
+            timeoutMilliseconds: 30_000,
+          },
+          isContentResponse,
+        ),
       controller.signal,
     )
       .then(result => {

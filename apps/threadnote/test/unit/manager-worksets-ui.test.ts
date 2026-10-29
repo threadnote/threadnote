@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 
 import React, {act} from 'react';
@@ -10,6 +11,10 @@ import type {ManagerWorksetPrepareJob} from '@threadnote/threadnote/manager/work
 import {managerWorksetJobElapsedMilliseconds, PrepareJobPanel, WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {readFile} from '@threadnote/testing/node-fs-promises';
 import {join} from '@threadnote/testing/node-path';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 interface PendingQuery {
   readonly signal?: AbortSignal;
@@ -28,7 +33,13 @@ interface PendingCatalog extends PendingQuery {
   readonly body: ReturnType<typeof catalog>;
 }
 
-const REVISION = 'a'.repeat(64);
+function parseJsonObject(text: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(text);
+  if (!isJsonObject(value)) throw new Error('Expected a workset request object.');
+  return value;
+}
+
+const REVISION = Effect.pipe('a', EffectString.repeat(64));
 let reactRoot: Root | undefined;
 let fetchOriginal: typeof fetch;
 let pendingQueries: PendingQuery[];
@@ -52,7 +63,7 @@ let pendingCatalogs: PendingCatalog[];
 let statusUnavailable: boolean;
 
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   fetchOriginal = globalThis.fetch;
   pendingQueries = [];
   catalogRevision = REVISION;
@@ -63,7 +74,7 @@ beforeEach(() => {
     ['beta', ['beta']],
   ]);
   projectInventory = ['alpha', 'beta'];
-  projectDetails = new Map(projectInventory.map(name => [name, manifestProject(name)]));
+  projectDetails = new Map(EffectArray.map(projectInventory, name => [name, manifestProject(name)]));
   projectRevisionConflictOnce = false;
   deferProjectDetails = false;
   pendingProjectDetails = [];
@@ -85,7 +96,7 @@ beforeEach(() => {
       return Promise.resolve(jsonResponse(body));
     }
     if (url === '/api/worksets/jobs') return Promise.resolve(jsonResponse({jobs: []}));
-    if (url.startsWith('/api/worksets/project?')) {
+    if (Effect.pipe(url, EffectString.startsWith('/api/worksets/project?'))) {
       const name = new URL(url, 'http://manager.test').searchParams.get('project') ?? '';
       const detail = projectDetails.get(name) ?? manifestProject(name);
       if (deferProjectDetails) {
@@ -95,7 +106,7 @@ beforeEach(() => {
       }
       return Promise.resolve(jsonResponse(detail));
     }
-    if (url.startsWith('/api/worksets/project-graph-preview?')) {
+    if (Effect.pipe(url, EffectString.startsWith('/api/worksets/project-graph-preview?'))) {
       const name = new URL(url, 'http://manager.test').searchParams.get('project') ?? '';
       if (scopePreviewFailure !== undefined) {
         return Promise.resolve(jsonResponse({error: scopePreviewFailure}, 422));
@@ -108,27 +119,27 @@ beforeEach(() => {
       return Promise.resolve(jsonResponse(scopePreview(name)));
     }
     if (url === '/api/worksets/projects') {
-      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const body = parseJsonObject(String(init?.body));
       projectMutationBodies.push(body);
       if (projectRevisionConflictOnce) {
         projectRevisionConflictOnce = false;
-        catalogRevision = 'f'.repeat(64);
+        catalogRevision = Effect.pipe('f', EffectString.repeat(64));
         return Promise.resolve(jsonResponse({code: 'revision-conflict', error: 'Manifest changed.'}, 409));
       }
       const operation = body.operation;
       if (operation === 'delete') {
         const name = String(body.project);
-        projectInventory = projectInventory.filter(project => project !== name);
+        projectInventory = EffectArray.filter(projectInventory, project => project !== name);
         projectDetails.delete(name);
       } else {
         const name = String(body.name);
         const originalName = operation === 'update' ? String(body.project) : undefined;
         if (originalName !== undefined) {
-          projectInventory = projectInventory.map(project => (project === originalName ? name : project));
+          projectInventory = EffectArray.map(projectInventory, project => (project === originalName ? name : project));
           definitionProjects = new Map(
-            [...definitionProjects].map(([workset, projects]) => [
+            EffectArray.map([...definitionProjects], ([workset, projects]) => [
               workset,
-              projects.map(project => (project === originalName ? name : project)),
+              EffectArray.map(projects, project => (project === originalName ? name : project)),
             ]),
           );
           projectDetails.delete(originalName);
@@ -138,15 +149,18 @@ beforeEach(() => {
         projectDetails.set(name, {
           name,
           path: String(body.path),
-          seed: Array.isArray(body.seed) ? body.seed.map(String) : [],
+          seed: EffectArray.isArray(body.seed) ? EffectArray.map(body.seed, String) : [],
           uri: String(body.uri),
         });
       }
-      catalogRevision = String.fromCharCode(106 + projectMutationBodies.length - 1).repeat(64);
+      catalogRevision = Effect.pipe(
+        String.fromCharCode(106 + projectMutationBodies.length - 1),
+        EffectString.repeat(64),
+      );
       return Promise.resolve(jsonResponse({catalog: catalog(), changed: true, warnings: []}));
     }
     if (url === '/api/worksets/definitions') {
-      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const body = parseJsonObject(String(init?.body));
       definitionMutationBodies.push(body);
       const operation = body.operation;
       if (operation === 'delete') {
@@ -155,16 +169,19 @@ beforeEach(() => {
         const name = String(body.name);
         const originalName = operation === 'update' ? String(body.workset) : undefined;
         if (originalName !== undefined && originalName !== name) definitionProjects.delete(originalName);
-        definitionProjects.set(name, Array.isArray(body.projects) ? body.projects.map(String) : []);
+        definitionProjects.set(name, EffectArray.isArray(body.projects) ? EffectArray.map(body.projects, String) : []);
       }
-      catalogRevision = String.fromCharCode(98 + definitionMutationBodies.length - 1).repeat(64);
+      catalogRevision = Effect.pipe(
+        String.fromCharCode(98 + definitionMutationBodies.length - 1),
+        EffectString.repeat(64),
+      );
       return Promise.resolve(jsonResponse({catalog: catalog(), changed: true, warnings: []}));
     }
-    if (url.startsWith('/api/worksets/definition')) {
+    if (Effect.pipe(url, EffectString.startsWith('/api/worksets/definition'))) {
       const name = new URL(url, 'http://manager.test').searchParams.get('workset') ?? 'alpha';
       return Promise.resolve(jsonResponse(definition(name)));
     }
-    if (url.startsWith('/api/worksets/status')) {
+    if (Effect.pipe(url, EffectString.startsWith('/api/worksets/status'))) {
       if (statusUnavailable)
         return Promise.resolve(
           jsonResponse(
@@ -277,7 +294,7 @@ describe('Manager Worksets interaction fencing', () => {
     expect(document.body.textContent).toContain('OldGenerationSymbol');
     expect(document.body.textContent).toContain('Current members');
 
-    catalogRevision = 'd'.repeat(64);
+    catalogRevision = Effect.pipe('d', EffectString.repeat(64));
     definitionProjects.set('alpha', ['alpha', 'beta']);
     await clickButton('Refresh definitions');
     await waitForText('2 members');
@@ -294,7 +311,10 @@ describe('Manager Worksets interaction fencing', () => {
   });
 
   it('keeps more than 250 selected projects searchable and pageable', async () => {
-    projectInventory = Array.from({length: 320}, (_, index) => `project-${String(index).padStart(3, '0')}`);
+    projectInventory = Array.from(
+      {length: 320},
+      (_, index) => `project-${Effect.pipe(String(index), EffectString.padStart(3, '0'))}`,
+    );
     definitionProjects = new Map([
       ['alpha', projectInventory.slice(0, 300)],
       ['beta', ['project-319']],
@@ -346,7 +366,7 @@ describe('Manager Worksets interaction fencing', () => {
     await waitForText('Workset definition deleted.');
     expect(definitionMutationBodies[1]).toMatchObject({
       confirm: true,
-      expectedRevision: 'b'.repeat(64),
+      expectedRevision: Effect.pipe('b', EffectString.repeat(64)),
       operation: 'delete',
       workset: 'gamma',
     });
@@ -488,7 +508,7 @@ describe('Manager Worksets interaction fencing', () => {
     await clickButton('Save project');
     await waitForText('Manifest project saved.');
     expect(projectMutationBodies[1]).toMatchObject({
-      expectedRevision: 'f'.repeat(64),
+      expectedRevision: Effect.pipe('f', EffectString.repeat(64)),
       name: 'alpha-renamed',
       operation: 'update',
       project: 'alpha',
@@ -551,7 +571,7 @@ describe('Manager Worksets interaction fencing', () => {
     await changeInput(updatedInputs[1], '/workspace/gamma');
     await clickButton('Save project');
     await waitForText('Manifest project saved.');
-    expect(projectMutationBodies[1]?.expectedRevision).toBe('j'.repeat(64));
+    expect(projectMutationBodies[1]?.expectedRevision).toBe(Effect.pipe('j', EffectString.repeat(64)));
   });
 
   it('links operation tabs to panels and supports arrow-key navigation', async () => {
@@ -587,7 +607,7 @@ describe('Manager Worksets interaction fencing', () => {
     await clickButton('Context brief');
     const mode = await waitForElement<HTMLSelectElement>('#worksets-panel-brief select');
 
-    expect([...mode.options].map(option => option.value)).toContain('resume');
+    expect(EffectArray.map([...mode.options], option => option.value)).toContain('resume');
   });
 
   it('keeps the six-section nav and Worksets editor usable at narrow widths', async () => {
@@ -650,7 +670,12 @@ async function waitForElement<T extends Element>(selector: string): Promise<T> {
 
 async function waitForText(text: string): Promise<void> {
   for (let index = 0; index < 20; index += 1) {
-    if (document.body.textContent?.includes(text)) return;
+    if (
+      Effect.pipe(document.body.textContent, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(text)),
+      )
+    )
+      return;
     await flush();
   }
   throw new Error(`Text did not render: ${text}`);
@@ -719,8 +744,21 @@ async function clickButton(label: string): Promise<void> {
 }
 
 async function clickButtonStartingWith(label: string): Promise<void> {
-  const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(candidate =>
-    candidate.textContent?.trim().startsWith(label),
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      __effectArrayValue =>
+        !!(candidate =>
+          Effect.pipe(
+            candidate.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+          ))(__effectArrayValue),
+    ),
   );
   expect(button).toBeDefined();
   await act(async () => button?.click());
@@ -728,14 +766,33 @@ async function clickButtonStartingWith(label: string): Promise<void> {
 }
 
 function findButton(label: string): HTMLButtonElement | undefined {
-  return [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-    candidate => candidate.textContent?.trim() === label,
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      candidate =>
+        Effect.pipe(candidate.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label,
+    ),
   );
 }
 
 function findButtonStartingWith(label: string): HTMLButtonElement | undefined {
-  return [...document.querySelectorAll<HTMLButtonElement>('button')].find(candidate =>
-    candidate.textContent?.trim().startsWith(label),
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      __effectArrayValue =>
+        !!(candidate =>
+          Effect.pipe(
+            candidate.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+          ))(__effectArrayValue),
+    ),
   );
 }
 
@@ -748,15 +805,15 @@ function jsonResponse(body: unknown, statusCode = 200): Response {
 
 function catalog() {
   return {
-    definitions: [...definitionProjects].map(([name, projects]) => ({
-      description: `${name[0].toUpperCase()}${name.slice(1)} services`,
+    definitions: EffectArray.map([...definitionProjects], ([name, projects]) => ({
+      description: `${Effect.pipe(name[0], EffectString.toUpperCase)}${Effect.pipe(name, EffectString.slice(1))} services`,
       memberCount: projects.length,
       name,
     })),
     definitionSource: 'seed-manifest',
     editability: {state: 'editable'},
     projectEditability: {state: 'editable'},
-    projects: projectInventory.map(project),
+    projects: EffectArray.map(projectInventory, project),
     projectsReadOnly: false,
     readOnly: false,
     revision: catalogRevision,
@@ -772,8 +829,11 @@ function project(name: string) {
     folder: `${name}-service`,
     name,
     path: `/workspace/${name}-service`,
-    worksets: [...definitionProjects].filter(([, projects]) => projects.includes(name)).map(([workset]) => workset),
-    worksetCount: [...definitionProjects.values()].filter(projects => projects.includes(name)).length,
+    worksets: EffectArray.map(
+      EffectArray.filter([...definitionProjects], ([, projects]) => projects.includes(name)),
+      ([workset]) => workset,
+    ),
+    worksetCount: EffectArray.filter([...definitionProjects.values()], projects => projects.includes(name)).length,
   };
 }
 
@@ -814,7 +874,7 @@ function definition(name: string) {
   return {
     configuredMembers: projects.length,
     description: `${name} services`,
-    members: projects.map(member => ({...project(member), configured: true, project: member})),
+    members: EffectArray.map(projects, member => ({...project(member), configured: true, project: member})),
     name,
     unresolvedMembers: 0,
   };
@@ -828,7 +888,7 @@ function status(name: string) {
       requested: 1,
       states: {current: 0, deferred: 0, excluded: 0, failed: 0, missing: 1, stale: 0, uncatalogued: 0},
     },
-    manifestDigest: 'b'.repeat(64),
+    manifestDigest: Effect.pipe('b', EffectString.repeat(64)),
     members: [{project: name, reason: 'no-ready-snapshot', state: 'missing'}],
     type: 'code-graph-workset-status',
     version: 1,
@@ -874,7 +934,10 @@ function evidence(repositoryKey: string, qualifiedName: string) {
       type: 'code-graph-workset-query',
       version: 2,
       warnings: [],
-      workset: {generation: {digest: 'c'.repeat(64), id: 'cgwg_example'}, name: repositoryKey},
+      workset: {
+        generation: {digest: Effect.pipe('c', EffectString.repeat(64)), id: 'cgwg_example'},
+        name: repositoryKey,
+      },
     },
     text: '',
   };

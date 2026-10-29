@@ -4,10 +4,12 @@ import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
-import {CodeGraphStoreBusyError, type CodeGraphStatus} from '@threadnote/graph/types';
+import {CodeGraphStoreBusyError, type CodeGraphIndexSummary, type CodeGraphStatus} from '@threadnote/graph/types';
 import {makeWorkflowGraphAdapter} from '../../src/workflow_automation/graph.js';
 import type {WorkflowBinding} from '../../src/workflow_memory/protocol.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
 
@@ -17,7 +19,9 @@ const graphStatus = (repo: string, options: {stale?: boolean; wrongRoot?: boolea
     checkoutId: 'checkout-fixture',
     displayName: 'fixture',
     gitCommonDirectory: `${repo}/.git`,
-    headCommit: options.wrongHead ? 'b'.repeat(40) : 'a'.repeat(40),
+    headCommit: options.wrongHead
+      ? Effect2.pipe('b', EffectString.repeat(40))
+      : Effect2.pipe('a', EffectString.repeat(40)),
     objectFormat: 'sha1' as const,
     repoRoot: options.wrongRoot ? `${repo}-other` : repo,
     repositoryId: 'repo-fixture',
@@ -29,7 +33,7 @@ const graphStatus = (repo: string, options: {stale?: boolean; wrongRoot?: boolea
     identity,
     languagePacks: [],
     readySnapshot: {
-      commit: options.wrongHead ? 'c'.repeat(40) : identity.headCommit,
+      commit: options.wrongHead ? Effect2.pipe('c', EffectString.repeat(40)) : identity.headCommit,
       dirty: false,
       edgeCount: 1,
       extractorSet: 'native-test',
@@ -45,8 +49,14 @@ const graphStatus = (repo: string, options: {stale?: boolean; wrongRoot?: boolea
   } satisfies CodeGraphStatus;
 };
 
+const completedIndex = (status: CodeGraphStatus): CodeGraphIndexSummary => {
+  const snapshot = status.readySnapshot;
+  if (!snapshot) throw new Error('Expected a ready snapshot in the graph test fixture');
+  return {diagnostics: [], durationMs: 0, identity: status.identity, reusedFiles: 0, skippedFiles: 0, snapshot};
+};
+
 const bindingFor = (f: Effect.Success<ReturnType<typeof nativeFixture>>): WorkflowBinding => ({
-  bindingId: '1'.repeat(64),
+  bindingId: Effect2.pipe('1', EffectString.repeat(64)),
   workflowRunId: 'native-v1-graph-test',
   profile: 'desktop',
   project: 'fixture',
@@ -66,7 +76,7 @@ const makeReady = Effect.fn('test.workflowAutomationGraph.makeReady')(function* 
   statusSequence: readonly CodeGraphStatus[],
   index: (
     options: Parameters<Parameters<typeof CodeGraphIndexer.of>[0]['index']>[0],
-  ) => Effect.Effect<unknown, unknown>,
+  ) => Effect.Effect<CodeGraphIndexSummary, unknown>,
 ) {
   const query = yield* CodeGraphQueryService;
   const indexer = yield* CodeGraphIndexer;
@@ -84,7 +94,7 @@ const makeReady = Effect.fn('test.workflowAutomationGraph.makeReady')(function* 
     ...indexer,
     index: options => {
       indexCalls++;
-      return index(options).pipe(Effect.as({} as never));
+      return index(options);
     },
   });
   const adapter = yield* makeWorkflowGraphAdapter(f.config, bindingFor(f)).pipe(
@@ -107,7 +117,7 @@ describe('native workflow graph adapter', () => {
       expect(ready).toEqual({
         state: 'ready',
         snapshotId: 'snapshot-fixture',
-        head: 'a'.repeat(40),
+        head: Effect2.pipe('a', EffectString.repeat(40)),
         graphContentId: 'graph-content-fixture',
         repositoryRoot: f.repo,
         dirty: false,
@@ -124,7 +134,7 @@ describe('native workflow graph adapter', () => {
       let optionsSeen: unknown;
       const fixture = yield* makeReady(f, [stale, current], options => {
         optionsSeen = options;
-        return Effect.succeed({});
+        return Effect.succeed(completedIndex(stale));
       });
       expect(yield* fixture.adapter.ready(f.repo)).toMatchObject({state: 'ready', snapshotId: 'snapshot-fixture'});
       expect(fixture.counts()).toEqual({indexCalls: 1, statusCalls: 2});
@@ -141,7 +151,7 @@ describe('native workflow graph adapter', () => {
         graphStatus(f.repo, {wrongHead: true}),
         graphStatus(f.repo, {wrongRoot: true}),
       ]) {
-        const fixture = yield* makeReady(f, [stale, invalid], () => Effect.succeed({}));
+        const fixture = yield* makeReady(f, [stale, invalid], () => Effect.succeed(completedIndex(stale)));
         const failed = yield* fixture.adapter.ready(f.repo).pipe(Effect.result);
         expect(failed).toMatchObject({
           _tag: 'Failure',

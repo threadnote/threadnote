@@ -1,3 +1,5 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {isManagerProjectName} from './project/name.js';
 import {Effect, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -37,12 +39,18 @@ import {
 } from '../memory/context/maintenance_review_projection.js';
 import {readMemoryRecordsByUri} from '../mcp/server/memory.js';
 import {managerAttentionProjectRoot} from './attention.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const REVIEW = /^review-[a-f0-9]{24}$/u;
 const CASE = /^health-case-[a-f0-9]{40}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 const bytes = (value: string) => new TextEncoder().encode(value).byteLength;
-class InvalidTopicDraftJson extends Schema.TaggedError<InvalidTopicDraftJson>()('InvalidTopicDraftJson', {}) {}
+class InvalidTopicDraftJson extends Schema.TaggedError<InvalidTopicDraftJson, {readonly brand: unique symbol}>()(
+  'InvalidTopicDraftJson',
+  {},
+) {}
 const invalid = (error: string) => ({status: 400, body: {code: 'invalid-topic-review-request', error}});
 const conflict = (error: string, code = 'topic-review-changed') => ({status: 409, body: {code, error}});
 const missing = () => ({
@@ -50,10 +58,10 @@ const missing = () => ({
   body: {code: 'topic-review-missing', error: 'This topic review is unavailable. Refresh the review inbox.'},
 });
 const keys = (body: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []) =>
-  required.every(key => Object.hasOwn(body, key)) &&
-  Object.keys(body).every(key => required.includes(key) || optional.includes(key));
+  EffectArray.every(required, key => EffectRecord.has(body, key)) &&
+  EffectArray.every(EffectRecord.keys(body), key => required.includes(key) || optional.includes(key));
 const exactRevision = (value: unknown): value is number =>
-  typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+  typeof value === 'number' && checkedIsSafeInteger(value) && value > 0;
 
 export interface ManagerTopicReviewCaseIdentity {
   readonly caseId: string;
@@ -87,19 +95,22 @@ function resolvedTopicCitationIds(review: CandidateReview): readonly string[] | 
     if (!isCodeTopicMaintenanceManifest(old) || !isCodeTopicMaintenanceManifest(next)) return undefined;
     const declared = (manifest: typeof old) => [
       ...new Set([
-        ...manifest.paragraphs.flatMap(item => item.citationIds),
-        ...manifest.additionalDependencies.map(item => item.citationId),
+        ...EffectArray.flatMap(manifest.paragraphs, item => item.citationIds),
+        ...EffectArray.map(manifest.additionalDependencies, item => item.citationId),
       ]),
     ];
-    const activeAfter = new Set(declared(next).map(id => topicMaintenanceAcceptedCitation(after, id).id));
-    const resolved = declared(old).flatMap(id => {
-      const current = maintenance.reviewEvidence.find(item => item.handleId === `current:${id}`);
+    const activeAfter = new Set(EffectArray.map(declared(next), id => topicMaintenanceAcceptedCitation(after, id).id));
+    const resolved = EffectArray.flatMap(declared(old), id => {
+      const current = EffectOption.getOrUndefined(
+        EffectArray.findFirst(maintenance.reviewEvidence, item => item.handleId === `current:${id}`),
+      );
       return current &&
         !('sourceKind' in current) &&
         current.provenance === 'current-verified' &&
         current.supportsCitation &&
         !current.truncated &&
-        maintenance.basis.handles.some(
+        EffectArray.some(
+          maintenance.basis.handles,
           handle => handle.id === current.handleId && handle.variant === 'current' && handle.citationId === id,
         ) &&
         activeAfter.has(current.citation.id)
@@ -179,8 +190,15 @@ export function projectManagerTopicReview(
     },
     paragraphs: maintenance.basis.paragraphs,
     additionalDependencies: maintenance.basis.additionalDependencies,
-    support: maintenance.basis.handles.flatMap(handle => {
-      const evidence = maintenance.reviewEvidence.find(item => item.handleId === handle.id);
+    support: EffectArray.flatMap(maintenance.basis.handles, handle => {
+      const evidence =
+        maintenance.version === 2
+          ? EffectOption.getOrUndefined(
+              EffectArray.findFirst(maintenance.reviewEvidence, item => item.handleId === handle.id),
+            )
+          : EffectOption.getOrUndefined(
+              EffectArray.findFirst(maintenance.reviewEvidence, item => item.handleId === handle.id),
+            );
       return evidence
         ? [
             {
@@ -193,7 +211,9 @@ export function projectManagerTopicReview(
           ]
         : [];
     }),
-    warnings: candidate.evidence.slice(0, 16).map(item => item.slice(0, 512)),
+    warnings: EffectArray.map((candidate.evidence ?? []).slice(0, 16), item =>
+      Effect2.pipe(item, EffectString.slice(0, 512)),
+    ),
     ...(approval
       ? {
           approval: {
@@ -257,8 +277,13 @@ export const managerTopicReviewCaseIdentity = Effect.fn('managerTopicReview.case
       (review.candidates[0]?.state === 'applied' &&
         review.maintenanceApproval?.stage === 'written' &&
         item?.evidenceRevision === review.maintenance.basis.observationRevision &&
-        item.subjectContentHashes?.find(subject => subject.uri === target.uri)?.hash ===
-          review.maintenance.basis.targetHash)) &&
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(item.subjectContentHashes), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(__effectArrayReceiver, subject => subject.uri === target.uri),
+            ),
+          ),
+        )?.hash === review.maintenance.basis.targetHash)) &&
     target.content === review.maintenanceApproval?.preview.content;
   return item?.caseId === caseId &&
     item.memoryId === target.metadata.memoryId &&
@@ -331,7 +356,7 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       keys.length !== 2 ||
       (reviewId === null) === (caseId === null) ||
       (reviewId === null ? !CASE.test(caseId ?? '') : !REVIEW.test(reviewId)) ||
-      keys.some(key => key !== 'project' && key !== 'reviewId' && key !== 'caseId')
+      EffectArray.some(keys, key => key !== 'project' && key !== 'reviewId' && key !== 'caseId')
     )
       return invalid('Select an exact project and topic review.');
     if (caseId !== null) {
@@ -343,10 +368,17 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
         item.project !== project ||
         item.family !== 'topic-maintenance' ||
         item.slot !== 'declared-support' ||
-        !item.subjectUri?.startsWith(`threadnote://user/${request.config.user}/memories/durable/`)
+        !Effect2.pipe(item.subjectUri, effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect2.pipe(
+                effectOptionalString,
+                EffectString.startsWith(`threadnote://user/${request.config.user}/memories/durable/`),
+              ),
+        )
       )
         return missing();
-      const expectedReviewId = `review-${sha256HexSync(`topic-maintenance\0${item.subjectUri}`).slice(0, 24)}`;
+      const expectedReviewId = `review-${Effect2.pipe(sha256HexSync(`topic-maintenance\0${item.subjectUri}`), EffectString.slice(0, 24))}`;
       const loaded = yield* loadCandidateReview(request.config.agentContextHome, expectedReviewId).pipe(Effect.result);
       if (Result.isFailure(loaded)) return missing();
       const selected = loaded.success;
@@ -361,7 +393,13 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
         payload.basis.targetUri !== item.subjectUri ||
         payload.basis.observationRevision !== item.evidenceRevision ||
         payload.basis.targetHash !==
-          item.subjectContentHashes?.find(subject => subject.uri === item.subjectUri)?.hash ||
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(item.subjectContentHashes), __effectArrayReceiver =>
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(__effectArrayReceiver, subject => subject.uri === item.subjectUri),
+              ),
+            ),
+          )?.hash ||
         approval.preview.reviewId !== expectedReviewId ||
         approval.preview.targetUri !== item.subjectUri ||
         approval.preview.beforeContentHash !== payload.basis.targetHash ||
@@ -395,8 +433,11 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
         ? response
         : missing();
     }
-    const review = (yield* listCandidateReviews(request.config.agentContextHome)).find(
-      item => item.reviewId === reviewId,
+    const review = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        yield* listCandidateReviews(request.config.agentContextHome),
+        item => item.reviewId === reviewId,
+      ),
     );
     if (!review || review.project !== project || !review.maintenance) return missing();
     return yield* topicReviewResponse(request.config, review);
@@ -427,18 +468,19 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       ) ||
       typeof body.caseId !== 'string' ||
       !CASE.test(body.caseId) ||
-      ![body.expectedContentHash, body.observationRevision, body.inspectionDigest].every(
-        value => typeof value === 'string' && HASH.test(value),
-      ) ||
-      !Number.isSafeInteger(body.fragmentStart) ||
-      !Number.isSafeInteger(body.fragmentEnd) ||
-      (body.fragmentStart as number) < 0 ||
-      (body.fragmentEnd as number) <= (body.fragmentStart as number) ||
+      typeof body.expectedContentHash !== 'string' ||
+      !HASH.test(body.expectedContentHash) ||
+      typeof body.observationRevision !== 'string' ||
+      !HASH.test(body.observationRevision) ||
+      typeof body.inspectionDigest !== 'string' ||
+      !HASH.test(body.inspectionDigest) ||
+      !checkedIsSafeInteger(body.fragmentStart) ||
+      !checkedIsSafeInteger(body.fragmentEnd) ||
+      body.fragmentStart < 0 ||
+      body.fragmentEnd <= body.fragmentStart ||
       body.approved !== true ||
       (body.retentionDays !== undefined &&
-        (!Number.isSafeInteger(body.retentionDays) ||
-          (body.retentionDays as number) < 1 ||
-          (body.retentionDays as number) > 365))
+        (!checkedIsSafeInteger(body.retentionDays) || body.retentionDays < 1 || body.retentionDays > 365))
     )
       return invalid('Select a current source excerpt and approve its retention.');
     const packet = yield* readContextMaintenancePacket(request.config, body.caseId).pipe(Effect.result);
@@ -451,12 +493,12 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       return conflict('The selected source changed. Refresh its evidence.');
     const captured = yield* captureTopicObsidianEvidence(request.config, {
       caseId: body.caseId,
-      expectedContentHash: body.expectedContentHash as string,
-      observationRevision: body.observationRevision as string,
-      inspectionDigest: body.inspectionDigest as string,
-      fragmentStart: body.fragmentStart as number,
-      fragmentEnd: body.fragmentEnd as number,
-      ...(body.retentionDays === undefined ? {} : {retentionDays: body.retentionDays as number}),
+      expectedContentHash: body.expectedContentHash,
+      observationRevision: body.observationRevision,
+      inspectionDigest: body.inspectionDigest,
+      fragmentStart: body.fragmentStart,
+      fragmentEnd: body.fragmentEnd,
+      ...(body.retentionDays === undefined ? {} : {retentionDays: body.retentionDays}),
       approved: true,
     }).pipe(Effect.result);
     if (Result.isFailure(captured))
@@ -478,9 +520,22 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       !CASE.test(body.caseId) ||
       (body.backend !== 'local-ai' && body.backend !== 'effect-ai') ||
       typeof body.modelId !== 'string' ||
-      !body.modelId.trim() ||
+      !Effect2.pipe(body.modelId, EffectString.trim) ||
       bytes(body.modelId) > 256 ||
-      [...body.modelId].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+      EffectArray.some(
+        [...body.modelId],
+        character =>
+          Effect2.pipe(
+            character,
+            EffectString.charCodeAt(0),
+            Effect2.Option.getOrElse(() => NaN),
+          ) < 32 ||
+          Effect2.pipe(
+            character,
+            EffectString.charCodeAt(0),
+            Effect2.Option.getOrElse(() => NaN),
+          ) === 127,
+      )
     )
       return invalid('Select an exact case, supported backend, and available model.');
   } else {
@@ -506,9 +561,10 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       (typeof body.editedDraftJson !== 'string' || bytes(body.editedDraftJson) > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES)
     )
       return invalid('Edited draft JSON must be within 32 KiB.');
-    if (isPreview && typeof body.editedDraftJson === 'string') {
+    const editedDraftJson = body.editedDraftJson;
+    if (isPreview && typeof editedDraftJson === 'string') {
       const parsed = yield* Effect.try({
-        try: (): unknown => JSON.parse(body.editedDraftJson as string),
+        try: (): unknown => JSON.parse(editedDraftJson),
         catch: () => InvalidTopicDraftJson.make({}),
       }).pipe(Effect.result);
       if (Result.isFailure(parsed)) return invalid('Edited draft must be valid JSON.');
@@ -517,7 +573,10 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       return invalid('Select an exact topic maintenance case.');
   }
   if (isGenerate) {
-    const caseId = body.caseId as string;
+    if (typeof body.caseId !== 'string' || typeof body.backend !== 'string' || typeof body.modelId !== 'string') {
+      return invalid('Select an exact case, supported backend, and available model.');
+    }
+    const caseId = body.caseId;
     const status = yield* readContextMaintenanceStatus(request.config, project, {caseId}).pipe(Effect.result);
     if (Result.isFailure(status)) return conflict('The selected topic case changed. Refresh maintenance.');
     const item = status.success.cases[0];
@@ -548,14 +607,14 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
     }
     const outcome = yield* requestTopicMaintenanceDraft(request.config, {
       caseId,
-      backend: body.backend as 'local-ai' | 'effect-ai',
-      modelId: body.modelId as string,
+      backend: body.backend === 'local-ai' || body.backend === 'effect-ai' ? body.backend : 'local-ai',
+      modelId: body.modelId,
       regenerate: action === 'regenerate',
     }).pipe(Effect.result);
     if (Result.isFailure(outcome)) {
       const error = outcome.failure;
       if (Schema.is(TopicDraftError)(error) && error.reason && error.recovery && REVIEW.test(error.recovery.reviewId)) {
-        const expectedReviewId = `review-${sha256HexSync(`topic-maintenance\0${item.subjectUri}`).slice(0, 24)}`;
+        const expectedReviewId = `review-${Effect2.pipe(sha256HexSync(`topic-maintenance\0${item.subjectUri}`), EffectString.slice(0, 24))}`;
         const loaded = yield* loadCandidateReview(request.config.agentContextHome, error.recovery.reviewId).pipe(
           Effect.result,
         );
@@ -605,7 +664,10 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
     }
     return yield* topicReviewResponse(request.config, outcome.success);
   }
-  const reviewId = body.reviewId as string;
+  if (typeof body.reviewId !== 'string' || !exactRevision(body.revision))
+    return invalid('Select an exact topic review and revision.');
+  const reviewId = body.reviewId;
+  const revision = body.revision;
   const loaded = yield* loadCandidateReview(request.config.agentContextHome, reviewId).pipe(Effect.result);
   if (
     Result.isFailure(loaded) ||
@@ -627,7 +689,9 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
         Effect.result,
       );
       const item = Result.isSuccess(selected)
-        ? selected.success.cases.find(item => item.caseId === body.caseId)
+        ? EffectOption.getOrUndefined(
+            EffectArray.findFirst(selected.success.cases, item => item.caseId === body.caseId),
+          )
         : undefined;
       if (
         item?.project !== project ||
@@ -640,7 +704,7 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
     }
     const selection: TopicReviewDecisionInput = {
       reviewId,
-      revision: body.revision as number,
+      revision,
       action,
       ...(typeof body.caseId === 'string' ? {caseId: body.caseId} : {}),
     };
@@ -693,15 +757,19 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
   const result = isPreview
     ? yield* prepareTopicMaintenanceReview(request.config, {
         reviewId,
-        revision: body.revision as number,
+        revision,
         ...(root?.state === 'available' ? {sourceCwd: root.cwd} : {}),
-        ...(body.editedDraftJson === undefined ? {} : {editedDraftJson: body.editedDraftJson as string}),
+        ...(body.editedDraftJson === undefined
+          ? {}
+          : typeof body.editedDraftJson === 'string'
+            ? {editedDraftJson: body.editedDraftJson}
+            : {}),
       }).pipe(Effect.result)
     : yield* applyTopicMaintenanceReview(request.config, {
         reviewId,
-        revision: body.revision as number,
+        revision,
         ...(root?.state === 'available' ? {sourceCwd: root.cwd} : {}),
-        approvalDigest: body.approvalDigest as string,
+        approvalDigest: typeof body.approvalDigest === 'string' ? body.approvalDigest : '',
         approved: true,
       }).pipe(Effect.result);
   if (Result.isFailure(result)) {
@@ -726,8 +794,10 @@ export const managerTopicPacketReviewId = Effect.fn('managerTopicReview.packetLi
   packet: {readonly project: string; readonly memoryUri?: string; readonly evidenceRevision: string},
 ) {
   if (!packet.memoryUri) return undefined;
-  const reviewId = `review-${sha256HexSync(`topic-maintenance\0${packet.memoryUri}`).slice(0, 24)}`;
-  const review = (yield* listCandidateReviews(config.agentContextHome)).find(item => item.reviewId === reviewId);
+  const reviewId = `review-${Effect2.pipe(sha256HexSync(`topic-maintenance\0${packet.memoryUri}`), EffectString.slice(0, 24))}`;
+  const review = EffectOption.getOrUndefined(
+    EffectArray.findFirst(yield* listCandidateReviews(config.agentContextHome), item => item.reviewId === reviewId),
+  );
   return review?.project === packet.project &&
     review.maintenance?.basis.targetUri === packet.memoryUri &&
     review.maintenance.basis.observationRevision === packet.evidenceRevision

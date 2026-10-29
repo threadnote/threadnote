@@ -5,10 +5,13 @@ import {readModelSelection} from '@threadnote/inference/models/selection';
 import {currentRecallCorpusGeneration, loadRecallIndexData} from '@threadnote/recall/index';
 import {purgeVectorIndex, rebuildVectorIndex, vectorIndexStatus} from '@threadnote/recall/vector-index';
 
-class SearchCommandError extends Schema.TaggedError<SearchCommandError>()('SearchCommandError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class SearchCommandError extends Schema.TaggedError<SearchCommandError, {readonly brand: unique symbol}>()(
+  'SearchCommandError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export const runIndexRebuild = Effect.fn('index.command.rebuild')(function* (
   config: RuntimeConfig,

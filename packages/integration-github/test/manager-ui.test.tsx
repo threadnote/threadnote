@@ -4,6 +4,10 @@ import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {ManagerDialogProvider} from '@threadnote/manager/dialog';
 import {GitHubConnectionForm} from '../src/manager-ui/connection-form.js';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 let root: Root | undefined;
 afterEach(async () => {
@@ -14,14 +18,29 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 async function render(node: React.ReactNode): Promise<void> {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
   await act(async () => root?.render(<ManagerDialogProvider>{node}</ManagerDialogProvider>));
 }
 function button(label: string): HTMLButtonElement {
-  const match = [...document.querySelectorAll('button')].find(item => item.textContent?.trim().startsWith(label));
+  const match = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(
+            item.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+          ))(__effectArrayValue),
+    ),
+  );
   if (!match) throw new Error('Button not found: ' + label);
   return match;
 }
@@ -44,7 +63,9 @@ describe('GitHub connection', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_path: string, init: RequestInit) => {
-        saved = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const body: unknown = JSON.parse(String(init.body));
+        if (!isJsonObject(body)) throw new Error('Expected a GitHub request object.');
+        saved = body;
         return new Response('{}');
       }),
     );

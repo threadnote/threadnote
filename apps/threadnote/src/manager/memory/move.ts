@@ -35,6 +35,8 @@ import {
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runCommand} from '../../utils.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ManagerMemoryMoveTarget {
   readonly kind: MemoryKind;
@@ -318,7 +320,7 @@ const sharedWorktreePath = Effect.fn('manager.sharedMoveWorktreePath')(function*
   relativePath: string,
 ) {
   const path = yield* Path.Path;
-  return path.join(worktree, ...relativePath.split('/'));
+  return path.join(worktree, ...Effect2.pipe(relativePath, EffectString.split('/')));
 });
 
 const readSharedWorktreeFile = Effect.fn('manager.readSharedMoveWorktreeFile')(function* (
@@ -357,7 +359,7 @@ const isGitTracked = Effect.fn('manager.isSharedMovePathTracked')(function* (wor
   if (result.exitCode === 0) return true;
   if (result.exitCode === 1) return false;
   return yield* MemoryOperationError.make({
-    message: `Could not inspect shared move source ${relativePath}: ${result.stderr.trim() || result.stdout.trim() || 'git ls-files failed'}.`,
+    message: `Could not inspect shared move source ${relativePath}: ${Effect2.pipe(result.stderr, EffectString.trim) || Effect2.pipe(result.stdout, EffectString.trim) || 'git ls-files failed'}.`,
   });
 });
 

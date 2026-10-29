@@ -1,14 +1,16 @@
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {resourceAccountMutationGenerationPath} from './lock.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CANONICAL_MUTATION_GENERATION_PATTERN =
   /^v1:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAXIMUM_CANONICAL_MUTATION_GENERATION_BYTES = 128;
 
-export class CanonicalMutationGenerationInvalid extends Schema.TaggedError<CanonicalMutationGenerationInvalid>()(
-  'CanonicalMutationGenerationInvalid',
-  {message: Schema.String},
-) {}
+export class CanonicalMutationGenerationInvalid extends Schema.TaggedError<
+  CanonicalMutationGenerationInvalid,
+  {readonly brand: unique symbol}
+>()('CanonicalMutationGenerationInvalid', {message: Schema.String}) {}
 
 export interface CanonicalMutationGenerationTransition {
   readonly currentGeneration: string;
@@ -39,7 +41,7 @@ export const readCanonicalMutationGeneration = Effect.fn('resourceMutationGenera
       message: 'Canonical mutation generation is not a bounded regular file.',
     });
   }
-  const generation = (yield* fs.readFileString(generationPath)).trim();
+  const generation = Effect2.pipe(yield* fs.readFileString(generationPath), EffectString.trim);
   if (!CANONICAL_MUTATION_GENERATION_PATTERN.test(generation)) {
     return yield* CanonicalMutationGenerationInvalid.make({message: 'Canonical mutation generation is malformed.'});
   }

@@ -8,20 +8,21 @@ import {isolatedBuilderRequestMatches} from '@threadnote/graph/isolated/builder'
 import {codeGraphBuildRequestKey} from '@threadnote/graph/indexer/build';
 import {WorktreeChangedDuringIndex} from '@threadnote/graph/indexer/shared';
 import {recoverIsolatedCodeGraphIndexSnapshot} from '@threadnote/graph/isolated/index';
-import type {CodeGraphLanguagePackRegistryShape} from '@threadnote/graph/languages/registry';
-import type {ObservedCodeGraphBuildStatus} from '@threadnote/graph/build_status';
+import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import {CodeGraphSnapshotUnavailable, type CodeGraphSnapshot, type RepositoryIdentity} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const identity: RepositoryIdentity = {
   caseMode: 'sensitive',
-  checkoutId: 'a'.repeat(64),
+  checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
   displayName: 'fixture/repository',
   gitCommonDirectory: '/fixture/repository/.git',
-  headCommit: 'b'.repeat(40),
+  headCommit: Effect2.pipe('b', EffectString.repeat(40)),
   objectFormat: 'sha1',
   repoRoot: '/fixture/repository',
-  repositoryId: 'c'.repeat(64),
-  worktreeId: 'd'.repeat(64),
+  repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+  worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
 };
 
 const snapshot: CodeGraphSnapshot = {
@@ -30,7 +31,7 @@ const snapshot: CodeGraphSnapshot = {
   edgeCount: 41,
   extractorSet: 'fixture-extractors',
   fileCount: 3,
-  id: `cgsn_${'e'.repeat(40)}`,
+  id: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`,
   repositoryId: identity.repositoryId,
   state: 'ready',
   symbolCount: 29,
@@ -48,14 +49,14 @@ const result = {
 
 describe('isolated index snapshot recovery', () => {
   it('never attaches a vector-required request to an active or completed structural-only build', () => {
-    const languagePacks = {cacheIdentities: [], packs: []} as unknown as CodeGraphLanguagePackRegistryShape;
+    const languagePacks = BUILTIN_LANGUAGE_PACK_REGISTRY;
     const structuralOnlyKey = codeGraphBuildRequestKey(
       identity,
       {dirty: false},
       languagePacks,
       undefined,
       false,
-      'f'.repeat(64),
+      Effect2.pipe('f', EffectString.repeat(64)),
     );
     const vectorRequiredKey = codeGraphBuildRequestKey(
       identity,
@@ -63,7 +64,7 @@ describe('isolated index snapshot recovery', () => {
       languagePacks,
       undefined,
       true,
-      'f'.repeat(64),
+      Effect2.pipe('f', EffectString.repeat(64)),
     );
 
     expect(vectorRequiredKey).not.toBe(structuralOnlyKey);
@@ -71,7 +72,7 @@ describe('isolated index snapshot recovery', () => {
       const status = {
         observation: {liveness},
         request: {key: structuralOnlyKey},
-      } as ObservedCodeGraphBuildStatus;
+      };
       expect(isolatedBuilderRequestMatches(status, vectorRequiredKey)).toBe(false);
     }
   });
@@ -121,10 +122,10 @@ describe('isolated index snapshot recovery', () => {
         let snapshotLoads = 0;
         const completedIdentity = {
           ...identity,
-          ...(drift === 'checkout' ? {checkoutId: 'f'.repeat(64)} : {}),
-          ...(drift === 'repository' ? {repositoryId: 'f'.repeat(64)} : {}),
-          ...(drift === 'worktree' ? {worktreeId: 'f'.repeat(64)} : {}),
-          ...(drift === 'head' ? {headCommit: 'f'.repeat(40)} : {}),
+          ...(drift === 'checkout' ? {checkoutId: Effect2.pipe('f', EffectString.repeat(64))} : {}),
+          ...(drift === 'repository' ? {repositoryId: Effect2.pipe('f', EffectString.repeat(64))} : {}),
+          ...(drift === 'worktree' ? {worktreeId: Effect2.pipe('f', EffectString.repeat(64))} : {}),
+          ...(drift === 'head' ? {headCommit: Effect2.pipe('f', EffectString.repeat(40))} : {}),
         };
         const failure = yield* recoverIsolatedCodeGraphIndexSnapshot({
           completedIdentity,
@@ -156,14 +157,14 @@ describe('isolated index snapshot recovery', () => {
         const loadedSnapshot: CodeGraphSnapshot = {
           ...snapshot,
           dirty: completedResult.dirty,
-          ...(drift === 'snapshot' ? {id: `cgsn_${'f'.repeat(40)}`} : {}),
-          ...(drift === 'repository' ? {repositoryId: 'f'.repeat(64)} : {}),
-          ...(drift === 'commit' ? {commit: 'f'.repeat(40)} : {}),
+          ...(drift === 'snapshot' ? {id: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`} : {}),
+          ...(drift === 'repository' ? {repositoryId: Effect2.pipe('f', EffectString.repeat(64))} : {}),
+          ...(drift === 'commit' ? {commit: Effect2.pipe('f', EffectString.repeat(40))} : {}),
           ...(drift === 'dirty' ? {dirty: !completedResult.dirty} : {}),
           ...(drift === 'files' ? {fileCount: completedResult.files + 1} : {}),
           ...(drift === 'symbols' ? {symbolCount: completedResult.symbols + 1} : {}),
           ...(drift === 'edges' ? {edgeCount: completedResult.edges + 1} : {}),
-          ...(drift === 'worktree' ? {worktreeId: 'f'.repeat(64)} : {}),
+          ...(drift === 'worktree' ? {worktreeId: Effect2.pipe('f', EffectString.repeat(64))} : {}),
         };
         const failure = yield* recoverIsolatedCodeGraphIndexSnapshot({
           completedIdentity: identity,

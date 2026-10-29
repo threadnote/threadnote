@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../../index_scope.js';
 import {
   REMOVED_VIEW_CLEANUP_COLUMNS,
   REMOVED_VIEW_CLEANUP_TABLE_SQL,
   REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS,
 } from '../removed/view_schema_contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_SCOPE_COLUMN_SQL = `scope_id TEXT NOT NULL DEFAULT '${CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY}'`;
 
@@ -23,15 +26,27 @@ export const SCOPED_REMOVED_VIEWS_TABLE_SQL = `CREATE TABLE removed_views (
   PRIMARY KEY (worktree_id, scope_id)
 ) WITHOUT ROWID`;
 
-export const SCOPED_REMOVED_VIEW_CLEANUP_TABLE_SQL = REMOVED_VIEW_CLEANUP_TABLE_SQL.replace(
-  'CREATE TABLE IF NOT EXISTS',
-  'CREATE TABLE',
-)
-  .replace('  expected_snapshot_id TEXT', `  ${CODE_GRAPH_SCOPE_COLUMN_SQL},\n  expected_snapshot_id TEXT`)
-  .replace(
-    'PRIMARY KEY (worktree_id, expected_snapshot_id)',
-    'PRIMARY KEY (worktree_id, scope_id, expected_snapshot_id)',
+export const SCOPED_REMOVED_VIEW_CLEANUP_TABLE_SQL = Effect.pipe(REMOVED_VIEW_CLEANUP_TABLE_SQL, __effectPipeInput => {
+  const __effectPipeStage0 = Effect.pipe(
+    __effectPipeInput,
+    EffectString.replace('CREATE TABLE IF NOT EXISTS', 'CREATE TABLE'),
   );
+  const __effectPipeStage1 = Effect.pipe(
+    __effectPipeStage0,
+    EffectString.replace(
+      '  expected_snapshot_id TEXT',
+      `  ${CODE_GRAPH_SCOPE_COLUMN_SQL},\n  expected_snapshot_id TEXT`,
+    ),
+  );
+  const __effectPipeStage2 = Effect.pipe(
+    __effectPipeStage1,
+    EffectString.replace(
+      'PRIMARY KEY (worktree_id, expected_snapshot_id)',
+      'PRIMARY KEY (worktree_id, scope_id, expected_snapshot_id)',
+    ),
+  );
+  return __effectPipeStage2;
+});
 
 export const SCOPED_REMOVED_VIEW_CLEANUP_COLUMNS = [
   REMOVED_VIEW_CLEANUP_COLUMNS[0],
@@ -50,7 +65,7 @@ export const SCOPED_REMOVED_VIEW_CLEANUP_DUE_INDEX_SQL = `CREATE INDEX removed_v
   ON removed_view_cleanup (next_attempt_at, worktree_id, scope_id, expected_snapshot_id)
   WHERE phase <> 'complete'`;
 
-const storedCleanupLiteral = `'${SCOPED_REMOVED_VIEW_CLEANUP_TABLE_SQL.replaceAll("'", "''")}'`;
+const storedCleanupLiteral = `'${Effect.pipe(SCOPED_REMOVED_VIEW_CLEANUP_TABLE_SQL, EffectString.replaceAll("'", "''"))}'`;
 const scopedCleanupGuard = `SELECT CASE WHEN
   (SELECT COUNT(*) FROM sqlite_master WHERE name = 'removed_view_cleanup' COLLATE NOCASE) <> 1
   OR NOT EXISTS (
@@ -65,24 +80,27 @@ const scopedCleanupGuard = `SELECT CASE WHEN
   THEN RAISE(ABORT, 'code graph removed view cleanup authority is incompatible') END;`;
 
 /** Preserve lease baton validation while revoking only the exact logical view. */
-export const SCOPED_REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS = REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS.map(
+export const SCOPED_REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS = EffectArray.map(
+  REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS,
   trigger => ({
     name: trigger.name,
-    sql: trigger.sql
-      .replace(/SELECT CASE[\s\S]*?END;/u, scopedCleanupGuard)
-      .replaceAll(
+    sql: Effect.pipe(
+      trigger.sql,
+      EffectString.replace(/SELECT CASE[\s\S]*?END;/u, scopedCleanupGuard),
+      EffectString.replaceAll(
         'WHERE worktree_id = OLD.worktree_id',
         'WHERE worktree_id = OLD.worktree_id AND scope_id = OLD.scope_id',
-      )
-      .replaceAll(
+      ),
+      EffectString.replaceAll(
         'WHERE worktree_id = NEW.worktree_id',
         'WHERE worktree_id = NEW.worktree_id AND scope_id = NEW.scope_id',
-      )
-      .replace('UPDATE OF worktree_id,', 'UPDATE OF worktree_id, scope_id,')
-      .replace(
+      ),
+      EffectString.replace('UPDATE OF worktree_id,', 'UPDATE OF worktree_id, scope_id,'),
+      EffectString.replace(
         'WHEN OLD.worktree_id <> NEW.worktree_id',
         'WHEN OLD.worktree_id <> NEW.worktree_id OR OLD.scope_id <> NEW.scope_id',
       ),
+    ),
   }),
 );
 

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, FileSystem, Option, Path, Predicate, Result, Schema} from 'effect';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {succeedUndefined} from '@threadnote/platform/optional';
@@ -38,6 +40,16 @@ import {
 export type {DeferredCodeAnchorIntentV1} from './code_anchor_scope.js';
 import {scheduleDeferredCodeAnchorIntentRefresh} from './code_anchor_scheduler.js';
 import {
+  deferredCodeAnchorIntentIdFromName,
+  deferredCodeAnchorRefsBloom,
+  deferredCodeAnchorShardedIntentName,
+  deferredCodeAnchorUriDigest,
+  deferredCodeAnchorUriDigestFromName,
+  isDeferredCodeAnchorIntentNameForDigest,
+  parseDeferredCodeAnchorIntentName,
+} from './code_anchor_names.js';
+export {isDeferredCodeAnchorIntentFilename} from './code_anchor_names.js';
+import {
   deferredCodeAnchorFinalizationVerified,
   memoryContentHash,
   readDeferredMemoryObservation,
@@ -69,6 +81,8 @@ import {
   writePrivateDeferredCodeAnchorFile,
 } from './code_anchor_private_fs.js';
 import {formatMemoryDocument, parseMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {deferredCodeAnchorFinalizationVerified, type DeferredMemoryObservation} from './code_anchor_memory.js';
 export {deferredCodeAnchorDoctorCheck} from './code_anchor_doctor.js';
@@ -89,8 +103,6 @@ const MAX_DEFERRED_CODE_ANCHOR_ROUTE_LOCK_WAIT_MILLISECONDS = 5_000;
 const DEFERRED_CODE_ANCHOR_ROUTE_LOCK_RETRY_MILLISECONDS = 25;
 const DEFERRED_CODE_ANCHOR_ROUTE_LOCK_STALE_MILLISECONDS = 5 * 60 * 1_000;
 const DEFERRED_CODE_ANCHOR_QUALIFIED_REF = /^cgr_[0-9a-f]{40}$/u;
-const DEFERRED_CODE_ANCHOR_REFS_BLOOM_BYTES = 16;
-const DEFERRED_CODE_ANCHOR_REFS_BLOOM_HASH_COUNT = 7;
 const DEFERRED_CODE_ANCHOR_ROUTE_LANE_COUNT = 8;
 const DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH = 32;
 const MIN_DEFERRED_CODE_ANCHOR_ROUTED_SCAN_LIMIT = 4;
@@ -334,7 +346,7 @@ export const findUrisWithDeferredCodeAnchorIntents = Effect.fn('memoryCodeAnchor
   const itemRoot = path.join(root, DEFERRED_CODE_ANCHOR_ITEM_ROOT_NAME);
   const itemRootNames = yield* readPrivateDeferredCodeAnchorDirectory(fs, itemRoot, [root, itemRoot]);
   const keyed = yield* Effect.forEach(
-    [...new Set(memoryUris.map(uri => parseResourceId(uri).canonicalUri))],
+    [...new Set(EffectArray.map(memoryUris, uri => parseResourceId(uri).canonicalUri))],
     uri => deferredCodeAnchorUriDigest(uri).pipe(Effect.map(digest => ({digest, uri}))),
     {concurrency: 4},
   );
@@ -349,8 +361,17 @@ export const findUrisWithDeferredCodeAnchorIntents = Effect.fn('memoryCodeAnchor
           : readPrivateDeferredCodeAnchorDirectory(fs, itemDirectory, itemAncestors)
       ).pipe(
         Effect.map(itemNames =>
-          (itemNames?.some(name => isDeferredCodeAnchorIntentNameForDigest(name, candidate.digest)) ?? false) ||
-          names.some(name => isDeferredCodeAnchorIntentNameForDigest(name, candidate.digest))
+          (Option.getOrUndefined(
+            Option.map(Option.fromNullishOr(itemNames), __effectArrayReceiver =>
+              EffectArray.some(
+                __effectArrayReceiver,
+                __effectArrayValue =>
+                  !!(name => isDeferredCodeAnchorIntentNameForDigest(name, candidate.digest))(__effectArrayValue),
+              ),
+            ),
+          ) ??
+            false) ||
+          EffectArray.some(names, name => isDeferredCodeAnchorIntentNameForDigest(name, candidate.digest))
             ? candidate.uri
             : undefined,
         ),
@@ -358,7 +379,7 @@ export const findUrisWithDeferredCodeAnchorIntents = Effect.fn('memoryCodeAnchor
     },
     {concurrency: 4},
   );
-  return new Set(present.filter((uri): uri is string => uri !== undefined));
+  return new Set(EffectArray.filter(present, (uri): uri is string => uri !== undefined));
 });
 
 export const discardDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.discard')(function* (
@@ -395,14 +416,18 @@ export const discardOtherDeferredCodeAnchorIntents = Effect.fn('memoryCodeAnchor
   const path = yield* Path.Path;
   const root = yield* deferredCodeAnchorRoot(config);
   const candidates = yield* deferredCodeAnchorIntentPaths(config, memoryUri);
-  const retainedCandidates = candidates.filter(
+  const retainedCandidates = EffectArray.filter(
+    candidates,
     candidate => deferredCodeAnchorIntentIdFromName(path.basename(candidate)) === retainedIntentId,
   );
   const retainedPath =
-    retainedCandidates.find(
-      candidate => parseDeferredCodeAnchorIntentName(path.basename(candidate))?.kind === 'sharded',
+    Option.getOrUndefined(
+      EffectArray.findFirst(
+        retainedCandidates,
+        candidate => parseDeferredCodeAnchorIntentName(path.basename(candidate))?.kind === 'sharded',
+      ),
     ) ?? retainedCandidates[0];
-  const paths = candidates.filter(candidate => candidate !== retainedPath);
+  const paths = EffectArray.filter(candidates, candidate => candidate !== retainedPath);
   const fs = yield* FileSystem.FileSystem;
   for (const intentPath of paths) {
     const ancestors = deferredCodeAnchorIntentAncestorsForPath(path, root, intentPath);
@@ -433,9 +458,10 @@ export const discardDeferredCodeAnchorIntentsWithin = Effect.fn('memoryCodeAncho
   yield* discardDeferredCodeAnchorIntent(config, canonical);
   const stored = yield* listDeferredCodeAnchorIntents(config);
   const prefix = `${canonical}/`;
-  const matching = stored.filter(
+  const matching = EffectArray.filter(
+    stored,
     (entry): entry is StoredDeferredCodeAnchorIntent =>
-      entry.kind === 'valid' && entry.intent.memoryUri.startsWith(prefix),
+      entry.kind === 'valid' && Effect2.pipe(entry.intent.memoryUri, EffectString.startsWith(prefix)),
   );
   yield* Effect.forEach(matching, entry => discardStoredDeferredCodeAnchorIntent(config, entry), {concurrency: 4});
   return matching.length;
@@ -469,16 +495,22 @@ export const finalizeDeferredCodeAnchors = Effect.fn('memoryCodeAnchor.finalize'
   options: {readonly limit?: number; readonly uris?: readonly string[]} = {},
 ) {
   const limit = boundedFinalizeLimit(options.limit);
-  const requestedUris = new Set((options.uris ?? []).map(uri => canonicalPersonalMemoryUri(config, uri)));
+  const requestedUris = new Set(EffectArray.map(options.uris ?? [], uri => canonicalPersonalMemoryUri(config, uri)));
   const requestedDigests = new Set(
     yield* Effect.forEach([...requestedUris], uri => deferredCodeAnchorUriDigest(uri), {concurrency: 4}),
   );
-  const matching = (yield* listDeferredCodeAnchorIntents(config)).filter(entry => {
-    if (requestedUris.size === 0) return true;
-    if (entry.kind === 'valid') return requestedUris.has(entry.intent.memoryUri);
-    const uriDigest = entry.uriDigest;
-    return uriDigest !== undefined && [...requestedDigests].some(digest => digest.startsWith(uriDigest));
-  });
+  const matching = EffectArrayPipe(yield* listDeferredCodeAnchorIntents(config), __effectArrayValues =>
+    EffectArray.filter(__effectArrayValues, (entry, __effectArrayIndex) => {
+      if (!(__effectArrayIndex in __effectArrayValues)) return false;
+      if (requestedUris.size === 0) return true;
+      if (entry.kind === 'valid') return requestedUris.has(entry.intent.memoryUri);
+      const uriDigest = entry.uriDigest;
+      return (
+        uriDigest !== undefined &&
+        EffectArray.some([...requestedDigests], digest => Effect2.pipe(digest, EffectString.startsWith(uriDigest)))
+      );
+    }),
+  );
   const stored =
     requestedUris.size === 0
       ? yield* selectDeferredCodeAnchorFinalizationWindow(config, matching, limit)
@@ -510,11 +542,11 @@ export const finalizeDeferredCodeAnchors = Effect.fn('memoryCodeAnchor.finalize'
     {concurrency: DEFERRED_CODE_ANCHOR_FINALIZATION_CONCURRENCY},
   );
   return {
-    conflictCount: items.filter(item => item.state === 'conflict').length,
-    failedCount: items.filter(item => item.state === 'failed').length,
-    finalizedCount: items.filter(item => item.state === 'finalized').length,
+    conflictCount: EffectArray.filter(items, item => item.state === 'conflict').length,
+    failedCount: EffectArray.filter(items, item => item.state === 'failed').length,
+    finalizedCount: EffectArray.filter(items, item => item.state === 'finalized').length,
     items,
-    pendingCount: items.filter(item => item.state === 'pending').length,
+    pendingCount: EffectArray.filter(items, item => item.state === 'pending').length,
     scannedCount: items.length,
     type: 'threadnote-deferred-code-anchor-finalization',
     version: DEFERRED_CODE_ANCHOR_FINALIZATION_VERSION,
@@ -591,10 +623,7 @@ export const finalizeDeferredCodeAnchorsForRoute = Effect.fn('memoryCodeAnchor.f
               locked.partial || locked.maintenancePending ? 'contended' : 'completed',
             );
           }
-          const selected = prioritizeDeferredCodeAnchorEntries(matching, preferredCodeRefs).slice(
-            0,
-            limit,
-          ) as readonly StoredDeferredCodeAnchorIntent[];
+          const selected = prioritizeDeferredCodeAnchorEntries(matching, preferredCodeRefs).slice(0, limit);
           const items = yield* Effect.forEach(
             selected,
             entry =>
@@ -622,13 +651,15 @@ export const finalizeDeferredCodeAnchorsForRoute = Effect.fn('memoryCodeAnchor.f
           );
           observedItems.push(...items);
           if (matching.length > selected.length) {
-            const unprocessed = matching.find(entry => !selected.includes(entry));
+            const unprocessed = Option.getOrUndefined(
+              EffectArray.findFirst(matching, entry => !selected.includes(entry)),
+            );
             if (unprocessed !== undefined) yield* retainDeferredCodeAnchorRouteMarkerLane(unprocessed);
           }
           const remainingWork =
             locked.partial ||
             matching.length > selected.length ||
-            observedItems.some(item => item.state === 'pending' || item.state === 'failed');
+            EffectArray.some(observedItems, item => item.state === 'pending' || item.state === 'failed');
           return deferredCodeAnchorRouteReceipt(
             remainingWork ? 'contended' : 'completed',
             matching.length,
@@ -658,7 +689,7 @@ export function deferredCodeAnchorIntentMatchesFinalizationRoute(
     (intent.recovery.recovery === 'prepare-current-graph' &&
       intent.recovery.preparation.target === 'workset' &&
       intent.recovery.preparation.arguments[0] === route.name) ||
-    intent.codeRefs.some(ref => DEFERRED_CODE_ANCHOR_QUALIFIED_REF.test(ref))
+    EffectArray.some(intent.codeRefs, ref => DEFERRED_CODE_ANCHOR_QUALIFIED_REF.test(ref))
   );
 }
 
@@ -840,11 +871,18 @@ export const listDeferredCodeAnchorIntents = Effect.fn('memoryCodeAnchor.listInt
     const ancestors = [root, itemRoot, itemDirectory];
     const itemNames = yield* readPrivateDeferredCodeAnchorDirectory(fs, itemDirectory, ancestors);
     for (const name of itemNames ?? []) {
-      if (name.endsWith('.json')) itemCandidates.push({ancestors, name, path: path.join(itemDirectory, name)});
+      if (Effect2.pipe(name, EffectString.endsWith('.json')))
+        itemCandidates.push({ancestors, name, path: path.join(itemDirectory, name)});
     }
   }
-  const legacyNames = ((yield* readPrivateDeferredCodeAnchorDirectory(fs, root, [root])) ?? []).filter(name =>
-    name.endsWith('.json'),
+  const legacyNames = EffectArrayPipe(
+    (yield* readPrivateDeferredCodeAnchorDirectory(fs, root, [root])) ?? [],
+    __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (name, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && Effect2.pipe(name, EffectString.endsWith('.json')),
+      ),
   );
   const legacyQuarantineRoot = path.join(root, DEFERRED_CODE_ANCHOR_LEGACY_QUARANTINE_NAME);
   const quarantinedCandidates: {readonly ancestors: readonly string[]; readonly name: string; readonly path: string}[] =
@@ -860,13 +898,13 @@ export const listDeferredCodeAnchorIntents = Effect.fn('memoryCodeAnchor.listInt
     }
   }
   const candidates = [
-    ...legacyNames.map(name => ({ancestors: [root], name, path: path.join(root, name)})),
+    ...EffectArray.map(legacyNames, name => ({ancestors: [root], name, path: path.join(root, name)})),
     ...itemCandidates,
     ...quarantinedCandidates,
   ];
   const entries: DeferredCodeAnchorIntentEntry[] = [];
   for (const {ancestors, name, path: intentPath} of candidates.sort((left, right) =>
-    left.path.localeCompare(right.path),
+    Effect2.pipe(left.path, EffectString.localeCompare(right.path)),
   )) {
     const content = yield* readPrivateDeferredCodeAnchorIntent(fs, intentPath, ancestors);
     const candidate = content === undefined ? undefined : parseDeferredCodeAnchorIntent(content);
@@ -935,7 +973,7 @@ const listDeferredCodeAnchorIntentsForRoute = Effect.fn('memoryCodeAnchor.listIn
     for (const entry of queue.entries) {
       if (
         deferredCodeAnchorIntentMatchesFinalizationRoute(entry.intent, route) &&
-        !entries.some(existing => existing.path === entry.path)
+        !EffectArray.some(entries, existing => existing.path === entry.path)
       ) {
         entries.push(entry);
         remaining -= 1;
@@ -955,12 +993,20 @@ function deferredCodeAnchorRouteQueueKeys(
   routeDigest: string,
   preferredCodeRefDigests: readonly string[],
 ): readonly string[] {
-  const preferredKeys = preferredCodeRefDigests.map(
-    digest => `p${digest.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH)}`,
+  const preferredKeys = EffectArray.map(
+    preferredCodeRefDigests,
+    digest => `p${Effect2.pipe(digest, EffectString.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH))}`,
   );
   return route.kind === 'repository'
-    ? [...preferredKeys, `r${routeDigest.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH)}`]
-    : [...preferredKeys, `w${routeDigest.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH)}`, 'q'];
+    ? [
+        ...preferredKeys,
+        `r${Effect2.pipe(routeDigest, EffectString.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH))}`,
+      ]
+    : [
+        ...preferredKeys,
+        `w${Effect2.pipe(routeDigest, EffectString.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH))}`,
+        'q',
+      ];
 }
 
 const readDeferredCodeAnchorRouteQueue = Effect.fn('memoryCodeAnchor.readRouteQueue')(function* (
@@ -1015,12 +1061,12 @@ const readDeferredCodeAnchorRouteQueue = Effect.fn('memoryCodeAnchor.readRouteQu
         else maintenancePending = true;
         continue;
       }
-      if (!markerName.endsWith('.ref')) {
+      if (!Effect2.pipe(markerName, EffectString.endsWith('.ref'))) {
         if (advanceCursor) yield* quarantine(markerPath, laneAncestors);
         else maintenancePending = true;
         continue;
       }
-      const name = `${markerName.slice(0, -4)}.json`;
+      const name = `${Effect2.pipe(markerName, EffectString.slice(0, -4))}.json`;
       const address = parseDeferredCodeAnchorIntentName(name);
       if (address?.kind !== 'sharded') {
         if (advanceCursor) yield* quarantine(markerPath, laneAncestors);
@@ -1072,7 +1118,13 @@ const migrateBoundedLegacyDeferredCodeAnchorIntents = Effect.fn('memoryCodeAncho
   if (rootAfterListing === undefined || !samePrivateDeferredCodeAnchorDirectories(rootAuthority, rootAfterListing)) {
     return yield* deferredCodeAnchorError('Deferred code-anchor outbox changed during legacy listing.');
   }
-  const names = page.names.filter(name => name.endsWith('.json')).slice(0, limit);
+  const names = EffectArrayPipe(page.names, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (name, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues && Effect2.pipe(name, EffectString.endsWith('.json')),
+    ),
+  ).slice(0, limit);
   for (const name of names) {
     const intentPath = path.join(root, name);
     if (parseDeferredCodeAnchorIntentName(name) === undefined) {
@@ -1093,7 +1145,17 @@ const migrateBoundedLegacyDeferredCodeAnchorIntents = Effect.fn('memoryCodeAncho
     yield* persistShardedDeferredCodeAnchorIntent(config, intent, content);
     yield* removePrivateDeferredCodeAnchorFile(fs, intentPath, [root]);
   }
-  return {partial: page.overflow || page.names.filter(name => name.endsWith('.json')).length > limit};
+  return {
+    partial:
+      page.overflow ||
+      EffectArrayPipe(page.names, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (name, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && Effect2.pipe(name, EffectString.endsWith('.json')),
+        ),
+      ).length > limit,
+  };
 });
 
 const persistShardedDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.persistSharded')(function* (
@@ -1113,7 +1175,10 @@ const persistShardedDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.persi
   );
   const itemDirectory = yield* ensurePrivateDeferredCodeAnchorDirectory(
     fs,
-    path.join(itemRoot, `u${uriDigest.slice(0, DEFERRED_CODE_ANCHOR_URI_ADDRESS_HEX_LENGTH)}`),
+    path.join(
+      itemRoot,
+      `u${Effect2.pipe(uriDigest, EffectString.slice(0, DEFERRED_CODE_ANCHOR_URI_ADDRESS_HEX_LENGTH))}`,
+    ),
     [root, itemRoot],
   );
   const target = path.join(itemDirectory, name);
@@ -1131,7 +1196,7 @@ const persistShardedDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.persi
       routeRoot,
       queueRoot,
     ]);
-    const marker = path.join(laneRoot, `${name.slice(0, -5)}.ref`);
+    const marker = path.join(laneRoot, `${Effect2.pipe(name, EffectString.slice(0, -5))}.ref`);
     yield* writePrivateDeferredCodeAnchorFile(fs, path, marker, '1\n', 'route marker', [
       root,
       routeRoot,
@@ -1152,17 +1217,28 @@ const deferredCodeAnchorRouteQueueKeysForIntent = Effect.fn('memoryCodeAnchor.ro
     repositoryId: intent.repositoryId,
     worktreeId: intent.worktreeId,
   });
-  const keys = [`r${repositoryDigest.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH)}`];
+  const keys = [`r${Effect2.pipe(repositoryDigest, EffectString.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH))}`];
   if (intent.recovery.recovery === 'prepare-current-graph' && intent.recovery.preparation.target === 'workset') {
     const worksetDigest = yield* deferredCodeAnchorRouteDigest(config, {
       kind: 'workset',
       name: intent.recovery.preparation.arguments[0],
     });
-    keys.push(`w${worksetDigest.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH)}`);
+    keys.push(`w${Effect2.pipe(worksetDigest, EffectString.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH))}`);
   }
   const digests = yield* Effect.forEach(intent.codeRefs, ref => sha256Hex(ref), {concurrency: 4});
-  keys.push(...digests.map(digest => `p${digest.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH)}`));
-  const qualifiedRefs = intent.codeRefs.filter(ref => DEFERRED_CODE_ANCHOR_QUALIFIED_REF.test(ref));
+  keys.push(
+    ...EffectArray.map(
+      digests,
+      digest => `p${Effect2.pipe(digest, EffectString.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH))}`,
+    ),
+  );
+  const qualifiedRefs = EffectArrayPipe(intent.codeRefs, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (ref, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues && DEFERRED_CODE_ANCHOR_QUALIFIED_REF.test(ref),
+    ),
+  );
   if (qualifiedRefs.length > 0) {
     keys.push('q');
   }
@@ -1213,7 +1289,13 @@ const selectDeferredCodeAnchorFinalizationWindow = Effect.fn('memoryCodeAnchor.s
 ) {
   if (entries.length <= limit) return prioritizeDeferredCodeAnchorEntries(entries, preferredCodeRefs);
   const cursor = yield* readDeferredCodeAnchorScanCursor(config, cursorName);
-  const next = cursor === undefined ? 0 : entries.findIndex(entry => entry.name > cursor);
+  const next =
+    cursor === undefined
+      ? 0
+      : Option.getOrElse(
+          EffectArray.findFirstIndex(entries, entry => entry.name > cursor),
+          () => -1,
+        );
   const start = next === -1 ? 0 : next;
   const rotated = [...entries.slice(start), ...entries.slice(0, start)];
   const baseline = rotated.slice(0, limit);
@@ -1239,7 +1321,9 @@ const readDeferredCodeAnchorScanCursor = Effect.fn('memoryCodeAnchor.readScanCur
   if (content === undefined || new TextEncoder().encode(content).byteLength > MAX_DEFERRED_CODE_ANCHOR_CURSOR_BYTES) {
     return undefined;
   }
-  const cursor = content.endsWith('\n') ? content.slice(0, -1) : content;
+  const cursor = Effect2.pipe(content, EffectString.endsWith('\n'))
+    ? Effect2.pipe(content, EffectString.slice(0, -1))
+    : content;
   return isDeferredCodeAnchorCursorValue(cursor) ? cursor : undefined;
 });
 
@@ -1258,14 +1342,21 @@ const writeDeferredCodeAnchorScanCursor = Effect.fn('memoryCodeAnchor.writeScanC
   yield* writePrivateDeferredCodeAnchorFile(fs, path, target, `${cursor}\n`, 'scan cursor', [root]);
 });
 
-function prioritizeDeferredCodeAnchorEntries(
-  entries: readonly DeferredCodeAnchorIntentEntry[],
+function prioritizeDeferredCodeAnchorEntries<Entry extends DeferredCodeAnchorIntentEntry>(
+  entries: readonly Entry[],
   preferredCodeRefs: readonly string[],
-): readonly DeferredCodeAnchorIntentEntry[] {
+): readonly Entry[] {
   if (preferredCodeRefs.length === 0) return entries;
   const preferred = new Set(preferredCodeRefs);
-  const preferredIndex = entries.findIndex(
-    entry => entry.kind === 'valid' && entry.intent.codeRefs.some(ref => preferred.has(ref)),
+  const preferredIndex = Option.getOrElse(
+    EffectArray.findFirstIndex(
+      entries,
+      __effectArrayValue =>
+        !!(entry => entry.kind === 'valid' && EffectArray.some(entry.intent.codeRefs, ref => preferred.has(ref)))(
+          __effectArrayValue,
+        ),
+    ),
+    () => -1,
   );
   if (preferredIndex <= 0) return entries;
   return [entries[preferredIndex], ...entries.slice(0, preferredIndex), ...entries.slice(preferredIndex + 1)];
@@ -1285,10 +1376,10 @@ function isDeferredCodeAnchorCursorValue(value: string): boolean {
   return (
     value.length > 0 &&
     value.length <= MAX_DEFERRED_CODE_ANCHOR_CURSOR_BYTES &&
-    value.endsWith('.json') &&
-    !value.includes('/') &&
-    !value.includes('\\') &&
-    !value.includes('\0') &&
+    Effect2.pipe(value, EffectString.endsWith('.json')) &&
+    !Effect2.pipe(value, EffectString.includes('/')) &&
+    !Effect2.pipe(value, EffectString.includes('\\')) &&
+    !Effect2.pipe(value, EffectString.includes('\0')) &&
     !/[\r\n]/u.test(value)
   );
 }
@@ -1386,7 +1477,7 @@ const discardStoredDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.discar
     path.join(itemAncestors[itemAncestors.length - 1], name),
     itemAncestors,
   );
-  const markerName = `${name.slice(0, -5)}.ref`;
+  const markerName = `${Effect2.pipe(name, EffectString.slice(0, -5))}.ref`;
   for (const key of yield* deferredCodeAnchorRouteQueueKeysForIntent(config, entry.intent)) {
     for (let lane = 0; lane < DEFERRED_CODE_ANCHOR_ROUTE_LANE_COUNT; lane += 1) {
       const laneAncestors = deferredCodeAnchorRouteAncestors(path, root, key, lane);
@@ -1410,7 +1501,7 @@ const discardDeferredCodeAnchorRouteMarkersNamed = Effect.fn('memoryCodeAnchor.d
   const root = yield* existingPrivateDeferredCodeAnchorRoot(config);
   if (root === undefined) return;
   const routeRoot = path.join(root, DEFERRED_CODE_ANCHOR_ROUTE_ROOT_NAME);
-  const markerName = `${intentName.slice(0, -5)}.ref`;
+  const markerName = `${Effect2.pipe(intentName, EffectString.slice(0, -5))}.ref`;
   const routeKeys = yield* readPrivateDeferredCodeAnchorDirectory(fs, routeRoot, [root, routeRoot]);
   for (const key of routeKeys ?? []) {
     if (!isDeferredCodeAnchorRouteQueueKey(key)) continue;
@@ -1539,8 +1630,8 @@ function parseDeferredCodeAnchorIntent(content: string): DeferredCodeAnchorInten
       typeof value.callerCwd !== 'string' ||
       typeof value.createdAt !== 'string' ||
       !isCanonicalIsoDate(value.createdAt) ||
-      !Array.isArray(value.codeRefs) ||
-      !value.codeRefs.every(ref => typeof ref === 'string') ||
+      !EffectArray.isArray(value.codeRefs) ||
+      !EffectArray.every(value.codeRefs, ref => typeof ref === 'string') ||
       !isMemoryCodeCitationRecovery(value.recovery)
     ) {
       return undefined;
@@ -1558,11 +1649,23 @@ function parseDeferredCodeAnchorIntent(content: string): DeferredCodeAnchorInten
     )
       return undefined;
     return {
-      ...value,
+      authorization: 'explicit-code-refs',
+      callerCwd: value.callerCwd,
       codeRefs,
+      createdAt: value.createdAt,
+      expectedMemoryHash: value.expectedMemoryHash,
+      intentId: value.intentId,
+      memoryId: value.memoryId,
+      memoryUri: value.memoryUri,
       ...(project === undefined ? {} : {project}),
       ...(projectScope === undefined ? {} : {projectScope}),
-    } as unknown as DeferredCodeAnchorIntentV1;
+      recovery: value.recovery,
+      repositoryId: value.repositoryId,
+      type: 'threadnote-deferred-code-anchor-intent',
+      version: DEFERRED_CODE_ANCHOR_INTENT_VERSION,
+      visibility: 'private-local',
+      worktreeId: value.worktreeId,
+    };
   } catch {
     return undefined;
   }
@@ -1587,7 +1690,7 @@ const storedDeferredCodeAnchorIntentMatchesAddress = Effect.fn('memoryCodeAnchor
   const address = parseDeferredCodeAnchorIntentName(name);
   if (
     address === undefined ||
-    !digest.startsWith(address.uriDigest) ||
+    !Effect2.pipe(digest, EffectString.startsWith(address.uriDigest)) ||
     (address.intentId !== undefined && address.intentId !== intent.intentId)
   ) {
     return false;
@@ -1609,11 +1712,12 @@ const storedDeferredCodeAnchorIntentMatchesAddress = Effect.fn('memoryCodeAnchor
     const refsBloom = yield* deferredCodeAnchorRefsBloom(intent.codeRefs);
     if (
       address.repositoryRouteDigest === undefined ||
-      !repositoryRouteDigest.startsWith(address.repositoryRouteDigest) ||
+      !Effect2.pipe(repositoryRouteDigest, EffectString.startsWith(address.repositoryRouteDigest)) ||
       (address.worksetRouteDigest === undefined
         ? worksetRouteDigest !== undefined
-        : worksetRouteDigest === undefined || !worksetRouteDigest.startsWith(address.worksetRouteDigest)) ||
-      address.qualified !== intent.codeRefs.some(ref => DEFERRED_CODE_ANCHOR_QUALIFIED_REF.test(ref)) ||
+        : worksetRouteDigest === undefined ||
+          !Effect2.pipe(worksetRouteDigest, EffectString.startsWith(address.worksetRouteDigest))) ||
+      address.qualified !== EffectArray.some(intent.codeRefs, ref => DEFERRED_CODE_ANCHOR_QUALIFIED_REF.test(ref)) ||
       (address.refsBloom !== undefined && address.refsBloom !== refsBloom)
     ) {
       return false;
@@ -1654,9 +1758,16 @@ const deferredCodeAnchorIntentPaths = Effect.fn('memoryCodeAnchor.intentPaths')(
   const root = yield* existingPrivateDeferredCodeAnchorRoot(config);
   if (root === undefined) return [] as string[];
   const digest = yield* deferredCodeAnchorUriDigest(memoryUri);
-  const legacy = ((yield* readPrivateDeferredCodeAnchorDirectory(fs, root, [root])) ?? [])
-    .filter(name => isDeferredCodeAnchorIntentNameForDigest(name, digest))
-    .map(name => path.join(root, name));
+  const legacy = EffectArray.map(
+    EffectArrayPipe((yield* readPrivateDeferredCodeAnchorDirectory(fs, root, [root])) ?? [], __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (name, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && isDeferredCodeAnchorIntentNameForDigest(name, digest),
+      ),
+    ),
+    name => path.join(root, name),
+  );
   const itemAncestors = deferredCodeAnchorItemAncestors(path, root, digest);
   const itemRoot = itemAncestors[1];
   const itemRootNames = yield* readPrivateDeferredCodeAnchorDirectory(fs, itemRoot, [root, itemRoot]);
@@ -1667,117 +1778,16 @@ const deferredCodeAnchorIntentPaths = Effect.fn('memoryCodeAnchor.intentPaths')(
       : ((yield* readPrivateDeferredCodeAnchorDirectory(fs, itemDirectory, itemAncestors)) ?? []);
   return [
     ...legacy,
-    ...sharded
-      .filter(name => isDeferredCodeAnchorIntentNameForDigest(name, digest))
-      .map(name => path.join(itemDirectory, name)),
+    ...EffectArray.map(
+      EffectArray.filter(
+        sharded,
+        (name, __effectArrayIndex) =>
+          __effectArrayIndex in sharded && isDeferredCodeAnchorIntentNameForDigest(name, digest),
+      ),
+      name => path.join(itemDirectory, name),
+    ),
   ];
 });
-
-function deferredCodeAnchorUriDigest(memoryUri: string) {
-  return sha256Hex(parseResourceId(memoryUri).canonicalUri);
-}
-
-interface DeferredCodeAnchorIntentNameAddress {
-  readonly intentId?: string;
-  readonly kind: 'legacy' | 'routed' | 'sharded';
-  readonly qualified: boolean;
-  readonly refsBloom?: string;
-  readonly repositoryRouteDigest?: string;
-  readonly uriDigest: string;
-  readonly worksetRouteDigest?: string;
-}
-
-const deferredCodeAnchorShardedIntentName = Effect.fn('memoryCodeAnchor.shardedIntentName')(function* (
-  intent: DeferredCodeAnchorIntentV1,
-) {
-  const uriDigest = yield* deferredCodeAnchorUriDigest(intent.memoryUri);
-  const refsBloom = yield* deferredCodeAnchorRefsBloom(intent.codeRefs);
-  return `${uriDigest.slice(0, DEFERRED_CODE_ANCHOR_URI_ADDRESS_HEX_LENGTH)}-${intent.intentId}-b${refsBloom}.json`;
-});
-
-const deferredCodeAnchorRefsBloom = Effect.fn('memoryCodeAnchor.refsBloom')(function* (refs: readonly string[]) {
-  const digests = yield* Effect.forEach(refs, ref => sha256Hex(ref), {concurrency: 4});
-  const bits = Array.from({length: DEFERRED_CODE_ANCHOR_REFS_BLOOM_BYTES * 8}, () => false);
-  for (const digest of digests) {
-    for (const position of deferredCodeAnchorBloomPositions(digest)) bits[position] = true;
-  }
-  let encoded = '';
-  for (let offset = 0; offset < bits.length; offset += 4) {
-    let value = 0;
-    for (let index = 0; index < 4; index += 1) value = value * 2 + (bits[offset + index] ? 1 : 0);
-    encoded += value.toString(16);
-  }
-  return encoded;
-});
-
-function deferredCodeAnchorBloomPositions(digest: string): readonly number[] {
-  const bitCount = DEFERRED_CODE_ANCHOR_REFS_BLOOM_BYTES * 8;
-  return Array.from(
-    {length: DEFERRED_CODE_ANCHOR_REFS_BLOOM_HASH_COUNT},
-    (_, index) => Number.parseInt(digest.slice(index * 8, index * 8 + 8), 16) % bitCount,
-  );
-}
-
-function parseDeferredCodeAnchorIntentName(name: string): DeferredCodeAnchorIntentNameAddress | undefined {
-  const legacy = /^([a-f0-9]{64})(?:-(tnca_[a-f0-9]+))?\.json$/u.exec(name);
-  if (legacy) {
-    return {
-      intentId: legacy[2],
-      kind: 'legacy',
-      qualified: false,
-      uriDigest: legacy[1],
-    };
-  }
-  const sharded = /^([a-f0-9]{32})-(tnca_[a-f0-9]{32})-b([a-f0-9]{32})\.json$/u.exec(name);
-  if (sharded) {
-    return {
-      intentId: sharded[2],
-      kind: 'sharded',
-      qualified: false,
-      refsBloom: sharded[3],
-      uriDigest: sharded[1],
-    };
-  }
-  const routed =
-    /^((?:[a-f0-9]{32}|[a-f0-9]{64}))-(tnca_[a-f0-9]{32})-r((?:[a-f0-9]{8}|[a-f0-9]{12}|[a-f0-9]{32}))(?:-w((?:[a-f0-9]{8}|[a-f0-9]{12}|[a-f0-9]{32})))?(-q)?(?:-b([a-f0-9]{32}))?\.json$/u.exec(
-      name,
-    );
-  if (!routed) return undefined;
-  return {
-    intentId: routed[2],
-    kind: 'routed',
-    qualified: routed[5] !== undefined,
-    refsBloom: routed[6],
-    repositoryRouteDigest: routed[3],
-    uriDigest: routed[1],
-    worksetRouteDigest: routed[4],
-  };
-}
-
-/** Public filename-shape classifier for bounded diagnostics and dogfood evidence. */
-export function isDeferredCodeAnchorIntentFilename(name: string): boolean {
-  return parseDeferredCodeAnchorIntentName(name) !== undefined;
-}
-
-function deferredCodeAnchorIntentIdFromName(name: string): string | undefined {
-  return parseDeferredCodeAnchorIntentName(name)?.intentId;
-}
-
-function deferredCodeAnchorUriDigestFromName(name: string): string | undefined {
-  return (
-    parseDeferredCodeAnchorIntentName(name)?.uriDigest ?? /^([a-f0-9]{64}|[a-f0-9]{32})(?:-|\.json$)/u.exec(name)?.[1]
-  );
-}
-
-function isDeferredCodeAnchorIntentNameForDigest(name: string, digest: string): boolean {
-  const addressedDigest = parseDeferredCodeAnchorIntentName(name)?.uriDigest;
-  return (
-    (addressedDigest !== undefined && digest.startsWith(addressedDigest)) ||
-    ((name.startsWith(`${digest}-tnca_`) ||
-      name.startsWith(`${digest.slice(0, DEFERRED_CODE_ANCHOR_URI_ADDRESS_HEX_LENGTH)}-tnca_`)) &&
-      name.endsWith('.json'))
-  );
-}
 
 const deferredCodeAnchorRoot = Effect.fn('memoryCodeAnchor.root')(function* (
   config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>,
@@ -1834,7 +1844,10 @@ const existingPrivateDeferredCodeAnchorRoot = Effect.fn('memoryCodeAnchor.existi
 function canonicalPersonalMemoryUri(config: Pick<RuntimeConfig, 'user'>, memoryUri: string): string {
   const canonical = parseResourceId(memoryUri).canonicalUri;
   const personalPrefix = `threadnote://user/${uriSegment(config.user)}/memories/`;
-  if (!canonical.startsWith(personalPrefix) || canonical.startsWith(`${personalPrefix}shared/`)) {
+  if (
+    !Effect2.pipe(canonical, EffectString.startsWith(personalPrefix)) ||
+    Effect2.pipe(canonical, EffectString.startsWith(`${personalPrefix}shared/`))
+  ) {
     throw deferredCodeAnchorError('Deferred code anchors require a personal canonical memory URI.');
   }
   return canonical;
@@ -1883,17 +1896,24 @@ const deferredCodeAnchorRouteDigest = Effect.fn('memoryCodeAnchor.routeDigest')(
     ) {
       return yield* deferredCodeAnchorError('Deferred code-anchor repository route is invalid.');
     }
-  } else if (route.name.length === 0 || route.name.length > 256 || route.name.trim() !== route.name) {
+  } else if (
+    route.name.length === 0 ||
+    route.name.length > 256 ||
+    Effect2.pipe(route.name, EffectString.trim) !== route.name
+  ) {
     return yield* deferredCodeAnchorError('Deferred code-anchor workset route is invalid.');
   }
   return yield* sha256Hex(
-    [
-      'threadnote-deferred-code-anchor-route-v1',
-      config.account,
-      uriSegment(config.user),
-      route.kind,
-      ...(route.kind === 'repository' ? [route.repositoryId, route.worktreeId] : [route.name]),
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'threadnote-deferred-code-anchor-route-v1',
+        config.account,
+        uriSegment(config.user),
+        route.kind,
+        ...(route.kind === 'repository' ? [route.repositoryId, route.worktreeId] : [route.name]),
+      ],
+      '\n',
+    ),
   );
 });
 
@@ -1922,11 +1942,11 @@ function deferredCodeAnchorRouteReceipt(
   items: readonly DeferredCodeAnchorFinalizeItemV1[] = [],
 ): DeferredCodeAnchorRouteFinalizationReceiptV1 {
   return {
-    conflictCount: items.filter(item => item.state === 'conflict').length,
-    failedCount: items.filter(item => item.state === 'failed').length,
-    finalizedCount: items.filter(item => item.state === 'finalized').length,
+    conflictCount: EffectArray.filter(items, item => item.state === 'conflict').length,
+    failedCount: EffectArray.filter(items, item => item.state === 'failed').length,
+    finalizedCount: EffectArray.filter(items, item => item.state === 'finalized').length,
     matchedCount,
-    pendingCount: items.filter(item => item.state === 'pending').length,
+    pendingCount: EffectArray.filter(items, item => item.state === 'pending').length,
     scannedCount: items.length,
     state,
     type: 'threadnote-deferred-code-anchor-route-finalization',
@@ -1935,6 +1955,6 @@ function deferredCodeAnchorRouteReceipt(
 }
 
 function commonCitationSourceCommit(citations: readonly MemoryCodeCitationV1[]): string | undefined {
-  const commits = new Set(citations.map(citation => citation.sourceCommit));
+  const commits = new Set(EffectArray.map(citations, citation => citation.sourceCommit));
   return commits.size === 1 ? citations[0]?.sourceCommit : undefined;
 }

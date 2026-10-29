@@ -1,3 +1,7 @@
+import {Schema} from 'effect';
+import {isIntegrationResult} from '@threadnote/manager/api/response-guards';
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import React, {useState} from 'react';
 import {AlertTriangle, ArrowUpFromLine, Check, Inbox, Pause, Pencil, Play, RefreshCw, Unplug} from 'lucide-react';
 import {ActionMenu} from '@threadnote/manager/action-menu';
@@ -9,6 +13,8 @@ import type {IntegrationResult} from '@threadnote/integration-core/manager-contr
 import type {ObsidianAction, ObsidianIntegration, ObsidianSource, ObsidianProjection} from '../manager-contracts.js';
 import {ObsidianConnectionForm} from './connection-form.js';
 import {product} from './catalog.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 type Connection =
   | {readonly kind: 'source'; readonly value?: ObsidianSource}
@@ -20,10 +26,18 @@ interface Operation {
   readonly result: IntegrationResult;
 }
 function matchingConnections(data: ObsidianIntegration | undefined, query: string): ObsidianIntegration {
+  const sources = data?.sources ?? [];
+  const projections = data?.projections ?? [];
   return {
-    sources: (data?.sources ?? []).filter(source => matchesIntegrationQuery(product, query, source.id, source.vault)),
-    projections: (data?.projections ?? []).filter(projection =>
-      matchesIntegrationQuery(product, query, projection.id, projection.vault),
+    sources: EffectArray.filter(
+      sources,
+      (source, __effectArrayIndex) =>
+        __effectArrayIndex in sources && matchesIntegrationQuery(product, query, source.id, source.vault),
+    ),
+    projections: EffectArray.filter(
+      projections,
+      (projection, __effectArrayIndex) =>
+        __effectArrayIndex in projections && matchesIntegrationQuery(product, query, projection.id, projection.vault),
     ),
   };
 }
@@ -55,12 +69,17 @@ export function ObsidianIntegrationView({
     setError('');
     setNotice('');
     try {
-      const result = await api<IntegrationResult>('/api/integrations/obsidian', {
-        action: 'sync-projection',
-        id,
-        apply: true,
-        confirm: true,
-      });
+      const result = await api<IntegrationResult>(
+        '/api/integrations/obsidian',
+        {
+          action: 'sync-projection',
+          id,
+          apply: true,
+          confirm: true,
+        },
+        undefined,
+        isIntegrationResult,
+      );
       setOperation({action: 'sync-projection', id, title: 'Export results', result});
       await onChanged('Memory export completed.');
     } catch (cause) {
@@ -75,7 +94,12 @@ export function ObsidianIntegrationView({
     setError('');
     setNotice('');
     try {
-      const result = await api<IntegrationResult>('/api/integrations/obsidian', {action, id, apply: false});
+      const result = await api<IntegrationResult>(
+        '/api/integrations/obsidian',
+        {action, id, apply: false},
+        undefined,
+        isIntegrationResult,
+      );
       setOperation({action, id, title, result});
     } catch (cause) {
       setError(errorMessage(cause));
@@ -108,7 +132,7 @@ export function ObsidianIntegrationView({
     <>
       {visible ? (
         <>
-          {sources.map(source => (
+          {EffectArray.map(sources, source => (
             <div className="integration-row" key={'obsidian-source-' + source.id}>
               <IntegrationLogo product={product} decorative />
               <div className="integration-row-main">
@@ -120,7 +144,7 @@ export function ObsidianIntegrationView({
                 </h4>
                 <p className="integration-path">Obsidian · Import notes · {source.vault}</p>
                 <p className="muted">
-                  Include: {source.include.join(', ')}
+                  Include: {EffectArray.join(source.include, ', ')}
                   {source.inbox ? ' · Inbox: ' + source.inbox : ''}
                 </p>
               </div>
@@ -164,7 +188,7 @@ export function ObsidianIntegrationView({
               </div>
             </div>
           ))}
-          {projections.map(projection => (
+          {EffectArray.map(projections, projection => (
             <div className="integration-row" key={'obsidian-projection-' + projection.id}>
               <IntegrationLogo product={product} decorative />
               <div className="integration-row-main">
@@ -181,7 +205,7 @@ export function ObsidianIntegrationView({
                   {projection.selectedUris === undefined
                     ? 'All matching memories'
                     : projection.selectedUris.length + ' selected memories'}{' '}
-                  · {projection.kinds.join(', ')} · {projection.statuses.join(', ')}
+                  · {EffectArray.join(projection.kinds, ', ')} · {EffectArray.join(projection.statuses, ', ')}
                   {projection.includeShared ? ' · Includes shared' : ' · Personal only'}
                 </p>
               </div>
@@ -252,19 +276,24 @@ function IntegrationPreview({
   const [result, setResult] = useState(operation.result);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const removing = operation.action.startsWith('remove-');
+  const removing = Effect.pipe(operation.action, EffectString.startsWith('remove-'));
   async function apply(): Promise<void> {
     if (busy) return;
     setBusy(true);
     setError('');
     try {
       setResult(
-        await api<IntegrationResult>('/api/integrations/obsidian', {
-          action: operation.action,
-          id: operation.id,
-          apply: true,
-          confirm: true,
-        }),
+        await api<IntegrationResult>(
+          '/api/integrations/obsidian',
+          {
+            action: operation.action,
+            id: operation.id,
+            apply: true,
+            confirm: true,
+          },
+          undefined,
+          isIntegrationResult,
+        ),
       );
       await onApplied();
     } catch (cause) {
@@ -273,8 +302,14 @@ function IntegrationPreview({
       setBusy(false);
     }
   }
-  const changes = result.entries.filter(entry => ['add', 'update', 'remove'].includes(entry.action)).length;
-  const protectedEdits = result.entries.filter(entry => entry.action === 'drift').length;
+  const changes = EffectArrayPipe(result.entries, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (entry, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues && ['add', 'update', 'remove'].includes(entry.action),
+    ),
+  ).length;
+  const protectedEdits = EffectArray.filter(result.entries, entry => entry.action === 'drift').length;
   return (
     <DetailModal
       title={operation.title}
@@ -314,7 +349,7 @@ function IntegrationPreview({
       ) : null}
       {result.entries.length ? (
         <div className="integration-preview-list">
-          {result.entries.map((entry, index) => (
+          {EffectArray.map(result.entries, (entry, index) => (
             <div key={entry.relativePath + index}>
               <span className={'integration-action ' + entry.action}>
                 {entry.action === 'drift' ? 'Edited in vault' : entry.action}
@@ -369,6 +404,48 @@ function IntegrationPreview({
 
 export const obsidianIntegration = defineIntegration<ObsidianIntegration>({
   product,
+  isData: Schema.is(
+    Schema.Struct({
+      sources: Schema.Array(
+        Schema.Struct({
+          id: Schema.String,
+          vault: Schema.String,
+          enabled: Schema.Boolean,
+          include: Schema.Array(Schema.String),
+          exclude: Schema.Array(Schema.String),
+          inbox: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.String])),
+          watch: Schema.Boolean,
+        }),
+      ),
+      projections: Schema.Array(
+        Schema.Struct({
+          id: Schema.String,
+          vault: Schema.String,
+          enabled: Schema.Boolean,
+          folder: Schema.String,
+          kinds: Schema.Array(
+            Schema.Union([
+              Schema.Literal('durable'),
+              Schema.Literal('handoff'),
+              Schema.Literal('incident'),
+              Schema.Literal('preference'),
+              Schema.Literal('smoke'),
+            ]),
+          ),
+          statuses: Schema.Array(
+            Schema.Union([
+              Schema.Literal('active'),
+              Schema.Literal('archived'),
+              Schema.Literal('expired'),
+              Schema.Literal('superseded'),
+            ]),
+          ),
+          includeShared: Schema.Boolean,
+          selectedUris: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Array(Schema.String)])),
+        }),
+      ),
+    }),
+  ),
   count: (data, query) => {
     const {sources, projections} = matchingConnections(data, query);
     return sources.length + projections.length;

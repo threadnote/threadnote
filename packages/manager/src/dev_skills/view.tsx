@@ -1,3 +1,12 @@
+import {
+  isManagerDevSkillsApplyResponse,
+  isManagerDevSkillsCatalog,
+  isManagerDevSkillsPlan,
+  isManagerDevSkillsProjects,
+  isManagerDevSkillsStatus,
+  isRuntimeUpdates,
+} from '../api/response_guards.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
 import {useManagerDialogs} from '../dialog.js';
@@ -40,36 +49,55 @@ export function DevSkillsPanel(): React.ReactElement {
   const [inventoryError, setInventoryError] = useState('');
   const epoch = useRef(0);
   const mounted = useRef(true);
-  const surface = catalog?.surfaces.find(item => item.surfaceId === surfaceId);
+  const surface = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(catalog?.surfaces), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, item => item.surfaceId === surfaceId)),
+    ),
+  );
   const managed = surface?.status === 'managed' ? surface : undefined;
   const platformSupported = !!managed && !!catalog && managed.platforms.includes(catalog.platform);
-  const existingPaths = recordedTargets
-    .filter(
-      item =>
+  const existingPaths = EffectArray.map(
+    EffectArray.filter(recordedTargets, item =>
+      Boolean(
         item.enrolled &&
         item.enrollmentState === 'enrolled' &&
         item.target.surfaceId === managed?.surfaceId &&
         item.target.profile === managed.profile &&
         item.target.scope === scope &&
         item.target.cwd,
-    )
-    .map(item => item.target.cwd!);
-  const projectPaths = [...new Set([...projects.map(project => project.path), ...existingPaths])];
+      ),
+    ),
+    item => item.target.cwd!,
+  );
+  const projectPaths = [...new Set([...EffectArray.map(projects, project => project.path), ...existingPaths])];
   const selector: ManagerDevSkillsSelector | undefined =
     managed && platformSupported && (scope === 'user' || projectPaths.includes(cwd))
       ? {agent: managed.surfaceId, profile: managed.profile, scope, ...(scope === 'user' ? {} : {cwd})}
       : undefined;
-  const selectorKey = selector ? JSON.stringify(selector) : '';
+  const selectorQuery = selector
+    ? new URLSearchParams({
+        agent: selector.agent,
+        ...(selector.profile === undefined ? {} : {profile: selector.profile}),
+        ...(selector.scope === undefined ? {} : {scope: selector.scope}),
+        ...(selector.cwd === undefined ? {} : {cwd: selector.cwd}),
+      }).toString()
+    : '';
   const selection = useRef({managed, scope, cwd, projects});
   selection.current = {managed, scope, cwd, projects};
 
   useEffect(() => {
     const controller = new AbortController();
-    void api<ManagerDevSkillsStatus>(routes.status, undefined, {...requestOptions, signal: controller.signal})
+    void api<ManagerDevSkillsStatus>(
+      routes.status,
+      undefined,
+      {...requestOptions, signal: controller.signal},
+      isManagerDevSkillsStatus,
+    )
       .then(next => {
         if (controller.signal.aborted) return;
         const current = selection.current;
-        const stillRecorded = next.targets.some(
+        const stillRecorded = EffectArray.some(
+          next.targets,
           item =>
             item.enrolled &&
             item.enrollmentState === 'enrolled' &&
@@ -78,7 +106,11 @@ export function DevSkillsPanel(): React.ReactElement {
             item.target.scope === current.scope &&
             item.target.cwd === current.cwd,
         );
-        if (current.cwd && !current.projects.some(project => project.path === current.cwd) && !stillRecorded) {
+        if (
+          current.cwd &&
+          !EffectArray.some(current.projects, project => project.path === current.cwd) &&
+          !stillRecorded
+        ) {
           epoch.current += 1;
           setPreview(undefined);
           setStatus(undefined);
@@ -97,11 +129,18 @@ export function DevSkillsPanel(): React.ReactElement {
   useEffect(() => {
     mounted.current = true;
     const controller = new AbortController();
-    void api<ManagerDevSkillsCatalog>(routes.catalog, undefined, {...requestOptions, signal: controller.signal})
+    void api<ManagerDevSkillsCatalog>(
+      routes.catalog,
+      undefined,
+      {...requestOptions, signal: controller.signal},
+      isManagerDevSkillsCatalog,
+    )
       .then(next => {
         if (controller.signal.aborted) return;
         setCatalog(next);
-        const first = next.surfaces.find(item => item.status === 'managed');
+        const first = EffectOption.getOrUndefined(
+          EffectArray.findFirst(next.surfaces, item => item.status === 'managed'),
+        );
         if (first?.status === 'managed') {
           setSurfaceId(first.surfaceId);
           setScope(first.defaultScope);
@@ -113,17 +152,27 @@ export function DevSkillsPanel(): React.ReactElement {
       .finally(() => {
         if (!controller.signal.aborted) setBusy('');
       });
-    void api<ManagerDevSkillsProjects>(routes.projects, undefined, {...requestOptions, signal: controller.signal})
+    void api<ManagerDevSkillsProjects>(
+      routes.projects,
+      undefined,
+      {...requestOptions, signal: controller.signal},
+      isManagerDevSkillsProjects,
+    )
       .then(next => {
         if (!controller.signal.aborted) setProjects(next.projects);
       })
       .catch(cause => {
         if (!controller.signal.aborted) setProjectError(errorMessage(cause));
       });
-    void api<RuntimeUpdates>('/api/runtime/updates?view=status', undefined, {
-      ...requestOptions,
-      signal: controller.signal,
-    })
+    void api<RuntimeUpdates>(
+      '/api/runtime/updates?view=status',
+      undefined,
+      {
+        ...requestOptions,
+        signal: controller.signal,
+      },
+      isRuntimeUpdates,
+    )
       .then(next => {
         if (!controller.signal.aborted) setPolicy(next);
       })
@@ -138,15 +187,20 @@ export function DevSkillsPanel(): React.ReactElement {
   }, []);
 
   useEffect(() => {
-    if (!selectorKey) return;
+    if (!selectorQuery) return;
     const controller = new AbortController();
     const ticket = epoch.current;
-    const query = new URLSearchParams(JSON.parse(selectorKey) as Record<string, string>);
+    const query = new URLSearchParams(selectorQuery);
     setBusy('Reading target status');
-    void api<ManagerDevSkillsStatus>(`${routes.status}?${query}`, undefined, {
-      ...requestOptions,
-      signal: controller.signal,
-    })
+    void api<ManagerDevSkillsStatus>(
+      `${routes.status}?${query}`,
+      undefined,
+      {
+        ...requestOptions,
+        signal: controller.signal,
+      },
+      isManagerDevSkillsStatus,
+    )
       .then(next => {
         if (!controller.signal.aborted && ticket === epoch.current) setStatus(next);
       })
@@ -157,7 +211,7 @@ export function DevSkillsPanel(): React.ReactElement {
         if (!controller.signal.aborted && ticket === epoch.current) setBusy('');
       });
     return () => controller.abort();
-  }, [selectorKey, refresh]);
+  }, [selectorQuery, refresh]);
 
   function invalidate(): void {
     epoch.current += 1;
@@ -176,7 +230,12 @@ export function DevSkillsPanel(): React.ReactElement {
     setNotice('');
     setBusy(`Previewing ${action}`);
     try {
-      const next = await api<ManagerDevSkillsPlan>(routes.preview, {action, selector}, requestOptions);
+      const next = await api<ManagerDevSkillsPlan>(
+        routes.preview,
+        {action, selector},
+        requestOptions,
+        isManagerDevSkillsPlan,
+      );
       if (mounted.current && ticket === epoch.current) setPreview(next);
     } catch (cause) {
       if (mounted.current && ticket === epoch.current) setError(errorMessage(cause));
@@ -211,13 +270,16 @@ export function DevSkillsPanel(): React.ReactElement {
           confirm: true,
         },
         requestOptions,
+        isManagerDevSkillsApplyResponse,
       );
       if (!mounted.current || ticket !== epoch.current) return;
       setStatus(response.status);
       setRecordedTargets(current => [
-        ...current.filter(
+        ...EffectArray.filter(
+          current,
           item =>
-            !response.status.targets.some(
+            !EffectArray.some(
+              response.status.targets,
               next =>
                 next.target.surfaceId === item.target.surfaceId &&
                 next.target.profile === item.target.profile &&
@@ -229,7 +291,14 @@ export function DevSkillsPanel(): React.ReactElement {
       ]);
       const result = response.result;
       setNotice(
-        `${result.applied ? 'Completed' : 'No changes applied'}: ${result.action}.${result.recovered ? ' Recovered an interrupted operation.' : ''}${result.retainedPaths.length ? ` Retained files: ${result.retainedPaths.join(', ')}` : ''}${result.issues.length ? ` ${result.issues.map(issue => issue.message).join(' ')}` : ''}`,
+        `${result.applied ? 'Completed' : 'No changes applied'}: ${result.action}.${result.recovered ? ' Recovered an interrupted operation.' : ''}${result.retainedPaths.length ? ` Retained files: ${EffectArray.join(result.retainedPaths, ', ')}` : ''}${
+          result.issues.length
+            ? ` ${EffectArray.join(
+                EffectArray.map(result.issues, issue => issue.message),
+                ' ',
+              )}`
+            : ''
+        }`,
       );
       setRefresh(value => value + 1);
     } catch (cause) {
@@ -307,7 +376,13 @@ export function DevSkillsPanel(): React.ReactElement {
                 onChange={event => {
                   invalidate();
                   setSurfaceId(event.target.value);
-                  const next = catalog?.surfaces.find(item => item.surfaceId === event.target.value);
+                  const next = EffectOption.getOrUndefined(
+                    EffectOption.map(EffectOption.fromNullishOr(catalog?.surfaces), __effectArrayReceiver =>
+                      EffectOption.getOrUndefined(
+                        EffectArray.findFirst(__effectArrayReceiver, item => item.surfaceId === event.target.value),
+                      ),
+                    ),
+                  );
                   if (next?.status === 'managed') setScope(next.defaultScope);
                   setCwd('');
                 }}
@@ -315,12 +390,16 @@ export function DevSkillsPanel(): React.ReactElement {
                 <option value="" disabled>
                   Select a host
                 </option>
-                {catalog?.surfaces.map(item => (
-                  <option key={item.surfaceId} value={item.surfaceId}>
-                    {item.displayName}
-                    {item.status === 'managed' ? ` · ${item.profile}` : ' · unsupported'}
-                  </option>
-                ))}
+                {EffectOption.getOrUndefined(
+                  EffectOption.map(EffectOption.fromNullishOr(catalog?.surfaces), __effectArrayReceiver =>
+                    EffectArray.map(__effectArrayReceiver, item => (
+                      <option key={item.surfaceId} value={item.surfaceId}>
+                        {item.displayName}
+                        {item.status === 'managed' ? ` · ${item.profile}` : ' · unsupported'}
+                      </option>
+                    )),
+                  ),
+                )}
               </select>
             </label>
             {managed ? (
@@ -332,11 +411,17 @@ export function DevSkillsPanel(): React.ReactElement {
                   value={scope}
                   onChange={event => {
                     invalidate();
-                    setScope(event.target.value as ManagerDevSkillsScope);
+                    const nextScope = event.target.value;
+                    if (
+                      (nextScope === 'user' || nextScope === 'project' || nextScope === 'local') &&
+                      managed.scopes.includes(nextScope)
+                    ) {
+                      setScope(nextScope);
+                    }
                     setCwd('');
                   }}
                 >
-                  {managed.scopes.map(value => (
+                  {EffectArray.map(managed.scopes, value => (
                     <option key={value} value={value}>
                       {value}
                     </option>
@@ -357,9 +442,11 @@ export function DevSkillsPanel(): React.ReactElement {
                   }}
                 >
                   <option value="">Select a registered project or existing installation</option>
-                  {projectPaths.map(path => (
+                  {EffectArray.map(projectPaths, path => (
                     <option key={path} value={path}>
-                      {projects.find(project => project.path === path)?.name ?? 'Existing installation'} · {path}
+                      {EffectOption.getOrUndefined(EffectArray.findFirst(projects, project => project.path === path))
+                        ?.name ?? 'Existing installation'}{' '}
+                      · {path}
                     </option>
                   ))}
                 </select>
@@ -369,7 +456,7 @@ export function DevSkillsPanel(): React.ReactElement {
           {managed?.scopeReason ? <p>{managed.scopeReason}</p> : null}
           {managed ? (
             <p>
-              Catalog layout: {managed.layout} · supported platforms: {managed.platforms.join(', ')}
+              Catalog layout: {managed.layout} · supported platforms: {EffectArray.join(managed.platforms, ', ')}
             </p>
           ) : null}
           {surface?.status === 'unsupported' ? <p role="status">{surface.reason}</p> : null}

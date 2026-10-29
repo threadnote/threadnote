@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import * as THREE from 'three';
 import {GRAPH_PALETTE} from './graph/model.js';
@@ -149,7 +150,7 @@ export function HomeAttentionFlow({
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     const scene = new THREE.Scene();
     const camera = new THREE.OrthographicCamera(0, 1, 0, 1, -1, 1);
-    const flows = FLOW_EDGES.map((edge, edgeIndex) => createFlow(scene, edge, edgeIndex));
+    const flows = EffectArray.map(FLOW_EDGES, (edge, edgeIndex) => createFlow(scene, edge, edgeIndex));
     let frame = 0;
     let visible = !document.hidden;
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -218,7 +219,7 @@ export function HomeAttentionFlow({
       </header>
       <div className="home-attention-flow-scene" ref={containerRef}>
         <canvas aria-hidden="true" ref={canvasRef} />
-        {nodes.map(node => (
+        {EffectArray.map(nodes, node => (
           <button
             aria-label={`Open ${node.kicker}: ${node.value} ${node.label}`}
             className={`home-flow-node is-${node.id} is-${node.status}`}

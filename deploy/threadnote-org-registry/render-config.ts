@@ -1,3 +1,6 @@
+import * as Effect from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 import {readFileSync} from 'node:fs';
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -5,7 +8,8 @@ type Environment = Readonly<Record<string, string | undefined>>;
 const REPOSITORY = /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$/u;
 
 function hasControlCharacter(value: string): boolean {
-  return [...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
+  // eslint-disable-next-line no-control-regex -- Reject literal C0 and DEL control characters from configured registry values.
+  return /[\u0000-\u001f\u007f]/u.test(value);
 }
 
 function required(env: Environment, name: string): string {
@@ -129,11 +133,11 @@ export function buildZotConfig(env: Environment) {
 
 export function assertProfileMatches(config: ReturnType<typeof buildZotConfig>, profile: unknown): void {
   const registry = (profile as {registry?: {canonical?: unknown; worker?: unknown}} | null)?.registry;
-  const origin = config.http.auth.bearer.realm.slice(0, -'/zot/auth/token'.length);
-  const [canonical, worker] = Object.keys(config.http.accessControl.repositories).filter(key => key !== '**');
+  const origin = Effect.pipe(config.http.auth.bearer.realm, EffectString.slice(0, -'/zot/auth/token'.length));
+  const [canonical, worker] = EffectRecord.keys(config.http.accessControl.repositories).filter(key => key !== '**');
   if (
-    registry?.canonical !== `oci://${origin.slice('https://'.length)}/${canonical}` ||
-    registry?.worker !== `oci://${origin.slice('https://'.length)}/${worker}`
+    registry?.canonical !== `oci://${Effect.pipe(origin, EffectString.slice('https://'.length))}/${canonical}` ||
+    registry?.worker !== `oci://${Effect.pipe(origin, EffectString.slice('https://'.length))}/${worker}`
   )
     throw new Error('Profile registry references do not match the Zot deployment');
 }

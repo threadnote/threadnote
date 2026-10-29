@@ -1,4 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {trimTrailingCharacters} from '@threadnote/platform/string-boundaries';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const IMAGE_PROJECTION_EXACT_TOKEN_LIMIT = 256 as const;
 
@@ -18,7 +21,7 @@ export function extractExactMemoryTokens(text: string): readonly string[] {
   const tokens: string[] = [];
   for (const pattern of TOKEN_PATTERNS) {
     pattern.lastIndex = 0;
-    for (const match of text.matchAll(pattern)) {
+    for (const match of Effect.pipe(text, EffectString.matchAll(pattern))) {
       const token = trimTrailingUriPunctuation(match[0]);
       if (token.length === 0 || seen.has(token)) continue;
       seen.add(token);
@@ -31,9 +34,9 @@ export function extractExactMemoryTokens(text: string): readonly string[] {
 
 export function renderExactTokenAppendix(tokens: readonly string[]): string | undefined {
   if (tokens.length === 0) return undefined;
-  return `Exact values (verbatim — trust these over the image):\n${tokens.join('\n')}`;
+  return `Exact values (verbatim — trust these over the image):\n${EffectArray.join(tokens, '\n')}`;
 }
 
 function trimTrailingUriPunctuation(value: string): string {
-  return value.startsWith('threadnote://') ? trimTrailingCharacters(value, '.,;:') : value;
+  return Effect.pipe(value, EffectString.startsWith('threadnote://')) ? trimTrailingCharacters(value, '.,;:') : value;
 }

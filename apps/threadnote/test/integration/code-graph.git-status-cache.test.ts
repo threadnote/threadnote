@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -8,8 +9,10 @@ import {CommandExecutor, CommandFailed, type CommandOptions} from '@threadnote/p
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {worktreeStatusWithPrivateCache} from '@threadnote/graph/git/status_cache';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const HASH = 'a'.repeat(64);
+const HASH = Effect2.pipe('a', EffectString.repeat(64));
 const STATUS_ARGUMENTS = ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--renames'] as const;
 
 describe('code graph private Git status cache', () => {
@@ -43,7 +46,7 @@ describe('code graph private Git status cache', () => {
           return Effect.fail(commandFailure(args));
         },
         executeBytes: (_executable, args) =>
-          Effect.die(new Error(`Direct index semantics unexpectedly fell back to: ${args.join(' ')}`)),
+          Effect.die(new Error(`Direct index semantics unexpectedly fell back to: ${EffectArray.join(args, ' ')}`)),
       });
       const observe = () =>
         worktreeStatusWithPrivateCache(identity, home, STATUS_ARGUMENTS, {minimumIndexBytes: 1}).pipe(
@@ -51,33 +54,56 @@ describe('code graph private Git status cache', () => {
         );
 
       expect((yield* observe()).stdout).toBe(' M src/index.ts\0');
-      expect(calls.filter(call => call.args.includes('update-index'))).toHaveLength(2);
+      expect(
+        EffectArray.filter(
+          calls,
+          __effectArrayValue => !!(call => call.args.includes('update-index'))(__effectArrayValue),
+        ),
+      ).toHaveLength(2);
       expect(fsmonitorOperations(calls, 'status')).toHaveLength(1);
       expect(fsmonitorOperations(calls, 'start')).toHaveLength(0);
       assertPrivateStatusCall(calls.at(-1), home);
 
       expect((yield* observe()).stdout).toBe(' M src/index.ts\0');
-      expect(calls.filter(call => call.args.includes('update-index'))).toHaveLength(2);
+      expect(
+        EffectArray.filter(
+          calls,
+          __effectArrayValue => !!(call => call.args.includes('update-index'))(__effectArrayValue),
+        ),
+      ).toHaveLength(2);
       expect(fsmonitorOperations(calls, 'status')).toHaveLength(1);
       assertPrivateStatusCall(calls.at(-1), home);
 
       cacheExtensionBytes = 3;
       writeSourceIndex();
       expect((yield* observe()).stdout).toBe(' M src/index.ts\0');
-      expect(calls.filter(call => call.args.includes('update-index'))).toHaveLength(2);
+      expect(
+        EffectArray.filter(
+          calls,
+          __effectArrayValue => !!(call => call.args.includes('update-index'))(__effectArrayValue),
+        ),
+      ).toHaveLength(2);
       expect(fsmonitorOperations(calls, 'status')).toHaveLength(1);
 
       sourceIndexObjectIdByte = 8;
       cacheExtensionBytes = 5;
       writeSourceIndex();
       expect((yield* observe()).stdout).toBe(' M src/index.ts\0');
-      expect(calls.filter(call => call.args.includes('update-index'))).toHaveLength(4);
+      expect(
+        EffectArray.filter(
+          calls,
+          __effectArrayValue => !!(call => call.args.includes('update-index'))(__effectArrayValue),
+        ),
+      ).toHaveLength(4);
       expect(fsmonitorOperations(calls, 'status')).toHaveLength(2);
       expect(fsmonitorOperations(calls, 'start')).toHaveLength(0);
-      expect(calls.filter(call => call.args.includes('ls-files'))).toHaveLength(0);
+      expect(
+        EffectArray.filter(calls, __effectArrayValue => !!(call => call.args.includes('ls-files'))(__effectArrayValue)),
+      ).toHaveLength(0);
       assertPrivateStatusCall(calls.at(-1), home);
       expect(
-        calls.every(
+        EffectArray.every(
+          calls,
           call =>
             !call.args.includes('--no-optional-locks') ||
             call.args.includes('rev-parse') ||
@@ -173,9 +199,13 @@ describe('code graph private Git status cache', () => {
       expect((yield* observe()).stdout).toBe(' M src/index.ts\0');
       expect(fsmonitorOperations(calls, 'status')).toHaveLength(2);
       expect(fsmonitorOperations(calls, 'start')).toHaveLength(1);
-      expect(calls.filter(call => call.args.includes('--no-optional-locks') && call.args.includes('status'))).toEqual(
-        [],
-      );
+      expect(
+        EffectArray.filter(
+          calls,
+          __effectArrayValue =>
+            !!(call => call.args.includes('--no-optional-locks') && call.args.includes('status'))(__effectArrayValue),
+        ),
+      ).toEqual([]);
 
       expect((yield* observe()).stdout).toBe(' M src/index.ts\0');
       expect(fsmonitorOperations(calls, 'status')).toHaveLength(2);
@@ -234,7 +264,11 @@ describe('code graph private Git status cache', () => {
 });
 
 function fsmonitorOperations(calls: ReadonlyArray<{readonly args: readonly string[]}>, operation: 'start' | 'status') {
-  return calls.filter(call => call.args.includes('fsmonitor--daemon') && call.args.includes(operation));
+  return EffectArray.filter(
+    calls,
+    __effectArrayValue =>
+      !!(call => call.args.includes('fsmonitor--daemon') && call.args.includes(operation))(__effectArrayValue),
+  );
 }
 
 function assertPrivateStatusCall(
@@ -244,7 +278,11 @@ function assertPrivateStatusCall(
   expect(call?.args).toContain('status');
   expect(call?.args).toContain('core.fsmonitor=true');
   expect(call?.args).toContain('core.untrackedCache=true');
-  expect(call?.options?.trustedGitIndexFile?.startsWith(home)).toBe(true);
+  expect(
+    Effect2.pipe(call?.options?.trustedGitIndexFile, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.startsWith(home)),
+    ),
+  ).toBe(true);
 }
 
 function repositoryIdentity(repoRoot: string): RepositoryIdentity {
@@ -253,11 +291,11 @@ function repositoryIdentity(repoRoot: string): RepositoryIdentity {
     checkoutId: HASH,
     displayName: 'fixture',
     gitCommonDirectory: join(repoRoot, '.git'),
-    headCommit: 'b'.repeat(40),
+    headCommit: Effect2.pipe('b', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot,
     repositoryId: HASH,
-    worktreeId: 'c'.repeat(64),
+    worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
   };
 }
 

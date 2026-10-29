@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {Predicate} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -14,8 +16,10 @@ import {
 import type {NativeWorkflowState} from '../src/native.js';
 import type {WorkflowWriteIntent} from '../src/contracts.js';
 import {decodeNativeCyclePlan, initializeNativeCycle} from '../src/cycle.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const hash = 'a'.repeat(64);
+const hash = Effect.pipe('a', EffectString.repeat(64));
 const stateBase: NativeWorkflowState = {
   format: 'threadnote-native-workflow',
   stateVersion: 1,
@@ -163,15 +167,21 @@ describe('native workflow request protocol', () => {
       code: 'invalid-request',
     });
     expect(
-      caught(() => decodeNativeWorkflowRequest({...validWriteRequest(), generation: 'g'.repeat(4097)})),
+      caught(() =>
+        decodeNativeWorkflowRequest({...validWriteRequest(), generation: Effect.pipe('g', EffectString.repeat(4097))}),
+      ),
     ).toMatchObject({
       code: 'invalid-request',
     });
-    expect(decodeNativeWorkflowRequest({...validWriteRequest(), body: '🧭'.repeat(15_000)})).toMatchObject({
-      body: '🧭'.repeat(15_000),
+    expect(
+      decodeNativeWorkflowRequest({...validWriteRequest(), body: Effect.pipe('🧭', EffectString.repeat(15_000))}),
+    ).toMatchObject({
+      body: Effect.pipe('🧭', EffectString.repeat(15_000)),
     });
     expect(
-      caught(() => decodeNativeWorkflowRequest({...validWriteRequest(), body: `🧭`.repeat(15_001)})),
+      caught(() =>
+        decodeNativeWorkflowRequest({...validWriteRequest(), body: Effect.pipe(`🧭`, EffectString.repeat(15_001))}),
+      ),
     ).toMatchObject({
       code: 'invalid-request',
     });
@@ -201,17 +211,29 @@ describe('native workflow request protocol', () => {
     fc.assert(
       fc.property(fc.string({maxLength: 48}), fc.integer({min: 1, max: 9999}), (generatedBody, suffix) => {
         const body = `${generatedBody} — 日本語 🧭 ${suffix}\n`;
-        const referenceUri = `threadnote://memory/tn_${String(suffix).padStart(10, '0')}`;
+        const referenceUri = `threadnote://memory/tn_${Effect.pipe(String(suffix), EffectString.padStart(10, '0'))}`;
         const left: WorkflowWriteIntent = {
           ...intent(),
           body,
           uri: undefined,
           codeRefs: [`src/generated-${suffix}.ts`],
           relations: [{type: 'evidence_for', uri: referenceUri}],
-          evidenceRefs: [{uri: referenceUri, memoryId: `tn_${String(suffix).padStart(10, '0')}`, revision: hash}],
+          evidenceRefs: [
+            {
+              uri: referenceUri,
+              memoryId: `tn_${Effect.pipe(String(suffix), EffectString.padStart(10, '0'))}`,
+              revision: hash,
+            },
+          ],
         };
         const right: WorkflowWriteIntent = {
-          evidenceRefs: [{revision: hash, memoryId: `tn_${String(suffix).padStart(10, '0')}`, uri: referenceUri}],
+          evidenceRefs: [
+            {
+              revision: hash,
+              memoryId: `tn_${Effect.pipe(String(suffix), EffectString.padStart(10, '0'))}`,
+              uri: referenceUri,
+            },
+          ],
           relations: [{uri: referenceUri, type: 'evidence_for'}],
           codeRefs: [`src/generated-${suffix}.ts`],
           uri: undefined,
@@ -251,7 +273,7 @@ describe('native workflow state', () => {
       phases: [
         {
           id: 'one',
-          definitionHash: '1'.repeat(64),
+          definitionHash: Effect.pipe('1', EffectString.repeat(64)),
           title: 'One',
           dependsOn: [],
           allowedPaths: ['src/'],
@@ -374,9 +396,9 @@ describe('native workflow state', () => {
   it('detects tampered intents, digests, bindings, source runs, duplicate IDs, and status artifacts', () => {
     const writeIntent = intent();
     const operation = {status: 'prepared', intent: writeIntent, intentDigest: nativeWorkflowIntentDigest(writeIntent)};
-    const wrongDigest = {...operation, intentDigest: '0'.repeat(64)};
+    const wrongDigest = {...operation, intentDigest: Effect.pipe('0', EffectString.repeat(64))};
     const changedBody = {...operation, intent: {...writeIntent, body: 'Tampered.'}};
-    const wrongBinding = {...operation, intent: {...writeIntent, bindingId: 'b'.repeat(64)}};
+    const wrongBinding = {...operation, intent: {...writeIntent, bindingId: Effect.pipe('b', EffectString.repeat(64))}};
     const wrongSource = {...operation, intent: {...writeIntent, sourceRunId: 'other-run'}};
     const duplicate = {...stateBase, operations: [operation, operation]};
     const preparedWithArtifact = {
@@ -411,7 +433,7 @@ describe('native workflow state', () => {
   it('matches full validation for generated states and corruptions while reusing only exact frozen operations', () => {
     fc.assert(
       fc.property(fc.array(fc.integer({min: 0, max: 9999}), {minLength: 1, maxLength: 8}), values => {
-        const operations = values.map((value, index) => {
+        const operations = EffectArray.map(values, (value, index) => {
           const operationIntent = intent({
             operationId: `write-${index}`,
             artifactKey: `plan-${index}`,
@@ -432,7 +454,7 @@ describe('native workflow state', () => {
         expect(Object.isFrozen(actual.operations[0].intent)).toBe(true);
 
         const first = actual.operations[0];
-        const wrongDigest = {...first, intentDigest: '0'.repeat(64)};
+        const wrongDigest = {...first, intentDigest: Effect.pipe('0', EffectString.repeat(64))};
         const corruptions = [
           {...actual, operations: [...actual.operations, first]},
           {...actual, operations: [wrongDigest, ...actual.operations.slice(1)]},
@@ -441,7 +463,10 @@ describe('native workflow state', () => {
         for (const corrupted of corruptions) {
           const fullError = caught(() => decodeNativeWorkflowState(corrupted));
           const cachedError = caught(() => optimized(corrupted));
-          expect(cachedError).toMatchObject({code: (fullError as {code: string}).code});
+          if (!Predicate.isObject(fullError) || typeof fullError.code !== 'string') {
+            throw new Error('Expected the decoder error to expose its stable code');
+          }
+          expect(cachedError).toMatchObject({code: fullError.code});
           expect(fullError).toMatchObject({code: 'invalid-state'});
         }
       }),
@@ -475,12 +500,12 @@ describe('native workflow state', () => {
     expect(Object.isFrozen(cachedOperation.intent.relations?.[0])).toBe(true);
     expect(Object.isFrozen(cachedOperation.intent.evidenceRefs?.[0])).toBe(true);
     expect(Reflect.set(cachedOperation.intent, 'body', 'mutated')).toBe(false);
-    expect(() => (cachedOperation.intent.codeRefs as string[]).push('src/other.ts')).toThrow();
+    expect(() => Reflect.apply(Array.prototype.push, cachedOperation.intent.codeRefs, ['src/other.ts'])).toThrow();
     expect(decoder(cached).operations[0]).toBe(cachedOperation);
     expect(decoder(cached).operations[0].intent.body).toBe(originalIntent.body);
 
     const wrongRun = {...cached, runId: 'other-run'};
-    const wrongBinding = {...cached, bindingId: 'b'.repeat(64)};
+    const wrongBinding = {...cached, bindingId: Effect.pipe('b', EffectString.repeat(64))};
     const duplicate = {...cached, operations: [cachedOperation, cachedOperation]};
     const invalidName = {
       ...cached,
@@ -490,11 +515,11 @@ describe('native workflow state', () => {
     const invalidReservation = {
       ...cached,
       authoringSave: {
-        intentDigest: 'c'.repeat(64),
+        intentDigest: Effect.pipe('c', EffectString.repeat(64)),
         rootUri: null,
         operationStart: 1,
         operationLimit: 2,
-        prefixDigest: '0'.repeat(64),
+        prefixDigest: Effect.pipe('0', EffectString.repeat(64)),
         journalBytesAtStart: 0,
         stateBytesAtStart: 0,
         reservedBytes: 0,
@@ -503,7 +528,7 @@ describe('native workflow state', () => {
     const overCapacityReservation = {
       ...cached,
       authoringSave: {
-        intentDigest: 'c'.repeat(64),
+        intentDigest: Effect.pipe('c', EffectString.repeat(64)),
         rootUri: null,
         operationStart: 1,
         operationLimit: 2,
@@ -577,12 +602,12 @@ describe('native workflow state', () => {
 
   it('holds a single exact reservation across completed prefixes at the operation and byte ceilings', () => {
     const byteLimit = 64 * 1024 * 1024;
-    const startingOperations = [{intentDigest: 'b'.repeat(64)}];
+    const startingOperations = [{intentDigest: Effect.pipe('b', EffectString.repeat(64))}];
     const prefixDigest = nativeAuthoringPrefixDigest(startingOperations);
     const plannedOperations = nativeWorkflowOperationLimit - startingOperations.length;
     const plannedBytes = 4096;
     const admission = {
-      intentDigest: 'c'.repeat(64),
+      intentDigest: Effect.pipe('c', EffectString.repeat(64)),
       rootUri: null,
       operationCount: startingOperations.length,
       plannedOperations,
@@ -614,10 +639,13 @@ describe('native workflow state', () => {
     );
 
     for (const changed of [
-      {...admission, intentDigest: 'd'.repeat(64)},
+      {...admission, intentDigest: Effect.pipe('d', EffectString.repeat(64))},
       {
         ...admission,
-        prefixDigest: nativeAuthoringPrefixDigest([...startingOperations, {intentDigest: 'e'.repeat(64)}]),
+        prefixDigest: nativeAuthoringPrefixDigest([
+          ...startingOperations,
+          {intentDigest: Effect.pipe('e', EffectString.repeat(64))},
+        ]),
       },
       {...admission, plannedBytes: plannedBytes + 1},
       {...admission, plannedOperations: plannedOperations - 1},
@@ -656,13 +684,14 @@ describe('native workflow state', () => {
     const byteLimit = 64 * 1024 * 1024;
     const inventory = Array.from({length: 2000}, (_, index) => {
       const prefix = 'threadnote://user/tester/memories/durable/projects/fixture/';
-      const unique = `owned-${String(index).padStart(4, '0')}-`;
+      const unique = `owned-${Effect.pipe(String(index), EffectString.padStart(4, '0'))}-`;
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       return prefix + unique + 'x'.repeat(250 - prefix.length - unique.length);
     });
-    expect(inventory.every(uri => new TextEncoder().encode(uri).byteLength === 250)).toBe(true);
+    expect(EffectArray.every(inventory, uri => new TextEncoder().encode(uri).byteLength === 250)).toBe(true);
     const scopeBytes = new TextEncoder().encode(JSON.stringify(inventory)).byteLength;
     const maximumScopeEntryBytes = Math.max(
-      ...inventory.map(uri => new TextEncoder().encode(JSON.stringify(uri)).byteLength + 1),
+      ...EffectArray.map(inventory, uri => new TextEncoder().encode(JSON.stringify(uri)).byteLength + 1),
     );
     const budgetInput = {
       contentBytes: 0,
@@ -676,10 +705,12 @@ describe('native workflow state', () => {
     expect(plannedBytes).toBeGreaterThan(59 * 1024 * 1024);
     expect(plannedBytes).toBeLessThan(61 * 1024 * 1024);
 
-    const originalOperations = Array.from({length: 3}, (_, index) => ({intentDigest: `${index + 1}`.repeat(64)}));
+    const originalOperations = Array.from({length: 3}, (_, index) => ({
+      intentDigest: Effect.pipe(`${index + 1}`, EffectString.repeat(64)),
+    }));
     const prefixDigest = nativeAuthoringPrefixDigest(originalOperations);
     const admission = {
-      intentDigest: 'f'.repeat(64),
+      intentDigest: Effect.pipe('f', EffectString.repeat(64)),
       rootUri: null,
       operationCount: originalOperations.length,
       plannedOperations: budgetInput.plannedOperations,
@@ -694,7 +725,8 @@ describe('native workflow state', () => {
 
     const candidateUris = Array.from({length: 16}, (_, index) => {
       const prefix = 'threadnote://user/tester/memories/durable/projects/fixture/';
-      const unique = `candidate-${String(index).padStart(2, '0')}-`;
+      const unique = `candidate-${Effect.pipe(String(index), EffectString.padStart(2, '0'))}-`;
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       return prefix + unique + 'y'.repeat(250 - prefix.length - unique.length);
     });
     const grownScopeBytes = new TextEncoder().encode(JSON.stringify([...inventory, ...candidateUris])).byteLength;
@@ -727,7 +759,10 @@ describe('native workflow state', () => {
         admitNativeAuthoringSave(
           {
             ...admission,
-            prefixDigest: nativeAuthoringPrefixDigest([...originalOperations, {intentDigest: '9'.repeat(64)}]),
+            prefixDigest: nativeAuthoringPrefixDigest([
+              ...originalOperations,
+              {intentDigest: Effect.pipe('9', EffectString.repeat(64))},
+            ]),
           },
           reservation,
         ),

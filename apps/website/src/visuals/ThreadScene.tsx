@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {useEffect, useRef, useState} from 'react';
 
 type SceneStatus = 'loading' | 'ready' | 'fallback';
@@ -52,19 +53,22 @@ export default function ThreadScene() {
         const group = new THREE.Group();
         scene.add(group);
 
-        const points = [
-          [-3.4, 1.55, 0],
-          [-1.6, 0.95, 0.45],
-          [-0.2, 1.6, -0.2],
-          [1.3, 0.65, 0.25],
-          [3.2, 1.2, -0.1],
-          [-2.5, -0.8, -0.25],
-          [-0.45, -0.25, 0.5],
-          [1.05, -1.35, -0.25],
-          [2.8, -0.7, 0.2],
-          [-1.4, -2.05, 0.1],
-          [0.55, -2.25, -0.45],
-        ].map(([x, y, z]) => new THREE.Vector3(x, y, z));
+        const points = EffectArray.map(
+          [
+            [-3.4, 1.55, 0],
+            [-1.6, 0.95, 0.45],
+            [-0.2, 1.6, -0.2],
+            [1.3, 0.65, 0.25],
+            [3.2, 1.2, -0.1],
+            [-2.5, -0.8, -0.25],
+            [-0.45, -0.25, 0.5],
+            [1.05, -1.35, -0.25],
+            [2.8, -0.7, 0.2],
+            [-1.4, -2.05, 0.1],
+            [0.55, -2.25, -0.45],
+          ],
+          ([x, y, z]) => new THREE.Vector3(x, y, z),
+        );
 
         const edges = [
           [0, 1],
@@ -85,7 +89,7 @@ export default function ThreadScene() {
         ];
 
         const lineGeometry = new THREE.BufferGeometry();
-        lineGeometry.setFromPoints(edges.flatMap(([from, to]) => [points[from], points[to]]));
+        lineGeometry.setFromPoints(EffectArray.flatMap(edges, ([from, to]) => [points[from], points[to]]));
         const lines = new THREE.LineSegments(
           lineGeometry,
           new THREE.LineBasicMaterial({
@@ -98,7 +102,7 @@ export default function ThreadScene() {
 
         const nodeGeometry = new THREE.IcosahedronGeometry(0.105, 1);
         const colors = [0x67e8c7, 0x7aa2ff, 0xc08cff, 0xffb86b];
-        const nodes = points.map((point, index) => {
+        const nodes = EffectArray.map(points, (point, index) => {
           const node = new THREE.Mesh(
             nodeGeometry,
             new THREE.MeshBasicMaterial({
@@ -154,7 +158,7 @@ export default function ThreadScene() {
           const elapsed = timer.getElapsed();
           group.rotation.y = Math.sin(elapsed * 0.24) * 0.12;
           group.rotation.x = Math.cos(elapsed * 0.18) * 0.035;
-          nodes.forEach((node, index) => {
+          EffectArray.forEach(nodes, (node, index) => {
             const scale = (index === 6 ? 1.7 : 1) + Math.sin(elapsed * 1.5 + index) * 0.12;
             node.scale.setScalar(scale);
           });
@@ -184,7 +188,7 @@ export default function ThreadScene() {
           nodeGeometry.dispose();
           pulseGeometry.dispose();
           lineGeometry.dispose();
-          nodes.forEach(node => node.material.dispose());
+          EffectArray.forEach(nodes, node => node.material.dispose());
           lines.material.dispose();
           pulse.material.dispose();
           renderer.dispose();

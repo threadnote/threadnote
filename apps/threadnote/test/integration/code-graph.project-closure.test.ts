@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -5,7 +6,7 @@ import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import * as FC from 'fast-check';
@@ -25,6 +26,8 @@ import {
 } from '@threadnote/graph/store';
 import type {CodeGraphQueryResult} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('project-closure incremental indexing', () => {
   it.effect('publishes current workspace dependencies when a manifest and source change together', () =>
@@ -93,7 +96,9 @@ describe('project-closure incremental indexing', () => {
           );
           const currentIdentity = yield* resolveRepositoryIdentity(root);
           const currentInventory = yield* inventoryRepository(currentIdentity, {includeOverlay: true});
-          const currentBarrel = currentInventory.files.find(file => file.path === 'packages/barrel/index.ts')!;
+          const currentBarrel = EffectOption.getOrUndefined(
+            EffectArray.findFirst(currentInventory.files, file => file.path === 'packages/barrel/index.ts'),
+          )!;
           const receipt = yield* store.reusableBaseReceipt(incrementalLayout.databasePath, base.snapshot.id);
           expect(receipt).toBeDefined();
           const poisonDerivation = materializedShardDerivationIdentity(
@@ -166,10 +171,13 @@ describe('project-closure incremental indexing', () => {
           expect(normalizeCatalog(incrementalCatalog)).toEqual(normalizeCatalog(fullCatalog));
           expect(incrementalHealth).toMatchObject({foreignKeyViolations: 0, integrity: 'ok'});
           expect(fullHealth).toMatchObject({foreignKeyViolations: 0, integrity: 'ok'});
-          const other = incrementalGraph.symbols.find(symbol => symbol.name === 'other');
+          const other = EffectOption.getOrUndefined(
+            EffectArray.findFirst(incrementalGraph.symbols, symbol => symbol.name === 'other'),
+          );
           expect(other).toBeDefined();
           expect(
-            incrementalGraph.edges.some(
+            EffectArray.some(
+              incrementalGraph.edges,
               edge => edge.sourceName === 'consume' && edge.relation === 'calls' && edge.targetId === other?.id,
             ),
           ).toBe(true);
@@ -311,12 +319,15 @@ describe('project-closure incremental indexing', () => {
                 writeFile(
                   root,
                   'packages/barrel/index.ts',
-                  [
-                    '// presentation-only edit',
-                    '// shifts the evidence span without changing resolver input',
-                    'export {real as foo} from "../core/index.js";',
-                    '',
-                  ].join('\n'),
+                  EffectArray.join(
+                    [
+                      '// presentation-only edit',
+                      '// shifts the evidence span without changing resolver input',
+                      'export {real as foo} from "../core/index.js";',
+                      '',
+                    ],
+                    '\n',
+                  ),
                 );
                 if (mode === 'clean') {
                   git(root, ['add', 'packages/barrel/index.ts']);
@@ -412,7 +423,7 @@ describe('project-closure incremental indexing', () => {
             'Reused persisted clean inventory admission for 1 changed path(s) without hydrating the complete base.',
           );
           expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
-          expect(incrementalGraph.symbols.some(symbol => symbol.name === 'newlyPublished')).toBe(true);
+          expect(EffectArray.some(incrementalGraph.symbols, symbol => symbol.name === 'newlyPublished')).toBe(true);
           expect(deltaPaths(incrementalLayout.databasePath, incremental.snapshot.id)).toEqual([
             'packages/app/index.ts',
             'packages/app/package.json',
@@ -474,11 +485,10 @@ describe('project-closure incremental indexing', () => {
             base.identity.checkoutId,
             base.identity.worktreeId,
           );
-          const inflatedHashes = [
-            'packages/app/index.ts',
-            'packages/app/package.json',
-            'packages/barrel/package.json',
-          ].map(value => snapshotFileContentHash(incrementalLayout.databasePath, base.snapshot.id, value));
+          const inflatedHashes = EffectArray.map(
+            ['packages/app/index.ts', 'packages/app/package.json', 'packages/barrel/package.json'],
+            value => snapshotFileContentHash(incrementalLayout.databasePath, base.snapshot.id, value),
+          );
           yield* Effect.sync(() => {
             inflateCachedFacts(incrementalLayout.databasePath, inflatedHashes, 7 * 1_048_576);
             redirectBarrel(root);
@@ -987,10 +997,13 @@ describe('project-closure incremental indexing', () => {
             expect(incremental.incrementalWork?.changedFiles).toBe(incremental.materialization?.stagedFiles);
             expect(incremental.incrementalWork?.attributionContextFiles).toBe(base.materialization?.totalFiles ?? 0);
             expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
-            const added = incrementalGraph.symbols.find(symbol => symbol.name === 'added');
+            const added = EffectOption.getOrUndefined(
+              EffectArray.findFirst(incrementalGraph.symbols, symbol => symbol.name === 'added'),
+            );
             expect(added).toBeDefined();
             expect(
-              incrementalGraph.edges.some(
+              EffectArray.some(
+                incrementalGraph.edges,
                 edge => edge.sourceName === 'pending' && edge.relation === 'calls' && edge.targetId === added?.id,
               ),
             ).toBe(true);
@@ -1081,7 +1094,10 @@ describe('project-closure incremental indexing', () => {
                 const indexer = yield* CodeGraphIndexer;
                 const path = yield* Path.Path;
                 const store = yield* CodeGraphStore;
-                const home = join(root, `.threadnote-${scenario.language.toLowerCase()}-${scenario.operation}`);
+                const home = join(
+                  root,
+                  `.threadnote-${Effect2.pipe(scenario.language, EffectString.toLowerCase)}-${scenario.operation}`,
+                );
                 const fullHome = `${home}-full`;
                 yield* indexer.index({cwd: root, threadnoteHome: home});
                 yield* Effect.sync(() => {
@@ -1211,16 +1227,20 @@ describe('project-closure incremental indexing', () => {
             });
             expect(incremental.incrementalWork?.attributionContextFiles).toBe(base.materialization?.totalFiles ?? 0);
             expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
-            const discovered = incrementalGraph.symbols.find(symbol => symbol.name === 'discovered');
+            const discovered = EffectOption.getOrUndefined(
+              EffectArray.findFirst(incrementalGraph.symbols, symbol => symbol.name === 'discovered'),
+            );
             expect(discovered).toBeDefined();
             expect(
-              incrementalGraph.edges.some(
+              EffectArray.some(
+                incrementalGraph.edges,
                 edge => edge.sourceName === 'consume' && edge.relation === 'calls' && edge.targetId === discovered?.id,
               ),
             ).toBe(true);
-            expect(incrementalGraph.symbols.some(symbol => symbol.name === 'retiring')).toBe(false);
+            expect(EffectArray.some(incrementalGraph.symbols, symbol => symbol.name === 'retiring')).toBe(false);
             expect(
-              incrementalGraph.edges.some(
+              EffectArray.some(
+                incrementalGraph.edges,
                 edge =>
                   edge.sourceName === 'consume' &&
                   edge.targetName === 'retiring' &&
@@ -1320,9 +1340,10 @@ describe('project-closure incremental indexing', () => {
               integrity: 'ok',
             });
             expect(deltaPaths(incrementalLayout.databasePath, incremental.snapshot.id)).toEqual(
-              Array.from({length: projectCount - 3}, (_, offset) => offset + 2)
-                .flatMap(index => [`packages/p${index}/index.ts`, `packages/p${index}/package.json`])
-                .sort(),
+              EffectArray.flatMap(
+                Array.from({length: projectCount - 3}, (_, offset) => offset + 2),
+                index => [`packages/p${index}/index.ts`, `packages/p${index}/package.json`],
+              ).sort(),
             );
           }),
         root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
@@ -1395,7 +1416,11 @@ function createLargeRootProjectRepository(): string {
     'import {discovered} from "./barrel-b.js";\nexport function consume() { return discovered(); }\n',
   );
   for (let index = 0; index < 139; index += 1) {
-    writeFile(root, `src/filler-${String(index).padStart(3, '0')}.ts`, `export const filler${index} = ${index};\n`);
+    writeFile(
+      root,
+      `src/filler-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`,
+      `export const filler${index} = ${index};\n`,
+    );
   }
   git(root, ['init', '-q']);
   git(root, ['config', 'user.name', 'Threadnote Test']);
@@ -1478,20 +1503,24 @@ function write(root: string, path: string, value: unknown): void {
 function workspaceCatalogRows(databasePath: string, snapshotId: string): readonly unknown[] {
   const database = new Database(databasePath, {readonly: true});
   try {
-    return [
-      'workspace_scopes',
-      'workspace_components',
-      'workspace_component_dependencies',
-      'workspace_external_dependencies',
-      'code_graph_monikers',
-    ]
-      .map(
+    return EffectArray.map(
+      EffectArray.map(
+        [
+          'workspace_scopes',
+          'workspace_components',
+          'workspace_component_dependencies',
+          'workspace_external_dependencies',
+          'code_graph_monikers',
+        ],
         table =>
           database
-            .query(`SELECT * FROM ${table} WHERE snapshot_id = ? ORDER BY 2, 3`)
-            .all(snapshotId) as readonly Record<string, unknown>[],
-      )
-      .map(rows => rows.map(({snapshot_id: _snapshotId, ...row}) => row));
+            .query<Record<string, unknown>, SQLQueryBindings[]>(
+              `SELECT * FROM ${table} WHERE snapshot_id = ? ORDER BY 2, 3`,
+            )
+            .all(snapshotId),
+      ),
+      rows => EffectArray.map(rows, ({snapshot_id: _snapshotId, ...row}) => row),
+    );
   } finally {
     database.close();
   }
@@ -1509,14 +1538,17 @@ function git(root: string, arguments_: readonly string[]): void {
 
 function normalizeGraph(graph: StoredCodeGraph): unknown {
   return {
-    edges: [...graph.edges].sort((left, right) => left.id.localeCompare(right.id)),
-    symbols: [...graph.symbols].sort((left, right) => left.id.localeCompare(right.id)),
+    edges: [...graph.edges].sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id))),
+    symbols: [...graph.symbols].sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id))),
   };
 }
 
 function documentEdge(graph: StoredCodeGraph, path: string, targetName: string) {
-  return graph.edges.find(
-    edge => edge.evidencePath === path && edge.relation === 'documents' && edge.targetName === targetName,
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      graph.edges,
+      edge => edge.evidencePath === path && edge.relation === 'documents' && edge.targetName === targetName,
+    ),
   );
 }
 
@@ -1535,7 +1567,7 @@ function normalizeCatalog(catalog: CodeGraphVisualizationCatalog | undefined): u
 
 function normalizeQuery(result: CodeGraphQueryResult): unknown {
   return {
-    edges: [...result.edges].sort((left, right) => left.id.localeCompare(right.id)),
+    edges: [...result.edges].sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id))),
     nodes: result.nodes,
     operation: result.operation,
     warnings: result.warnings,
@@ -1545,10 +1577,12 @@ function normalizeQuery(result: CodeGraphQueryResult): unknown {
 function deltaPaths(databasePath: string, snapshotId: string): readonly string[] {
   const database = new Database(databasePath, {readonly: true});
   try {
-    return database
-      .query<{readonly path: string}, [string]>('SELECT path FROM snapshot_files WHERE snapshot_id = ? ORDER BY path')
-      .all(snapshotId)
-      .map(row => row.path);
+    return EffectArray.map(
+      database
+        .query<{readonly path: string}, [string]>('SELECT path FROM snapshot_files WHERE snapshot_id = ? ORDER BY path')
+        .all(snapshotId),
+      row => row.path,
+    );
   } finally {
     database.close(false);
   }
@@ -1562,7 +1596,7 @@ function mutateBarrelCache(databasePath: string, scenario: 'missing' | 'oversize
     } else if (scenario === 'oversized') {
       database.run(`UPDATE file_blobs SET facts_json = ? WHERE path_hint = 'packages/barrel/index.ts'`, [
         JSON.stringify({
-          diagnostics: ['x'.repeat(8 * 1_048_576)],
+          diagnostics: [Effect2.pipe('x', EffectString.repeat(8 * 1_048_576))],
           edges: [],
           path: 'packages/barrel/index.ts',
           references: [],
@@ -1589,6 +1623,7 @@ function inflateCachedFacts(databasePath: string, contentHashes: readonly string
       const facts = decodeStoredCodeGraphFact(row.factsJson).facts;
       const inflated = serializeBoundedCodeGraphFact({
         ...facts,
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         diagnostics: [...facts.diagnostics, 'x'.repeat(diagnosticBytes)],
       });
       database.run('UPDATE file_blobs SET facts_json = ? WHERE content_hash = ?', [
@@ -1646,15 +1681,17 @@ function corruptCachedFactPath(databasePath: string, contentHash: string): void 
 function cachedFactPayloadPaths(databasePath: string, contentHash: string): readonly string[] {
   const database = new Database(databasePath, {readonly: true});
   try {
-    return database
-      .query<{readonly path: string}, [string]>(
-        `SELECT json_extract(facts_json, '$.path') AS path
+    return EffectArray.map(
+      database
+        .query<{readonly path: string}, [string]>(
+          `SELECT json_extract(facts_json, '$.path') AS path
          FROM file_blobs
          WHERE content_hash = ?
          ORDER BY extractor_set`,
-      )
-      .all(contentHash)
-      .map(row => row.path);
+        )
+        .all(contentHash),
+      row => row.path,
+    );
   } finally {
     database.close(false);
   }
@@ -1674,7 +1711,7 @@ function insertOutsideReexportOverflow(databasePath: string, snapshotId: string)
           snapshotId,
           'packages/unrelated/index.ts',
           'unrelated',
-          `packages/outside-${String(index).padStart(5, '0')}.ts`,
+          `packages/outside-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}.ts`,
           `outside${index}`,
         );
       }

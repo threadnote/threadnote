@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphReference, CodeGraphSymbol} from './types.js';
@@ -27,6 +28,8 @@ import {
   uniqueStrings,
   workspaceIdentity,
 } from './workspace/primitives.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {discoverBazelWorkspace} from './workspace/bazel.js';
 
@@ -34,8 +37,8 @@ export function workspaceHasUninventoriedMonikerEvidence(
   workspace: CodeGraphWorkspace,
   filePaths: ReadonlySet<string>,
 ): boolean {
-  return workspace.projects.some(project =>
-    (project.monikers ?? []).some(moniker => !filePaths.has(moniker.evidence.path)),
+  return EffectArray.some(workspace.projects, project =>
+    EffectArray.some(project.monikers ?? [], moniker => !filePaths.has(moniker.evidence.path)),
   );
 }
 
@@ -71,28 +74,34 @@ export function discoverManifestWorkspace(files: readonly CodeGraphInventoryFile
   const projects = diagnosticResolution.projects;
   const orderedDiagnostics = boundedCodeGraphWorkspaceDiagnostics(diagnosticResolution);
   const fingerprint = sha256HexSync(
-    [
-      'code-graph-workspace-v1',
-      ...projects.map(project =>
-        [
-          project.id,
-          project.workspaceId,
-          project.buildSystem,
-          project.kind,
-          project.provenance,
-          project.name,
-          project.root,
-          project.resolutionDomain,
-          project.dependencies.join(','),
-          JSON.stringify(project.externalDependencies ?? []),
-          JSON.stringify(project.monikers ?? []),
-          project.sourceRoots.join(','),
-          project.workspaceRoots.join(','),
-          project.diagnostics.join(','),
-        ].join('\0'),
-      ),
-      ...orderedDiagnostics,
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'code-graph-workspace-v1',
+        ...EffectArray.map(projects, project =>
+          EffectArray.join(
+            [
+              project.id,
+              project.workspaceId,
+              project.buildSystem,
+              project.kind,
+              project.provenance,
+              project.name,
+              project.root,
+              project.resolutionDomain,
+              EffectArray.join(project.dependencies, ','),
+              JSON.stringify(project.externalDependencies ?? []),
+              JSON.stringify(project.monikers ?? []),
+              EffectArray.join(project.sourceRoots, ','),
+              EffectArray.join(project.workspaceRoots, ','),
+              EffectArray.join(project.diagnostics, ','),
+            ],
+            '\0',
+          ),
+        ),
+        ...orderedDiagnostics,
+      ],
+      '\n',
+    ),
   );
   return {
     diagnostics: orderedDiagnostics,
@@ -252,7 +261,7 @@ function mergedWorkspaceFingerprint(
   return sha256HexSync(
     JSON.stringify({
       diagnostics,
-      projects: projects.map(project => [
+      projects: EffectArray.map(projects, project => [
         project.id,
         project.workspaceId,
         project.buildSystem,
@@ -262,7 +271,7 @@ function mergedWorkspaceFingerprint(
         project.root,
         project.resolutionDomain,
         project.dependencies,
-        project.dependencyDetails.map(dependency => [
+        EffectArray.map(project.dependencyDetails, dependency => [
           dependency.targetId,
           dependency.provenance,
           dependency.evidence ?? '',
@@ -275,7 +284,7 @@ function mergedWorkspaceFingerprint(
         project.diagnostics,
       ]),
       version: CODE_GRAPH_WORKSPACE_MODEL_VERSION,
-      workspaces: workspaces.map(workspace => [
+      workspaces: EffectArray.map(workspaces, workspace => [
         workspace.id,
         workspace.buildSystem,
         workspace.provenance,
@@ -290,21 +299,25 @@ function mergedWorkspaceFingerprint(
 export function createWorkspaceAttributor(
   workspace: CodeGraphWorkspace,
 ): (facts: readonly CodeGraphFileFacts[]) => readonly CodeGraphFileFacts[] {
-  const projectsById = new Map(workspace.projects.map(project => [project.id, project]));
+  const projectsById = new Map(EffectArray.map(workspace.projects, project => [project.id, project]));
   const findProject = createWorkspaceProjectLookup(workspace.projects);
   const findPackageProject = createWorkspaceProjectLookup(
-    workspace.projects.filter(project => project.buildSystem === 'node' || project.buildSystem === 'pnpm'),
+    EffectArray.filter(workspace.projects, project => project.buildSystem === 'node' || project.buildSystem === 'pnpm'),
   );
   return facts =>
-    facts.map(file => ({
+    EffectArray.map(facts, file => ({
       ...file,
-      references: file.references?.map(reference =>
-        Option.match(findProject(file.path, reference.resolutionDomain), {
-          onNone: () => reference,
-          onSome: project => attributeReference(reference, project, projectsById, findProject),
-        }),
+      references: Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(file.references), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, reference =>
+            Option.match(findProject(file.path, reference.resolutionDomain), {
+              onNone: () => reference,
+              onSome: project => attributeReference(reference, project, projectsById, findProject),
+            }),
+          ),
+        ),
       ),
-      symbols: file.symbols.map(symbol =>
+      symbols: EffectArray.map(file.symbols, symbol =>
         Option.match(
           symbol.kind === 'package' && symbol.resolutionDomain === 'workspace'
             ? findPackageProject(file.path)
@@ -344,24 +357,27 @@ function discoverMavenProjects(
   fileIndex: WorkspaceFileIndex,
 ): readonly ProjectCandidate[] {
   const output: ProjectCandidate[] = [];
-  for (const file of files.filter(candidate => basename(candidate.path) === 'pom.xml')) {
+  for (const file of EffectArray.filter(files, candidate => basename(candidate.path) === 'pom.xml')) {
     if (file.content === undefined) continue;
     const root = dirname(file.path);
-    const projectXml = file.content.replace(/<parent\b[\s\S]*?<\/parent>/i, '');
+    const projectXml = Effect2.pipe(file.content, EffectString.replace(/<parent\b[\s\S]*?<\/parent>/i, ''));
     const group = xmlTag(projectXml, 'groupId');
-    const artifact = xmlTag(projectXml, 'artifactId') ?? (root.split('/').at(-1) || 'root');
+    const artifact = xmlTag(projectXml, 'artifactId') ?? (Effect2.pipe(root, EffectString.split('/')).at(-1) || 'root');
     const name = group ? `${group}:${artifact}` : artifact;
-    const moduleRoots = xmlTags(file.content, 'module').flatMap(module => {
+    const moduleRoots = EffectArray.flatMap(xmlTags(file.content, 'module'), module => {
       const normalized = normalizeContainedPath(root, module);
       return normalized === undefined ? [] : [normalized];
     });
-    const dependencies = [...file.content.matchAll(/<dependency\b[\s\S]*?<\/dependency>/gi)].flatMap(match => {
-      const dependencyGroup = xmlTag(match[0], 'groupId');
-      const dependencyArtifact = xmlTag(match[0], 'artifactId');
-      return dependencyArtifact
-        ? [dependencyGroup ? `${dependencyGroup}:${dependencyArtifact}` : dependencyArtifact]
-        : [];
-    });
+    const dependencies = EffectArray.flatMap(
+      [...Effect2.pipe(file.content, EffectString.matchAll(/<dependency\b[\s\S]*?<\/dependency>/gi))],
+      match => {
+        const dependencyGroup = xmlTag(match[0], 'groupId');
+        const dependencyArtifact = xmlTag(match[0], 'artifactId');
+        return dependencyArtifact
+          ? [dependencyGroup ? `${dependencyGroup}:${dependencyArtifact}` : dependencyArtifact]
+          : [];
+      },
+    );
     output.push({
       aliases: [name, artifact, root],
       buildSystem: 'maven',
@@ -392,25 +408,32 @@ function discoverGradleProjects(
   fileIndex: WorkspaceFileIndex,
 ): readonly ProjectCandidate[] {
   const output: ProjectCandidate[] = [];
-  const settingsFiles = files
-    .filter(candidate => /^(?:settings\.gradle(?:\.kts)?)$/i.test(basename(candidate.path)))
-    .filter(file => file.content !== undefined);
+  const settingsFiles = EffectArray.filter(
+    EffectArray.filter(
+      files,
+      (candidate, __effectArrayIndex) =>
+        __effectArrayIndex in files && /^(?:settings\.gradle(?:\.kts)?)$/i.test(basename(candidate.path)),
+    ),
+    file => file.content !== undefined,
+  );
   const coveredBuildRoots = new Set<string>();
   for (const settings of settingsFiles) {
     const workspaceRoot = dirname(settings.path);
     const rootName =
       /\brootProject\.name\s*=\s*["']([^"']+)["']/.exec(settings.content!)?.[1] ??
-      (workspaceRoot.split('/').at(-1) || 'root');
+      (Effect2.pipe(workspaceRoot, EffectString.split('/')).at(-1) || 'root');
     const projectDirectories = gradleProjectDirectories(settings.content!, workspaceRoot);
     const includedModules = gradleIncludes(settings.content!);
     const modules = ['', ...includedModules];
     for (const modulePath of modules) {
-      const gradlePath = modulePath ? `:${modulePath.split('/').join(':')}` : ':';
+      const gradlePath = modulePath
+        ? `:${EffectArray.join(Effect2.pipe(modulePath, EffectString.split('/')), ':')}`
+        : ':';
       const root = projectDirectories.get(gradlePath) ?? joinPath(workspaceRoot, modulePath);
       coveredBuildRoots.add(root);
       const buildFile = fileIndex.buildFileByRoot.get(root);
       const dependencyAliases = buildFile?.content ? gradleProjectDependencies(buildFile.content) : [];
-      const moduleName = modulePath.split('/').at(-1) || rootName;
+      const moduleName = Effect2.pipe(modulePath, EffectString.split('/')).at(-1) || rootName;
       output.push({
         aliases: [gradlePath, moduleName, root],
         buildSystem: 'gradle',
@@ -428,24 +451,30 @@ function discoverGradleProjects(
       });
     }
     for (const modulePath of includedModules) {
-      const root = projectDirectories.get(`:${modulePath.split('/').join(':')}`) ?? joinPath(workspaceRoot, modulePath);
+      const root =
+        projectDirectories.get(`:${EffectArray.join(Effect2.pipe(modulePath, EffectString.split('/')), ':')}`) ??
+        joinPath(workspaceRoot, modulePath);
       if (!hasIndexedPathWithin(fileIndex.sortedPaths, root)) {
         diagnostics.push(`${settings.path}: declared Gradle project ${modulePath} has no indexed files`);
       }
     }
   }
-  for (const buildFile of files.filter(candidate => /^build\.gradle(?:\.kts)?$/i.test(basename(candidate.path)))) {
+  for (const buildFile of EffectArray.filter(
+    files,
+    (candidate, __effectArrayIndex) =>
+      __effectArrayIndex in files && /^build\.gradle(?:\.kts)?$/i.test(basename(candidate.path)),
+  )) {
     const root = dirname(buildFile.path);
     if (coveredBuildRoots.has(root)) continue;
     output.push({
-      aliases: [root, root.split('/').at(-1) || 'root'],
+      aliases: [root, Effect2.pipe(root, EffectString.split('/')).at(-1) || 'root'],
       buildSystem: 'gradle',
       dependencyAliases: buildFile.content ? gradleProjectDependencies(buildFile.content) : [],
       diagnostics: [],
       evidence: buildFile.path,
       kind: 'project',
       languages: ['java', 'kotlin'],
-      name: root.split('/').at(-1) || 'root',
+      name: Effect2.pipe(root, EffectString.split('/')).at(-1) || 'root',
       provenance: 'declared',
       resolutionDomain: 'jvm',
       root,
@@ -461,11 +490,15 @@ function discoverSwiftPackageProjects(
   diagnostics: string[],
 ): readonly ProjectCandidate[] {
   const output: ProjectCandidate[] = [];
-  for (const file of files.filter(candidate => basename(candidate.path).toLowerCase() === 'package.swift')) {
+  for (const file of EffectArray.filter(
+    files,
+    candidate => Effect2.pipe(basename(candidate.path), EffectString.toLowerCase) === 'package.swift',
+  )) {
     if (file.content === undefined) continue;
     const packageRoot = dirname(file.path);
     const packageName =
-      /\bPackage\s*\(\s*name\s*:\s*"([^"]+)"/m.exec(file.content)?.[1] ?? (packageRoot.split('/').at(-1) || 'Package');
+      /\bPackage\s*\(\s*name\s*:\s*"([^"]+)"/m.exec(file.content)?.[1] ??
+      (Effect2.pipe(packageRoot, EffectString.split('/')).at(-1) || 'Package');
     const targets = swiftTargets(file.content);
     if (targets.length === 0) {
       output.push({
@@ -520,10 +553,14 @@ function discoverXcodeProjects(
   diagnostics: string[],
 ): readonly ProjectCandidate[] {
   const output: ProjectCandidate[] = [];
-  for (const file of files.filter(candidate => /\.xcodeproj\/project\.pbxproj$/i.test(candidate.path))) {
+  for (const file of EffectArray.filter(
+    files,
+    (candidate, __effectArrayIndex) =>
+      __effectArrayIndex in files && /\.xcodeproj\/project\.pbxproj$/i.test(candidate.path),
+  )) {
     const projectBundle = dirname(file.path);
     const root = dirname(projectBundle);
-    const projectName = basename(projectBundle).replace(/\.xcodeproj$/i, '');
+    const projectName = Effect2.pipe(basename(projectBundle), EffectString.replace(/\.xcodeproj$/i, ''));
     const targetNames = file.content ? xcodeNativeTargetNames(file.content) : [];
     output.push({
       aliases: [projectName, root, ...targetNames],
@@ -550,10 +587,13 @@ function discoverXcodeProjects(
 }
 
 function addFallbackProjects(files: readonly CodeGraphInventoryFile[], candidates: ProjectCandidate[]): void {
-  const coveredSourceRoots = createPathPrefixSet(candidates.flatMap(candidate => candidate.sourceRoots));
-  for (const file of files.filter(candidate => /\.(?:java|kt|kts|swift)$/i.test(candidate.path))) {
+  const coveredSourceRoots = createPathPrefixSet(EffectArray.flatMap(candidates, candidate => candidate.sourceRoots));
+  for (const file of EffectArray.filter(
+    files,
+    (candidate, __effectArrayIndex) => __effectArrayIndex in files && /\.(?:java|kt|kts|swift)$/i.test(candidate.path),
+  )) {
     if (coveredSourceRoots.hasPrefix(file.path)) continue;
-    const swift = file.path.toLowerCase().endsWith('.swift');
+    const swift = Effect2.pipe(file.path, EffectString.toLowerCase, EffectString.endsWith('.swift'));
     const inferred = swift ? inferSwiftRoot(file.path) : inferJvmRoot(file.path);
     if (!inferred) continue;
     candidates.push({
@@ -657,9 +697,9 @@ function evidenceDistance(root: string, evidence: string | undefined): number {
   if (!evidence) return Number.MAX_SAFE_INTEGER;
   const evidenceRoot = dirname(evidence);
   if (root === evidenceRoot) return 0;
-  if (evidenceRoot === '') return root === '' ? 0 : root.split('/').length;
-  if (!root.startsWith(`${evidenceRoot}/`)) return Number.MAX_SAFE_INTEGER;
-  return root.slice(evidenceRoot.length + 1).split('/').length;
+  if (evidenceRoot === '') return root === '' ? 0 : Effect2.pipe(root, EffectString.split('/')).length;
+  if (!Effect2.pipe(root, EffectString.startsWith(`${evidenceRoot}/`))) return Number.MAX_SAFE_INTEGER;
+  return Effect2.pipe(root, EffectString.slice(evidenceRoot.length + 1), EffectString.split('/')).length;
 }
 
 function componentKindRank(kind: CodeGraphWorkspaceComponentKind): number {
@@ -682,7 +722,7 @@ function materializeProjects(
   const aliases = new Map<string, Set<string>>();
   for (const candidate of candidates) {
     const identity = candidate.identityKey ?? `${candidate.resolutionDomain}\n${candidate.root}`;
-    const id = `cgp_${sha256HexSync(`project-v1\n${identity}`).slice(0, 32)}`;
+    const id = `cgp_${Effect2.pipe(sha256HexSync(`project-v1\n${identity}`), EffectString.slice(0, 32))}`;
     projectIds.set(candidate, id);
     candidatesById.set(id, candidate);
     for (const alias of candidate.aliases) {
@@ -691,7 +731,7 @@ function materializeProjects(
       aliases.set(alias, values);
     }
   }
-  return candidates.map(candidate => {
+  return EffectArray.map(candidates, candidate => {
     const id = projectIds.get(candidate)!;
     const dependencies = new Map<string, string | undefined>();
     for (const alias of uniqueStrings(candidate.dependencyAliases)) {
@@ -709,7 +749,10 @@ function materializeProjects(
           }
         }
       } else if (targets && targets.size > 1) {
-        const qualifier = [...targets].every(target => candidatesById.get(target)?.provenance === 'declared')
+        const qualifier = EffectArray.every(
+          [...targets],
+          target => candidatesById.get(target)?.provenance === 'declared',
+        )
           ? 'declared '
           : '';
         diagnostics.push(
@@ -721,8 +764,10 @@ function materializeProjects(
         );
       }
     }
+    const externalDependencyValues = candidate.externalDependencies ?? [];
     const externalDependencies = normalizeExternalDependencies(
-      (candidate.externalDependencies ?? []).filter(dependency => {
+      EffectArray.filter(externalDependencyValues, (dependency, __effectArrayIndex) => {
+        if (!(__effectArrayIndex in externalDependencyValues)) return false;
         if (dependency.importAlias !== dependency.name) return true;
         const targets = aliases.get(dependency.name);
         if (targets === undefined || targets.size !== 1) return true;
@@ -774,9 +819,10 @@ function materializeProjects(
     return {
       buildSystem: candidate.buildSystem,
       dependencies: [...dependencies.keys()].sort(),
-      dependencyDetails: [...dependencies.entries()]
-        .sort(([left], [right]) => compareCodeUnits(left, right))
-        .map(([targetId, evidence]) => ({evidence, provenance: candidate.provenance, targetId})),
+      dependencyDetails: EffectArray.map(
+        [...dependencies.entries()].sort(([left], [right]) => compareCodeUnits(left, right)),
+        ([targetId, evidence]) => ({evidence, provenance: candidate.provenance, targetId}),
+      ),
       externalDependencies,
       diagnostics: candidate.diagnostics,
       id,
@@ -808,7 +854,7 @@ function attributeSymbol(symbol: CodeGraphSymbol, project: CodeGraphWorkspacePro
   }
   return {
     ...symbol,
-    lookupKeys: (symbol.lookupKeys ?? []).map(key => scopedLookupKey(key, project, resolutionDomain)),
+    lookupKeys: EffectArray.map(symbol.lookupKeys ?? [], key => scopedLookupKey(key, project, resolutionDomain)),
     packageName: project.name,
     resolutionScopeId: project.id,
   };
@@ -823,18 +869,18 @@ function attributeReference(
   if (!projectSupportsResolutionDomain(project, reference.resolutionDomain)) return reference;
   const lookupTiers: Array<readonly string[]> = [];
   for (const tier of reference.lookupTiers) {
-    const owners = tier.map(key => {
+    const owners = EffectArray.map(tier, key => {
       const path = reference.resolutionDomain === 'typescript' ? typeScriptLookupPath(key) : undefined;
       return path === undefined ? undefined : Option.getOrUndefined(findProject(path, 'typescript'))?.id;
     });
     const keysForProject = (target: CodeGraphWorkspaceProject) =>
-      tier.flatMap((key, index) =>
+      EffectArray.flatMap(tier, (key, index) =>
         owners[index] === undefined || owners[index] === target.id
           ? [scopedLookupKey(key, target, reference.resolutionDomain)]
           : [],
       );
     lookupTiers.push(keysForProject(project));
-    const dependencyKeys = project.dependencies.flatMap(dependencyId => {
+    const dependencyKeys = EffectArray.flatMap(project.dependencies, dependencyId => {
       const dependency = projectsById.get(dependencyId);
       return dependency && projectSupportsResolutionDomain(dependency, reference.resolutionDomain)
         ? keysForProject(dependency)
@@ -844,7 +890,11 @@ function attributeReference(
   }
   return {
     ...reference,
-    aliasLookupKeys: reference.aliasLookupKeys?.map(key => scopedLookupKey(key, project, reference.resolutionDomain)),
+    aliasLookupKeys: Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(reference.aliasLookupKeys), __effectArrayReceiver =>
+        EffectArray.map(__effectArrayReceiver, key => scopedLookupKey(key, project, reference.resolutionDomain)),
+      ),
+    ),
     lookupTiers,
   };
 }
@@ -864,14 +914,16 @@ function typeScriptLookupPath(key: string): string | undefined {
 
 function scopedLookupKey(key: string, project: CodeGraphWorkspaceProject, resolutionDomain: string): string {
   const prefix = `${resolutionDomain}:`;
-  return key.startsWith(prefix) ? `${prefix}${project.id}:${key.slice(prefix.length)}` : key;
+  return Effect2.pipe(key, EffectString.startsWith(prefix))
+    ? `${prefix}${project.id}:${Effect2.pipe(key, EffectString.slice(prefix.length))}`
+    : key;
 }
 
 function projectSupportsResolutionDomain(project: CodeGraphWorkspaceProject, resolutionDomain: string): boolean {
   return (
     project.resolutionDomain === resolutionDomain ||
     (resolutionDomain === 'bazel' &&
-      project.languages.some(language => language === 'bazel' || language === 'starlark'))
+      EffectArray.some(project.languages, language => language === 'bazel' || language === 'starlark'))
   );
 }
 
@@ -897,7 +949,7 @@ function createWorkspaceProjectPathIndex(projects: readonly CodeGraphWorkspacePr
   const add = (target: Map<string, CodeGraphWorkspaceProject[]>, root: string, project: CodeGraphWorkspaceProject) => {
     const existing = target.get(root);
     if (existing) {
-      if (!existing.some(candidate => candidate.id === project.id)) existing.push(project);
+      if (!EffectArray.some(existing, candidate => candidate.id === project.id)) existing.push(project);
     } else {
       target.set(root, [project]);
     }
@@ -922,12 +974,16 @@ function nearestPrefixProject(
     const candidates = projectsByPrefix.get(prefix) ?? [];
     const project = matchingResolutionProject(candidates, resolutionDomain);
     if (project) return project;
-    const separator = prefix.lastIndexOf('/');
+    const separator = Effect2.pipe(
+      prefix,
+      EffectString.lastIndexOf('/'),
+      Effect2.Option.getOrElse(() => -1),
+    );
     if (separator < 0) {
       const roots = projectsByPrefix.get('') ?? [];
       return matchingResolutionProject(roots, resolutionDomain);
     }
-    prefix = prefix.slice(0, separator);
+    prefix = Effect2.pipe(prefix, EffectString.slice(0, separator));
   }
 }
 
@@ -937,8 +993,16 @@ function matchingResolutionProject(
 ): CodeGraphWorkspaceProject | undefined {
   if (resolutionDomain === undefined) return candidates[0];
   return (
-    candidates.find(candidate => candidate.resolutionDomain === resolutionDomain) ??
-    candidates.find(candidate => projectSupportsResolutionDomain(candidate, resolutionDomain))
+    Option.getOrUndefined(
+      EffectArray.findFirst(candidates, candidate => candidate.resolutionDomain === resolutionDomain),
+    ) ??
+    Option.getOrUndefined(
+      EffectArray.findFirst(
+        candidates,
+        __effectArrayValue =>
+          !!(candidate => projectSupportsResolutionDomain(candidate, resolutionDomain))(__effectArrayValue),
+      ),
+    )
   );
 }
 
@@ -955,7 +1019,14 @@ function hasIndexedPathWithin(sortedPaths: readonly string[], root: string): boo
     }
   }
   const candidate = sortedPaths[lower];
-  return candidate === root || candidate?.startsWith(`${root}/`) === true;
+  return (
+    candidate === root ||
+    Effect2.pipe(candidate, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.startsWith(`${root}/`)),
+    ) === true
+  );
 }
 
 function createPathPrefixSet(initial: readonly string[]): {
@@ -971,37 +1042,44 @@ function createPathPrefixSet(initial: readonly string[]): {
       let prefix = path;
       for (;;) {
         if (roots.has(prefix)) return true;
-        const separator = prefix.lastIndexOf('/');
+        const separator = Effect2.pipe(
+          prefix,
+          EffectString.lastIndexOf('/'),
+          Effect2.Option.getOrElse(() => -1),
+        );
         if (separator < 0) return roots.has('');
-        prefix = prefix.slice(0, separator);
+        prefix = Effect2.pipe(prefix, EffectString.slice(0, separator));
       }
     },
   };
 }
 
 function conventionalJvmSourceRoots(root: string): readonly string[] {
-  return [
-    'src/main/java',
-    'src/main/kotlin',
-    'src/test/java',
-    'src/test/kotlin',
-    'src/androidTest/java',
-    'src/androidTest/kotlin',
-    'src/commonMain/kotlin',
-    'src/commonTest/kotlin',
-    'src/jvmMain/kotlin',
-    'src/jvmTest/kotlin',
-    'src/iosMain/kotlin',
-    'src/iosTest/kotlin',
-  ].map(source => joinPath(root, source));
+  return EffectArray.map(
+    [
+      'src/main/java',
+      'src/main/kotlin',
+      'src/test/java',
+      'src/test/kotlin',
+      'src/androidTest/java',
+      'src/androidTest/kotlin',
+      'src/commonMain/kotlin',
+      'src/commonTest/kotlin',
+      'src/jvmMain/kotlin',
+      'src/jvmTest/kotlin',
+      'src/iosMain/kotlin',
+      'src/iosTest/kotlin',
+    ],
+    source => joinPath(root, source),
+  );
 }
 
 function gradleIncludes(content: string): readonly string[] {
   const output = new Set<string>();
-  for (const line of content.split(/\r?\n/)) {
+  for (const line of Effect2.pipe(content, EffectString.split(/\r?\n/))) {
     if (!/^\s*include\b/.test(line)) continue;
-    for (const match of line.matchAll(/["'](:[^"']+)["']/g)) {
-      const path = match[1].replace(/^:/, '').replaceAll(':', '/');
+    for (const match of Effect2.pipe(line, EffectString.matchAll(/["'](:[^"']+)["']/g))) {
+      const path = Effect2.pipe(match[1], EffectString.replace(/^:/, ''), EffectString.replaceAll(':', '/'));
       if (path) output.add(path);
     }
   }
@@ -1010,8 +1088,9 @@ function gradleIncludes(content: string): readonly string[] {
 
 function gradleProjectDirectories(content: string, root: string): ReadonlyMap<string, string> {
   const output = new Map<string, string>();
-  for (const match of content.matchAll(
-    /project\s*\(\s*["'](:[^"']+)["']\s*\)\.projectDir\s*=\s*(?:file\s*\(\s*)?["']([^"']+)["']/g,
+  for (const match of Effect2.pipe(
+    content,
+    EffectString.matchAll(/project\s*\(\s*["'](:[^"']+)["']\s*\)\.projectDir\s*=\s*(?:file\s*\(\s*)?["']([^"']+)["']/g),
   )) {
     const normalized = normalizeContainedPath(root, match[2]);
     if (normalized !== undefined) output.set(match[1], normalized);
@@ -1021,7 +1100,10 @@ function gradleProjectDirectories(content: string, root: string): ReadonlyMap<st
 
 function gradleProjectDependencies(content: string): readonly string[] {
   return unique(
-    [...content.matchAll(/\bproject\s*\(\s*(?:path\s*:\s*)?["'](:[^"']+)["']\s*\)/g)].map(match => match[1]),
+    EffectArray.map(
+      [...Effect2.pipe(content, EffectString.matchAll(/\bproject\s*\(\s*(?:path\s*:\s*)?["'](:[^"']+)["']\s*\)/g))],
+      match => match[1],
+    ),
   );
 }
 
@@ -1031,12 +1113,19 @@ function swiftTargets(content: string): readonly {
   readonly path?: string;
   readonly test: boolean;
 }[] {
-  const starts = [...content.matchAll(/\.(target|executableTarget|testTarget)\s*\(\s*name\s*:\s*"([^"]+)"/g)];
-  return starts.map((match, index) => {
-    const body = content.slice(match.index, starts[index + 1]?.index ?? content.length);
+  const starts = [
+    ...Effect2.pipe(
+      content,
+      EffectString.matchAll(/\.(target|executableTarget|testTarget)\s*\(\s*name\s*:\s*"([^"]+)"/g),
+    ),
+  ];
+  return EffectArray.map(starts, (match, index) => {
+    const body = Effect2.pipe(content, EffectString.slice(match.index, starts[index + 1]?.index ?? content.length));
     const path = /\bpath\s*:\s*"([^"]+)"/.exec(body)?.[1];
     const dependencyBlock = /\bdependencies\s*:\s*\[([\s\S]*?)\]/.exec(body)?.[1] ?? '';
-    const dependencies = unique([...dependencyBlock.matchAll(/"([^"]+)"/g)].map(value => value[1]));
+    const dependencies = unique(
+      EffectArray.map([...Effect2.pipe(dependencyBlock, EffectString.matchAll(/"([^"]+)"/g))], value => value[1]),
+    );
     return {
       dependencies,
       name: match[2],
@@ -1051,9 +1140,9 @@ function inferJvmRoot(
 ): {readonly name: string; readonly root: string; readonly sourceRoot: string} | undefined {
   const match = /^(.*?)(?:\/)?src\/(?:[^/]+\/)?(?:java|kotlin)\//.exec(path);
   if (!match) return undefined;
-  const root = match[1].replace(/\/$/, '');
-  const sourceRoot = path.slice(0, match[0].length - 1);
-  return {name: root.split('/').at(-1) || 'root', root, sourceRoot};
+  const root = Effect2.pipe(match[1], EffectString.replace(/\/$/, ''));
+  const sourceRoot = Effect2.pipe(path, EffectString.slice(0, match[0].length - 1));
+  return {name: Effect2.pipe(root, EffectString.split('/')).at(-1) || 'root', root, sourceRoot};
 }
 
 function inferSwiftRoot(
@@ -1061,17 +1150,27 @@ function inferSwiftRoot(
 ): {readonly name: string; readonly root: string; readonly sourceRoot: string} | undefined {
   const match = /^(.*?)(?:\/)?(?:Sources|Tests)\/([^/]+)\//.exec(path);
   if (!match) return undefined;
-  const sourceRoot = path.slice(0, match[0].length - 1);
+  const sourceRoot = Effect2.pipe(path, EffectString.slice(0, match[0].length - 1));
   return {name: match[2], root: sourceRoot, sourceRoot};
 }
 
 function xmlTag(content: string, tag: string): string | undefined {
-  return new RegExp(`<${tag}(?:\\s[^>]*)?>\\s*([^<]+?)\\s*</${tag}>`, 'i').exec(content)?.[1]?.trim();
+  return Effect2.pipe(
+    new RegExp(`<${tag}(?:\\s[^>]*)?>\\s*([^<]+?)\\s*</${tag}>`, 'i').exec(content)?.[1],
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
 }
 
 function xmlTags(content: string, tag: string): readonly string[] {
-  return [...content.matchAll(new RegExp(`<${tag}(?:\\s[^>]*)?>\\s*([^<]+?)\\s*</${tag}>`, 'gi'))].map(match =>
-    match[1].trim(),
+  return EffectArray.map(
+    [
+      ...Effect2.pipe(
+        content,
+        EffectString.matchAll(new RegExp(`<${tag}(?:\\s[^>]*)?>\\s*([^<]+?)\\s*</${tag}>`, 'gi')),
+      ),
+    ],
+    match => Effect2.pipe(match[1], EffectString.trim),
   );
 }
 

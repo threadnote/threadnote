@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Predicate} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -33,6 +34,7 @@ import {decodeStoredCodeGraphFact, encodeStoredCodeGraphFact} from '../fact/stor
 import {materializedFileShardIdentity} from './cache.js';
 import {stagePersistedFullFacts} from './resolution/core.js';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
+import * as EffectRecord from 'effect/Record';
 
 interface CheckpointImportRow {
   readonly abi_algorithm: unknown;
@@ -89,7 +91,7 @@ function validateCoverage(coverage: CodeGraphCheckpointCoverageSummary): void {
     coverage.eligibleFiles < 0 ||
     !Number.isSafeInteger(coverage.excludedFiles) ||
     coverage.excludedFiles < 0 ||
-    !Array.isArray(coverage.reasons) ||
+    !EffectArray.isArray(coverage.reasons) ||
     coverage.reasons.length > 1_024
   ) {
     throw invalid('Code graph checkpoint coverage is invalid.');
@@ -150,7 +152,11 @@ function encodedCoverage(coverage: CodeGraphCheckpointCoverageSummary): string {
     state: coverage.state,
     eligibleFiles: coverage.eligibleFiles,
     excludedFiles: coverage.excludedFiles,
-    reasons: coverage.reasons.map(reason => ({code: reason.code, files: reason.files, bytes: reason.bytes})),
+    reasons: EffectArray.map(coverage.reasons, reason => ({
+      code: reason.code,
+      files: reason.files,
+      bytes: reason.bytes,
+    })),
   });
   if (Buffer.byteLength(encoded, 'utf8') > MAXIMUM_CHECKPOINT_TEXT_BYTES) {
     throw invalid('Code graph checkpoint coverage is too large.');
@@ -172,7 +178,7 @@ function decodedCoverage(value: unknown): CodeGraphCheckpointCoverageSummary {
     throw invalid('Stored code graph checkpoint coverage is invalid.');
   }
   const object = decoded;
-  if (!Array.isArray(object.reasons)) throw invalid('Stored code graph checkpoint coverage is invalid.');
+  if (!EffectArray.isArray(object.reasons)) throw invalid('Stored code graph checkpoint coverage is invalid.');
   const reasons: CodeGraphCheckpointCoverageSummary['reasons'][number][] = [];
   for (const reason of object.reasons) {
     if (!Predicate.isObject(reason)) throw invalid('Stored code graph checkpoint coverage is invalid.');
@@ -220,8 +226,8 @@ function encodedRecordCounts(input: CodeGraphCheckpointImportBuildInput): string
   if (!Number.isSafeInteger(input.batchCount) || input.batchCount < 0) {
     throw invalid('Code graph checkpoint import batch count is invalid.');
   }
-  const counts = Object.fromEntries(
-    CODE_GRAPH_CHECKPOINT_RECORD_KINDS.map(kind => {
+  const counts = EffectRecord.fromEntries(
+    EffectArray.map(CODE_GRAPH_CHECKPOINT_RECORD_KINDS, kind => {
       const count = input.recordCounts[kind];
       if (!Number.isSafeInteger(count) || count < 0) {
         throw invalid(`Code graph checkpoint ${kind} record count is invalid.`);
@@ -247,9 +253,12 @@ function decodedRecordCounts(value: unknown): Readonly<Record<CodeGraphCheckpoin
   }
   const object = decoded;
   if (
-    Object.keys(object).length !== CODE_GRAPH_CHECKPOINT_RECORD_KINDS.length ||
-    CODE_GRAPH_CHECKPOINT_RECORD_KINDS.some(
-      kind => typeof object[kind] !== 'number' || !Number.isSafeInteger(object[kind]) || object[kind] < 0,
+    EffectRecord.keys(object).length !== CODE_GRAPH_CHECKPOINT_RECORD_KINDS.length ||
+    Boolean(
+      EffectArray.some(
+        CODE_GRAPH_CHECKPOINT_RECORD_KINDS,
+        kind => typeof object[kind] !== 'number' || !Number.isSafeInteger(object[kind]) || object[kind] < 0,
+      ),
     )
   ) {
     throw invalid('Stored code graph checkpoint record counts are invalid.');
@@ -286,7 +295,7 @@ function decodedPackProvenance(value: unknown): readonly CodeGraphLanguagePackPr
 }
 
 function validatePackProvenance(value: unknown): readonly CodeGraphLanguagePackProvenance[] {
-  if (!Array.isArray(value) || value.length > 1_024) {
+  if (!EffectArray.isArray(value) || value.length > 1_024) {
     throw invalid('Code graph checkpoint pack provenance is invalid.');
   }
   let previousId: string | undefined;
@@ -297,7 +306,8 @@ function validatePackProvenance(value: unknown): readonly CodeGraphLanguagePackP
     }
     const pack = candidate;
     if (
-      Object.keys(pack).sort().join(',') !== 'cacheIdentity,derivationIdentity,id,resolutionDomain,resolutionVersion' ||
+      EffectArray.join(EffectRecord.keys(pack).sort(), ',') !==
+        'cacheIdentity,derivationIdentity,id,resolutionDomain,resolutionVersion' ||
       typeof pack.id !== 'string' ||
       !/^[a-z][a-z0-9-]*$/u.test(pack.id) ||
       (previousId !== undefined && pack.id <= previousId) ||
@@ -812,13 +822,13 @@ export const stageCheckpointImportRecordPage = Effect.fn('codeGraph.stageCheckpo
   }
   const records = yield* Effect.try({
     catch: () => invalid('Code graph checkpoint import record page is invalid.'),
-    try: () => page.records.map(record => parseCodeGraphCheckpointRecordV1(record)),
+    try: () => EffectArray.map(page.records, record => parseCodeGraphCheckpointRecordV1(record)),
   });
   if (records.length === 0) {
     return yield* invalid('Code graph checkpoint import record page must not be empty.');
   }
   const plan = yield* checkpointImportBuildPlan(sql, snapshotId);
-  const expectedPacks = new Map(plan.packProvenance.map(pack => [pack.id, pack] as const));
+  const expectedPacks = new Map(EffectArray.map(plan.packProvenance, pack => [pack.id, pack] as const));
   for (const record of records) {
     if (record.kind !== 'pack-provenance') continue;
     const expected = expectedPacks.get(record.id);
@@ -887,13 +897,16 @@ export const stageCheckpointImportRecordPage = Effect.fn('codeGraph.stageCheckpo
   ) {
     return yield* invalid('Checkpoint import batches must be staged in contiguous order.');
   }
-  const symbols = records.filter(
+  const symbols = EffectArray.filter(
+    records,
     (record): record is Extract<CodeGraphCheckpointRecordV1, {readonly kind: 'symbol'}> => record.kind === 'symbol',
   );
-  const edges = records.filter(
+  const edges = EffectArray.filter(
+    records,
     (record): record is Extract<CodeGraphCheckpointRecordV1, {readonly kind: 'edge'}> => record.kind === 'edge',
   );
-  const monikers = records.filter(
+  const monikers = EffectArray.filter(
+    records,
     (record): record is Extract<CodeGraphCheckpointRecordV1, {readonly kind: 'moniker'}> => record.kind === 'moniker',
   );
   yield* stagePersistedFullFacts(
@@ -901,13 +914,13 @@ export const stageCheckpointImportRecordPage = Effect.fn('codeGraph.stageCheckpo
     snapshotId,
     ownerToken,
     page.batchIndex,
-    symbols.map(checkpointSymbol),
-    edges.map(checkpointEdge),
+    EffectArray.map(symbols, checkpointSymbol),
+    EffectArray.map(edges, checkpointEdge),
     [],
     () => Effect.void,
     true,
     undefined,
-    monikers.map(checkpointMoniker),
+    EffectArray.map(monikers, checkpointMoniker),
   );
   for (const record of records) {
     yield* stageCheckpointSupplementalRecord(sql, snapshotId, authority[0].extractor_set, record, completedAt);
@@ -972,7 +985,7 @@ export const verifyCheckpointImportRecordCounts = Effect.fn('codeGraph.verifyChe
   `;
   if (
     persistedPacks.length !== plan.packProvenance.length ||
-    persistedPacks.some((pack, index) => {
+    EffectArray.some(persistedPacks, (pack, index) => {
       const expected = plan.packProvenance[index];
       return (
         expected === undefined ||

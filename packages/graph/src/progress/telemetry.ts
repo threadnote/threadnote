@@ -1,3 +1,5 @@
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 export const CODE_GRAPH_SLOW_FILE_THRESHOLD_MILLISECONDS = 1_000;
 export const CODE_GRAPH_TOP_SLOW_FILE_LIMIT = 10;
 
@@ -123,17 +125,21 @@ export function retainCodeGraphSlowFileTelemetry(
     .sort(
       (left, right) =>
         right.durationMilliseconds - left.durationMilliseconds ||
-        left.pathHash.localeCompare(right.pathHash) ||
-        left.language.localeCompare(right.language),
+        Effect.pipe(left.pathHash, EffectString.localeCompare(right.pathHash)) ||
+        Effect.pipe(left.language, EffectString.localeCompare(right.language)),
     )
     .slice(0, limit);
 }
 
 export function codeGraphPathExtension(path: string): string {
-  const basename = path.split('/').at(-1) ?? '';
-  const separator = basename.lastIndexOf('.');
+  const basename = Effect.pipe(path, EffectString.split('/')).at(-1) ?? '';
+  const separator = Effect.pipe(
+    basename,
+    EffectString.lastIndexOf('.'),
+    Effect.Option.getOrElse(() => -1),
+  );
   if (separator <= 0 || separator === basename.length - 1) return 'none';
-  return basename.slice(separator, separator + 16).toLowerCase();
+  return Effect.pipe(basename, EffectString.slice(separator, separator + 16), EffectString.toLowerCase);
 }
 
 function saturatingAdd(left: number, right: number): number {

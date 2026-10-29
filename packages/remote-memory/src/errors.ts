@@ -10,23 +10,26 @@ export type RemoteMemoryErrorCode =
   | 'service_unavailable'
   | 'unauthorized';
 
-export class RemoteMemoryError extends Schema.TaggedError<RemoteMemoryError>()('RemoteMemoryError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  code: Schema.Literals([
-    'attestation_required',
-    'conflict',
-    'forbidden',
-    'idempotency_mismatch',
-    'invalid_request',
-    'not_found',
-    'rate_limited',
-    'service_unavailable',
-    'unauthorized',
-  ]),
-  details: Schema.Any,
-  message: Schema.String,
-  status: Schema.Finite,
-}) {
+export class RemoteMemoryError extends Schema.TaggedError<RemoteMemoryError, {readonly brand: unique symbol}>()(
+  'RemoteMemoryError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    code: Schema.Literals([
+      'attestation_required',
+      'conflict',
+      'forbidden',
+      'idempotency_mismatch',
+      'invalid_request',
+      'not_found',
+      'rate_limited',
+      'service_unavailable',
+      'unauthorized',
+    ]),
+    details: Schema.Any,
+    message: Schema.String,
+    status: Schema.Finite,
+  },
+) {
   static of(
     code: RemoteMemoryErrorCode,
     message: string,

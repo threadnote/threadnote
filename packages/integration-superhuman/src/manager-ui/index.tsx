@@ -1,3 +1,6 @@
+import {Schema} from 'effect';
+import {isIntegrationResult} from '@threadnote/manager/api/response-guards';
+import {Array as EffectArray} from 'effect';
 import React, {useState} from 'react';
 import {AlertTriangle, Check, Pause, Pencil, Play, RefreshCw, Unplug} from 'lucide-react';
 import {ActionMenu} from '@threadnote/manager/action-menu';
@@ -10,11 +13,15 @@ import type {IntegrationResult} from '@threadnote/integration-core/manager-contr
 import type {SuperhumanSource} from '../manager-contracts.js';
 import {SuperhumanConnectionForm} from './connection-form.js';
 import {product} from './catalog.js';
+import {Option as EffectOption} from 'effect';
 
 type Connections = {readonly sources: readonly SuperhumanSource[]};
 function matchingSources(data: Connections | undefined, query: string): readonly SuperhumanSource[] {
-  return (data?.sources ?? []).filter(source =>
-    matchesIntegrationQuery(product, query, source.id, source.project ?? ''),
+  const sources = data?.sources ?? [];
+  return EffectArray.filter(
+    sources,
+    (source, __effectArrayIndex) =>
+      __effectArrayIndex in sources && matchesIntegrationQuery(product, query, source.id, source.project ?? ''),
   );
 }
 
@@ -59,13 +66,18 @@ export function SuperhumanIntegrationView({
     setError('');
     setNotice('');
     try {
-      const result = await api<IntegrationResult>('/api/integrations/superhuman', {
-        action,
-        id: source.id,
-        ...(action === 'set-enabled' ? {enabled: !source.enabled} : {}),
-        apply: true,
-        confirm: true,
-      });
+      const result = await api<IntegrationResult>(
+        '/api/integrations/superhuman',
+        {
+          action,
+          id: source.id,
+          ...(action === 'set-enabled' ? {enabled: !source.enabled} : {}),
+          apply: true,
+          confirm: true,
+        },
+        undefined,
+        isIntegrationResult,
+      );
       if (action === 'sync-source') setSuperhumanResult(result);
       if (!result.applied) {
         if (action !== 'sync-source') throw new Error('Connection change was not applied.');
@@ -94,7 +106,7 @@ export function SuperhumanIntegrationView({
     <>
       {visible ? (
         <>
-          {documents.map(source => (
+          {EffectArray.map(documents, source => (
             <div className="integration-row" key={'superhuman-' + source.id}>
               <IntegrationLogo product={product} decorative />
               <div className="integration-row-main">
@@ -156,7 +168,18 @@ export function SuperhumanIntegrationView({
       {connection ? (
         <SuperhumanConnectionForm
           source={connection.value}
-          reusableCredential={!connection.value && (data?.sources.some(source => source.credentialConfigured) ?? false)}
+          reusableCredential={
+            !connection.value &&
+            (EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(data?.sources), __effectArrayReceiver =>
+                EffectArray.some(
+                  __effectArrayReceiver,
+                  __effectArrayValue => !!(source => source.credentialConfigured)(__effectArrayValue),
+                ),
+              ),
+            ) ??
+              false)
+          }
           onClose={closeConnection}
           onSaved={async () => {
             closeConnection();
@@ -176,7 +199,7 @@ export function SuperhumanIntegrationView({
           </p>
           {superhumanResult.warnings?.length ? (
             <ul className="integration-warnings">
-              {superhumanResult.warnings.map((warning, index) => (
+              {EffectArray.map(superhumanResult.warnings, (warning, index) => (
                 <li key={index}>
                   <AlertTriangle /> {warning}
                 </li>
@@ -201,18 +224,53 @@ function integrationStatus(source: Pick<SuperhumanSource, 'enabled' | 'credentia
 }
 
 function scopeSummary(source: SuperhumanSource): string {
-  const whole = source.documents.filter(document => document.pages === undefined).length;
-  const pages = source.documents.reduce((sum, document) => sum + (document.pages?.length ?? 0), 0);
-  return [
-    whole ? `${whole} whole ${whole === 1 ? 'document' : 'documents'}` : '',
-    pages ? `${pages} selected ${pages === 1 ? 'page' : 'pages'}` : '',
-  ]
-    .filter(Boolean)
-    .join(' · ');
+  const whole = EffectArray.filter(source.documents, document => document.pages === undefined).length;
+  const pages = EffectArray.reduce(source.documents, 0, (sum, document) => sum + (document.pages?.length ?? 0));
+  return EffectArray.join(
+    EffectArray.filter(
+      [
+        whole ? `${whole} whole ${whole === 1 ? 'document' : 'documents'}` : '',
+        pages ? `${pages} selected ${pages === 1 ? 'page' : 'pages'}` : '',
+      ],
+      Boolean,
+    ),
+    ' · ',
+  );
 }
 
 export const superhumanIntegration = defineIntegration<Connections>({
   product,
+  isData: Schema.is(
+    Schema.Struct({
+      sources: Schema.Array(
+        Schema.Struct({
+          id: Schema.String,
+          enabled: Schema.Boolean,
+          project: Schema.Union([Schema.Null, Schema.String]),
+          documents: Schema.Array(
+            Schema.Struct({
+              id: Schema.String,
+              pages: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Array(Schema.String)])),
+            }),
+          ),
+          credentialEnv: Schema.String,
+          credentialStorage: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Literal('local')])),
+          credentialConfigured: Schema.Boolean,
+          includeHidden: Schema.Boolean,
+          refreshIntervalMinutes: Schema.Finite,
+          maxStaleHours: Schema.Finite,
+          status: Schema.Union([
+            Schema.Literal('active'),
+            Schema.Literal('needs-sync'),
+            Schema.Literal('needs-attention'),
+          ]),
+          chunks: Schema.Finite,
+          lastSyncedAt: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Finite])),
+          nextAttemptAt: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Finite])),
+        }),
+      ),
+    }),
+  ),
   count: (data, query) => matchingSources(data, query).length,
   View: SuperhumanIntegrationView,
 });

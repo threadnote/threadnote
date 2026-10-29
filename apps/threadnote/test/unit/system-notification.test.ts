@@ -6,6 +6,9 @@ import {CommandExecutor, CommandSpawnFailed} from '@threadnote/platform/command'
 import {SystemInfo} from '@threadnote/platform/system';
 import {sendSystemNotification, systemNotificationInvocation} from '@threadnote/threadnote/system_notification';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 describe('system notifications', () => {
   it('passes macOS notification text as argv instead of AppleScript source', () => {
@@ -35,8 +38,20 @@ describe('system notifications', () => {
     expect(invocation?.executable).toBe('D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
     expect(invocation?.env?.THREADNOTE_NOTIFICATION_TITLE).toBe(title);
     expect(invocation?.env?.THREADNOTE_NOTIFICATION_BODY).toBe(body);
-    expect(invocation?.args.join('\n')).not.toContain(title);
-    expect(invocation?.args.join('\n')).not.toContain(body);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(invocation?.args), __effectArrayJoinReceiver =>
+          EffectArray.join(__effectArrayJoinReceiver, '\n'),
+        ),
+      ),
+    ).not.toContain(title);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(invocation?.args), __effectArrayJoinReceiver =>
+          EffectArray.join(__effectArrayJoinReceiver, '\n'),
+        ),
+      ),
+    ).not.toContain(body);
   });
 
   it('uses notify-send on Linux and reports unsupported platforms', () => {
@@ -51,7 +66,11 @@ describe('system notifications', () => {
 
   it('rejects empty notification text and bounds payload size', () => {
     expect(systemNotificationInvocation('darwin', {}, {body: '  ', title: 'Threadnote'})).toBe(undefined);
-    const invocation = systemNotificationInvocation('linux', {}, {body: 'b'.repeat(700), title: 't'.repeat(200)});
+    const invocation = systemNotificationInvocation(
+      'linux',
+      {},
+      {body: Effect2.pipe('b', EffectString.repeat(700)), title: Effect2.pipe('t', EffectString.repeat(200))},
+    );
     expect(invocation?.args.at(-2)).toHaveLength(120);
     expect(invocation?.args.at(-1)).toHaveLength(500);
   });

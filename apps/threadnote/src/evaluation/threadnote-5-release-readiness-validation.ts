@@ -1,8 +1,16 @@
+import {
+  isFiniteNumber as checkedIsFiniteNumber,
+  isSafeInteger as checkedIsSafeInteger,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray, Predicate} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function exactObject(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
   const source = object(value, label);
-  if (canonicalJson(Object.keys(source).sort()) !== canonicalJson([...keys].sort())) {
+  if (canonicalJson(EffectRecord.keys(source).sort()) !== canonicalJson([...keys].sort())) {
     throw new Error(`${label} has unsupported or missing fields.`);
   }
   return source;
@@ -10,18 +18,18 @@ export function exactObject(value: unknown, keys: readonly string[], label: stri
 
 export function allowedKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   const set = new Set(allowed);
-  return Object.keys(value).every(key => set.has(key));
+  return EffectArray.every(EffectRecord.keys(value), key => set.has(key));
 }
 
 export function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!Predicate.isObject(value)) {
     throw new Error(`${label} must be an object.`);
   }
-  return value as Record<string, unknown>;
+  return value;
 }
 
 export function boundedArray(value: unknown, label: string, minimum: number, maximum: number): readonly unknown[] {
-  if (!Array.isArray(value) || value.length < minimum || value.length > maximum) {
+  if (!EffectArray.isArray(value) || value.length < minimum || value.length > maximum) {
     throw new Error(`${label} must contain ${minimum} to ${maximum} entries.`);
   }
   return value;
@@ -41,7 +49,7 @@ export function hashText(value: unknown, label: string): string {
 }
 
 export function nonEmptyText(value: unknown, maximum: number): value is string {
-  return typeof value === 'string' && value.trim().length > 0 && value.length <= maximum;
+  return typeof value === 'string' && Effect.pipe(value, EffectString.trim).length > 0 && value.length <= maximum;
 }
 
 export function text(value: unknown, label: string, maximum: number): string {
@@ -54,9 +62,11 @@ export function compareText(left: string, right: string): number {
 }
 
 export function isoInstant(value: unknown): value is string {
-  return typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  return (
+    typeof value === 'string' && checkedIsFiniteNumber(Date.parse(value)) && new Date(value).toISOString() === value
+  );
 }
 
 export function integerIn(value: unknown, minimum: number, maximum: number): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum;
+  return checkedIsSafeInteger(value) && value >= minimum && value <= maximum;
 }

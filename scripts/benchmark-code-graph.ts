@@ -1,7 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {BenchmarkLeaseTrace} from './benchmark-lease-trace.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {
   Clock,
   Context,
@@ -129,6 +130,9 @@ import {
   verifyManagedDevelopmentRuntimeForSourceCheckout,
   type DevelopmentRuntimeEvidence,
 } from './development-runtime.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 const EXTERNAL_SAMPLER_READY_TIMEOUT_MS = 5_000;
@@ -273,6 +277,10 @@ export const CODE_GRAPH_SQLITE_WRITER_PROFILES = {
 >;
 
 export type CodeGraphSqliteWriterProfile = keyof typeof CODE_GRAPH_SQLITE_WRITER_PROFILES;
+
+function isCodeGraphSqliteWriterProfile(value: string): value is CodeGraphSqliteWriterProfile {
+  return EffectArray.some(EffectRecord.keys(CODE_GRAPH_SQLITE_WRITER_PROFILES), key => key === value);
+}
 type SqliteWriterBenchmarkPhase = 'cold' | 'one-file-reindex' | 'same-overlay-reference';
 export type SqliteWriterSettingsEvidence = CodeGraphSqliteWriterSettings & {
   readonly benchmarkPhase: SqliteWriterBenchmarkPhase;
@@ -284,9 +292,9 @@ export function validateSqliteWriterSettingsEvidence(
 ): void {
   const requested: CodeGraphSqliteWriterTuning = CODE_GRAPH_SQLITE_WRITER_PROFILES[profile].tuning;
   for (const benchmarkPhase of ['cold', 'one-file-reindex', 'same-overlay-reference'] as const) {
-    const phaseEvidence = evidence.filter(settings => settings.benchmarkPhase === benchmarkPhase);
-    const connection = phaseEvidence.filter(settings => settings.phase === 'connection').at(-1);
-    if (!connection || connection.journalMode.toLowerCase() !== 'wal') {
+    const phaseEvidence = EffectArray.filter(evidence, settings => settings.benchmarkPhase === benchmarkPhase);
+    const connection = EffectArray.filter(phaseEvidence, settings => settings.phase === 'connection').at(-1);
+    if (!connection || Effect2.pipe(connection.journalMode, EffectString.toLowerCase) !== 'wal') {
       throw ScriptError.make({
         message: `SQLite writer profile ${profile} did not report a WAL connection for ${benchmarkPhase}.`,
       });
@@ -312,10 +320,20 @@ export function validateSqliteWriterSettingsEvidence(
   }
   if (requested.reconstructibleBuildSynchronous === 'normal') {
     for (const benchmarkPhase of ['cold', 'same-overlay-reference'] as const) {
-      const phaseEvidence = evidence.filter(settings => settings.benchmarkPhase === benchmarkPhase);
-      const building = phaseEvidence.findIndex(settings => settings.phase === 'building' && settings.synchronous === 1);
-      const publication = phaseEvidence.findIndex(
-        (settings, index) => index > building && settings.phase === 'publication' && settings.synchronous === 2,
+      const phaseEvidence = EffectArray.filter(evidence, settings => settings.benchmarkPhase === benchmarkPhase);
+      const building = Option.getOrElse(
+        EffectArray.findFirstIndex(
+          phaseEvidence,
+          settings => settings.phase === 'building' && settings.synchronous === 1,
+        ),
+        () => -1,
+      );
+      const publication = Option.getOrElse(
+        EffectArray.findFirstIndex(
+          phaseEvidence,
+          (settings, index) => index > building && settings.phase === 'publication' && settings.synchronous === 2,
+        ),
+        () => -1,
       );
       if (building < 0 || publication < 0) {
         throw ScriptError.make({
@@ -344,7 +362,10 @@ const INCREMENTAL_STAGED_ACTIVATION_STAGES = [
   'checkpointing-snapshot',
 ] as const satisfies readonly CodeGraphActivationActivity['stage'][];
 
-const ACTIVATION_COPY_STAGES = ACTIVATION_STAGES.filter(stage => stage.startsWith('copying-'));
+const ACTIVATION_COPY_STAGES = EffectArray.filter(
+  ACTIVATION_STAGES,
+  __effectArrayValue => !!(stage => Effect2.pipe(stage, EffectString.startsWith('copying-')))(__effectArrayValue),
+);
 
 const RESOLUTION_TRANSACTION_STAGES = [
   ['preparingBatch', 'preparing-batch'],
@@ -354,18 +375,19 @@ const RESOLUTION_TRANSACTION_STAGES = [
   ['retiringReferences', 'retiring-references'],
 ] as const;
 
-const ACTIVATION_RELEASE_EVIDENCE_MEASUREMENTS = (['cold', 'one-file-reindex'] as const).flatMap(prefix => [
+const ACTIVATION_RELEASE_EVIDENCE_MEASUREMENTS = EffectArray.flatMap(['cold', 'one-file-reindex'] as const, prefix => [
   {name: `${prefix}-activation-observed-stages-n1`, unit: 'count'} as const,
   {name: `${prefix}-activation-longest-transaction-n1`, unit: 'milliseconds'} as const,
   {name: `${prefix}-maximum-progress-heartbeat-gap-n1`, unit: 'milliseconds'} as const,
-  ...ACTIVATION_STAGES.flatMap(stage => [
+  ...EffectArray.flatMap(ACTIVATION_STAGES, stage => [
     {name: `${prefix}-activation-${stage}-observed-n1`, unit: 'count'} as const,
     {name: `${prefix}-activation-${stage}-duration-n1`, unit: 'milliseconds'} as const,
     {name: `${prefix}-activation-${stage}-rows-n1`, unit: 'count'} as const,
   ]),
 ]);
 
-const SAMPLER_RELEASE_EVIDENCE_MEASUREMENTS = (['cold', 'one-file-reindex', 'same-overlay-reference'] as const).flatMap(
+const SAMPLER_RELEASE_EVIDENCE_MEASUREMENTS = EffectArray.flatMap(
+  ['cold', 'one-file-reindex', 'same-overlay-reference'] as const,
   prefix => [
     {name: `${prefix}-external-sampler-version-n1`, unit: 'count'} as const,
     {name: `${prefix}-external-storage-samples-n1`, unit: 'count'} as const,
@@ -385,7 +407,8 @@ const SAMPLER_RELEASE_EVIDENCE_MEASUREMENTS = (['cold', 'one-file-reindex', 'sam
   ],
 );
 
-const MATERIALIZATION_REPLAY_RELEASE_EVIDENCE_MEASUREMENTS = (['cold', 'same-overlay-reference'] as const).flatMap(
+const MATERIALIZATION_REPLAY_RELEASE_EVIDENCE_MEASUREMENTS = EffectArray.flatMap(
+  ['cold', 'same-overlay-reference'] as const,
   prefix => [
     {name: `${prefix}-materialization-attributed-files-n1`, unit: 'count'} as const,
     {name: `${prefix}-materialization-cached-fact-bytes-total-n1`, unit: 'bytes'} as const,
@@ -410,22 +433,23 @@ const MATERIALIZATION_QUERY_INDEX_RESTORATION_RELEASE_EVIDENCE_MEASUREMENTS = [
 ] as const;
 
 const MATERIALIZATION_STORAGE_HIGH_WATER_RELEASE_EVIDENCE_MEASUREMENTS = [
-  ...(['cold', 'one-file-reindex', 'same-overlay-reference'] as const).flatMap(prefix => [
+  ...EffectArray.flatMap(['cold', 'one-file-reindex', 'same-overlay-reference'] as const, prefix => [
     {name: `${prefix}-materialization-durable-database-growth-high-water-n1`, unit: 'bytes'} as const,
     {name: `${prefix}-materialization-durable-filesystem-high-water-n1`, unit: 'bytes'} as const,
     {name: `${prefix}-materialization-durable-journal-high-water-n1`, unit: 'bytes'} as const,
     {name: `${prefix}-materialization-durable-wal-high-water-n1`, unit: 'bytes'} as const,
   ]),
-  ...(['cold', 'same-overlay-reference'] as const).flatMap(prefix => [
+  ...EffectArray.flatMap(['cold', 'same-overlay-reference'] as const, prefix => [
     {name: `${prefix}-materialization-sidecar-database-high-water-n1`, unit: 'bytes'} as const,
     {name: `${prefix}-materialization-sidecar-journal-high-water-n1`, unit: 'bytes'} as const,
     {name: `${prefix}-materialization-sidecar-wal-high-water-n1`, unit: 'bytes'} as const,
   ]),
 ] as const;
 
-const RESOLUTION_TRANSACTION_RELEASE_EVIDENCE_MEASUREMENTS = (
-  ['cold', 'one-file-reindex', 'same-overlay-reference'] as const
-).map(prefix => ({name: `${prefix}-reference-resolution-longest-transaction-n1`, unit: 'milliseconds'}) as const);
+const RESOLUTION_TRANSACTION_RELEASE_EVIDENCE_MEASUREMENTS = EffectArray.map(
+  ['cold', 'one-file-reindex', 'same-overlay-reference'] as const,
+  prefix => ({name: `${prefix}-reference-resolution-longest-transaction-n1`, unit: 'milliseconds'}) as const,
+);
 
 export const PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS = [
   {name: 'cold-materialization', unit: 'milliseconds'},
@@ -602,8 +626,12 @@ const benchmarkCodeGraph = Effect.scoped(
       : undefined;
     const releaseEvidenceSource = yield* validateReleaseEvidenceSource(
       threadnoteSourceRoot,
-      system.environment().THREADNOTE_BENCHMARK_RELEASE_REF?.trim() || undefined,
-      system.environment().THREADNOTE_BENCHMARK_RELEASE_SHA?.trim() || undefined,
+      Effect2.pipe(system.environment().THREADNOTE_BENCHMARK_RELEASE_REF, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || undefined,
+      Effect2.pipe(system.environment().THREADNOTE_BENCHMARK_RELEASE_SHA, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || undefined,
     );
     const largeEvidenceRun = options.profile === 'production-large' || options.repository !== undefined;
     const checkpointedEvidenceRun = largeEvidenceRun || longScaleEvidenceRun;
@@ -834,8 +862,12 @@ const benchmarkCodeGraph = Effect.scoped(
     const coldStorageAfter = yield* codeGraphStorageTelemetry(fs, path, benchmarkLayout.databasePath, databaseRoot);
     yield* runCheckpoint?.mark('hot-query-and-mutation') ?? Effect.void;
     if (options.vectors) {
-      if (cold.diagnostics.some(diagnostic => diagnostic.includes('Vector graph retrieval unavailable'))) {
-        return yield* ScriptError.make({message: cold.diagnostics.join('\n')});
+      if (
+        EffectArray.some(cold.diagnostics, diagnostic =>
+          Effect2.pipe(diagnostic, EffectString.includes('Vector graph retrieval unavailable')),
+        )
+      ) {
+        return yield* ScriptError.make({message: EffectArray.join(cold.diagnostics, '\n')});
       }
       const semanticControl = yield* query.inspect({
         cwd: prepared.repository,
@@ -850,11 +882,14 @@ const benchmarkCodeGraph = Effect.scoped(
           ? 'docs/architecture.md'
           : GENERATED_VECTOR_CONTROL_PATH;
       const minimumScore = vectorSemanticControlMinimumScore(expectedPath);
-      if (!semanticControl.nodes.some(node => node.path === expectedPath && node.score >= minimumScore)) {
-        const observed = semanticControl.nodes
-          .slice(0, 5)
-          .map(node => `${node.path}:${node.name}:${node.score.toFixed(3)}`)
-          .join(', ');
+      if (!EffectArray.some(semanticControl.nodes, node => node.path === expectedPath && node.score >= minimumScore)) {
+        const observed = EffectArray.join(
+          EffectArray.map(
+            semanticControl.nodes.slice(0, 5),
+            node => `${node.path}:${node.name}:${node.score.toFixed(3)}`,
+          ),
+          ', ',
+        );
         return yield* ScriptError.make({
           message: `Vector benchmark semantic positive control did not resolve; observed ${observed || 'no nodes'}.`,
         });
@@ -1044,9 +1079,11 @@ const benchmarkCodeGraph = Effect.scoped(
     yield* runCheckpoint?.mark('post-incremental-query-and-analysis') ?? Effect.void;
     if (
       options.vectors &&
-      incremental.diagnostics.some(diagnostic => diagnostic.includes('Vector graph retrieval unavailable'))
+      EffectArray.some(incremental.diagnostics, diagnostic =>
+        Effect2.pipe(diagnostic, EffectString.includes('Vector graph retrieval unavailable')),
+      )
     ) {
-      return yield* ScriptError.make({message: incremental.diagnostics.join('\n')});
+      return yield* ScriptError.make({message: EffectArray.join(incremental.diagnostics, '\n')});
     }
     if (options.vectors) {
       const semanticControl = yield* query.inspect({
@@ -1063,14 +1100,18 @@ const benchmarkCodeGraph = Effect.scoped(
           : GENERATED_VECTOR_CONTROL_PATH;
       if (
         semanticControl.snapshot.id !== incremental.snapshot.id ||
-        !semanticControl.nodes.some(
+        !EffectArray.some(
+          semanticControl.nodes,
           node => node.path === expectedPath && node.score >= vectorSemanticControlMinimumScore(expectedPath),
         )
       ) {
-        const observed = semanticControl.nodes
-          .slice(0, 5)
-          .map(node => `${node.path}:${node.name}:${node.score.toFixed(3)}`)
-          .join(', ');
+        const observed = EffectArray.join(
+          EffectArray.map(
+            semanticControl.nodes.slice(0, 5),
+            node => `${node.path}:${node.name}:${node.score.toFixed(3)}`,
+          ),
+          ', ',
+        );
         return yield* ScriptError.make({
           message:
             `Incremental vector benchmark semantic positive control did not resolve on the new snapshot; ` +
@@ -1513,7 +1554,7 @@ const benchmarkCodeGraph = Effect.scoped(
         ),
         benchmarkMeasurement('whole-graph-structural-analysis', 'milliseconds', analysisDurations),
         benchmarkMeasurement('whole-graph-structural-analysis-process-cpu', 'milliseconds', analysisCpuDurations),
-        ...[...analysisStageTimings].flatMap(([stage, samples]) => [
+        ...EffectArray.flatMap([...analysisStageTimings], ([stage, samples]) => [
           benchmarkMeasurement(`whole-graph-structural-analysis-${stage}`, 'milliseconds', samples.wall),
           benchmarkMeasurement(`whole-graph-structural-analysis-${stage}-process-cpu`, 'milliseconds', samples.cpu),
         ]),
@@ -1760,7 +1801,12 @@ const benchmarkCodeGraph = Effect.scoped(
               embeddingContextThreadCounts:
                 embeddingContextPlan.threadCounts.length === 0
                   ? 'upstream-default'
-                  : embeddingContextPlan.threadCounts.join(','),
+                  : EffectArray.join(
+                      EffectArray.map(embeddingContextPlan.threadCounts, item =>
+                        item === null || item === undefined ? '' : String(item),
+                      ),
+                      ',',
+                    ),
               ...(embeddingContextPlan.modelGpuLayers === undefined
                 ? {}
                 : {embeddingModelGpuLayers: embeddingContextPlan.modelGpuLayers}),
@@ -1873,7 +1919,18 @@ const benchmarkCodeGraph = Effect.scoped(
                 coldExternalQueryControls,
               ),
               externalControlLanguages:
-                prepared.externalControls?.map(control => control.expectedLanguage).join(',') ?? '',
+                Option.getOrUndefined(
+                  Option.map(
+                    Option.fromNullishOr(
+                      Option.getOrUndefined(
+                        Option.map(Option.fromNullishOr(prepared.externalControls), __effectArrayReceiver =>
+                          EffectArray.map(__effectArrayReceiver, control => control.expectedLanguage),
+                        ),
+                      ),
+                    ),
+                    __effectArrayJoinReceiver => EffectArray.join(__effectArrayJoinReceiver, ','),
+                  ),
+                ) ?? '',
               externalQueryPositiveControl:
                 'every cold and incremental control returned its expected tracked public path and language; reviewed public controls retained',
               externalRepositoryCommit: prepared.externalCommit,
@@ -2097,7 +2154,7 @@ export const restoreBenchmarkOverlay = Effect.fn('benchmarkCodeGraph.restoreOver
  * resolution surface, so the benchmark exercises the real incremental path.
  */
 export function semanticBenchmarkOverlay(filePath: string, source: string): string {
-  const normalized = filePath.replaceAll('\\', '/').toLowerCase();
+  const normalized = Effect2.pipe(filePath, EffectString.replaceAll('\\', '/'), EffectString.toLowerCase);
   if (/\.(?:ts|tsx|mts|cts|js|jsx|mjs)$/.test(normalized)) {
     return insertAfterInterpreter(source, "import 'threadnote-benchmark-overlay';");
   }
@@ -2122,47 +2179,53 @@ export function semanticBenchmarkOverlay(filePath: string, source: string): stri
 }
 
 function sourceNewline(source: string): '\n' | '\r\n' {
-  return source.includes('\r\n') ? '\r\n' : '\n';
+  return Effect2.pipe(source, EffectString.includes('\r\n')) ? '\r\n' : '\n';
 }
 
 function appendStatement(source: string, statement: string): string {
   const newline = sourceNewline(source);
-  return `${source}${source.endsWith('\n') ? '' : newline}${statement}${newline}`;
+  return `${source}${Effect2.pipe(source, EffectString.endsWith('\n')) ? '' : newline}${statement}${newline}`;
 }
 
 function insertAfterBom(source: string, statement: string): string {
   const newline = sourceNewline(source);
-  const offset = source.startsWith('\uFEFF') ? 1 : 0;
-  return `${source.slice(0, offset)}${statement}${newline}${source.slice(offset)}`;
+  const offset = Effect2.pipe(source, EffectString.startsWith('\uFEFF')) ? 1 : 0;
+  return `${Effect2.pipe(source, EffectString.slice(0, offset))}${statement}${newline}${Effect2.pipe(source, EffectString.slice(offset))}`;
 }
 
 function insertAfterInterpreter(source: string, statement: string): string {
-  const bomOffset = source.startsWith('\uFEFF') ? 1 : 0;
-  if (!source.startsWith('#!', bomOffset)) return insertAfterBom(source, statement);
+  const bomOffset = Effect2.pipe(source, EffectString.startsWith('\uFEFF')) ? 1 : 0;
+  if (!Effect2.pipe(source, EffectString.startsWith('#!', bomOffset))) return insertAfterBom(source, statement);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const lineEnd = source.indexOf('\n', bomOffset);
   if (lineEnd < 0) return `${source}${sourceNewline(source)}${statement}${sourceNewline(source)}`;
-  return `${source.slice(0, lineEnd + 1)}${statement}${sourceNewline(source)}${source.slice(lineEnd + 1)}`;
+  return `${Effect2.pipe(source, EffectString.slice(0, lineEnd + 1))}${statement}${sourceNewline(source)}${Effect2.pipe(source, EffectString.slice(lineEnd + 1))}`;
 }
 
 function insertAfterPackage(source: string, statement: string): string {
   const packageLine = /^[\t ]*package(?:[\t ]+[^\r\n;]+;?)[\t ]*$/m.exec(source);
   if (!packageLine || packageLine.index === undefined) return insertAfterBom(source, statement);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const lineEnd = source.indexOf('\n', packageLine.index + packageLine[0].length);
   const offset = lineEnd < 0 ? source.length : lineEnd + 1;
-  const separator = lineEnd < 0 && !source.endsWith('\n') ? sourceNewline(source) : '';
-  return `${source.slice(0, offset)}${separator}${statement}${sourceNewline(source)}${source.slice(offset)}`;
+  const separator = lineEnd < 0 && !Effect2.pipe(source, EffectString.endsWith('\n')) ? sourceNewline(source) : '';
+  return `${Effect2.pipe(source, EffectString.slice(0, offset))}${separator}${statement}${sourceNewline(source)}${Effect2.pipe(source, EffectString.slice(offset))}`;
 }
 
 function insertAfterRustPreamble(source: string, statement: string): string {
   const newline = sourceNewline(source);
-  const bomOffset = source.startsWith('\uFEFF') ? 1 : 0;
+  const bomOffset = Effect2.pipe(source, EffectString.startsWith('\uFEFF')) ? 1 : 0;
   let offset = bomOffset;
-  for (const line of source.slice(bomOffset).split(/(?<=\n)/)) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('#![') && !trimmed.startsWith('//!')) break;
+  for (const line of Effect2.pipe(source, EffectString.slice(bomOffset), EffectString.split(/(?<=\n)/))) {
+    const trimmed = Effect2.pipe(line, EffectString.trim);
+    if (
+      !Effect2.pipe(trimmed, EffectString.startsWith('#![')) &&
+      !Effect2.pipe(trimmed, EffectString.startsWith('//!'))
+    )
+      break;
     offset += line.length;
   }
-  return `${source.slice(0, offset)}${statement}${newline}${source.slice(offset)}`;
+  return `${Effect2.pipe(source, EffectString.slice(0, offset))}${statement}${newline}${Effect2.pipe(source, EffectString.slice(offset))}`;
 }
 
 type BenchmarkIndexTimingStage = Parameters<NonNullable<CodeGraphIndexOptions['onTiming']>>[0];
@@ -2207,11 +2270,11 @@ export class BenchmarkStageTimings {
   }
 
   observations(): readonly (readonly [BenchmarkTimingStage, Readonly<BenchmarkStageTiming>])[] {
-    return [...this.#observations].map(([stage, observation]) => [stage, {...observation}] as const);
+    return EffectArray.map([...this.#observations], ([stage, observation]) => [stage, {...observation}] as const);
   }
 
   measurements(prefix: string): ReturnType<typeof benchmarkMeasurement>[] {
-    return this.observations().flatMap(([stage, observation]) => [
+    return EffectArray.flatMap(this.observations(), ([stage, observation]) => [
       benchmarkMeasurement(`${prefix}-completion-${stage}-count-n1`, 'count', [observation.count]),
       benchmarkMeasurement(`${prefix}-completion-${stage}-wall-total-n1`, 'milliseconds', [
         observation.wallMilliseconds,
@@ -2357,7 +2420,9 @@ export function createBenchmarkRegistrationTracing(): BenchmarkRegistrationTraci
         const name = options.name;
         const at = options.startTime;
         if (typeof at === 'bigint' && at >= startedAt) {
-          selected = BENCHMARK_REGISTRATION_SPAN_NAMES.find(value => value === name);
+          selected = Option.getOrUndefined(
+            EffectArray.findFirst(BENCHMARK_REGISTRATION_SPAN_NAMES, value => value === name),
+          );
           start = at;
         }
       } catch {
@@ -2388,7 +2453,7 @@ export function createBenchmarkRegistrationTracing(): BenchmarkRegistrationTraci
       partialSpans,
       invalidSpans,
       overflow,
-      spans: Object.fromEntries([...summaries].map(([name, summary]) => [name, {...summary}])),
+      spans: EffectRecord.fromEntries(EffectArray.map([...summaries], ([name, summary]) => [name, {...summary}])),
     }),
   };
 }
@@ -2703,9 +2768,12 @@ export class IndexPhaseTimeline {
   duration(from: IndexPhasePoint, to: IndexPhasePoint, ...fallbackTo: readonly IndexPhasePoint[]): number {
     const start = this.#points.get(from);
     if (start === undefined) return 0;
-    const end = [to, ...fallbackTo, 'finish' as const]
-      .map(point => this.#points.get(point))
-      .find((candidate): candidate is bigint => candidate !== undefined);
+    const end = Option.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.map([to, ...fallbackTo, 'finish' as const], point => this.#points.get(point)),
+        (candidate): candidate is bigint => candidate !== undefined,
+      ),
+    );
     return Math.max(0, Number((end ?? start) - start) / NANOSECONDS_PER_MILLISECOND);
   }
 
@@ -2715,9 +2783,12 @@ export class IndexPhaseTimeline {
     ...fallbackTo: readonly IndexPhasePoint[]
   ): {readonly cpuMilliseconds: number; readonly rssBoundaryPeakBytes: number} {
     const started = this.#resources.get(from);
-    const finished = [to, ...fallbackTo, 'finish' as const]
-      .map(point => this.#resources.get(point))
-      .find((candidate): candidate is ProcessTelemetry => candidate !== undefined);
+    const finished = Option.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.map([to, ...fallbackTo, 'finish' as const], point => this.#resources.get(point)),
+        (candidate): candidate is ProcessTelemetry => candidate !== undefined,
+      ),
+    );
     if (!started || !finished) return {cpuMilliseconds: 0, rssBoundaryPeakBytes: 0};
     return {
       cpuMilliseconds: cpuMilliseconds(started, finished).total,
@@ -3008,7 +3079,7 @@ export function indexPhaseMeasurements(
     benchmarkMeasurement(`${prefix}-reference-resolution-longest-transaction-n1`, 'milliseconds', [
       timeline.referenceResolutionLongestTransactionMilliseconds(),
     ]),
-    ...RESOLUTION_TRANSACTION_STAGES.map(([stage, measurement]) =>
+    ...EffectArray.map(RESOLUTION_TRANSACTION_STAGES, ([stage, measurement]) =>
       benchmarkMeasurement(`${prefix}-reference-resolution-transaction-stage-${measurement}-n1`, 'milliseconds', [
         timeline.referenceResolutionTransactionStageMilliseconds(stage) ?? 0,
       ]),
@@ -3064,12 +3135,12 @@ export function indexPhaseMeasurements(
     benchmarkMeasurement(`${prefix}-materialized-reference-candidate-rows-n1`, 'count', [
       timeline.materializedReferenceCandidates(),
     ]),
-    ...MATERIALIZATION_STAGES.map(stage =>
+    ...EffectArray.map(MATERIALIZATION_STAGES, stage =>
       benchmarkMeasurement(`${prefix}-materialization-stage-${stage}-n1`, 'milliseconds', [
         timeline.materializationStageMilliseconds(stage) ?? 0,
       ]),
     ),
-    ...MATERIALIZATION_SUBPHASES.flatMap(([subphase, measurement]) => {
+    ...EffectArray.flatMap(MATERIALIZATION_SUBPHASES, ([subphase, measurement]) => {
       const milliseconds = timeline.materializationSubphaseMilliseconds(subphase);
       return milliseconds === undefined
         ? []
@@ -3151,7 +3222,7 @@ function activationStageMeasurements(
     benchmarkMeasurement(`${prefix}-maximum-progress-heartbeat-gap-n1`, 'milliseconds', [
       timeline.maximumProgressHeartbeatGapMilliseconds(),
     ]),
-    ...ACTIVATION_STAGES.flatMap(stage => {
+    ...EffectArray.flatMap(ACTIVATION_STAGES, stage => {
       const observed = timeline.activationStage(stage);
       return [
         benchmarkMeasurement(`${prefix}-activation-${stage}-observed-n1`, 'count', [observed ? 1 : 0]),
@@ -3177,7 +3248,7 @@ function indexPhaseResourceMeasurements(
     ['post-activation-completion', 'activating:complete', 'finish', 'finish'],
     ['vector-index', 'embedding:start', 'embedding:complete', 'finish'],
   ] as const satisfies readonly (readonly [string, IndexPhasePoint, IndexPhasePoint, IndexPhasePoint])[];
-  return phases.flatMap(([name, from, to, fallback]) => {
+  return EffectArray.flatMap(phases, ([name, from, to, fallback]) => {
     const resources = timeline.resources(from, to, fallback);
     return [
       benchmarkMeasurement(`${prefix}-${name}-process-cpu-n1`, 'milliseconds', [resources.cpuMilliseconds]),
@@ -3191,7 +3262,7 @@ export function externalSamplerMeasurements(
   artifact: CodeGraphBenchmarkSamplerArtifact | undefined,
 ): ReturnType<typeof benchmarkMeasurement>[] {
   if (!artifact) return [];
-  const phases = Object.entries(artifact.phases);
+  const phases = EffectRecord.toEntries(artifact.phases);
   const processTreeMeasurements =
     artifact.version >= 3 &&
     artifact.processTelemetry.availability === 'available' &&
@@ -3207,16 +3278,16 @@ export function externalSamplerMeasurements(
             boundedPhaseTotal(phases, sample => sample.processSampleFailures ?? 0),
           ]),
           benchmarkMeasurement(`${prefix}-external-process-tree-maximum-sample-gap-n1`, 'milliseconds', [
-            Math.max(0, ...phases.map(([, sample]) => sample.processSampleGapPeakMilliseconds ?? 0)),
+            Math.max(0, ...EffectArray.map(phases, ([, sample]) => sample.processSampleGapPeakMilliseconds ?? 0)),
           ]),
           benchmarkMeasurement(`${prefix}-external-process-count-peak-observed-n1`, 'count', [
-            Math.max(0, ...phases.map(([, sample]) => sample.processPeakCount ?? 0)),
+            Math.max(0, ...EffectArray.map(phases, ([, sample]) => sample.processPeakCount ?? 0)),
           ]),
           benchmarkMeasurement(`${prefix}-external-process-cpu-n1`, 'milliseconds', [
             boundedPhaseTotal(phases, sample => sample.cpuMilliseconds ?? 0),
           ]),
           benchmarkMeasurement(`${prefix}-external-rss-peak-observed-n1`, 'bytes', [
-            Math.max(0, ...phases.map(([, sample]) => sample.rssPeakBytes ?? 0)),
+            Math.max(0, ...EffectArray.map(phases, ([, sample]) => sample.rssPeakBytes ?? 0)),
           ]),
           ...(artifact.processTelemetry.ioCounters === 'linux-proc-read-write-bytes'
             ? [
@@ -3243,13 +3314,13 @@ export function externalSamplerMeasurements(
             boundedPhaseTotal(phases, sample => sample.temporaryOpenSamples ?? 0),
           ]),
           benchmarkMeasurement(`${prefix}-external-sqlite-temp-combined-peak-observed-n1`, 'bytes', [
-            Math.max(0, ...phases.map(([, sample]) => sample.temporaryPeakBytes)),
+            Math.max(0, ...EffectArray.map(phases, ([, sample]) => sample.temporaryPeakBytes)),
           ]),
           benchmarkMeasurement(`${prefix}-external-sqlite-temp-linked-peak-observed-n1`, 'bytes', [
-            Math.max(0, ...phases.map(([, sample]) => sample.temporaryLinkedPeakBytes ?? 0)),
+            Math.max(0, ...EffectArray.map(phases, ([, sample]) => sample.temporaryLinkedPeakBytes ?? 0)),
           ]),
           benchmarkMeasurement(`${prefix}-external-sqlite-temp-open-process-tree-peak-observed-n1`, 'bytes', [
-            Math.max(0, ...phases.map(([, sample]) => sample.temporaryOpenPeakBytes ?? 0)),
+            Math.max(0, ...EffectArray.map(phases, ([, sample]) => sample.temporaryOpenPeakBytes ?? 0)),
           ]),
         ]
       : [];
@@ -3258,12 +3329,14 @@ export function externalSamplerMeasurements(
     benchmarkMeasurement(`${prefix}-external-storage-samples-n1`, 'count', [artifact.samples]),
     ...processTreeMeasurements,
     ...openTemporaryFileMeasurements,
-    ...phases.flatMap(([phase, sample]) => {
+    ...EffectArray.flatMap(phases, ([phase, sample]) => {
       const name =
-        phase
-          .replace(/[^a-z0-9]+/gi, '-')
-          .replace(/^-|-$/g, '')
-          .toLowerCase() || 'unknown';
+        Effect2.pipe(
+          phase,
+          EffectString.replace(/[^a-z0-9]+/gi, '-'),
+          EffectString.replace(/^-|-$/g, ''),
+          EffectString.toLowerCase,
+        ) || 'unknown';
       const processMeasurements =
         artifact.processTelemetry.availability === 'available' &&
         sample.cpuMilliseconds !== undefined &&
@@ -3353,14 +3426,14 @@ function boundedPhaseTotal(
   phases: readonly (readonly [string, CodeGraphBenchmarkSamplerArtifact['phases'][string]])[],
   value: (sample: CodeGraphBenchmarkSamplerArtifact['phases'][string]) => number,
 ): number {
-  return phases.reduce((total, [, sample]) => Math.min(Number.MAX_SAFE_INTEGER, total + value(sample)), 0);
+  return EffectArray.reduce(phases, 0, (total, [, sample]) => Math.min(Number.MAX_SAFE_INTEGER, total + value(sample)));
 }
 
 function externalTelemetryPeak(
   artifact: CodeGraphBenchmarkSamplerArtifact,
   field: 'databasePeakBytes' | 'journalPeakBytes' | 'shmPeakBytes' | 'temporaryPeakBytes' | 'walPeakBytes',
 ): number {
-  return Math.max(0, ...Object.values(artifact.phases).map(phase => phase[field] ?? 0));
+  return Math.max(0, ...EffectArray.map(EffectRecord.values(artifact.phases), phase => phase[field] ?? 0));
 }
 
 /**
@@ -3473,18 +3546,24 @@ interface ExternalSamplerHandle {
 export function parseCodeGraphBenchmarkRunCheckpoint(value: unknown): CodeGraphBenchmarkRunCheckpoint {
   if (typeof value !== 'object' || value === null)
     throw ScriptError.make({message: 'Benchmark run checkpoint must be an object.'});
-  const checkpoint = value as Partial<CodeGraphBenchmarkRunCheckpoint>;
+  const checkpoint = ratchetRecord(value, 'Benchmark run checkpoint');
+  const {phase, state, updatedAt, version} = checkpoint;
   if (
-    checkpoint.version !== 1 ||
-    !['complete', 'failed', 'running'].includes(checkpoint.state ?? '') ||
-    typeof checkpoint.phase !== 'string' ||
-    !/^[a-z][a-z0-9-]{0,63}$/.test(checkpoint.phase) ||
-    typeof checkpoint.updatedAt !== 'string' ||
-    !Number.isFinite(Date.parse(checkpoint.updatedAt))
+    version !== 1 ||
+    (state !== 'complete' && state !== 'failed' && state !== 'running') ||
+    typeof phase !== 'string' ||
+    !/^[a-z][a-z0-9-]{0,63}$/.test(phase) ||
+    typeof updatedAt !== 'string' ||
+    !Number.isFinite(Date.parse(updatedAt))
   ) {
     throw ScriptError.make({message: 'Benchmark run checkpoint is invalid.'});
   }
-  return checkpoint as CodeGraphBenchmarkRunCheckpoint;
+  return {
+    phase,
+    state,
+    updatedAt,
+    version: 1,
+  };
 }
 
 const makeBenchmarkRunCheckpoint = Effect.fn('benchmarkCodeGraph.makeRunCheckpoint')(function* (outputPath: string) {
@@ -3619,7 +3698,7 @@ export const startExternalSampler = Effect.fn('benchmarkCodeGraph.startExternalS
         if (exitCode !== 0) {
           const stderr = subprocess.stderr ? yield* Effect.promise(() => new Response(subprocess.stderr).text()) : '';
           return yield* ScriptError.make({
-            message: `Code graph benchmark sampler exited with ${exitCode}: ${stderr.trim() || 'no diagnostic'}`,
+            message: `Code graph benchmark sampler exited with ${exitCode}: ${Effect2.pipe(stderr, EffectString.trim) || 'no diagnostic'}`,
           });
         }
         return parseCodeGraphBenchmarkSamplerArtifact(JSON.parse(yield* fs.readFileString(outputPath)));
@@ -3741,7 +3820,7 @@ function regularFileBytes(fs: FileSystem.FileSystem, file: string): Effect.Effec
 function sqliteRowCount(databasePath: string, query: string, ...parameters: readonly string[]): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database.query(query).get(...parameters) as {readonly count?: bigint | number} | null;
+    const row = database.query<{readonly count?: bigint | number} | null, SQLQueryBindings[]>(query).get(...parameters);
     const count = Number(row?.count ?? 0);
     if (!Number.isSafeInteger(count) || count < 0)
       throw ScriptError.make({message: `Invalid SQLite row count for ${databasePath}.`});
@@ -3755,13 +3834,20 @@ function sqliteLexicalTermRowCount(databasePath: string, snapshotId: string): nu
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     const compact = database
-      .query('SELECT posting_count AS count FROM lexical_storage_formats WHERE snapshot_id = ? LIMIT 1')
-      .get(snapshotId) as {readonly count?: bigint | number} | null;
+      .query<{readonly count?: bigint | number} | null, SQLQueryBindings[]>(
+        'SELECT posting_count AS count FROM lexical_storage_formats WHERE snapshot_id = ? LIMIT 1',
+      )
+      .get(snapshotId);
     const row =
       compact ??
-      (database.query('SELECT COUNT(*) AS count FROM symbol_terms WHERE snapshot_id = ?').get(snapshotId) as {
-        readonly count?: bigint | number;
-      } | null);
+      database
+        .query<
+          {
+            readonly count?: bigint | number;
+          } | null,
+          SQLQueryBindings[]
+        >('SELECT COUNT(*) AS count FROM symbol_terms WHERE snapshot_id = ?')
+        .get(snapshotId);
     const count = Number(row?.count ?? 0);
     if (!Number.isSafeInteger(count) || count < 0) {
       throw ScriptError.make({message: `Invalid SQLite lexical term row count for ${databasePath}.`});
@@ -3791,9 +3877,11 @@ function sqliteLanguageCounts(databasePath: string, snapshotId: string): readonl
         .query('SELECT language, COUNT(*) AS count FROM symbols WHERE snapshot_id = ? GROUP BY language')
         .all(snapshotId),
     );
-    return [...new Set([...files.keys(), ...symbols.keys()])]
-      .sort()
-      .map(language => ({files: files.get(language) ?? 0, language, symbols: symbols.get(language) ?? 0}));
+    return EffectArray.map([...new Set([...files.keys(), ...symbols.keys()])].sort(), language => ({
+      files: files.get(language) ?? 0,
+      language,
+      symbols: symbols.get(language) ?? 0,
+    }));
   } finally {
     database.close(false);
   }
@@ -3802,9 +3890,9 @@ function sqliteLanguageCounts(databasePath: string, snapshotId: string): readonl
 function sqliteGroupedLanguageCounts(rows: readonly unknown[]): ReadonlyMap<string, number> {
   const counts = new Map<string, number>();
   for (const value of rows) {
-    const row = value as {readonly count?: bigint | number; readonly language?: string};
-    const language = row.language ?? '';
-    const count = Number(row.count ?? -1);
+    const row = ratchetRecord(value, 'SQLite language aggregate');
+    const language = typeof row.language === 'string' ? row.language : '';
+    const count = Number(typeof row.count === 'bigint' || typeof row.count === 'number' ? row.count : -1);
     if (!/^[a-z][a-z0-9-]*$/.test(language) || !Number.isSafeInteger(count) || count < 0) {
       throw ScriptError.make({message: 'Code graph database returned an invalid privacy-safe language aggregate.'});
     }
@@ -3816,7 +3904,9 @@ function sqliteGroupedLanguageCounts(rows: readonly unknown[]): ReadonlyMap<stri
 function sqliteVersionString(databasePath: string): string {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database.query('SELECT sqlite_version() AS version').get() as {readonly version?: string} | null;
+    const row = database
+      .query<{readonly version?: string} | null, SQLQueryBindings[]>('SELECT sqlite_version() AS version')
+      .get();
     const version = row?.version ?? '';
     if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
       throw ScriptError.make({message: 'Code graph database returned an invalid SQLite version.'});
@@ -3830,7 +3920,9 @@ function sqliteVersionString(databasePath: string): string {
 function sqlitePageSize(databasePath: string): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database.query('PRAGMA page_size').get() as {readonly page_size?: bigint | number} | null;
+    const row = database
+      .query<{readonly page_size?: bigint | number} | null, SQLQueryBindings[]>('PRAGMA page_size')
+      .get();
     const pageSize = Number(row?.page_size ?? 0);
     if (!Number.isSafeInteger(pageSize) || pageSize < 512 || pageSize > 65_536) {
       throw ScriptError.make({message: 'Code graph database returned an invalid SQLite page size.'});
@@ -4012,8 +4104,10 @@ function openCodeGraphStructuralDigestReadSnapshot(
     database.run('BEGIN');
     const snapshot = Option.fromNullishOr(
       database
-        .query('SELECT base_snapshot_id FROM snapshots WHERE id = ? AND state = ? LIMIT 1')
-        .get(snapshotId, 'ready') as {readonly base_snapshot_id?: unknown} | undefined,
+        .query<{readonly base_snapshot_id?: unknown}, SQLQueryBindings[]>(
+          'SELECT base_snapshot_id FROM snapshots WHERE id = ? AND state = ? LIMIT 1',
+        )
+        .get(snapshotId, 'ready'),
     );
     if (Option.isNone(snapshot))
       throw ScriptError.make({message: 'Ready snapshot was unavailable for the structural graph digest.'});
@@ -4196,14 +4290,14 @@ export function codeGraphStructuralParityEvidence(
   incremental: CodeGraphStructuralGraphEvidence,
   sameOverlayReference: CodeGraphStructuralGraphEvidence,
 ): CodeGraphStructuralParityEvidence {
-  const referenceStreams = new Map(sameOverlayReference.streams.map(stream => [stream.name, stream]));
+  const referenceStreams = new Map(EffectArray.map(sameOverlayReference.streams, stream => [stream.name, stream]));
   if (
     referenceStreams.size !== sameOverlayReference.streams.length ||
     incremental.streams.length !== sameOverlayReference.streams.length
   ) {
     throw ScriptError.make({message: 'Structural graph digest evidence returned an inconsistent stream set.'});
   }
-  const mismatchedStreams = incremental.streams.flatMap(stream => {
+  const mismatchedStreams = EffectArray.flatMap(incremental.streams, stream => {
     const reference = referenceStreams.get(stream.name);
     if (!reference)
       throw ScriptError.make({message: 'Structural graph digest evidence returned an inconsistent stream set.'});
@@ -4221,13 +4315,15 @@ export function codeGraphStructuralParityEvidence(
 }
 
 export function codeGraphStructuralParityFailureMessage(evidence: CodeGraphStructuralParityEvidence): string {
-  const mismatches = evidence.mismatchedStreams
-    .map(
+  const mismatches = EffectArray.join(
+    EffectArray.map(
+      evidence.mismatchedStreams,
       mismatch =>
         `${mismatch.name} incremental(count=${mismatch.incremental.rowCount},sha256=${mismatch.incremental.digest}) ` +
         `same-overlay-full(count=${mismatch.sameOverlayReference.rowCount},sha256=${mismatch.sameOverlayReference.digest})`,
-    )
-    .join('; ');
+    ),
+    '; ',
+  );
   return `Structural graph digest parity failed: ${mismatches || 'composite digest mismatch'}.`;
 }
 
@@ -4295,18 +4391,21 @@ const vectorMappingDigest = Effect.fn('benchmarkCodeGraph.vectorMappingDigest')(
       const database = new Database(path.join(modelRoot, name), {readonly: true, strict: true});
       try {
         const mappings = database
-          .query(
+          .query<
+            {
+              readonly fingerprint?: unknown;
+              readonly symbol_id?: unknown;
+              readonly vector?: unknown;
+            },
+            SQLQueryBindings[]
+          >(
             `SELECT vector.symbol_id, vector.fingerprint, vector.vector
              FROM vector_pointers AS pointer
              JOIN vectors AS vector ON vector.generation = pointer.generation
              WHERE pointer.worktree_id = ?
              ORDER BY vector.symbol_id`,
           )
-          .all(worktreeId) as readonly {
-          readonly fingerprint?: unknown;
-          readonly symbol_id?: unknown;
-          readonly vector?: unknown;
-        }[];
+          .all(worktreeId);
         updateVectorMappingDigest(hash, model);
         for (const mapping of mappings) {
           if (
@@ -4373,7 +4472,7 @@ function languageAggregateMeasurements(
   prefix: 'cold',
   aggregates: readonly CodeGraphLanguageAggregate[],
 ): ReturnType<typeof benchmarkMeasurement>[] {
-  return aggregates.flatMap(aggregate => [
+  return EffectArray.flatMap(aggregates, aggregate => [
     benchmarkMeasurement(`${prefix}-materialized-file-rows-language-${aggregate.language}`, 'count', [aggregate.files]),
     benchmarkMeasurement(`${prefix}-materialized-symbol-rows-language-${aggregate.language}`, 'count', [
       aggregate.symbols,
@@ -4499,9 +4598,9 @@ const benchmarkMcpOperationMatrix = Effect.fn('benchmarkCodeGraph.mcpOperationMa
   yield* execute({operation: 'explain', symbol: seed.id});
   yield* execute({operation: 'impact', query: seed.id});
   const peer =
-    neighbors.nodes.find(node => node.id !== seed.id)?.id ??
-    neighbors.edges.find(edge => edge.sourceId === seed.id)?.targetId ??
-    neighbors.edges.find(edge => edge.targetId === seed.id)?.sourceId ??
+    Option.getOrUndefined(EffectArray.findFirst(neighbors.nodes, node => node.id !== seed.id))?.id ??
+    Option.getOrUndefined(EffectArray.findFirst(neighbors.edges, edge => edge.sourceId === seed.id))?.targetId ??
+    Option.getOrUndefined(EffectArray.findFirst(neighbors.edges, edge => edge.targetId === seed.id))?.sourceId ??
     seed.id;
   yield* execute({depth: 8, from: seed.id, operation: 'path', to: peer});
   return results;
@@ -4563,11 +4662,21 @@ const benchmarkManagerPerformanceMeasured = Effect.fn('benchmarkCodeGraph.manage
   warmups: number,
 ) {
   const catalogCold = yield* timedJsonEffect(managerGraphCatalog(threadnoteHome));
-  const repositoryGroup = catalogCold.value.repositories.find(
-    repository => repository.repositoryId === expectedRepositoryId,
+  const repositoryGroup = Option.getOrUndefined(
+    EffectArray.findFirst(
+      catalogCold.value.repositories,
+      repository => repository.repositoryId === expectedRepositoryId,
+    ),
   );
-  const indexedView = repositoryGroup?.views.find(
-    view => view.snapshot.id === expectedSnapshotId && view.snapshot.state === 'ready',
+  const indexedView = Option.getOrUndefined(
+    Option.map(Option.fromNullishOr(repositoryGroup?.views), __effectArrayReceiver =>
+      Option.getOrUndefined(
+        EffectArray.findFirst(
+          __effectArrayReceiver,
+          view => view.snapshot.id === expectedSnapshotId && view.snapshot.state === 'ready',
+        ),
+      ),
+    ),
   );
   if (!indexedView) {
     return yield* ScriptError.make({message: 'Manager benchmark catalog did not expose the expected ready snapshot.'});
@@ -4615,7 +4724,9 @@ const benchmarkManagerPerformanceMeasured = Effect.fn('benchmarkCodeGraph.manage
       nodeLimit: MANAGER_GRAPH_MAX_NODE_LIMIT,
     });
   }
-  const project = indexedView.projects.find(candidate => (candidate.symbolCount ?? 1) > 0) ?? indexedView.projects[0];
+  const project =
+    Option.getOrUndefined(EffectArray.findFirst(indexedView.projects, candidate => (candidate.symbolCount ?? 1) > 0)) ??
+    indexedView.projects[0];
   if (!project) return yield* ScriptError.make({message: 'Manager benchmark snapshot has no project detail scope.'});
   const detailCold = yield* timedJsonEffect(
     managerGraphVisualization(
@@ -4692,12 +4803,12 @@ const benchmarkManagerPerformanceMeasured = Effect.fn('benchmarkCodeGraph.manage
     indexedView.id,
     'all',
     {edgeLimit: MANAGER_GRAPH_MAX_EDGE_LIMIT, nodeLimit: MANAGER_GRAPH_MAX_NODE_LIMIT},
-    Option.some(`cgsn_${'0'.repeat(40)}`),
+    Option.some(`cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`),
   ).pipe(Effect.match({onFailure: () => true, onSuccess: () => false}));
   const snapshotBindingPassed =
     overviewCold.value.repository.snapshot.id === expectedSnapshotId &&
     detailCold.value.repository.snapshot.id === expectedSnapshotId &&
-    querySamples.every(sample => sample.value.repository.snapshot.id === expectedSnapshotId) &&
+    EffectArray.every(querySamples, sample => sample.value.repository.snapshot.id === expectedSnapshotId) &&
     nodeDetail.value.snapshotId === expectedSnapshotId &&
     staleSnapshotRejected;
   if (!snapshotBindingPassed) {
@@ -4822,28 +4933,28 @@ const benchmarkManagerPerformanceMeasured = Effect.fn('benchmarkCodeGraph.manage
 
   return {
     catalogColdMilliseconds: [catalogCold.durationMilliseconds],
-    catalogWarmMilliseconds: catalogWarm.map(sample => sample.durationMilliseconds),
+    catalogWarmMilliseconds: EffectArray.map(catalogWarm, sample => sample.durationMilliseconds),
     detailColdMilliseconds: [detailCold.durationMilliseconds],
     detailEdgeCount: detailCold.value.edges.length,
     detailNodeCount: detailCold.value.nodes.length,
     edgeBudget: MANAGER_GRAPH_MAX_EDGE_LIMIT,
     maxResponsePayloadBytes: [
       catalogCold.payloadBytes,
-      ...catalogWarm.map(sample => sample.payloadBytes),
+      ...EffectArray.map(catalogWarm, sample => sample.payloadBytes),
       overviewCold.payloadBytes,
-      ...overviewWarm.map(sample => sample.payloadBytes),
+      ...EffectArray.map(overviewWarm, sample => sample.payloadBytes),
       detailCold.payloadBytes,
       nodeDetail.payloadBytes,
-      ...querySamples.map(sample => sample.payloadBytes),
+      ...EffectArray.map(querySamples, sample => sample.payloadBytes),
     ],
     nodeBudget: MANAGER_GRAPH_MAX_NODE_LIMIT,
     nodeDetailColdMilliseconds: [nodeDetail.durationMilliseconds],
     overviewColdMilliseconds: [overviewCold.durationMilliseconds],
     overviewEdgeCount: overviewCold.value.edges.length,
     overviewNodeCount: overviewCold.value.nodes.length,
-    overviewWarmMilliseconds: overviewWarm.map(sample => sample.durationMilliseconds),
-    queryMilliseconds: querySamples.map(sample => sample.durationMilliseconds),
-    queryPayloadBytes: querySamples.map(sample => sample.payloadBytes),
+    overviewWarmMilliseconds: EffectArray.map(overviewWarm, sample => sample.durationMilliseconds),
+    queryMilliseconds: EffectArray.map(querySamples, sample => sample.durationMilliseconds),
+    queryPayloadBytes: EffectArray.map(querySamples, sample => sample.payloadBytes),
     layoutPreparationProxyMilliseconds,
     requestCancellationPassed: true,
     snapshotBindingPassed: true,
@@ -4903,7 +5014,7 @@ export function retryManagerBenchmarkBusy<A, E, R>(
 function mcpOperationMatrixMeasurements(
   results: readonly McpOperationBenchmarkResult[],
 ): ReturnType<typeof benchmarkMeasurement>[] {
-  return results.flatMap(result => [
+  return EffectArray.flatMap(results, result => [
     benchmarkMeasurement(`mcp-${result.operation}-duration`, 'milliseconds', [result.durationMilliseconds]),
     benchmarkMeasurement(`mcp-${result.operation}-structured-output`, 'bytes', [result.structuredBytes]),
     benchmarkMeasurement(`mcp-${result.operation}-text-output`, 'bytes', [result.textBytes]),
@@ -4962,7 +5073,7 @@ function externalQueryControlMeasurements(
   phase: 'cold' | 'incremental' | 'same-overlay-reference',
   controls: readonly ExternalQueryControlResult[],
 ): ReturnType<typeof benchmarkMeasurement>[] {
-  return controls.flatMap(control => [
+  return EffectArray.flatMap(controls, control => [
     benchmarkMeasurement(`external-query-${phase}-${control.language}-duration`, 'milliseconds', [
       control.durationMilliseconds,
     ]),
@@ -4979,8 +5090,8 @@ function externalQueryControlParityMeasurements(
   incremental: readonly ExternalQueryControlResult[],
   reference: readonly ExternalQueryControlResult[],
 ): ReturnType<typeof benchmarkMeasurement>[] {
-  const referenceByLanguage = new Map(reference.map(control => [control.language, control]));
-  return incremental.map(control =>
+  const referenceByLanguage = new Map(EffectArray.map(reference, control => [control.language, control]));
+  return EffectArray.map(incremental, control =>
     benchmarkMeasurement(`external-query-${control.language}-same-overlay-structural-parity`, 'count', [
       referenceByLanguage.get(control.language)?.digest === control.digest &&
       referenceByLanguage.get(control.language)?.stableNodeId === control.stableNodeId
@@ -4999,37 +5110,35 @@ export function retainedExternalControlEvidence(
   controls: readonly ExternalRepositoryQueryControl[],
   coldResults: readonly ExternalQueryControlResult[],
 ): string {
-  const resultByLanguage = new Map(coldResults.map(result => [result.language, result]));
-  const entries = controls
-    .map(control => {
-      const result = resultByLanguage.get(control.expectedLanguage);
-      if (!result) throw ScriptError.make({message: 'External control evidence is missing a cold query result.'});
-      return [
-        performanceControlMetadataKey(control.expectedLanguage),
-        {
-          path: privacySafeExternalControlPath(control.expectedPath),
-          query: privacySafeExternalControlQuery(control.query),
-          stableNodeId: result.stableNodeId,
-        },
-      ] as const;
-    })
-    .sort(([left], [right]) => left.localeCompare(right, 'en'));
-  if (new Set(entries.map(([language]) => language)).size !== entries.length) {
+  const resultByLanguage = new Map(EffectArray.map(coldResults, result => [result.language, result]));
+  const entries = EffectArray.map(controls, control => {
+    const result = resultByLanguage.get(control.expectedLanguage);
+    if (!result) throw ScriptError.make({message: 'External control evidence is missing a cold query result.'});
+    return [
+      performanceControlMetadataKey(control.expectedLanguage),
+      {
+        path: privacySafeExternalControlPath(control.expectedPath),
+        query: privacySafeExternalControlQuery(control.query),
+        stableNodeId: result.stableNodeId,
+      },
+    ] as const;
+  }).sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right, ['en'])));
+  if (new Set(EffectArray.map(entries, ([language]) => language)).size !== entries.length) {
     throw ScriptError.make({message: 'External control evidence contains duplicate public language categories.'});
   }
-  return JSON.stringify(Object.fromEntries(entries));
+  return JSON.stringify(EffectRecord.fromEntries(entries));
 }
 
 export function assertPerformanceControlSet(controls: readonly ExternalRepositoryQueryControl[]): void {
-  const actual = [...new Set(controls.map(control => control.expectedLanguage))].sort();
+  const actual = [...new Set(EffectArray.map(controls, control => control.expectedLanguage))].sort();
   const expected = [...PERFORMANCE_CONTROL_LANGUAGES].sort();
   if (
     controls.length !== PERFORMANCE_CONTROL_LANGUAGES.length ||
     actual.length !== expected.length ||
-    actual.some((language, index) => language !== expected[index])
+    EffectArray.some(actual, (language, index) => language !== expected[index])
   ) {
     throw ScriptError.make({
-      message: `Release-bound external performance evidence requires exactly ${PERFORMANCE_CONTROL_LANGUAGES.join(', ')} controls.`,
+      message: `Release-bound external performance evidence requires exactly ${EffectArray.join(PERFORMANCE_CONTROL_LANGUAGES, ', ')} controls.`,
     });
   }
 }
@@ -5049,7 +5158,8 @@ function assertExternalQueryPositiveControl(
   readonly returnedNodes: number;
   readonly stableNodeId: string;
 } {
-  const expectedNodes = result.nodes.filter(
+  const expectedNodes = EffectArray.filter(
+    result.nodes,
     node =>
       node.path === expected.expectedPath &&
       node.language === performanceControlExpectedNodeLanguage(expected.expectedLanguage),
@@ -5086,7 +5196,7 @@ function queryResultStructuralDigest(result: CodeGraphQueryResult): string {
   digest.update(
     JSON.stringify({
       edges: result.edges,
-      nodes: result.nodes.map(({contentHash: _contentHash, ...node}) => node),
+      nodes: EffectArray.map(result.nodes, ({contentHash: _contentHash, ...node}) => node),
       operation: result.operation,
     }),
   );
@@ -5104,17 +5214,21 @@ function compareIdentity(left: {readonly id: string}, right: {readonly id: strin
 }
 
 function queryResultDigestEvidence(result: CodeGraphQueryResult): CodeGraphQueryResultDigestEvidence {
-  const nodes = result.nodes.map(({contentHash: _contentHash, ...node}) => node);
+  const nodes = EffectArray.map(result.nodes, ({contentHash: _contentHash, ...node}) => node);
   const canonicalNodes = [...nodes].sort(compareIdentity);
   const canonicalEdges = [...result.edges].sort(compareIdentity);
-  const scorelessCanonicalNodes = canonicalNodes.map(({score: _score, ...node}) => node);
+  const scorelessCanonicalNodes = EffectArray.map(canonicalNodes, ({score: _score, ...node}) => node);
   return {
     canonicalDigest: queryResultDigest({edges: canonicalEdges, nodes: canonicalNodes, operation: result.operation}),
-    edgeIdentityDigest: queryResultDigest(canonicalEdges.map(edge => edge.id)),
-    elapsedTimePartial: result.warnings.some(warning => warning.includes('elapsed-time budget')),
-    nodeIdentityDigest: queryResultDigest(canonicalNodes.map(node => node.id)),
+    edgeIdentityDigest: queryResultDigest(EffectArray.map(canonicalEdges, edge => edge.id)),
+    elapsedTimePartial: EffectArray.some(result.warnings, warning =>
+      Effect2.pipe(warning, EffectString.includes('elapsed-time budget')),
+    ),
+    nodeIdentityDigest: queryResultDigest(EffectArray.map(canonicalNodes, node => node.id)),
     orderedDigest: queryResultStructuralDigest(result),
-    resultLimitPartial: result.warnings.some(warning => warning.includes('configured result limit')),
+    resultLimitPartial: EffectArray.some(result.warnings, warning =>
+      Effect2.pipe(warning, EffectString.includes('configured result limit')),
+    ),
     returnedEdges: result.edges.length,
     returnedNodes: result.nodes.length,
     scorelessCanonicalDigest: queryResultDigest({
@@ -5155,9 +5269,9 @@ export function codeGraphQueryResultParityFailureMessage(evidence: CodeGraphQuer
   const phase = (value: CodeGraphQueryResultDigestEvidence): string =>
     `nodes=${value.returnedNodes}, edges=${value.returnedEdges}, ` +
     `elapsedTimePartial=${value.elapsedTimePartial}, resultLimitPartial=${value.resultLimitPartial}, ` +
-    `ordered=${value.orderedDigest.slice(0, 12)}, canonical=${value.canonicalDigest.slice(0, 12)}, ` +
-    `scoreless=${value.scorelessCanonicalDigest.slice(0, 12)}, ` +
-    `nodeIds=${value.nodeIdentityDigest.slice(0, 12)}, edgeIds=${value.edgeIdentityDigest.slice(0, 12)}`;
+    `ordered=${Effect2.pipe(value.orderedDigest, EffectString.slice(0, 12))}, canonical=${Effect2.pipe(value.canonicalDigest, EffectString.slice(0, 12))}, ` +
+    `scoreless=${Effect2.pipe(value.scorelessCanonicalDigest, EffectString.slice(0, 12))}, ` +
+    `nodeIds=${Effect2.pipe(value.nodeIdentityDigest, EffectString.slice(0, 12))}, edgeIds=${Effect2.pipe(value.edgeIdentityDigest, EffectString.slice(0, 12))}`;
   return (
     `Primary query parity failed (${evidence.classification}); ` +
     `incremental ${phase(evidence.incremental)}; ` +
@@ -5177,11 +5291,11 @@ function assertProductionLargeEvidence(
   artifact: BenchmarkArtifactV1,
   releaseProfile?: 'full-release' | 'governed-reduced-release',
 ): void {
-  if (!artifact.suite.startsWith('code-graph-production-large-')) {
+  if (!Effect2.pipe(artifact.suite, EffectString.startsWith('code-graph-production-large-'))) {
     throw ScriptError.make({message: `Production release evidence has the wrong suite: ${artifact.suite}.`});
   }
-  const measurements = new Map(artifact.measurements.map(measurement => [measurement.name, measurement]));
-  const missing = PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS.flatMap(required => {
+  const measurements = new Map(EffectArray.map(artifact.measurements, measurement => [measurement.name, measurement]));
+  const missing = EffectArray.flatMap(PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS, required => {
     const measurement = measurements.get(required.name);
     return measurement?.unit === required.unit ? [] : [`${required.name} (${required.unit})`];
   });
@@ -5214,7 +5328,7 @@ function assertProductionLargeEvidence(
   missing.push(...missingSamplerObservations(measurements));
   missing.push(...missingActivationObservations(artifact, measurements));
   if (missing.length > 0) {
-    throw ScriptError.make({message: `Production release evidence is incomplete: ${missing.join(', ')}.`});
+    throw ScriptError.make({message: `Production release evidence is incomplete: ${EffectArray.join(missing, ', ')}.`});
   }
 }
 
@@ -5225,7 +5339,7 @@ function missingMaterializationStorageHighWaterEvidence(
     const measurement = measurements.get(name);
     return measurement === undefined ? undefined : exactSingleSampleCount(measurement);
   };
-  const missing = (['cold', 'one-file-reindex', 'same-overlay-reference'] as const).flatMap(prefix => {
+  const missing = EffectArray.flatMap(['cold', 'one-file-reindex', 'same-overlay-reference'] as const, prefix => {
     const filesystem = value(`${prefix}-materialization-durable-filesystem-high-water-n1`);
     const journal = value(`${prefix}-materialization-durable-journal-high-water-n1`);
     const wal = value(`${prefix}-materialization-durable-wal-high-water-n1`);
@@ -5250,7 +5364,7 @@ function missingMaterializationStorageHighWaterEvidence(
 function missingMaterializationQueryIndexRestorationEvidence(
   measurements: ReadonlyMap<string, BenchmarkArtifactV1['measurements'][number]>,
 ): readonly string[] {
-  const missing = (['cold', 'same-overlay-reference'] as const).flatMap(prefix => {
+  const missing = EffectArray.flatMap(['cold', 'same-overlay-reference'] as const, prefix => {
     const measurement = measurements.get(`${prefix}-materialization-stage-restoring-indexes-n1`);
     const duration = measurement === undefined ? undefined : exactSingleSampleCount(measurement);
     return duration !== undefined && duration > 0 ? [] : [`${prefix} full-build query-index restoration`];
@@ -5264,7 +5378,7 @@ function missingMaterializationQueryIndexRestorationEvidence(
 function missingMaterializationReplayEquations(
   measurements: ReadonlyMap<string, BenchmarkArtifactV1['measurements'][number]>,
 ): readonly string[] {
-  return (['cold', 'same-overlay-reference'] as const).flatMap(prefix => {
+  return EffectArray.flatMap(['cold', 'same-overlay-reference'] as const, prefix => {
     const attributed = measurements.get(`${prefix}-materialization-attributed-files-n1`);
     const cachedTotal = measurements.get(`${prefix}-materialization-cached-fact-bytes-total-n1`);
     const cached = measurements.get(`${prefix}-materialization-cached-fact-replay-bytes-n1`);
@@ -5293,7 +5407,7 @@ function missingMaterializationReplayEquations(
     ) {
       missing.push(`${prefix} materialization replay-byte equation`);
     }
-    const deferredWriteSubphases = ['persistence', 'serialization'].map(subphase =>
+    const deferredWriteSubphases = EffectArray.map(['persistence', 'serialization'], subphase =>
       measurements.get(`${prefix}-materialization-subphase-shard-${subphase}-n1`),
     );
     if (
@@ -5308,7 +5422,8 @@ function missingMaterializationReplayEquations(
         missing.push(`${prefix} large-build materialized-shard cache deferral`);
       }
       if (
-        deferredWriteSubphases.some(
+        EffectArray.some(
+          deferredWriteSubphases,
           measurement => measurement === undefined || exactSingleSampleCount(measurement) !== 0,
         )
       ) {
@@ -5334,7 +5449,7 @@ function exactSingleSampleCount(measurement: BenchmarkArtifactV1['measurements']
   return measurement.samples === 1 &&
     value !== undefined &&
     Number.isSafeInteger(value) &&
-    values.every(candidate => candidate === value)
+    EffectArray.every(values, candidate => candidate === value)
     ? value
     : undefined;
 }
@@ -5345,23 +5460,29 @@ function missingProductionShapeTargetAttainment(
   releaseProfile?: 'full-release' | 'governed-reduced-release',
 ): readonly string[] {
   if (!isReviewedProductionProfile(artifact) && releaseProfile !== 'governed-reduced-release') return [];
-  return PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS.filter(required =>
-    required.name.startsWith('production-shape-'),
-  ).flatMap(required => {
-    const measurement = measurements.get(required.name);
-    if (!measurement || measurement.unit !== 'percent') return [];
-    return measurement.minimum >= PRODUCTION_LARGE_TARGET_ATTAINMENT_MINIMUM_PERCENT
-      ? []
-      : [
-          `${required.name} expected at least ` +
-            `${PRODUCTION_LARGE_TARGET_ATTAINMENT_MINIMUM_PERCENT}% target attainment`,
-        ];
-  });
+  const requiredMeasurements = EffectArray.filter(
+    PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS,
+    (required: (typeof PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS)[number]): boolean =>
+      Effect2.pipe(required.name, EffectString.startsWith('production-shape-')),
+  );
+  return EffectArray.flatMap(
+    requiredMeasurements,
+    (required: (typeof PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS)[number]) => {
+      const measurement = measurements.get(required.name);
+      if (!measurement || measurement.unit !== 'percent') return [];
+      return measurement.minimum >= PRODUCTION_LARGE_TARGET_ATTAINMENT_MINIMUM_PERCENT
+        ? []
+        : [
+            `${required.name} expected at least ` +
+              `${PRODUCTION_LARGE_TARGET_ATTAINMENT_MINIMUM_PERCENT}% target attainment`,
+          ];
+    },
+  );
 }
 
 function isReviewedProductionProfile(artifact: BenchmarkArtifactV1): boolean {
   const expected = productionProfileArtifactMetadata(PRODUCTION_LARGE_CODE_GRAPH_PROFILE);
-  return Object.entries(expected).every(([name, value]) => artifact.metadata[name] === value);
+  return EffectArray.every(EffectRecord.toEntries(expected), ([name, value]) => artifact.metadata[name] === value);
 }
 
 function missingReviewedProductionProfile(artifact: BenchmarkArtifactV1): readonly string[] {
@@ -5372,7 +5493,7 @@ function isGovernedReducedProductionProfile(artifact: BenchmarkArtifactV1): bool
   const expected = productionProfileArtifactMetadata(
     productionProfile({profile: 'production-large', profileFiles: 3_000, profileSymbols: 110_000}),
   );
-  return Object.entries(expected).every(([name, value]) => artifact.metadata[name] === value);
+  return EffectArray.every(EffectRecord.toEntries(expected), ([name, value]) => artifact.metadata[name] === value);
 }
 
 function missingGovernedReducedProductionProfile(artifact: BenchmarkArtifactV1): readonly string[] {
@@ -5414,23 +5535,26 @@ export function assertExternalPerformanceEvidence(artifact: BenchmarkArtifactV1)
 function missingDeterministicParityEvidence(
   measurements: ReadonlyMap<string, BenchmarkArtifactV1['measurements'][number]>,
 ): readonly string[] {
-  return [
-    'cold-primary-query-returned-nodes',
-    'one-file-reindex-primary-query-returned-nodes',
-    'same-overlay-full-rebuild-primary-query-returned-nodes',
-    'primary-query-structural-parity',
-    'structural-graph-digest-parity',
-  ].flatMap(name => {
-    const measurement = measurements.get(name);
-    return measurement && measurement.minimum >= 1 ? [] : [`${name} positive result`];
-  });
+  return EffectArray.flatMap(
+    [
+      'cold-primary-query-returned-nodes',
+      'one-file-reindex-primary-query-returned-nodes',
+      'same-overlay-full-rebuild-primary-query-returned-nodes',
+      'primary-query-structural-parity',
+      'structural-graph-digest-parity',
+    ],
+    name => {
+      const measurement = measurements.get(name);
+      return measurement && measurement.minimum >= 1 ? [] : [`${name} positive result`];
+    },
+  );
 }
 
 function missingSamplerObservations(
   measurements: ReadonlyMap<string, BenchmarkArtifactV1['measurements'][number]>,
 ): readonly string[] {
   const requiredFailureMeasurements = new Set<string>();
-  const missing = (['cold', 'one-file-reindex', 'same-overlay-reference'] as const).flatMap(prefix => {
+  const missing = EffectArray.flatMap(['cold', 'one-file-reindex', 'same-overlay-reference'] as const, prefix => {
     const expectedPositive = [
       `${prefix}-external-storage-samples-n1`,
       `${prefix}-external-process-tree-samples-n1`,
@@ -5438,7 +5562,7 @@ function missingSamplerObservations(
       `${prefix}-external-process-count-peak-observed-n1`,
       `${prefix}-external-rss-peak-observed-n1`,
     ];
-    const prefixMissing = expectedPositive.flatMap(name => {
+    const prefixMissing = EffectArray.flatMap(expectedPositive, name => {
       const measurement = measurements.get(name);
       return measurement && measurement.minimum >= 1 ? [] : [`${name} positive result`];
     });
@@ -5471,8 +5595,8 @@ function missingSamplerObservations(
   });
   for (const [name, measurement] of measurements) {
     if (
-      (name.endsWith('-external-process-tree-failures-n1') ||
-        name.endsWith('-external-open-temp-process-tree-failures-n1')) &&
+      (Effect2.pipe(name, EffectString.endsWith('-external-process-tree-failures-n1')) ||
+        Effect2.pipe(name, EffectString.endsWith('-external-open-temp-process-tree-failures-n1'))) &&
       !requiredFailureMeasurements.has(name) &&
       measurement.maximum !== 0
     ) {
@@ -5491,14 +5615,17 @@ function missingReleaseSourceProvenance(artifact: BenchmarkArtifactV1): readonly
   let harnessDeltaPaths: readonly string[] = [];
   try {
     const parsed = JSON.parse(String(artifact.metadata.releaseEvidenceHarnessDeltaPaths ?? '[]'));
-    if (Array.isArray(parsed) && parsed.every(path => typeof path === 'string')) harnessDeltaPaths = parsed;
+    if (EffectArray.isArray(parsed) && EffectArray.every(parsed, path => typeof path === 'string'))
+      harnessDeltaPaths = parsed;
   } catch {
     // The shared missing-evidence result below reports malformed provenance.
   }
   const canonicalHarnessDelta =
     harnessDeltaPaths.length > 0 &&
     new Set(harnessDeltaPaths).size === harnessDeltaPaths.length &&
-    harnessDeltaPaths.every(path => (RELEASE_EVIDENCE_HARNESS_DELTA_PATHS as readonly string[]).includes(path)) &&
+    EffectArray.every(harnessDeltaPaths, path =>
+      (RELEASE_EVIDENCE_HARNESS_DELTA_PATHS as readonly string[]).includes(path),
+    ) &&
     JSON.stringify([...harnessDeltaPaths].sort()) === JSON.stringify(harnessDeltaPaths);
   const sourceModeValid =
     (sourceMode === 'exact-release' &&
@@ -5557,16 +5684,20 @@ function missingBenchmarkRuntimeProvenance(artifact: BenchmarkArtifactV1): reado
     metadata.benchmarkValidatedManagedProcessLeaseInspection === 'complete' &&
     metadata.benchmarkValidatedManagedDependencyInstallation === 'bun install --frozen-lockfile' &&
     typeof managedVersion === 'string' &&
-    (managedVersion.endsWith(`-local.g${sourceCommit}`) || managedVersion.endsWith(`.local.g${sourceCommit}`)) &&
+    (Effect2.pipe(managedVersion, EffectString.endsWith(`-local.g${sourceCommit}`)) ||
+      Effect2.pipe(managedVersion, EffectString.endsWith(`.local.g${sourceCommit}`))) &&
     typeof metadata.benchmarkValidatedManagedPayloadFileCount === 'number' &&
     metadata.benchmarkValidatedManagedPayloadFileCount > 0 &&
     typeof metadata.benchmarkValidatedManagedPayloadBytes === 'number' &&
     metadata.benchmarkValidatedManagedPayloadBytes > 0 &&
-    [
-      metadata.benchmarkValidatedManagedExecutableSha256,
-      metadata.benchmarkValidatedManagedPayloadManifestSha256,
-      metadata.benchmarkValidatedManagedReleaseMetadataSha256,
-    ].every(value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)) &&
+    EffectArray.every(
+      [
+        metadata.benchmarkValidatedManagedExecutableSha256,
+        metadata.benchmarkValidatedManagedPayloadManifestSha256,
+        metadata.benchmarkValidatedManagedReleaseMetadataSha256,
+      ],
+      value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value),
+    ) &&
     typeof metadata.benchmarkValidatedManagedRuntime === 'string' &&
     metadata.benchmarkValidatedManagedRuntime.length > 0 &&
     typeof metadata.benchmarkValidatedManagedTarget === 'string' &&
@@ -5579,7 +5710,7 @@ function missingActivationObservations(
   artifact: BenchmarkArtifactV1,
   measurements: ReadonlyMap<string, BenchmarkArtifactV1['measurements'][number]>,
 ): readonly string[] {
-  const missing = (['cold', 'one-file-reindex'] as const).flatMap(prefix => {
+  const missing = EffectArray.flatMap(['cold', 'one-file-reindex'] as const, prefix => {
     const storageMode =
       prefix === 'cold'
         ? artifact.metadata.coldMaterializationStorageMode
@@ -5623,7 +5754,7 @@ function missingActivationObservations(
 
 const threadnoteSourceGit = Effect.fn('benchmarkCodeGraph.threadnoteSourceGit')(
   (sourceRoot: string, args: readonly string[]) =>
-    repositoryGit(sourceRoot, args).pipe(Effect.map(result => result.stdout.trim())),
+    repositoryGit(sourceRoot, args).pipe(Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim))),
 );
 
 function githubRunnerArchitecture(architecture: string): 'ARM64' | 'X64' | undefined {
@@ -5659,13 +5790,27 @@ export const validateBenchmarkRuntimeProvenance = Effect.fn('benchmarkCodeGraph.
   }
   const environment = system.environment();
   if (environment.GITHUB_ACTIONS === 'true') {
-    const githubWorkspace = environment.GITHUB_WORKSPACE?.trim();
-    const githubSha = environment.GITHUB_SHA?.trim();
-    const githubRunId = environment.GITHUB_RUN_ID?.trim();
-    const githubRepository = environment.GITHUB_REPOSITORY?.trim();
-    const runnerArchitecture = environment.RUNNER_ARCH?.trim();
-    const runnerEnvironment = environment.RUNNER_ENVIRONMENT?.trim();
-    const runnerOperatingSystem = environment.RUNNER_OS?.trim();
+    const githubWorkspace = Effect2.pipe(environment.GITHUB_WORKSPACE, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+    const githubSha = Effect2.pipe(environment.GITHUB_SHA, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+    const githubRunId = Effect2.pipe(environment.GITHUB_RUN_ID, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+    const githubRepository = Effect2.pipe(environment.GITHUB_REPOSITORY, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+    const runnerArchitecture = Effect2.pipe(environment.RUNNER_ARCH, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+    const runnerEnvironment = Effect2.pipe(environment.RUNNER_ENVIRONMENT, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+    const runnerOperatingSystem = Effect2.pipe(environment.RUNNER_OS, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
     const expectedRunnerArchitecture = githubRunnerArchitecture(system.architecture);
     const expectedRunnerOperatingSystem = githubRunnerOperatingSystem(system.platform);
     if (
@@ -5695,7 +5840,9 @@ export const validateBenchmarkRuntimeProvenance = Effect.fn('benchmarkCodeGraph.
       {concurrency: 4},
     );
     const normalize = (value: string) =>
-      system.platform === 'win32' ? path.resolve(value).toLocaleLowerCase('en-US') : path.resolve(value);
+      system.platform === 'win32'
+        ? Effect2.pipe(path.resolve(value), EffectString.toLocaleLowerCase('en-US'))
+        : path.resolve(value);
     if (normalize(realSourceRoot) !== normalize(realGithubWorkspace)) {
       return yield* ScriptError.make({message: 'GitHub Actions benchmark provenance is not bound to this workspace.'});
     }
@@ -5798,7 +5945,9 @@ export function resolvedReleaseEvidenceSource(
     releaseIsAncestor &&
     normalizedDeltaPaths.length > 0 &&
     new Set(normalizedDeltaPaths).size === normalizedDeltaPaths.length &&
-    normalizedDeltaPaths.every(path => (RELEASE_EVIDENCE_HARNESS_DELTA_PATHS as readonly string[]).includes(path));
+    EffectArray.every(normalizedDeltaPaths, path =>
+      (RELEASE_EVIDENCE_HARNESS_DELTA_PATHS as readonly string[]).includes(path),
+    );
   if (
     releaseEvidenceVersionForRef(ref) === undefined ||
     !EXACT_GIT_COMMIT_PATTERN.test(sha) ||
@@ -5882,7 +6031,7 @@ const validateReleaseEvidenceSource = Effect.fn('benchmarkCodeGraph.validateRele
           ],
           {concurrency: 2},
         );
-  const harnessDeltaPaths = harnessDeltaOutput.split('\n').filter(Boolean);
+  const harnessDeltaPaths = EffectArray.filter(Effect2.pipe(harnessDeltaOutput, EffectString.split('\n')), Boolean);
   return yield* Effect.try(() =>
     resolvedReleaseEvidenceSource(
       ref,
@@ -5992,10 +6141,10 @@ export function parseCodeGraphBenchmarkArguments(args: readonly string[]): CodeG
     else if (argument === '--scale-symbols') scaleSymbols = integer(args[++index], argument, 1);
     else if (argument === '--sqlite-writer-profile') {
       const value = required(args[++index], argument);
-      if (!(value in CODE_GRAPH_SQLITE_WRITER_PROFILES)) {
+      if (!isCodeGraphSqliteWriterProfile(value)) {
         throw ScriptError.make({message: `Unknown SQLite writer benchmark profile: ${value}`});
       }
-      sqliteWriterProfile = value as CodeGraphSqliteWriterProfile;
+      sqliteWriterProfile = value;
     } else if (argument === '--warmups') warmups = integer(args[++index], argument, 0);
     else if (argument === '--fail-on-budget') failOnBudget = true;
     else if (argument === '--ratchet') ratchetPath = required(args[++index], argument);
@@ -6058,7 +6207,10 @@ export function parseCodeGraphBenchmarkArguments(args: readonly string[]): CodeG
   if (ratchetPath !== undefined && outputPath === undefined) {
     throw ScriptError.make({message: '--ratchet requires --output so failed evidence remains reviewable.'});
   }
-  const legacyControlValues = [queryText, expectedPath, expectedLanguage].filter(value => value !== undefined).length;
+  const legacyControlValues = EffectArray.filter(
+    [queryText, expectedPath, expectedLanguage],
+    value => value !== undefined,
+  ).length;
   if (structuredControls.length > 0 && legacyControlValues > 0) {
     throw ScriptError.make({
       message: '--control cannot be combined with legacy --query, --expected-path, or --expected-language flags.',
@@ -6075,7 +6227,9 @@ export function parseCodeGraphBenchmarkArguments(args: readonly string[]): CodeG
       : queryText && expectedPath && expectedLanguage
         ? [{expectedLanguage, expectedPath, query: queryText}]
         : [];
-  if (new Set(externalControls.map(control => control.expectedLanguage)).size !== externalControls.length) {
+  if (
+    new Set(EffectArray.map(externalControls, control => control.expectedLanguage)).size !== externalControls.length
+  ) {
     throw ScriptError.make({message: 'External query controls must use unique language categories.'});
   }
   if (repository !== undefined) {
@@ -6154,15 +6308,17 @@ function parseExternalRepositoryQueryControl(value: string): ExternalRepositoryQ
       message: '--control must be a JSON object with query, expectedPath, and expectedLanguage strings.',
     });
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+  if (typeof parsed !== 'object' || parsed === null || EffectArray.isArray(parsed)) {
     throw ScriptError.make({
       message: '--control must be a JSON object with query, expectedPath, and expectedLanguage strings.',
     });
   }
   const candidate = parsed as Partial<Record<keyof ExternalRepositoryQueryControl, unknown>>;
-  const query = typeof candidate.query === 'string' ? candidate.query.trim() : '';
-  const expectedPath = typeof candidate.expectedPath === 'string' ? candidate.expectedPath.trim() : '';
-  const expectedLanguage = typeof candidate.expectedLanguage === 'string' ? candidate.expectedLanguage.trim() : '';
+  const query = typeof candidate.query === 'string' ? Effect2.pipe(candidate.query, EffectString.trim) : '';
+  const expectedPath =
+    typeof candidate.expectedPath === 'string' ? Effect2.pipe(candidate.expectedPath, EffectString.trim) : '';
+  const expectedLanguage =
+    typeof candidate.expectedLanguage === 'string' ? Effect2.pipe(candidate.expectedLanguage, EffectString.trim) : '';
   if (!query || !expectedPath || !/^[a-z][a-z0-9-]*$/.test(expectedLanguage)) {
     throw ScriptError.make({
       message:
@@ -6182,13 +6338,21 @@ const prepareExternalCodeGraphFixture = Effect.fn('benchmarkCodeGraph.prepareExt
   }
   const requestedRoot = path.resolve(options.repository);
   const repository = yield* fs.realPath(
-    path.resolve((yield* repositoryGit(requestedRoot, ['rev-parse', '--show-toplevel'])).stdout.trim()),
+    path.resolve(
+      Effect2.pipe((yield* repositoryGit(requestedRoot, ['rev-parse', '--show-toplevel'])).stdout, EffectString.trim),
+    ),
   );
   const [externalCommit, dirty, origin] = yield* Effect.all(
     [
-      repositoryGit(repository, ['rev-parse', 'HEAD']).pipe(Effect.map(result => result.stdout.trim())),
-      repositoryGit(repository, CONFIG_NEUTRAL_GIT_STATUS_ARGUMENTS).pipe(Effect.map(result => result.stdout.trim())),
-      repositoryGit(repository, ['remote', 'get-url', 'origin']).pipe(Effect.map(result => result.stdout.trim())),
+      repositoryGit(repository, ['rev-parse', 'HEAD']).pipe(
+        Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+      ),
+      repositoryGit(repository, CONFIG_NEUTRAL_GIT_STATUS_ARGUMENTS).pipe(
+        Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+      ),
+      repositoryGit(repository, ['remote', 'get-url', 'origin']).pipe(
+        Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+      ),
     ],
     {concurrency: 3},
   );
@@ -6211,7 +6375,7 @@ const prepareExternalCodeGraphFixture = Effect.fn('benchmarkCodeGraph.prepareExt
     artifactContainment === '' ||
     (!path.isAbsolute(artifactContainment) &&
       artifactContainment !== '..' &&
-      !artifactContainment.startsWith(`..${path.sep}`))
+      !Effect2.pipe(artifactContainment, EffectString.startsWith(`..${path.sep}`)))
   ) {
     return yield* ScriptError.make({
       message: '--output must be outside the external repository so benchmark evidence cannot modify the checkout.',
@@ -6263,7 +6427,9 @@ const prepareExternalCodeGraphFixture = Effect.fn('benchmarkCodeGraph.prepareExt
     const containment = path.relative(repository, benchmarkHome);
     if (
       containment === '' ||
-      (!path.isAbsolute(containment) && containment !== '..' && !containment.startsWith(`..${path.sep}`))
+      (!path.isAbsolute(containment) &&
+        containment !== '..' &&
+        !Effect2.pipe(containment, EffectString.startsWith(`..${path.sep}`)))
     ) {
       return yield* ScriptError.make({message: 'Benchmark homes must be outside the external repository.'});
     }
@@ -6287,7 +6453,7 @@ const prepareExternalCodeGraphFixture = Effect.fn('benchmarkCodeGraph.prepareExt
 });
 
 export function publicGitHubRepositoryEvidence(remote: string): PublicGitHubRepositoryEvidence {
-  const trimmed = remote.trim();
+  const trimmed = Effect2.pipe(remote, EffectString.trim);
   const scp = /^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(trimmed);
   const [owner, repository] = scp
     ? ([scp[1], scp[2]] as const)
@@ -6302,7 +6468,7 @@ export function publicGitHubRepositoryEvidence(remote: string): PublicGitHubRepo
           parsed.protocol === 'ssh:' && (parsed.username.length === 0 || parsed.username === 'git');
         const credentialsAllowed = parsed.protocol === 'https:' ? parsed.username.length === 0 : allowedSshUser;
         if (
-          parsed.hostname.toLowerCase() !== 'github.com' ||
+          Effect2.pipe(parsed.hostname, EffectString.toLowerCase) !== 'github.com' ||
           !credentialsAllowed ||
           parsed.password.length > 0 ||
           parsed.port.length > 0 ||
@@ -6329,9 +6495,9 @@ export function credentialsDisabledGitProofEnvironment(
   globalConfig: string,
 ): Record<string, string | undefined> {
   const sanitized = {...environment};
-  for (const key of Object.keys(sanitized)) {
+  for (const key of EffectRecord.keys(sanitized)) {
     if (
-      key.toUpperCase().startsWith('GIT_') ||
+      Effect2.pipe(key, EffectString.toUpperCase, EffectString.startsWith('GIT_')) ||
       [
         'GCM_CREDENTIAL_STORE',
         'GCM_INTERACTIVE',
@@ -6341,7 +6507,7 @@ export function credentialsDisabledGitProofEnvironment(
         'NETRC',
         'SSH_ASKPASS',
         'SSH_ASKPASS_REQUIRE',
-      ].includes(key.toUpperCase())
+      ].includes(Effect2.pipe(key, EffectString.toUpperCase))
     ) {
       delete sanitized[key];
     }
@@ -6366,12 +6532,18 @@ const exactCommitProofRemote = Effect.fn('benchmarkCodeGraph.exactCommitProofRem
   repository: PublicGitHubRepositoryEvidence,
   environment: Readonly<Record<string, string | undefined>>,
 ) {
-  const testRemote = environment[TEST_PUBLIC_REPOSITORY_REMOTE_ENV]?.trim();
+  const testRemote = Effect2.pipe(environment[TEST_PUBLIC_REPOSITORY_REMOTE_ENV], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (!testRemote) return repository.url;
   if (
     environment.NODE_ENV !== 'test' ||
-    environment.THREADNOTE_BENCHMARK_RELEASE_REF?.trim() ||
-    environment.THREADNOTE_BENCHMARK_RELEASE_SHA?.trim()
+    Effect2.pipe(environment.THREADNOTE_BENCHMARK_RELEASE_REF, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) ||
+    Effect2.pipe(environment.THREADNOTE_BENCHMARK_RELEASE_SHA, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
   ) {
     return yield* ScriptError.make({
       message: 'The local public-repository proof seam is test-only and unavailable for release evidence.',
@@ -6454,10 +6626,11 @@ export const verifyAnonymousPublicGitHubRepository = Effect.fn(
     '--verify',
     'FETCH_HEAD^{commit}',
   ]).pipe(
-    Effect.map(result => result.stdout.trim()),
-    Effect.mapError(() =>
-      ScriptError.make({message: 'External benchmark public-repository proof did not resolve the fetched commit.'}),
-    ),
+    Effect.mapBoth({
+      onSuccess: result => Effect2.pipe(result.stdout, EffectString.trim),
+      onFailure: () =>
+        ScriptError.make({message: 'External benchmark public-repository proof did not resolve the fetched commit.'}),
+    }),
   );
   if (resolved !== externalCommit) {
     return yield* ScriptError.make({
@@ -6490,7 +6663,9 @@ const acquireFreshBenchmarkHome = Effect.fn('benchmarkCodeGraph.acquireFreshHome
   const containment = path.relative(repository, target);
   if (
     containment === '' ||
-    (!path.isAbsolute(containment) && containment !== '..' && !containment.startsWith(`..${path.sep}`))
+    (!path.isAbsolute(containment) &&
+      containment !== '..' &&
+      !Effect2.pipe(containment, EffectString.startsWith(`..${path.sep}`)))
   ) {
     return yield* ScriptError.make({message: 'Benchmark homes must be outside the external repository.'});
   }
@@ -6510,7 +6685,7 @@ const acquireFreshBenchmarkHome = Effect.fn('benchmarkCodeGraph.acquireFreshHome
             return finalContainment === '' ||
               (!path.isAbsolute(finalContainment) &&
                 finalContainment !== '..' &&
-                !finalContainment.startsWith(`..${path.sep}`))
+                !Effect2.pipe(finalContainment, EffectString.startsWith(`..${path.sep}`)))
               ? Effect.fail(ScriptError.make({message: 'Benchmark homes must be outside the external repository.'}))
               : Effect.succeed(home);
           }),
@@ -6561,7 +6736,9 @@ const externalBenchmarkPreflight = Effect.fn('benchmarkCodeGraph.externalPreflig
   semanticBenchmarkOverlay(prepared.incrementalSourcePath, source);
   const [tree, primaryCapacity, referenceCapacity, hardware] = yield* Effect.all(
     [
-      repositoryGit(prepared.repository, ['rev-parse', 'HEAD^{tree}']).pipe(Effect.map(result => result.stdout.trim())),
+      repositoryGit(prepared.repository, ['rev-parse', 'HEAD^{tree}']).pipe(
+        Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+      ),
       filesystemCapacity(prepared.home),
       filesystemCapacity(prepared.referenceHome),
       system.hardwareInfo,
@@ -6636,7 +6813,10 @@ const productionBenchmarkGovernance = Effect.fn('benchmarkCodeGraph.productionGo
   if (!productionBenchmarkStorageGoverned(system.platform, allowGithubActionsHostedStorage, storageEnvironments)) {
     return yield* ScriptError.make({message: 'Production-large benchmark requires solid-state storage.'});
   }
-  if (system.platform === 'darwin' && storageEnvironments.some(storage => storage.location !== 'internal')) {
+  if (
+    system.platform === 'darwin' &&
+    EffectArray.some(storageEnvironments, storage => storage.location !== 'internal')
+  ) {
     return yield* ScriptError.make({message: 'Production-large benchmark requires internal storage on macOS.'});
   }
   return {
@@ -6657,7 +6837,7 @@ export function productionBenchmarkStorageGoverned(
   if (storageEnvironments.length !== 2) return false;
   return (
     (githubHostedSsdAttested && platform === 'linux') ||
-    storageEnvironments.every(storage => storage.medium === 'solid-state')
+    EffectArray.every(storageEnvironments, storage => storage.medium === 'solid-state')
   );
 }
 
@@ -6667,7 +6847,10 @@ const verifyPublicRepositoryOrigin = Effect.fn('benchmarkCodeGraph.verifyPublicR
   expectedVerification: ExternalRepositoryPublicVerification | undefined,
   externalCommit: string,
 ) {
-  const remote = (yield* repositoryGit(repository, ['remote', 'get-url', 'origin'])).stdout.trim();
+  const remote = Effect2.pipe(
+    (yield* repositoryGit(repository, ['remote', 'get-url', 'origin'])).stdout,
+    EffectString.trim,
+  );
   const actual = publicGitHubRepositoryEvidence(remote);
   if (actual.name !== expected.name || actual.url !== expected.url) {
     return yield* ScriptError.make({message: 'External benchmark public repository identity changed during the run.'});
@@ -6682,9 +6865,22 @@ const verifyPublicRepositoryOrigin = Effect.fn('benchmarkCodeGraph.verifyPublicR
 
 const filesystemCapacity = Effect.fn('benchmarkCodeGraph.filesystemCapacity')(function* (target: string) {
   const result = yield* runCommandEffect('df', ['-Pk', target], {timeoutMs: 10_000});
-  const line = result.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
-  const columns = line?.trim().split(/\s+/) ?? [];
-  const capacityIndex = columns.findIndex(column => /^\d+%$/.test(column));
+  const line = EffectArray.filter(
+    Effect2.pipe(result.stdout, EffectString.trim, EffectString.split(/\r?\n/)),
+    Boolean,
+  ).at(-1);
+  const columns =
+    Effect2.pipe(
+      line,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.split(/\s+/)),
+    ) ?? [];
+  const capacityIndex = Option.getOrElse(
+    EffectArray.findFirstIndex(columns, __effectArrayValue => !!(column => /^\d+%$/.test(column))(__effectArrayValue)),
+    () => -1,
+  );
   const availableKilobytes = Number(columns[capacityIndex - 1] ?? Number.NaN);
   const filesystem = columns[0] ?? '';
   if (!filesystem || capacityIndex < 3 || !Number.isSafeInteger(availableKilobytes) || availableKilobytes < 0) {
@@ -6698,7 +6894,7 @@ export const benchmarkStorageEnvironment = Effect.fn('benchmarkCodeGraph.storage
 ) {
   const statArguments = process.platform === 'darwin' ? ['-f', '%T', target] : ['-f', '-c', '%T', target];
   let filesystem = yield* runCommandEffect('stat', statArguments, {timeoutMs: 10_000}).pipe(
-    Effect.map(result => result.stdout.trim().toLowerCase()),
+    Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim, EffectString.toLowerCase)),
     Effect.orElseSucceed(() => 'unknown'),
     Effect.map(value => (/^[a-z0-9._+-]{1,64}$/.test(value) ? value : 'unknown')),
   );
@@ -6722,13 +6918,15 @@ export const benchmarkStorageEnvironment = Effect.fn('benchmarkCodeGraph.storage
     const source = yield* runCommandEffect('findmnt', ['-n', '-o', 'SOURCE', '--target', target], {
       timeoutMs: 10_000,
     }).pipe(
-      Effect.map(result => result.stdout.trim()),
+      Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
       Effect.orElseSucceed(() => ''),
     );
     medium = benchmarkLinuxStorageClassification(filesystem, source, []);
     if (medium === 'unknown' && source.length > 0) {
       const rotational = yield* runCommandEffect('lsblk', ['-n', '-o', 'ROTA', source], {timeoutMs: 10_000}).pipe(
-        Effect.map(result => result.stdout.trim().split(/\s+/).filter(Boolean)),
+        Effect.map(result =>
+          EffectArray.filter(Effect2.pipe(result.stdout, EffectString.trim, EffectString.split(/\s+/)), Boolean),
+        ),
         Effect.orElseSucceed(() => [] as string[]),
       );
       medium = benchmarkLinuxStorageClassification(filesystem, source, rotational);
@@ -6755,7 +6953,10 @@ export function benchmarkDarwinStorageClassification(info: string): BenchmarkSto
   const filesystemValue =
     /^\s*Type \(Bundle\):\s*([a-z0-9._+-]{1,64})\s*$/imu.exec(info)?.[1] ??
     /^\s*File System Personality:\s*([a-z0-9._+-]{1,64})\s*$/imu.exec(info)?.[1];
-  const filesystem = filesystemValue?.toLowerCase() ?? 'unknown';
+  const filesystem =
+    Effect2.pipe(filesystemValue, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+    ) ?? 'unknown';
   const virtualOrNetwork = /^\s*(?:Virtual|Network):\s+Yes\s*$/imu.test(info);
   const medium: BenchmarkStorageEnvironment['medium'] = virtualOrNetwork
     ? 'virtual-or-network'
@@ -6899,12 +7100,12 @@ export const benchmarkConcurrentWorktreeIsolation = Effect.fn('benchmarkCodeGrap
         linkedQuery.snapshot.worktreeId === linked.identity.worktreeId &&
         primaryCrossQuery.snapshot.worktreeId === primary.identity.worktreeId &&
         linkedCrossQuery.snapshot.worktreeId === linked.identity.worktreeId &&
-        primaryQuery.nodes.some(node => node.name === 'primaryWorktreeSentinel') &&
-        !primaryQuery.nodes.some(node => node.name === 'linkedWorktreeSentinel') &&
-        linkedQuery.nodes.some(node => node.name === 'linkedWorktreeSentinel') &&
-        !linkedQuery.nodes.some(node => node.name === 'primaryWorktreeSentinel') &&
-        !primaryCrossQuery.nodes.some(node => node.name === 'linkedWorktreeSentinel') &&
-        !linkedCrossQuery.nodes.some(node => node.name === 'primaryWorktreeSentinel');
+        EffectArray.some(primaryQuery.nodes, node => node.name === 'primaryWorktreeSentinel') &&
+        !EffectArray.some(primaryQuery.nodes, node => node.name === 'linkedWorktreeSentinel') &&
+        EffectArray.some(linkedQuery.nodes, node => node.name === 'linkedWorktreeSentinel') &&
+        !EffectArray.some(linkedQuery.nodes, node => node.name === 'primaryWorktreeSentinel') &&
+        !EffectArray.some(primaryCrossQuery.nodes, node => node.name === 'linkedWorktreeSentinel') &&
+        !EffectArray.some(linkedCrossQuery.nodes, node => node.name === 'primaryWorktreeSentinel');
       if (!isolationPassed) {
         return yield* ScriptError.make({message: 'Concurrent linked-worktree graph isolation control failed.'});
       }
@@ -6944,7 +7145,12 @@ export function sanitizedBenchmarkEnvironmentProvenance(
   environment: Readonly<Record<string, string | undefined>>,
 ): Readonly<Record<string, string>> {
   const values: Record<string, string> = {};
-  if (environment.SQLITE_TMPDIR?.trim()) values.SQLITE_TMPDIR = 'configured-path-redacted';
+  if (
+    Effect2.pipe(environment.SQLITE_TMPDIR, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    values.SQLITE_TMPDIR = 'configured-path-redacted';
   const idleTimeout = boundedEnvironmentInteger(
     environment,
     'THREADNOTE_CODE_GRAPH_PARSER_IDLE_TIMEOUT_MS',
@@ -6965,14 +7171,22 @@ export function sanitizedBenchmarkEnvironmentProvenance(
   if ([1, 2, 4, 8].includes(embeddingContexts)) {
     values[THREADNOTE_EMBEDDING_CONTEXTS_ENV] = String(embeddingContexts);
   }
-  if (environment.THREADNOTE_BENCHMARK_RUNNER_CLASS?.trim()) {
+  if (
+    Effect2.pipe(environment.THREADNOTE_BENCHMARK_RUNNER_CLASS, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  ) {
     values.THREADNOTE_BENCHMARK_RUNNER_CLASS = benchmarkRunnerLabel(
       'THREADNOTE_BENCHMARK_RUNNER_CLASS',
       'local-unclassified',
       environment,
     );
   }
-  if (environment.THREADNOTE_BENCHMARK_RUNNER_ID?.trim()) {
+  if (
+    Effect2.pipe(environment.THREADNOTE_BENCHMARK_RUNNER_ID, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  ) {
     values.THREADNOTE_BENCHMARK_RUNNER_ID = benchmarkRunnerLabel(
       'THREADNOTE_BENCHMARK_RUNNER_ID',
       'local',
@@ -7001,10 +7215,12 @@ function benchmarkRunnerLabel(
   fallback: string,
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): string {
-  const value = environment[name]?.trim();
+  const value = Effect2.pipe(environment[name], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (!value) return fallback;
   if (name === 'THREADNOTE_BENCHMARK_RUNNER_CLASS') {
-    const normalized = value.toLowerCase();
+    const normalized = Effect2.pipe(value, EffectString.toLowerCase);
     if (normalized === 'local-unclassified') return normalized;
     if (/^github-hosted-ubuntu-[a-z0-9.]+-x64$/.test(normalized)) return 'github-hosted-linux-x64';
     if (/^github-hosted-ubuntu-[a-z0-9.]+-arm64$/.test(normalized)) return 'github-hosted-linux-arm64';
@@ -7013,7 +7229,7 @@ function benchmarkRunnerLabel(
     return 'other';
   }
   const digest = new Bun.CryptoHasher('sha256').update(value).digest('hex');
-  return `runner-${digest.slice(0, 16)}`;
+  return `runner-${Effect2.pipe(digest, EffectString.slice(0, 16))}`;
 }
 
 const validateExternalTrackedRegularPath = Effect.fn('benchmarkCodeGraph.validateExternalTrackedRegularPath')(
@@ -7033,7 +7249,7 @@ const validateExternalTrackedRegularPath = Effect.fn('benchmarkCodeGraph.validat
     if (
       containment === '' ||
       containment === '..' ||
-      containment.startsWith(`..${path.sep}`) ||
+      Effect2.pipe(containment, EffectString.startsWith(`..${path.sep}`)) ||
       path.isAbsolute(containment)
     ) {
       return yield* ScriptError.make({message: `${option} must name a repository-relative file.`});
@@ -7043,12 +7259,12 @@ const validateExternalTrackedRegularPath = Effect.fn('benchmarkCodeGraph.validat
     if (
       canonicalContainment === '' ||
       canonicalContainment === '..' ||
-      canonicalContainment.startsWith(`..${path.sep}`) ||
+      Effect2.pipe(canonicalContainment, EffectString.startsWith(`..${path.sep}`)) ||
       path.isAbsolute(canonicalContainment)
     ) {
       return yield* ScriptError.make({message: `${option} resolved outside the external repository.`});
     }
-    const gitPath = containment.split(path.sep).join('/');
+    const gitPath = EffectArray.join(Effect2.pipe(containment, EffectString.split(path.sep)), '/');
     const tracked = yield* repositoryGit(repository, ['ls-files', '--stage', '--error-unmatch', '--', gitPath]);
     if (!/^100(?:644|755)\s/.test(tracked.stdout)) {
       return yield* ScriptError.make({message: `${option} must name a tracked regular file, not a link or submodule.`});
@@ -7067,8 +7283,12 @@ const verifyExternalRepositoryUnchanged = Effect.fn('benchmarkCodeGraph.verifyEx
 ) {
   const [commit, dirty] = yield* Effect.all(
     [
-      repositoryGit(repository, ['rev-parse', 'HEAD']).pipe(Effect.map(result => result.stdout.trim())),
-      repositoryGit(repository, CONFIG_NEUTRAL_GIT_STATUS_ARGUMENTS).pipe(Effect.map(result => result.stdout.trim())),
+      repositoryGit(repository, ['rev-parse', 'HEAD']).pipe(
+        Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+      ),
+      repositoryGit(repository, CONFIG_NEUTRAL_GIT_STATUS_ARGUMENTS).pipe(
+        Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+      ),
     ],
     {concurrency: 2},
   );
@@ -7218,7 +7438,12 @@ function productionProfileIdentity(profile: ProductionCodeGraphFixtureProfile, v
     `generated-code-graph-production-v${profile.version}-${vectors ? 'vectors' : 'lexical'}:` +
     `${profile.targetEligibleFiles}:${profile.targetGraphSymbols}:${profile.targetGraphEdges}:` +
     `${profile.targetRepositoryFiles}:${profile.targetLexicalTermRows}:${profile.workspaceCount}:` +
-    `${Object.values(profile.classMix).join(':')}:${profile.activeWorkspaceExcludedSourceFiles}:` +
+    `${EffectArray.join(
+      EffectArray.map(EffectRecord.values(profile.classMix), item =>
+        item === null || item === undefined ? '' : String(item),
+      ),
+      ':',
+    )}:${profile.activeWorkspaceExcludedSourceFiles}:` +
     `${profile.duplicateBlobs.generatedSvgVariants}:${profile.duplicateBlobs.heavyJsonVariants}:` +
     `${profile.duplicateBlobs.heavyJsonPayloadBytes}:${profile.lowSignalJsonExclusionThresholdBytes}:` +
     `${profile.highSignalConfigHardCapBytes}`
@@ -7275,7 +7500,7 @@ export function productionProfileArtifactMetadata(
     profileWorkspaces: profile.workspaceCount,
     profileWorktreeChurnMode: 'declared-surrogate-scenarios-no-latency-claims',
     profileWorktreeChurnScenarioCount: profile.worktreeChurnScenarioCount,
-    profileWorktreeChurnScenarios: PRODUCTION_WORKTREE_CHURN_SCENARIOS.join(','),
+    profileWorktreeChurnScenarios: EffectArray.join(PRODUCTION_WORKTREE_CHURN_SCENARIOS, ','),
   };
 }
 
@@ -7286,9 +7511,13 @@ function benchmarkComparisonKey(input: {
   readonly operatingSystem: string;
   readonly runnerClass: string;
 }): string {
-  return [input.runnerClass, input.operatingSystem, input.architecture, input.cpu, input.memoryBytes]
-    .map(value => String(value).trim().replace(/\s+/g, ' '))
-    .join('|');
+  return EffectArray.join(
+    EffectArray.map(
+      [input.runnerClass, input.operatingSystem, input.architecture, input.cpu, input.memoryBytes],
+      value => Effect2.pipe(String(value), EffectString.trim, EffectString.replace(/\s+/g, ' ')),
+    ),
+    '|',
+  );
 }
 
 type BenchmarkRatchetPrimitive = boolean | number | string;
@@ -7325,14 +7554,6 @@ interface PreparedCodeGraphBenchmarkRatchetSandwich {
   readonly controlMeasurementsByName: ReadonlyMap<string, BenchmarkArtifactV1['measurements'][number][]>;
   readonly initialCandidateMeasurementsByName: ReadonlyMap<string, BenchmarkArtifactV1['measurements'][number][]>;
 }
-
-const BENCHMARK_RATCHET_UNITS = new Set<BenchmarkMeasurementUnit>([
-  'bytes',
-  'count',
-  'milliseconds',
-  'operations_per_second',
-  'percent',
-]);
 
 const PRODUCTION_RATCHET_RELATIVE_HEADROOM = 0.25;
 const PRODUCTION_RATCHET_DETAILED_MILLISECOND_RELATIVE_HEADROOM = 0.75;
@@ -7404,18 +7625,19 @@ const PRODUCTION_RATCHET_MILLISECOND_TARGETS = new Map<string, number>([
 export function createCodeGraphProductionRatchet(values: readonly BenchmarkArtifactV1[]): CodeGraphBenchmarkRatchetV1 {
   if (values.length < 3)
     throw ScriptError.make({message: 'Production ratchet generation requires at least three artifacts.'});
-  const artifacts = values.map(parseBenchmarkArtifactV1);
+  const artifacts = EffectArray.map(values, parseBenchmarkArtifactV1);
   for (const artifact of artifacts) assertProductionLargeEvidence(artifact);
   const first = artifacts[0];
-  const names = productionRatchetMeasurements(first)
-    .map(measurement => measurement.name)
-    .sort();
+  const retainedMeasurements = EffectArray.map(artifacts, productionRatchetMeasurements);
+  const measurementIndexes = EffectArray.map(
+    retainedMeasurements,
+    measurements => new Map(EffectArray.map(measurements, measurement => [measurement.name, measurement])),
+  );
+  const names = EffectArray.map(retainedMeasurements[0], measurement => measurement.name).sort();
   const generationIdentity = productionRatchetGenerationIdentity(first);
   const metadata = productionRatchetMetadata(first);
-  for (const artifact of artifacts.slice(1)) {
-    const candidateNames = productionRatchetMeasurements(artifact)
-      .map(measurement => measurement.name)
-      .sort();
+  for (const [index, artifact] of artifacts.slice(1).entries()) {
+    const candidateNames = EffectArray.map(retainedMeasurements[index + 1], measurement => measurement.name).sort();
     if (
       artifact.suite !== first.suite ||
       JSON.stringify(candidateNames) !== JSON.stringify(names) ||
@@ -7439,21 +7661,23 @@ export function createCodeGraphProductionRatchet(values: readonly BenchmarkArtif
   }
   const measurements: Record<string, CodeGraphBenchmarkMeasurementRatchetV1> = {};
   for (const name of names) {
-    const samples = artifacts.map(artifact =>
-      productionRatchetMeasurements(artifact).find(measurement => measurement.name === name),
-    );
-    if (samples.some(sample => sample === undefined)) {
+    const samples = EffectArray.map(measurementIndexes, index => index.get(name));
+    if (EffectArray.some(samples, sample => sample === undefined)) {
       throw ScriptError.make({message: `Production ratchet measurement ${name} is missing.`});
     }
-    const complete = samples as readonly BenchmarkArtifactV1['measurements'][number][];
+    const complete: BenchmarkArtifactV1['measurements'][number][] = [];
+    for (const sample of samples) {
+      if (sample === undefined) throw ScriptError.make({message: `Production ratchet measurement ${name} is missing.`});
+      complete.push(sample);
+    }
     const unit = complete[0].unit;
-    if (complete.some(sample => sample.unit !== unit || sample.samples !== 1)) {
+    if (EffectArray.some(complete, sample => sample.unit !== unit || sample.samples !== 1)) {
       throw ScriptError.make({message: `Production ratchet measurement ${name} has inconsistent samples or units.`});
     }
     measurements[name] = productionMeasurementRatchet(
       name,
       unit,
-      complete.map(sample => sample.p50),
+      EffectArray.map(complete, sample => sample.p50),
     );
   }
   return {
@@ -7478,31 +7702,34 @@ export function createCodeGraphProductionRatchet(values: readonly BenchmarkArtif
 // enclosing operation wall/CPU/resource measurements remain assessed. Enumerate
 // the finite contract so a new stage, statistic, or prefix still fails closed.
 const PRODUCTION_RATCHET_COMPLETION_DIAGNOSTICS = new Set([
-  ...(['cold', 'one-file-reindex', 'same-overlay-reference'] as const).flatMap(prefix => [
-    ...[
-      'admission',
-      'database-session',
-      'database-session-body',
-      'index-scope',
-      'index-scope-body',
-      'lifecycle-opportunity',
-      'reference-reservation-owner-identity',
-      'reference-reservation-claim',
-      'reference-reservation-use',
-      'reference-reservation-release',
-      'reporter-completion',
-      'share-drain',
-      'snapshot-lease-release',
-      'snapshot-lease-release-after-complete',
-    ].flatMap(stage =>
-      ['count', 'process-cpu-total', 'wall-maximum', 'wall-total'].map(
-        statistic => `${prefix}-completion-${stage}-${statistic}-n1`,
-      ),
+  ...EffectArray.flatMap(['cold', 'one-file-reindex', 'same-overlay-reference'] as const, prefix => [
+    ...EffectArray.flatMap(
+      [
+        'admission',
+        'database-session',
+        'database-session-body',
+        'index-scope',
+        'index-scope-body',
+        'lifecycle-opportunity',
+        'reference-reservation-owner-identity',
+        'reference-reservation-claim',
+        'reference-reservation-use',
+        'reference-reservation-release',
+        'reporter-completion',
+        'share-drain',
+        'snapshot-lease-release',
+        'snapshot-lease-release-after-complete',
+      ],
+      stage =>
+        EffectArray.map(
+          ['count', 'process-cpu-total', 'wall-maximum', 'wall-total'],
+          statistic => `${prefix}-completion-${stage}-${statistic}-n1`,
+        ),
     ),
     `${prefix}-post-activation-completion`,
     `${prefix}-post-activation-completion-process-cpu-n1`,
   ]),
-  ...['lease-acquire', 'read-session', 'lease-release'].flatMap(stage => [
+  ...EffectArray.flatMap(['lease-acquire', 'read-session', 'lease-release'], stage => [
     `whole-graph-structural-analysis-${stage}`,
     `whole-graph-structural-analysis-${stage}-process-cpu`,
   ]),
@@ -7511,16 +7738,17 @@ const PRODUCTION_RATCHET_COMPLETION_DIAGNOSTICS = new Set([
 function productionRatchetMeasurements(
   artifact: BenchmarkArtifactV1,
 ): readonly BenchmarkArtifactV1['measurements'][number][] {
-  const retained = artifact.measurements.filter(
+  const retained = EffectArray.filter(
+    artifact.measurements,
     measurement =>
       !dynamicExternalSamplerPhaseMeasurement(measurement.name) &&
       !unstableProductionRatchetMeasurement(measurement.name),
   );
-  const names = retained.map(measurement => measurement.name);
+  const names = EffectArray.map(retained, measurement => measurement.name);
   if (new Set(names).size !== names.length) {
     throw ScriptError.make({message: 'Production ratchet artifacts require unique assessed measurement names.'});
   }
-  return retained.filter(measurement => !PRODUCTION_RATCHET_COMPLETION_DIAGNOSTICS.has(measurement.name));
+  return EffectArray.filter(retained, measurement => !PRODUCTION_RATCHET_COMPLETION_DIAGNOSTICS.has(measurement.name));
 }
 
 function unstableProductionRatchetMeasurement(name: string): boolean {
@@ -7528,22 +7756,26 @@ function unstableProductionRatchetMeasurement(name: string): boolean {
   // a phase peak. Retain it in evidence, but govern memory with the external
   // process-tree RSS peaks that cover the complete operation.
   return (
-    name.endsWith('-boundary-rss-n1') ||
-    name.endsWith('-external-process-tree-maximum-sample-gap-n1') ||
+    Effect2.pipe(name, EffectString.endsWith('-boundary-rss-n1')) ||
+    Effect2.pipe(name, EffectString.endsWith('-external-process-tree-maximum-sample-gap-n1')) ||
     // Available capacity is a lower-bound admission condition, never an upper
     // performance bound. The governed preflight and metadata retain the 20 GiB
     // floor; more free space must not fail the ratchet.
-    name.endsWith('-filesystem-available-n1')
+    Effect2.pipe(name, EffectString.endsWith('-filesystem-available-n1'))
   );
 }
 
 function dynamicExternalSamplerPhaseMeasurement(name: string): boolean {
-  const prefix = ['bootstrap', 'cold', 'one-file-reindex', 'same-overlay-reference'].find(candidate =>
-    name.startsWith(`${candidate}-`),
+  const prefix = Option.getOrUndefined(
+    EffectArray.findFirst(
+      ['bootstrap', 'cold', 'one-file-reindex', 'same-overlay-reference'],
+      __effectArrayValue =>
+        !!(candidate => Effect2.pipe(name, EffectString.startsWith(`${candidate}-`)))(__effectArrayValue),
+    ),
   );
   if (prefix === undefined) return false;
-  const suffix = name.slice(prefix.length + 1);
-  if (suffix.startsWith('external-')) return false;
+  const suffix = Effect2.pipe(name, EffectString.slice(prefix.length + 1));
+  if (Effect2.pipe(suffix, EffectString.startsWith('external-'))) return false;
   return (
     /-external-(?:process|rss)-.+-n1$/u.test(suffix) ||
     /-sqlite-(?:main|shm|temp|wal)(?:-[a-z0-9-]+)?-peak-observed-n1$/u.test(suffix)
@@ -7551,8 +7783,8 @@ function dynamicExternalSamplerPhaseMeasurement(name: string): boolean {
 }
 
 function productionRatchetMetadata(artifact: BenchmarkArtifactV1): Readonly<Record<string, BenchmarkRatchetPrimitive>> {
-  const profile = Object.fromEntries(
-    Object.keys(productionProfileArtifactMetadata(PRODUCTION_LARGE_CODE_GRAPH_PROFILE)).map(name => [
+  const profile = EffectRecord.fromEntries(
+    EffectArray.map(EffectRecord.keys(productionProfileArtifactMetadata(PRODUCTION_LARGE_CODE_GRAPH_PROFILE)), name => [
       name,
       artifact.metadata[name],
     ]),
@@ -7605,7 +7837,8 @@ function productionRatchetMetadata(artifact: BenchmarkArtifactV1): Readonly<Reco
     sqliteVersion: artifact.metadata.sqliteVersion,
     vectorEnabled: artifact.metadata.vectorEnabled,
   };
-  if (Object.values(selected).some(value => !['boolean', 'number', 'string'].includes(typeof value))) {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+  if (EffectArray.some(Object.values(selected), value => !['boolean', 'number', 'string'].includes(typeof value))) {
     throw ScriptError.make({message: 'Production ratchet artifact metadata is incomplete.'});
   }
   return selected;
@@ -7733,7 +7966,7 @@ function productionMeasurementRatchet(
   }
   if (unit === 'milliseconds') {
     const objective = PRODUCTION_RATCHET_MILLISECOND_TARGETS.get(name);
-    const detailedTiming = name.endsWith('-n1') && objective === undefined;
+    const detailedTiming = Effect2.pipe(name, EffectString.endsWith('-n1')) && objective === undefined;
     const coldRegistration = name === 'cold-registration-lock-and-database-setup';
     const sameOverlayRegistration = name === 'same-overlay-reference-registration-lock-and-database-setup';
     const relativeHeadroom = coldRegistration
@@ -7784,22 +8017,27 @@ function productionNonIncreasingWorkMeasurement(name: string, unit: BenchmarkMea
 }
 
 function productionCoverageMeasurement(name: string, unit: BenchmarkMeasurementUnit): boolean {
-  return unit === 'count' && (name.endsWith('-attempts-n1') || name.endsWith('-samples-n1'));
+  return (
+    unit === 'count' &&
+    (Effect2.pipe(name, EffectString.endsWith('-attempts-n1')) ||
+      Effect2.pipe(name, EffectString.endsWith('-samples-n1')))
+  );
 }
 
 function productionDeterministicMeasurement(name: string, unit: BenchmarkMeasurementUnit): boolean {
   if (unit !== 'count') return false;
   return (
-    name.includes('-parity') ||
-    name.includes('-returned-') ||
-    name.includes('-incremental-work-') ||
-    name.includes('-materialized-') ||
-    name.includes('-rows') ||
-    (name.includes('-activation-') && name.endsWith('-observed-n1')) ||
-    name.endsWith('-sampler-version-n1') ||
-    name.endsWith('-staged-files') ||
-    name.endsWith('-total-files') ||
-    name.endsWith('-vector-enabled') ||
+    Effect2.pipe(name, EffectString.includes('-parity')) ||
+    Effect2.pipe(name, EffectString.includes('-returned-')) ||
+    Effect2.pipe(name, EffectString.includes('-incremental-work-')) ||
+    Effect2.pipe(name, EffectString.includes('-materialized-')) ||
+    Effect2.pipe(name, EffectString.includes('-rows')) ||
+    (Effect2.pipe(name, EffectString.includes('-activation-')) &&
+      Effect2.pipe(name, EffectString.endsWith('-observed-n1'))) ||
+    Effect2.pipe(name, EffectString.endsWith('-sampler-version-n1')) ||
+    Effect2.pipe(name, EffectString.endsWith('-staged-files')) ||
+    Effect2.pipe(name, EffectString.endsWith('-total-files')) ||
+    Effect2.pipe(name, EffectString.endsWith('-vector-enabled')) ||
     /-(?:edges|files|packages|relations|symbols|terms|workspaces)(?:-n1)?$/u.test(name)
   );
 }
@@ -7820,16 +8058,16 @@ export function enforceCodeGraphBenchmarkRatchet(
   if (artifact.suite !== ratchet.suite) {
     failures.push(`suite ${JSON.stringify(artifact.suite)} does not match ${JSON.stringify(ratchet.suite)}`);
   }
-  for (const [name, expected] of Object.entries(ratchet.environment).sort(([left], [right]) =>
-    left.localeCompare(right),
+  for (const [name, expected] of EffectRecord.toEntries(ratchet.environment).sort(([left], [right]) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
   )) {
-    const actual = artifact.environment[name as keyof BenchmarkArtifactV1['environment']];
+    const actual = Reflect.get(artifact.environment, name);
     if (actual !== expected) {
       failures.push(`environment.${name} ${formatRatchetValue(actual)} does not match ${formatRatchetValue(expected)}`);
     }
   }
-  for (const [name, expected] of Object.entries(ratchet.metadata).sort(([left], [right]) =>
-    left.localeCompare(right),
+  for (const [name, expected] of EffectRecord.toEntries(ratchet.metadata).sort(([left], [right]) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
   )) {
     const actual = artifact.metadata[name];
     if (actual !== expected) {
@@ -7837,19 +8075,20 @@ export function enforceCodeGraphBenchmarkRatchet(
     }
   }
   if (ratchet.suite === 'code-graph-production-large-v2') {
-    const assessedNames = productionRatchetMeasurements(artifact)
-      .map(measurement => measurement.name)
-      .sort();
-    const ratchetedNames = Object.keys(ratchet.measurements).sort();
+    const assessedNames = EffectArray.map(
+      productionRatchetMeasurements(artifact),
+      measurement => measurement.name,
+    ).sort();
+    const ratchetedNames = EffectRecord.keys(ratchet.measurements).sort();
     if (JSON.stringify(assessedNames) !== JSON.stringify(ratchetedNames)) {
       const assessed = new Set(assessedNames);
       const ratcheted = new Set(ratchetedNames);
-      const missing = ratchetedNames.filter(name => !assessed.has(name));
-      const ungoverned = assessedNames.filter(name => !ratcheted.has(name));
+      const missing = EffectArray.filter(ratchetedNames, name => !assessed.has(name));
+      const ungoverned = EffectArray.filter(assessedNames, name => !ratcheted.has(name));
       failures.push(
         `stable production measurement set changed` +
-          `${missing.length > 0 ? `; missing: ${missing.join(', ')}` : ''}` +
-          `${ungoverned.length > 0 ? `; ungoverned: ${ungoverned.join(', ')}` : ''}`,
+          `${missing.length > 0 ? `; missing: ${EffectArray.join(missing, ', ')}` : ''}` +
+          `${ungoverned.length > 0 ? `; ungoverned: ${EffectArray.join(ungoverned, ', ')}` : ''}`,
       );
     }
   }
@@ -7858,8 +8097,8 @@ export function enforceCodeGraphBenchmarkRatchet(
     ? prepareCodeGraphBenchmarkRatchetPairedControl(artifact, pairedControl, ratchet, failures)
     : undefined;
   let confirmatoryWallTailAcceptedName: string | undefined;
-  for (const [name, limit] of Object.entries(ratchet.measurements).sort(([left], [right]) =>
-    left.localeCompare(right),
+  for (const [name, limit] of EffectRecord.toEntries(ratchet.measurements).sort(([left], [right]) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
   )) {
     const matches = measurementsByName.get(name) ?? [];
     if (matches.length === 0) {
@@ -7894,8 +8133,8 @@ export function enforceCodeGraphBenchmarkRatchet(
     }
     const initialStaticFailures = codeGraphBenchmarkMeasurementRatchetFailures(name, initialMeasurement, limit);
     const appendCandidateStaticFailures = () => {
-      failures.push(...initialStaticFailures.map(failure => `initial candidate ${failure}`));
-      failures.push(...staticFailures.map(failure => `remeasured candidate ${failure}`));
+      failures.push(...EffectArray.map(initialStaticFailures, failure => `initial candidate ${failure}`));
+      failures.push(...EffectArray.map(staticFailures, failure => `remeasured candidate ${failure}`));
     };
     const hardObjective = PRODUCTION_RATCHET_MILLISECOND_TARGETS.get(name);
     if (staticFailures.length === 0 && initialStaticFailures.length === 0 && hardObjective === undefined) continue;
@@ -7989,7 +8228,7 @@ export function enforceCodeGraphBenchmarkRatchet(
       dispersionLimit,
     );
     if (dispersionFailures.length > 0) {
-      failures.push(...dispersionFailures.map(failure => `candidate sandwich dispersion ${failure}`));
+      failures.push(...EffectArray.map(dispersionFailures, failure => `candidate sandwich dispersion ${failure}`));
       continue;
     }
     const sandwichP95 =
@@ -8004,15 +8243,18 @@ export function enforceCodeGraphBenchmarkRatchet(
       continue;
     }
     failures.push(
-      ...codeGraphBenchmarkMeasurementRatchetFailures(
-        name,
-        benchmarkMeasurement(name, measurement.unit, [sandwichP95]),
-        pairedLimit,
-      ).map(failure => `${failure} for the bounded candidate sandwich against the exact protected-base control`),
+      ...EffectArray.map(
+        codeGraphBenchmarkMeasurementRatchetFailures(
+          name,
+          benchmarkMeasurement(name, measurement.unit, [sandwichP95]),
+          pairedLimit,
+        ),
+        failure => `${failure} for the bounded candidate sandwich against the exact protected-base control`,
+      ),
     );
   }
   if (failures.length > 0) {
-    throw ScriptError.make({message: `Code graph performance ratchet failed: ${failures.join('; ')}`});
+    throw ScriptError.make({message: `Code graph performance ratchet failed: ${EffectArray.join(failures, '; ')}`});
   }
 }
 
@@ -8031,7 +8273,8 @@ function productionHostSensitiveWallMeasurement(name: string, limit: CodeGraphBe
     limit.unit === 'milliseconds' &&
     limit.samplesMinimum === 1 &&
     limit.p95Maximum !== undefined &&
-    Object.keys(limit).every(key => key === 'p95Maximum' || key === 'samplesMinimum' || key === 'unit') &&
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    EffectArray.every(Object.keys(limit), key => key === 'p95Maximum' || key === 'samplesMinimum' || key === 'unit') &&
     // Default every new millisecond metric to the static ratchet. Only
     // explicitly reviewed elapsed intervals may use a same-runner control;
     // cumulative parser, serialization, transaction, and general stage or
@@ -8039,7 +8282,7 @@ function productionHostSensitiveWallMeasurement(name: string, limit: CodeGraphBe
     // named persistence/commit splits above are synchronous hosted-storage
     // wall waits; independently ratcheted CPU, row/work, and byte/storage
     // measurements continue to govern the amount of work they perform.
-    PRODUCTION_PAIRED_WALL_MEASUREMENT_PATTERNS.some(pattern => pattern.test(name))
+    EffectArray.some(PRODUCTION_PAIRED_WALL_MEASUREMENT_PATTERNS, pattern => pattern.test(name))
   );
 }
 
@@ -8070,7 +8313,8 @@ function productionScreeningBootstrapProcessCountAccepted(
     limit.unit !== 'count' ||
     limit.maximum !== PRODUCTION_RATCHET_SCREENING_BOOTSTRAP_PROCESS_COUNT_MAXIMUM ||
     limit.samplesMinimum !== 1 ||
-    !Object.keys(limit).every(key => key === 'maximum' || key === 'samplesMinimum' || key === 'unit') ||
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    !EffectArray.every(Object.keys(limit), key => key === 'maximum' || key === 'samplesMinimum' || key === 'unit') ||
     initialStaticFailures.length !== 1 ||
     remeasuredStaticFailures.length !== 0 ||
     initialCandidate.samples < limit.samplesMinimum ||
@@ -8193,12 +8437,12 @@ function prepareCodeGraphBenchmarkRatchetPairedControl(
   ) {
     failures.push('paired sandwich suite does not match both candidates, the control, and reviewed ratchet');
   }
-  for (const [name, expected] of Object.entries(ratchet.environment)) {
+  for (const [name, expected] of EffectRecord.toEntries(ratchet.environment)) {
     for (const [label, candidate] of [
       ['paired control', control],
       ['initial candidate', initialCandidate],
     ] as const) {
-      const actual = candidate.environment[name as keyof BenchmarkArtifactV1['environment']];
+      const actual = Reflect.get(candidate.environment, name);
       if (actual !== expected) {
         failures.push(
           `${label} environment.${name} ${formatRatchetValue(actual)} does not match ` + formatRatchetValue(expected),
@@ -8230,15 +8474,15 @@ function prepareCodeGraphBenchmarkRatchetPairedControl(
       'initial candidate does not share the remeasured candidate fixture, output, runtime, and storage contract',
     );
   }
-  const controlNames = productionRatchetMeasurements(control)
-    .map(measurement => measurement.name)
-    .sort();
-  const candidateNames = productionRatchetMeasurements(artifact)
-    .map(measurement => measurement.name)
-    .sort();
-  const initialCandidateNames = productionRatchetMeasurements(initialCandidate)
-    .map(measurement => measurement.name)
-    .sort();
+  const controlNames = EffectArray.map(productionRatchetMeasurements(control), measurement => measurement.name).sort();
+  const candidateNames = EffectArray.map(
+    productionRatchetMeasurements(artifact),
+    measurement => measurement.name,
+  ).sort();
+  const initialCandidateNames = EffectArray.map(
+    productionRatchetMeasurements(initialCandidate),
+    measurement => measurement.name,
+  ).sort();
   if (JSON.stringify(controlNames) !== JSON.stringify(candidateNames)) {
     failures.push('paired control assessed measurement set does not match the candidate');
   }
@@ -8277,17 +8521,19 @@ function parseCodeGraphBenchmarkRatchet(value: unknown): CodeGraphBenchmarkRatch
   const ratchet = ratchetRecord(value, 'Code graph performance ratchet');
   rejectRatchetUnknownKeys(ratchet, ['environment', 'measurements', 'metadata', 'suite', 'version'], 'ratchet');
   if (ratchet.version !== 1) throw ScriptError.make({message: 'Code graph performance ratchet version must be 1.'});
-  if (typeof ratchet.suite !== 'string' || ratchet.suite.trim().length === 0) {
+  if (typeof ratchet.suite !== 'string' || Effect2.pipe(ratchet.suite, EffectString.trim).length === 0) {
     throw ScriptError.make({message: 'Code graph performance ratchet suite must be a non-empty string.'});
   }
   const measurements = ratchetRecord(ratchet.measurements, 'Code graph performance ratchet measurements');
-  const measurementEntries = Object.entries(measurements);
+  const measurementEntries = EffectRecord.toEntries(measurements);
   if (measurementEntries.length === 0) {
     throw ScriptError.make({message: 'Code graph performance ratchet must constrain at least one measurement.'});
   }
-  const parsedMeasurements = Object.create(null) as Record<string, CodeGraphBenchmarkMeasurementRatchetV1>;
-  for (const [name, rawLimit] of measurementEntries.sort(([left], [right]) => left.localeCompare(right))) {
-    if (name.trim().length === 0) {
+  const parsedMeasurementEntries: [string, CodeGraphBenchmarkMeasurementRatchetV1][] = [];
+  for (const [name, rawLimit] of measurementEntries.sort(([left], [right]) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
+  )) {
+    if (Effect2.pipe(name, EffectString.trim).length === 0) {
       throw ScriptError.make({message: 'Code graph performance ratchet measurement names must be non-empty.'});
     }
     const limit = ratchetRecord(rawLimit, `Code graph performance ratchet measurement ${name}`);
@@ -8296,9 +8542,9 @@ function parseCodeGraphBenchmarkRatchet(value: unknown): CodeGraphBenchmarkRatch
       ['maximum', 'meanMaximum', 'minimum', 'p50Maximum', 'p95Maximum', 'p99Maximum', 'samplesMinimum', 'unit'],
       `measurement ${name}`,
     );
-    if (typeof limit.unit !== 'string' || !BENCHMARK_RATCHET_UNITS.has(limit.unit as BenchmarkMeasurementUnit)) {
-      throw ScriptError.make({message: `Code graph performance ratchet measurement ${name} has an invalid unit.`});
-    }
+    const unit = Schema.decodeUnknownSync(
+      Schema.Literals(['bytes', 'count', 'milliseconds', 'operations_per_second', 'percent']),
+    )(limit.unit);
     const minimum = optionalRatchetThreshold(limit.minimum, name, 'minimum');
     const maximum = optionalRatchetThreshold(limit.maximum, name, 'maximum');
     const meanMaximum = optionalRatchetThreshold(limit.meanMaximum, name, 'meanMaximum');
@@ -8331,16 +8577,19 @@ function parseCodeGraphBenchmarkRatchet(value: unknown): CodeGraphBenchmarkRatch
         message: `Code graph performance ratchet measurement ${name} samplesMinimum must be a positive integer.`,
       });
     }
-    parsedMeasurements[name] = {
-      ...(maximum === undefined ? {} : {maximum}),
-      ...(meanMaximum === undefined ? {} : {meanMaximum}),
-      ...(minimum === undefined ? {} : {minimum}),
-      ...(p50Maximum === undefined ? {} : {p50Maximum}),
-      ...(p95Maximum === undefined ? {} : {p95Maximum}),
-      ...(p99Maximum === undefined ? {} : {p99Maximum}),
-      ...(samplesMinimum === undefined ? {} : {samplesMinimum}),
-      unit: limit.unit as BenchmarkMeasurementUnit,
-    };
+    parsedMeasurementEntries.push([
+      name,
+      {
+        ...(maximum === undefined ? {} : {maximum}),
+        ...(meanMaximum === undefined ? {} : {meanMaximum}),
+        ...(minimum === undefined ? {} : {minimum}),
+        ...(p50Maximum === undefined ? {} : {p50Maximum}),
+        ...(p95Maximum === undefined ? {} : {p95Maximum}),
+        ...(p99Maximum === undefined ? {} : {p99Maximum}),
+        ...(samplesMinimum === undefined ? {} : {samplesMinimum}),
+        unit,
+      },
+    ]);
   }
   const environment = parseRatchetConditions(ratchet.environment, 'environment');
   const metadata = parseRatchetConditions(ratchet.metadata, 'metadata');
@@ -8348,7 +8597,7 @@ function parseCodeGraphBenchmarkRatchet(value: unknown): CodeGraphBenchmarkRatch
   requireRatchetConditionKeys(metadata, ['runnerClass', 'runtimePlatform', 'vectorEnabled'], 'metadata');
   return {
     environment,
-    measurements: parsedMeasurements,
+    measurements: EffectRecord.fromEntries(parsedMeasurementEntries),
     metadata,
     suite: ratchet.suite,
     version: 1,
@@ -8361,10 +8610,12 @@ function parseRatchetConditions(
 ): Readonly<Record<string, BenchmarkRatchetPrimitive>> {
   if (value === undefined) return {};
   const conditions = ratchetRecord(value, `Code graph performance ratchet ${label}`);
-  const parsed = Object.create(null) as Record<string, BenchmarkRatchetPrimitive>;
-  for (const [name, expected] of Object.entries(conditions).sort(([left], [right]) => left.localeCompare(right))) {
+  const parsedEntries: [string, BenchmarkRatchetPrimitive][] = [];
+  for (const [name, expected] of EffectRecord.toEntries(conditions).sort(([left], [right]) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
+  )) {
     if (
-      name.trim().length === 0 ||
+      Effect2.pipe(name, EffectString.trim).length === 0 ||
       (typeof expected !== 'boolean' && typeof expected !== 'string' && typeof expected !== 'number') ||
       (typeof expected === 'number' && !Number.isFinite(expected))
     ) {
@@ -8372,16 +8623,20 @@ function parseRatchetConditions(
         message: `Code graph performance ratchet ${label}.${name || '<empty>'} must be a finite primitive.`,
       });
     }
-    parsed[name] = expected;
+    parsedEntries.push([name, expected]);
   }
-  return parsed;
+  return EffectRecord.fromEntries(parsedEntries);
+}
+
+function isUnknownRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function ratchetRecord(value: unknown, label: string): Readonly<Record<string, unknown>> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!isUnknownRecord(value)) {
     throw ScriptError.make({message: `${label} must be an object.`});
   }
-  return value as Readonly<Record<string, unknown>>;
+  return value;
 }
 
 function requireRatchetConditionKeys(
@@ -8389,10 +8644,10 @@ function requireRatchetConditionKeys(
   required: readonly string[],
   label: 'environment' | 'metadata',
 ): void {
-  const missing = required.filter(name => !(name in conditions));
+  const missing = EffectArray.filter(required, name => !(name in conditions));
   if (missing.length > 0) {
     throw ScriptError.make({
-      message: `Code graph performance ratchet ${label} is missing condition(s): ${missing.join(', ')}.`,
+      message: `Code graph performance ratchet ${label} is missing condition(s): ${EffectArray.join(missing, ', ')}.`,
     });
   }
 }
@@ -8402,11 +8657,11 @@ function rejectRatchetUnknownKeys(
   allowed: readonly string[],
   label: string,
 ): void {
-  const unknown = Object.keys(value)
-    .filter(key => !allowed.includes(key))
-    .sort();
+  const unknown = EffectArray.filter(EffectRecord.keys(value), key => !allowed.includes(key)).sort();
   if (unknown.length > 0) {
-    throw ScriptError.make({message: `Code graph performance ${label} has unknown field(s): ${unknown.join(', ')}.`});
+    throw ScriptError.make({
+      message: `Code graph performance ${label} has unknown field(s): ${EffectArray.join(unknown, ', ')}.`,
+    });
   }
 }
 
@@ -8439,50 +8694,56 @@ export function enforceCodeGraphBenchmarkBudget(
 ): void {
   if (typeof value !== 'object' || value === null)
     throw ScriptError.make({message: 'Code graph budget file must be an object.'});
-  const record = value as {
-    readonly developmentPerformance?: unknown;
-    readonly developmentPerformanceByPlatform?: Readonly<Record<string, unknown>>;
-    readonly developmentPerformanceByRunnerClass?: Readonly<Record<string, unknown>>;
-    readonly scalePerformance?: Readonly<Record<string, unknown>>;
-    readonly scalePerformanceByRunnerClass?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-    readonly vectorPerformance?: unknown;
-    readonly vectorScalePerformance?: Readonly<Record<string, unknown>>;
-  };
+  const record = ratchetRecord(value, 'Code graph budget file');
+  const vectorScalePerformance = record.vectorScalePerformance;
+  const scalePerformance = record.scalePerformance;
+  const developmentByPlatform = record.developmentPerformanceByPlatform;
+  const developmentByRunnerClass = record.developmentPerformanceByRunnerClass;
+  const scaleByRunnerClass = record.scalePerformanceByRunnerClass;
   const baseSelected =
     artifact.metadata.vectorEnabled === true
       ? scaleSymbols === undefined
         ? record.vectorPerformance
-        : record.vectorScalePerformance?.[String(scaleSymbols)]
+        : isUnknownRecord(vectorScalePerformance)
+          ? vectorScalePerformance[String(scaleSymbols)]
+          : undefined
       : scaleSymbols === undefined
         ? record.developmentPerformance
-        : record.scalePerformance?.[String(scaleSymbols)];
+        : isUnknownRecord(scalePerformance)
+          ? scalePerformance[String(scaleSymbols)]
+          : undefined;
   const runtimePlatform = artifact.metadata.runtimePlatform;
   const runnerClass = artifact.metadata.runnerClass;
   const platformOverride =
     artifact.metadata.vectorEnabled !== true &&
     scaleSymbols === undefined &&
     typeof runtimePlatform === 'string' &&
-    typeof record.developmentPerformanceByPlatform?.[runtimePlatform] === 'object' &&
-    record.developmentPerformanceByPlatform[runtimePlatform] !== null
-      ? record.developmentPerformanceByPlatform[runtimePlatform]
+    isUnknownRecord(developmentByPlatform) &&
+    typeof developmentByPlatform[runtimePlatform] === 'object' &&
+    developmentByPlatform[runtimePlatform] !== null
+      ? developmentByPlatform[runtimePlatform]
       : undefined;
   const runnerDevelopmentOverride =
     artifact.metadata.vectorEnabled !== true &&
     scaleSymbols === undefined &&
     typeof runnerClass === 'string' &&
     benchmarkRunnerClassMatchesArtifact(runnerClass, runtimePlatform, artifact.environment.architecture) &&
-    typeof record.developmentPerformanceByRunnerClass?.[runnerClass] === 'object' &&
-    record.developmentPerformanceByRunnerClass[runnerClass] !== null
-      ? record.developmentPerformanceByRunnerClass[runnerClass]
+    isUnknownRecord(developmentByRunnerClass) &&
+    typeof developmentByRunnerClass[runnerClass] === 'object' &&
+    developmentByRunnerClass[runnerClass] !== null
+      ? developmentByRunnerClass[runnerClass]
       : undefined;
   const runnerScalePerformance =
-    typeof runnerClass === 'string' ? record.scalePerformanceByRunnerClass?.[runnerClass] : undefined;
+    typeof runnerClass === 'string' && isUnknownRecord(scaleByRunnerClass)
+      ? scaleByRunnerClass[runnerClass]
+      : undefined;
   const runnerScaleOverride =
     artifact.metadata.vectorEnabled !== true &&
     scaleSymbols !== undefined &&
     typeof runnerClass === 'string' &&
     benchmarkRunnerClassMatchesArtifact(runnerClass, runtimePlatform, artifact.environment.architecture) &&
-    typeof runnerScalePerformance?.[String(scaleSymbols)] === 'object' &&
+    isUnknownRecord(runnerScalePerformance) &&
+    typeof runnerScalePerformance[String(scaleSymbols)] === 'object' &&
     runnerScalePerformance[String(scaleSymbols)] !== null
       ? runnerScalePerformance[String(scaleSymbols)]
       : undefined;
@@ -8502,7 +8763,7 @@ export function enforceCodeGraphBenchmarkBudget(
         `for ${scaleSymbols ?? 'development'}.`,
     });
   }
-  const budget = selected as Readonly<Record<string, unknown>>;
+  const budget = ratchetRecord(selected, 'Selected code graph budget');
   const hotQueryName =
     artifact.metadata.vectorEnabled === true ? 'hot-semantic-vector-query' : 'hot-exact-lexical-query';
   const checks = [
@@ -8516,7 +8777,9 @@ export function enforceCodeGraphBenchmarkBudget(
   ] as const;
   const failures: string[] = [];
   for (const [measurementName, budgetName] of checks) {
-    const measurement = artifact.measurements.find(candidate => candidate.name === measurementName);
+    const measurement = Option.getOrUndefined(
+      EffectArray.findFirst(artifact.measurements, candidate => candidate.name === measurementName),
+    );
     const maximum = budget[budgetName];
     if (!measurement) {
       failures.push(`missing ${measurementName} measurement`);
@@ -8530,7 +8793,9 @@ export function enforceCodeGraphBenchmarkBudget(
       failures.push(`${measurementName} ${statistic} exceeds ${maximum}`);
     }
   }
-  const hotQuery = artifact.measurements.find(candidate => candidate.name === hotQueryName);
+  const hotQuery = Option.getOrUndefined(
+    EffectArray.findFirst(artifact.measurements, candidate => candidate.name === hotQueryName),
+  );
   const hotQueryMaximum = budget.hotQueryP95MillisecondsMaximum;
   if (!hotQuery) {
     failures.push(`missing ${hotQueryName} measurement`);
@@ -8576,7 +8841,9 @@ export function enforceCodeGraphBenchmarkBudget(
       Number.isFinite(p95ToleranceRatio) &&
       p95ToleranceRatio >= 0 &&
       p95ToleranceRatio <= CODE_GRAPH_HOT_QUERY_WALL_P95_TOLERANCE_RATIO_MAXIMUM;
-    const processCpu = artifact.measurements.find(candidate => candidate.name === 'hot-query-process-cpu');
+    const processCpu = Option.getOrUndefined(
+      EffectArray.findFirst(artifact.measurements, candidate => candidate.name === 'hot-query-process-cpu'),
+    );
     if (guardedToleranceConfigured && !guardConfigurationValid) {
       failures.push(
         'hot query wall tolerance requires non-negative numeric p50 and process-CPU bounds, an integer sample minimum of at least 25, a p95 ratio from 0 to 0.05, and an optional p50 ratio from 0 to 0.05',
@@ -8624,7 +8891,7 @@ export function enforceCodeGraphBenchmarkBudget(
     }
   }
   if (failures.length > 0)
-    throw ScriptError.make({message: `Code graph performance budget failed: ${failures.join('; ')}`});
+    throw ScriptError.make({message: `Code graph performance budget failed: ${EffectArray.join(failures, '; ')}`});
 }
 
 function benchmarkRunnerClassMatchesArtifact(
@@ -8635,7 +8902,7 @@ function benchmarkRunnerClassMatchesArtifact(
   const hosted = /^github-hosted-(linux|macos|windows)-(arm64|x64)$/u.exec(runnerClass);
   if (hosted === null) return true;
   const platform = hosted[1] === 'windows' ? 'win32' : hosted[1] === 'macos' ? 'darwin' : 'linux';
-  return runtimePlatform === platform && architecture.toLowerCase() === hosted[2];
+  return runtimePlatform === platform && Effect2.pipe(architecture, EffectString.toLowerCase) === hosted[2];
 }
 
 function processPeakRssBytes(): number {
@@ -8679,6 +8946,7 @@ function integer(value: string | undefined, option: string, minimum: number): nu
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }

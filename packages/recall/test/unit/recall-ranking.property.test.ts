@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -9,6 +10,9 @@ import {
   type RankedRecallCandidate,
 } from '@threadnote/recall/rank';
 import {mergeRecallHits, RECALL_CATEGORY_ORDER, type RecallCategory, type RecallHit} from '@threadnote/recall/results';
+
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const FIXED_NOW = new Date('2026-07-30T00:00:00.000Z');
 const MEMORY_KINDS = ['durable', 'handoff', 'incident', 'preference', 'smoke'] as const;
@@ -30,7 +34,7 @@ function compareCodeUnits(left: string, right: string): number {
 }
 
 function generatedUri(id: number, label = 'generated'): string {
-  return `threadnote://user/test/memories/${label}-${String(id).padStart(3, '0')}.md`;
+  return `threadnote://user/test/memories/${label}-${Effect.pipe(String(id), EffectString.padStart(3, '0'))}.md`;
 }
 
 function expectBoundedRankedCandidate(result: RankedRecallCandidate): void {
@@ -41,6 +45,7 @@ function expectBoundedRankedCandidate(result: RankedRecallCandidate): void {
   expect(result.relevanceScore).toBeGreaterThanOrEqual(0);
   expect(result.relevanceScore).toBeLessThanOrEqual(1);
 
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
   for (const [signal, value] of Object.entries(result.signals)) {
     expect(Number.isFinite(value), `${signal} should be finite`).toBe(true);
     expect(value, `${signal} should be at most 1`).toBeLessThanOrEqual(1);
@@ -68,7 +73,7 @@ const recallCandidatesArbitrary = FC.uniqueArray(
     selector: value => value.id,
   },
 ).map(specs =>
-  specs.map((spec): RecallCandidate => ({
+  EffectArray.map(specs, (spec): RecallCandidate => ({
     authority: 'agent_generated',
     feedback: spec.feedbackPercent / 100,
     fields: {
@@ -120,20 +125,20 @@ const recallDocumentsArbitrary: FC.Arbitrary<readonly RecallDocumentSpec[]> = FC
 );
 
 function recallDocumentHits(document: RecallDocumentSpec): readonly RecallHit[] {
-  const uri = `threadnote://${document.category}/${document.uriLabel}-${String(document.id).padStart(3, '0')}.md`;
-  return document.scores.map((score, index) => ({
+  const uri = `threadnote://${document.category}/${document.uriLabel}-${Effect.pipe(String(document.id), EffectString.padStart(3, '0'))}.md`;
+  return EffectArray.map(document.scores, (score, index) => ({
     category: document.category,
     contextType: `${document.contextType}-chunk-${index}`,
     score: score / 10,
     snippet: `generated document ${document.id}, chunk ${index}`,
-    uri: `${uri}#chunk_${String(index).padStart(4, '0')}`,
+    uri: `${uri}#chunk_${Effect.pipe(String(index), EffectString.padStart(4, '0'))}`,
   }));
 }
 
 function recallPasses(documents: readonly RecallDocumentSpec[]): readonly (readonly RecallHit[])[] {
   const passes: RecallHit[][] = [[], [], []];
   for (const document of documents) {
-    recallDocumentHits(document).forEach((hit, index) => {
+    EffectArray.forEach(recallDocumentHits(document), (hit, index) => {
       passes[(document.passOffset + index) % passes.length].push(hit);
     });
   }
@@ -141,19 +146,17 @@ function recallPasses(documents: readonly RecallDocumentSpec[]): readonly (reado
 }
 
 function mergeOracle(documents: readonly RecallDocumentSpec[]): readonly RecallHit[] {
-  return documents
-    .map((document): RecallHit => {
-      const winner = [...recallDocumentHits(document)].sort(
-        (left, right) => right.score - left.score || compareCodeUnits(left.uri, right.uri),
-      )[0];
-      return {...winner, uri: winner.uri.replace(/#.*$/, '')};
-    })
-    .sort(
-      (left, right) =>
-        RECALL_CATEGORY_ORDER.indexOf(left.category) - RECALL_CATEGORY_ORDER.indexOf(right.category) ||
-        right.score - left.score ||
-        compareCodeUnits(left.uri, right.uri),
-    );
+  return EffectArray.map(documents, (document): RecallHit => {
+    const winner = [...recallDocumentHits(document)].sort(
+      (left, right) => right.score - left.score || compareCodeUnits(left.uri, right.uri),
+    )[0];
+    return {...winner, uri: Effect.pipe(winner.uri, EffectString.replace(/#.*$/, ''))};
+  }).sort(
+    (left, right) =>
+      RECALL_CATEGORY_ORDER.indexOf(left.category) - RECALL_CATEGORY_ORDER.indexOf(right.category) ||
+      right.score - left.score ||
+      compareCodeUnits(left.uri, right.uri),
+  );
 }
 
 const recallMergeCaseArbitrary = recallDocumentsArbitrary.chain(documents => {
@@ -240,15 +243,21 @@ describe('recall ranking properties', () => {
       sources: FC.uniqueArray(FC.stringMatching(/^[a-z]{1,8}$/), {maxLength: 12, minLength: 1}),
     },
     ({body: rawBody, sources}) => {
-      const body = rawBody.replace(/\s+$/u, '') || 'body';
-      const decorated = [
-        body,
-        '',
-        '<!-- threadnote:hygiene-sources:v1 -->',
-        '## Threadnote Hygiene Sources',
-        '',
-        ...sources.map(source => `- threadnote://user/me/memories/handoffs/archived/threadnote/source-${source}.md`),
-      ].join('\n');
+      const body = Effect.pipe(rawBody, EffectString.replace(/\s+$/u, '')) || 'body';
+      const decorated = EffectArray.join(
+        [
+          body,
+          '',
+          '<!-- threadnote:hygiene-sources:v1 -->',
+          '## Threadnote Hygiene Sources',
+          '',
+          ...EffectArray.map(
+            sources,
+            source => `- threadnote://user/me/memories/handoffs/archived/threadnote/source-${source}.md`,
+          ),
+        ],
+        '\n',
+      );
 
       expect(recallMemoryContentHash(decorated)).toBe(recallMemoryContentHash(body));
     },
@@ -264,13 +273,13 @@ describe('recall ranking properties', () => {
         workspaceScope: hierarchyCase.current,
       });
 
-      expect(ranked.results.map(result => result.candidate.uri)).toEqual([
+      expect(EffectArray.map(ranked.results, result => result.candidate.uri)).toEqual([
         'threadnote://exact.md',
         'threadnote://ancestor.md',
         'threadnote://repo-wide.md',
         'threadnote://sibling.md',
       ]);
-      expect(ranked.results.map(result => result.signals.workspace)).toEqual([1, 0.75, 0.5, 0.25]);
+      expect(EffectArray.map(ranked.results, result => result.signals.workspace)).toEqual([1, 0.75, 0.5, 0.25]);
     },
     {fastCheck: {numRuns: 100}},
   );
@@ -299,7 +308,7 @@ describe('recall ranking properties', () => {
       const reverse = rankRecallCandidates('latest release status', [newer, older], context);
 
       expect(forward).toEqual(reverse);
-      expect(forward.results.map(result => result.candidate.uri)).toEqual([newer.uri, older.uri]);
+      expect(EffectArray.map(forward.results, result => result.candidate.uri)).toEqual([newer.uri, older.uri]);
       expect(forward.results[0].finalScore).toBeGreaterThan(forward.results[1].finalScore);
     },
     {fastCheck: {numRuns: 100}},
@@ -313,7 +322,7 @@ describe('recall ranking properties', () => {
     },
     ({teams}) => {
       const body = 'A stable package-scoped recall contract.';
-      const aliases: RecallCandidate[] = teams.map((team, index) => ({
+      const aliases: RecallCandidate[] = EffectArray.map(teams, (team, index) => ({
         authority: 'reviewed_shared',
         contentHash: recallMemoryContentHash(body),
         fields: {project: 'threadnote', topic: 'package-scope'},
@@ -338,7 +347,7 @@ describe('recall ranking properties', () => {
       expect(forward).toHaveLength(1);
       expect(forward[0]?.memoryId).toBe('tn_package_scope');
       expect([forward[0].uri, ...(forward[0].equivalentUris ?? [])].sort(compareCodeUnits)).toEqual(
-        aliases.map(candidate => candidate.uri).sort(compareCodeUnits),
+        EffectArray.map(aliases, candidate => candidate.uri).sort(compareCodeUnits),
       );
     },
     {fastCheck: {numRuns: 100}},
@@ -349,7 +358,7 @@ describe('recall ranking properties', () => {
     'requires a structured identifier declaration before components contribute exact evidence',
     {identifierCase: structuredIdentifierCaseArbitrary},
     ({identifierCase}) => {
-      const identifier = `${identifierCase.component.toUpperCase()}${identifierCase.connector}TOKEN${identifierCase.connector}${identifierCase.suffix}`;
+      const identifier = `${Effect.pipe(identifierCase.component, EffectString.toUpperCase)}${identifierCase.connector}TOKEN${identifierCase.connector}${identifierCase.suffix}`;
       const candidate: RecallCandidate = {
         exactTerms: [identifier],
         fields: {
@@ -404,11 +413,11 @@ describe('recall ranking properties', () => {
       expect(untrustedAlone?.finalScore ?? 0).toBeLessThanOrEqual(trustedAlone?.finalScore ?? 0);
       expect(untrustedAlone?.finalScore ?? 0).toBeLessThanOrEqual(untrustedAlone?.relevanceScore ?? 0);
 
-      const together = rankRecallCandidates(
-        demotionCase.query,
-        [{...untrusted, uri: 'threadnote://a-untrusted.md'}, trusted],
-        context,
-      ).results.map(result => result.candidate.uri);
+      const together = EffectArray.map(
+        rankRecallCandidates(demotionCase.query, [{...untrusted, uri: 'threadnote://a-untrusted.md'}, trusted], context)
+          .results,
+        result => result.candidate.uri,
+      );
 
       expect(together).toEqual(['threadnote://a-trusted.md', 'threadnote://a-untrusted.md']);
     },
@@ -432,8 +441,8 @@ describe('recall ranking properties', () => {
 
       expect(permuted).toEqual(ranked);
       expect(ranked.results.length).toBeLessThanOrEqual(candidates.length);
-      expect(new Set(ranked.results.map(result => result.candidate.uri)).size).toBe(ranked.results.length);
-      ranked.results.forEach(expectBoundedRankedCandidate);
+      expect(new Set(EffectArray.map(ranked.results, result => result.candidate.uri)).size).toBe(ranked.results.length);
+      EffectArray.forEach(ranked.results, expectBoundedRankedCandidate);
       expect(Number.isFinite(ranked.confidence.score)).toBe(true);
       expect(ranked.confidence.score).toBeGreaterThanOrEqual(0);
       expect(ranked.confidence.score).toBeLessThanOrEqual(1);
@@ -454,7 +463,7 @@ describe('recall ranking properties', () => {
       }),
     },
     ({labels}) => {
-      const candidates = labels.map((label, index): RecallCandidate => ({
+      const candidates = EffectArray.map(labels, (label, index): RecallCandidate => ({
         fields: {title: 'Alpha retry policy'},
         kind: 'durable',
         reranker: 0.5,
@@ -462,13 +471,16 @@ describe('recall ranking properties', () => {
         text: 'Alpha retry policy uses bounded retries.',
         uri: generatedUri(index, label),
       }));
-      const expected = candidates.map(candidate => candidate.uri).sort(compareCodeUnits);
+      const expected = EffectArray.map(candidates, candidate => candidate.uri).sort(compareCodeUnits);
 
       expect(
-        rankRecallCandidates('alpha retry policy', [...candidates].reverse(), {
-          now: FIXED_NOW,
-          project: 'threadnote',
-        }).results.map(result => result.candidate.uri),
+        EffectArray.map(
+          rankRecallCandidates('alpha retry policy', [...candidates].reverse(), {
+            now: FIXED_NOW,
+            project: 'threadnote',
+          }).results,
+          result => result.candidate.uri,
+        ),
       ).toEqual(expected);
     },
     {fastCheck: {numRuns: 75}},
@@ -486,9 +498,11 @@ describe('recall ranking properties', () => {
       expect(merged).toEqual(expected);
       expect(mergeRecallHits([permutation])).toEqual(expected);
       expect(mergeRecallHits([merged])).toEqual(merged);
-      expect(new Set(merged.map(hit => hit.uri)).size).toBe(merged.length);
-      expect(merged.every(hit => !hit.uri.includes('#'))).toBe(true);
-      expect(merged.every(hit => Number.isFinite(hit.score) && hit.score >= 0 && hit.score <= 1)).toBe(true);
+      expect(new Set(EffectArray.map(merged, hit => hit.uri)).size).toBe(merged.length);
+      expect(EffectArray.every(merged, hit => !Effect.pipe(hit.uri, EffectString.includes('#')))).toBe(true);
+      expect(EffectArray.every(merged, hit => Number.isFinite(hit.score) && hit.score >= 0 && hit.score <= 1)).toBe(
+        true,
+      );
     },
     {fastCheck: {numRuns: 150}},
   );
@@ -505,17 +519,17 @@ describe('recall ranking properties', () => {
       score: FC.integer({max: 10, min: 0}),
     },
     ({category, labels, score}) => {
-      const hits = labels.map((label): RecallHit => ({
+      const hits = EffectArray.map(labels, (label): RecallHit => ({
         category,
         contextType: 'generated',
         score: score / 10,
         snippet: `generated document ${label}`,
         uri: `threadnote://${category}/${label}.md`,
       }));
-      const expectedUris = hits.map(hit => hit.uri).sort(compareCodeUnits);
+      const expectedUris = EffectArray.map(hits, hit => hit.uri).sort(compareCodeUnits);
 
-      expect(mergeRecallHits([hits]).map(hit => hit.uri)).toEqual(expectedUris);
-      expect(mergeRecallHits([[...hits].reverse()]).map(hit => hit.uri)).toEqual(expectedUris);
+      expect(EffectArray.map(mergeRecallHits([hits]), hit => hit.uri)).toEqual(expectedUris);
+      expect(EffectArray.map(mergeRecallHits([[...hits].reverse()]), hit => hit.uri)).toEqual(expectedUris);
     },
     {fastCheck: {numRuns: 75}},
   );
@@ -533,7 +547,7 @@ describe('recall ranking properties', () => {
     },
     ({category, labels, score}) => {
       const documentUri = `threadnote://${category}/same-document.md`;
-      const hits = labels.map((label): RecallHit => ({
+      const hits = EffectArray.map(labels, (label): RecallHit => ({
         category,
         contextType: `context-${label}`,
         score: score / 10,

@@ -1,5 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import * as fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import {Schema} from 'effect';
 import {
   runMcpBroker,
   type McpBrokerChild,
@@ -7,6 +9,20 @@ import {
   type McpBrokerFailureEvent,
 } from '@threadnote/threadnote/mcp/broker';
 import type {StandaloneActiveRelease} from '@threadnote/threadnote/process/standalone_lease';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+function parseJsonLine(line: string): unknown {
+  return JSON.parse(line);
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
+function readStringId(line: string): string {
+  return Schema.decodeUnknownSync(Schema.Struct({id: Schema.String}))(parseJsonLine(line)).id;
+}
 
 describe('MCP session broker', () => {
   it('reports missing activation without dispatching any request or changing its id', async () => {
@@ -65,7 +81,7 @@ describe('MCP session broker', () => {
     active = undefined;
     clientInput.pushLine(JSON.stringify({id: 3, jsonrpc: '2.0', method: 'tools/call', params: {name: 'health'}}));
     expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({id: 3, result: {version: 'activated'}});
-    expect(child.received.map(line => JSON.parse(line).id)).toEqual([2, 3]);
+    expect(EffectArray.map(child.received, line => JSON.parse(line).id)).toEqual([2, 3]);
     clientInput.end();
     await running;
   });
@@ -255,11 +271,13 @@ describe('MCP session broker', () => {
     expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({method: 'notifications/resources/list_changed'});
     expect(await clientOutput.nextLine()).toContain('4.2.2-b');
     expect(spawned).toHaveLength(2);
-    expect(spawned[1]?.received.map(line => JSON.parse(line).method)).toEqual([
-      'initialize',
-      'notifications/initialized',
-      'tools/call',
-    ]);
+    expect(
+      Effect.Option.getOrUndefined(
+        Effect.Option.map(Effect.Option.fromNullishOr(spawned[1]?.received), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, line => JSON.parse(line).method),
+        ),
+      ),
+    ).toEqual(['initialize', 'notifications/initialized', 'tools/call']);
     expect(clientOutput.availableLines()).toBe(0);
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(failures).toEqual([]);
@@ -295,10 +313,9 @@ describe('MCP session broker', () => {
     await spawned[0].receivedCount(3);
     spawned[0].exitUnexpectedly();
 
-    const failure = JSON.parse(await clientOutput.nextLine()) as {
-      readonly error: {readonly message: string};
-      readonly id: string;
-    };
+    const failure = Schema.decodeUnknownSync(
+      Schema.Struct({id: Schema.String, error: Schema.Struct({message: Schema.String})}),
+    )(parseJsonLine(await clientOutput.nextLine()));
     expect(failure.id).toBe('mutation-1');
     expect(failure.error.message).toContain('Read the canonical record');
     expect(spawned).toHaveLength(1);
@@ -309,7 +326,7 @@ describe('MCP session broker', () => {
     await replacement.receivedCount(3);
     expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({method: 'notifications/tools/list_changed'});
     expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({method: 'notifications/resources/list_changed'});
-    expect(replacement.received.map(line => JSON.parse(line).method)).toEqual([
+    expect(EffectArray.map(replacement.received, line => JSON.parse(line).method)).toEqual([
       'initialize',
       'notifications/initialized',
       'tools/call',
@@ -343,7 +360,7 @@ describe('MCP session broker', () => {
     expect(await clientOutput.nextLine()).toContain('4.2.2');
 
     const replacement = await waitForSpawnedChild(spawned, 1);
-    expect(replacement.received.map(line => JSON.parse(line).method)).toEqual(['initialize']);
+    expect(EffectArray.map(replacement.received, line => JSON.parse(line).method)).toEqual(['initialize']);
 
     clientInput.end();
     await running;
@@ -382,13 +399,13 @@ describe('MCP session broker', () => {
     expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({method: 'notifications/resources/list_changed'});
     expect(await clientOutput.nextLine()).toContain('4.2.2-b');
 
-    expect(spawned[0].received.map(line => JSON.parse(line).method)).toEqual([
+    expect(EffectArray.map(spawned[0].received, line => JSON.parse(line).method)).toEqual([
       'initialize',
       'notifications/initialized',
       'tools/call',
       'notifications/cancelled',
     ]);
-    expect(spawned[1].received.map(line => JSON.parse(line).method)).toEqual([
+    expect(EffectArray.map(spawned[1].received, line => JSON.parse(line).method)).toEqual([
       'initialize',
       'notifications/initialized',
       'tools/call',
@@ -540,7 +557,7 @@ describe('MCP session broker', () => {
     await clientOutput.nextLine();
     clientInput.pushLine(JSON.stringify({jsonrpc: '2.0', method: 'notifications/initialized'}));
     spawned[0].emitServerRequest(7);
-    const oldExternalId = (JSON.parse(await clientOutput.nextLine()) as {id: string}).id;
+    const oldExternalId = readStringId(await clientOutput.nextLine());
     expect(oldExternalId).not.toBe('7');
     spawned[0].exitUnexpectedly();
     expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({
@@ -555,7 +572,7 @@ describe('MCP session broker', () => {
     expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({method: 'notifications/resources/list_changed'});
     await clientOutput.nextLine();
     spawned[1].emitServerRequest(7);
-    const newExternalId = (JSON.parse(await clientOutput.nextLine()) as {id: string}).id;
+    const newExternalId = readStringId(await clientOutput.nextLine());
     expect(newExternalId).not.toBe(oldExternalId);
 
     clientInput.pushLine(JSON.stringify({id: oldExternalId, jsonrpc: '2.0', result: {late: true}}));
@@ -591,7 +608,7 @@ describe('MCP session broker', () => {
     await clientOutput.nextLine();
     clientInput.pushLine(JSON.stringify({jsonrpc: '2.0', method: 'notifications/initialized'}));
     spawned[0].emitServerRequest('sample');
-    const externalId = (JSON.parse(await clientOutput.nextLine()) as {id: string}).id;
+    const externalId = readStringId(await clientOutput.nextLine());
     spawned[0].emitServerCancellation('sample');
     expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({
       method: 'notifications/cancelled',
@@ -628,7 +645,7 @@ describe('MCP session broker', () => {
     await clientOutput.nextLine();
     clientInput.pushLine(JSON.stringify({jsonrpc: '2.0', method: 'notifications/initialized'}));
     spawned[0].emitServerRequest(7);
-    const externalId = (JSON.parse(await clientOutput.nextLine()) as {id: string}).id;
+    const externalId = readStringId(await clientOutput.nextLine());
     spawned[0].exitUnexpectedly();
     expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({
       method: 'notifications/cancelled',
@@ -659,7 +676,7 @@ describe('MCP session broker', () => {
     await clientOutput.nextLine();
     clientInput.pushLine(JSON.stringify({jsonrpc: '2.0', method: 'notifications/initialized'}));
     spawned[0].emitServerRequest('sample');
-    const externalId = (JSON.parse(await clientOutput.nextLine()) as {id: string}).id;
+    const externalId = readStringId(await clientOutput.nextLine());
     clientInput.pushLine(JSON.stringify({id: 2, jsonrpc: '2.0', method: 'tools/call', params: {name: 'health'}}));
     expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({
       method: 'notifications/cancelled',
@@ -762,8 +779,8 @@ describe('MCP session broker', () => {
           clientInput.pushLine(JSON.stringify({id: 2, jsonrpc: '2.0', method: 'tools/call', params: {name: 'health'}}));
           for (;;) {
             // Must never throw: every line the broker forwards parses as JSON.
-            const parsed = JSON.parse(await clientOutput.nextLine()) as {readonly id?: unknown};
-            if (parsed.id === 2) break;
+            const parsed = parseJsonLine(await clientOutput.nextLine());
+            if (isJsonRecord(parsed) && parsed.id === 2) break;
           }
 
           clientInput.end();
@@ -791,7 +808,8 @@ async function expectInFlightToolResultAfterDroppedProgress(progressFrames: numb
       return child;
     },
     writeOutput: async line => {
-      const envelope = JSON.parse(line) as {readonly method?: string};
+      const envelope = parseJsonLine(line);
+      if (!isJsonRecord(envelope)) throw new Error('Expected an MCP JSON-RPC object.');
       if (envelope.method === 'notifications/progress') {
         throw Object.assign(new Error('temporary client write failure'), {code: 'EAGAIN'});
       }
@@ -848,7 +866,7 @@ class FakeMcpChild implements McpBrokerChild {
       end: () => this.#end(),
       flush: async () => undefined,
       write: (value: string) => {
-        for (const line of value.trimEnd().split('\n')) this.#handle(line);
+        for (const line of Effect.pipe(value, EffectString.trimEnd, EffectString.split('\n'))) this.#handle(line);
         return value.length;
       },
     };
@@ -884,7 +902,12 @@ class FakeMcpChild implements McpBrokerChild {
     if (this.#ended) throw new Error('Child input is closed.');
     this.received.push(line);
     for (const resolve of this.#receivedWaiters.splice(0)) resolve();
-    const envelope = JSON.parse(line) as {readonly id?: string | number; readonly method?: string};
+    const envelope = Schema.decodeUnknownSync(
+      Schema.Struct({
+        id: Schema.optional(Schema.Union([Schema.String, Schema.Finite])),
+        method: Schema.optional(Schema.String),
+      }),
+    )(parseJsonLine(line));
     if (envelope.method === 'initialize') {
       if (this.options.ignoreInitialize) return;
       this.#output.pushLine(
@@ -956,7 +979,7 @@ class AsyncByteQueue implements AsyncIterable<Uint8Array> {
   }
 
   availableLines(): number {
-    return this.#queued.filter(entry => !entry.done).length;
+    return EffectArray.filter(this.#queued, entry => !entry.done).length;
   }
 
   end(): void {
@@ -968,7 +991,7 @@ class AsyncByteQueue implements AsyncIterable<Uint8Array> {
   async nextLine(): Promise<string> {
     const next = await this.#next();
     if (next.done) throw new Error('Queue ended before a line was available.');
-    return new TextDecoder().decode(next.value).trimEnd();
+    return Effect.pipe(new TextDecoder().decode(next.value), EffectString.trimEnd);
   }
 
   pushLine(line: string): void {

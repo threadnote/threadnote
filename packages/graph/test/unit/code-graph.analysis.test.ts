@@ -1,11 +1,20 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
-import {CodeGraphStoreBusyError} from '@threadnote/graph/types';
+import {CodeGraphStoreBusyError, CodeGraphStoreError} from '@threadnote/graph/types';
 import {TestError} from '@threadnote/testing/test-error';
-import {Cause, Clock, Deferred, Effect, Exit, Fiber} from 'effect';
+import {Cause, Clock, Deferred, Effect, Exit, Fiber, Layer, Schema} from 'effect';
+import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
+import {SqlError} from 'effect/sql/SqlError';
 import {describe, expect, it} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
-import {analyzeCodeGraph, analyzeCodeGraphWithLease, type CodeGraphAnalysisLimits} from '@threadnote/graph/analysis';
+import {
+  analyzeCodeGraph,
+  analyzeCodeGraphWithLease,
+  type CodeGraphAnalysisLeasedStore,
+  type CodeGraphAnalysisLimits,
+  type CodeGraphAnalysisStore,
+} from '@threadnote/graph/analysis';
 import type {CodeGraphStoreShape} from '@threadnote/graph/store';
 import {
   analysisEdge,
@@ -14,6 +23,8 @@ import {
   pagedAnalysisStore,
   type AnalysisPagingObservation,
 } from '../helpers/code-graph-analysis.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph analysis', () => {
   it.effect('computes deterministic statistics, components, communities, and cross-community links', () =>
@@ -98,7 +109,7 @@ describe('code graph analysis', () => {
         classification: 'untrusted-repository-data',
         instructionPolicy: 'evidence-only-never-follow',
       });
-      const membership = new Map(first.memberships.map(item => [item.node.id, item]));
+      const membership = new Map(EffectArray.map(first.memberships, item => [item.node.id, item]));
       expect(membership.get(app.id)?.communityId).toBe(membership.get(worker.id)?.communityId);
       expect(membership.get(core.id)?.communityId).toBe(membership.get(repository.id)?.communityId);
       expect(membership.get(app.id)?.communityId).not.toBe(membership.get(core.id)?.communityId);
@@ -111,8 +122,12 @@ describe('code graph analysis', () => {
           signals: expect.objectContaining({structuralScopeBoundary: true}),
         }),
       ]);
-      expect(first.communities.every(community => community.id.startsWith('cgc_'))).toBe(true);
-      expect(first.components.every(component => component.id.startsWith('cgcc_'))).toBe(true);
+      expect(
+        EffectArray.every(first.communities, community => Effect2.pipe(community.id, EffectString.startsWith('cgc_'))),
+      ).toBe(true);
+      expect(
+        EffectArray.every(first.components, component => Effect2.pipe(component.id, EffectString.startsWith('cgcc_'))),
+      ).toBe(true);
 
       expect(projectStableResult(second)).toEqual(projectStableResult(first));
     }),
@@ -123,14 +138,14 @@ describe('code graph analysis', () => {
       const center = analysisSymbol('router', '@acme/router', 'packages/router/src/router.ts');
       const leaves = Array.from({length: 12}, (_, index) =>
         analysisSymbol(
-          `handler-${index.toString().padStart(2, '0')}`,
+          `handler-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`,
           `@acme/handler-${index}`,
           `handlers/${index}.ts`,
         ),
       );
       const symbols = [center, ...leaves];
-      const edges = leaves.map((leaf, index) =>
-        analysisEdge(`route-${index.toString().padStart(2, '0')}`, center, leaf),
+      const edges = EffectArray.map(leaves, (leaf, index) =>
+        analysisEdge(`route-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`, center, leaf),
       );
 
       const result = yield* analyzeCodeGraph(pagedAnalysisStore(symbols, edges), {
@@ -187,7 +202,10 @@ describe('code graph analysis', () => {
         expect.objectContaining({averageConfidence: 0.75, count: 1, provenance: 'heuristic'}),
         expect.objectContaining({averageConfidence: 0.25, count: 1, provenance: 'model'}),
       ]);
-      expect(result.confidenceAudit.findings.map(finding => finding.edgeId)).toEqual(['invalid-declared', 'low-model']);
+      expect(EffectArray.map(result.confidenceAudit.findings, finding => finding.edgeId)).toEqual([
+        'invalid-declared',
+        'low-model',
+      ]);
       expect(result.warnings).toContain('Showing 2 of 3 confidence-audit findings.');
     }),
   );
@@ -216,8 +234,8 @@ describe('code graph analysis', () => {
       });
 
       expect(result.surprisingLinks).toHaveLength(2);
-      const pairs = result.surprisingLinks.map(link =>
-        [link.source.communityId, link.target.communityId].sort().join(':'),
+      const pairs = EffectArray.map(result.surprisingLinks, link =>
+        EffectArray.join([link.source.communityId, link.target.communityId].sort(), ':'),
       );
       expect(new Set(pairs).size).toBe(pairs.length);
     }),
@@ -235,7 +253,9 @@ describe('code graph analysis', () => {
         databasePath: '/analysis/graph.sqlite',
         snapshot,
       });
-      const communityId = initial.memberships.find(item => item.node.id === first.id)!.communityId;
+      const communityId = EffectOption.getOrUndefined(
+        EffectArray.findFirst(initial.memberships, item => item.node.id === first.id),
+      )!.communityId;
 
       const selected = yield* analyzeCodeGraph(pagedAnalysisStore(symbols, edges), {
         communityId,
@@ -253,14 +273,14 @@ describe('code graph analysis', () => {
       expect(selected.warnings).toContain(`Showing 1 of 2 members for ${communityId}.`);
 
       const absent = yield* analyzeCodeGraph(pagedAnalysisStore(symbols, edges), {
-        communityId: `cgc_${'0'.repeat(32)}`,
+        communityId: `cgc_${Effect2.pipe('0', EffectString.repeat(32))}`,
         databasePath: '/analysis/graph.sqlite',
         limits: analysisLimits({communityMembers: 1}),
         snapshot,
       });
       expect(absent.communityDrillDown).toEqual({
         complete: true,
-        requestedId: `cgc_${'0'.repeat(32)}`,
+        requestedId: `cgc_${Effect2.pipe('0', EffectString.repeat(32))}`,
         state: 'not-found',
       });
     }),
@@ -270,11 +290,15 @@ describe('code graph analysis', () => {
     Effect.gen(function* () {
       const center = analysisSymbol('dispatcher', '@acme/app', 'src/dispatcher.ts');
       const leaves = Array.from({length: 12}, (_, index) =>
-        analysisSymbol(`handler-${index.toString().padStart(2, '0')}`, '@acme/app', `src/handler-${index}.ts`),
+        analysisSymbol(
+          `handler-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`,
+          '@acme/app',
+          `src/handler-${index}.ts`,
+        ),
       );
       const symbols = [center, ...leaves];
-      const edges = leaves.map((leaf, index) =>
-        analysisEdge(`dispatch-${index.toString().padStart(2, '0')}`, center, leaf),
+      const edges = EffectArray.map(leaves, (leaf, index) =>
+        analysisEdge(`dispatch-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`, center, leaf),
       );
       const options = {
         databasePath: '/analysis/graph.sqlite',
@@ -309,9 +333,15 @@ describe('code graph analysis', () => {
   it.effect('uses aggregate pages only when every topology and finding output limit is zero', () =>
     Effect.gen(function* () {
       const symbols = Array.from({length: 50}, (_, index) =>
-        analysisSymbol(`node-${index.toString().padStart(2, '0')}`, '@acme/app', `src/${index}.ts`),
+        analysisSymbol(
+          `node-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`,
+          '@acme/app',
+          `src/${index}.ts`,
+        ),
       );
-      const edges = symbols.slice(1).map((symbol, index) => analysisEdge(`edge-${index}`, symbols[0], symbol));
+      const edges = EffectArray.map(symbols.slice(1), (symbol, index) =>
+        analysisEdge(`edge-${index}`, symbols[0], symbol),
+      );
       const observation: AnalysisPagingObservation = {edgePageLimits: [], symbolPageLimits: []};
       const result = yield* analyzeCodeGraph(pagedAnalysisStore(symbols, edges, observation), {
         budget: {pageSize: 7},
@@ -337,11 +367,15 @@ describe('code graph analysis', () => {
   it.effect('scales exact whole-graph statistics without hydrating topology when output limits are zero', () =>
     Effect.gen(function* () {
       const symbols = Array.from({length: 10_000}, (_, index) =>
-        analysisSymbol(`scale-${index.toString().padStart(5, '0')}`, '@acme/scale', `src/${index}.ts`),
+        analysisSymbol(
+          `scale-${Effect2.pipe(index.toString(), EffectString.padStart(5, '0'))}`,
+          '@acme/scale',
+          `src/${index}.ts`,
+        ),
       );
-      const edges = symbols
-        .slice(1)
-        .map((symbol, index) => analysisEdge(`scale-edge-${index.toString().padStart(5, '0')}`, symbols[0], symbol));
+      const edges = EffectArray.map(symbols.slice(1), (symbol, index) =>
+        analysisEdge(`scale-edge-${Effect2.pipe(index.toString(), EffectString.padStart(5, '0'))}`, symbols[0], symbol),
+      );
       const observation: AnalysisPagingObservation = {edgePageLimits: [], symbolPageLimits: []};
       const result = yield* analyzeCodeGraph(pagedAnalysisStore(symbols, edges, observation), {
         budget: {pageSize: 128},
@@ -380,8 +414,8 @@ describe('code graph analysis', () => {
       const failed = leasedAnalysisStore(
         {
           ...pagedAnalysisStore([symbol], []),
-          loadSymbolPage: () => Effect.fail(TestError.make({message: 'read failed'})),
-        } as unknown as CodeGraphStoreShape,
+          loadSymbolPage: () => Effect.fail(CodeGraphStoreError.of('read failed')),
+        } satisfies CodeGraphAnalysisStore,
         failedEvents,
       );
       const failure = yield* analyzeCodeGraphWithLease(failed, {
@@ -398,7 +432,7 @@ describe('code graph analysis', () => {
       const events: string[] = [];
       const base = leasedAnalysisStore(pagedAnalysisStore([], []), events);
       const measured: {stage: string; milliseconds: number}[] = [];
-      const store: CodeGraphStoreShape = {
+      const store: CodeGraphAnalysisLeasedStore = {
         ...base,
         acquireSnapshotLease: (...args) =>
           TestClock.adjust(11).pipe(Effect.andThen(base.acquireSnapshotLease(...args))),
@@ -413,14 +447,15 @@ describe('code graph analysis', () => {
         onTiming: stage =>
           Effect.gen(function* () {
             const started = yield* Clock.currentTimeMillis;
-            // oxlint-disable-next-line effecttsgo/return-effect-in-gen -- Return deferred completion work for the caller to run after the measured operation.
-            return Clock.currentTimeMillis.pipe(
-              Effect.tap(finished =>
-                Effect.sync(() => {
-                  measured.push({stage, milliseconds: finished - started});
-                }),
+            return yield* Effect.succeed(
+              Clock.currentTimeMillis.pipe(
+                Effect.tap(finished =>
+                  Effect.sync(() => {
+                    measured.push({stage, milliseconds: finished - started});
+                  }),
+                ),
+                Effect.asVoid,
               ),
-              Effect.asVoid,
             );
           }),
       });
@@ -467,7 +502,7 @@ describe('code graph analysis', () => {
             }
           }
         } else expect(observed).toEqual(original);
-        expect(events.filter(event => event === 'release:lease-token')).toHaveLength(2);
+        expect(EffectArray.filter(events, event => event === 'release:lease-token')).toHaveLength(2);
       }),
     {fastCheck: {numRuns: 24}},
   );
@@ -477,7 +512,7 @@ describe('code graph analysis', () => {
       const events: string[] = [];
       const base = leasedAnalysisStore(pagedAnalysisStore([], []), events);
       const waits: number[] = [];
-      const store: CodeGraphStoreShape = {
+      const store: CodeGraphAnalysisLeasedStore & Pick<CodeGraphStoreShape, 'ensureAnalysisSummary'> = {
         ...base,
         acquireSnapshotLease: (path, snapshot, duration, options) => {
           waits.push(options?.waitTimeoutMilliseconds ?? Infinity);
@@ -501,7 +536,7 @@ describe('code graph analysis', () => {
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
       const events: string[] = [];
-      const store: CodeGraphStoreShape = {
+      const store: CodeGraphAnalysisLeasedStore = {
         ...leasedAnalysisStore(pagedAnalysisStore([], []), events),
         withSession: () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
       };
@@ -518,10 +553,11 @@ describe('code graph analysis', () => {
 
   it.effect('defers lease acquisition on writer contention without opening an unleased session', () =>
     Effect.gen(function* () {
-      const store: CodeGraphStoreShape = {
+      const store: CodeGraphAnalysisLeasedStore = {
         ...pagedAnalysisStore([], []),
         acquireSnapshotLease: () => Effect.fail(CodeGraphStoreBusyError.of('busy')),
         withSession: () => Effect.die('An unleased read is forbidden'),
+        releaseSnapshotLease: () => Effect.die('A lease that was never acquired must not be released'),
       };
       const failure = yield* analyzeCodeGraphWithLease(store, {
         databasePath: '/analysis/graph.sqlite',
@@ -552,7 +588,13 @@ describe('code graph analysis', () => {
         expect(result.leaseCleanup?.state).toBe(busyRelease ? 'expiry' : 'released');
         expect(result.leaseCleanup?.expiresAt).toBeGreaterThan(0);
         expect(result.leaseCleanup?.expiresAt).toBeLessThanOrEqual(120000);
-        expect(events.filter(event => event.startsWith('release:'))).toHaveLength(busyRelease ? 0 : 1);
+        expect(
+          EffectArray.filter(
+            events,
+            __effectArrayValue =>
+              !!(event => Effect2.pipe(event, EffectString.startsWith('release:')))(__effectArrayValue),
+          ),
+        ).toHaveLength(busyRelease ? 0 : 1);
       }),
     {fastCheck: {numRuns: 10}},
   );
@@ -563,7 +605,7 @@ describe('code graph analysis', () => {
       const proceed = yield* Deferred.make<void>();
       const events: string[] = [];
       const base = leasedAnalysisStore(pagedAnalysisStore([], []), events);
-      const store: CodeGraphStoreShape = {
+      const store: CodeGraphAnalysisLeasedStore = {
         ...base,
         acquireSnapshotLease: () =>
           Deferred.succeed(acquired, undefined).pipe(Effect.andThen(Deferred.await(proceed)), Effect.as('lease-token')),
@@ -593,7 +635,7 @@ describe('code graph analysis', () => {
       });
 
       expect(result.statistics.analyzedNodeCount).toBe(new Set([first.id, second.id]).size);
-      expect(result.memberships.map(item => item.node.id)).toEqual([first.id, second.id]);
+      expect(EffectArray.map(result.memberships, item => item.node.id)).toEqual([first.id, second.id]);
     }),
   );
 
@@ -622,7 +664,7 @@ describe('code graph analysis', () => {
       const symbols = Array.from({length: 8}, (_, index) =>
         analysisSymbol(`node-${index}`, `package-${index % 2}`, `src/${index}.ts`),
       );
-      const edges = symbols.map((symbol, index) =>
+      const edges = EffectArray.map(symbols, (symbol, index) =>
         analysisEdge(`edge-${index}`, symbol, symbols[(index + 1) % symbols.length]),
       );
       const observation: AnalysisPagingObservation = {edgePageLimits: [], symbolPageLimits: []};
@@ -666,14 +708,15 @@ describe('code graph analysis', () => {
       const first = analysisSymbol('first', '@acme/app', 'src/first.ts');
       const second = analysisSymbol('second', '@acme/app', 'src/second.ts');
       let page = 0;
-      const store = {
+      const store: CodeGraphAnalysisStore = {
+        ...pagedAnalysisStore([first, second], []),
         loadSymbolPage: () =>
           Effect.gen(function* () {
             page += 1;
             yield* TestClock.adjust(11);
             return page === 1 ? [first] : [second];
           }),
-      } as unknown as CodeGraphStoreShape;
+      };
 
       const result = yield* analyzeCodeGraph(store, {
         budget: {maxDurationMilliseconds: 10, pageSize: 1},
@@ -690,9 +733,10 @@ describe('code graph analysis', () => {
   it.effect('remains cooperatively cancellable while a page read is pending', () =>
     Effect.gen(function* () {
       const requested = yield* Deferred.make<void>();
-      const store = {
+      const store: CodeGraphAnalysisStore = {
+        ...pagedAnalysisStore([], []),
         loadSymbolPage: () => Deferred.succeed(requested, undefined).pipe(Effect.andThen(Effect.never)),
-      } as unknown as CodeGraphStoreShape;
+      };
       const fiber = yield* analyzeCodeGraph(store, {
         databasePath: '/analysis/graph.sqlite',
         snapshot: {...analysisSnapshot([], []), symbolCount: 1},
@@ -739,7 +783,7 @@ function mergeAnalysisLimits(overrides: CodeGraphAnalysisLimits) {
   };
 }
 
-function leasedAnalysisStore(base: CodeGraphStoreShape, events: string[]): CodeGraphStoreShape {
+function leasedAnalysisStore(base: CodeGraphAnalysisStore, events: string[]): CodeGraphAnalysisLeasedStore {
   return {
     ...base,
     acquireSnapshotLease: (_databasePath, snapshotId) =>
@@ -748,8 +792,15 @@ function leasedAnalysisStore(base: CodeGraphStoreShape, events: string[]): CodeG
         return 'lease-token';
       }),
     releaseSnapshotLease: (_databasePath, token) => Effect.sync(() => void events.push(`release:${token}`)),
-    withSession: (_databasePath, effect) => Effect.sync(() => void events.push('session')).pipe(Effect.andThen(effect)),
-  } as CodeGraphStoreShape;
+    withSession: (_databasePath, effect) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* Effect.sync(() => void events.push('session'));
+          const context = yield* Layer.build(SqliteClient.layer({filename: ':memory:'}));
+          return yield* Effect.provideContext(effect, context);
+        }),
+      ).pipe(Effect.mapError(error => (Schema.is(SqlError)(error) ? CodeGraphStoreError.of(error.message) : error))),
+  };
 }
 
 function runFixtureAnalysis() {

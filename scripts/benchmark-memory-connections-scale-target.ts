@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {DateTime, Effect} from 'effect';
@@ -14,6 +15,8 @@ import {
 import {runMemoryConnectionsScaleWorkload} from '@threadnote/threadnote/evaluation/memory-connections-scale';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {atomicWrite, printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_BUDGET = 'apps/threadnote/test/evaluation/baselines/memory-connections-scale-v1/budget.json';
 const GIT_STATUS_ARGS = [
@@ -97,7 +100,7 @@ const program = Effect.scoped(
     }
     yield* printJson(artifact);
     if (!options.developmentSmoke && !artifact.gate.passed) {
-      return yield* ScriptError.make({message: artifact.gate.failures.join('\n')});
+      return yield* ScriptError.make({message: EffectArray.join(artifact.gate.failures, '\n')});
     }
   }),
 );
@@ -146,7 +149,7 @@ function gitObservation(args: readonly string[]): {readonly success: boolean; re
   const result = Bun.spawnSync({cmd: ['git', ...args], stderr: 'ignore', stdout: 'pipe'});
   return {
     success: result.exitCode === 0,
-    text: result.stdout ? new TextDecoder().decode(result.stdout).trim() : '',
+    text: result.stdout ? Effect2.pipe(new TextDecoder().decode(result.stdout), EffectString.trim) : '',
   };
 }
 
@@ -183,6 +186,7 @@ function nonNegativeInteger(value: string | undefined, option: string): number {
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }

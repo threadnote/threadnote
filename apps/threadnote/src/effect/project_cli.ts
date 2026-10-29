@@ -8,17 +8,17 @@ import {
   type ManagerManifestProjectMutationResult,
 } from '../manager/worksets.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {CliRuntimeRunner} from './cli.js';
 import {applicationError} from '@threadnote/platform/errors';
 import {argument, boolean, optionalString, repeatedString} from './cli/flags.js';
 import {SystemInfo} from '@threadnote/platform/system';
+import {Array as EffectArray} from 'effect';
 
 interface JsonOption {
   readonly json: boolean;
 }
 
-export function makeProjectCommand(
-  withRuntime: <E, R>(body: (config: RuntimeConfig) => Effect.Effect<void, E, R>) => Effect.Effect<void, E, R>,
-) {
+export function makeProjectCommand(withRuntime: CliRuntimeRunner) {
   const list = Command.make('list', {json: boolean('json', 'Emit versioned machine-readable JSON')}, options =>
     withRuntime(config => runProjectListCommand(config, options)),
   ).pipe(Command.withDescription('List local Threadnote projects'));
@@ -98,12 +98,12 @@ export function runProjectShowCommand(config: RuntimeConfig, project: string, op
     yield* Console.log(`Project: ${current.name}`);
     yield* Console.log(`Path: ${current.path}`);
     yield* Console.log(`URI: ${current.uri}`);
-    yield* Console.log(`Seed patterns: ${current.seed.length === 0 ? 'none' : current.seed.join(', ')}`);
+    yield* Console.log(`Seed patterns: ${current.seed.length === 0 ? 'none' : EffectArray.join(current.seed, ', ')}`);
     yield* Console.log(
       current.graph === undefined
         ? 'Graph scope: full repository'
-        : `Graph scope: ${current.graph.roots.join(', ')}${
-            current.graph.include?.length ? ` (includes ${current.graph.include.join(', ')})` : ''
+        : `Graph scope: ${EffectArray.join(current.graph.roots, ', ')}${
+            current.graph.include?.length ? ` (includes ${EffectArray.join(current.graph.include, ', ')})` : ''
           }`,
     );
   });

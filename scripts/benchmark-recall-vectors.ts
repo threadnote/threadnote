@@ -1,8 +1,9 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {BunRuntime} from '@effect/platform-bun';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {Clock, Console, Effect, FileSystem, Layer, Path} from 'effect';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 
@@ -18,13 +19,22 @@ import {
 } from '@threadnote/recall/vector-index';
 import {assessRecallVectorPerformance} from './recall-vector-performance-budget.js';
 import {assessVectorDatabaseStorage, createCompactedSqliteSnapshot} from './recall-vector-storage-budget.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw ScriptError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 const MEBIBYTE = 1024 * 1024;
 const DEFAULT_DOCUMENT_COUNT = 10_000;
 const DEFAULT_QUERY_SAMPLES = 10;
 const VECTOR_QUERY_RESULT_LIMIT = 25;
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+const manifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
 
 const options = parseOptions(process.argv.slice(2));
 
@@ -44,7 +54,7 @@ const runtimeLayer = Layer.succeed(
   LocalModelRuntime.of({
     diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
     embedMany: ({inputs, manifest: requested}) =>
-      Effect.sync(() => inputs.map(input => deterministicVector(requested.dimensions ?? 0, input))),
+      Effect.sync(() => EffectArray.map(inputs, input => deterministicVector(requested.dimensions ?? 0, input))),
     generate: () => Effect.die(ScriptError.make({message: 'Unexpected generation'})),
     rerank: () => Effect.die(ScriptError.make({message: 'Unexpected reranking'})),
   }),
@@ -67,7 +77,7 @@ const program = Effect.scoped(
     yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
     const candidates = Array.from({length: options.documents}, (_, index) => ({
       text: `# Vector benchmark ${index}\n\nUnique vector benchmark document ${index}.`,
-      uri: `threadnote://resources/repos/vector-benchmark/${String(index).padStart(6, '0')}.md`,
+      uri: `threadnote://resources/repos/vector-benchmark/${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}.md`,
     }));
     const initialRss = startRssSampler();
     let initialPeakRssBytes = initialRss.peak();
@@ -295,7 +305,11 @@ function modelInstallation(home: string) {
 }
 
 function count(database: Database, table: string): number {
-  return Number((database.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as {readonly count: number}).count);
+  return Number(
+    requiredRow(
+      database.query<{readonly count: number}, SQLQueryBindings[]>(`SELECT COUNT(*) AS count FROM ${table}`).get(),
+    ).count,
+  );
 }
 
 function percentile(sorted: readonly number[], ratio: number): number {

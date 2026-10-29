@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -128,7 +129,7 @@ describe('remember shared replacement', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   effectIt.effect(

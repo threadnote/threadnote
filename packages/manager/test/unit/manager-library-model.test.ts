@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import type {TreeNode} from '../../src/ui/contracts.js';
@@ -10,6 +11,9 @@ import {
   replaceMemoryBody,
   toggleMemorySelection,
 } from '../../src/library_model.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const node = (name: string, children?: readonly TreeNode[], team?: string): TreeNode => ({
   name,
@@ -17,7 +21,7 @@ const node = (name: string, children?: readonly TreeNode[], team?: string): Tree
   relativePath: name,
   isDir: children !== undefined,
   children,
-  isSystem: name.startsWith('.'),
+  isSystem: Effect.pipe(name, EffectString.startsWith('.')),
   isShared: !!team,
   sharedTeam: team,
 });
@@ -26,34 +30,43 @@ describe('Library recursive selection', () => {
   it('retains semantic and authored title matches with every ancestor while preserving the original tree', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.nat({max: 1000}), {minLength: 1, maxLength: 30}), ids => {
-        const leaves = ids.map(id => node(`folder/nested/${id}.md`));
+        const leaves = EffectArray.map(ids, id => node(`folder/nested/${id}.md`));
         const original = node('root', [node('folder', [node('folder/nested', leaves)])]);
-        const selected = leaves.filter((_, index) => index % 2 === 0);
-        const recalled = new Set(selected.map(leaf => leaf.uri));
+        const selected = EffectArray.filter(leaves, (_, index) => index % 2 === 0);
+        const recalled = new Set(EffectArray.map(selected, leaf => leaf.uri));
         const before = JSON.stringify(original);
         const result = librarySearchTree(original, 'unrelated query', recalled, false);
-        expect(descendantMemoryUris(result!)).toEqual(selected.map(leaf => leaf.uri));
+        expect(descendantMemoryUris(result!)).toEqual(EffectArray.map(selected, leaf => leaf.uri));
         expect(JSON.stringify(original)).toBe(before);
         expect(librarySearchTree(result, 'unrelated query', recalled, false)).toEqual(result);
       }),
       {numRuns: 60},
     );
-    const titled = {...node('opaque.md'), metadata: {topic: 'Authored title'} as TreeNode['metadata']};
+    const titled = {
+      ...node('opaque.md'),
+      metadata: {
+        kind: 'durable',
+        sourceAgentClient: 'threadnote-test',
+        status: 'active',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        topic: 'Authored title',
+      } satisfies TreeNode['metadata'],
+    };
     expect(librarySearchTree(titled, 'authored', new Set(), false)).toBe(titled);
     expect(librarySearchTree(node('.system.md'), 'system', new Set(), false)).toBeUndefined();
   });
   it('selects collapsed descendants and preserves unrelated siblings when toggled', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.nat({max: 999}), {minLength: 1, maxLength: 30}), ids => {
-        const leaves = ids.map(id => node(`folder/${id}.md`));
+        const leaves = EffectArray.map(ids, id => node(`folder/${id}.md`));
         const folder = node(
           'folder',
-          leaves.map((leaf, index) => node(`folder/nested-${index}`, [leaf])),
+          EffectArray.map(leaves, (leaf, index) => node(`folder/nested-${index}`, [leaf])),
         );
         const original = new Set(['sibling.md']);
         const selected = toggleMemorySelection(original, folder, true);
         expect([...selected].sort()).toEqual(
-          ['sibling.md', ...ids.map(id => `threadnote://user/test/memories/folder/${id}.md`)].sort(),
+          ['sibling.md', ...EffectArray.map(ids, id => `threadnote://user/test/memories/folder/${id}.md`)].sort(),
         );
         expect(toggleMemorySelection(selected, folder, true)).toEqual(selected);
         expect(toggleMemorySelection(selected, folder, false)).toEqual(original);
@@ -101,7 +114,7 @@ describe('Markdown authoring boundary', () => {
           'MEMORY\nkind: durable\nmemory_id: stable-id\nrelation: references threadnote://memory/other\n\n';
         const trailer = '\n\n<!-- MEMORY_FIELDS\n{"version":1}\n-->\n';
         const content = header + body + trailer;
-        expect(Object.values(memoryDocumentParts(content)).join('')).toBe(content);
+        expect(EffectArray.join(EffectRecord.values(memoryDocumentParts(content)), '')).toBe(content);
         expect(replaceMemoryBody(content, replacement)).toBe(header + replacement + trailer);
       }),
       {numRuns: 80},

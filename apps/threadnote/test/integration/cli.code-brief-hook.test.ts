@@ -48,9 +48,8 @@ it('delivers a cited action card for an existing Edit file and stays silent for 
     });
     expect(delivered.exitCode).toBe(0);
     expect(delivered.stderr).toBe('');
-    const output = JSON.parse(delivered.stdout) as {
-      hookSpecificOutput: {hookEventName: string; additionalContext: string};
-    };
+    const output: unknown = JSON.parse(delivered.stdout);
+    if (!isCitedPreToolUseOutput(output)) throw new Error('The hook did not return its cited PreToolUse context.');
     expect(output.hookSpecificOutput.hookEventName).toBe('PreToolUse');
     expect(output.hookSpecificOutput.additionalContext).toContain('Invariant: keep the stable value');
     expect(output.hookSpecificOutput.additionalContext).toContain('Avoid: resetting the identity');
@@ -100,4 +99,20 @@ async function runHook(repository: string, environment: NodeJS.ProcessEnv, paylo
     new Response(child.stderr).text(),
   ]);
   return {exitCode, stdout, stderr};
+}
+
+function isCitedPreToolUseOutput(
+  value: unknown,
+): value is {readonly hookSpecificOutput: {readonly hookEventName: string; readonly additionalContext: string}} {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'hookSpecificOutput' in value &&
+    typeof value.hookSpecificOutput === 'object' &&
+    value.hookSpecificOutput !== null &&
+    'hookEventName' in value.hookSpecificOutput &&
+    value.hookSpecificOutput.hookEventName === 'PreToolUse' &&
+    'additionalContext' in value.hookSpecificOutput &&
+    typeof value.hookSpecificOutput.additionalContext === 'string'
+  );
 }

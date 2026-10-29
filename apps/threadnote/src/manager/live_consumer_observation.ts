@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   Clock,
   Context,
@@ -102,14 +103,15 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
   let hinted = false;
   let changeSequence = 0;
   let processSnapshot: ManageableThreadnoteProcessDiagnostics | undefined;
-  const topics = MANAGER_CONSUMER_OBSERVED_TOPICS.filter(
+  const topics = EffectArray.filter(
+    MANAGER_CONSUMER_OBSERVED_TOPICS,
     topic =>
       (topic !== 'model-setup' || options.modelPaths !== undefined) &&
       (topic !== 'runtime-updates' || options.runtimePaths !== undefined),
   );
   const adapters = options.adapters ?? [];
   const watchLimit = options.watchLimit ?? MAX_WATCHES;
-  const allTopics = [...new Set([...topics, ...adapters.flatMap(adapter => adapter.topics)])];
+  const allTopics = [...new Set([...topics, ...EffectArray.flatMap(adapters, adapter => adapter.topics)])];
 
   const statIdentity = (file: string, maximumBytes = 1_048_576) =>
     Effect.gen(function* () {
@@ -122,11 +124,17 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
       if (stat === undefined) return 'absent';
       if (stat.type !== 'File' || Number(stat.size) > maximumBytes)
         return yield* Effect.die(new Error('Unsupported live source'));
-      return [
-        Number(stat.size),
-        Option.getOrUndefined(stat.mtime)?.getTime() ?? '',
-        Option.getOrUndefined(stat.ino) ?? '',
-      ].join(':');
+      return EffectArray.join(
+        EffectArray.map(
+          [
+            Number(stat.size),
+            Option.getOrUndefined(stat.mtime)?.getTime() ?? '',
+            Option.getOrUndefined(stat.ino) ?? '',
+          ],
+          item => (item === null || item === undefined ? '' : String(item)),
+        ),
+        ':',
+      );
     });
 
   const readBoundedText = (file: string, maximumBytes: number) =>
@@ -183,7 +191,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
     // Age and RSS are display clocks, not process membership or action state.
     const revision = sha256HexSync(
       JSON.stringify(
-        snapshot.processes.map(process => ({
+        EffectArray.map(snapshot.processes, process => ({
           activityRole: process.activityRole,
           currentOperation: process.currentOperation,
           parentProcessId: process.parentProcessId,
@@ -213,7 +221,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
     ];
     return {
       revision: sha256HexSync(JSON.stringify(identities)),
-      directories: [...new Set(options.modelPaths.map(file => path.dirname(file)))],
+      directories: [...new Set(EffectArray.map(options.modelPaths, file => path.dirname(file)))],
     } satisfies Probe;
   });
 
@@ -222,7 +230,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
     const identities = yield* Effect.forEach(options.runtimePaths, file => statIdentity(file));
     return {
       revision: sha256HexSync(JSON.stringify(identities)),
-      directories: [...new Set(options.runtimePaths.map(file => path.dirname(file)))],
+      directories: [...new Set(EffectArray.map(options.runtimePaths, file => path.dirname(file)))],
     } satisfies Probe;
   });
 
@@ -250,7 +258,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
         }),
       {concurrency: 2},
     );
-    if (worktrees.some(({observation}) => observation.state !== 'complete')) return undefined;
+    if (EffectArray.some(worktrees, ({observation}) => observation.state !== 'complete')) return undefined;
     const graph = yield* observeManagerGraphSources(config);
     const catalog = codeGraphWorksetCatalogLayout(path, config.agentContextHome);
     const database = yield* statIdentity(catalog.databasePath, Infinity);
@@ -259,7 +267,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
       path.dirname(config.manifestPath),
       catalog.root,
       ...graph.directories,
-      ...worktrees.flatMap(({cwd, observation}) =>
+      ...EffectArray.flatMap(worktrees, ({cwd, observation}) =>
         observation.state === 'complete' ? [cwd, ...observation.watchDirectories] : [],
       ),
     ]);
@@ -271,7 +279,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
           database,
           wal,
           graph.revision,
-          worktrees.map(({observation}) => (observation.state === 'complete' ? observation.revision : '')),
+          EffectArray.map(worktrees, ({observation}) => (observation.state === 'complete' ? observation.revision : '')),
         ]),
       ),
       directories: [...directorySet],
@@ -386,7 +394,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
   });
   const admitRetained = Effect.gen(function* () {
     const retained = new Map(
-      [...connections.values()].flat().map(resource => [managerLiveResourceKey(resource), resource]),
+      EffectArray.map([...connections.values()].flat(), resource => [managerLiveResourceKey(resource), resource]),
     );
     for (const key of entries.keys()) if (!retained.has(key)) entries.delete(key);
     const added: Entry[] = [];
@@ -401,12 +409,12 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
       else yield* check(entry);
     }
     if (
-      [...retained.values()].some(resource => resource.topic === 'processes') &&
+      EffectArray.some([...retained.values()], resource => resource.topic === 'processes') &&
       !entries.has(managerLiveResourceKey({topic: 'processes', scope: 'account'}))
     )
       yield* reportProcessCoverage(false, false);
     yield* updateWatches;
-    return new Set(added.map(entry => managerLiveResourceKey(entry.resource)));
+    return new Set(EffectArray.map(added, entry => managerLiveResourceKey(entry.resource)));
   });
   const reconcile = (force = false) =>
     Effect.gen(function* () {
@@ -432,7 +440,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
   yield* Effect.forever(
     Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
-      const processActive = [...entries.values()].some(entry => entry.resource.topic === 'processes');
+      const processActive = EffectArray.some([...entries.values()], entry => entry.resource.topic === 'processes');
       const due = Math.min(nextPeriodic, processActive ? nextProcess : Infinity);
       yield* Effect.race(Queue.take(wake), Effect.sleep(Math.max(1, due - now)));
       yield* reconcile();
@@ -458,10 +466,13 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
     },
     subscribe: (connection: string, requested: readonly ManagerLiveResource[]) =>
       Effect.gen(function* () {
-        const supported = requested.filter(resource => topics.includes(resource.topic));
+        const supported = EffectArray.filter(
+          requested,
+          (resource, __effectArrayIndex) => __effectArrayIndex in requested && topics.includes(resource.topic),
+        );
         const graphProcessSource =
-          requested.some(resource => resource.topic === 'graph-status') &&
-          adapters.some(adapter => adapter.processChanged !== undefined)
+          EffectArray.some(requested, resource => resource.topic === 'graph-status') &&
+          EffectArray.some(adapters, adapter => adapter.processChanged !== undefined)
             ? [{topic: 'processes' as const, scope: 'account' as const}]
             : [];
         const local = [...supported, ...graphProcessSource];
@@ -482,8 +493,12 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
           adapter.subscribe(connection, requested),
         );
         return [
-          ...requested.filter(
-            resource => topics.includes(resource.topic) && !entries.get(managerLiveResourceKey(resource))?.available,
+          ...EffectArray.filter(
+            requested,
+            (resource, __effectArrayIndex) =>
+              __effectArrayIndex in requested &&
+              topics.includes(resource.topic) &&
+              !entries.get(managerLiveResourceKey(resource))?.available,
           ),
           ...externalUnavailable.flat(),
         ];

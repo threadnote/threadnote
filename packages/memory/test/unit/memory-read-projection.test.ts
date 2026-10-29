@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
@@ -14,6 +15,8 @@ import {
   projectMemoryRead,
   selectMemoryMarkdownSection,
 } from '@threadnote/memory/read/projection';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('complete memory read projection', () => {
   it('defaults to agent-channel metadata while explicit text and dual preserve canonical content', () => {
@@ -36,14 +39,14 @@ describe('complete memory read projection', () => {
 
   it('replaces raw citation JSON with compact code evidence without changing the memory body', () => {
     const citation = createMemoryCodeCitation({
-      extractorSet: 'e'.repeat(64),
-      fileContentHash: {algorithm: 'sha256', value: 'f'.repeat(64)},
+      extractorSet: Effect.pipe('e', EffectString.repeat(64)),
+      fileContentHash: {algorithm: 'sha256', value: Effect.pipe('f', EffectString.repeat(64))},
       path: 'packages/context/src/projector.ts',
-      repositoryId: 'a'.repeat(64),
+      repositoryId: Effect.pipe('a', EffectString.repeat(64)),
       repositoryIdentityKind: 'remote',
-      sourceCommit: 'b'.repeat(40),
+      sourceCommit: Effect.pipe('b', EffectString.repeat(40)),
       sourceDirty: false,
-      sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+      sourceSnapshotId: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}`,
       target: {kind: 'file'},
       version: 1,
     });
@@ -65,10 +68,14 @@ describe('complete memory read projection', () => {
         topic: 'compact-read',
         visibility: 'personal',
       },
-      body.trim(),
+      Effect.pipe(body, EffectString.trim),
     );
-    const separator = formatted.indexOf('\n\n');
-    const canonical = `${formatted.slice(0, separator + 2)}${body}`;
+    const separator = Effect.pipe(
+      formatted,
+      EffectString.indexOf('\n\n'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    const canonical = `${Effect.pipe(formatted, EffectString.slice(0, separator + 2))}${body}`;
     const read = projectMemoryRead([
       {
         text: canonical,
@@ -79,14 +86,14 @@ describe('complete memory read projection', () => {
 
     expect(agent).toContain('TN-MEMORY/1');
     expect(agent).toContain(
-      `Code evidence [remote:${citation.repositoryId.slice(0, 12)} @ ${citation.sourceCommit}]: packages/context/src/projector.ts`,
+      `Code evidence [remote:${Effect.pipe(citation.repositoryId, EffectString.slice(0, 12))} @ ${citation.sourceCommit}]: packages/context/src/projector.ts`,
     );
     expect(agent).toContain('Relation: references memories/durable/projects/threadnote/related.md');
     expect(agent).toContain(
       'Relation: references threadnote://user/other/memories/durable/projects/threadnote/external.md',
     );
     expect(agent).toContain('Source: memories/durable/projects/threadnote/compact-read.md');
-    expect(agent.endsWith(body)).toBe(true);
+    expect(Effect.pipe(agent, EffectString.endsWith(body))).toBe(true);
     expect(agent).not.toContain('code_citation:');
     expect(agent).not.toContain(citation.repositoryId);
     expect(memoryReadMcpText(read, 'text')).toBe(canonical);
@@ -152,11 +159,14 @@ describe('complete memory read projection', () => {
   });
 
   it('is deterministic for a stable source', () => {
-    const resources = [{text: `${'🙂 bounded evidence\n'.repeat(50)}`, uri: 'threadnote://test/stable.md'}];
+    const resources = [
+      {text: `${Effect.pipe('🙂 bounded evidence\n', EffectString.repeat(50))}`, uri: 'threadnote://test/stable.md'},
+    ];
     expect(projectMemoryRead(resources)).toEqual(projectMemoryRead(resources));
   });
 
   it('refuses over-cap memories with an outline and no body prefix', () => {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     const body = `${'x'.repeat(MEMORY_READ_MAXIMUM_CONTENT_BYTES + 1)}`;
     const content = `# Ledger\n## Open\n${body}\n`;
     expect(() => projectMemoryRead([{text: content, uri: 'threadnote://test/huge.md'}])).toThrow(
@@ -166,17 +176,21 @@ describe('complete memory read projection', () => {
       projectMemoryRead([{text: content, uri: 'threadnote://test/huge.md'}]);
     } catch (error) {
       expect(error).toBeInstanceOf(MemoryReadTooLargeError);
-      const failure = error as MemoryReadTooLargeError;
+      if (!Schema.is(MemoryReadTooLargeError)(error)) throw error;
+      const failure = error;
       expect(failure.message).toContain(`${MEMORY_READ_MAXIMUM_CONTENT_BYTES} bytes`);
       expect(failure.message).toContain('mode=outline');
       expect(failure.message).toContain('section=');
       expect(failure.message).toContain('## Open');
       expect(failure.outline).toContain('# Ledger');
-      expect(failure.message.includes(body.slice(0, 80))).toBe(false);
+      expect(Effect.pipe(failure.message, EffectString.includes(Effect.pipe(body, EffectString.slice(0, 80))))).toBe(
+        false,
+      );
     }
   });
 
   it('returns the complete memory at the exact byte cap', () => {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     const text = 'a'.repeat(MEMORY_READ_MAXIMUM_CONTENT_BYTES);
     const read = projectMemoryRead([{text, uri: 'threadnote://test/exact.md'}]);
     expect(read.structuredContent.complete).toBe(true);
@@ -187,6 +201,7 @@ describe('complete memory read projection', () => {
   it('refuses any over-cap payload without returning a successful prefix', () => {
     fc.assert(
       fc.property(fc.integer({max: 32, min: 1}), extra => {
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const text = 'x'.repeat(MEMORY_READ_MAXIMUM_CONTENT_BYTES + extra);
         expect(() => projectMemoryRead([{text, uri: 'threadnote://test/cap.md'}])).toThrow(MemoryReadTooLargeError);
       }),
@@ -199,7 +214,8 @@ describe('complete memory read projection', () => {
       fc.property(
         fc.array(fc.constantFrom('a', 'é', '🙂', '\n', '\ud800', '\udc00'), {maxLength: 12, minLength: 1}),
         characters => {
-          const segment = characters.join('');
+          const segment = EffectArray.join(characters, '');
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           const text = segment.repeat(Math.ceil(70_000 / segment.length));
           const resources = [{text, uri: 'threadnote://test/headingless.md'}];
           expect(memoryReadContentBytes(text)).toBeGreaterThan(MEMORY_READ_MAXIMUM_CONTENT_BYTES);
@@ -234,7 +250,7 @@ describe('complete memory read projection', () => {
             offsetBytes = page.nextOffsetBytes!;
           }
           expect(complete).toBe(true);
-          expect(parts.join('')).toBe(text);
+          expect(EffectArray.join(parts, '')).toBe(text);
         },
       ),
       {numRuns: 10},
@@ -242,7 +258,7 @@ describe('complete memory read projection', () => {
   });
 
   it('pages a 1 MiB memory without rescanning each preceding character', () => {
-    const text = `${'a'.repeat(1_048_576)}🙂\ud800`;
+    const text = `${Effect.pipe('a', EffectString.repeat(1_048_576))}🙂\ud800`;
     const resources = [{text, uri: 'threadnote://test/megabyte.md'}];
     const parts: string[] = [];
     let offsetBytes = 0;
@@ -253,7 +269,7 @@ describe('complete memory read projection', () => {
       expect(page.contentBytes).toBeLessThanOrEqual(MEMORY_READ_PAGE_BYTES);
       if (page.complete) {
         expect(page.nextOffsetBytes).toBeUndefined();
-        expect(parts.join('')).toBe(text);
+        expect(EffectArray.join(parts, '')).toBe(text);
         return;
       }
       expect(page.nextOffsetBytes).toBeGreaterThan(offsetBytes);
@@ -265,6 +281,7 @@ describe('complete memory read projection', () => {
 
   it('keeps repeated surrogate-boundary content above the one-shot cap', () => {
     const segment = '\udc00\ud800';
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     const text = segment.repeat(Math.ceil(70_000 / segment.length));
     expect(memoryReadContentBytes(text)).toBeGreaterThan(MEMORY_READ_MAXIMUM_CONTENT_BYTES);
     expect(() => projectMemoryRead([{text, uri: 'threadnote://test/surrogate-boundary.md'}])).toThrow(
@@ -273,7 +290,7 @@ describe('complete memory read projection', () => {
   });
 
   it('rejects stale and invalid page continuations', () => {
-    const resources = [{text: `🙂${'a'.repeat(70_000)}`, uri: 'threadnote://test/large.md'}];
+    const resources = [{text: `🙂${Effect.pipe('a', EffectString.repeat(70_000))}`, uri: 'threadnote://test/large.md'}];
     const first = projectMemoryRead(resources, {offsetBytes: 0}).structuredContent;
     expect(() => projectMemoryRead(resources, {offsetBytes: first.nextOffsetBytes})).toThrow(MemoryReadProjectionError);
     expect(() => projectMemoryRead(resources, {offsetBytes: 1, sourceHash: first.sourceHash})).toThrow(
@@ -339,26 +356,41 @@ describe('complete memory read projection', () => {
   });
 
   it('ignores ATX pseudoheadings inside backtick and tilde code fences', () => {
-    const content = [
-      '# Root',
-      '```sh',
-      '# Install',
-      'echo pseudo',
-      '```',
-      '~~~python',
-      '## Usage',
-      'print("pseudo")',
-      '~~~~',
-      '## Install',
-      'real instructions',
-      '## Usage',
-      'real usage',
-      '',
-    ].join('\n');
+    const content = EffectArray.join(
+      [
+        '# Root',
+        '```sh',
+        '# Install',
+        'echo pseudo',
+        '```',
+        '~~~python',
+        '## Usage',
+        'print("pseudo")',
+        '~~~~',
+        '## Install',
+        'real instructions',
+        '## Usage',
+        'real usage',
+        '',
+      ],
+      '\n',
+    );
 
     const outline = memoryMarkdownOutline(content);
-    expect(outline.match(/Install/gu)).toHaveLength(1);
-    expect(outline.match(/Usage/gu)).toHaveLength(1);
+    expect(
+      Effect.pipe(
+        outline,
+        EffectString.match(/Install/gu),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(1);
+    expect(
+      Effect.pipe(
+        outline,
+        EffectString.match(/Usage/gu),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(1);
     expect(selectMemoryMarkdownSection(content, 'Install')).toBe('## Install\nreal instructions\n');
     expect(selectMemoryMarkdownSection(content, 'Usage')).toBe('## Usage\nreal usage\n');
   });
@@ -375,16 +407,20 @@ describe('complete memory read projection', () => {
           {maxLength: 8},
         ),
         (character, length, pseudoTitles) => {
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           const fence = character.repeat(length);
-          const content = [
-            `${fence} language`,
-            ...pseudoTitles.map(title => `## ${title}`),
-            fence,
-            '## Real section',
-            'authoritative body',
-            '## Next',
-            '',
-          ].join('\n');
+          const content = EffectArray.join(
+            [
+              `${fence} language`,
+              ...EffectArray.map(pseudoTitles, title => `## ${title}`),
+              fence,
+              '## Real section',
+              'authoritative body',
+              '## Next',
+              '',
+            ],
+            '\n',
+          );
 
           expect(selectMemoryMarkdownSection(content, 'Real section')).toBe('## Real section\nauthoritative body\n');
           const outline = memoryMarkdownOutline(content);

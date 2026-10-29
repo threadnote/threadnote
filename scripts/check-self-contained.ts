@@ -1,15 +1,35 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {hasUndeclaredPythonRuntimeReference} from './effect/self-contained-source.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface PackageManifest {
   readonly dependencies?: Readonly<Record<string, string>>;
   readonly devDependencies?: Readonly<Record<string, string>>;
   readonly packageManager?: string;
   readonly scripts?: Readonly<Record<string, string>>;
+}
+
+function isStringRecord(value: unknown): value is Readonly<Record<string, string>> {
+  return isRecord(value) && EffectArray.every(EffectRecord.values(value), item => typeof item === 'string');
+}
+
+function isPackageManifest(value: unknown): value is PackageManifest {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !EffectArray.isArray(value) &&
+    (!('dependencies' in value) || isStringRecord(value.dependencies)) &&
+    (!('devDependencies' in value) || isStringRecord(value.devDependencies)) &&
+    (!('packageManager' in value) || typeof value.packageManager === 'string') &&
+    (!('scripts' in value) || isStringRecord(value.scripts))
+  );
 }
 
 const ROOT_URL = new URL('..', import.meta.url);
@@ -120,11 +140,14 @@ const checkSelfContained = Effect.gen(function* () {
   const manifest = yield* fs.readFileString(path.join(root, 'package.json')).pipe(
     Effect.flatMap(content =>
       Effect.try({
-        try: () => JSON.parse(content) as PackageManifest,
+        try: (): unknown => JSON.parse(content),
         catch: cause => ScriptError.make({message: 'Could not parse package.json.', cause}),
       }),
     ),
   );
+  if (!isPackageManifest(manifest)) {
+    return yield* ScriptError.make({message: 'package.json has an invalid manifest shape.'});
+  }
   const allDependencies = {...manifest.dependencies, ...manifest.devDependencies};
   if (manifest.packageManager !== `bun@${EXPECTED_BUN_VERSION}`) {
     failures.push(`packageManager must pin bun@${EXPECTED_BUN_VERSION}`);
@@ -153,7 +176,7 @@ const checkSelfContained = Effect.gen(function* () {
   if (manifest.devDependencies?.['@tree-sitter-grammars/tree-sitter-hcl'] !== EXPECTED_TREE_SITTER_HCL_VERSION) {
     failures.push(`@tree-sitter-grammars/tree-sitter-hcl must be pinned to ${EXPECTED_TREE_SITTER_HCL_VERSION}`);
   }
-  for (const [packageName, version] of Object.entries(EXPECTED_TREE_SITTER_GRAMMAR_PACKAGE_VERSIONS)) {
+  for (const [packageName, version] of EffectRecord.toEntries(EXPECTED_TREE_SITTER_GRAMMAR_PACKAGE_VERSIONS)) {
     if (manifest.devDependencies?.[packageName] !== version) {
       failures.push(`${packageName} must be pinned to ${version}`);
     }
@@ -164,14 +187,14 @@ const checkSelfContained = Effect.gen(function* () {
   if (allDependencies.graphify) {
     failures.push('Graphify must not be a runtime or development dependency.');
   }
-  const scriptCommands = Object.values(manifest.scripts ?? {}).join('\n');
+  const scriptCommands = EffectArray.join(EffectRecord.values(manifest.scripts ?? {}), '\n');
   if (/\b(?:node|npm|npx|pip|pipx|python|python3)\b/.test(scriptCommands)) {
     failures.push('package scripts must run through Bun only and must not invoke a Python runtime.');
   }
 
   for (const installer of ['scripts/install.sh', 'scripts/install.ps1'] as const) {
     const content = yield* fs.readFileString(path.join(root, installer));
-    if (!content.includes('/releases/download/')) {
+    if (!Effect2.pipe(content, EffectString.includes('/releases/download/'))) {
       failures.push(`${installer} must install standalone GitHub release artifacts.`);
     }
     if (/\b(?:npm|npx|node_modules)\b/i.test(content)) {
@@ -221,13 +244,16 @@ const checkSelfContained = Effect.gen(function* () {
         'threadnote-memory',
         'SKILL.md',
       ),
-      ...[
-        'agent-instructions.md',
-        'start-skill.md',
-        'agent-skills/threadnote-context/SKILL.md',
-        'agent-skills/threadnote-memory/SKILL.md',
-        'agent-skills/threadnote-code-graph/SKILL.md',
-      ].map(file => path.join(root, 'dist', 'config', 'agent-profiles', 'codex-cloud-personal', file)),
+      ...EffectArray.map(
+        [
+          'agent-instructions.md',
+          'start-skill.md',
+          'agent-skills/threadnote-context/SKILL.md',
+          'agent-skills/threadnote-memory/SKILL.md',
+          'agent-skills/threadnote-code-graph/SKILL.md',
+        ],
+        file => path.join(root, 'dist', 'config', 'agent-profiles', 'codex-cloud-personal', file),
+      ),
       path.join(root, 'dist', 'cursor-plugin', '.cursor-plugin', 'plugin.json'),
       path.join(root, 'dist', 'cursor-plugin', 'assets', 'logo.svg'),
       path.join(root, 'dist', 'cursor-plugin', 'rules', 'threadnote.mdc'),
@@ -246,7 +272,9 @@ const checkSelfContained = Effect.gen(function* () {
       path.join(root, 'dist', 'assets', 'code-graph', 'licenses', 'tree-sitter-kotlin.LICENSE'),
       path.join(root, 'dist', 'assets', 'code-graph', 'licenses', 'tree-sitter-swift.LICENSE'),
       path.join(root, 'dist', 'assets', 'code-graph', 'licenses', 'web-tree-sitter.LICENSE'),
-      ...REMOTE_MEMORY_MIGRATIONS.map(name => path.join(root, 'dist', 'remote-memory', 'migrations', name)),
+      ...EffectArray.map(REMOTE_MEMORY_MIGRATIONS, name =>
+        path.join(root, 'dist', 'remote-memory', 'migrations', name),
+      ),
     ]) {
       if (!(yield* fs.exists(required))) {
         failures.push(`standalone build output is missing: ${normalizePath(path.relative(root, required))}`);
@@ -309,7 +337,12 @@ const checkSelfContained = Effect.gen(function* () {
   }
 
   if (failures.length > 0) {
-    return yield* ScriptError.make({message: failures.map(failure => `- ${failure}`).join('\n')});
+    return yield* ScriptError.make({
+      message: EffectArray.join(
+        EffectArray.map(failures, failure => `- ${failure}`),
+        '\n',
+      ),
+    });
   }
   yield* Console.log('Self-contained Bun source and release checks passed.');
 });
@@ -338,29 +371,29 @@ const validateCursorPlugin = Effect.fn('checkSelfContained.validateCursorPlugin'
   root: string,
   failures: string[],
 ) {
-  const instructions = normalizeNewlines(
-    yield* fs.readFileString(path.join(root, 'config', 'agent-instructions.md')),
-  ).trim();
+  const instructions = Effect2.pipe(
+    normalizeNewlines(yield* fs.readFileString(path.join(root, 'config', 'agent-instructions.md'))),
+    EffectString.trim,
+  );
   const rule = yield* fs.readFileString(path.join(root, 'cursor-plugin', 'rules', 'threadnote.mdc'));
   if (!/^---\r?\n[\s\S]*?^description:\s*\S.+$[\s\S]*?^alwaysApply:\s*true\s*$[\s\S]*?^---$/m.test(rule)) {
     failures.push('Cursor plugin rule must have a description and alwaysApply: true MDC frontmatter');
   }
-  const expectedBlock = [
-    '<!-- BEGIN THREADNOTE USER INSTRUCTIONS -->',
-    instructions,
-    '<!-- END THREADNOTE USER INSTRUCTIONS -->',
-  ].join('\n');
-  if (!normalizeNewlines(rule).includes(expectedBlock)) {
+  const expectedBlock = EffectArray.join(
+    ['<!-- BEGIN THREADNOTE USER INSTRUCTIONS -->', instructions, '<!-- END THREADNOTE USER INSTRUCTIONS -->'],
+    '\n',
+  );
+  if (!Effect2.pipe(normalizeNewlines(rule), EffectString.includes(expectedBlock))) {
     failures.push('Cursor plugin rule is out of sync with config/agent-instructions.md');
   }
 });
 
 function normalizePath(value: string): string {
-  return value.replaceAll('\\', '/');
+  return Effect2.pipe(value, EffectString.replaceAll('\\', '/'));
 }
 
 function normalizeNewlines(value: string): string {
-  return value.replaceAll('\r\n', '\n');
+  return Effect2.pipe(value, EffectString.replaceAll('\r\n', '\n'));
 }
 
 const validateCodeGraphAssets = Effect.fn('checkSelfContained.validateCodeGraphAssets')(function* (
@@ -382,9 +415,12 @@ const validateCodeGraphAssets = Effect.fn('checkSelfContained.validateCodeGraphA
   }
   const expected = [
     {id: 'web-tree-sitter', metadata: manifest.runtime, runtime: true},
-    ...Object.entries(manifest.grammars)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([id, metadata]) => ({id, metadata, runtime: false})),
+    ...EffectArray.map(
+      EffectRecord.toEntries(manifest.grammars).sort(([left], [right]) =>
+        Effect2.pipe(left, EffectString.localeCompare(right)),
+      ),
+      ([id, metadata]) => ({id, metadata, runtime: false}),
+    ),
   ];
   for (const asset of expected) {
     if (
@@ -392,7 +428,7 @@ const validateCodeGraphAssets = Effect.fn('checkSelfContained.validateCodeGraphA
       typeof asset.metadata.path !== 'string' ||
       typeof asset.metadata.version !== 'string' ||
       typeof asset.metadata.source !== 'string' ||
-      !asset.metadata.source.startsWith('https://github.com/') ||
+      !Effect2.pipe(asset.metadata.source, EffectString.startsWith('https://github.com/')) ||
       typeof asset.metadata.sha256 !== 'string' ||
       !/^[0-9a-f]{64}$/.test(asset.metadata.sha256) ||
       (!asset.runtime && (!Number.isInteger(asset.metadata.abi) || Number(asset.metadata.abi) <= 0))
@@ -400,10 +436,10 @@ const validateCodeGraphAssets = Effect.fn('checkSelfContained.validateCodeGraphA
       failures.push(`code graph asset metadata is invalid for ${asset.id}`);
       continue;
     }
-    const assetPath = path.join(root, ...asset.metadata.path.split('/'));
+    const assetPath = path.join(root, ...Effect2.pipe(asset.metadata.path, EffectString.split('/')));
     const packagePath =
       !asset.runtime && packageRoot !== undefined && typeof asset.metadata.packagePath === 'string'
-        ? path.join(packageRoot, ...asset.metadata.packagePath.split('/'))
+        ? path.join(packageRoot, ...Effect2.pipe(asset.metadata.packagePath, EffectString.split('/')))
         : undefined;
     const verifiablePath = (yield* fs.exists(assetPath)) ? assetPath : packagePath;
     if (verifiablePath === undefined || !(yield* fs.exists(verifiablePath))) {
@@ -417,10 +453,10 @@ const validateCodeGraphAssets = Effect.fn('checkSelfContained.validateCodeGraphA
       if (typeof asset.metadata.license !== 'string') {
         failures.push(`code graph asset license metadata is missing for ${asset.id}`);
       } else {
-        const bundledLicense = path.join(root, ...asset.metadata.license.split('/'));
+        const bundledLicense = path.join(root, ...Effect2.pipe(asset.metadata.license, EffectString.split('/')));
         const packageLicense =
           packageRoot !== undefined && typeof asset.metadata.licensePackagePath === 'string'
-            ? path.join(packageRoot, ...asset.metadata.licensePackagePath.split('/'))
+            ? path.join(packageRoot, ...Effect2.pipe(asset.metadata.licensePackagePath, EffectString.split('/')))
             : undefined;
         const licensePath = (yield* fs.exists(bundledLicense)) ? bundledLicense : packageLicense;
         if (licensePath === undefined || !(yield* fs.exists(licensePath)) || (yield* fs.stat(licensePath)).size <= 0) {
@@ -428,7 +464,7 @@ const validateCodeGraphAssets = Effect.fn('checkSelfContained.validateCodeGraphA
         }
       }
       if (typeof asset.metadata.builderLicense === 'string') {
-        const builderLicense = path.join(root, ...asset.metadata.builderLicense.split('/'));
+        const builderLicense = path.join(root, ...Effect2.pipe(asset.metadata.builderLicense, EffectString.split('/')));
         if (!(yield* fs.exists(builderLicense)) || (yield* fs.stat(builderLicense)).size <= 0) {
           failures.push(`code graph asset builder license is missing: ${asset.metadata.builderLicense}`);
         }
@@ -454,7 +490,7 @@ function parseJsonFile(fs: FileSystem.FileSystem, path: string): Effect.Effect<u
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 BunRuntime.runMain(provideScriptLayer(checkSelfContained, BunServices.layer));

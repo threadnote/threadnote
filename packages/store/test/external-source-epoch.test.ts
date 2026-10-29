@@ -19,9 +19,12 @@ import {
   serializeExternalSourceReceipt,
   type ExternalDocumentManifest,
 } from '@threadnote/store/external-resource';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const fingerprint = 'a'.repeat(64);
-const epoch = 'b'.repeat(64);
+const fingerprint = Effect2.pipe('a', EffectString.repeat(64));
+const epoch = Effect2.pipe('b', EffectString.repeat(64));
 const base = Layer.mergeAll(
   BunServices.layer,
   SystemInfo.layer.pipe(
@@ -130,7 +133,7 @@ describe('external source epoch', () => {
             expected.push(uri);
           }
         }
-        expect(Object.keys(yield* loadExternalResourceAccess(location)).sort()).toEqual(expected.sort());
+        expect(EffectRecord.keys(yield* loadExternalResourceAccess(location)).sort()).toEqual(expected.sort());
         for (const {uri} of documents)
           expect(Result.isSuccess(yield* store.read(location, uri).pipe(Effect.result))).toBe(expected.includes(uri));
         yield* store.write(

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Result} from 'effect';
@@ -11,6 +12,8 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {ContextBriefPlanV1} from '@threadnote/context/types';
 import {contextBriefCodeAnchorTelemetryFields} from '@threadnote/threadnote/telemetry/context_brief';
 import {TestError} from '@threadnote/testing/test-error';
+import {ApplicationLayer} from '../../src/effect/runtime.js';
+import {provideTestLayer} from '../helpers/effect-layer.js';
 
 const mocks = vi.hoisted(() => ({
   captureMemoryCodeCitations: vi.fn(),
@@ -52,6 +55,8 @@ vi.mock('@threadnote/threadnote/telemetry/code_anchor_finalization', () => ({
 
 import {retrieveContextBriefCodeLinkedMemoryEvidence} from '@threadnote/threadnote/context_brief/index';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MEMORY_URI = 'threadnote://user/tester/memories/durable/projects/threadnote/recovery.md';
 const CONFIG: RuntimeConfig = {
@@ -67,13 +72,16 @@ describe('Context Brief code-linked memory recovery', () => {
     vi.clearAllMocks();
     mocks.captureMemoryCodeCitations.mockImplementation(
       (_config: RuntimeConfig, input: {readonly refs?: readonly string[]}) =>
-        Effect.succeed((input.refs ?? []).map(codeCitation)),
+        Effect.succeed(EffectArray.map(input.refs ?? [], codeCitation)),
     );
     mocks.loadRecallCodeLinks.mockReturnValue(Effect.succeed([]));
     mocks.loadRecallMemoryIdentities.mockReturnValue(Effect.succeed([]));
     mocks.readMemoryRecordsByUri.mockReturnValue(Effect.succeed([]));
     mocks.resolveRepositoryIdentity.mockReturnValue(
-      Effect.succeed({repositoryId: 'a'.repeat(64), worktreeId: 'b'.repeat(64)}),
+      Effect.succeed({
+        repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+        worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+      }),
     );
     mocks.expireRecallIndexValidation.mockReturnValue(Effect.void);
     mocks.finalizeDeferredCodeAnchorsForRoute.mockReturnValue(Effect.succeed(finalizationReceipt('completed', 0)));
@@ -90,7 +98,7 @@ describe('Context Brief code-linked memory recovery', () => {
       const citation = codeCitation('src/first.ts');
       mocks.loadRecallCodeLinks.mockReturnValue(
         Effect.succeed(
-          [inside, ...outside].map(uri => ({
+          EffectArray.map([inside, ...outside], uri => ({
             anchorOrdinal: 0,
             citationId: citation.id,
             matchKind: 'file-path',
@@ -99,7 +107,7 @@ describe('Context Brief code-linked memory recovery', () => {
         ),
       );
       mocks.readMemoryRecordsByUri.mockImplementation((_config: RuntimeConfig, uris: readonly string[]) =>
-        Effect.succeed(uris.map(uri => ({...memoryRecord(citation), uri}))),
+        Effect.succeed(EffectArray.map(uris, uri => ({...memoryRecord(citation), uri}))),
       );
       const result = yield* contextBriefRecoveryTestEffect(
         retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(['src/first.ts']), {
@@ -111,7 +119,7 @@ describe('Context Brief code-linked memory recovery', () => {
         CONFIG,
         expect.objectContaining({allowedUriScopes: [root]}),
       );
-      expect(result.candidates.map(candidate => candidate.uri)).toEqual([inside]);
+      expect(EffectArray.map(result.candidates, candidate => candidate.uri)).toEqual([inside]);
       expect(mocks.finalizeDeferredCodeAnchorsForRoute).not.toHaveBeenCalled();
     });
 
@@ -145,7 +153,10 @@ describe('Context Brief code-linked memory recovery', () => {
     ({completedBeforeInterruption, interruptedAdmission, stillContended}) =>
       Effect.gen(function* () {
         mocks.resolveRepositoryIdentity.mockReturnValue(
-          Effect.succeed({repositoryId: 'a'.repeat(64), worktreeId: 'b'.repeat(64)}),
+          Effect.succeed({
+            repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+          }),
         );
         const limits: number[] = [];
         let totalAdmissions = 0;
@@ -178,7 +189,9 @@ describe('Context Brief code-linked memory recovery', () => {
         );
         expect(limits).toEqual(firstAdmissions < 4 ? [4, 4 - firstAdmissions] : [4]);
         expect(totalAdmissions).toBeLessThanOrEqual(4);
-        expect(receipts.reduce((count, receipt) => count + receipt.scannedCount, 0)).toBeLessThanOrEqual(4);
+        expect(EffectArray.reduce(receipts, 0, (count, receipt) => count + receipt.scannedCount)).toBeLessThanOrEqual(
+          4,
+        );
         expect(result.codeAnchorCoverage).toMatchObject({requested: 1, resolved: 1});
         expect(result.gaps.includes('code-anchor-recall-unavailable')).toBe(firstAdmissions === 4 || stillContended);
         expect(mocks.loadRecallCodeLinks).toHaveBeenLastCalledWith(
@@ -194,7 +207,10 @@ describe('Context Brief code-linked memory recovery', () => {
   effectIt.effect('does not retry pending graph readiness or a failed finalization and preserves recall', () =>
     Effect.gen(function* () {
       mocks.resolveRepositoryIdentity.mockReturnValue(
-        Effect.succeed({repositoryId: 'a'.repeat(64), worktreeId: 'b'.repeat(64)}),
+        Effect.succeed({
+          repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+          worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+        }),
       );
       for (const field of ['pendingCount', 'failedCount'] as const) {
         let passes = 0;
@@ -227,7 +243,10 @@ describe('Context Brief code-linked memory recovery', () => {
     () =>
       Effect.gen(function* () {
         mocks.resolveRepositoryIdentity.mockReturnValue(
-          Effect.succeed({repositoryId: 'a'.repeat(64), worktreeId: 'b'.repeat(64)}),
+          Effect.succeed({
+            repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+          }),
         );
         mocks.finalizeDeferredCodeAnchorsForRoute.mockReturnValue(Effect.succeed(finalizationReceipt('failed', 0)));
         const citation = codeCitation('src/first.ts');
@@ -238,7 +257,7 @@ describe('Context Brief code-linked memory recovery', () => {
         const result = yield* contextBriefRecoveryTestEffect(
           retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(['src/first.ts'])),
         );
-        expect(result.candidates.map(candidate => candidate.uri)).toEqual([MEMORY_URI]);
+        expect(EffectArray.map(result.candidates, candidate => candidate.uri)).toEqual([MEMORY_URI]);
         expect(result.gaps).toContain('code-anchor-recall-unavailable');
         expect(result.gaps).not.toContain('code-anchor-recall-no-active-memory');
         mocks.loadRecallCodeLinks.mockReturnValue(Effect.succeed([]));
@@ -262,7 +281,7 @@ describe('Context Brief code-linked memory recovery', () => {
         retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(['src/first.ts'])),
       );
       expect(result.codeAnchorCoverage).toMatchObject({requested: 1, resolved: 1, matchedMemories: 1});
-      expect(result.candidates.map(candidate => candidate.uri)).toEqual([MEMORY_URI]);
+      expect(EffectArray.map(result.candidates, candidate => candidate.uri)).toEqual([MEMORY_URI]);
       expect(result.gaps).toContain('code-anchor-recall-unavailable');
       expect(mocks.finalizeDeferredCodeAnchorsForRoute).not.toHaveBeenCalled();
       mocks.loadRecallCodeLinks.mockReturnValue(Effect.succeed([]));
@@ -459,14 +478,14 @@ function codeCitation(path: string, ordinal = 0): MemoryCodeCitationV1 {
   const digit = ((Math.max(ordinal, 0) % 15) + 1).toString(16);
   return {
     extractorSet: 'fixture-extractor',
-    fileContentHash: {algorithm: 'sha256', value: digit.repeat(64)},
-    id: `tncc_${digit.repeat(40)}`,
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe(digit, EffectString.repeat(64))},
+    id: `tncc_${Effect2.pipe(digit, EffectString.repeat(40))}`,
     path,
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote',
-    sourceCommit: 'b'.repeat(40),
+    sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   };
@@ -495,10 +514,8 @@ function unresolvedCaptureError(): MemoryCodeCitationCaptureError {
   return MemoryCodeCitationCaptureError.of('unresolved', undefined, 'code-reference-unresolved');
 }
 
-function contextBriefRecoveryTestEffect<A, E>(effect: Effect.Effect<A, E, unknown>): Effect.Effect<A, E> {
-  // Every required boundary is replaced above with an Effect that requires no services.
-  // oxlint-disable-next-line effecttsgo/unsafe-effect-type-assertion -- fully mocked focused unit boundary
-  return effect as Effect.Effect<A, E>;
+function contextBriefRecoveryTestEffect<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return provideTestLayer(ApplicationLayer)(effect);
 }
 
 function finalizationReceipt(

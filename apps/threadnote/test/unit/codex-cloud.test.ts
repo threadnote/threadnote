@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Effect, FileSystem, Layer, Path} from 'effect';
@@ -33,7 +34,7 @@ describe('Codex Cloud contracts', () => {
         fc.array(fc.nat(), {maxLength: 30}),
         (teams, duplicates) => {
           const normalized = normalizeCodexCloudShares(
-            [...teams].reverse().concat(duplicates.map(index => teams[index % teams.length])),
+            [...teams].reverse().concat(EffectArray.map(duplicates, index => teams[index % teams.length])),
           );
           expect(normalized).toEqual([...teams].sort());
           expect(normalizeCodexCloudShares(normalized)).toEqual(normalized);
@@ -148,7 +149,8 @@ effectIt.effect('Codex Cloud repairs and removes CLI-only managed artifacts whil
     expect(yield* fs.exists(template)).toBe(true);
     expect(yield* fs.exists(graphSkill)).toBe(true);
     expect(
-      (yield* agentIntegrationDoctorChecks(config).pipe(Effect.provideService(SystemInfo, testSystem))).every(
+      EffectArray.every(
+        yield* agentIntegrationDoctorChecks(config).pipe(Effect.provideService(SystemInfo, testSystem)),
         check => check.status === 'ok',
       ),
     ).toBe(true);

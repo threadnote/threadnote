@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {enqueueCodeGraphEmbeddingDemandSql} from '../vector/demand.js';
 import {Clock, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -366,8 +367,11 @@ const resolveActivationReferences = Effect.fn('codeGraph.resolveActivationRefere
               yield* sql.unsafe(
                 `INSERT INTO activation_resolved_reference_batch (
                 old_edge_id, new_edge_id, relation, target_id, target_name, provenance, confidence
-              ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-                batch.flatMap(row => [
+              ) VALUES ${EffectArray.join(
+                EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?)'),
+                ', ',
+              )}`,
+                EffectArray.flatMap(batch, row => [
                   row.oldEdgeId,
                   row.newEdgeId,
                   row.relation,
@@ -389,15 +393,21 @@ const resolveActivationReferences = Effect.fn('codeGraph.resolveActivationRefere
                   `INSERT OR IGNORE INTO snapshot_symbol_lookup (
                      snapshot_id, lookup_key, symbol_id, resolution_domain, exported,
                      provenance, evidence_edge_id, evidence_path
-                   ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-                  batch.flatMap(row => [persistentFull.snapshotId, ...row]),
+                   ) VALUES ${EffectArray.join(
+                     EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?, ?)'),
+                     ', ',
+                   )}`,
+                  EffectArray.flatMap(batch, row => [persistentFull.snapshotId, ...row]),
                 );
               } else {
                 yield* sql.unsafe(
                   `INSERT OR IGNORE INTO activation_symbol_lookup (
                      lookup_key, symbol_id, resolution_domain, exported,
                      provenance, evidence_edge_id, evidence_path
-                   ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
+                   ) VALUES ${EffectArray.join(
+                     EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?)'),
+                     ', ',
+                   )}`,
                   batch.flat(),
                 );
               }
@@ -551,12 +561,14 @@ const resolveActivationReferences = Effect.fn('codeGraph.resolveActivationRefere
             }
           }
         });
-        const hasResolutions = reservation.pages.some(page => page.resolutions.length > 0);
+        const hasResolutions = EffectArray.some(reservation.pages, page => page.resolutions.length > 0);
         if (hasResolutions) {
           const transactionStartedAt = yield* Clock.currentTimeMillis;
           yield* persistentCapacityProtector
             ? persistentCapacityProtector(
-                aggregatePersistentReferenceResolutionCapacityBoundaries(reservation.pages.map(page => page.capacity)),
+                aggregatePersistentReferenceResolutionCapacityBoundaries(
+                  EffectArray.map(reservation.pages, page => page.capacity),
+                ),
                 transactions,
               )
             : transactions;

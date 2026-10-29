@@ -1,4 +1,4 @@
-import type {Sql, TransactionSql} from 'postgres';
+import type {Sql, ISql} from 'postgres';
 import type {AuthorizedRemotePrincipal} from './authorization.js';
 import {remoteMemoryError} from './errors.js';
 import {
@@ -95,7 +95,7 @@ export class PostgresRemoteRateLimiter implements RemoteMemoryRateLimiter {
 
   private async withTenant<A>(
     tenantId: string,
-    use: (transaction: TransactionSql) => Promise<A>,
+    use: (transaction: ISql) => Promise<A>,
     execution?: RemoteMemoryRequestExecution,
   ): Promise<A> {
     requireActiveRemoteMemoryRequest(execution);

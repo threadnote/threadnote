@@ -1,8 +1,12 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, Crypto, Effect, FileSystem, Path, PlatformError, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type Config = Pick<RuntimeConfig, 'account' | 'agentContextHome'>;
 const HOUR = 3_600_000;
@@ -85,10 +89,13 @@ const stateSchema = Schema.Struct({
   discoveryCursor: Schema.optionalKey(text),
 });
 type State = {-readonly [K in keyof typeof stateSchema.Type]: (typeof stateSchema.Type)[K]};
-export class DraftQueueError extends Schema.TaggedError<DraftQueueError>()('DraftQueueError', {
-  reason: Schema.Literals(['storage', 'invalid-input', 'stale-claim']),
-  message: Schema.String,
-}) {}
+export class DraftQueueError extends Schema.TaggedError<DraftQueueError, {readonly brand: unique symbol}>()(
+  'DraftQueueError',
+  {
+    reason: Schema.Literals(['storage', 'invalid-input', 'stale-claim']),
+    message: Schema.String,
+  },
+) {}
 const invalid = () => DraftQueueError.make({reason: 'invalid-input', message: 'Invalid private draft queue input.'});
 const stale = () =>
   DraftQueueError.make({reason: 'stale-claim', message: 'The draft queue lease is no longer current.'});
@@ -166,9 +173,10 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
             pending: [],
           };
           if (
-            new Set(state.queued.map(w => w.targetKey)).size !== state.queued.length ||
-            new Set(state.backgroundReservations.map(r => r.token)).size !== state.backgroundReservations.length ||
-            new Set(state.pending.map(cp => cp.targetKey)).size !== state.pending.length ||
+            new Set(EffectArray.map(state.queued, w => w.targetKey)).size !== state.queued.length ||
+            new Set(EffectArray.map(state.backgroundReservations, r => r.token)).size !==
+              state.backgroundReservations.length ||
+            new Set(EffectArray.map(state.pending, cp => cp.targetKey)).size !== state.pending.length ||
             (state.active?.published && !state.active.dispatched)
           )
             return yield* invalid();
@@ -183,7 +191,7 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
               staged.set(cp.targetKey, cp);
             },
           };
-          state.backgroundReservations = state.backgroundReservations.filter(r => r.at > tx.now - HOUR);
+          state.backgroundReservations = EffectArray.filter(state.backgroundReservations, r => r.at > tx.now - HOUR);
           yield* recover(tx);
           const result = yield* use(tx);
           state.pending = [...staged.values()];
@@ -192,9 +200,10 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
           if (staged.size === 0 && original === JSON.stringify(state)) return result;
           yield* write(statePath, state);
           if (
-            new Set(state.queued.map(w => w.targetKey)).size !== state.queued.length ||
-            new Set(state.backgroundReservations.map(r => r.token)).size !== state.backgroundReservations.length ||
-            new Set(state.pending.map(cp => cp.targetKey)).size !== state.pending.length
+            new Set(EffectArray.map(state.queued, w => w.targetKey)).size !== state.queued.length ||
+            new Set(EffectArray.map(state.backgroundReservations, r => r.token)).size !==
+              state.backgroundReservations.length ||
+            new Set(EffectArray.map(state.pending, cp => cp.targetKey)).size !== state.pending.length
           )
             return yield* invalid();
           for (const cp of state.pending) yield* write(targetPath(cp.targetKey), cp);
@@ -225,7 +234,13 @@ const current = (cp: DraftQueueTarget | undefined, work: DraftQueueWork) =>
 function checkpoint(work: DraftQueueWork, old?: DraftQueueTarget): DraftQueueTarget {
   const remembered =
     old?.materialRevision === work.materialRevision
-      ? old.identityHistory?.find(entry => entry.identity === work.identity)
+      ? EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(old.identityHistory), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(__effectArrayReceiver, entry => entry.identity === work.identity),
+            ),
+          ),
+        )
       : undefined;
   return {
     targetKey: work.targetKey,
@@ -247,7 +262,13 @@ function checkpoint(work: DraftQueueWork, old?: DraftQueueTarget): DraftQueueTar
 function terminalState(cp: DraftQueueTarget | undefined, work: DraftQueueWork) {
   if (cp?.materialRevision !== work.materialRevision) return undefined;
   if (current(cp, work) && (cp.state === 'completed' || cp.state === 'failed')) return cp.state;
-  const state = cp.identityHistory?.find(entry => entry.identity === work.identity)?.state;
+  const state = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(cp.identityHistory), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(__effectArrayReceiver, entry => entry.identity === work.identity),
+      ),
+    ),
+  )?.state;
   return state === 'waiting' ? undefined : state;
 }
 function identityCheckpoint(
@@ -262,7 +283,10 @@ function identityCheckpoint(
     work.identity,
     ...(state === 'completed' && work.dedupeIdentity ? [work.dedupeIdentity] : []),
   ])) {
-    const index = history.findIndex(entry => entry.identity === identity);
+    const index = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(history, entry => entry.identity === identity),
+      () => -1,
+    );
     const entry = {
       identity,
       state,
@@ -279,12 +303,16 @@ function historyAtCapacity(cp: DraftQueueTarget | undefined, work: DraftQueueWor
   return (
     cp?.materialRevision === work.materialRevision &&
     (cp.identityHistory?.length ?? 0) >= IDENTITY_CAPACITY &&
-    !cp.identityHistory?.some(entry => entry.identity === work.identity) &&
+    !EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(cp.identityHistory), __effectArrayReceiver =>
+        EffectArray.some(__effectArrayReceiver, entry => entry.identity === work.identity),
+      ),
+    ) &&
     !(work.foreground && work.regenerate === true)
   );
 }
 function refund(tx: Transaction, token: string) {
-  tx.state.backgroundReservations = tx.state.backgroundReservations.filter(r => r.token !== token);
+  tx.state.backgroundReservations = EffectArray.filter(tx.state.backgroundReservations, r => r.token !== token);
 }
 function recover(tx: Transaction) {
   return Effect.gen(function* () {
@@ -308,7 +336,7 @@ function recover(tx: Transaction) {
             : recorded,
         );
     } else if (current(cp, active.work) && !suppressed(cp, active.work)) {
-      if (!tx.state.queued.some(w => w.targetKey === active.work.targetKey)) {
+      if (!EffectArray.some(tx.state.queued, w => w.targetKey === active.work.targetKey)) {
         if (tx.state.queued.length < CAPACITY) tx.state.queued = [active.work, ...tx.state.queued];
         else tx.put({...checkpoint(active.work, cp), state: 'waiting', reason: 'queue-capacity'});
       }
@@ -327,7 +355,7 @@ function waitReason(tx: Transaction, work: DraftQueueWork, cp?: DraftQueueTarget
     const grant = tx.state.policy.remoteGrant;
     if (!grant || grant.providerIdentity !== work.providerIdentity) return 'remote-grant-required';
     if (
-      tx.state.backgroundReservations.filter(r => r.providerIdentity === work.providerIdentity).length >=
+      EffectArray.filter(tx.state.backgroundReservations, r => r.providerIdentity === work.providerIdentity).length >=
       grant.unitsPerHour
     )
       return 'remote-budget';
@@ -353,7 +381,10 @@ export function enqueueDraftWork(config: Config, input: DraftQueueWork) {
           if (terminal === 'completed' || (terminal === 'failed' && !work.foreground))
             return {state: 'suppressed', reason: terminal} as const;
           if (tx.state.active?.work.identity === work.identity) return {state: 'waiting', reason: 'active'} as const;
-          const index = tx.state.queued.findIndex(w => w.targetKey === work.targetKey);
+          const index = EffectOption.getOrElse(
+            EffectArray.findFirstIndex(tx.state.queued, w => w.targetKey === work.targetKey),
+            () => -1,
+          );
           if (index < 0 && tx.state.queued.length >= CAPACITY)
             return {state: 'waiting', reason: 'queue-capacity'} as const;
           const queued = [...tx.state.queued];
@@ -389,7 +420,15 @@ export function claimDraftWork(
         ({state: 'waiting', reason, ...(nextEligibleAt === undefined ? {} : {nextEligibleAt})}) as const;
       if (options?.allPaused) return waiting('all-maintenance-paused');
       if (tx.state.active) return waiting('active', tx.state.active.leaseUntil);
-      const ordered = [...tx.state.queued.filter(w => w.foreground), ...tx.state.queued.filter(w => !w.foreground)];
+      const ordered = [
+        ...EffectArrayPipe(tx.state.queued, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (w, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && w.foreground,
+          ),
+        ),
+        ...EffectArray.filter(tx.state.queued, w => !w.foreground),
+      ];
       let firstReason = 'empty';
       let nextEligibleAt: number | undefined;
       for (const work of ordered) {
@@ -413,7 +452,7 @@ export function claimDraftWork(
         const token = yield* (yield* Crypto.Crypto).randomUUIDv4();
         const claim = {token, work, leaseUntil: tx.now + LEASE};
         tx.state.active = {...claim, dispatched: false, policyRevision: sha256HexSync(JSON.stringify(tx.state.policy))};
-        tx.state.queued = tx.state.queued.filter(w => w.targetKey !== work.targetKey);
+        tx.state.queued = EffectArray.filter(tx.state.queued, w => w.targetKey !== work.targetKey);
         if (!work.foreground)
           tx.state.backgroundReservations = [
             ...tx.state.backgroundReservations,
@@ -547,7 +586,7 @@ export function finishDraftWork(
           retryCount: retry ? 1 : (base.retryCount ?? 0),
         };
         tx.put(waitingCheckpoint);
-        if (!tx.state.queued.some(w => w.targetKey === work.targetKey)) {
+        if (!EffectArray.some(tx.state.queued, w => w.targetKey === work.targetKey)) {
           if (tx.state.queued.length < CAPACITY) tx.state.queued = [...tx.state.queued, work];
           else
             tx.put({
@@ -563,7 +602,9 @@ export function finishDraftWork(
           ...identityCheckpoint(base, work, completed ? 'completed' : 'failed')!,
           state: completed ? 'completed' : 'failed',
           nextEligibleAt: undefined,
-          ...(outcome.reason && !active.published ? {reason: outcome.reason.slice(0, 4096)} : {}),
+          ...(outcome.reason && !active.published
+            ? {reason: Effect2.pipe(outcome.reason, EffectString.slice(0, 4096))}
+            : {}),
         });
       return true;
     }),
@@ -609,7 +650,8 @@ export function recordDraftQueueDecision(
             decision: decision.action,
             decisionMaterialRevision: decision.materialRevision,
           });
-          tx.state.queued = tx.state.queued.filter(
+          tx.state.queued = EffectArray.filter(
+            tx.state.queued,
             w => w.targetKey !== decision.targetKey || w.materialRevision !== decision.materialRevision,
           );
         }),
@@ -633,9 +675,9 @@ function status(tx: Transaction) {
       if (reason === 'hourly-budget' || reason === 'remote-budget') {
         const reservations =
           reason === 'remote-budget'
-            ? state.backgroundReservations.filter(r => r.providerIdentity === work.providerIdentity)
+            ? EffectArray.filter(state.backgroundReservations, r => r.providerIdentity === work.providerIdentity)
             : state.backgroundReservations;
-        if (reservations.length) times.push(Math.min(...reservations.map(r => r.at)) + HOUR);
+        if (reservations.length) times.push(Math.min(...EffectArray.map(reservations, r => r.at)) + HOUR);
       }
     }
     return {
@@ -647,7 +689,10 @@ function status(tx: Transaction) {
       ...(state.active
         ? {active: {token: state.active.token, work: state.active.work, leaseUntil: state.active.leaseUntil}}
         : {}),
-      backgroundReservations: state.backgroundReservations.map(({token: _token, ...reservation}) => reservation),
+      backgroundReservations: EffectArray.map(
+        state.backgroundReservations,
+        ({token: _token, ...reservation}) => reservation,
+      ),
       ...(times.length ? {nextEligibleAt: Math.min(...times)} : {}),
     };
   });
@@ -694,7 +739,12 @@ export function selectDraftQueueTargets(config: Config, uris: readonly string[],
         Effect.sync(() => {
           const ordered = [...new Set(validUris)].sort();
           const count = Number.isFinite(limit) ? Math.min(4, Math.max(0, Math.floor(limit))) : 4;
-          const split = tx.state.discoveryCursor ? ordered.findIndex(uri => uri > tx.state.discoveryCursor!) : 0;
+          const split = tx.state.discoveryCursor
+            ? EffectOption.getOrElse(
+                EffectArray.findFirstIndex(ordered, uri => uri > tx.state.discoveryCursor!),
+                () => -1,
+              )
+            : 0;
           const offset = split < 0 ? 0 : split;
           const chosen = [...ordered.slice(offset), ...ordered.slice(0, offset)].slice(0, count);
           if (chosen.length) tx.state.discoveryCursor = chosen.at(-1);

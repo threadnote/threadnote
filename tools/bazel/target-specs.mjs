@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {fileURLToPath} from 'node:url';
 /* oxlint-disable effecttsgo/node-builtin-import -- Target discovery runs before the declared Bazel graph exists. */
 import {existsSync, statSync} from 'node:fs';
@@ -6,6 +8,10 @@ import {ciLongRunningTestGroups, ciRequiredLongRunningTestGroupNames} from '../c
 import {groupApplicationTests} from './application-test-groups.mjs';
 import {allowedRepositoryPath, listRepositoryFiles, sourceRepositoryPathCandidates} from './repository-inputs.mjs';
 import {collectSourceClosure, sourceImports} from './source-closure.mjs';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const defaultRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 export const createTargetSpecs = async (root = defaultRoot) => {
@@ -20,20 +26,22 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'node_modules',
   ]);
   const filesBelow = directory =>
-    [...repositoryFiles].filter(
+    EffectArray.filter(
+      [...repositoryFiles],
       path =>
-        path.startsWith(`${directory}/`) &&
-        !path.split('/').some(part => ignoredNames.has(part)) &&
+        Effect.pipe(path, EffectString.startsWith(`${directory}/`)) &&
+        !EffectArray.some(Effect.pipe(path, EffectString.split('/')), part => ignoredNames.has(part)) &&
         existsSync(join(root, path)) &&
         statSync(join(root, path)).isFile(),
     );
   const contents = new Map();
-  const readable = [...repositoryFiles].filter(
+  const readable = EffectArray.filter(
+    [...repositoryFiles],
     path => (/\.(?:[cm]?[jt]sx?)$/u.test(path) || /(?:^|\/)package\.json$/u.test(path)) && existsSync(join(root, path)),
   );
   for (let offset = 0; offset < readable.length; offset += 64)
     await Promise.all(
-      readable.slice(offset, offset + 64).map(async path => {
+      EffectArray.map(readable.slice(offset, offset + 64), async path => {
         contents.set(path, await Bun.file(join(root, path)).text());
       }),
     );
@@ -42,22 +50,28 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     return contents.get(path);
   };
   const testFilesBelow = directory =>
-    filesBelow(directory)
-      .filter(path => /\.test\.tsx?$/u.test(path))
-      .sort();
-  const packageDirectories = [...repositoryFiles]
-    .filter(path => /^packages\/[^/]+\/package\.json$/u.test(path))
-    .map(path => path.slice(0, -13))
-    .sort();
-  const applicationWorkspaceDirectories = [
-    ...[...repositoryFiles]
-      .filter(path => /^apps\/[^/]+\/package\.json$/u.test(path))
-      .map(path => path.slice(0, -13))
-      .sort(),
-    ...packageDirectories,
-  ].filter(path => existsSync(join(root, path, 'package.json')));
+    EffectArrayPipe(filesBelow(directory), __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (path, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && /\.test\.tsx?$/u.test(path),
+      ),
+    ).sort();
+  const packageDirectories = EffectArray.map(
+    EffectArray.filter([...repositoryFiles], path => /^packages\/[^/]+\/package\.json$/u.test(path)),
+    path => Effect.pipe(path, EffectString.slice(0, -13)),
+  ).sort();
+  const applicationWorkspaceDirectories = EffectArray.filter(
+    [
+      ...EffectArray.map(
+        EffectArray.filter([...repositoryFiles], path => /^apps\/[^/]+\/package\.json$/u.test(path)),
+        path => Effect.pipe(path, EffectString.slice(0, -13)),
+      ).sort(),
+      ...packageDirectories,
+    ],
+    path => existsSync(join(root, path, 'package.json')),
+  );
   const applicationWorkspaces = new Map(
-    applicationWorkspaceDirectories.map(path => {
+    EffectArray.map(applicationWorkspaceDirectories, path => {
       const manifest = JSON.parse(readSource(`${path}/package.json`));
       return [manifest.name, {path, manifest}];
     }),
@@ -71,13 +85,20 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     const absolute = join(root, path);
     return repositoryFiles.has(path) && existsSync(absolute) && statSync(absolute).isFile();
   };
-  const longRunningTests = new Set(Object.values(ciLongRunningTestGroups).flat());
+  const longRunningTests = new Set(EffectRecord.values(ciLongRunningTestGroups).flat());
   const applicationTests = [...testFilesBelow('apps/threadnote/test')].sort();
-  const applicationIntegrationTests = applicationTests.filter(path =>
-    path.startsWith('apps/threadnote/test/integrations/'),
+  const applicationIntegrationTests = EffectArray.filter(
+    applicationTests,
+    (path, __effectArrayIndex) =>
+      __effectArrayIndex in applicationTests &&
+      Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/integrations/')),
   );
   const postgresTests = new Set(
-    applicationTests.filter(path => readSource(path).includes('THREADNOTE_TEST_POSTGRES_URL')),
+    EffectArray.filter(
+      applicationTests,
+      (path, __effectArrayIndex) =>
+        __effectArrayIndex in applicationTests && readSource(path).includes('THREADNOTE_TEST_POSTGRES_URL'),
+    ),
   );
   const websiteReleaseTests = new Set([
     'apps/website/test/website-release-boundary.test.ts',
@@ -117,9 +138,10 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'apps/threadnote/test/unit/code-graph.maintenance-bounded.test.ts',
   ];
   const rootManifest = JSON.parse(readSource('package.json'));
-  const allNpm = Object.keys({...rootManifest.dependencies, ...rootManifest.devDependencies})
-    .filter(name => !name.startsWith('@threadnote/'))
-    .sort();
+  const allNpm = EffectArray.filter(
+    EffectRecord.keys({...rootManifest.dependencies, ...rootManifest.devDependencies}),
+    name => !Effect.pipe(name, EffectString.startsWith('@threadnote/')),
+  ).sort();
 
   const packageDataRoots = {
     'packages/evidence': ['apps/threadnote/test/evaluation'],
@@ -225,7 +247,9 @@ export const createTargetSpecs = async (root = defaultRoot) => {
           const candidates = [candidate];
           if (/\.[cm]?jsx?$/u.test(candidate)) candidates.push(candidate.replace(/\.[cm]?jsx?$/u, '.ts'));
           if (/\.jsx?$/u.test(candidate)) candidates.push(candidate.replace(/\.jsx?$/u, '.tsx'));
-          const referencedSource = candidates.find(applicationSourceExists);
+          const referencedSource = EffectOption.getOrUndefined(
+            EffectArray.findFirst(candidates, applicationSourceExists),
+          );
           if (referencedSource) {
             if (
               applicationSourceExtensions.test(referencedSource) &&
@@ -296,14 +320,20 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'tools/ci/test/platform-benchmark-scope.test.ts',
   ];
 
-  const packageTests = packageDirectories.flatMap(directory => {
+  const packageTests = EffectArray.flatMap(packageDirectories, directory => {
     const entries = testFilesBelow(`${directory}/test`);
     if (entries.length === 0) return [];
     const runtimeEntries = packageRuntimeTestEntries[directory]
-      ? entries.filter(path => readSource(path).includes('standalone.ts'))
+      ? EffectArray.filter(
+          entries,
+          (path, __effectArrayIndex) => __effectArrayIndex in entries && readSource(path).includes('standalone.ts'),
+        )
       : [];
     const workspaceEntries = packageWorkspaceTestEntries[directory] ?? [];
-    const standardEntries = entries.filter(path => !runtimeEntries.includes(path) && !workspaceEntries.includes(path));
+    const standardEntries = EffectArray.filter(
+      entries,
+      path => !runtimeEntries.includes(path) && !workspaceEntries.includes(path),
+    );
     const shared = {
       package: directory,
       kind: 'test',
@@ -345,10 +375,10 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     ];
   });
 
-  const longRunningTargets = ciRequiredLongRunningTestGroupNames.map(group => ({
+  const longRunningTargets = EffectArray.map(ciRequiredLongRunningTestGroupNames, group => ({
     entries: [...ciLongRunningTestGroups[group]],
     package: 'apps/threadnote',
-    name: `test_long_${group.replaceAll('-', '_')}`,
+    name: `test_long_${Effect.pipe(group, EffectString.replaceAll('-', '_'))}`,
     kind: 'test',
     data: applicationTestData,
     referencedInputRoots: applicationReferencedInputRoots,
@@ -357,7 +387,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     timeout: 'long',
     workspace: true,
   }));
-  const applicationStandardTests = applicationTests.filter(
+  const applicationStandardTests = EffectArray.filter(
+    applicationTests,
     path => !longRunningTests.has(path) && !postgresTests.has(path) && !applicationIntegrationTests.includes(path),
   );
   const integrationPackages = [
@@ -369,37 +400,42 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'integration-github',
     'integration-linear',
   ];
-  const providerPackages = integrationPackages.filter(
+  const providerPackages = EffectArray.filter(
+    integrationPackages,
     name => !['integration-core', 'integration-runtime'].includes(name),
   );
-  const applicationTestAffinities = Object.fromEntries(
-    applicationStandardTests.map(path => {
+  const applicationTestAffinities = EffectRecord.fromEntries(
+    EffectArray.map(applicationStandardTests, path => {
       const closure = applicationTestSourceClosure(path);
       const dependencies = new Set(
-        closure.files
-          .map(file => file.match(/^packages\/(integration-[^/]+)\//u)?.[1])
-          .filter(name => integrationPackages.includes(name)),
+        EffectArray.filter(
+          EffectArray.map(closure.files, file => file.match(/^packages\/(integration-[^/]+)\//u)?.[1]),
+          name => integrationPackages.includes(name),
+        ),
       );
-      const providers = providerPackages.filter(name => dependencies.has(name));
+      const providers = EffectArray.filter(providerPackages, name => dependencies.has(name));
       const dependencyNames =
         providers.length === providerPackages.length
           ? ['all']
           : providers.length > 0
-            ? providers.map(name => name.slice('integration-'.length))
-            : integrationPackages.filter(name => dependencies.has(name)).map(name => name.slice('integration-'.length));
-      return [path, dependencyNames.length === 0 ? '' : `integration_${dependencyNames.join('_')}`];
+            ? EffectArray.map(providers, name => Effect.pipe(name, EffectString.slice('integration-'.length)))
+            : EffectArray.map(
+                EffectArray.filter(integrationPackages, name => dependencies.has(name)),
+                name => Effect.pipe(name, EffectString.slice('integration-'.length)),
+              );
+      return [path, dependencyNames.length === 0 ? '' : `integration_${EffectArray.join(dependencyNames, '_')}`];
     }),
   );
   const applicationTestGroups = groupApplicationTests(applicationStandardTests, {
     affinities: applicationTestAffinities,
   });
-  const applicationIntegrationTargets = applicationIntegrationTests.map(path => ({
+  const applicationIntegrationTargets = EffectArray.map(applicationIntegrationTests, path => ({
     package: 'apps/threadnote',
-    name: `test_integration_${path
-      .split('/')
-      .at(-1)
-      .replace(/\.test\.tsx?$/u, '')
-      .replaceAll(/[^a-zA-Z0-9_]+/gu, '_')}`,
+    name: `test_integration_${Effect.pipe(
+      Effect.pipe(path, EffectString.split('/')).at(-1),
+      EffectString.replace(/\.test\.tsx?$/u, ''),
+      EffectString.replaceAll(/[^a-zA-Z0-9_]+/gu, '_'),
+    )}`,
     kind: 'test',
     entries: [path],
     data: applicationTestData,
@@ -418,13 +454,13 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       'scripts/clean.ts',
       'scripts/generate-code-graph-language-catalog.ts',
     ],
-    sourceRoots: ['apps/threadnote/src', ...packageDirectories.map(path => `${path}/src`)],
+    sourceRoots: ['apps/threadnote/src', ...EffectArray.map(packageDirectories, path => `${path}/src`)],
     dataRoots: [
       'assets',
       'config',
       'cursor-plugin',
       'packages/manager/static',
-      ...providerPackages.map(name => `packages/${name}/static`),
+      ...EffectArray.map(providerPackages, name => `packages/${name}/static`),
       'packages/remote-memory/src/migrations',
     ],
     data: ['.threadnoteignore', 'LICENSE', 'THIRD_PARTY.md', 'package.json', 'scripts/native/graph-keychain.m'],
@@ -469,7 +505,13 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'apps/threadnote/test/unit/effect-system.test.ts',
         'packages/workflow-automations/test/inventory.test.ts',
         'packages/workflow-automations/test/baseline.test.ts',
-        ...filesBelow('apps/threadnote/test/e2e').filter(path => path.endsWith('.e2e.ts')),
+        ...EffectArrayPipe(filesBelow('apps/threadnote/test/e2e'), __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (path, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues && Effect.pipe(path, EffectString.endsWith('.e2e.ts')),
+          ),
+        ),
         'apps/threadnote/test/dev-skills/release-artifact.test.ts',
         'apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts',
         // smoke-self-contained launches this path from a runtime-resolved root.
@@ -523,7 +565,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       name: 'typecheck',
       kind: 'test',
       entries: [],
-      sourceRoots: ['apps/threadnote/src', ...packageDirectories.map(path => `${path}/src`)],
+      sourceRoots: ['apps/threadnote/src', ...EffectArray.map(packageDirectories, path => `${path}/src`)],
       data: ['tsconfig.json', 'package.json'],
       npm: ['@types/bun', '@types/react', '@types/react-dom', '@types/three'],
       args: ['check', '-p', 'tsconfig.json'],
@@ -537,7 +579,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'apps/threadnote/src',
         'apps/threadnote/test',
         'apps/website/test',
-        ...packageDirectories.flatMap(path => [`${path}/src`, `${path}/test`]),
+        ...EffectArray.flatMap(packageDirectories, path => [`${path}/src`, `${path}/test`]),
         'infra/telemetry-gateway/test',
         'tools/bazel/test',
         'tools/ci',
@@ -624,7 +666,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       package: 'apps/website',
       name: 'test',
       kind: 'test',
-      entries: testFilesBelow('apps/website/test').filter(path => !websiteReleaseTests.has(path)),
+      entries: EffectArray.filter(testFilesBelow('apps/website/test'), path => !websiteReleaseTests.has(path)),
       sourceRoots: ['apps/website/src'],
       dataRoots: [
         'apps/website/public',
@@ -720,7 +762,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       args: ['tools/bazel/website-build.ts', '{output}'],
       env: {THREADNOTE_SITE_PREPARED_METADATA: 'apps/website/.bazel-inputs/metadata.json', THREADNOTE_SITE_BASE: '/'},
     },
-    ...applicationTestGroups.map(({entries, name}) => ({
+    ...EffectArray.map(applicationTestGroups, ({entries, name}) => ({
       package: 'apps/threadnote',
       name,
       kind: 'test',
@@ -773,8 +815,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       package: 'apps/threadnote',
       name: 'test',
       tests: [
-        ...applicationTestGroups.map(({name}) => `:${name}`),
-        ...applicationIntegrationTargets.map(({name}) => `:${name}`),
+        ...EffectArray.map(applicationTestGroups, ({name}) => `:${name}`),
+        ...EffectArray.map(applicationIntegrationTargets, ({name}) => `:${name}`),
       ].sort(),
     },
   ];
@@ -783,7 +825,10 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     {
       label: '//infra/telemetry-gateway:gateway_test',
       kind: 'test',
-      inputs: filesBelow('infra/telemetry-gateway').filter(path => !path.includes('/cmd/')),
+      inputs: EffectArray.filter(
+        filesBelow('infra/telemetry-gateway'),
+        path => !Effect.pipe(path, EffectString.includes('/cmd/')),
+      ),
     },
     {
       label: '//infra/telemetry-gateway/internal/budget:budget_test',
@@ -826,7 +871,14 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         ...filesBelow('packages/graph/src'),
         ...filesBelow('apps/threadnote/src/evaluation'),
         ...filesBelow('apps/threadnote/test/evaluation'),
-        ...filesBelow('scripts').filter(path => /(?:evaluate|benchmark|recall|code-memory|context-brief)/u.test(path)),
+        ...EffectArrayPipe(filesBelow('scripts'), __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (path, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues &&
+              /(?:evaluate|benchmark|recall|code-memory|context-brief)/u.test(path),
+          ),
+        ),
       ],
     },
     {
@@ -844,9 +896,14 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         ...filesBelow('apps/threadnote/src/effect'),
         ...filesBelow('apps/threadnote/src/process'),
         ...filesBelow('apps/threadnote/src/release'),
-        ...filesBelow('apps/threadnote/test/unit').filter(path =>
-          /(?:windows|command-shim|effect-command|effect-system|standalone-process-lease|process-diagnostics|local-ai|update|mcp|maintenance-bounded)/u.test(
-            path,
+        ...EffectArrayPipe(filesBelow('apps/threadnote/test/unit'), __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (path, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues &&
+              /(?:windows|command-shim|effect-command|effect-system|standalone-process-lease|process-diagnostics|local-ai|update|mcp|maintenance-bounded)/u.test(
+                path,
+              ),
           ),
         ),
       ],

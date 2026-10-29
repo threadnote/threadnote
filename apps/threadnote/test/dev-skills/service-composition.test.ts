@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -12,6 +13,7 @@ import {
 import {consumerId, enrollmentContext, homeIndexPath, runtimeIndexPath} from '../../src/dev_skills/registry.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {devSkillsTestLayer, fixture, snapshot, devSkillsReleaseFixture} from './service-fixture.js';
+import * as EffectRecord from 'effect/Record';
 
 const selector = {agent: 'codex'};
 describe('workflow setup ownership and enablement', () => {
@@ -73,8 +75,8 @@ describe('workflow setup ownership and enablement', () => {
       expect((yield* f.run(statusDevSkills(f.config, selector))).targets[0].enrolled).toBe(true);
       const context = yield* f.run(enrollmentContext(f.config));
       const legacy = (entries: typeof context.homeIndex.targets) =>
-        Object.fromEntries(
-          Object.entries(entries).map(([id, entry]) => {
+        EffectRecord.fromEntries(
+          EffectArray.map(EffectRecord.toEntries(entries), ([id, entry]) => {
             const {enabled: _e, createdBy: _c, ...rest} = entry;
             return [id, rest];
           }),
@@ -98,7 +100,7 @@ describe('workflow setup ownership and enablement', () => {
       // A legacy owner has no new setup provenance; a stale checkpoint cannot take it over.
       yield* f.run(undoDevSkillsEnsure(f.config, 'new'));
       expect((yield* f.run(statusDevSkills(f.config, selector))).targets[0].enrolled).toBe(true);
-      expect(consumerId(Object.values(context.homeIndex.targets)[0])).toBe(read.targets[0].consumerId);
+      expect(consumerId(EffectRecord.values(context.homeIndex.targets)[0])).toBe(read.targets[0].consumerId);
     }).pipe(provideTestLayer(devSkillsTestLayer), TestClock.withLive),
   );
   effectIt.effect('owned maintenance converges the active payload; new-consumer undo preserves helpers', () =>

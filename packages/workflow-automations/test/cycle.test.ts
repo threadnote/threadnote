@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {Array as A, String as S} from 'effect';
@@ -8,6 +9,7 @@ import {
 } from '../src/cycle_packet.js';
 import {
   decodeNativeCyclePlan,
+  nativeCycleHasControl,
   decodeNativeCycleState,
   initializeNativeCycle,
   invalidateNativeCycle,
@@ -19,16 +21,18 @@ import {
   type NativeCycleValidation,
   type NativeCycleState,
 } from '../src/cycle.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 import {decodeNativeCycleRuntime} from '../src/cycle_runtime.js';
 
-const gitSha = 'a'.repeat(40);
-const gitTree = 'b'.repeat(40);
-const digest = 'c'.repeat(64);
+const gitSha = Effect.pipe('a', EffectString.repeat(40));
+const gitTree = Effect.pipe('b', EffectString.repeat(40));
+const digest = Effect.pipe('c', EffectString.repeat(64));
 const makePlan = (
   phases = [
     {
       id: 'one',
-      definitionHash: '1'.repeat(64),
+      definitionHash: Effect.pipe('1', EffectString.repeat(64)),
       title: 'One',
       dependsOn: [],
       allowedPaths: ['src/'],
@@ -41,7 +45,7 @@ const makePlan = (
     },
     {
       id: 'two',
-      definitionHash: '2'.repeat(64),
+      definitionHash: Effect.pipe('2', EffectString.repeat(64)),
       title: 'Two',
       dependsOn: ['one'],
       allowedPaths: ['test/'],
@@ -126,6 +130,28 @@ const prDelivery = (state: 'open' | 'merged' = 'open') => ({
 });
 
 describe('native cycle pure domain', () => {
+  it('matches the prior control-character policy for arbitrary UTF-16 strings', () => {
+    fc.assert(
+      fc.property(fc.array(fc.integer({min: 0, max: 0xffff}), {maxLength: 256}), codeUnits => {
+        const value = String.fromCharCode(...codeUnits);
+        const expected = (allowLineFeed: boolean) => {
+          for (const character of value) {
+            const code = Effect.pipe(
+              character,
+              EffectString.charCodeAt(0),
+              Effect.Option.getOrElse(() => Number.NaN),
+            );
+            if ((code < 32 && !(allowLineFeed && code === 10)) || (code >= 127 && code <= 159)) return true;
+          }
+          return false;
+        };
+        expect(nativeCycleHasControl(value)).toBe(expected(false));
+        expect(nativeCycleHasControl(value, true)).toBe(expected(true));
+      }),
+      {numRuns: 500},
+    );
+  });
+
   const before = {...decodeNativeCyclePlan(makePlan()).source, intentHash: digest};
   const after = {
     ...before,
@@ -288,7 +314,7 @@ describe('native cycle pure domain', () => {
           const phases = [
             {
               id: 'root',
-              definitionHash: '3'.repeat(64),
+              definitionHash: Effect.pipe('3', EffectString.repeat(64)),
               title: entries[0].title,
               dependsOn: [],
               allowedPaths: ['src/'],
@@ -299,9 +325,9 @@ describe('native cycle pure domain', () => {
               status: 'pending',
               acceptanceRefs: [{id: 'root-ref', criterion: 'works', requirements: ['req'], specScenarios: []}],
             },
-            ...entries.map((entry, index) => ({
+            ...EffectArray.map(entries, (entry, index) => ({
               id: `phase-${index}`,
-              definitionHash: '4'.repeat(64),
+              definitionHash: Effect.pipe('4', EffectString.repeat(64)),
               title: entry.title,
               dependsOn: entry.depends ? ['root'] : [],
               allowedPaths: [`dir-${index}/`],
@@ -385,7 +411,7 @@ describe('native cycle pure domain', () => {
       uri: 'threadnote://user/me/memories/shared/team-a/feature',
       revision: digest,
       currentHead: gitSha,
-      remoteCommit: 'd'.repeat(40),
+      remoteCommit: Effect.pipe('d', EffectString.repeat(40)),
       evidence: 'Published shared feature memory.',
     };
     expect(validateNativeCycleFeaturePublication(receipt, {team: 'team-a', currentHead: gitSha})).toBe(true);
@@ -394,7 +420,7 @@ describe('native cycle pure domain', () => {
     ).toThrow();
     expect(() =>
       validateNativeCycleFeaturePublication(
-        {...receipt, currentHead: 'e'.repeat(40)},
+        {...receipt, currentHead: Effect.pipe('e', EffectString.repeat(40))},
         {team: 'team-a', currentHead: gitSha},
       ),
     ).toThrow();
@@ -407,7 +433,10 @@ describe('native cycle pure domain', () => {
       phaseHash: digest,
       head: gitSha,
       tree: gitTree,
-      validation: {...validation, acceptance: [{criterion: 'tested', result: 'passed', evidence: 'x'.repeat(1800)}]},
+      validation: {
+        ...validation,
+        acceptance: [{criterion: 'tested', result: 'passed', evidence: Effect.pipe('x', EffectString.repeat(1800))}],
+      },
     }));
     const noisyState = {...state, phases: {...state.phases, two: {...state.phases.two, history: noisyHistory}}};
     expect(nativeCyclePacket(noisyState, 'one', {...packetOptions, budgetBytes: 12 * 1024})).toEqual(basePacket);

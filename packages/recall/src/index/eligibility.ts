@@ -1,6 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import type {MemoryAuthority, MemoryTrust} from '@threadnote/memory/document';
 import {normalizeRecallProject, recallAuthorityIsEligible, type RecallEligibilityPolicy} from '../eligibility.js';
 import type {RecallSqlPredicate} from './scope.js';
+import * as EffectRecord from 'effect/Record';
 
 export function recallApprovedAuthoritative(
   authority: MemoryAuthority | undefined,
@@ -25,15 +27,18 @@ export function recallEligibilityPredicate(
     'threadnote://resources/external/github',
     'threadnote://resources/external/linear',
   ];
-  const outside = roots.map(() => `(${alias}.uri <> ? AND (${alias}.uri < ? OR ${alias}.uri >= ?))`).join(' AND ');
+  const outside = EffectArray.join(
+    EffectArray.map(roots, () => `(${alias}.uri <> ? AND (${alias}.uri < ? OR ${alias}.uri >= ?))`),
+    ' AND ',
+  );
   const access = policy?.externalResources ?? {};
   const externalPredicate =
-    Object.keys(access).length === 0
+    EffectRecord.keys(access).length === 0
       ? outside
       : `(${outside} OR EXISTS (SELECT 1 FROM json_each(?) AS external_access WHERE external_access.key = ${alias}.uri ${externalHashExpression === false ? '' : `AND external_access.value = ${externalHashExpression}`}))`;
   const externalParams = [
-    ...roots.flatMap(root => [root, `${root}/`, `${root}0`]),
-    ...(Object.keys(access).length === 0 ? [] : [JSON.stringify(access)]),
+    ...EffectArray.flatMap(roots, root => [root, `${root}/`, `${root}0`]),
+    ...(EffectRecord.keys(access).length === 0 ? [] : [JSON.stringify(access)]),
   ];
   if (policy === undefined || policy.kind === 'pinned-hard-uri-bypass') {
     return {params: externalParams, restricted: true, sql: externalPredicate};
@@ -60,16 +65,23 @@ export function recallEligibilityPredicate(
         : `(${alias}.project IS NULL OR ${preferenceExemption})`,
     );
   } else if (policy.projects.mode === 'allow-projects-and-projectless') {
-    const projects = policy.projects.projects
-      .map(normalizeRecallProject)
-      .filter((project): project is string => project !== undefined);
+    const projects = EffectArray.filter(
+      EffectArray.map(policy.projects.projects, normalizeRecallProject),
+      (project): project is string => project !== undefined,
+    );
     if (projects.length === 0) {
       return {params: [], restricted: true, sql: '0 = 1'};
     }
     predicates.push(
       preferenceExemption === undefined
-        ? `(${alias}.project IS NULL OR ${alias}.project IN (${projects.map(() => '?').join(', ')}))`
-        : `(${alias}.project IS NULL OR ${alias}.project IN (${projects.map(() => '?').join(', ')}) OR ${preferenceExemption})`,
+        ? `(${alias}.project IS NULL OR ${alias}.project IN (${EffectArray.join(
+            EffectArray.map(projects, () => '?'),
+            ', ',
+          )}))`
+        : `(${alias}.project IS NULL OR ${alias}.project IN (${EffectArray.join(
+            EffectArray.map(projects, () => '?'),
+            ', ',
+          )}) OR ${preferenceExemption})`,
     );
     params.push(...projects);
   }
@@ -78,5 +90,5 @@ export function recallEligibilityPredicate(
   }
   return predicates.length === 0
     ? {params: [], restricted: false, sql: '1 = 1'}
-    : {params, restricted: true, sql: predicates.join(' AND ')};
+    : {params, restricted: true, sql: EffectArray.join(predicates, ' AND ')};
 }

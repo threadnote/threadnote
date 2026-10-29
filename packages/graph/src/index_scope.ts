@@ -1,7 +1,10 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {ProjectGraphManifest, ProjectManifest} from '@threadnote/workspace/config';
 import type {CodeGraphLanguagePackRegistryShape} from './languages/registry.js';
+import {CodeGraphWorkspaceSchema} from './languages/types.js';
 import type {CodeGraphLanguagePackError, CodeGraphWorkspace, CodeGraphWorkspaceProject} from './languages/types.js';
 import {compareCodeUnits} from './ordering.js';
 import type {CodeGraphInventoryFile} from './types.js';
@@ -11,12 +14,22 @@ import {
   codeGraphWorkspaceProjectsForDiagnostic,
   createCodeGraphWorkspaceDiagnosticIndex,
 } from './workspace/diagnostics.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface CodeGraphWorkspaceCatalog {
   readonly fingerprint: string;
   readonly resolutionContextPaths: readonly string[];
   readonly workspace: CodeGraphWorkspace;
 }
+
+const isCodeGraphWorkspaceCatalog = Schema.is(
+  Schema.Struct({
+    fingerprint: Schema.String,
+    resolutionContextPaths: Schema.Array(Schema.String),
+    workspace: CodeGraphWorkspaceSchema,
+  }),
+);
 
 const WORKSPACE_CATALOG_CACHE_MAXIMUM = 8;
 const WORKSPACE_CATALOG_CACHE_BYTES = 4 * 1_024 * 1_024;
@@ -45,15 +58,19 @@ export type CodeGraphIndexScopeMembership = Pick<
 export const CODE_GRAPH_SCOPE_RECEIPT_IDS_MAXIMUM = 100_000;
 export const CODE_GRAPH_SCOPE_RECEIPT_IDS_JSON_BYTES_MAXIMUM = 4 * 1024 * 1024;
 
+const isCanonicalScopeReceiptIdArray = (value: unknown): value is readonly string[] =>
+  EffectArray.isArray(value) &&
+  EffectArray.every(
+    value,
+    (id): id is string =>
+      typeof id === 'string' && id.length > 0 && id.length <= 4096 && !Effect2.pipe(id, EffectString.includes('\0')),
+  );
+
 export function canonicalCodeGraphScopeReceiptIds(value: unknown): readonly string[] | undefined {
-  if (
-    !Array.isArray(value) ||
-    value.length > CODE_GRAPH_SCOPE_RECEIPT_IDS_MAXIMUM ||
-    value.some(id => typeof id !== 'string' || id.length === 0 || id.length > 4096 || id.includes('\0'))
-  ) {
+  if (!isCanonicalScopeReceiptIdArray(value) || value.length > CODE_GRAPH_SCOPE_RECEIPT_IDS_MAXIMUM) {
     return undefined;
   }
-  const canonical = [...new Set<string>(value)].sort();
+  const canonical = [...new Set(value)].sort();
   return canonical.length === value.length ? canonical : undefined;
 }
 
@@ -87,19 +104,20 @@ export interface CodeGraphIndexScopePreview {
   readonly version: typeof CODE_GRAPH_INDEX_SCOPE_PREVIEW_VERSION;
 }
 
-export class CodeGraphIndexScopeResolutionError extends Schema.TaggedError<CodeGraphIndexScopeResolutionError>()(
-  'CodeGraphIndexScopeResolutionError',
-  {message: Schema.String},
-) {}
+export class CodeGraphIndexScopeResolutionError extends Schema.TaggedError<
+  CodeGraphIndexScopeResolutionError,
+  {readonly brand: unique symbol}
+>()('CodeGraphIndexScopeResolutionError', {message: Schema.String}) {}
 
 export function resolveCodeGraphWorkspaceCatalog(
   files: readonly CodeGraphInventoryFile[],
   languagePacks: CodeGraphLanguagePackRegistryShape,
   cached?: CodeGraphWorkspaceCatalog,
 ): Effect.Effect<CodeGraphWorkspaceCatalog, CodeGraphLanguagePackError> {
-  const contexts = files
-    .filter(file => languagePacks.isResolutionContext(file.path))
-    .sort((left, right) => compareCodeUnits(left.path, right.path));
+  const contexts = EffectArray.filter(
+    files,
+    (file, __effectArrayIndex) => __effectArrayIndex in files && languagePacks.isResolutionContext(file.path),
+  ).sort((left, right) => compareCodeUnits(left.path, right.path));
   const fingerprint = workspaceCatalogFingerprint(contexts);
   if (cached?.fingerprint === fingerprint) return Effect.succeed(cached);
   const retained = workspaceCatalogs.get(languagePacks);
@@ -107,11 +125,17 @@ export function resolveCodeGraphWorkspaceCatalog(
   if (previous !== undefined) {
     retained!.delete(fingerprint);
     retained!.set(fingerprint, previous);
-    return Effect.sync(() => JSON.parse(previous.serialized) as CodeGraphWorkspaceCatalog);
+    return Effect.sync(() => {
+      const catalog: unknown = JSON.parse(previous.serialized);
+      if (!isCodeGraphWorkspaceCatalog(catalog)) {
+        throw new Error('Cached code graph workspace catalog is invalid.');
+      }
+      return catalog;
+    });
   }
   return languagePacks.discoverWorkspace(contexts).pipe(
     Effect.map(workspace => {
-      const catalog = {fingerprint, resolutionContextPaths: contexts.map(file => file.path), workspace};
+      const catalog = {fingerprint, resolutionContextPaths: EffectArray.map(contexts, file => file.path), workspace};
       const serialized = JSON.stringify(catalog);
       const bytes = serialized.length * 2;
       if (bytes <= WORKSPACE_CATALOG_CACHE_BYTES) {
@@ -120,7 +144,7 @@ export function resolveCodeGraphWorkspaceCatalog(
           new Map<string, {readonly serialized: string; readonly bytes: number}>();
         entries.delete(fingerprint);
         entries.set(fingerprint, {serialized, bytes});
-        let retainedBytes = [...entries.values()].reduce((total, entry) => total + entry.bytes, 0);
+        let retainedBytes = EffectArray.reduce([...entries.values()], 0, (total, entry) => total + entry.bytes);
         while (entries.size > WORKSPACE_CATALOG_CACHE_MAXIMUM || retainedBytes > WORKSPACE_CATALOG_CACHE_BYTES) {
           const oldest = entries.keys().next().value!;
           retainedBytes -= entries.get(oldest)!.bytes;
@@ -157,7 +181,10 @@ export function resolveCodeGraphIndexScope(
   const roots = canonicalPaths(graph.roots);
   const rootsByProjectId = new Map<string, CodeGraphWorkspaceProject>();
   for (const root of roots) {
-    const matches = allProjects.filter(candidate => componentMatchesRoot(candidate, root));
+    const matches = EffectArray.filter(
+      allProjects,
+      (candidate, __effectArrayIndex) => __effectArrayIndex in allProjects && componentMatchesRoot(candidate, root),
+    );
     if (matches.length === 0) throw unresolvedRoot(root, allProjects);
     for (const match of matches) rootsByProjectId.set(match.id, match);
   }
@@ -165,18 +192,23 @@ export function resolveCodeGraphIndexScope(
   const includedProjects = forwardDependencyClosure(rootProjects, allProjects);
   const admittedPrefixes = canonicalPaths([
     ...(graph.include ?? []),
-    ...includedProjects.flatMap(candidate => [candidate.root, ...candidate.sourceRoots]),
+    ...EffectArray.flatMap(includedProjects, candidate => [candidate.root, ...candidate.sourceRoots]),
   ]);
-  const selectedRoots = includedProjects.flatMap(candidate => [candidate.root, ...candidate.sourceRoots]);
-  const workspaceRoots = new Set(includedProjects.flatMap(candidate => candidate.workspaceRoots));
+  const selectedRoots = EffectArray.flatMap(includedProjects, candidate => [candidate.root, ...candidate.sourceRoots]);
+  const workspaceRoots = new Set(EffectArray.flatMap(includedProjects, candidate => candidate.workspaceRoots));
   const controlPaths = uniqueStrings([
-    ...includedProjects.flatMap(candidate =>
-      candidate.dependencyDetails.flatMap(detail => (detail.evidence ? [detail.evidence] : [])),
+    ...EffectArray.flatMap(includedProjects, candidate =>
+      EffectArray.flatMap(candidate.dependencyDetails, detail => (detail.evidence ? [detail.evidence] : [])),
     ),
-    ...catalog.resolutionContextPaths.filter(path => {
-      const directory = path.split('/').slice(0, -1).join('/');
-      return selectedRoots.some(root => contextSupportsRoot(path, root)) || workspaceRoots.has(directory);
-    }),
+    ...EffectArrayPipe(catalog.resolutionContextPaths, __effectArrayValues =>
+      EffectArray.filter(__effectArrayValues, (path, __effectArrayIndex) => {
+        if (!(__effectArrayIndex in __effectArrayValues)) return false;
+        const directory = EffectArray.join(Effect2.pipe(path, EffectString.split('/')).slice(0, -1), '/');
+        return (
+          EffectArray.some(selectedRoots, root => contextSupportsRoot(path, root)) || workspaceRoots.has(directory)
+        );
+      }),
+    ),
   ]);
   return resolvedScope({
     admittedPrefixes,
@@ -184,7 +216,7 @@ export function resolveCodeGraphIndexScope(
     definitionDigest,
     diagnostics: scopeDiagnostics(catalog.workspace, includedProjects, {admittedPrefixes, controlPaths}),
     includedProjects,
-    rootProjectIds: rootProjects.map(candidate => candidate.id),
+    rootProjectIds: EffectArray.map(rootProjects, candidate => candidate.id),
     scopeKey,
     controlPaths,
   });
@@ -205,7 +237,7 @@ export function forwardDependencyClosure(
   roots: readonly CodeGraphWorkspaceProject[],
   projects: readonly CodeGraphWorkspaceProject[],
 ): readonly CodeGraphWorkspaceProject[] {
-  const byId = new Map(projects.map(project => [project.id, project]));
+  const byId = new Map(EffectArray.map(projects, project => [project.id, project]));
   const visited = new Set<string>();
   const queue = [...roots].sort(compareProjects);
   while (queue.length > 0) {
@@ -214,7 +246,7 @@ export function forwardDependencyClosure(
     visited.add(project.id);
     const dependencyIds = uniqueStrings([
       ...project.dependencies,
-      ...project.dependencyDetails.map(dependency => dependency.targetId),
+      ...EffectArray.map(project.dependencyDetails, dependency => dependency.targetId),
     ]);
     for (const id of dependencyIds) {
       const target = byId.get(id);
@@ -222,7 +254,7 @@ export function forwardDependencyClosure(
     }
     queue.sort(compareProjects);
   }
-  return [...visited].map(id => byId.get(id)!).sort(compareProjects);
+  return EffectArray.map([...visited], id => byId.get(id)!).sort(compareProjects);
 }
 
 function resolvedScope(input: {
@@ -237,8 +269,8 @@ function resolvedScope(input: {
 }): ResolvedCodeGraphIndexScope {
   const diagnostics = uniqueStrings(input.diagnostics);
   const completeness =
-    diagnostics.every(diagnostic => !codeGraphWorkspaceDiagnosticBlocksCompleteness(diagnostic)) &&
-    input.includedProjects.every(project => project.provenance === 'declared')
+    EffectArray.every(diagnostics, diagnostic => !codeGraphWorkspaceDiagnosticBlocksCompleteness(diagnostic)) &&
+    EffectArray.every(input.includedProjects, project => project.provenance === 'declared')
       ? 'complete'
       : 'partial';
   const controlPaths = uniqueStrings(input.controlPaths ?? input.catalog.resolutionContextPaths);
@@ -249,13 +281,13 @@ function resolvedScope(input: {
         completeness,
         controlPaths,
         diagnostics,
-        projects: input.includedProjects.map(project => ({
+        projects: EffectArray.map(input.includedProjects, project => ({
           buildSystem: project.buildSystem,
           dependencies: uniqueStrings([
             ...project.dependencies,
-            ...project.dependencyDetails.map(detail => detail.targetId),
+            ...EffectArray.map(project.dependencyDetails, detail => detail.targetId),
           ]),
-          dependencyDetails: project.dependencyDetails.map(detail => [
+          dependencyDetails: EffectArray.map(project.dependencyDetails, detail => [
             detail.targetId,
             detail.provenance,
             detail.evidence ?? '',
@@ -273,7 +305,7 @@ function resolvedScope(input: {
     controlPaths,
     definitionDigest: input.definitionDigest,
     diagnostics,
-    includedProjectIds: input.includedProjects.map(project => project.id),
+    includedProjectIds: EffectArray.map(input.includedProjects, project => project.id),
     rootProjectIds: input.rootProjectIds,
     scopeKey: input.scopeKey,
   } satisfies ResolvedCodeGraphIndexScope;
@@ -293,57 +325,82 @@ function scopeDiagnostics(
   projects: readonly CodeGraphWorkspaceProject[],
   selected?: {readonly admittedPrefixes: readonly string[]; readonly controlPaths: readonly string[]},
 ): readonly string[] {
-  const knownIds = new Set(workspace.projects.map(project => project.id));
-  const selectedIds = new Set(projects.map(project => project.id));
+  const knownIds = new Set(EffectArray.map(workspace.projects, project => project.id));
+  const selectedIds = new Set(EffectArray.map(projects, project => project.id));
   const diagnosticIndex =
     selected === undefined ? undefined : createCodeGraphWorkspaceDiagnosticIndex(workspace.projects);
-  return collapseCodeGraphWorkspaceDiagnosticClasses([
-    ...workspace.diagnostics.filter(diagnostic => {
-      if (selected === undefined) return true;
-      const attributed = codeGraphWorkspaceProjectsForDiagnostic(diagnosticIndex!, diagnostic);
-      return attributed.length > 0
-        ? attributed.some(project => selectedIds.has(project.id))
-        : diagnosticAppliesToScope(diagnostic, selected);
-    }),
-    ...projects.flatMap(project => [
-      ...project.diagnostics,
-      ...(project.provenance === 'inferred' ? [`Component ${project.id} is inferred.`] : []),
-      ...uniqueStrings([...project.dependencies, ...project.dependencyDetails.map(detail => detail.targetId)])
-        .filter(dependency => !knownIds.has(dependency))
-        .map(dependency => `Component ${project.id} references missing dependency ${dependency}.`),
+  return EffectArray.filter(
+    collapseCodeGraphWorkspaceDiagnosticClasses([
+      ...EffectArrayPipe(workspace.diagnostics, __effectArrayValues =>
+        EffectArray.filter(__effectArrayValues, (diagnostic, __effectArrayIndex) => {
+          if (!(__effectArrayIndex in __effectArrayValues)) return false;
+          if (selected === undefined) return true;
+          const attributed = codeGraphWorkspaceProjectsForDiagnostic(diagnosticIndex!, diagnostic);
+          return attributed.length > 0
+            ? EffectArray.some(attributed, project => selectedIds.has(project.id))
+            : diagnosticAppliesToScope(diagnostic, selected);
+        }),
+      ),
+      ...EffectArray.flatMap(projects, project => [
+        ...project.diagnostics,
+        ...(project.provenance === 'inferred' ? [`Component ${project.id} is inferred.`] : []),
+        ...EffectArray.map(
+          EffectArray.filter(
+            uniqueStrings([
+              ...project.dependencies,
+              ...EffectArray.map(project.dependencyDetails, detail => detail.targetId),
+            ]),
+            dependency => !knownIds.has(dependency),
+          ),
+          dependency => `Component ${project.id} references missing dependency ${dependency}.`,
+        ),
+      ]),
     ]),
-  ])
-    .filter(diagnostic => diagnostic.length > 0)
-    .slice(0, 100);
+    diagnostic => diagnostic.length > 0,
+  ).slice(0, 100);
 }
 
 function diagnosticAppliesToScope(
   diagnostic: string,
   selected: {readonly admittedPrefixes: readonly string[]; readonly controlPaths: readonly string[]},
 ): boolean {
-  const separator = diagnostic.indexOf(':');
+  const separator = Effect2.pipe(
+    diagnostic,
+    EffectString.indexOf(':'),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (separator <= 0) return true;
-  const evidencePath = diagnostic.slice(0, separator);
+  const evidencePath = Effect2.pipe(diagnostic, EffectString.slice(0, separator));
   if (
-    evidencePath.startsWith('/') ||
-    evidencePath.includes('\\') ||
-    evidencePath.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect2.pipe(evidencePath, EffectString.startsWith('/')) ||
+    Effect2.pipe(evidencePath, EffectString.includes('\\')) ||
+    EffectArray.some(
+      Effect2.pipe(evidencePath, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   )
     return true;
   return (
     selected.controlPaths.includes(evidencePath) ||
-    selected.admittedPrefixes.some(
-      prefix => prefix === '' || evidencePath === prefix || evidencePath.startsWith(`${prefix}/`),
+    EffectArray.some(
+      selected.admittedPrefixes,
+      prefix =>
+        prefix === '' || evidencePath === prefix || Effect2.pipe(evidencePath, EffectString.startsWith(`${prefix}/`)),
     )
   );
 }
 
 function workspaceCatalogFingerprint(files: readonly CodeGraphInventoryFile[]): string {
   return sha256HexSync(
-    [
-      'code-graph-workspace-catalog-v2',
-      ...files.map(file => [file.path, file.mode, file.blobId, file.contentHash].join('\0')),
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'code-graph-workspace-catalog-v2',
+        ...EffectArray.map(files, file =>
+          EffectArray.join([file.path, file.mode, file.blobId, file.contentHash], '\0'),
+        ),
+      ],
+      '\n',
+    ),
   );
 }
 
@@ -361,10 +418,11 @@ function unresolvedRoot(
   root: string,
   projects: readonly CodeGraphWorkspaceProject[],
 ): CodeGraphIndexScopeResolutionError {
-  const candidates = canonicalPaths(projects.flatMap(project => [project.root, ...project.sourceRoots]))
-    .filter(candidate => candidate.length > 0)
-    .slice(0, 5);
-  const suggestion = candidates.length === 0 ? '' : ` Candidates: ${candidates.join(', ')}.`;
+  const candidates = EffectArray.filter(
+    canonicalPaths(EffectArray.flatMap(projects, project => [project.root, ...project.sourceRoots])),
+    candidate => candidate.length > 0,
+  ).slice(0, 5);
+  const suggestion = candidates.length === 0 ? '' : ` Candidates: ${EffectArray.join(candidates, ', ')}.`;
   return CodeGraphIndexScopeResolutionError.make({
     message: `No workspace component matches graph root "${root}".${suggestion}`,
   });
@@ -375,12 +433,12 @@ function componentMatchesRoot(project: CodeGraphWorkspaceProject, root: string):
 }
 
 function contextSupportsRoot(path: string, root: string): boolean {
-  const directory = path.split('/').slice(0, -1).join('/');
+  const directory = EffectArray.join(Effect2.pipe(path, EffectString.split('/')).slice(0, -1), '/');
   return isPathPrefix(directory, root) || isPathPrefix(root, path);
 }
 
 function isPathPrefix(prefix: string, path: string): boolean {
-  return prefix === '' || path === prefix || path.startsWith(`${prefix}/`);
+  return prefix === '' || path === prefix || Effect2.pipe(path, EffectString.startsWith(`${prefix}/`));
 }
 
 function canonicalPaths(paths: readonly string[]): readonly string[] {

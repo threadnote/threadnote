@@ -33,6 +33,8 @@ import {
   removeGraphShareTrustReceipt,
 } from '@threadnote/graph/sharing/trust';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 const fixture = Effect.fn('test.frontierAcceptance.fixture')(function* () {
@@ -46,7 +48,7 @@ const fixture = Effect.fn('test.frontierAcceptance.fixture')(function* () {
     canonicalRemote: 'github.com/acme/example',
     organization: 'acme',
     publisherKeyFingerprint: key.fingerprint,
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
   });
   const profileDigest = graphShareProfileDigest(profile);
   const enrollment = parseGraphShareEnrollment({
@@ -72,12 +74,12 @@ const fixture = Effect.fn('test.frontierAcceptance.fixture')(function* () {
       checkpoint: {
         manifestDigest: sha256Digest('checkpoint'),
         snapshotId: 'cgsn_fixture',
-        sourceCommit: 'b'.repeat(40),
+        sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
       },
       deltas: [],
       generation,
-      graphAbi: 'c'.repeat(64),
-      graphContentId: 'cgc_' + 'd'.repeat(40),
+      graphAbi: Effect2.pipe('c', EffectString.repeat(64)),
+      graphContentId: 'cgc_' + Effect2.pipe('d', EffectString.repeat(40)),
       logicalGraphDigest: sha256Digest('graph'),
       previousManifestDigest: generation === 1 ? null : sha256Digest('previous'),
       profileDigest,
@@ -85,7 +87,7 @@ const fixture = Effect.fn('test.frontierAcceptance.fixture')(function* () {
       repositoryId: scope.repositoryId,
       schemaVersion: 1,
       snapshotId: 'cgsn_fixture',
-      sourceCommit: 'b'.repeat(40),
+      sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
       ...overrides,
     };
     const signed = yield* signGraphShareFrontier(key, manifest);
@@ -112,7 +114,7 @@ describe('authenticated frontier acceptance', () => {
           yield* f.candidate(4, 3, {logicalGraphDigest: sha256Digest('different graph')}),
           yield* f.candidate(5, 3, {branch: 'refs/heads/unrelated'}),
           yield* f.candidate(5, 3, {profileDigest: sha256Digest('different profile')}),
-          yield* f.candidate(5, 3, {repositoryId: 'e'.repeat(64)}),
+          yield* f.candidate(5, 3, {repositoryId: Effect2.pipe('e', EffectString.repeat(64))}),
         ];
         const unsigned = yield* f.candidate(5, 3);
         candidates.push({...unsigned, pointer: {...unsigned.pointer, envelopeDigest: baseline.pointer.envelopeDigest}});
@@ -192,7 +194,7 @@ describe('authenticated frontier acceptance', () => {
       const f = yield* fixture();
       const input = {casRoot: f.casRoot, home: f.home, scope: f.scope, pointer: (yield* f.candidate(1)).pointer};
       yield* acceptGraphShareFrontier(input);
-      for (const invalid of ['{invalid', 'x'.repeat(4097)]) {
+      for (const invalid of ['{invalid', Effect2.pipe('x', EffectString.repeat(4097))]) {
         yield* f.fs.writeFileString(f.target, invalid);
         expect(Result.isFailure(yield* acceptGraphShareFrontier(input).pipe(Effect.result))).toBe(true);
         expect(yield* f.fs.readFileString(f.target)).toBe(invalid);
@@ -231,7 +233,7 @@ describe('authenticated frontier acceptance', () => {
       for (const change of [
         {branch: 'refs/heads/other'},
         {profileDigest: sha256Digest('other')},
-        {repositoryId: 'f'.repeat(64)},
+        {repositoryId: Effect2.pipe('f', EffectString.repeat(64))},
         {generation: 2},
         {publisherFence: 3},
       ]) {

@@ -1,6 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Exit, FileSystem, Layer, Path, Schema, Scope, Stream} from 'effect';
+import {Deferred, Effect, Exit, FileSystem, Layer, Path, Predicate, Schema, Scope, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -21,6 +22,9 @@ import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
 const baseLayer = Layer.mergeAll(
   BunServices.layer,
@@ -33,6 +37,14 @@ const baseLayer = Layer.mergeAll(
 const testLayer = Layer.mergeAll(baseLayer, CommandExecutor.layer.pipe(Layer.provide(baseLayer)));
 const withLayer = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.scoped(Layer.build(testLayer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
+
+const worksetJobId = (body: unknown): string | undefined => {
+  if (!Predicate.isObject(body) || !Predicate.isObject(body.job)) return undefined;
+  return typeof body.job.id === 'string' ? body.job.id : undefined;
+};
+
+const worksetJobs = (body: unknown): readonly unknown[] | undefined =>
+  Predicate.isObject(body) && EffectArray.isArray(body.jobs) ? body.jobs : undefined;
 
 describe('Manager consumer live observation', () => {
   effectIt.effect('observes atomic share changes, coalesces idle state, and releases watches', () =>
@@ -48,7 +60,7 @@ describe('Manager consumer live observation', () => {
       const changes: string[] = [];
       const availability: boolean[] = [];
       const unwatched: FileSystem.FileSystem = {...fs, watch: () => Stream.never};
-      const broker = yield* makeManagerLiveConsumerObservation({agentContextHome: home} as RuntimeConfig, {
+      const broker = yield* makeManagerLiveConsumerObservation(runtimeConfigForTest({agentContextHome: home}), {
         onInvalidate: (_resource, revision) =>
           Effect.sync(() => {
             changes.push(revision);
@@ -86,7 +98,7 @@ describe('Manager consumer live observation', () => {
       const teams = path.join(directory, 'teams.json');
       yield* fs.makeDirectory(teams);
       const seen: boolean[] = [];
-      const broker = yield* makeManagerLiveConsumerObservation({agentContextHome: home} as RuntimeConfig, {
+      const broker = yield* makeManagerLiveConsumerObservation(runtimeConfigForTest({agentContextHome: home}), {
         onInvalidate: () => Effect.void,
         onAvailability: (_resource, available) =>
           Effect.sync(() => {
@@ -127,7 +139,7 @@ describe('Manager consumer live observation', () => {
       for (let index = 1; index <= 257; index++)
         yield* fs.writeFileString(path.join(directory, String(index) + '.json'), '{}');
       const seen: boolean[] = [];
-      const broker = yield* makeManagerLiveConsumerObservation({agentContextHome: home} as RuntimeConfig, {
+      const broker = yield* makeManagerLiveConsumerObservation(runtimeConfigForTest({agentContextHome: home}), {
         onInvalidate: () => Effect.void,
         onAvailability: (_resource, available) =>
           Effect.sync(() => {
@@ -174,7 +186,7 @@ describe('Manager consumer live observation', () => {
         processStartIdentity: () => Effect.succeed('identity-a'),
       });
       const revisions: string[] = [];
-      const broker = yield* makeManagerLiveConsumerObservation({agentContextHome: home} as RuntimeConfig, {
+      const broker = yield* makeManagerLiveConsumerObservation(runtimeConfigForTest({agentContextHome: home}), {
         onInvalidate: (_resource, revision) =>
           Effect.sync(() => {
             revisions.push(revision);
@@ -228,7 +240,7 @@ describe('Manager consumer live observation', () => {
       });
       let graphChanges = 0;
       const broker = yield* makeManagerLiveConsumerObservation(
-        {agentContextHome: home} as RuntimeConfig,
+        runtimeConfigForTest({agentContextHome: home}),
         {onInvalidate: () => Effect.void, onAvailability: () => Effect.void},
         {
           adapters: [
@@ -283,7 +295,7 @@ describe('Manager consumer live observation', () => {
             if (resource.topic === 'graph-status') availability.push(available);
           }),
       };
-      const config = {agentContextHome: home} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home});
       const graph = yield* makeManagerGraphLiveObservation(config, callbacks).pipe(
         Effect.provideService(SystemInfo, isolatedSystem),
       );
@@ -319,7 +331,7 @@ describe('Manager consumer live observation', () => {
       yield* fs.writeFileString(path.join(share, 'teams.json'), '{}');
       const seen: Array<{topic: string; available: boolean}> = [];
       const broker = yield* makeManagerLiveConsumerObservation(
-        {agentContextHome: home} as RuntimeConfig,
+        runtimeConfigForTest({agentContextHome: home}),
         {
           onInvalidate: () => Effect.void,
           onAvailability: (resource, available) =>
@@ -354,7 +366,7 @@ describe('Manager consumer live observation', () => {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-resource-capacity-'});
       const available: string[] = [];
-      const broker = yield* makeManagerLiveConsumerObservation({agentContextHome: home} as RuntimeConfig, {
+      const broker = yield* makeManagerLiveConsumerObservation(runtimeConfigForTest({agentContextHome: home}), {
         onInvalidate: () => Effect.void,
         onAvailability: resource =>
           Effect.sync(() => {
@@ -396,7 +408,7 @@ describe('Manager consumer live observation', () => {
             if (resource.topic === 'graph-status') availability.push(available);
           }),
       };
-      const config = {agentContextHome: home} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home});
       const graph = yield* makeManagerGraphLiveObservation(config, callbacks);
       const broker = yield* makeManagerLiveConsumerObservation(config, callbacks, {adapters: [graph]});
       const occupied = Array.from({length: 32}, (_, index) => ({
@@ -428,7 +440,7 @@ describe('Manager consumer live observation', () => {
       const changes: string[] = [];
       const unwatched: FileSystem.FileSystem = {...fs, watch: () => Stream.never};
       const broker = yield* makeManagerLiveConsumerObservation(
-        {agentContextHome: home} as RuntimeConfig,
+        runtimeConfigForTest({agentContextHome: home}),
         {
           onInvalidate: resource =>
             Effect.sync(() => {
@@ -469,7 +481,7 @@ describe('Manager consumer live observation', () => {
       const priorGeneration = yield* managerSourceFilesProbe([artifact], [], [artifact]);
       const revisions: string[] = [];
       const broker = yield* makeManagerLiveConsumerObservation(
-        {agentContextHome: home} as RuntimeConfig,
+        runtimeConfigForTest({agentContextHome: home}),
         {
           onInvalidate: (_resource, revision) =>
             Effect.sync(() => {
@@ -505,7 +517,7 @@ describe('Manager consumer live observation', () => {
       const revisions: string[] = [];
       const unwatched: FileSystem.FileSystem = {...fs, watch: () => Stream.never};
       const broker = yield* makeManagerLiveConsumerObservation(
-        {agentContextHome: home, manifestPath} as RuntimeConfig,
+        runtimeConfigForTest({agentContextHome: home, manifestPath}),
         {
           onInvalidate: (_resource, revision) =>
             Effect.sync(() => {
@@ -550,23 +562,26 @@ describe('Manager consumer live observation', () => {
       const manifestPath = path.join(home, 'manifest.yaml');
       yield* fs.writeFileString(
         manifestPath,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: sample',
-          '    path: ' + repository,
-          '    uri: threadnote://resources/repos/sample',
-          '    seed: []',
-          'worksets:',
-          '  - name: all',
-          '    projects: [sample]',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: sample',
+            '    path: ' + repository,
+            '    uri: threadnote://resources/repos/sample',
+            '    seed: []',
+            'worksets:',
+            '  - name: all',
+            '    projects: [sample]',
+            '',
+          ],
+          '\n',
+        ),
       );
       const revisions: string[] = [];
       const unwatched: FileSystem.FileSystem = {...fs, watch: () => Stream.never};
       const broker = yield* makeManagerLiveConsumerObservation(
-        {agentContextHome: home, manifestPath} as RuntimeConfig,
+        runtimeConfigForTest({agentContextHome: home, manifestPath}),
         {
           onInvalidate: (_resource, revision) =>
             Effect.sync(() => {
@@ -595,18 +610,21 @@ describe('Manager consumer live observation', () => {
       yield* fs.makeDirectory(home);
       yield* fs.writeFileString(
         manifestPath,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: sample',
-          '    path: ' + root,
-          '    uri: threadnote://resources/repos/sample',
-          '    seed: []',
-          'worksets:',
-          '  - name: all',
-          '    projects: [sample]',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: sample',
+            '    path: ' + root,
+            '    uri: threadnote://resources/repos/sample',
+            '    seed: []',
+            'worksets:',
+            '  - name: all',
+            '    projects: [sample]',
+            '',
+          ],
+          '\n',
+        ),
       );
       const config = {
         account: 'local',
@@ -663,7 +681,7 @@ describe('Manager consumer live observation', () => {
               ),
               Effect.as({
                 coverage: {complete: true, excluded: 0, failed: 0, missing: 0, ready: 1, requested: 1},
-                manifestDigest: 'd'.repeat(64),
+                manifestDigest: Effect2.pipe('d', EffectString.repeat(64)),
                 members: [],
                 state: 'ready' as const,
                 type: 'code-graph-workset-prepare' as const,
@@ -679,7 +697,8 @@ describe('Manager consumer live observation', () => {
       expect(changes).toEqual(['worksets']);
       yield* Deferred.await(progressReached);
       expect(changes).toEqual(['worksets', 'worksets']);
-      const id = (start.body as {job: {id: string}}).job.id;
+      const id = worksetJobId(start.body);
+      if (id === undefined) return yield* TestError.make({message: 'prepare job response has no id'});
       const running = yield* request('GET', `/api/worksets/jobs/${id}`, {});
       expect(running).toMatchObject({body: {job: {status: 'running', progress: {phase: 'indexing'}}}});
       yield* Deferred.succeed(release, undefined);
@@ -690,7 +709,8 @@ describe('Manager consumer live observation', () => {
       mode = 'failure';
       const failedStart = yield* request('POST', '/api/worksets/prepare', {workset: 'all'});
       if (!failedStart) return yield* TestError.make({message: 'failed prepare route not handled'});
-      const failedId = (failedStart.body as {job: {id: string}}).job.id;
+      const failedId = worksetJobId(failedStart.body);
+      if (failedId === undefined) return yield* TestError.make({message: 'failed prepare job response has no id'});
       yield* Effect.yieldNow;
       expect(yield* request('GET', `/api/worksets/jobs/${failedId}`, {})).toMatchObject({
         body: {job: {status: 'failed'}},
@@ -699,7 +719,9 @@ describe('Manager consumer live observation', () => {
       mode = 'block';
       const cancelledStart = yield* request('POST', '/api/worksets/prepare', {workset: 'all'});
       if (!cancelledStart) return yield* TestError.make({message: 'cancel prepare route not handled'});
-      const cancelledId = (cancelledStart.body as {job: {id: string}}).job.id;
+      const cancelledId = worksetJobId(cancelledStart.body);
+      if (cancelledId === undefined)
+        return yield* TestError.make({message: 'cancelled prepare job response has no id'});
       yield* Effect.yieldNow;
       expect((yield* request('POST', '/api/worksets/jobs/cancel', {id: cancelledId}))?.status).toBe(202);
       yield* Effect.yieldNow;
@@ -711,7 +733,8 @@ describe('Manager consumer live observation', () => {
       for (let index = 0; index < 33; index++) {
         const next = yield* request('POST', '/api/worksets/prepare', {workset: 'all'});
         if (!next) return yield* TestError.make({message: 'trim prepare route not handled'});
-        const nextId = (next.body as {job: {id: string}}).job.id;
+        const nextId = worksetJobId(next.body);
+        if (nextId === undefined) return yield* TestError.make({message: 'trimmed prepare job response has no id'});
         yield* Effect.yieldNow;
         expect(yield* request('GET', `/api/worksets/jobs/${nextId}`, {})).toMatchObject({
           body: {job: {status: 'completed'}},
@@ -719,7 +742,9 @@ describe('Manager consumer live observation', () => {
       }
       const listed = yield* request('GET', '/api/worksets/jobs', {});
       if (!listed) return yield* TestError.make({message: 'job list route not handled'});
-      expect((listed.body as {jobs: readonly unknown[]}).jobs).toHaveLength(32);
+      const jobs = worksetJobs(listed.body);
+      if (jobs === undefined) return yield* TestError.make({message: 'job list response has no jobs'});
+      expect(jobs).toHaveLength(32);
       yield* Scope.close(jobScope, Exit.void);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -732,7 +757,7 @@ describe('Manager consumer live observation', () => {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-citation-live-'});
         const changes: string[] = [];
-        const broker = yield* makeManagerLiveConsumerObservation({agentContextHome: home} as RuntimeConfig, {
+        const broker = yield* makeManagerLiveConsumerObservation(runtimeConfigForTest({agentContextHome: home}), {
           onInvalidate: (resource, revision) =>
             Effect.sync(() => {
               if ('project' in resource) changes.push(resource.project + ':' + revision);
@@ -756,7 +781,7 @@ effectIt.effect('observes empty share configuration and later external creation 
     const path = yield* Path.Path;
     const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-empty-share-'});
     const revisions: string[] = [];
-    const broker = yield* makeManagerLiveConsumerObservation({agentContextHome: home} as RuntimeConfig, {
+    const broker = yield* makeManagerLiveConsumerObservation(runtimeConfigForTest({agentContextHome: home}), {
       onInvalidate: (_resource, revision) =>
         Effect.sync(() => {
           revisions.push(revision);

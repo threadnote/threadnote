@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, Result} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -36,40 +37,42 @@ import {
 } from '../../src/memory/context/maintenance_review.js';
 import {verifyAutomaticMaintenanceReviewSource} from '../../src/memory/context/maintenance_review_source.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const selectorPin = () =>
   createMemoryCodeCitation({
     version: 1,
-    repositoryId: '1'.repeat(64),
+    repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
     repositoryIdentityKind: 'local',
-    sourceCommit: '2'.repeat(40),
-    sourceSnapshotId: `cgsn_${'3'.repeat(40)}`,
+    sourceCommit: Effect2.pipe('2', EffectString.repeat(40)),
+    sourceSnapshotId: `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`,
     sourceDirty: false,
     extractorSet: 'old-extractor',
     path: 'source.ts',
-    fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('4', EffectString.repeat(64))},
     target: {
       kind: 'symbol',
-      nodeId: `cgs_${'5'.repeat(32)}`,
+      nodeId: `cgs_${Effect2.pipe('5', EffectString.repeat(32))}`,
       language: 'typescript',
       symbolKind: 'variable',
       name: 'limit',
       qualifiedName: 'limit',
       span: {line: 1, column: 14, endLine: 1, endColumn: 23},
-      fragmentHash: {algorithm: 'sha256', value: '6'.repeat(64)},
-      signatureHash: {algorithm: 'sha256', value: '7'.repeat(64)},
+      fragmentHash: {algorithm: 'sha256', value: Effect2.pipe('6', EffectString.repeat(64))},
+      signatureHash: {algorithm: 'sha256', value: Effect2.pipe('7', EffectString.repeat(64))},
       fragmentCanonicalization: 'utf8-source-span-v1',
     },
   });
 const symbol = (overrides: Partial<CodeGraphSymbol> = {}): CodeGraphSymbol => ({
-  id: `cgs_${'7'.repeat(32)}`,
+  id: `cgs_${Effect2.pipe('7', EffectString.repeat(32))}`,
   name: 'limit',
   qualifiedName: 'limit',
   path: 'source.ts',
   kind: 'variable',
   language: 'typescript',
   exported: true,
-  contentHash: '8'.repeat(64),
+  contentHash: Effect2.pipe('8', EffectString.repeat(64)),
   span: {line: 1, column: 14, endLine: 1, endColumn: 23},
   ...overrides,
 });
@@ -82,8 +85,8 @@ describe('automatic current symbol capture', () => {
         const {id: _id, ...fields} = approved;
         const current = createMemoryCodeCitation({
           ...fields,
-          sourceCommit: sha256HexSync(`commit-${context}`).slice(0, 40),
-          sourceSnapshotId: `cgsn_${sha256HexSync(`snapshot-${context}`).slice(0, 40)}`,
+          sourceCommit: Effect2.pipe(sha256HexSync(`commit-${context}`), EffectString.slice(0, 40)),
+          sourceSnapshotId: `cgsn_${Effect2.pipe(sha256HexSync(`snapshot-${context}`), EffectString.slice(0, 40))}`,
           extractorSet: `current-context-${context}`,
         });
         const excerpt = {
@@ -91,7 +94,7 @@ describe('automatic current symbol capture', () => {
           startLine: 1,
           endLine: 1,
           excerptHash: sha256HexSync('export const limit = 7;'),
-          fileBytesHash: '4'.repeat(64),
+          fileBytesHash: Effect2.pipe('4', EffectString.repeat(64)),
           provenance: 'current-verified' as const,
           supportsCitation: true,
           truncated: false,
@@ -107,9 +110,12 @@ describe('automatic current symbol capture', () => {
         };
         const root = createMemoryCodeCitation({
           ...fields,
-          fileContentHash: {algorithm: 'sha256', value: '9'.repeat(64)},
+          fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('9', EffectString.repeat(64))},
         });
-        const ambiguous = createMemoryCodeCitation({...fields, sourceCommit: 'a'.repeat(40)});
+        const ambiguous = createMemoryCodeCitation({
+          ...fields,
+          sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
+        });
         const before = JSON.stringify({approved, current, excerpt, root, ambiguous});
         expect(automaticInactiveCodeRootIds([root], [approved], current, excerpt)).toEqual([root.id]);
         expect(automaticInactiveCodeRootIds([root], [], current, excerpt)).toEqual([]);
@@ -136,26 +142,32 @@ describe('automatic current symbol capture', () => {
         const symbolTarget = current.target;
         const changes = [
           {...current, sourceDirty: true},
-          {...current, repositoryId: 'a'.repeat(64)},
+          {...current, repositoryId: Effect2.pipe('a', EffectString.repeat(64))},
           {...current, repositoryIdentityKind: 'remote' as const},
           {...current, path: 'other.ts'},
-          {...current, fileContentHash: {algorithm: 'sha256' as const, value: 'a'.repeat(64)}},
-          ...[
-            {nodeId: `cgs_${'a'.repeat(32)}`},
-            {name: 'other'},
-            {qualifiedName: 'other'},
-            {language: 'javascript'},
-            {symbolKind: 'function'},
-            {signatureHash: undefined},
-            {signatureHash: {algorithm: 'sha256' as const, value: 'a'.repeat(64)}},
-            {fragmentHash: {algorithm: 'sha256' as const, value: 'a'.repeat(64)}},
-            ...(['line', 'column', 'endLine', 'endColumn'] as const).map(coordinate => ({
-              span: {
-                ...symbolTarget.span,
-                [coordinate]: symbolTarget.span[coordinate] + 1,
-              },
-            })),
-          ].map(change => ({...current, target: {...current.target, ...change}})),
+          {
+            ...current,
+            fileContentHash: {algorithm: 'sha256' as const, value: Effect2.pipe('a', EffectString.repeat(64))},
+          },
+          ...EffectArray.map(
+            [
+              {nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`},
+              {name: 'other'},
+              {qualifiedName: 'other'},
+              {language: 'javascript'},
+              {symbolKind: 'function'},
+              {signatureHash: undefined},
+              {signatureHash: {algorithm: 'sha256' as const, value: Effect2.pipe('a', EffectString.repeat(64))}},
+              {fragmentHash: {algorithm: 'sha256' as const, value: Effect2.pipe('a', EffectString.repeat(64))}},
+              ...EffectArray.map(['line', 'column', 'endLine', 'endColumn'] as const, coordinate => ({
+                span: {
+                  ...symbolTarget.span,
+                  [coordinate]: symbolTarget.span[coordinate] + 1,
+                },
+              })),
+            ],
+            change => ({...current, target: {...current.target, ...change}}),
+          ),
         ];
         for (const changed of changes) {
           expect(retainAutomaticApprovedSymbolExcerpt(approved, changed, excerpt)).toBeUndefined();
@@ -190,11 +202,11 @@ describe('automatic current symbol capture', () => {
         ...fields,
         target: {
           ...first.target,
-          nodeId: `cgs_${'9'.repeat(32)}`,
+          nodeId: `cgs_${Effect2.pipe('9', EffectString.repeat(32))}`,
           name: 'secondary',
           qualifiedName: 'secondary',
           span: {line: 2, column: 14, endLine: 2, endColumn: 35},
-          fragmentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+          fragmentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
         },
       }),
     ];
@@ -215,7 +227,7 @@ describe('automatic current symbol capture', () => {
         'Two independent constants.',
       ),
     )!;
-    const entries = pins.map((citation, i) => {
+    const entries = EffectArray.map(pins, (citation, i) => {
       const content = i ? 'export const secondary = 2;' : 'export const limit = 1;';
       const id = automaticMaintenanceEvidenceId({kind: 'code', citation});
       return {
@@ -254,14 +266,16 @@ describe('automatic current symbol capture', () => {
     fc.assert(
       fc.property(fc.boolean(), fc.boolean(), (reverseEvidence, reverseCandidates) => {
         const prepared = prepareAutomaticMemory(target, {
-          scopeRevision: 'b'.repeat(64),
-          evidence: (reverseEvidence ? [...entries].reverse() : entries).map(e => e.evidence),
-          candidates: (reverseCandidates ? [...entries].reverse() : entries).map(e => e.candidate),
+          scopeRevision: Effect2.pipe('b', EffectString.repeat(64)),
+          evidence: EffectArray.map(reverseEvidence ? [...entries].reverse() : entries, e => e.evidence),
+          candidates: EffectArray.map(reverseCandidates ? [...entries].reverse() : entries, e => e.candidate),
         });
         const packet = automaticReviewPacket(target, prepared);
         expect(packet.reviewEvidence).toHaveLength(2);
         for (const expected of entries) {
-          const actual = packet.reviewEvidence.find(e => e.content === expected.candidate.text)!;
+          const actual = EffectOption.getOrUndefined(
+            EffectArray.findFirst(packet.reviewEvidence, e => e.content === expected.candidate.text),
+          )!;
           expect(actual.handleId).toBe(`current:${expected.evidence.id}`);
           expect(actual.descriptor.source).toEqual(expected.evidence.source);
           if (actual.descriptor.source.kind !== 'code' || actual.descriptor.source.citation.target.kind !== 'symbol')
@@ -300,7 +314,7 @@ describe('automatic current symbol capture', () => {
       ),
     )!;
     const prepared = prepareAutomaticMemory(target, {
-      scopeRevision: 'a'.repeat(64),
+      scopeRevision: Effect2.pipe('a', EffectString.repeat(64)),
       evidence: [
         {id, source: {kind: 'code', citation}, scope: 'repository', authority: 'recorded', availability: 'available'},
       ],
@@ -320,8 +334,8 @@ describe('automatic current symbol capture', () => {
             source: {
               repositoryId: citation.repositoryId,
               path: citation.path,
-              sourceCommit: 'b'.repeat(40),
-              sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+              sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
+              sourceSnapshotId: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
               sourceDirty: false,
               extractorSet: citation.extractorSet,
               fileContentHash: sha256HexSync(content),
@@ -343,14 +357,16 @@ describe('automatic current symbol capture', () => {
         const citation = selectorPin(),
           before = JSON.stringify(citation),
           exact = symbol();
-        const noise = noiseFields.map((field, i) => symbol({id: `noise-${i}`, [field]: 'other'}));
+        const noise = EffectArray.map(noiseFields, (field, i) => symbol({id: `noise-${i}`, [field]: 'other'}));
         const rows = reverse ? [...noise, exact].reverse() : [exact, ...noise];
         expect(exactAutomaticCurrentSymbol(citation, citation.repositoryId, rows, false)).toEqual(exact);
         expect(
           exactAutomaticCurrentSymbol(citation, citation.repositoryId, [...rows, symbol({id: 'duplicate'})], false),
         ).toBeUndefined();
         expect(exactAutomaticCurrentSymbol(citation, citation.repositoryId, rows, true)).toBeUndefined();
-        expect(exactAutomaticCurrentSymbol(citation, '9'.repeat(64), rows, false)).toBeUndefined();
+        expect(
+          exactAutomaticCurrentSymbol(citation, Effect2.pipe('9', EffectString.repeat(64)), rows, false),
+        ).toBeUndefined();
         expect(exactAutomaticCurrentSymbol(citation, citation.repositoryId, noise, false)).toBeUndefined();
         expect(JSON.stringify(citation)).toBe(before);
       }),
@@ -405,7 +421,8 @@ describe('automatic current symbol capture', () => {
           );
         const sourceBody = (factor: number) =>
           `export const limit = ${factor} * 1_024;\n` +
-          Array.from({length: 300}, (_, i) => `// line ${i}: sufficiently large source with unrelated details.\n`).join(
+          EffectArray.join(
+            Array.from({length: 300}, (_, i) => `// line ${i}: sufficiently large source with unrelated details.\n`),
             '',
           );
         yield* git(['init', '--quiet']);
@@ -461,7 +478,10 @@ describe('automatic current symbol capture', () => {
         expect(captured?.excerpt.content).toBe(`export const limit = ${factor} * 1_024;`);
         expect(captured?.citation.target.kind).toBe('symbol');
         expect(JSON.stringify(historical)).toBe(historicalBefore);
-        const wrongRepository = createMemoryCodeCitation({...oldFields, repositoryId: 'f'.repeat(64)});
+        const wrongRepository = createMemoryCodeCitation({
+          ...oldFields,
+          repositoryId: Effect2.pipe('f', EffectString.repeat(64)),
+        });
         expect(yield* captureAutomaticCurrentSymbol(config, repository, wrongRepository, 'fixture')).toBeUndefined();
         const wrongPath = createMemoryCodeCitation({...oldFields, path: 'other.ts'});
         expect(yield* captureAutomaticCurrentSymbol(config, repository, wrongPath, 'fixture')).toBeUndefined();
@@ -471,22 +491,35 @@ describe('automatic current symbol capture', () => {
           historical,
           {symbolSpanOnly: true},
         );
-        expect(oldEvidence.excerpts.some(e => e.provenance === 'current-verified')).toBe(!previousExtractor);
+        expect(EffectArray.some(oldEvidence.excerpts, e => e.provenance === 'current-verified')).toBe(
+          !previousExtractor,
+        );
         if (!previousExtractor)
-          expect(oldEvidence.excerpts.find(e => e.provenance === 'current-verified')?.supportsCitation).toBe(false);
+          expect(
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(oldEvidence.excerpts, e => e.provenance === 'current-verified'),
+            )?.supportsCitation,
+          ).toBe(false);
         const live = yield* readLiveAutomaticPreparation(config, uri, repository);
         expect(
-          live.prepared.assessment.evidence.find(
-            e => e.source.kind === 'code' && e.source.citation.id === historical.id,
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              live.prepared.assessment.evidence,
+              e => e.source.kind === 'code' && e.source.citation.id === historical.id,
+            ),
           )?.availability,
         ).toBe(previousExtractor ? 'unknown' : 'available');
         const packet = automaticReviewPacket(live.record, live.prepared, live.locators, live.repositoryIdentity);
         expect(packet.draftRequest.available).toBe(true);
-        const entry = packet.reviewEvidence.find(
-          e =>
-            e.handleId.startsWith('current:') &&
-            e.descriptor.source.kind === 'code' &&
-            e.descriptor.source.citation.target.kind === 'symbol',
+        const entry = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            packet.reviewEvidence,
+            __effectArrayValue =>
+              !!(e =>
+                Effect2.pipe(e.handleId, EffectString.startsWith('current:')) &&
+                e.descriptor.source.kind === 'code' &&
+                e.descriptor.source.citation.target.kind === 'symbol')(__effectArrayValue),
+          ),
         )!;
         expect(entry.content).toBe(`export const limit = ${factor} * 1_024;`);
         const basis = packet.basis;
@@ -557,7 +590,10 @@ describe('automatic current symbol capture', () => {
           accepted.repositoryIdentity,
         );
         const currentEntries = (p: typeof acceptedPacket) =>
-          p.reviewEvidence.filter(e => e.handleId.startsWith('current:'));
+          EffectArray.filter(
+            p.reviewEvidence,
+            (e, index) => index in p.reviewEvidence && Effect2.pipe(e.handleId, EffectString.startsWith('current:')),
+          );
         expect(currentEntries(acceptedPacket)).toHaveLength(1);
         expect(currentEntries(acceptedPacket)[0].descriptor).toEqual(exact.reviewedSupport.active.sources[0]);
         const unchangedState = () =>
@@ -603,8 +639,16 @@ describe('automatic current symbol capture', () => {
         expect(unchangedPacket.basis.packetDigest).not.toBe(acceptedPacket.basis.packetDigest);
         if (!previousExtractor) {
           const rootId = automaticMaintenanceEvidenceId({kind: 'code', citation: historical});
-          expect(accepted.prepared.assessment.evidence.find(e => e.id === rootId)?.availability).toBe('available');
-          expect(unchanged.prepared.assessment.evidence.find(e => e.id === rootId)?.availability).toBe('unknown');
+          expect(
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(accepted.prepared.assessment.evidence, e => e.id === rootId),
+            )?.availability,
+          ).toBe('available');
+          expect(
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(unchanged.prepared.assessment.evidence, e => e.id === rootId),
+            )?.availability,
+          ).toBe('unknown');
           expect(accepted.prepared.omissions).toContain('current-code-citation-unsupported');
           expect(unchanged.prepared.omissions).toContain('current-code-evidence-unavailable');
           expect(unchanged.prepared.assessment.coverage.omittedSources).toBe(
@@ -612,18 +656,21 @@ describe('automatic current symbol capture', () => {
           );
         }
         expect(yield* unchangedState()).toEqual(beforeUnrelated);
-        expect(unchanged.prepared.assessment.evidence.map(e => e.id)).toEqual(
-          accepted.prepared.assessment.evidence.map(e => e.id),
+        expect(EffectArray.map(unchanged.prepared.assessment.evidence, e => e.id)).toEqual(
+          EffectArray.map(accepted.prepared.assessment.evidence, e => e.id),
         );
-        expect(currentEntries(unchangedPacket).map(e => e.descriptor)).toEqual(
-          currentEntries(acceptedPacket).map(e => e.descriptor),
+        expect(EffectArray.map(currentEntries(unchangedPacket), e => e.descriptor)).toEqual(
+          EffectArray.map(currentEntries(acceptedPacket), e => e.descriptor),
         );
         const activeSource = exact.reviewedSupport.active.sources[0].source;
         if (activeSource.kind !== 'code') throw new Error('Expected approved code source');
-        const retainedCandidate = unchanged.prepared.candidates.find(
-          candidate =>
-            candidate.evidenceId === exact.reviewedSupport.active.sources[0].id &&
-            candidate.excerpt?.provenance === 'current-verified',
+        const retainedCandidate = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            unchanged.prepared.candidates,
+            candidate =>
+              candidate.evidenceId === exact.reviewedSupport.active.sources[0].id &&
+              candidate.excerpt?.provenance === 'current-verified',
+          ),
         );
         expect(retainedCandidate?.excerpt?.source.extractorSet).not.toBe(activeSource.citation.extractorSet);
         expect(automaticSupportedSymbolMatchesExcerpt(activeSource.citation, retainedCandidate!.excerpt!)).toBe(true);
@@ -631,9 +678,9 @@ describe('automatic current symbol capture', () => {
         yield* writePreparedMemory(config, unchanged.prepared);
         const cached = yield* readPreparedMemory(config, uri);
         expect(cached).toEqual(unchanged.prepared);
-        expect(currentEntries(automaticReviewPacket(unchanged.record, cached!)).map(e => e.descriptor)).toEqual(
-          currentEntries(acceptedPacket).map(e => e.descriptor),
-        );
+        expect(
+          EffectArray.map(currentEntries(automaticReviewPacket(unchanged.record, cached!)), e => e.descriptor),
+        ).toEqual(EffectArray.map(currentEntries(acceptedPacket), e => e.descriptor));
         expect(yield* fs.readFileString(canonicalPath(config))).toBe(approved);
         // Retention must also remain usable by a subsequent exact review, preview and apply.
         const sameBodyReview = yield* requestAutomaticMemoryReview(config, {
@@ -647,7 +694,7 @@ describe('automatic current symbol capture', () => {
         const payload = sameBodyReview.maintenance;
         const malformed = {
           ...payload,
-          reviewEvidence: payload.reviewEvidence.map(entry =>
+          reviewEvidence: EffectArray.map(payload.reviewEvidence, entry =>
             entry.codeExcerpt
               ? {
                   ...entry,
@@ -716,19 +763,28 @@ describe('automatic current symbol capture', () => {
         );
         expect(next.basis.body).toBe(`The limit is ${factor * 1024} bytes.`);
         expect(next.draftRequest.available).toBe(true);
-        expect(next.reviewEvidence.filter(e => e.handleId.startsWith('current:'))).toHaveLength(1);
         expect(
-          next.reviewEvidence.some(
+          EffectArray.filter(
+            next.reviewEvidence,
+            (e, index) => index in next.reviewEvidence && Effect2.pipe(e.handleId, EffectString.startsWith('current:')),
+          ),
+        ).toHaveLength(1);
+        expect(
+          EffectArray.some(
+            next.reviewEvidence,
             e =>
-              e.handleId.startsWith('current:') &&
+              Effect2.pipe(e.handleId, EffectString.startsWith('current:')) &&
               e.content === 'export const limit = 4 * 1_024;' &&
               e.descriptor.source.kind === 'code' &&
               e.descriptor.source.citation.target.kind === 'symbol',
           ),
         ).toBe(true);
         expect(
-          rebuilt.prepared.assessment.evidence.find(
-            e => e.source.kind === 'code' && e.source.citation.id === historical.id,
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              rebuilt.prepared.assessment.evidence,
+              e => e.source.kind === 'code' && e.source.citation.id === historical.id,
+            ),
           )?.availability,
         ).toBe('unknown');
         yield* writePreparedMemory(fresh, rebuilt.prepared);

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Effect, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {expandPath} from '@threadnote/platform/paths';
@@ -19,12 +20,17 @@ import {
   previewDevSkills,
   statusDevSkills,
   type DevSkillsAction,
+  type DevSkillsProfile,
+  type DevSkillsScope,
   type DevSkillsSelector,
 } from '../dev_skills/index.js';
 import {selectDevSkillsTarget} from '../dev_skills/plan.js';
 import {consumerId, enrollmentContext, readReceipt} from '../dev_skills/registry.js';
 import {isRecord, stableJson} from '../dev_skills/files.js';
 import {managerProjectPathIsForeign} from './project/roots.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface ManagerDevSkillsRequest {
   readonly body: Effect.Effect<Record<string, unknown>, unknown>;
@@ -36,7 +42,10 @@ interface ManagerDevSkillsResponse {
   readonly status: number;
   readonly body: unknown;
 }
-class ManagerDevSkillsHttpError extends Schema.TaggedError<ManagerDevSkillsHttpError>()('ManagerDevSkillsHttpError', {
+class ManagerDevSkillsHttpError extends Schema.TaggedError<
+  ManagerDevSkillsHttpError,
+  {readonly brand: unique symbol}
+>()('ManagerDevSkillsHttpError', {
   code: Schema.String,
   message: Schema.String,
   recovery: Schema.Literals(['preview', 'select-project', 'select-target', 'retry']),
@@ -44,56 +53,73 @@ class ManagerDevSkillsHttpError extends Schema.TaggedError<ManagerDevSkillsHttpE
 const invalid = (message: string) =>
   ManagerDevSkillsHttpError.make({code: 'invalid-input', message, recovery: 'select-target'});
 function object(value: unknown, allowed: readonly string[]): Record<string, unknown> {
-  if (!isRecord(value) || Object.keys(value).some(key => !allowed.includes(key)))
+  if (!isRecord(value) || EffectArray.some(EffectRecord.keys(value), key => !allowed.includes(key)))
     throw invalid(
       'Provide only the documented workflow request fields. Destinations and runtime configuration are server-owned.',
     );
   return value;
 }
+function isDevSkillsProfile(value: string): value is DevSkillsProfile {
+  return value === 'desktop' || value === 'codex-cloud-personal' || value === 'cursor-cloud-personal';
+}
+
+function isDevSkillsScope(value: string): value is DevSkillsScope {
+  return value === 'user' || value === 'project' || value === 'local';
+}
+
 function selectorInput(value: unknown): DevSkillsSelector {
   const selected = object(value, ['agent', 'profile', 'scope', 'cwd']);
   if (typeof selected.agent !== 'string' || !/^[a-z][a-z0-9-]{0,127}$/u.test(selected.agent))
     throw invalid('Select a catalog agent.');
-  if (
-    selected.profile !== undefined &&
-    (typeof selected.profile !== 'string' ||
-      !['desktop', 'codex-cloud-personal', 'cursor-cloud-personal'].includes(selected.profile))
-  )
+  const profile = selected.profile;
+  if (profile !== undefined && (typeof profile !== 'string' || !isDevSkillsProfile(profile)))
     throw invalid('Select a desktop or personal Codex/Cursor profile.');
-  if (
-    selected.scope !== undefined &&
-    (typeof selected.scope !== 'string' || !['user', 'project', 'local'].includes(selected.scope))
-  )
+  const scope = selected.scope;
+  if (scope !== undefined && (typeof scope !== 'string' || !isDevSkillsScope(scope)))
     throw invalid('Select a declared user, project or local scope.');
-  if (selected.scope === 'project' || selected.scope === 'local') {
-    if (typeof selected.cwd !== 'string' || !selected.cwd || selected.cwd.length > 4096 || selected.cwd.includes('\0'))
+  const cwd = selected.cwd;
+  if (scope === 'project' || scope === 'local') {
+    if (typeof cwd !== 'string' || !cwd || cwd.length > 4096 || Effect2.pipe(cwd, EffectString.includes('\0')))
       throw invalid('Project and local scope require one registered project folder.');
-  } else if (selected.cwd !== undefined)
+  } else if (cwd !== undefined) {
     throw invalid('A project folder is valid only for an explicit project or local scope.');
-  return selected as unknown as DevSkillsSelector;
+  }
+  return {
+    agent: selected.agent,
+    ...(profile === undefined ? {} : {profile}),
+    ...(scope === undefined ? {} : {scope}),
+    ...(cwd === undefined ? {} : {cwd}),
+  };
 }
+
 function queryInput(url: URL): DevSkillsSelector | undefined {
   if (!url.search) return undefined;
   const entries = [...url.searchParams];
-  if (new Set(entries.map(([key]) => key)).size !== entries.length)
+  if (new Set(EffectArray.map(entries, ([key]) => key)).size !== entries.length)
     throw invalid('Duplicate workflow selector fields are not allowed.');
-  return selectorInput(Object.fromEntries(entries));
+  return selectorInput(EffectRecord.fromEntries(entries));
 }
+function isDevSkillsAction(value: string): value is DevSkillsAction {
+  return value === 'install' || value === 'update' || value === 'remove';
+}
+
 function mutationInput(value: unknown, applying: boolean) {
   const body = object(value, applying ? ['action', 'selector', 'previewDigest', 'confirm'] : ['action', 'selector']);
-  if (typeof body.action !== 'string' || !['install', 'update', 'remove'].includes(body.action))
+  if (typeof body.action !== 'string' || !isDevSkillsAction(body.action))
     throw invalid('Select install, update or remove.');
-  if (
-    applying &&
-    (body.confirm !== true || typeof body.previewDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(body.previewDigest))
-  )
-    throw invalid('Apply requires explicit confirmation and the exact preview digest.');
+  let previewDigest: string | undefined;
+  if (applying) {
+    if (body.confirm !== true || typeof body.previewDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(body.previewDigest))
+      throw invalid('Apply requires explicit confirmation and the exact preview digest.');
+    previewDigest = body.previewDigest;
+  }
   return {
-    action: body.action as DevSkillsAction,
+    action: body.action,
     selector: selectorInput(body.selector),
-    previewDigest: body.previewDigest as string | undefined,
+    previewDigest,
   };
 }
+
 const validate = <A>(body: () => A) =>
   Effect.try({
     try: body,
@@ -103,12 +129,20 @@ const validate = <A>(body: () => A) =>
 function supportedProjectPath(value: string, platform: NodeJS.Platform): boolean {
   if (!value || value.length > 4096 || managerProjectPathIsForeign(value, platform)) return false;
   for (const character of value) {
-    const point = character.codePointAt(0)!;
+    const point = Effect2.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect2.Option.getOrElse(() => undefined),
+    )!;
     if (point <= 0x1f || point === 0x7f) return false;
   }
   // Win32 aliases trailing ASCII spaces/dots; do not present their rewritten identity.
   return (
-    platform !== 'win32' || !value.split(/[\\/]/u).some(part => part !== '.' && part !== '..' && /[ .]$/u.test(part))
+    platform !== 'win32' ||
+    !EffectArray.some(
+      Effect2.pipe(value, EffectString.split(/[\\/]/u)),
+      part => part !== '.' && part !== '..' && /[ .]$/u.test(part),
+    )
   );
 }
 
@@ -160,7 +194,8 @@ const admitSelector = Effect.fn('managerDevSkills.admitSelector')(function* (
   const catalog = yield* readManagerDevSkillsProjects(config).pipe(Effect.result);
   if (
     catalog._tag === 'Success' &&
-    catalog.success.projects.some(
+    EffectArray.some(
+      catalog.success.projects,
       project => path.isAbsolute(project.path) && path.relative(path.resolve(project.path), target.cwd!) === '',
     )
   )
@@ -211,7 +246,7 @@ function errorResponse(error: unknown): ManagerDevSkillsResponse {
 export const handleManagerDevSkillsRequest = Effect.fn('managerDevSkills.handleRequest')(function* (
   request: ManagerDevSkillsRequest,
 ) {
-  if (!request.url.pathname.startsWith('/api/dev-skills/')) return undefined;
+  if (!Effect2.pipe(request.url.pathname, EffectString.startsWith('/api/dev-skills/'))) return undefined;
   return yield* Effect.gen(function* () {
     const {url, config, method} = request;
     if (method === 'GET' && url.pathname === routes.status) {

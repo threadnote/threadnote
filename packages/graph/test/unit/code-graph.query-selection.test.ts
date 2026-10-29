@@ -1,11 +1,15 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 import type {CodeGraphQueryNode, CodeGraphQueryResult} from '@threadnote/graph/types';
 import {sanitizeSelection} from '../../src/query/selection.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const node = (index: number, characters: number): CodeGraphQueryNode => ({
-  contentHash: 'a'.repeat(64),
+  contentHash: Effect.pipe('a', EffectString.repeat(64)),
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   documentation: '漢'.repeat(characters),
   exported: true,
   id: `node-${index}`,
@@ -60,13 +64,16 @@ describe('graph selection coverage', () => {
       };
       const before = JSON.stringify(input);
       const result = sanitizeSelection(input);
-      const bytes = result.nodes.reduce(
-        (total, item) => total + new TextEncoder().encode(JSON.stringify(item)).byteLength,
+      const bytes = EffectArray.reduce(
+        result.nodes,
         0,
+        (total, item) => total + new TextEncoder().encode(JSON.stringify(item)).byteLength,
       );
       expect(bytes).toBeLessThanOrEqual(256 * 1024);
       expect(JSON.stringify(input)).toBe(before);
-      expect(result.nodes.every(item => input.nodes.some(original => original.id === item.id))).toBe(true);
+      expect(
+        EffectArray.every(result.nodes, item => EffectArray.some(input.nodes, original => original.id === item.id)),
+      ).toBe(true);
       if (result.nodes.length < input.nodes.length) {
         expect(result.searchCoverage?.status).toBe('bounded');
         expect(result.searchCoverage?.limitsReached).toContain('output-bytes');

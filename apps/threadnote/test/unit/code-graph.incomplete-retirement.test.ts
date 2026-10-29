@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -14,11 +15,13 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {join, mkdtemp, rm, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryRoots.splice(0), root => rm(root, {force: true, recursive: true})));
 });
 
 describe('code graph incomplete snapshot retirement', () => {
@@ -129,10 +132,12 @@ describe('code graph incomplete snapshot retirement', () => {
     const database = new Database(databasePath, {readonly: true});
     try {
       const states = new Map(
-        database
-          .query<{readonly id: string; readonly state: string}, []>('SELECT id, state FROM snapshots ORDER BY id')
-          .all()
-          .map(row => [row.id, row.state]),
+        EffectArray.map(
+          database
+            .query<{readonly id: string; readonly state: string}, []>('SELECT id, state FROM snapshots ORDER BY id')
+            .all(),
+          row => [row.id, row.state],
+        ),
       );
       expect(states.has(snapshots.old.id)).toBe(false);
       expect(states.has(snapshots.cleanOld.id)).toBe(false);
@@ -244,7 +249,7 @@ describe('code graph incomplete snapshot retirement', () => {
               snapshotsTotal: 2,
             });
             expect(updates[1]?.pagesCompleted).toBe(1);
-            expect(updates.every(update => update.snapshotsTotal === 2)).toBe(true);
+            expect(EffectArray.every(updates, update => update.snapshotsTotal === 2)).toBe(true);
             expect(updates[1]?.rowsDeleted).toBeGreaterThan(0);
             expect(updates[1]?.rowsDeleted).toBeLessThan(13_501);
             expect(updates[1]?.snapshotsCompleted).toBe(0);
@@ -576,14 +581,14 @@ function seedLargeInterruptedBuild(databasePath: string, snapshotId: string, ret
     );
     database.transaction(() => {
       for (let index = 0; index < 2_100; index += 1) {
-        const id = `stale-symbol-${index.toString().padStart(4, '0')}`;
+        const id = `stale-symbol-${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}`;
         insertSymbol.run(snapshotId, id, `hash-${index}`, `stale${index}`, `stale${index}`);
         for (let term = 0; term < 3; term += 1) insertTerm.run(snapshotId, `term-${term}`, id);
       }
       for (let index = 0; index < 5_100; index += 1) {
         insertEdge.run(
           snapshotId,
-          `stale-edge-${index.toString().padStart(4, '0')}`,
+          `stale-edge-${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}`,
           `source${index}`,
           `target${index}`,
         );
@@ -598,7 +603,9 @@ function seedLargeInterruptedBuild(databasePath: string, snapshotId: string, ret
 function interruptedRowCount(databasePath: string, snapshotId: string): number {
   const database = new Database(databasePath, {readonly: true});
   try {
-    return ['symbols', 'symbol_terms', 'edges'].reduce(
+    return EffectArray.reduce(
+      ['symbols', 'symbol_terms', 'edges'],
+      0,
       (total, table) =>
         total +
         Number(
@@ -606,7 +613,6 @@ function interruptedRowCount(databasePath: string, snapshotId: string): number {
             .query<{readonly count: number}, [string]>(`SELECT COUNT(*) AS count FROM ${table} WHERE snapshot_id = ?`)
             .get(snapshotId)?.count ?? 0,
         ),
-      0,
     );
   } finally {
     database.close();
@@ -629,10 +635,10 @@ function seedInterruptedSymbol(database: Database, snapshotId: string, symbolId:
 function repositoryIdentity(root: string, repositoryId: string, worktreeId: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'retirement-fixture',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
     repositoryId,
@@ -647,7 +653,7 @@ function buildingSnapshot(identity: RepositoryIdentity, suffix: string): CodeGra
     edgeCount: 0,
     extractorSet: 'extractor-set',
     fileCount: 0,
-    id: `cgsn_${'0'.repeat(40)}-full-${sha256HexSync(suffix).slice(0, 16)}`,
+    id: `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}-full-${Effect2.pipe(sha256HexSync(suffix), EffectString.slice(0, 16))}`,
     overlayFingerprint: `overlay-${suffix}`,
     repositoryId: identity.repositoryId,
     state: 'building',

@@ -1,6 +1,6 @@
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it} from '@effect/vitest';
-import {DateTime, Effect, FileSystem, Path} from 'effect';
+import {DateTime, Effect, FileSystem, Path, Predicate} from 'effect';
 import {describe} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -13,6 +13,9 @@ import {
   runHomeMigration,
 } from '@threadnote/threadnote/migration/home';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 describe('OpenViking home migration', () => {
   it.effect('rejects a staged copy when the target volume cannot hold the source plus margin', () =>
@@ -385,9 +388,9 @@ describe('OpenViking home migration', () => {
         expect(yield* fs.exists(path.join(targetHome, 'ov.conf'))).toBe(false);
         expect(yield* fs.readFileString(memory)).toContain('Canonical memory');
 
-        const receipt = JSON.parse(
+        const receipt = parseMigrationReceipt(
           yield* fs.readFileString(path.join(targetHome, 'migration', 'openviking-home-v1.json')),
-        ) as {readonly sourceTreeSha256: string};
+        );
         expect(receipt.sourceTreeSha256).toMatch(/^[0-9a-f]{64}$/);
 
         const repeated = yield* migrateOpenVikingHome({apply: true, legacyHome, targetHome});
@@ -850,7 +853,10 @@ describe('OpenViking home migration', () => {
             ['FETCH_HEAD', 'legacy transient fetch state\n'],
             ['index', 'legacy staged state'],
             ['refs/heads/main', `${unpublishedCommit}\n`],
-            [`objects/${unpublishedCommit.slice(0, 2)}/${unpublishedCommit.slice(2)}`, 'unpublished object'],
+            [
+              `objects/${Effect2.pipe(unpublishedCommit, EffectString.slice(0, 2))}/${Effect2.pipe(unpublishedCommit, EffectString.slice(2))}`,
+              'unpublished object',
+            ],
           ]);
           for (const [relativePath, content] of legacyGitState) {
             const file = path.join(legacyGitdir, relativePath);
@@ -891,7 +897,11 @@ describe('OpenViking home migration', () => {
             yield* fs.writeFileString(
               path.join(currentGitdir, 'config'),
               scenario === 'rewritten-config-and-partial-worktree'
-                ? legacyConfig.replaceAll(legacyWorktree, currentWorktree).replaceAll(legacyGitdir, currentGitdir)
+                ? Effect2.pipe(
+                    legacyConfig,
+                    EffectString.replaceAll(legacyWorktree, currentWorktree),
+                    EffectString.replaceAll(legacyGitdir, currentGitdir),
+                  )
                 : legacyConfig,
             );
           }
@@ -937,15 +947,20 @@ describe('OpenViking home migration', () => {
           expect(yield* fs.exists(path.join(targetHome, 'migration', '.openviking-home-v1-share-copy'))).toBe(false);
           expect(
             yield* fs.readFileString(
-              path.join(currentGitdir, 'objects', unpublishedCommit.slice(0, 2), unpublishedCommit.slice(2)),
+              path.join(
+                currentGitdir,
+                'objects',
+                Effect2.pipe(unpublishedCommit, EffectString.slice(0, 2)),
+                Effect2.pipe(unpublishedCommit, EffectString.slice(2)),
+              ),
             ),
           ).toBe('unpublished object');
           expect(yield* fs.readFileString(path.join(currentGitdir, 'config'))).toContain(
             `worktree = ${currentWorktree}`,
           );
-          const teams = JSON.parse(yield* fs.readFileString(path.join(targetHome, 'share', 'teams.json'))) as {
-            readonly teams: {readonly default: {readonly gitdir: string; readonly worktree: string}};
-          };
+          const teams = parseDefaultShareGitPaths(
+            yield* fs.readFileString(path.join(targetHome, 'share', 'teams.json')),
+          );
           expect(teams.teams.default).toMatchObject({gitdir: currentGitdir, worktree: currentWorktree});
           expect(yield* fs.readFileString(path.join(legacyGitdir, 'config'))).toBe(legacyConfig);
           expect(yield* fs.readFileString(path.join(legacyGitdir, 'FETCH_HEAD'))).toBe(
@@ -1100,7 +1115,10 @@ describe('OpenViking home migration', () => {
           ['index', 'legacy staged state'],
           ['refs/heads/main', `${legacyCommit}\n`],
           ['logs/HEAD', 'legacy HEAD reflog\n'],
-          [`objects/${legacyCommit.slice(0, 2)}/${legacyCommit.slice(2)}`, 'legacy unpublished object'],
+          [
+            `objects/${Effect2.pipe(legacyCommit, EffectString.slice(0, 2))}/${Effect2.pipe(legacyCommit, EffectString.slice(2))}`,
+            'legacy unpublished object',
+          ],
           ['future-git-extension/state', 'legacy extension state\n'],
         ]);
         for (const [relativePath, content] of legacyState) {
@@ -1146,7 +1164,12 @@ describe('OpenViking home migration', () => {
         expect(yield* fs.readFileString(path.join(migratedGitdir, 'logs', 'HEAD'))).toBe('legacy HEAD reflog\n');
         expect(
           yield* fs.readFileString(
-            path.join(migratedGitdir, 'objects', legacyCommit.slice(0, 2), legacyCommit.slice(2)),
+            path.join(
+              migratedGitdir,
+              'objects',
+              Effect2.pipe(legacyCommit, EffectString.slice(0, 2)),
+              Effect2.pipe(legacyCommit, EffectString.slice(2)),
+            ),
           ),
         ).toBe('legacy unpublished object');
         expect(yield* fs.readFileString(path.join(migratedGitdir, 'future-git-extension', 'state'))).toBe(
@@ -1248,7 +1271,12 @@ describe('OpenViking home migration', () => {
         const legacyIndex = 'legacy staged share state';
         yield* fs.writeFileString(path.join(legacyGitdir, 'index'), legacyIndex);
         const unpublishedCommit = '0123456789abcdef0123456789abcdef01234567';
-        const unpublishedObject = path.join(legacyGitdir, 'objects', '01', unpublishedCommit.slice(2));
+        const unpublishedObject = path.join(
+          legacyGitdir,
+          'objects',
+          '01',
+          Effect2.pipe(unpublishedCommit, EffectString.slice(2)),
+        );
         yield* fs.makeDirectory(path.dirname(unpublishedObject), {recursive: true});
         yield* fs.writeFileString(unpublishedObject, 'unpublished commit object');
         yield* fs.makeDirectory(path.join(legacyGitdir, 'refs', 'heads'), {recursive: true});
@@ -1314,7 +1342,10 @@ describe('OpenViking home migration', () => {
           ['MERGE_HEAD', `${currentCommit}\n`],
           ['rebase-merge/done', 'pick current\n'],
           ['sequencer/todo', 'pick current\n'],
-          [`objects/${currentCommit.slice(0, 2)}/${currentCommit.slice(2)}`, 'current unpublished object'],
+          [
+            `objects/${Effect2.pipe(currentCommit, EffectString.slice(0, 2))}/${Effect2.pipe(currentCommit, EffectString.slice(2))}`,
+            'current unpublished object',
+          ],
           ['objects/pack/pack-current.pack', 'current pack'],
           ['info/exclude', 'current exclusion\n'],
           ['hooks/pre-commit', '#!/bin/sh\nexit 0\n'],
@@ -1366,12 +1397,17 @@ describe('OpenViking home migration', () => {
         expect(yield* fs.exists(path.join(migratedGitdir, 'legacy-only-extension'))).toBe(false);
         expect(
           yield* fs.exists(
-            path.join(migratedGitdir, 'objects', unpublishedCommit.slice(0, 2), unpublishedCommit.slice(2)),
+            path.join(
+              migratedGitdir,
+              'objects',
+              Effect2.pipe(unpublishedCommit, EffectString.slice(0, 2)),
+              Effect2.pipe(unpublishedCommit, EffectString.slice(2)),
+            ),
           ),
         ).toBe(false);
-        const migratedTeams = JSON.parse(yield* fs.readFileString(path.join(targetHome, 'share', 'teams.json'))) as {
-          readonly teams: {readonly default: {readonly gitdir: string; readonly worktree: string}};
-        };
+        const migratedTeams = parseDefaultShareGitPaths(
+          yield* fs.readFileString(path.join(targetHome, 'share', 'teams.json')),
+        );
         expect(migratedTeams.teams.default).toMatchObject({
           gitdir: migratedGitdir,
           worktree: migratedWorktree,
@@ -1437,6 +1473,28 @@ describe('OpenViking home migration', () => {
   );
 });
 
+function parseMigrationReceipt(text: string): {readonly sourceTreeSha256: string} {
+  const value: unknown = JSON.parse(text);
+  if (!Predicate.isObject(value) || typeof value.sourceTreeSha256 !== 'string') {
+    throw new Error('Expected a migration receipt with a source tree digest.');
+  }
+  return {sourceTreeSha256: value.sourceTreeSha256};
+}
+
+function parseDefaultShareGitPaths(text: string): {
+  readonly teams: {readonly default: {readonly gitdir: string; readonly worktree: string}};
+} {
+  const value: unknown = JSON.parse(text);
+  if (!Predicate.isObject(value) || !Predicate.isObject(value.teams) || !Predicate.isObject(value.teams.default)) {
+    throw new Error('Expected a share teams file with a default team.');
+  }
+  const defaultTeam = value.teams.default;
+  if (typeof defaultTeam.gitdir !== 'string' || typeof defaultTeam.worktree !== 'string') {
+    throw new Error('Expected default team gitdir and worktree paths.');
+  }
+  return {teams: {default: {gitdir: defaultTeam.gitdir, worktree: defaultTeam.worktree}}};
+}
+
 function snapshotDirectory(
   fs: FileSystem.FileSystem,
   path: Path.Path,
@@ -1447,7 +1505,10 @@ function snapshotDirectory(
       const snapshot: string[] = [];
       for (const name of (yield* fs.readDirectory(directory)).sort()) {
         const absolutePath = path.join(directory, name);
-        const relativePath = path.relative(root, absolutePath).split(path.sep).join('/');
+        const relativePath = EffectArray.join(
+          Effect2.pipe(path.relative(root, absolutePath), EffectString.split(path.sep)),
+          '/',
+        );
         const info = yield* fs.stat(absolutePath);
         if (info.type === 'Directory') {
           snapshot.push(`directory:${relativePath}`, ...(yield* walk(absolutePath)));

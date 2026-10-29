@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Redacted, Result} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -11,7 +12,7 @@ import {
   readExternalSourceReceipt,
   ExternalSourcePolicy,
 } from '@threadnote/store/external-resource';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import {
   mutateSourceConfiguration,
   readSourceConfiguration,
@@ -34,12 +35,17 @@ import {linearDocumentId} from '../src/render.js';
 import {comment, connection, issue, request, response, safeFetch, source, uuid} from './fixtures.js';
 import {provideLayer} from './layer.js';
 import {TestConsole} from 'effect/testing';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
+
 const configurationRegistry = makeSourceConfigurationRegistry({sources: [linearSourceCodec], projections: []});
 const options = {...source, apply: true, apiToken: Redacted.make('synthetic-linear-private-key')};
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'linear-source-'}));
-  const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+  const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
   return {fs, home, config, location: {home, account: 'local', user: 'tester'}};
 });
 const doc = linearDocumentId(source.organizationId, 'issue', issue.id);
@@ -72,7 +78,7 @@ describe('Linear read-only source lifecycle', () => {
       expect(yield* policy.current(location, source.id, 'linear')).toBeUndefined();
       yield* mutateSourceConfiguration(config, configuration => ({
         ...configuration,
-        sources: configuration.sources.map(candidate =>
+        sources: EffectArray.map(configuration.sources, candidate =>
           candidate.id === source.id ? {...candidate, enabled: false} : candidate,
         ),
       }));
@@ -94,7 +100,10 @@ describe('Linear read-only source lifecycle', () => {
         ),
       ).toBe('synthetic-linear-private-key');
       expect(
-        (yield* fs.readFileString(yield* sourceConfigurationPath(config))).includes('synthetic-linear-private-key'),
+        Effect2.pipe(
+          yield* fs.readFileString(yield* sourceConfigurationPath(config)),
+          EffectString.includes('synthetic-linear-private-key'),
+        ),
       ).toBe(false);
       expect((yield* fs.stat(`${home}/threadnote/credentials/linear/${source.id}`)).mode & 0o077).toBe(0);
       const imported = yield* runLinearSourceSync(config, {
@@ -105,16 +114,16 @@ describe('Linear read-only source lifecycle', () => {
       expect(imported.syncedDocuments).toEqual([doc]);
       const manifest = yield* readExternalDocumentManifest(location, source.id, doc, 'linear');
       expect(manifest?.status).toBe('active');
-      const uris = Object.keys(manifest!.chunks);
+      const uris = EffectRecord.keys(manifest!.chunks);
       expect(uris.length).toBe(2);
-      expect(Object.keys(yield* loadExternalResourceAccess(location))).toEqual(uris);
+      expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).toEqual(uris);
       expect(yield* externalResourceAccess(location, uris[0])).toBe(true);
       expect((yield* runLinearSourceInventory(config, source.id)).entries).toHaveLength(1);
       yield* runLinearSourceStatus(config, source.id);
       expect(yield* TestConsole.logLines).toContain(`Linear source "${source.id}": 1 cached item(s).`);
       const current = requireLinearSource(yield* readSourceConfiguration(config), source.id);
       yield* mutateSourceConfiguration(config, c => upsertLinearSource(c, {...current, enabled: false}));
-      expect(Object.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
+      expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
       expect(Result.isFailure(yield* (yield* ResourceStore).read(location, uris[0]).pipe(Effect.result))).toBe(true);
       yield* runLinearSourceRemove(config, {id: source.id, apply: true});
       expect((yield* readSourceConfiguration(config)).sources).toEqual([]);
@@ -141,7 +150,7 @@ describe('Linear read-only source lifecycle', () => {
       expect(calls).toBe(0);
       const current = requireLinearSource(yield* readSourceConfiguration(config), source.id);
       yield* mutateSourceConfiguration(config, c => upsertLinearSource(c, {...current, maxStaleHours: 1}));
-      expect(Object.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
+      expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
     }).pipe(TestClock.withLive, provideLayer),
   );
   effectIt.effect(
@@ -164,7 +173,7 @@ describe('Linear read-only source lifecycle', () => {
           apply: true,
           clientOptions: {
             fetch: async (url, init) =>
-              request(init).query.includes('LinearComments')
+              Effect2.pipe(request(init).query, EffectString.includes('LinearComments'))
                 ? new Response(
                     JSON.stringify({
                       data: {issue: {id: issue.id, comments: connection([comment(100)])}},
@@ -191,13 +200,13 @@ describe('Linear read-only source lifecycle', () => {
         apply: true,
         clientOptions: {
           fetch: async (url, init) =>
-            request(init).query.includes('LinearIssue(')
+            Effect2.pipe(request(init).query, EffectString.includes('LinearIssue('))
               ? response({issue: {...issue, team: {id: uuid(999), name: 'Outside'}}})
               : safeFetch(url, init),
         },
       });
       expect((yield* readExternalDocumentManifest(location, source.id, doc, 'linear'))?.status).toBe('quarantined');
-      expect(Object.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
+      expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
       yield* runLinearSourceAdd(config, options);
       yield* runLinearSourceSync(config, {id: source.id, apply: true, clientOptions: {fetch: safeFetch}});
       yield* runLinearSourceSync(config, {
@@ -206,13 +215,13 @@ describe('Linear read-only source lifecycle', () => {
         clientOptions: {fetch: async () => response({organization: {id: uuid(999)}, viewer: {id: source.principalId}})},
       });
       expect((yield* readExternalSourceReceipt(location, source.id, 'linear'))?.status).toBe('authentication-rejected');
-      expect(Object.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
+      expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
       yield* runLinearSourceSync(config, {
         id: source.id,
         apply: true,
         clientOptions: {fetch: async () => response({}, 401)},
       });
-      expect(Object.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
+      expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
     }).pipe(TestClock.withLive, provideLayer),
   );
   effectIt.effect('persists RATELIMITED cooldown and sanitizes reflected keys', () =>
@@ -274,7 +283,7 @@ describe('Linear read-only source lifecycle', () => {
       yield* runLinearSourceAdd(config, options);
       yield* runLinearSourceSync(config, {id: source.id, apply: true, clientOptions: {fetch: safeFetch}});
       yield* fs.remove(`${config.agentContextHome}/threadnote/credentials/linear/${source.id}`);
-      expect(Object.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
+      expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
       const unavailable = yield* runLinearSourceSync(config, {
         id: source.id,
         apply: true,
@@ -291,7 +300,7 @@ describe('Linear read-only source lifecycle', () => {
       const result = yield* runLinearSourceAdd(config, {
         ...options,
         apiToken: Redacted.make('synthetic-replacement-key'),
-        expectedFingerprint: 'a'.repeat(64),
+        expectedFingerprint: Effect2.pipe('a', EffectString.repeat(64)),
       }).pipe(Effect.result);
       expect(Result.isFailure(result)).toBe(true);
       expect(Redacted.value(yield* resolveLinearCredential(config, current))).toBe('synthetic-linear-private-key');
@@ -309,9 +318,9 @@ describe('Linear read-only source lifecycle', () => {
         yield* runLinearSourceAdd(config, options);
         yield* runLinearSourceSync(config, {id: source.id, apply: true, clientOptions: {fetch: safeFetch}});
         const old = yield* readExternalDocumentManifest(location, source.id, doc, 'linear');
-        expect(Object.keys(yield* loadExternalResourceAccess(location))).not.toEqual([]);
+        expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).not.toEqual([]);
         yield* storeLinearCredential(config, source.id, Redacted.make('synthetic-rotated-private-key'));
-        expect(Object.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
+        expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
         yield* runLinearSourceSync(config, {id: source.id, apply: true, clientOptions: {fetch: safeFetch}});
         expect((yield* readExternalDocumentManifest(location, source.id, doc, 'linear'))?.accessEpoch).not.toBe(
           old?.accessEpoch,
@@ -323,7 +332,7 @@ describe('Linear read-only source lifecycle', () => {
           apply: true,
           clientOptions: {
             fetch: async (url, init) => {
-              if (request(init).query.includes('LinearComments') && !rotated) {
+              if (Effect2.pipe(request(init).query, EffectString.includes('LinearComments')) && !rotated) {
                 rotated = true;
                 await Bun.write(keyFile, 'synthetic-second-rotated-key');
               }
@@ -332,7 +341,7 @@ describe('Linear read-only source lifecycle', () => {
           },
         }).pipe(Effect.result);
         expect(Result.isFailure(result)).toBe(true);
-        expect(Object.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
+        expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
       }).pipe(TestClock.withLive, provideLayer),
   );
 });

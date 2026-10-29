@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {Effect, FileSystem, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -10,6 +11,10 @@ import {
   type ContextMaintenanceWorkerObservation,
 } from './maintenance_evidence.js';
 import {resolveMaintenanceRelationPolicy, resolveRelationTarget} from './maintenance_policy.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export type MaintenanceCitationAssociation = Effect.Success<
   ReturnType<typeof readContextMaintenanceCitationAssociation>
@@ -40,25 +45,29 @@ export function maintenanceRecordRevision(
   sourceRevision: string | undefined,
 ) {
   const contentHash = (content: string) => sha256HexSync(canonicalMemoryDocumentContent(content));
-  const relations = (record.metadata.relations ?? [])
-    .map(relation => {
+  const relations = EffectArray.join(
+    EffectArray.map(record.metadata.relations ?? [], relation => {
       const target = resolveRelationTarget(corpus, relation.uri);
       const policy = resolveMaintenanceRelationPolicy(record, relation, corpus, inventoryComplete);
-      const successors = corpus
-        .filter(
-          candidate =>
+      const successors = EffectArray.map(
+        EffectArray.filter(
+          corpus,
+          (candidate, __effectArrayIndex) =>
+            __effectArrayIndex in corpus &&
             candidate.metadata.status === 'active' &&
-            (candidate.metadata.relations ?? []).some(
+            EffectArray.some(
+              candidate.metadata.relations ?? [],
               link =>
                 link.type === 'supersedes' &&
                 resolveRelationTarget(corpus, link.uri).record?.uri === target.record?.uri,
             ),
-        )
-        .map(candidate => [candidate.uri, contentHash(candidate.content)])
-        .sort();
-      return `${relation.type}:${relation.uri}:${target.state}:${target.record?.content ?? ''}:${policy.state}:${JSON.stringify(successors)}:${JSON.stringify(policy.lineage?.map(item => [item.uri, contentHash(item.content)]))}`;
-    })
-    .join('|');
+        ),
+        candidate => [candidate.uri, contentHash(candidate.content)],
+      ).sort();
+      return `${relation.type}:${relation.uri}:${target.state}:${target.record?.content ?? ''}:${policy.state}:${JSON.stringify(successors)}:${JSON.stringify(EffectOption.getOrUndefined(EffectOption.map(EffectOption.fromNullishOr(policy.lineage), __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, item => [item.uri, contentHash(item.content)]))))}`;
+    }),
+    '|',
+  );
   return sha256HexSync(
     `${inventoryComplete}:${contentHash(record.content)}:${sourceEpoch ?? ''}:${sourceRevision ?? ''}:${relations}`,
   );
@@ -71,7 +80,7 @@ const readRecordSourceAssociation = Effect.fn('contextMaintenance.recordAssociat
 ) {
   const citations = [
     ...new Map(
-      currentMemoryCodeCitations(record).map(citation => [
+      EffectArray.map(currentMemoryCodeCitations(record), citation => [
         `${citation.repositoryId}:${citation.sourceCommit}`,
         citation,
       ]),
@@ -80,14 +89,16 @@ const readRecordSourceAssociation = Effect.fn('contextMaintenance.recordAssociat
   const parts: MaintenanceCitationAssociation[] = [];
   for (let offset = 0; offset < Math.max(1, citations.length); offset += 32)
     parts.push(yield* readContextMaintenanceCitationAssociation(config, cwd, citations.slice(offset, offset + 32)));
-  const bySelector = Object.fromEntries(
-    parts.flatMap(part => Object.entries(part.bySelector)).sort(([a], [b]) => a.localeCompare(b)),
+  const bySelector = EffectRecord.fromEntries(
+    EffectArray.flatMap(parts, part => EffectRecord.toEntries(part.bySelector)).sort(([a], [b]) =>
+      Effect2.pipe(a, EffectString.localeCompare(b)),
+    ),
   );
   return {
     epoch: sha256HexSync(JSON.stringify([citations.length, bySelector])),
     bySelector,
-    roots: [...new Set(parts.flatMap(part => part.roots))],
-    sourceEpochs: Object.assign({}, ...parts.map(part => part.sourceEpochs)),
+    roots: [...new Set(EffectArray.flatMap(parts, part => part.roots))],
+    sourceEpochs: Object.assign({}, ...EffectArray.map(parts, part => part.sourceEpochs)),
   } satisfies MaintenanceCitationAssociation;
 });
 
@@ -96,19 +107,24 @@ export function projectMaintenanceCitationAssociation(
   association: MaintenanceCitationAssociation,
 ) {
   const selectors = [
-    ...new Set(currentMemoryCodeCitations(record).map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)),
+    ...new Set(
+      EffectArray.map(
+        currentMemoryCodeCitations(record),
+        citation => `${citation.repositoryId}:${citation.sourceCommit}`,
+      ),
+    ),
   ].sort();
   return sha256HexSync(
     JSON.stringify([
       ...(record.metadata.reviewedSupport
         ? [
             record.metadata.reviewedSupport.active.digest,
-            currentMemoryCodeCitations(record).map(citation => citation.id),
+            EffectArray.map(currentMemoryCodeCitations(record), citation => citation.id),
           ]
         : []),
       selectors.length,
-      Object.fromEntries(
-        selectors.flatMap(selector => {
+      EffectRecord.fromEntries(
+        EffectArray.flatMap(selectors, selector => {
           const epoch = association.bySelector[selector];
           return epoch === undefined ? [] : [[selector, epoch]];
         }),
@@ -128,20 +144,24 @@ export const recordSourceRevision = Effect.fn('contextMaintenance.recordSourceRe
   const association = observed ?? (yield* readRecordSourceAssociation(config, record, cwd));
   return sha256HexSync(
     projectMaintenanceCitationAssociation(record, association) +
-      (yield* Effect.forEach(
-        [...new Set(currentMemoryCodeCitations(record).map(citation => citation.path))],
-        relative =>
-          Effect.gen(function* () {
-            const safe = yield* Effect.try(() => assertSafeRelativePath(relative));
-            const root = yield* fs.realPath(cwd);
-            const file = yield* fs.realPath(path.join(root, safe));
-            const contained = path.relative(root, file);
-            if (contained.startsWith('..') || path.isAbsolute(contained)) return `${relative}:outside-root`;
-            const info = yield* fs.stat(file);
-            return `${relative}:${Number(info.size)}:${JSON.stringify(info.mtime)}`;
-          }).pipe(Effect.orElseSucceed(() => `${relative}:unavailable`)),
-        {concurrency: 16},
-      )).join('\n'),
+      EffectArray.join(
+        yield* Effect.forEach(
+          [...new Set(EffectArray.map(currentMemoryCodeCitations(record), citation => citation.path))],
+          relative =>
+            Effect.gen(function* () {
+              const safe = yield* Effect.try(() => assertSafeRelativePath(relative));
+              const root = yield* fs.realPath(cwd);
+              const file = yield* fs.realPath(path.join(root, safe));
+              const contained = path.relative(root, file);
+              if (Effect2.pipe(contained, EffectString.startsWith('..')) || path.isAbsolute(contained))
+                return `${relative}:outside-root`;
+              const info = yield* fs.stat(file);
+              return `${relative}:${Number(info.size)}:${JSON.stringify(info.mtime)}`;
+            }).pipe(Effect.orElseSucceed(() => `${relative}:unavailable`)),
+          {concurrency: 16},
+        ),
+        '\n',
+      ),
   );
 });
 

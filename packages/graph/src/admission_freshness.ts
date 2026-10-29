@@ -37,9 +37,12 @@ const currentReceiptSchema = Schema.Struct({
 const receiptSchema = Schema.Union([legacyReceiptSchema, currentReceiptSchema]);
 type AdmissionReceipt = typeof receiptSchema.Type;
 
-class CodeGraphAdmissionError extends Schema.TaggedError<CodeGraphAdmissionError>()('CodeGraphAdmissionError', {
-  message: Schema.String,
-}) {}
+class CodeGraphAdmissionError extends Schema.TaggedError<CodeGraphAdmissionError, {readonly brand: unique symbol}>()(
+  'CodeGraphAdmissionError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export function codeGraphSnapshotAdmissionReceiptPath(
   path: Path.Path,

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import operationsExample from '../../../../docs/examples/org-operations.v1.json' with {type: 'json'};
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -13,15 +14,22 @@ import {
   OPERATIONS_CHECK_SPECIFICATIONS,
 } from '@threadnote/remote-memory/operations/contract';
 import {operationsDraft, observedOperationsEvidence, checkedAt} from '../helpers/operations-fixtures.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('operations evidence boundary', () => {
   it('keeps external actions pending and fails closed until every observation passes', () => {
     const manifest = buildOperationsManifest(operationsDraft());
-    const evidence = operationsEvidenceTemplate(manifest, 'b'.repeat(32), 'c'.repeat(32));
+    const evidence = operationsEvidenceTemplate(
+      manifest,
+      Effect.pipe('b', EffectString.repeat(32)),
+      Effect.pipe('c', EffectString.repeat(32)),
+    );
     const receipt = verifyOperationsEvidence(manifest, evidence, checkedAt);
     expect(receipt.status).toBe('pending');
     expect(receipt.checks).toHaveLength(OPERATIONS_CHECKS.length);
-    expect(receipt.checks.every(check => check.status === 'pending')).toBe(true);
+    expect(EffectArray.every(receipt.checks, check => check.status === 'pending')).toBe(true);
     expect(receipt.providerActions).toBe('none');
     expect(verifyOperationsReceipt(manifest, evidence, receipt, checkedAt)).toEqual(receipt);
   });
@@ -40,9 +48,12 @@ describe('operations evidence boundary', () => {
     for (let i = 0; i < ids.length; i++) {
       for (let j = i + 1; j < ids.length; j++) {
         const duplicate = structuredClone(draft);
-        const source =
-          ids[i] === 'deploymentId' ? draft.deploymentId : draft.owners[ids[i] as keyof typeof draft.owners];
-        duplicate.owners[ids[j] as keyof typeof draft.owners] = source;
+        const first = ids[i];
+        const second = ids[j];
+        if (first === undefined || second === undefined) continue;
+        const source = first === 'deploymentId' ? draft.deploymentId : draft.owners[first];
+        if (second === 'deploymentId') duplicate.deploymentId = source;
+        else duplicate.owners[second] = source;
         expect(() => buildOperationsManifest(duplicate)).toThrow('Invalid operations input.');
       }
     }
@@ -53,7 +64,9 @@ describe('operations evidence boundary', () => {
         ['support', 'escalation'],
       ] as const) {
         const duplicate = structuredClone(draft);
-        const alert = duplicate.alerts.find(alert => alert.kind === kind)!;
+        const alert = EffectOption.getOrUndefined(
+          EffectArray.findFirst(duplicate.alerts, alert => alert.kind === kind),
+        )!;
         alert.owners[second] = alert.owners[first];
         expect(() => buildOperationsManifest(duplicate)).toThrow('Invalid operations input.');
       }
@@ -64,19 +77,28 @@ describe('operations evidence boundary', () => {
     const draft = operationsDraft();
     const manifest = buildOperationsManifest(draft);
     for (const at of ['2026-09-17T23:59:59.999Z', '2026-09-19T00:00:00.001Z']) {
-      const pending = operationsEvidenceTemplate(manifest, 'b'.repeat(32), 'c'.repeat(32));
-      expect(verifyOperationsEvidence(manifest, pending, at).checks.every(check => check.status === 'blocked')).toBe(
-        true,
+      const pending = operationsEvidenceTemplate(
+        manifest,
+        Effect.pipe('b', EffectString.repeat(32)),
+        Effect.pipe('c', EffectString.repeat(32)),
       );
+      expect(
+        EffectArray.every(verifyOperationsEvidence(manifest, pending, at).checks, check => check.status === 'blocked'),
+      ).toBe(true);
     }
     const refreshed = observedOperationsEvidence(manifest);
-    for (const entry of refreshed.checks) entry.observedAt = entry.observedAt.replace('2026-09-18', '2026-09-19');
+    for (const entry of refreshed.checks)
+      entry.observedAt = Effect.pipe(entry.observedAt, EffectString.replace('2026-09-18', '2026-09-19'));
     expect(verifyOperationsEvidence(manifest, refreshed, '2026-09-19T01:00:00.000Z').status).toBe('blocked');
   });
 
   it('bounds the reviewed manifest window inclusively for any verification instant', () => {
     const manifest = buildOperationsManifest(operationsDraft());
-    const pending = operationsEvidenceTemplate(manifest, 'b'.repeat(32), 'c'.repeat(32));
+    const pending = operationsEvidenceTemplate(
+      manifest,
+      Effect.pipe('b', EffectString.repeat(32)),
+      Effect.pipe('c', EffectString.repeat(32)),
+    );
     const window = manifest.maxEvidenceAgeSeconds * 1000;
     fc.assert(
       fc.property(
@@ -108,11 +130,17 @@ describe('operations evidence boundary', () => {
     ];
     for (const [before, after] of pairs) {
       const evidence = observedOperationsEvidence(manifest);
-      evidence.checks.find(entry => entry.check === after)!.observedAt = evidence.checks.find(
-        entry => entry.check === before,
-      )!.observedAt;
+      EffectOption.getOrUndefined(EffectArray.findFirst(evidence.checks, entry => entry.check === after))!.observedAt =
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(evidence.checks, entry => entry.check === before),
+        )!.observedAt;
       expect(
-        verifyOperationsEvidence(manifest, evidence, checkedAt).checks.find(entry => entry.check === after)?.status,
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            verifyOperationsEvidence(manifest, evidence, checkedAt).checks,
+            entry => entry.check === after,
+          ),
+        )?.status,
       ).toBe('blocked');
     }
   });
@@ -126,7 +154,9 @@ describe('operations evidence boundary', () => {
         'authenticatedReadsContinuous',
       ]) {
         const evidence = observedOperationsEvidence(manifest);
-        const entry = evidence.checks.find(entry => entry.check === check)!;
+        const entry = EffectOption.getOrUndefined(
+          EffectArray.findFirst(evidence.checks, entry => entry.check === check),
+        )!;
         expect(entry.facts[fact]).toBe(true);
         entry.facts[fact] = false;
         expect(verifyOperationsEvidence(manifest, evidence, checkedAt).status).toBe('blocked');
@@ -151,10 +181,12 @@ describe('operations evidence boundary', () => {
     const draft = operationsDraft();
     const manifest = buildOperationsManifest(draft);
     const example = buildOperationsManifest(operationsExample);
-    expect(example.alerts.map(alert => alert.kind)).toEqual(manifest.alerts.map(alert => alert.kind));
+    expect(EffectArray.map(example.alerts, alert => alert.kind)).toEqual(
+      EffectArray.map(manifest.alerts, alert => alert.kind),
+    );
     for (const kind of OPERATIONS_ALERTS) {
       expect(() =>
-        buildOperationsManifest({...draft, alerts: draft.alerts.filter(alert => alert.kind !== kind)}),
+        buildOperationsManifest({...draft, alerts: EffectArray.filter(draft.alerts, alert => alert.kind !== kind)}),
       ).toThrow();
       for (const fact of [
         'namedOwnersResolved',
@@ -165,7 +197,9 @@ describe('operations evidence boundary', () => {
         'rollbackTested',
       ]) {
         const evidence = observedOperationsEvidence(manifest);
-        const entry = evidence.checks.find(entry => entry.check === 'alert-delivery')!;
+        const entry = EffectOption.getOrUndefined(
+          EffectArray.findFirst(evidence.checks, entry => entry.check === 'alert-delivery'),
+        )!;
         const key = `${kind}:${fact}`;
         expect(entry.facts[key]).toBe(true);
         entry.facts[key] = false;
@@ -182,7 +216,7 @@ describe('operations evidence boundary', () => {
     for (const invalid of [
       {...evidence, checks: evidence.checks.slice(1)},
       {...evidence, checks: [...evidence.checks.slice(1), evidence.checks[1]]},
-      {...evidence, manifestDigest: 'f'.repeat(64)},
+      {...evidence, manifestDigest: Effect.pipe('f', EffectString.repeat(64))},
       {...evidence, isolatedTargetId: manifest.deploymentId},
       {...evidence, checks: [...evidence.checks, {check: 'unknown', status: 'pending'}]},
     ])
@@ -194,13 +228,17 @@ describe('operations evidence boundary', () => {
     for (const check of OPERATIONS_CHECKS) {
       for (const fact of OPERATIONS_CHECK_SPECIFICATIONS[check].facts) {
         const evidence = observedOperationsEvidence(manifest);
-        const entry = evidence.checks.find(entry => entry.check === check)!;
+        const entry = EffectOption.getOrUndefined(
+          EffectArray.findFirst(evidence.checks, entry => entry.check === check),
+        )!;
         entry.facts[fact] = false;
         expect(verifyOperationsEvidence(manifest, evidence, checkedAt).status).toBe('blocked');
       }
     }
     const evidence = observedOperationsEvidence(manifest);
-    evidence.checks.find(entry => entry.check === 'restore-reconciliation')!.metrics.hashMismatches = 1;
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(evidence.checks, entry => entry.check === 'restore-reconciliation'),
+    )!.metrics.hashMismatches = 1;
     expect(verifyOperationsEvidence(manifest, evidence, checkedAt).status).toBe('blocked');
   });
 
@@ -208,19 +246,24 @@ describe('operations evidence boundary', () => {
     const manifest = buildOperationsManifest(operationsDraft());
     for (const metric of ['recoveryPointLossSeconds', 'elapsedSeconds']) {
       const evidence = observedOperationsEvidence(manifest);
-      evidence.checks.find(entry => entry.check === 'isolated-restore')!.metrics[metric] = 100_000;
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(evidence.checks, entry => entry.check === 'isolated-restore'),
+      )!.metrics[metric] = 100_000;
       expect(verifyOperationsEvidence(manifest, evidence, checkedAt).status).toBe('blocked');
     }
     const overdue = observedOperationsEvidence(manifest);
-    overdue.checks.find(entry => entry.check === 'readiness')!.metrics.recoveryElapsedSeconds =
-      manifest.backup.rtoSeconds + 1;
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(overdue.checks, entry => entry.check === 'readiness'),
+    )!.metrics.recoveryElapsedSeconds = manifest.backup.rtoSeconds + 1;
     expect(verifyOperationsEvidence(manifest, overdue, checkedAt).status).toBe('blocked');
     const evidence = observedOperationsEvidence(manifest);
     const receipt = verifyOperationsEvidence(manifest, evidence, checkedAt);
     expect(verifyOperationsEvidence(manifest, evidence, '2026-09-20T00:00:00.000Z').status).toBe('blocked');
     expect(verifyOperationsEvidence(manifest, evidence, '2026-09-17T00:00:00.000Z').status).toBe('blocked');
     expect(() => verifyOperationsReceipt(manifest, evidence, receipt, '2026-09-20T00:00:00.000Z')).toThrow();
-    evidence.checks.find(entry => entry.check === 'rollback')!.observedAt = '2026-09-18T00:00:00.000Z';
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(evidence.checks, entry => entry.check === 'rollback'),
+    )!.observedAt = '2026-09-18T00:00:00.000Z';
     expect(verifyOperationsEvidence(manifest, evidence, checkedAt).status).toBe('blocked');
     const draft = operationsDraft();
     draft.backup.retentionSeconds = 1;
@@ -234,10 +277,13 @@ describe('operations evidence boundary', () => {
       for (const invalid of [
         {...evidence, content: secret},
         {...evidence, drillId: secret},
-        {...evidence, checks: evidence.checks.map((entry, i) => (i === 0 ? {...entry, observerId: secret} : entry))},
         {
           ...evidence,
-          checks: evidence.checks.map((entry, i) =>
+          checks: EffectArray.map(evidence.checks, (entry, i) => (i === 0 ? {...entry, observerId: secret} : entry)),
+        },
+        {
+          ...evidence,
+          checks: EffectArray.map(evidence.checks, (entry, i) =>
             i === 0 ? {...entry, facts: {...entry.facts, [secret]: true}} : entry,
           ),
         },
@@ -267,24 +313,35 @@ describe('operations evidence boundary', () => {
         'unresolvedWrites',
       ]) {
         const evidence = observedOperationsEvidence(manifest);
-        evidence.checks.find(entry => entry.check === name)!.metrics[metric] = metric === 'verifiedRecords' ? 0 : 1;
+        EffectOption.getOrUndefined(EffectArray.findFirst(evidence.checks, entry => entry.check === name))!.metrics[
+          metric
+        ] = metric === 'verifiedRecords' ? 0 : 1;
         expect(verifyOperationsEvidence(manifest, evidence, checkedAt).status).toBe('blocked');
       }
     }
     for (const metric of ['backupAgeSeconds', 'pitrWindowSeconds', 'pitrLagSeconds']) {
       const evidence = observedOperationsEvidence(manifest);
-      evidence.checks.find(entry => entry.check === 'backup')!.metrics[metric] =
-        metric === 'pitrWindowSeconds' ? 0 : 1_000_000;
+      EffectOption.getOrUndefined(EffectArray.findFirst(evidence.checks, entry => entry.check === 'backup'))!.metrics[
+        metric
+      ] = metric === 'pitrWindowSeconds' ? 0 : 1_000_000;
       expect(verifyOperationsEvidence(manifest, evidence, checkedAt).status).toBe('blocked');
     }
   });
 
   it('rejects tampered manifests and receipts, including forged success over pending observations', () => {
     const manifest = buildOperationsManifest(operationsDraft());
-    const evidence = operationsEvidenceTemplate(manifest, 'b'.repeat(32), 'c'.repeat(32));
+    const evidence = operationsEvidenceTemplate(
+      manifest,
+      Effect.pipe('b', EffectString.repeat(32)),
+      Effect.pipe('c', EffectString.repeat(32)),
+    );
     const receipt = verifyOperationsEvidence(manifest, evidence, checkedAt);
     expect(() =>
-      verifyOperationsEvidence({...manifest, manifestDigest: 'f'.repeat(64)}, evidence, checkedAt),
+      verifyOperationsEvidence(
+        {...manifest, manifestDigest: Effect.pipe('f', EffectString.repeat(64))},
+        evidence,
+        checkedAt,
+      ),
     ).toThrow();
     expect(() => verifyOperationsReceipt(manifest, evidence, {...receipt, status: 'verified'}, checkedAt)).toThrow();
     expect(() => verifyOperationsReceipt(manifest, evidence, {...receipt, raw: 'private'}, checkedAt)).toThrow();
@@ -300,10 +357,19 @@ describe('operations evidence boundary', () => {
         order => {
           const draft = operationsDraft();
           const manifest = buildOperationsManifest(draft);
-          const reordered = Object.fromEntries(Object.entries(draft).reverse());
+          const reordered = EffectRecord.fromEntries(EffectRecord.toEntries(draft).reverse());
           expect(buildOperationsManifest(reordered)).toEqual(manifest);
           const evidence = observedOperationsEvidence(manifest);
-          evidence.checks = order.map(check => evidence.checks.find(entry => entry.check === check)!);
+          const reorderedChecks = EffectArray.map(order, check => {
+            const entry = EffectOption.getOrUndefined(
+              EffectArray.findFirst(evidence.checks, candidate => candidate.check === check),
+            );
+            if (entry === undefined) throw new Error(`Missing operations check ${check}.`);
+            return entry;
+          });
+          const [firstCheck, ...remainingChecks] = reorderedChecks;
+          if (firstCheck === undefined) throw new Error('Operations checklist cannot be empty.');
+          evidence.checks = [firstCheck, ...remainingChecks];
           const before = JSON.stringify(evidence);
           const receipt = verifyOperationsEvidence(manifest, evidence, checkedAt);
           expect(receipt).toEqual(verifyOperationsEvidence(manifest, observedOperationsEvidence(manifest), checkedAt));

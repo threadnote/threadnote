@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect} from 'effect';
 import {
   withAnonymousTelemetryCheckpoint,
@@ -59,7 +60,7 @@ export function codeAnchorFinalizationTelemetryFields(
     receipt.failedCount,
     ...(receipt.matchedCount === undefined ? [] : [receipt.matchedCount]),
   ];
-  if (!counts.every(isPrivateCount) || !isPrivateCount(elapsedMilliseconds)) return undefined;
+  if (!EffectArray.every(counts, isPrivateCount) || !isPrivateCount(elapsedMilliseconds)) return undefined;
   if (
     receipt.finalizedCount + receipt.pendingCount + receipt.conflictCount + receipt.failedCount !==
       receipt.scannedCount ||
@@ -104,7 +105,7 @@ function finalizationResult(
     ['conflict', receipt.conflictCount],
     ['failed', receipt.failedCount],
   ];
-  const nonEmpty = outcomes.filter(entry => entry[1] > 0);
+  const nonEmpty = EffectArray.filter(outcomes, entry => entry[1] > 0);
   if (nonEmpty.length === 1) return nonEmpty[0][0];
   if (nonEmpty.length > 1) return 'mixed';
   return undefined;

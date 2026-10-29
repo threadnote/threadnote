@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect} from 'effect';
 import {Command} from 'effect/cli';
 import {
@@ -104,7 +105,7 @@ export function makeDevSkillsCommand(withRuntime: CliRuntimeRunner) {
         );
       }),
   );
-  const actions = (['install', 'update', 'remove'] as const).map(action =>
+  const actions = EffectArray.map(['install', 'update', 'remove'] as const, action =>
     Command.make(
       action,
       {
@@ -146,23 +147,26 @@ function printCatalog(result: Effect.Success<ReturnType<typeof listDevSkills>>, 
   return Console.log(
     json
       ? JSON.stringify(result)
-      : [
-          `Threadnote development workflows · ${result.bundle.releaseVersion}`,
-          'dev-spec → dev-plan → dev-cycle (with watch-pr)',
-          ...result.surfaces.map(surface =>
-            surface.status === 'managed'
-              ? `${surface.surfaceId}\t${surface.scopes.join(', ')}\t${surface.platforms.join(', ')}\t${surface.profile}`
-              : `${surface.surfaceId}\tUnsupported: ${surface.reason}`,
-          ),
-        ].join('\n'),
+      : EffectArray.join(
+          [
+            `Threadnote development workflows · ${result.bundle.releaseVersion}`,
+            'dev-spec → dev-plan → dev-cycle (with watch-pr)',
+            ...EffectArray.map(result.surfaces, surface =>
+              surface.status === 'managed'
+                ? `${surface.surfaceId}\t${EffectArray.join(surface.scopes, ', ')}\t${EffectArray.join(surface.platforms, ', ')}\t${surface.profile}`
+                : `${surface.surfaceId}\tUnsupported: ${surface.reason}`,
+            ),
+          ],
+          '\n',
+        ),
   );
 }
 
 function readinessLines(readiness?: DevSkillsReadiness): readonly string[] {
   if (!readiness) return [];
-  return (['planning', 'publication', 'watch'] as const).map(operation => {
+  return EffectArray.map(['planning', 'publication', 'watch'] as const, operation => {
     const value = readiness[operation];
-    const reasons = [...new Set(value.reasons.map(reason => reason.message))].join(' ');
+    const reasons = EffectArray.join([...new Set(EffectArray.map(value.reasons, reason => reason.message))], ' ');
     return `  ${operation}: ${value.state}${reasons ? ' — ' + reasons : ''}`;
   });
 }
@@ -171,19 +175,25 @@ function printStatus(result: Effect.Success<ReturnType<typeof statusDevSkills>>,
   return Console.log(
     json
       ? JSON.stringify(result)
-      : [
-          `Bundled workflows: ${result.bundle.releaseVersion}`,
-          ...(result.targets.length === 0
-            ? ['No recorded workflow installations. Use dev-skills list to choose an agent.']
-            : []),
-          ...result.targets.flatMap(status => [
-            `${status.target.surfaceId} (${status.target.profile}, ${status.target.scope}): ${status.installationState}${status.enrolled ? '' : ' · not enrolled'}`,
-            `  Destination: ${status.target.skillRoot}`,
-            `  Consumers: ${status.consumers.length}`,
-            ...status.issues.map(issue => `  ${issue.message}${issue.path ? ' (' + issue.path + ')' : ''}`),
-            ...readinessLines(status.readiness),
-          ]),
-        ].join('\n'),
+      : EffectArray.join(
+          [
+            `Bundled workflows: ${result.bundle.releaseVersion}`,
+            ...(result.targets.length === 0
+              ? ['No recorded workflow installations. Use dev-skills list to choose an agent.']
+              : []),
+            ...EffectArray.flatMap(result.targets, status => [
+              `${status.target.surfaceId} (${status.target.profile}, ${status.target.scope}): ${status.installationState}${status.enrolled ? '' : ' · not enrolled'}`,
+              `  Destination: ${status.target.skillRoot}`,
+              `  Consumers: ${status.consumers.length}`,
+              ...EffectArray.map(
+                status.issues,
+                issue => `  ${issue.message}${issue.path ? ' (' + issue.path + ')' : ''}`,
+              ),
+              ...readinessLines(status.readiness),
+            ]),
+          ],
+          '\n',
+        ),
   );
 }
 
@@ -192,20 +202,29 @@ function printPlan(result: DevSkillsPlan | DevSkillsResult, json: boolean) {
   return Console.log(
     json
       ? JSON.stringify(result)
-      : [
-          `${prefix} ${result.action}: ${result.target.surfaceId} (${result.target.profile}, ${result.target.scope})`,
-          `Destination: ${result.target.skillRoot}`,
-          `Installation: ${result.installationState}`,
-          `Affected consumers: ${result.consumers.length}`,
-          ...result.consumers.map(consumer => `  ${consumer.target.surfaceId}: ${consumer.home}`),
-          `File changes: ${result.changes.length}`,
-          ...result.changes.map(
-            change =>
-              `  ${change.beforeHash === null ? 'Create' : change.afterHash === null ? 'Remove' : 'Update'} ${change.path}`,
-          ),
-          ...result.issues.map(issue => `${issue.code}: ${issue.message}${issue.path ? ' (' + issue.path + ')' : ''}`),
-          ...('retainedPaths' in result ? result.retainedPaths.map(path => `Preserved modified file: ${path}`) : []),
-          ...readinessLines(result.readiness),
-        ].join('\n'),
+      : EffectArray.join(
+          [
+            `${prefix} ${result.action}: ${result.target.surfaceId} (${result.target.profile}, ${result.target.scope})`,
+            `Destination: ${result.target.skillRoot}`,
+            `Installation: ${result.installationState}`,
+            `Affected consumers: ${result.consumers.length}`,
+            ...EffectArray.map(result.consumers, consumer => `  ${consumer.target.surfaceId}: ${consumer.home}`),
+            `File changes: ${result.changes.length}`,
+            ...EffectArray.map(
+              result.changes,
+              change =>
+                `  ${change.beforeHash === null ? 'Create' : change.afterHash === null ? 'Remove' : 'Update'} ${change.path}`,
+            ),
+            ...EffectArray.map(
+              result.issues,
+              issue => `${issue.code}: ${issue.message}${issue.path ? ' (' + issue.path + ')' : ''}`,
+            ),
+            ...('retainedPaths' in result
+              ? EffectArray.map(result.retainedPaths, path => `Preserved modified file: ${path}`)
+              : []),
+            ...readinessLines(result.readiness),
+          ],
+          '\n',
+        ),
   );
 }

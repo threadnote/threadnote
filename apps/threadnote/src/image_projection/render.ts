@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {fromPromise} from '@threadnote/platform/errors';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -27,6 +28,6 @@ export const renderMemoryTextToImages: MemoryImageRenderer = Effect.fn('imagePro
   });
   return {
     droppedChars: result.droppedChars,
-    pages: result.pages.map(page => ({height: page.height, png: page.png, width: page.width})),
+    pages: EffectArray.map(result.pages, page => ({height: page.height, png: page.png, width: page.width})),
   };
 });

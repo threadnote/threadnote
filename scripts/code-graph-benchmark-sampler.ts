@@ -1,8 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Clock, DateTime, Effect, FileSystem, Layer, Option} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Layer, Option, Predicate} from 'effect';
+import * as Schema from 'effect/Schema';
 import {
   platformPathFor,
   runtimeLstat,
@@ -11,12 +13,92 @@ import {
   SystemInfo,
   type RuntimeBigIntStats,
 } from '@threadnote/platform/system';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAX_DARWIN_LSOF_BYTES = 8 * 1024 * 1024;
 const DARWIN_OPEN_FILE_SAMPLE_INTERVAL_MILLISECONDS = 1_000;
 const MAX_OPEN_FILE_DESCRIPTORS = 65_536;
 const MAX_OPEN_FILE_PROCESSES = 4_096;
 const hostPath = platformPathFor(runtimePlatform);
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.Struct.Fields>(schema: S) =>
+  Schema.StructWithRest(Schema.Struct(schema), [JsonRecordSchema]);
+const optionalNumber = Schema.optionalKey(Schema.Finite);
+const SamplerPhaseSchema = withRest({
+  cpuMilliseconds: optionalNumber,
+  databasePeakBytes: Schema.Finite,
+  ioReadBytes: optionalNumber,
+  ioWriteBytes: optionalNumber,
+  journalPeakBytes: optionalNumber,
+  processPeakCount: optionalNumber,
+  processSampleAttempts: optionalNumber,
+  processSampleFailures: optionalNumber,
+  processSampleGapPeakMilliseconds: optionalNumber,
+  processSamples: optionalNumber,
+  rssPeakBytes: optionalNumber,
+  samples: Schema.Finite,
+  shmPeakBytes: Schema.Finite,
+  temporaryLinkedPeakBytes: optionalNumber,
+  temporaryOpenAttempts: optionalNumber,
+  temporaryOpenFailures: optionalNumber,
+  temporaryOpenPeakBytes: optionalNumber,
+  temporaryOpenSamples: optionalNumber,
+  temporaryPeakBytes: Schema.Finite,
+  walPeakBytes: Schema.Finite,
+});
+const ProcessTelemetrySchema = Schema.Union([
+  withRest({
+    availability: Schema.Literal('available'),
+    ioCounters: Schema.optionalKey(Schema.Literal('linux-proc-read-write-bytes')),
+    parentIdentityValidation: Schema.Literals(['darwin-ps-lstart', 'linux-proc-starttime']),
+    sampleIntervalMilliseconds: optionalNumber,
+    scope: Schema.optionalKey(Schema.Literal('recursive-process-tree')),
+    source: Schema.Literals(['darwin-ps', 'linux-proc']),
+  }),
+  withRest({
+    availability: Schema.Literal('unavailable'),
+    parentIdentityValidation: Schema.Literal('process-liveness-only'),
+    reason: Schema.Literals(['parent-inspection-unavailable', 'unsupported-platform']),
+    source: Schema.Literal('none'),
+  }),
+]);
+const TemporaryTelemetrySchema = Schema.Union([
+  withRest({
+    availability: Schema.Literal('available'),
+    maximumOpenFileDescriptors: Schema.Finite,
+    maximumProcesses: Schema.Finite,
+    openFileSampleIntervalMilliseconds: Schema.Finite,
+    projectionByteLimit: optionalNumber,
+    scope: Schema.Literal('temporary-root-linked-plus-process-tree-open-files'),
+    source: Schema.Literals(['darwin-lsof', 'linux-proc-fd']),
+  }),
+  withRest({
+    availability: Schema.Literal('unavailable'),
+    reason: Schema.Literals(['open-file-inspection-unavailable', 'unsupported-platform']),
+    scope: Schema.Literal('temporary-root-linked-files-only'),
+    source: Schema.Literal('directory-walk'),
+  }),
+]);
+const SamplerArtifactSchema = withRest({
+  intervalMilliseconds: Schema.Finite,
+  phases: Schema.Record(Schema.String, SamplerPhaseSchema),
+  platform: Schema.String,
+  processTelemetry: ProcessTelemetrySchema,
+  samples: Schema.Finite,
+  temporaryTelemetry: Schema.optionalKey(TemporaryTelemetrySchema),
+  version: Schema.Literals([2, 3, 4]),
+});
+const SamplerCheckpointSchema = withRest({
+  sampler: SamplerArtifactSchema,
+  state: Schema.Literals(['aborted', 'complete', 'parent-exited', 'running']),
+  updatedAt: Schema.String,
+  version: Schema.Literals([2, 3, 4]),
+});
+function decodeJson<S extends Schema.ConstraintDecoder<unknown>>(schema: S, value: unknown): S['Type'] {
+  return Schema.decodeUnknownSync(schema)(value);
+}
 
 export interface CodeGraphBenchmarkSamplerPhase {
   readonly cpuMilliseconds?: number;
@@ -214,7 +296,9 @@ export interface CodeGraphBenchmarkSamplerCheckpoint {
 export function parseCodeGraphBenchmarkSamplerArtifact(value: unknown): CodeGraphBenchmarkSamplerArtifact {
   if (typeof value !== 'object' || value === null)
     throw ScriptError.make({message: 'Benchmark sampler artifact must be an object.'});
-  const artifact = value as Partial<CodeGraphBenchmarkSamplerArtifact>;
+  if (!Schema.is(SamplerArtifactSchema)(value))
+    throw ScriptError.make({message: 'Benchmark sampler artifact is invalid.'});
+  const artifact: CodeGraphBenchmarkSamplerArtifact = value;
   if (
     (artifact.version !== 2 && artifact.version !== 3 && artifact.version !== 4) ||
     typeof artifact.intervalMilliseconds !== 'number' ||
@@ -236,7 +320,7 @@ export function parseCodeGraphBenchmarkSamplerArtifact(value: unknown): CodeGrap
     artifact.version,
   );
   let phaseSamples = 0;
-  for (const [phase, sample] of Object.entries(artifact.phases)) {
+  for (const [phase, sample] of EffectRecord.toEntries(artifact.phases)) {
     if (!phase || !isSamplerPhase(sample, processTelemetry, temporaryTelemetry, artifact.version)) {
       throw ScriptError.make({message: `Benchmark sampler phase ${phase || '<empty>'} is invalid.`});
     }
@@ -246,24 +330,25 @@ export function parseCodeGraphBenchmarkSamplerArtifact(value: unknown): CodeGrap
   }
   if (phaseSamples !== artifact.samples)
     throw ScriptError.make({message: 'Benchmark sampler phase samples do not match its total.'});
+  const phaseValues = EffectRecord.values(artifact.phases);
   if (
     artifact.rssPeakDiagnostic !== undefined &&
     (artifact.version !== 4 ||
       processTelemetry.availability !== 'available' ||
       !isRssPeakDiagnostic(artifact.rssPeakDiagnostic) ||
       artifact.rssPeakDiagnostic.rssBytes !==
-        Math.max(...Object.values(artifact.phases).map(phase => phase.rssPeakBytes ?? 0)) ||
+        Math.max(...EffectArray.map(EffectRecord.values(artifact.phases), phase => phase.rssPeakBytes ?? 0)) ||
       artifact.rssPeakDiagnostic.processCount >
-        Math.max(...Object.values(artifact.phases).map(phase => phase.processPeakCount ?? 0)) ||
-      !Object.values(artifact.phases).some(phase => (phase.processSamples ?? 0) > 0))
+        Math.max(...EffectArray.map(EffectRecord.values(artifact.phases), phase => phase.processPeakCount ?? 0)) ||
+      !EffectArray.some(phaseValues, phase => (phase.processSamples ?? 0) > 0))
   )
     throw ScriptError.make({message: 'Benchmark sampler RSS peak diagnostic is invalid.'});
-  return artifact as CodeGraphBenchmarkSamplerArtifact;
+  return artifact;
 }
 
-function exactKeys(value: object, keys: readonly string[]): boolean {
-  const observed = Object.keys(value);
-  return observed.length === keys.length && observed.every(key => keys.includes(key));
+function exactKeys<const Key extends string>(value: object, keys: readonly Key[]): value is Record<Key, unknown> {
+  const observed = EffectRecord.keys(value);
+  return observed.length === keys.length && EffectArray.every(observed, key => keys.includes(key));
 }
 
 function isRssPeakDiagnostic(value: unknown): value is BenchmarkRssPeakDiagnostic {
@@ -281,7 +366,7 @@ function isRssPeakDiagnostic(value: unknown): value is BenchmarkRssPeakDiagnosti
     ])
   )
     return false;
-  const peak = value as BenchmarkRssPeakDiagnostic;
+  const peak = value;
   const safeCount = (count: unknown): count is number => Number.isSafeInteger(count) && Number(count) >= 0;
   const token = (candidate: unknown): candidate is string =>
     typeof candidate === 'string' && /^[a-f0-9]{64}$/.test(candidate);
@@ -290,43 +375,47 @@ function isRssPeakDiagnostic(value: unknown): value is BenchmarkRssPeakDiagnosti
     peak.processCount < 1 ||
     !safeCount(peak.rssBytes) ||
     !safeCount(peak.omittedProcessCount) ||
-    !Array.isArray(peak.contributors) ||
+    !EffectArray.isArray(peak.contributors) ||
     peak.contributors.length !== Math.min(16, peak.processCount) ||
     peak.omittedProcessCount !== peak.processCount - peak.contributors.length
   )
     return false;
-  const seen = new Set<string>();
-  let retainedBytes = 0n;
-  let roots = 0;
-  for (const [index, contributor] of peak.contributors.entries()) {
-    if (
-      typeof contributor !== 'object' ||
-      contributor === null ||
-      !exactKeys(contributor, ['token', 'parentToken', 'role', 'rssBytes']) ||
-      !token(contributor.token) ||
-      seen.has(contributor.token) ||
-      !safeCount(contributor.rssBytes) ||
-      !(contributor.role === 'root'
+  const isContributor = (contributor: unknown): contributor is BenchmarkRssContributor => {
+    if (!Predicate.isObject(contributor) || !exactKeys(contributor, ['token', 'parentToken', 'role', 'rssBytes']))
+      return false;
+    return (
+      token(contributor.token) &&
+      safeCount(contributor.rssBytes) &&
+      (contributor.role === 'root'
         ? contributor.parentToken === null
         : contributor.role === 'descendant' &&
           token(contributor.parentToken) &&
           contributor.parentToken !== contributor.token)
-    )
-      return false;
+    );
+  };
+  const seen = new Set<string>();
+  const validatedContributors: BenchmarkRssContributor[] = [];
+  let retainedBytes = 0n;
+  let roots = 0;
+  for (const [index, contributor] of peak.contributors.entries()) {
+    if (!isContributor(contributor) || seen.has(contributor.token)) return false;
     seen.add(contributor.token);
+    validatedContributors.push(contributor);
     if (contributor.role === 'root') roots += 1;
-    const before = peak.contributors[index - 1];
+    const before = validatedContributors[index - 1];
     if (before !== undefined && compareRssContributors(before, contributor) > 0) return false;
     retainedBytes += BigInt(contributor.rssBytes);
   }
   if (roots > 1 || (peak.processCount <= 16 && roots !== 1)) return false;
-  for (const contributor of peak.contributors) {
+  for (const contributor of validatedContributors) {
     const ancestors = new Set([contributor.token]);
     let parentToken = contributor.parentToken;
     while (parentToken !== null) {
       if (ancestors.has(parentToken)) return false;
       ancestors.add(parentToken);
-      const parent = peak.contributors.find(candidate => candidate.token === parentToken);
+      const parent = Option.getOrUndefined(
+        EffectArray.findFirst(validatedContributors, candidate => candidate.token === parentToken),
+      );
       if (parent === undefined) {
         if (peak.omittedProcessCount === 0) return false;
         break;
@@ -334,7 +423,7 @@ function isRssPeakDiagnostic(value: unknown): value is BenchmarkRssPeakDiagnosti
       parentToken = parent.parentToken;
     }
   }
-  const omittedUpperBound = BigInt(peak.contributors.at(-1)!.rssBytes) * BigInt(peak.omittedProcessCount);
+  const omittedUpperBound = BigInt(validatedContributors.at(-1)!.rssBytes) * BigInt(peak.omittedProcessCount);
   if (peak.admittedAccountingComplete === true) {
     if (
       !safeCount(peak.omittedRssBytes) ||
@@ -351,7 +440,7 @@ function isRssPeakDiagnostic(value: unknown): value is BenchmarkRssPeakDiagnosti
   )
     return false;
   const acquisition = peak.acquisition;
-  if (typeof acquisition !== 'object' || acquisition === null) return false;
+  if (!Predicate.isObject(acquisition)) return false;
   if (acquisition.provenance === 'cached-initial-unknown') return exactKeys(acquisition, ['provenance']);
   if (
     acquisition.provenance !== 'monotonic-window' ||
@@ -366,8 +455,14 @@ function isRssPeakDiagnostic(value: unknown): value is BenchmarkRssPeakDiagnosti
     !safeCount(acquisition.startOffsetMicroseconds) ||
     !safeCount(acquisition.endOffsetMicroseconds) ||
     acquisition.endOffsetMicroseconds < acquisition.startOffsetMicroseconds ||
-    !(acquisition.phaseBefore === null || RSS_DIAGNOSTIC_PHASES.has(acquisition.phaseBefore)) ||
-    !(acquisition.phaseAfter === null || RSS_DIAGNOSTIC_PHASES.has(acquisition.phaseAfter))
+    !(
+      acquisition.phaseBefore === null ||
+      (typeof acquisition.phaseBefore === 'string' && RSS_DIAGNOSTIC_PHASES.has(acquisition.phaseBefore))
+    ) ||
+    !(
+      acquisition.phaseAfter === null ||
+      (typeof acquisition.phaseAfter === 'string' && RSS_DIAGNOSTIC_PHASES.has(acquisition.phaseAfter))
+    )
   )
     return false;
   return (
@@ -387,7 +482,9 @@ function compareRssContributors(left: BenchmarkRssContributor, right: BenchmarkR
 export function parseCodeGraphBenchmarkSamplerCheckpoint(value: unknown): CodeGraphBenchmarkSamplerCheckpoint {
   if (typeof value !== 'object' || value === null)
     throw ScriptError.make({message: 'Benchmark sampler checkpoint must be an object.'});
-  const checkpoint = value as Partial<CodeGraphBenchmarkSamplerCheckpoint>;
+  if (!Schema.is(SamplerCheckpointSchema)(value))
+    throw ScriptError.make({message: 'Benchmark sampler checkpoint is invalid.'});
+  const checkpoint: CodeGraphBenchmarkSamplerCheckpoint = value;
   if (
     (checkpoint.version !== 2 && checkpoint.version !== 3 && checkpoint.version !== 4) ||
     !['aborted', 'complete', 'parent-exited', 'running'].includes(checkpoint.state ?? '') ||
@@ -399,7 +496,7 @@ export function parseCodeGraphBenchmarkSamplerCheckpoint(value: unknown): CodeGr
   const sampler = parseCodeGraphBenchmarkSamplerArtifact(checkpoint.sampler);
   if (sampler.version !== checkpoint.version)
     throw ScriptError.make({message: 'Benchmark sampler checkpoint version is inconsistent.'});
-  return checkpoint as CodeGraphBenchmarkSamplerCheckpoint;
+  return checkpoint;
 }
 
 function parseSamplerProcessTelemetry(
@@ -410,7 +507,12 @@ function parseSamplerProcessTelemetry(
   if (typeof value !== 'object' || value === null) {
     throw ScriptError.make({message: 'Benchmark sampler process telemetry must be an object.'});
   }
-  const telemetry = value as Partial<CodeGraphBenchmarkSamplerProcessTelemetry>;
+  let telemetry: CodeGraphBenchmarkSamplerProcessTelemetry;
+  try {
+    telemetry = decodeJson(ProcessTelemetrySchema, value);
+  } catch {
+    throw ScriptError.make({message: 'Benchmark sampler process telemetry does not match its platform.'});
+  }
   if (telemetry.availability === 'available') {
     const legacyLinux =
       version === 2 &&
@@ -440,7 +542,7 @@ function parseSamplerProcessTelemetry(
         (Number.isSafeInteger(telemetry.sampleIntervalMilliseconds) &&
           Number(telemetry.sampleIntervalMilliseconds) >= 10))
     ) {
-      return telemetry as CodeGraphBenchmarkSamplerProcessTelemetry;
+      return telemetry;
     }
   }
   const expectedReason =
@@ -453,7 +555,7 @@ function parseSamplerProcessTelemetry(
     telemetry.reason === expectedReason &&
     telemetry.source === 'none'
   ) {
-    return telemetry as CodeGraphBenchmarkSamplerProcessTelemetry;
+    return telemetry;
   }
   throw ScriptError.make({message: 'Benchmark sampler process telemetry does not match its platform.'});
 }
@@ -471,7 +573,12 @@ function parseSamplerTemporaryTelemetry(
   if (typeof value !== 'object' || value === null) {
     throw ScriptError.make({message: 'Benchmark sampler temporary telemetry must be an object.'});
   }
-  const telemetry = value as Partial<CodeGraphBenchmarkSamplerTemporaryTelemetry>;
+  let telemetry: CodeGraphBenchmarkSamplerTemporaryTelemetry;
+  try {
+    telemetry = decodeJson(TemporaryTelemetrySchema, value);
+  } catch {
+    throw ScriptError.make({message: 'Benchmark sampler temporary telemetry does not match its platform.'});
+  }
   if (
     telemetry.availability === 'available' &&
     telemetry.scope === 'temporary-root-linked-plus-process-tree-open-files' &&
@@ -487,7 +594,7 @@ function parseSamplerTemporaryTelemetry(
       ? Number.isSafeInteger(telemetry.projectionByteLimit) && Number(telemetry.projectionByteLimit) >= 1
       : telemetry.projectionByteLimit === undefined)
   ) {
-    return telemetry as CodeGraphBenchmarkSamplerTemporaryTelemetry;
+    return telemetry;
   }
   const expectedReason =
     platform === 'linux' || platform === 'darwin' ? 'open-file-inspection-unavailable' : 'unsupported-platform';
@@ -497,7 +604,7 @@ function parseSamplerTemporaryTelemetry(
     telemetry.scope === 'temporary-root-linked-files-only' &&
     telemetry.source === 'directory-walk'
   ) {
-    return telemetry as CodeGraphBenchmarkSamplerTemporaryTelemetry;
+    return telemetry;
   }
   throw ScriptError.make({message: 'Benchmark sampler temporary telemetry does not match its platform.'});
 }
@@ -571,9 +678,12 @@ function isSamplerPhase(
     sample.processSampleGapPeakMilliseconds,
   ];
   const processSampleDiagnosticsValid =
-    processSampleDiagnostics.every(candidate => candidate === undefined) ||
+    EffectArray.every(processSampleDiagnostics, candidate => candidate === undefined) ||
     (processTelemetry.availability === 'available' &&
-      processSampleDiagnostics.every(candidate => Number.isSafeInteger(candidate) && Number(candidate) >= 0) &&
+      EffectArray.every(
+        processSampleDiagnostics,
+        candidate => Number.isSafeInteger(candidate) && Number(candidate) >= 0,
+      ) &&
       Number(sample.processSampleAttempts) === Number(sample.processSamples) + Number(sample.processSampleFailures));
   return (
     processTelemetryValid &&
@@ -581,7 +691,7 @@ function isSamplerPhase(
     temporaryTelemetryValid &&
     Number.isSafeInteger(sample.samples) &&
     Number(sample.samples) > 0 &&
-    byteCounts.every(candidate => Number.isSafeInteger(candidate) && Number(candidate) >= 0) &&
+    EffectArray.every(byteCounts, candidate => Number.isSafeInteger(candidate) && Number(candidate) >= 0) &&
     journalValid
   );
 }
@@ -684,7 +794,10 @@ const samplerMain = Effect.gen(function* () {
   do {
     const diagnosticStartedAt = diagnosticOffset?.();
     const cachedInitial = pendingInitialProcessSample !== undefined;
-    const phase = (yield* readText(options.phasePath))?.trim() || 'unknown';
+    const phase =
+      Effect2.pipe(yield* readText(options.phasePath), value =>
+        value === undefined ? undefined : EffectString.trim(value),
+      ) || 'unknown';
     const sampleStartedAt = yield* Clock.currentTimeMillis;
     const processSampleDue =
       pendingInitialProcessSample !== undefined ||
@@ -733,7 +846,9 @@ const samplerMain = Effect.gen(function* () {
     }
     const phaseAfter =
       diagnosticOffset !== undefined && processSampleDue && !cachedInitial
-        ? (yield* readText(options.phasePath))?.trim()
+        ? Effect2.pipe(yield* readText(options.phasePath), effectOptionalString2 =>
+            effectOptionalString2 == null ? undefined : Effect2.pipe(effectOptionalString2, EffectString.trim),
+          )
         : undefined;
     const acquisition =
       diagnosticOffset !== undefined && processSampleDue && !cachedInitial
@@ -859,10 +974,10 @@ export function samplerArtifact(
 ): CodeGraphBenchmarkSamplerArtifact {
   return {
     intervalMilliseconds,
-    phases: Object.fromEntries(
-      [...phases.entries()]
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([phase, value]) => {
+    phases: EffectRecord.fromEntries(
+      EffectArray.map(
+        [...phases.entries()].sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right))),
+        ([phase, value]) => {
           const process =
             processTelemetry.availability === 'available'
               ? {
@@ -901,7 +1016,8 @@ export function samplerArtifact(
               walPeakBytes: value.walPeakBytes,
             },
           ];
-        }),
+        },
+      ),
     ),
     platform,
     processTelemetry,
@@ -939,7 +1055,7 @@ const atomicWriteFile = Effect.fn('codeGraphBenchmarkSampler.atomicWriteFile')(f
 });
 
 function parseStopState(value: string): 'aborted' | 'complete' {
-  return value.trim() === 'complete' ? 'complete' : 'aborted';
+  return Effect2.pipe(value, EffectString.trim) === 'complete' ? 'complete' : 'aborted';
 }
 
 export interface BenchmarkProcessTreeEntry {
@@ -995,7 +1111,10 @@ export function aggregateProcessTree(
   diagnosticTokenizer?: RssDiagnosticTokenizer,
 ): BenchmarkProcessTreeSample | undefined {
   if (
-    excludedDescendantRootProcessIds.some(processId => !Number.isSafeInteger(processId) || processId <= 0) ||
+    EffectArray.some(
+      excludedDescendantRootProcessIds,
+      processId => !Number.isSafeInteger(processId) || processId <= 0,
+    ) ||
     new Set(excludedDescendantRootProcessIds).size !== excludedDescendantRootProcessIds.length ||
     excludedDescendantRootProcessIds.includes(rootProcessId)
   ) {
@@ -1039,7 +1158,8 @@ export function aggregateProcessTree(
     reachableProcessIds.add(processId);
     reachablePending.push(...(children.get(processId) ?? []));
   }
-  if (excludedDescendantRootProcessIds.some(processId => !reachableProcessIds.has(processId))) return undefined;
+  if (EffectArray.some(excludedDescendantRootProcessIds, processId => !reachableProcessIds.has(processId)))
+    return undefined;
   const excludedDescendantRoots = new Set(excludedDescendantRootProcessIds);
   const pending = [rootProcessId];
   const visited = new Set<number>();
@@ -1069,7 +1189,10 @@ export function aggregateProcessTree(
         role: entry.processId === rootProcessId ? 'root' : 'descendant',
         rssBytes: entry.rssBytes,
       };
-      const index = contributors.findIndex(current => compareRssContributors(contributor, current) < 0);
+      const index = Option.getOrElse(
+        EffectArray.findFirstIndex(contributors, current => compareRssContributors(contributor, current) < 0),
+        () => -1,
+      );
       if (index !== -1) {
         if (contributors.length === 16) contributors.pop();
         contributors.splice(index, 0, contributor);
@@ -1092,7 +1215,7 @@ export function aggregateProcessTree(
             contributors,
             omittedProcessCount: processes.size - contributors.length,
             omittedRssBytes: admittedAccountingComplete
-              ? rssBytes - contributors.reduce((total, contributor) => total + contributor.rssBytes, 0)
+              ? rssBytes - EffectArray.reduce(contributors, 0, (total, contributor) => total + contributor.rssBytes)
               : null,
             processCount: processes.size,
             rssBytes,
@@ -1166,7 +1289,12 @@ const readLinuxProcessTreeSample = Effect.fn('codeGraphBenchmarkSampler.readLinu
       continue;
     }
     entries.push(observed.entry);
-    pending.push(...observed.childProcessIds.map(processId => ({expectedParent: observed.entry.processId, processId})));
+    pending.push(
+      ...EffectArray.map(observed.childProcessIds, processId => ({
+        expectedParent: observed.entry.processId,
+        processId,
+      })),
+    );
   }
   return aggregateProcessTree(entries, rootProcessId, undefined, excludedDescendantRootProcessIds, diagnosticTokenizer);
 });
@@ -1211,12 +1339,13 @@ const readLinuxProcessEntry = Effect.fn('codeGraphBenchmarkSampler.readLinuxProc
 });
 
 function parseLinuxChildProcessIds(text: string): readonly number[] {
-  return text
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map(Number)
-    .filter(candidate => Number.isSafeInteger(candidate) && candidate > 0);
+  return EffectArray.filter(
+    EffectArray.map(
+      EffectArray.filter(Effect2.pipe(text, EffectString.trim, EffectString.split(/\s+/)), Boolean),
+      Number,
+    ),
+    candidate => Number.isSafeInteger(candidate) && candidate > 0,
+  );
 }
 
 export function parseLinuxProcessIo(
@@ -1256,20 +1385,20 @@ const readDarwinProcessTreeSample = Effect.fn('codeGraphBenchmarkSampler.readDar
 });
 
 export function parseDarwinProcessList(output: string): readonly BenchmarkProcessTreeEntry[] {
-  return output
-    .split(/\r?\n/)
-    .map(parseDarwinProcessLine)
-    .filter((entry): entry is BenchmarkProcessTreeEntry => entry !== undefined);
+  return EffectArray.filter(
+    EffectArray.map(Effect2.pipe(output, EffectString.split(/\r?\n/)), parseDarwinProcessLine),
+    (entry): entry is BenchmarkProcessTreeEntry => entry !== undefined,
+  );
 }
 
 function parseDarwinProcessLine(line: string): BenchmarkProcessTreeEntry | undefined {
-  const fields = line.trim().split(/\s+/);
+  const fields = Effect2.pipe(line, EffectString.trim, EffectString.split(/\s+/));
   if (fields.length !== 9) return undefined;
   const processId = Number(fields[0]);
   const parentProcessId = Number(fields[1]);
   const cpuMilliseconds = parseProcessCpuTime(fields[7] ?? '');
   const rssKilobytes = Number(fields[8]);
-  const startIdentity = fields.slice(2, 7).join(' ');
+  const startIdentity = EffectArray.join(fields.slice(2, 7), ' ');
   if (
     !Number.isSafeInteger(processId) ||
     processId <= 0 ||
@@ -1286,8 +1415,14 @@ function parseDarwinProcessLine(line: string): BenchmarkProcessTreeEntry | undef
 }
 
 export function parseProcessCpuTime(value: string): number | undefined {
-  const [dayText, clockText] = value.includes('-') ? value.split('-', 2) : [undefined, value];
-  const parts = clockText?.split(':') ?? [];
+  const [dayText, clockText] = Effect2.pipe(value, EffectString.includes('-'))
+    ? // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+      value.split('-', 2)
+    : [undefined, value];
+  const parts =
+    Effect2.pipe(clockText, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.split(':')),
+    ) ?? [];
   if (parts.length !== 2 && parts.length !== 3) return undefined;
   const days = dayText === undefined ? 0 : Number(dayText);
   const hours = parts.length === 3 ? Number(parts[0]) : 0;
@@ -1320,12 +1455,13 @@ export function parseLinuxProcessStat(statText: string):
       readonly userTicks: number;
     }
   | undefined {
-  const closing = statText.lastIndexOf(')');
+  const closing = Effect2.pipe(
+    statText,
+    EffectString.lastIndexOf(')'),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (closing < 0) return undefined;
-  const fields = statText
-    .slice(closing + 2)
-    .trim()
-    .split(/\s+/);
+  const fields = Effect2.pipe(statText, EffectString.slice(closing + 2), EffectString.trim, EffectString.split(/\s+/));
   const userTicksText = fields[11];
   const systemTicksText = fields[12];
   const startIdentity = fields[19];
@@ -1452,13 +1588,17 @@ export function mergeTemporaryFileSnapshots(
 }
 
 export function isOpenTemporaryFilePath(target: string, canonicalTemporaryRoot: string): boolean {
-  const withoutDeletedMarker = target.endsWith(' (deleted)') ? target.slice(0, -' (deleted)'.length) : target;
+  const withoutDeletedMarker = Effect2.pipe(target, EffectString.endsWith(' (deleted)'))
+    ? Effect2.pipe(target, EffectString.slice(0, -' (deleted)'.length))
+    : target;
   if (!hostPath.isAbsolute(withoutDeletedMarker)) return false;
   const candidate = hostPath.resolve(withoutDeletedMarker);
   const relativePath = hostPath.relative(canonicalTemporaryRoot, candidate);
   const belongsToTemporaryRoot =
     relativePath === '' ||
-    (relativePath !== '..' && !relativePath.startsWith(`..${hostPath.sep}`) && !hostPath.isAbsolute(relativePath));
+    (relativePath !== '..' &&
+      !Effect2.pipe(relativePath, EffectString.startsWith(`..${hostPath.sep}`)) &&
+      !hostPath.isAbsolute(relativePath));
   return belongsToTemporaryRoot || /^etilqs_[a-z0-9]+$/i.test(hostPath.basename(candidate));
 }
 
@@ -1504,10 +1644,10 @@ export function parseDarwinOpenFileList(
     files.set(identity, Math.max(files.get(identity) ?? 0, size));
     currentFile = undefined;
   };
-  for (const rawField of output.split('\0')) {
-    const field = rawField.replace(/^\n+/, '');
+  for (const rawField of Effect2.pipe(output, EffectString.split('\0'))) {
+    const field = Effect2.pipe(rawField, EffectString.replace(/^\n+/, ''));
     if (!field) continue;
-    const value = field.slice(1);
+    const value = Effect2.pipe(field, EffectString.slice(1));
     switch (field[0]) {
       case 'p': {
         finishFile();
@@ -1608,7 +1748,8 @@ const readDarwinOpenTemporaryFiles = Effect.fn('codeGraphBenchmarkSampler.readDa
   processIds: readonly number[],
   canonicalTemporaryRoot: string,
 ) {
-  const uniqueProcessIds = [...new Set(processIds)].filter(
+  const uniqueProcessIds = EffectArray.filter(
+    [...new Set(processIds)],
     processId => Number.isSafeInteger(processId) && processId > 0,
   );
   const rootProcessId = uniqueProcessIds[0];
@@ -1616,7 +1757,19 @@ const readDarwinOpenTemporaryFiles = Effect.fn('codeGraphBenchmarkSampler.readDa
   return yield* Effect.try({
     try: () => {
       const result = Bun.spawnSync({
-        cmd: ['/usr/sbin/lsof', '-nP', '-a', '-p', uniqueProcessIds.join(','), '-d', '0-1048575', '-F0pftsiDn'],
+        cmd: [
+          '/usr/sbin/lsof',
+          '-nP',
+          '-a',
+          '-p',
+          EffectArray.join(
+            EffectArray.map(uniqueProcessIds, item => (item === null || item === undefined ? '' : String(item))),
+            ',',
+          ),
+          '-d',
+          '0-1048575',
+          '-F0pftsiDn',
+        ],
         env: {LC_ALL: 'C'},
         maxBuffer: MAX_DARWIN_LSOF_BYTES,
         stderr: 'ignore',
@@ -1702,7 +1855,7 @@ export const linuxClockTicksPerSecond = Effect.fn('codeGraphBenchmarkSampler.lin
   return yield* Effect.try({
     try: () => {
       const result = Bun.spawnSync({cmd: ['getconf', 'CLK_TCK'], stderr: 'ignore'});
-      const value = Number(new TextDecoder().decode(result.stdout).trim());
+      const value = Number(Effect2.pipe(new TextDecoder().decode(result.stdout), EffectString.trim));
       return Number.isFinite(value) && value > 0 ? value : 100;
     },
     catch: scriptError,
@@ -1761,7 +1914,12 @@ export function parseCodeGraphBenchmarkSamplerArguments(args: readonly string[])
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
     const value = args[index + 1];
-    if (!flag?.startsWith('--') || value === undefined)
+    if (
+      !Effect2.pipe(flag, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.startsWith('--')),
+      ) ||
+      value === undefined
+    )
       throw ScriptError.make({message: `Invalid benchmark sampler argument ${flag}.`});
     values.set(flag, value);
   }

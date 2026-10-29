@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, Context, Effect, FileSystem, Path, Schema, Stream} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
@@ -18,7 +20,7 @@ import {graphShareCommitIsAncestor, GRAPH_SHARE_GIT_OBJECT_ID} from '../git.js';
 import type {GraphShareEnrollment, GraphShareProfileV1} from '../profile.js';
 import {graphShareRegistryPublicationScope} from '../registry/publication.js';
 import {makeGraphShareRegistryReader} from '../registry/reader.js';
-import {verifyGraphWorkerResultAnnouncement, type GraphWorkerResultAnnouncement} from '../worker/announcement.js';
+import {decodeGraphWorkerResultAnnouncement, verifyGraphWorkerResultAnnouncement} from '../worker/announcement.js';
 import {
   graphWorkerAdmissionArchiveSummaries,
   graphWorkerAdmissionReceiptSummary,
@@ -45,6 +47,8 @@ import {
   type GraphWorkerResultVerificationAuthority,
 } from '../worker/result.js';
 import {graphWorkerRegistryForProfile} from '../worker/registry_upload.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const LOCK_OPTIONS = {
   heartbeatIntervalMilliseconds: 10_000,
@@ -102,7 +106,7 @@ export const admitGraphControlWorkerResult = Effect.fn('codeGraph.sharing.admitC
       }),
     catch: () => graphSharingFailure('Worker registry is outside its enrolled scope.'),
   });
-  const announcement = structuredClone(input.announcement) as GraphWorkerResultAnnouncement;
+  const announcement = yield* decodeGraphWorkerResultAnnouncement(structuredClone(input.announcement));
   const workerId = announcement?.body?.workerId;
   if (typeof workerId !== 'string' || !/^gw_[0-9a-f]{32}$/u.test(workerId))
     return yield* graphSharingFailure('Graph worker result request is invalid.');
@@ -145,7 +149,12 @@ export const admitGraphControlWorkerResult = Effect.fn('codeGraph.sharing.admitC
           kind: 'operation',
           operationId: body.idempotencyKey,
         });
-        const receipt = prior.view.receipts.find(item => item.announcement.body.idempotencyKey === body.idempotencyKey);
+        const receipt = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            prior.view.receipts,
+            item => item.announcement.body.idempotencyKey === body.idempotencyKey,
+          ),
+        );
         if (receipt === undefined) return undefined;
         const currentWorker = yield* requireWorker();
         const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
@@ -221,8 +230,11 @@ export const admitGraphControlWorkerResult = Effect.fn('codeGraph.sharing.admitC
           Effect.provideService(CommandExecutor, input.commandExecutor),
         );
         if (disposition !== undefined) return {status: disposition, idempotencyKey: body.idempotencyKey};
-        const stored = current.view.receipts.find(
-          item => item.announcement.body.idempotencyKey === body.idempotencyKey,
+        const stored = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            current.view.receipts,
+            item => item.announcement.body.idempotencyKey === body.idempotencyKey,
+          ),
         );
         if (stored !== undefined)
           return admitGraphWorkerAnnouncement(singletonReceiptStore(stored), {
@@ -260,7 +272,10 @@ export const admitGraphControlWorkerResult = Effect.fn('codeGraph.sharing.admitC
             group.receipts,
           );
           if (parked.status === 'capacity-exceeded') return {status: 'capacity-exceeded' as const, store: current.hot};
-          const remaining = current.hot.receipts.filter(receipt => receipt.sourceCommit !== group.sourceCommit);
+          const remaining = EffectArray.filter(
+            current.hot.receipts,
+            receipt => receipt.sourceCommit !== group.sourceCommit,
+          );
           const hot = {
             ...mergeGraphWorkerAdmissionReceipts(remaining, []),
             archiveStarted: true as const,
@@ -285,7 +300,10 @@ export const admitGraphControlWorkerResult = Effect.fn('codeGraph.sharing.admitC
             catch: () => graphSharingUnavailable('Graph worker admission copies conflict.'),
           });
           if (
-            merged.quarantine.some(item => item.repositoryId === body.repositoryId && item.actionKey === body.actionKey)
+            EffectArray.some(
+              merged.quarantine,
+              item => item.repositoryId === body.repositoryId && item.actionKey === body.actionKey,
+            )
           )
             return {...outcome, status: 'quarantined' as const};
         }
@@ -315,7 +333,7 @@ const sourceDisposition = Effect.fn('codeGraph.sharing.workerSourceDisposition')
     maxOutputBytes: 128,
     timeoutMs: 10_000,
   }).pipe(Effect.mapError(() => graphSharingUnavailable('Publisher source checkout is unavailable.')));
-  const currentHead = head.stdout.trim();
+  const currentHead = Effect2.pipe(head.stdout, EffectString.trim);
   if (head.exitCode !== 0 || !GRAPH_SHARE_GIT_OBJECT_ID.test(currentHead))
     return yield* graphSharingUnavailable('Publisher source checkout is unavailable.');
   if (sourceCommit !== currentHead) {
@@ -385,7 +403,8 @@ const readHotAdmissionState = Effect.fn('codeGraph.sharing.readWorkerAdmissionSt
     catch: () => graphSharingUnavailable('Graph worker admission state is invalid.'),
   });
   if (
-    parsed.receipts.some(
+    EffectArray.some(
+      parsed.receipts,
       receipt =>
         receipt.announcement.body.repositoryId !== policy.repositoryId ||
         receipt.announcement.body.profileDigest !== policy.profileDigest,
@@ -431,7 +450,7 @@ function mergeAdmissionView(
   return {
     receipts: selected.receipts,
     quarantine: graphWorkerAdmissionQuarantineForSummaries(
-      [...summaries.values()].map(summary => ({...summary, repositoryId: policy.repositoryId})),
+      EffectArray.map([...summaries.values()], summary => ({...summary, repositoryId: policy.repositoryId})),
     ),
   };
 }
@@ -450,14 +469,12 @@ function oldestParkableSource(
     if (receipt.sourceCommit === currentSource || receipt.sourceCommit === publishedSource) continue;
     groups.set(receipt.sourceCommit, [...(groups.get(receipt.sourceCommit) ?? []), receipt]);
   }
-  return [...groups.entries()]
-    .map(([sourceCommit, receipts]) => ({sourceCommit, receipts}))
-    .sort(
-      (left, right) =>
-        Math.min(...left.receipts.map(receipt => receipt.admittedAt)) -
-          Math.min(...right.receipts.map(receipt => receipt.admittedAt)) ||
-        (left.sourceCommit < right.sourceCommit ? -1 : 1),
-    )[0];
+  return EffectArray.map([...groups.entries()], ([sourceCommit, receipts]) => ({sourceCommit, receipts})).sort(
+    (left, right) =>
+      Math.min(...EffectArray.map(left.receipts, receipt => receipt.admittedAt)) -
+        Math.min(...EffectArray.map(right.receipts, receipt => receipt.admittedAt)) ||
+      (left.sourceCommit < right.sourceCommit ? -1 : 1),
+  )[0];
 }
 
 function countCoveredReceipts(
@@ -466,12 +483,23 @@ function countCoveredReceipts(
   covered: ReadonlySet<string>,
 ) {
   return new Set([
-    ...hot
-      .filter(receipt => covered.has(receipt.sourceCommit))
-      .map(receipt => receipt.announcement.body.idempotencyKey),
-    ...graphWorkerAdmissionArchiveSummaries(archive.manifest)
-      .filter(receipt => covered.has(receipt.sourceCommit))
-      .map(receipt => receipt.operationId),
+    ...EffectArray.map(
+      EffectArray.filter(
+        hot,
+        (receipt, __effectArrayIndex) => __effectArrayIndex in hot && covered.has(receipt.sourceCommit),
+      ),
+      receipt => receipt.announcement.body.idempotencyKey,
+    ),
+    ...EffectArray.map(
+      EffectArrayPipe(graphWorkerAdmissionArchiveSummaries(archive.manifest), __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (receipt, __effectArrayIndex2) =>
+            __effectArrayIndex2 in __effectArrayValues && covered.has(receipt.sourceCommit),
+        ),
+      ),
+      receipt => receipt.operationId,
+    ),
   ]).size;
 }
 
@@ -530,12 +558,15 @@ export const retireGraphWorkerAdmissionsCoveredByPublishedSourceLocked = Effect.
   const target = yield* graphWorkerAdmissionStatePath(input.home, policy);
   const snapshot = yield* readAdmissionView(target, policy, {kind: 'index'});
   const covered = new Set([published]);
-  const sources = [
-    ...new Set([
-      ...snapshot.hot.receipts.map(receipt => receipt.sourceCommit),
-      ...snapshot.archive.manifest.segments.map(segment => segment.sourceCommit),
-    ]),
-  ].filter(source => source !== published);
+  const sources = EffectArray.filter(
+    [
+      ...new Set([
+        ...EffectArray.map(snapshot.hot.receipts, receipt => receipt.sourceCommit),
+        ...EffectArray.map(snapshot.archive.manifest.segments, segment => segment.sourceCommit),
+      ]),
+    ],
+    source => source !== published,
+  );
   const ancestors = yield* Effect.forEach(
     sources,
     source => graphShareCommitIsAncestor(input.repoRoot, source, published),

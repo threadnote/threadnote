@@ -4,9 +4,11 @@
 import {spawnSync} from 'node:child_process';
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- Same compiled host-boundary requirement.
 import {writeFileSync} from 'node:fs';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const diagnosticLimit = 16 * 1024;
-const normalize = (text: string) => text.replace(/\r\n?/g, '\n');
+const normalize = (text: string) => Effect.pipe(text, EffectString.replace(/\r\n?/g, '\n'));
 export const decodeReleaseOutput = (value: Uint8Array): string =>
   normalize(new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(value));
 

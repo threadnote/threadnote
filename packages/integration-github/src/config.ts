@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   requiredIdentifier,
@@ -9,7 +10,11 @@ import {
   CREDENTIAL_ENV_PATTERN,
   type SourceConfig,
   type SourceConfiguration,
+  type ProjectionConfig,
 } from '@threadnote/integration-core/config';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export {validateSourceIdentifier} from '@threadnote/integration-core/config';
 export interface GitHubSourceConfig {
   readonly type: 'github';
@@ -23,23 +28,23 @@ export interface GitHubSourceConfig {
   readonly maxStaleHours: number;
 }
 export const DEFAULT_GITHUB_CREDENTIAL_ENV = 'THREADNOTE_GITHUB_TOKEN';
-export function upsertGitHubSource(
-  configuration: SourceConfiguration,
+export function upsertGitHubSource<S extends SourceConfig, P extends ProjectionConfig>(
+  configuration: SourceConfiguration<S, P>,
   source: GitHubSourceConfig,
-): SourceConfiguration {
+): SourceConfiguration<S | GitHubSourceConfig, P> {
   const checked = validateGitHubSourceConfig(source);
-  if (configuration.sources.some(item => item.id === checked.id && item.type !== checked.type))
+  if (EffectArray.some(configuration.sources, item => item.id === checked.id && item.type !== checked.type))
     throw SourceConfigurationError.make({message: `Source "${checked.id}" already has another type.`});
   return {
     version: 2,
     projections: configuration.projections,
-    sources: [...configuration.sources.filter(item => item.id !== checked.id), checked].sort((a, b) =>
-      a.id.localeCompare(b.id),
+    sources: [...EffectArray.filter(configuration.sources, item => item.id !== checked.id), checked].sort((a, b) =>
+      Effect.pipe(a.id, EffectString.localeCompare(b.id)),
     ),
   };
 }
 export function requireGitHubSource(configuration: SourceConfiguration, id: string): GitHubSourceConfig {
-  const source = configuration.sources.find(item => item.id === id);
+  const source = EffectOption.getOrUndefined(EffectArray.findFirst(configuration.sources, item => item.id === id));
   if (!source || !isGitHubSource(source))
     throw SourceConfigurationError.make({message: `No GitHub source named "${id}".`});
   return source;
@@ -60,11 +65,11 @@ export function validateGitHubSourceConfig(source: GitHubSourceConfig): GitHubSo
     'github source',
   );
 }
-export function normalizeGitHubRepository(value: string): string {
+export function normalizeGitHubRepository(value: unknown): string {
   if (typeof value !== 'string')
     throw SourceConfigurationError.make({message: 'GitHub repository must be owner/name or a github.com URL.'});
-  let path = value.trim();
-  if (path.startsWith('https://')) {
+  let path = Effect.pipe(value, EffectString.trim);
+  if (Effect.pipe(path, EffectString.startsWith('https://'))) {
     let url: URL;
     try {
       url = new URL(path);
@@ -73,9 +78,9 @@ export function normalizeGitHubRepository(value: string): string {
     }
     if (url.hostname !== 'github.com' || url.port || url.username || url.password || url.search || url.hash)
       throw SourceConfigurationError.make({message: 'GitHub repository URL must be on github.com.'});
-    path = url.pathname.replace(/\/$/, '').slice(1);
+    path = Effect.pipe(url.pathname, EffectString.replace(/\/$/, ''), EffectString.slice(1));
   }
-  const parts = path.split('/');
+  const parts = Effect.pipe(path, EffectString.split('/'));
   if (
     parts.length !== 2 ||
     !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(parts[0]) ||
@@ -84,7 +89,7 @@ export function normalizeGitHubRepository(value: string): string {
     parts[1] === '..'
   )
     throw SourceConfigurationError.make({message: 'GitHub repository must be owner/name or a github.com URL.'});
-  return `${parts[0].toLowerCase()}/${parts[1].toLowerCase()}`;
+  return `${Effect.pipe(parts[0], EffectString.toLowerCase)}/${Effect.pipe(parts[1], EffectString.toLowerCase)}`;
 }
 function parseGitHubSource(value: Record<string, unknown>, label: string): GitHubSourceConfig {
   const id = portableIdentifier(requiredIdentifier(value.id, `${label}.id`), `${label}.id`);
@@ -97,9 +102,9 @@ function parseGitHubSource(value: Record<string, unknown>, label: string): GitHu
   if (value.credential_storage !== undefined && value.credential_storage !== 'local')
     throw SourceConfigurationError.make({message: `${label}.credential_storage must be "local" when present.`});
   const project = value.project === null ? null : requiredIdentifier(value.project, `${label}.project`);
-  if (!Array.isArray(value.repositories) || value.repositories.length === 0 || value.repositories.length > 64)
+  if (!EffectArray.isArray(value.repositories) || value.repositories.length === 0 || value.repositories.length > 64)
     throw SourceConfigurationError.make({message: `${label}.repositories must contain 1 to 64 repositories.`});
-  const repositories = value.repositories.map(repository => normalizeGitHubRepository(repository as string));
+  const repositories = EffectArray.map(value.repositories, repository => normalizeGitHubRepository(repository));
   if (new Set(repositories).size !== repositories.length)
     throw SourceConfigurationError.make({message: `${label}.repositories contains duplicate repositories.`});
   return {
@@ -133,7 +138,7 @@ export function sourceConfigurationFingerprint(source: GitHubSourceConfig): stri
       credentialEnv: source.credentialEnv,
       credentialStorage: source.credentialStorage ?? null,
       project: source.project,
-      repositories: source.repositories.map(normalizeGitHubRepository).sort(),
+      repositories: EffectArray.map(source.repositories, normalizeGitHubRepository).sort(),
       refreshIntervalMinutes: source.refreshIntervalMinutes,
       maxStaleHours: source.maxStaleHours,
     }),

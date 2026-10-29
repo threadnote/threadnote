@@ -3,6 +3,8 @@ import {threadnoteStorageLayout} from '@threadnote/store/layout';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type LocalMemoryConfig = Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>;
 
@@ -17,7 +19,8 @@ export const localMemoryPathForUri = Effect.fn('memory.localMemoryPathForUri')(f
   config: LocalMemoryConfig,
   uri: string,
 ) {
-  if (!uri.startsWith(`threadnote://user/${uriSegment(config.user)}/memories/`)) return undefined;
+  if (!Effect2.pipe(uri, EffectString.startsWith(`threadnote://user/${uriSegment(config.user)}/memories/`)))
+    return undefined;
   const parsed = yield* Effect.try(() => parseResourceId(uri)).pipe(Effect.option);
   if (Option.isNone(parsed) || parsed.value.anchor !== undefined) return undefined;
   const path = yield* Path.Path;

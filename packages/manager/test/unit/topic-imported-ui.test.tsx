@@ -3,14 +3,26 @@ import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {topicMaintenanceObsidianCitationId} from '@threadnote/memory/topic-maintenance';
+import {isJsonObject} from '@threadnote/platform/json';
 import type {MemoryObsidianEvidenceV1} from '@threadnote/memory/document';
-import type {ManagerContextMaintenancePacketV2} from '../../src/attention/contracts.js';
+import type {
+  ManagerContextMaintenancePacketV2,
+  ManagerContextMaintenanceStatusV2,
+} from '../../src/attention/contracts.js';
 import type {ManagerTopicReviewV1} from '../../src/attention/topic_contracts.js';
 import {TopicReviewContent} from '../../src/attention/topic_review.js';
 import {MaintenanceCaseDialog} from '../../src/attention/maintenance_dialogs.js';
 import {TopicEnrollmentPanel} from '../../src/attention/topic_enrollment.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
-const hash = 'a'.repeat(64);
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON request object.');
+  return value;
+}
+
+const hash = Effect.pipe('a', EffectString.repeat(64));
 const uri = 'threadnote://user/tester/memories/durable/projects/notes/decision.md';
 const citation: MemoryObsidianEvidenceV1 = {
   version: 1,
@@ -123,6 +135,19 @@ const privateReview: ManagerTopicReviewV1 = {
   },
   canApply: true,
 };
+
+function maintenanceStatus(cases: ManagerContextMaintenanceStatusV2['cases']): ManagerContextMaintenanceStatusV2 {
+  return {
+    version: 2,
+    paused: false,
+    state: 'needs-decision',
+    generation: 'fixture-generation',
+    projects: [],
+    cases,
+    receipts: [],
+  };
+}
+
 let activePrivateReview = privateReview;
 let root: Root;
 let revoked: boolean;
@@ -139,7 +164,7 @@ const posted: Record<string, unknown>[] = [];
 const response = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {status, headers: {'content-type': 'application/json'}});
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
@@ -169,9 +194,8 @@ beforeEach(() => {
         return response({models: [{id: 'model', label: 'Model', isDefault: true}]});
       if (url.pathname === '/api/attention/context-maintenance') {
         if (url.searchParams.get('view') === 'status')
-          return response({
-            version: 2,
-            cases: [
+          return response(
+            maintenanceStatus([
               {
                 caseId: 'case-note',
                 project: 'notes',
@@ -187,8 +211,8 @@ beforeEach(() => {
                 attemptCount: 1,
                 events: [],
               },
-            ],
-          });
+            ]),
+          );
         if (maintenanceReadDenied) return response({error: 'Private source access denied.'}, 403);
         const selectedPacket =
           maintenanceReadUnavailable && evidence.topicEvidence?.version === 2
@@ -220,7 +244,7 @@ beforeEach(() => {
         return packetUnavailable ? response({error: 'Source evidence changed.'}, 409) : response(selectedPacket);
       }
       if (url.pathname === '/api/attention/topic-review' && init?.method === 'POST') {
-        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const body = requireJsonObject(JSON.parse(String(init.body)));
         posted.push(body);
         if (body.action === 'capture') {
           await captureGate;
@@ -238,7 +262,10 @@ beforeEach(() => {
                   revision: 1,
                   state: 'captured',
                   citation,
-                  fragment: currentText.slice(Number(body.fragmentStart), Number(body.fragmentEnd)),
+                  fragment: Effect.pipe(
+                    currentText,
+                    EffectString.slice(Number(body.fragmentStart), Number(body.fragmentEnd)),
+                  ),
                 },
               },
             },
@@ -280,7 +307,7 @@ beforeEach(() => {
       if (url.pathname === '/api/attention/topic-enrollment') {
         if (revoked) return response({error: 'Private source unavailable.'}, 409);
         if (init?.method === 'POST') {
-          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          const body = requireJsonObject(JSON.parse(String(init.body)));
           posted.push(body);
           return response(
             body.action === 'preview'
@@ -310,7 +337,16 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 const button = (text: string) =>
-  [...document.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent?.includes(text))!;
+  EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(text)),
+          ))(__effectArrayValue),
+    ),
+  )!;
 const renderReview = () =>
   act(async () =>
     root.render(
@@ -368,11 +404,19 @@ it('requires an exact note selection and retention approval before capture and g
   expect(document.body.textContent).toContain('Accepted supporting excerpt');
   expect(button('Generate draft').disabled).toBe(true);
   expect(button('Keep selected excerpt').disabled).toBe(true);
-  const start = currentText.indexOf('🙂');
-  const end = currentText.indexOf('\nTrailing');
+  const start = Effect.pipe(
+    currentText,
+    EffectString.indexOf('🙂'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const end = Effect.pipe(
+    currentText,
+    EffectString.indexOf('\nTrailing'),
+    Effect.Option.getOrElse(() => -1),
+  );
   await selectExcerpt(start, end);
   expect(document.querySelector('[aria-label="Selected note excerpt"]')?.textContent).toBe(
-    currentText.slice(start, end),
+    Effect.pipe(currentText, EffectString.slice(start, end)),
   );
   expect(button('Keep selected excerpt').disabled).toBe(true);
   await act(async () => document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
@@ -398,7 +442,7 @@ it('requires an exact note selection and retention approval before capture and g
     }),
   ]);
   expect(document.querySelector('[aria-label="Retained note excerpt"]')?.textContent).toBe(
-    currentText.slice(start, end),
+    Effect.pipe(currentText, EffectString.slice(start, end)),
   );
   expect(button('Generate draft').disabled).toBe(false);
 });
@@ -497,7 +541,11 @@ it('enrolls with explicit paragraph annotations and exact preview approval, then
   expect(button('Preview topic enrollment').disabled).toBe(true);
   for (const select of document.querySelectorAll<HTMLSelectElement>('select')) {
     await act(async () => {
-      select.value = select.getAttribute('aria-label')?.startsWith('Role') ? 'descriptive' : 'direct';
+      select.value = Effect.pipe(select.getAttribute('aria-label'), effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.startsWith('Role')),
+      )
+        ? 'descriptive'
+        : 'direct';
       select.dispatchEvent(new Event('change', {bubbles: true}));
     });
   }

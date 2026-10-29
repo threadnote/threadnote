@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {readFile, readlink, rename, rm as nodeRm, symlink} from '@threadnote/testing/node-fs-promises';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
@@ -10,19 +11,21 @@ import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {join, mkdir, mkdtemp, rm, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('targeted code graph purge', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('previews and removes only the selected checkout without a worktree path', async () => {
     const home = await mkdtemp('threadnote-targeted-graph-purge-');
     homes.push(home);
-    const checkoutId = 'a'.repeat(64);
-    const siblingCheckoutId = 'b'.repeat(64);
+    const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
+    const siblingCheckoutId = Effect2.pipe('b', EffectString.repeat(64));
     const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
     const siblingRoot = join(home, 'indexes', 'code-graph', 'repositories', siblingCheckoutId);
     await mkdir(join(repositoryRoot, 'vectors'), {recursive: true});
@@ -57,8 +60,8 @@ describe('targeted code graph purge', () => {
     Effect.gen(function* () {
       const home = yield* Effect.promise(() => mkdtemp('threadnote-targeted-graph-purge-progress-'));
       homes.push(home);
-      const checkoutId = 'd'.repeat(64);
-      const siblingCheckoutId = 'e'.repeat(64);
+      const checkoutId = Effect2.pipe('d', EffectString.repeat(64));
+      const siblingCheckoutId = Effect2.pipe('e', EffectString.repeat(64));
       const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
       const siblingRoot = join(home, 'indexes', 'code-graph', 'repositories', siblingCheckoutId);
       yield* Effect.promise(() => mkdir(join(repositoryRoot, 'vectors'), {recursive: true}));
@@ -86,7 +89,7 @@ describe('targeted code graph purge', () => {
       home =>
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
-          const checkoutId = '9'.repeat(64);
+          const checkoutId = Effect2.pipe('9', EffectString.repeat(64));
           const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
           yield* Effect.promise(() => mkdir(repositoryRoot, {recursive: true}));
           yield* Effect.promise(() => writeFile(join(repositoryRoot, 'graph-v3.sqlite'), 'disposable graph\n'));
@@ -134,7 +137,7 @@ describe('targeted code graph purge', () => {
       home =>
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
-          const checkoutId = '8'.repeat(64);
+          const checkoutId = Effect2.pipe('8', EffectString.repeat(64));
           const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
           const graph = join(repositoryRoot, 'graph-v3.sqlite');
           yield* Effect.promise(() => mkdir(repositoryRoot, {recursive: true}));
@@ -186,7 +189,7 @@ describe('targeted code graph purge', () => {
     async () => {
       const home = await mkdtemp('threadnote-targeted-graph-purge-link-');
       homes.push(home);
-      const checkoutId = 'c'.repeat(64);
+      const checkoutId = Effect2.pipe('c', EffectString.repeat(64));
       const repositories = join(home, 'indexes', 'code-graph', 'repositories');
       const repositoryRoot = join(repositories, checkoutId);
       const external = join(home, 'external-graph');
@@ -206,7 +209,7 @@ describe('targeted code graph purge', () => {
   it('fails immediately while an active build owns the checkout lock', async () => {
     const home = await mkdtemp('threadnote-targeted-graph-purge-lock-');
     homes.push(home);
-    const checkoutId = 'd'.repeat(64);
+    const checkoutId = Effect2.pipe('d', EffectString.repeat(64));
     const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
     await mkdir(repositoryRoot, {recursive: true});
     await writeFile(join(repositoryRoot, 'graph-v3.sqlite'), 'locked graph\n');
@@ -252,7 +255,7 @@ describe('targeted code graph purge', () => {
   it.skipIf(process.platform === 'win32')('revalidates the checkout root after planning', async () => {
     const home = await mkdtemp('threadnote-targeted-graph-purge-race-');
     homes.push(home);
-    const checkoutId = 'e'.repeat(64);
+    const checkoutId = Effect2.pipe('e', EffectString.repeat(64));
     const repositories = join(home, 'indexes', 'code-graph', 'repositories');
     const repositoryRoot = join(repositories, checkoutId);
     const external = join(home, 'external-race-graph');
@@ -282,7 +285,7 @@ describe('targeted code graph purge', () => {
   it('refuses a same-path directory replacement and preserves its contents', async () => {
     const home = await mkdtemp('threadnote-targeted-graph-purge-directory-race-');
     homes.push(home);
-    const checkoutId = 'f'.repeat(64);
+    const checkoutId = Effect2.pipe('f', EffectString.repeat(64));
     const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
     const sentinel = join(repositoryRoot, 'replacement-must-survive.txt');
     await mkdir(repositoryRoot, {recursive: true});
@@ -309,7 +312,7 @@ describe('targeted code graph purge', () => {
   it('quarantines atomically and restores a directory swapped after verification', async () => {
     const home = await mkdtemp('threadnote-targeted-graph-purge-removal-race-');
     homes.push(home);
-    const checkoutId = '1'.repeat(64);
+    const checkoutId = Effect2.pipe('1', EffectString.repeat(64));
     const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
     const displacedRoot = join(home, 'displaced-original-graph');
     const sentinel = join(repositoryRoot, 'replacement-must-survive.txt');

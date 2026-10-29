@@ -2,9 +2,9 @@ import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Effect, FileSystem, Layer, Path} from 'effect';
+import {Clock, Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -15,8 +15,25 @@ import {
   prepareCodeGraphVectorRetirement,
   runCodeGraphOrdinaryVectorMaintenanceUnit,
 } from '@threadnote/graph/vector/maintenance';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
+const isRecordedOperation = Schema.is(Schema.Struct({operation: Schema.optionalKey(Schema.Unknown)}));
+
+function operationFromRecordedJson(content: string): string {
+  const parsed: unknown = JSON.parse(content);
+  if (parsed === null) throw new TypeError('Recorded vector operation must not be null.');
+  if (!isRecordedOperation(parsed)) return 'invalid';
+  return String(parsed.operation ?? 'invalid');
+}
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
+
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const MODEL_NAME = 'model-os';
 const OS_VECTOR_ROWS = 1_001;
 const VectorOsLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
@@ -210,8 +227,12 @@ function waitForMarker(fs: FileSystem.FileSystem, markerPath: string, child: Vec
 function collectChildStreams(child: VectorChildProcess) {
   return Effect.all(
     {
-      stderr: readBoundedChildStream(child.stderr, 4_096).pipe(Effect.map(output => output.trim())),
-      stdout: readBoundedChildStream(child.stdout, 4_096).pipe(Effect.map(output => output.trim())),
+      stderr: readBoundedChildStream(child.stderr, 4_096).pipe(
+        Effect.map(output => Effect2.pipe(output, EffectString.trim)),
+      ),
+      stdout: readBoundedChildStream(child.stdout, 4_096).pipe(
+        Effect.map(output => Effect2.pipe(output, EffectString.trim)),
+      ),
     },
     {concurrency: 2},
   );
@@ -256,13 +277,12 @@ function activeReceiptOperations(fs: FileSystem.FileSystem, path: Path.Path, thr
   return Effect.gen(function* () {
     const root = codeGraphDiskReservationRoot(path, threadnoteHome);
     if (!(yield* fs.exists(root))) return [] as string[];
-    const names = (yield* fs.readDirectory(root)).filter(name => /^v1-[0-9a-f]{64}\.json$/.test(name)).sort();
+    const names = EffectArray.filter(
+      yield* fs.readDirectory(root),
+      __effectArrayValue => !!(name => /^v1-[0-9a-f]{64}\.json$/.test(name))(__effectArrayValue),
+    ).sort();
     return yield* Effect.forEach(names, name =>
-      fs
-        .readFileString(path.join(root, name))
-        .pipe(
-          Effect.map(content => String((JSON.parse(content) as {readonly operation?: unknown}).operation ?? 'invalid')),
-        ),
+      fs.readFileString(path.join(root, name)).pipe(Effect.map(operationFromRecordedJson)),
     );
   });
 }
@@ -307,14 +327,18 @@ function seedVectorDatabase(databasePath: string): void {
            template_version, count, state, created_at
          ) VALUES ('generation-os', 'snapshot-os', 'model-os', ?, 384, 1, ?, 'ready', ?)`,
       )
-      .run('f'.repeat(64), OS_VECTOR_ROWS, new Date(0).toISOString());
+      .run(Effect2.pipe('f', EffectString.repeat(64)), OS_VECTOR_ROWS, new Date(0).toISOString());
     const insert = database.prepare(
       `INSERT INTO vectors (generation, symbol_id, fingerprint, vector)
        VALUES ('generation-os', ?, ?, ?)`,
     );
     database.transaction(() => {
       for (let index = 0; index < OS_VECTOR_ROWS; index += 1) {
-        insert.run(`symbol-${index.toString().padStart(6, '0')}`, 'e'.repeat(64), new Uint8Array(16));
+        insert.run(
+          `symbol-${Effect2.pipe(index.toString(), EffectString.padStart(6, '0'))}`,
+          Effect2.pipe('e', EffectString.repeat(64)),
+          new Uint8Array(16),
+        );
       }
     })();
   } finally {
@@ -332,26 +356,41 @@ function readVectorState(databasePath: string): {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     const marker = database
-      .query('SELECT page_revision FROM vector_generation_retirements ORDER BY retirement_id LIMIT 1')
-      .get() as {readonly page_revision?: unknown} | null;
+      .query<{readonly page_revision?: unknown} | null, SQLQueryBindings[]>(
+        'SELECT page_revision FROM vector_generation_retirements ORDER BY retirement_id LIMIT 1',
+      )
+      .get();
     const sequence = database
-      .query("SELECT seq FROM sqlite_sequence WHERE name = 'vector_generation_retirements'")
-      .get() as {readonly seq?: unknown} | null;
+      .query<{readonly seq?: unknown} | null, SQLQueryBindings[]>(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'vector_generation_retirements'",
+      )
+      .get();
     return {
       generations: Number(
-        (database.query('SELECT COUNT(*) AS count FROM vector_generations').get() as {readonly count: number}).count,
+        requiredRow(
+          database
+            .query<{readonly count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM vector_generations')
+            .get(),
+        ).count,
       ),
       markers: Number(
-        (
-          database.query('SELECT COUNT(*) AS count FROM vector_generation_retirements').get() as {
-            readonly count: number;
-          }
+        requiredRow(
+          database
+            .query<
+              {
+                readonly count: number;
+              },
+              SQLQueryBindings[]
+            >('SELECT COUNT(*) AS count FROM vector_generation_retirements')
+            .get(),
         ).count,
       ),
       pageRevision: marker === null ? null : Number(marker.page_revision),
       sequence: sequence === null ? 0 : Number(sequence.seq),
       vectors: Number(
-        (database.query('SELECT COUNT(*) AS count FROM vectors').get() as {readonly count: number}).count,
+        requiredRow(
+          database.query<{readonly count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM vectors').get(),
+        ).count,
       ),
     };
   } finally {

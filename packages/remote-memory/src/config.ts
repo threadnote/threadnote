@@ -1,5 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {remoteMemoryError} from './errors.js';
 import {requireGitMemoryBinding, type GitMemoryBinding} from './git/binding.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {pipe as effectPipe} from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export type RemoteMemoryCanonicalStore = 'git' | 'postgres';
 
@@ -43,11 +48,13 @@ export function remoteMemoryConfigFromEnvironment(
   const accessTokenIssuer = required(environment, 'THREADNOTE_REMOTE_OAUTH_ISSUER');
   assertIssuerUrl(httpsUrl(accessTokenIssuer, 'THREADNOTE_REMOTE_OAUTH_ISSUER'));
   const cursorIssuerUrl = httpsUrl(
-    environment.THREADNOTE_REMOTE_CURSOR_ISSUER?.trim() || 'https://api.cursor.com',
+    Effect.pipe(environment.THREADNOTE_REMOTE_CURSOR_ISSUER, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) || 'https://api.cursor.com',
     'THREADNOTE_REMOTE_CURSOR_ISSUER',
   );
   assertIssuerUrl(cursorIssuerUrl);
-  const cursorIssuer = cursorIssuerUrl.toString().replace(/\/$/u, '');
+  const cursorIssuer = Effect.pipe(cursorIssuerUrl.toString(), EffectString.replace(/\/$/u, ''));
   const databaseUrl = databaseConnectionUrl(required(environment, 'THREADNOTE_REMOTE_DATABASE_URL'));
   const localService = publicBaseUrl.hostname === 'localhost' || publicBaseUrl.hostname === '127.0.0.1';
   const autoMigrate = booleanValue(environment.THREADNOTE_REMOTE_AUTO_MIGRATE, localService);
@@ -57,12 +64,18 @@ export function remoteMemoryConfigFromEnvironment(
       'THREADNOTE_REMOTE_AUTO_MIGRATE is only allowed for localhost development.',
     );
   }
-  const allowedHosts = csv(environment.THREADNOTE_REMOTE_ALLOWED_HOSTS, [publicBaseUrl.host]).map(validateHostValue);
-  const allowedOrigins = csv(environment.THREADNOTE_REMOTE_ALLOWED_ORIGINS, ['https://cursor.com']).map(value =>
-    validateOriginValue(value, localService),
+  const allowedHosts = EffectArray.map(
+    csv(environment.THREADNOTE_REMOTE_ALLOWED_HOSTS, [publicBaseUrl.host]),
+    validateHostValue,
+  );
+  const allowedOrigins = EffectArray.map(
+    csv(environment.THREADNOTE_REMOTE_ALLOWED_ORIGINS, ['https://cursor.com']),
+    value => validateOriginValue(value, localService),
   );
   const accessTokenAudience = audienceValue(
-    environment.THREADNOTE_REMOTE_OAUTH_AUDIENCE?.trim() || new URL('/mcp', publicBaseUrl).toString(),
+    Effect.pipe(environment.THREADNOTE_REMOTE_OAUTH_AUDIENCE, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) || new URL('/mcp', publicBaseUrl).toString(),
     'THREADNOTE_REMOTE_OAUTH_AUDIENCE',
   );
   const accessTokenClientIdClaim = clientIdClaimValue(environment.THREADNOTE_REMOTE_OAUTH_CLIENT_ID_CLAIM);
@@ -71,7 +84,9 @@ export function remoteMemoryConfigFromEnvironment(
     accessTokenClientIdClaim,
   );
   const attestationAudience = audienceValue(
-    environment.THREADNOTE_REMOTE_CURSOR_AUDIENCE?.trim() || new URL('/attest/cursor', publicBaseUrl).toString(),
+    Effect.pipe(environment.THREADNOTE_REMOTE_CURSOR_AUDIENCE, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) || new URL('/attest/cursor', publicBaseUrl).toString(),
     'THREADNOTE_REMOTE_CURSOR_AUDIENCE',
   );
   if (accessTokenAudience !== new URL('/mcp', publicBaseUrl).toString()) {
@@ -84,15 +99,25 @@ export function remoteMemoryConfigFromEnvironment(
     );
   }
   const accessTokenJwksUrl = httpsUrl(
-    environment.THREADNOTE_REMOTE_OAUTH_JWKS_URL?.trim() ||
-      new URL('/.well-known/jwks.json', `${accessTokenIssuer.replace(/\/$/, '')}/`).toString(),
+    Effect.pipe(environment.THREADNOTE_REMOTE_OAUTH_JWKS_URL, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) ||
+      new URL(
+        '/.well-known/jwks.json',
+        `${Effect.pipe(accessTokenIssuer, EffectString.replace(/\/$/, ''))}/`,
+      ).toString(),
     'THREADNOTE_REMOTE_OAUTH_JWKS_URL',
   );
   const cursorJwksUrl = httpsUrl(
-    environment.THREADNOTE_REMOTE_CURSOR_JWKS_URL?.trim() ||
+    Effect.pipe(environment.THREADNOTE_REMOTE_CURSOR_JWKS_URL, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) ||
       (cursorIssuer === 'https://api.cursor.com'
         ? 'https://api.cursor.com/keys'
-        : new URL('/.well-known/jwks.json', `${cursorIssuer.replace(/\/$/, '')}/`).toString()),
+        : new URL(
+            '/.well-known/jwks.json',
+            `${Effect.pipe(cursorIssuer, EffectString.replace(/\/$/, ''))}/`,
+          ).toString()),
     'THREADNOTE_REMOTE_CURSOR_JWKS_URL',
   );
   if (accessTokenJwksUrl.origin !== new URL(accessTokenIssuer).origin) {
@@ -105,7 +130,9 @@ export function remoteMemoryConfigFromEnvironment(
     throw remoteMemoryError('invalid_request', "The Cursor JWKS URL must use Cursor's published /keys endpoint.");
   }
   const canonicalStore = canonicalStoreValue(environment.THREADNOTE_REMOTE_CANONICAL_STORE);
-  const gitWorktree = environment.THREADNOTE_REMOTE_MEMORY_GIT_WORKTREE?.trim();
+  const gitWorktree = Effect.pipe(environment.THREADNOTE_REMOTE_MEMORY_GIT_WORKTREE, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   if (canonicalStore === 'git') {
     if (!gitWorktree) {
       throw remoteMemoryError(
@@ -133,26 +160,43 @@ export function remoteMemoryConfigFromEnvironment(
     ...(canonicalStore === 'git'
       ? {
           gitBinding: requireGitMemoryBinding({
-            tenantId: environment.THREADNOTE_REMOTE_MEMORY_GIT_TENANT_ID?.trim() ?? '',
-            shareId: environment.THREADNOTE_REMOTE_MEMORY_GIT_SHARE_ID?.trim() ?? '',
+            tenantId:
+              Effect.pipe(environment.THREADNOTE_REMOTE_MEMORY_GIT_TENANT_ID, effectOptionalString =>
+                effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+              ) ?? '',
+            shareId:
+              Effect.pipe(environment.THREADNOTE_REMOTE_MEMORY_GIT_SHARE_ID, effectOptionalString =>
+                effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+              ) ?? '',
           }),
         }
       : {}),
     gitBranch: gitRefName(
-      environment.THREADNOTE_REMOTE_MEMORY_GIT_BRANCH?.trim() || 'main',
+      Effect.pipe(environment.THREADNOTE_REMOTE_MEMORY_GIT_BRANCH, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) || 'main',
       'THREADNOTE_REMOTE_MEMORY_GIT_BRANCH',
     ),
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves narrowing for the URL value.
     ...(environment.THREADNOTE_REMOTE_MEMORY_GIT_CLONE_URL?.trim()
-      ? {gitCloneUrl: gitCloneUrl(environment.THREADNOTE_REMOTE_MEMORY_GIT_CLONE_URL.trim(), localService)}
+      ? {
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The optional-chain guard narrows this value.
+          gitCloneUrl: gitCloneUrl(environment.THREADNOTE_REMOTE_MEMORY_GIT_CLONE_URL.trim(), localService),
+        }
       : {}),
     gitPush: booleanValue(environment.THREADNOTE_REMOTE_MEMORY_GIT_PUSH, true),
     gitRemote: gitRefName(
-      environment.THREADNOTE_REMOTE_MEMORY_GIT_REMOTE?.trim() || 'origin',
+      Effect.pipe(environment.THREADNOTE_REMOTE_MEMORY_GIT_REMOTE, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) || 'origin',
       'THREADNOTE_REMOTE_MEMORY_GIT_REMOTE',
     ),
     ...(gitWorktree ? {gitWorktree} : {}),
     globallyEnabled: booleanValue(environment.THREADNOTE_REMOTE_ENABLED, false),
-    host: environment.THREADNOTE_REMOTE_HOST?.trim() || '127.0.0.1',
+    host:
+      Effect.pipe(environment.THREADNOTE_REMOTE_HOST, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) || '127.0.0.1',
     ...(legacyClientIdCompatibilityUntil === undefined ? {} : {legacyClientIdCompatibilityUntil}),
     maxBodyBytes: boundedInteger(environment.THREADNOTE_REMOTE_MAX_BODY_BYTES, 256 * 1024, 1024, 1024 * 1024),
     port: boundedInteger(environment.THREADNOTE_REMOTE_PORT, 8787, 1, 65_535),
@@ -167,7 +211,7 @@ function gitCloneUrl(value: string, localService: boolean): string {
   const invalid = () =>
     remoteMemoryError('invalid_request', 'The Git clone URL must use credential-free SSH or HTTPS.');
   if (/[^\x21-\x7e]|\\/u.test(value)) throw invalid();
-  if (localService && value.startsWith('/')) return value;
+  if (localService && Effect.pipe(value, EffectString.startsWith('/'))) return value;
   if (/^[A-Za-z0-9_-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._~/-]+$/u.test(value)) return value;
   let url: URL;
   try {
@@ -220,7 +264,9 @@ export function redactedRemoteMemoryConfig(config: RemoteMemoryServiceConfig): R
 }
 
 function required(environment: Readonly<Record<string, string | undefined>>, key: string): string {
-  const value = environment[key]?.trim();
+  const value = Effect.pipe(environment[key], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   if (!value) throw remoteMemoryError('invalid_request', `${key} is required.`);
   return value;
 }
@@ -270,6 +316,7 @@ function assertIssuerUrl(url: URL): void {
 }
 
 function configuredUrl(value: string | undefined, fallback: URL | undefined, key: string): URL {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining narrows `value` for URL construction.
   if (!value?.trim()) {
     if (fallback) return fallback;
     throw remoteMemoryError('invalid_request', `${key} is required.`);
@@ -284,22 +331,33 @@ function configuredUrl(value: string | undefined, fallback: URL | undefined, key
 }
 
 function csv(value: string | undefined, fallback: readonly string[]): readonly string[] {
-  const values = value
-    ?.split(',')
-    .map(item => item.trim())
-    .filter(Boolean);
+  const values = effectPipe(
+    EffectOption.fromNullishOr(
+      EffectOption.getOrUndefined(
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain short-circuiting through split/map/filter.
+        EffectOption.map(EffectOption.fromNullishOr(value?.split(',')), mapReceiver =>
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain short-circuiting through split/map/filter.
+          EffectArray.map(mapReceiver, item => item.trim()),
+        ),
+      ),
+    ),
+    EffectOption.map(values => EffectArray.filter(values, (value, index) => index in values && Boolean(value))),
+    EffectOption.getOrUndefined,
+  );
   return values && values.length > 0 ? [...new Set(values)] : fallback;
 }
 
 function validateHostValue(value: string): string {
-  const normalized = value.toLowerCase();
+  const normalized = Effect.pipe(value, EffectString.toLowerCase);
   let parsed: URL;
   try {
     parsed = new URL(`https://${normalized}`);
   } catch {
     throw remoteMemoryError('invalid_request', 'Allowed Host entries must be exact host[:port] values.');
   }
-  const labels = parsed.hostname.startsWith('[') ? [] : parsed.hostname.split('.');
+  const labels = Effect.pipe(parsed.hostname, EffectString.startsWith('['))
+    ? []
+    : Effect.pipe(parsed.hostname, EffectString.split('.'));
   if (
     parsed.host !== normalized ||
     parsed.username ||
@@ -307,7 +365,7 @@ function validateHostValue(value: string): string {
     parsed.pathname !== '/' ||
     parsed.search ||
     parsed.hash ||
-    labels.some(label => !label || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label))
+    EffectArray.some(labels, label => !label || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label))
   ) {
     throw remoteMemoryError('invalid_request', 'Allowed Host entries must be exact host[:port] values.');
   }
@@ -324,7 +382,7 @@ function validateOriginValue(value: string, localService: boolean): string {
   const loopbackHttp = isLoopbackHostname(url.hostname) && url.protocol === 'http:';
   if (
     (url.protocol !== 'https:' && !(localService && loopbackHttp)) ||
-    url.origin !== value.replace(/\/$/u, '') ||
+    url.origin !== Effect.pipe(value, EffectString.replace(/\/$/u, '')) ||
     url.username ||
     url.password
   ) {
@@ -337,7 +395,12 @@ function validateOriginValue(value: string, localService: boolean): string {
 }
 
 function boundedInteger(value: string | undefined, fallback: number, minimum: number, maximum: number): number {
-  if (!value?.trim()) return fallback;
+  if (
+    !Effect.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    return fallback;
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
     throw remoteMemoryError('invalid_request', `Expected an integer from ${minimum} through ${maximum}.`);
@@ -346,13 +409,19 @@ function boundedInteger(value: string | undefined, fallback: number, minimum: nu
 }
 
 function booleanValue(value: string | undefined, fallback: boolean): boolean {
-  if (!value?.trim()) return fallback;
+  if (
+    !Effect.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    return fallback;
   if (value === 'true') return true;
   if (value === 'false') return false;
   throw remoteMemoryError('invalid_request', 'Expected true or false.');
 }
 
 function clientIdClaimValue(value: string | undefined): 'azp' | 'client_id' | 'cid' | 'azp-or-client_id' | undefined {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining narrows `value` for Date.parse and comparison.
   if (!value?.trim()) return undefined;
   if (value === 'azp' || value === 'client_id' || value === 'cid' || value === 'azp-or-client_id') return value;
   throw remoteMemoryError(
@@ -365,6 +434,7 @@ function legacyClientIdCompatibilityTimestamp(
   value: string | undefined,
   clientIdClaim: RemoteMemoryServiceConfig['accessTokenClientIdClaim'],
 ): string | undefined {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing for Date.parse and comparison.
   if (!value?.trim()) return undefined;
   if (clientIdClaim === undefined) {
     throw remoteMemoryError(
@@ -393,15 +463,15 @@ function isLoopbackHostname(hostname: string): boolean {
 }
 
 function isAbsoluteWorktree(path: string): boolean {
-  return path.startsWith('/') || /^[A-Za-z]:[\\/]/u.test(path);
+  return Effect.pipe(path, EffectString.startsWith('/')) || /^[A-Za-z]:[\\/]/u.test(path);
 }
 
 function gitRefName(value: string, key: string): string {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(value) ||
-    value.startsWith('-') ||
-    value.includes(':') ||
-    value.includes('..')
+    Effect.pipe(value, EffectString.startsWith('-')) ||
+    Effect.pipe(value, EffectString.includes(':')) ||
+    Effect.pipe(value, EffectString.includes('..'))
   ) {
     throw remoteMemoryError('invalid_request', `${key} must be a safe git refname.`);
   }
@@ -409,7 +479,12 @@ function gitRefName(value: string, key: string): string {
 }
 
 function canonicalStoreValue(value: string | undefined): RemoteMemoryCanonicalStore {
-  if (!value?.trim()) return 'postgres';
+  if (
+    !Effect.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    return 'postgres';
   if (value === 'git' || value === 'postgres') return value;
   throw remoteMemoryError('invalid_request', 'THREADNOTE_REMOTE_CANONICAL_STORE must be git or postgres.');
 }

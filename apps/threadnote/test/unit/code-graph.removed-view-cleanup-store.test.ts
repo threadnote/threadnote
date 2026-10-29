@@ -1,7 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {legacyCodeGraphAuthorityStatements} from '@threadnote/graph/test/helpers/code-graph-legacy-authority';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, DateTime, Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -11,17 +12,23 @@ import {
   CodeGraphStore,
   codeGraphRemovedViewCleanupAdmissionPageStatement,
   codeGraphRemovedViewCleanupDuePageStatement,
-  type CodeGraphRemovedViewCleanupEntry,
 } from '@threadnote/graph/store';
 import {CODE_GRAPH_EXTRACTOR_GENERATION, CodeGraphStoreError, type RepositoryIdentity} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
-const REPOSITORY_ID = 'b'.repeat(64);
-const WORKTREE_ID = 'c'.repeat(64);
-const OTHER_WORKTREE_ID = 'd'.repeat(64);
-const RECORD_DIGEST = 'e'.repeat(64);
-const RECORD_IDENTITY = 'f'.repeat(64);
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
+
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
+const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
+const WORKTREE_ID = Effect2.pipe('c', EffectString.repeat(64));
+const OTHER_WORKTREE_ID = Effect2.pipe('d', EffectString.repeat(64));
+const RECORD_DIGEST = Effect2.pipe('e', EffectString.repeat(64));
+const RECORD_IDENTITY = Effect2.pipe('f', EffectString.repeat(64));
 const SNAPSHOT_ID = 'cgsn_1111111111111111111111111111111111111111';
 const NEW_SNAPSHOT_ID = 'cgsn_2222222222222222222222222222222222222222';
 
@@ -170,10 +177,10 @@ describe('removed code graph view cleanup queue', () => {
           const database = new Database(databasePath, {readonly: true, strict: true});
           try {
             return {
-              columns: database
-                .query<{readonly name: string}, []>('PRAGMA table_info(snapshot_reuse_receipts)')
-                .all()
-                .map(row => row.name),
+              columns: EffectArray.map(
+                database.query<{readonly name: string}, []>('PRAGMA table_info(snapshot_reuse_receipts)').all(),
+                row => row.name,
+              ),
               revision: database
                 .query("SELECT value FROM schema_metadata WHERE key = 'persistent_extension_schema_revision'")
                 .get(),
@@ -324,22 +331,35 @@ describe('removed code graph view cleanup queue', () => {
 
         const cases = [
           {
-            mutate: (definition: string) => definition.replace("'vector-pointers'", "'VECTOR-POINTERS'"),
+            mutate: (definition: string) =>
+              Effect2.pipe(definition, EffectString.replace("'vector-pointers'", "'VECTOR-POINTERS'")),
             name: 'uppercase-phase-literal',
           },
           {
             mutate: (definition: string) =>
-              definition.replace('worktree_id TEXT NOT NULL CHECK', 'worktree_id TEXT NOT NULL COLLATE NOCASE CHECK'),
+              Effect2.pipe(
+                definition,
+                EffectString.replace(
+                  'worktree_id TEXT NOT NULL CHECK',
+                  'worktree_id TEXT NOT NULL COLLATE NOCASE CHECK',
+                ),
+              ),
             name: 'nocase-primary-key',
           },
           {
             mutate: (definition: string) =>
-              definition.replace('revision INTEGER NOT NULL CHECK', 'revision INTEGER NOT NULL DEFAULT 0 CHECK'),
+              Effect2.pipe(
+                definition,
+                EffectString.replace('revision INTEGER NOT NULL CHECK', 'revision INTEGER NOT NULL DEFAULT 0 CHECK'),
+              ),
             name: 'revision-default',
           },
           {
             mutate: (definition: string) =>
-              definition.replace(/\n\) WITHOUT ROWID$/u, ',\n  CHECK (length(worktree_id) = 64)\n) WITHOUT ROWID'),
+              Effect2.pipe(
+                definition,
+                EffectString.replace(/\n\) WITHOUT ROWID$/u, ',\n  CHECK (length(worktree_id) = 64)\n) WITHOUT ROWID'),
+              ),
             name: 'redundant-table-check',
           },
         ] as const;
@@ -516,8 +536,11 @@ describe('removed code graph view cleanup queue', () => {
         const finalB = yield* store.loadActiveViewFence(databasePath, WORKTREE_ID);
 
         expect(
-          [firstB!.activatedAt, removedB, activeA!.activatedAt, removedA, finalB!.activatedAt].map(Date.parse),
-        ).toEqual([0, 1, 2, 3, 4].map(offset => Date.parse(initialGeneration) + offset));
+          EffectArray.map(
+            [firstB!.activatedAt, removedB, activeA!.activatedAt, removedA, finalB!.activatedAt],
+            Date.parse,
+          ),
+        ).toEqual(EffectArray.map([0, 1, 2, 3, 4], offset => Date.parse(initialGeneration) + offset));
         expect(finalB).toMatchObject({snapshotId: NEW_SNAPSHOT_ID});
         expect(finalB!.activatedAt).not.toBe(firstB!.activatedAt);
       }),
@@ -670,7 +693,7 @@ describe('removed code graph view cleanup queue', () => {
 
         const advanced = yield* store.updateRemovedViewCleanup(databasePath, candidate, {
           attempts: 0,
-          cursorToken: 'model:' + '1'.repeat(64),
+          cursorToken: 'model:' + Effect2.pipe('1', EffectString.repeat(64)),
           nextAttemptAt: 2,
           phase: 'vector-pointers',
           updatedAt: DateTime.formatIso(DateTime.makeUnsafe(now + 1)),
@@ -685,7 +708,8 @@ describe('removed code graph view cleanup queue', () => {
           }),
         ).toEqual({state: 'stale'});
 
-        const current = (advanced as {readonly entry: CodeGraphRemovedViewCleanupEntry}).entry;
+        if (advanced.state !== 'updated') throw new Error('Expected the cleanup receipt to advance.');
+        const current = advanced.entry;
         yield* Effect.sync(() => legacyPromote(databasePath, WORKTREE_ID, NEW_SNAPSHOT_ID));
         expect(yield* store.authorizeRemovedViewCleanup(databasePath, current)).toEqual({
           observedSnapshotId: NEW_SNAPSHOT_ID,
@@ -721,7 +745,7 @@ describe('removed code graph view cleanup queue', () => {
         expect(candidate).toBeDefined();
         const update = {
           attempts: candidate.attempts,
-          cursorToken: `concurrent:${'1'.repeat(64)}`,
+          cursorToken: `concurrent:${Effect2.pipe('1', EffectString.repeat(64))}`,
           nextAttemptAt: candidate.nextAttemptAt,
           phase: candidate.phase,
           updatedAt: DateTime.formatIso(DateTime.makeUnsafe(Date.parse(candidate.updatedAt) + 1)),
@@ -733,7 +757,7 @@ describe('removed code graph view cleanup queue', () => {
           ],
           {concurrency: 'unbounded'},
         );
-        expect(results.map(result => result.state).sort()).toEqual(['stale', 'updated']);
+        expect(EffectArray.map(results, result => result.state).sort()).toEqual(['stale', 'updated']);
         expect(readCleanupRows(databasePath)).toEqual([
           expect.objectContaining({cursor_token: update.cursorToken, revision: candidate.revision + 1}),
         ]);
@@ -864,7 +888,11 @@ describe('removed code graph view cleanup queue', () => {
             );
             database.transaction(() => {
               for (let index = 0; index < 10_000; index += 1) {
-                insert.run(`lease-${String(index).padStart(5, '0')}`, SNAPSHOT_ID, expiresAt);
+                insert.run(
+                  `lease-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}`,
+                  SNAPSHOT_ID,
+                  expiresAt,
+                );
               }
             })();
           } finally {
@@ -926,15 +954,19 @@ describe('removed code graph view cleanup queue', () => {
         const plans = yield* Effect.sync(() => ({
           admission: queryPlan(
             databasePath,
-            codeGraphRemovedViewCleanupAdmissionPageStatement('0'.repeat(64), 'after', 32),
+            codeGraphRemovedViewCleanupAdmissionPageStatement(Effect2.pipe('0', EffectString.repeat(64)), 'after', 32),
           ),
           due: queryPlan(databasePath, codeGraphRemovedViewCleanupDuePageStatement(now, 32)),
         }));
-        expect(plans.admission.some(row => /PRIMARY KEY/u.test(row.detail))).toBe(true);
-        expect(plans.due.some(row => row.detail.includes('removed_view_cleanup_due'))).toBe(true);
-        expect([...plans.admission, ...plans.due].some(row => /TEMP B-TREE|SCAN cleanup/u.test(row.detail))).toBe(
-          false,
-        );
+        expect(EffectArray.some(plans.admission, row => /PRIMARY KEY/u.test(row.detail))).toBe(true);
+        expect(
+          EffectArray.some(plans.due, row =>
+            Effect2.pipe(row.detail, EffectString.includes('removed_view_cleanup_due')),
+          ),
+        ).toBe(true);
+        expect(
+          EffectArray.some([...plans.admission, ...plans.due], row => /TEMP B-TREE|SCAN cleanup/u.test(row.detail)),
+        ).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -1016,7 +1048,7 @@ describe('removed code graph view cleanup queue', () => {
                  ) VALUES (?, ?, ?, 1, NULL, NULL, NULL, 'complete', NULL, 0, 0, 0, NULL, ?)`,
               )
               .run(OTHER_WORKTREE_ID, NEW_SNAPSHOT_ID, removedAt, removedAt);
-            const planStatement = database.prepare(
+            const planStatement = database.prepare<{readonly detail: string}, [string, number]>(
               `EXPLAIN QUERY PLAN
                SELECT token
                FROM snapshot_leases INDEXED BY snapshot_leases_snapshot_expiry
@@ -1024,10 +1056,14 @@ describe('removed code graph view cleanup queue', () => {
                ORDER BY expires_at
                LIMIT 1`,
             );
-            const canonicalPlan = planStatement.all(SNAPSHOT_ID, 0) as readonly {readonly detail: string}[];
+            const canonicalPlan = planStatement.all(SNAPSHOT_ID, 0);
             planStatement.finalize();
-            expect(canonicalPlan.some(row => row.detail.includes('snapshot_leases_snapshot_expiry'))).toBe(true);
-            expect(canonicalPlan.some(row => /SCAN|TEMP B-TREE/iu.test(row.detail))).toBe(false);
+            expect(
+              EffectArray.some(canonicalPlan, row =>
+                Effect2.pipe(row.detail, EffectString.includes('snapshot_leases_snapshot_expiry')),
+              ),
+            ).toBe(true);
+            expect(EffectArray.some(canonicalPlan, row => /SCAN|TEMP B-TREE/iu.test(row.detail))).toBe(false);
             database.run('DROP INDEX snapshot_leases_snapshot_expiry');
 
             const mutations = [
@@ -1393,10 +1429,12 @@ function readCleanupDdlAuthoritySurface(databasePath: string) {
         .query('SELECT worktree_id, snapshot_id, activated_at FROM active_snapshots ORDER BY worktree_id')
         .all(),
       cleanup: database.query('SELECT * FROM removed_view_cleanup ORDER BY worktree_id, expected_snapshot_id').all(),
-      cleanupSql: (
+      cleanupSql: requiredRow(
         database
-          .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'removed_view_cleanup'")
-          .get() as {readonly sql: string}
+          .query<{readonly sql: string}, SQLQueryBindings[]>(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'removed_view_cleanup'",
+          )
+          .get(),
       ).sql,
       journal: database.query('PRAGMA journal_mode').get(),
       metadata: database.query('SELECT key, value FROM schema_metadata ORDER BY key').all(),
@@ -1413,12 +1451,14 @@ function readCleanupDdlAuthoritySurface(databasePath: string) {
 function readLeaseCarriers(databasePath: string): readonly string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database
-      .query<{readonly token: string}, []>(
-        'SELECT token FROM snapshot_leases WHERE retire_when_inactive = 1 ORDER BY token',
-      )
-      .all()
-      .map(row => row.token);
+    return EffectArray.map(
+      database
+        .query<{readonly token: string}, []>(
+          'SELECT token FROM snapshot_leases WHERE retire_when_inactive = 1 ORDER BY token',
+        )
+        .all(),
+      row => row.token,
+    );
   } finally {
     database.close(false);
   }
@@ -1443,9 +1483,14 @@ function queryPlan(
 ): readonly {readonly detail: string}[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-      readonly detail: string;
-    }[];
+    return database
+      .query<
+        {
+          readonly detail: string;
+        },
+        SQLQueryBindings[]
+      >(`EXPLAIN QUERY PLAN ${statement.text}`)
+      .all(...statement.parameters);
   } finally {
     database.close(false);
   }
@@ -1466,7 +1511,7 @@ function withFixture<A, E, R>(
         checkoutId: CHECKOUT_ID,
         displayName: 'fixture',
         gitCommonDirectory: path.join(root, '.git'),
-        headCommit: '1'.repeat(40),
+        headCommit: Effect2.pipe('1', EffectString.repeat(40)),
         objectFormat: 'sha1',
         repoRoot: root,
         repositoryId: REPOSITORY_ID,
@@ -1496,8 +1541,8 @@ function seedSnapshot(database: Database, snapshotId: string, worktreeId: string
       snapshotId,
       REPOSITORY_ID,
       worktreeId,
-      '1'.repeat(40),
-      `cgc_${snapshotId.slice(-40)}`,
+      Effect2.pipe('1', EffectString.repeat(40)),
+      `cgc_${Effect2.pipe(snapshotId, EffectString.slice(-40))}`,
       state,
       new Date(0).toISOString(),
       state === 'ready' ? new Date(0).toISOString() : null,
@@ -1526,7 +1571,7 @@ function readCleanupRows(databasePath: string): readonly Record<string, unknown>
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     return database
-      .query(
+      .query<Record<string, unknown>, SQLQueryBindings[]>(
         `SELECT worktree_id, expected_snapshot_id, repository_id,
                 provenance_record_digest, provenance_record_identity,
                 phase, cursor_token, revision, attempts, next_attempt_at,
@@ -1534,7 +1579,7 @@ function readCleanupRows(databasePath: string): readonly Record<string, unknown>
          FROM removed_view_cleanup
          ORDER BY worktree_id, expected_snapshot_id`,
       )
-      .all() as readonly Record<string, unknown>[];
+      .all();
   } finally {
     database.close(false);
   }

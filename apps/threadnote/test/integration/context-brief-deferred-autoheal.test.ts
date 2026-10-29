@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -125,8 +126,10 @@ describe('Context Brief deferred code-anchor recovery', () => {
               'v1',
             );
             expect(
-              (yield* fs.readDirectory(pendingRoot, {recursive: true})).filter(name =>
-                isDeferredCodeAnchorIntentFilename(path.basename(name)),
+              EffectArray.filter(
+                yield* fs.readDirectory(pendingRoot, {recursive: true}),
+                __effectArrayValue =>
+                  !!(name => isDeferredCodeAnchorIntentFilename(path.basename(name)))(__effectArrayValue),
               ),
             ).toHaveLength(1);
 
@@ -177,7 +180,7 @@ describe('Context Brief deferred code-anchor recovery', () => {
               requested: 1,
               resolved: 1,
             });
-            const receiptStates = receipts.map(receipt => receipt.state);
+            const receiptStates = EffectArray.map(receipts, receipt => receipt.state);
             if (interruptFirstAdmission) {
               expect(receiptStates).toEqual(['contended', 'completed']);
             } else {
@@ -194,8 +197,10 @@ describe('Context Brief deferred code-anchor recovery', () => {
               },
             ]);
             expect(
-              (yield* fs.readDirectory(pendingRoot, {recursive: true})).filter(name =>
-                isDeferredCodeAnchorIntentFilename(path.basename(name)),
+              EffectArray.filter(
+                yield* fs.readDirectory(pendingRoot, {recursive: true}),
+                __effectArrayValue =>
+                  !!(name => isDeferredCodeAnchorIntentFilename(path.basename(name)))(__effectArrayValue),
               ),
             ).toEqual([]);
             const finalized = parseMemoryDocument(memoryUri, yield* store.read(location, memoryUri));
@@ -211,10 +216,12 @@ describe('Context Brief deferred code-anchor recovery', () => {
             const second = yield* retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors).pipe(
               TestClock.withLive,
             );
-            expect(second.candidates.map(candidate => candidate.uri)).toEqual([memoryUri]);
+            expect(EffectArray.map(second.candidates, candidate => candidate.uri)).toEqual([memoryUri]);
             expect(
-              (yield* fs.readDirectory(pendingRoot, {recursive: true})).filter(name =>
-                isDeferredCodeAnchorIntentFilename(path.basename(name)),
+              EffectArray.filter(
+                yield* fs.readDirectory(pendingRoot, {recursive: true}),
+                __effectArrayValue =>
+                  !!(name => isDeferredCodeAnchorIntentFilename(path.basename(name)))(__effectArrayValue),
               ),
             ).toEqual([]);
           }),

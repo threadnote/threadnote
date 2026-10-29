@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Exit, FileSystem, Path} from 'effect';
@@ -6,9 +7,11 @@ import {describe, expect, it} from 'vitest';
 import {
   CONTEXT_BRIEF_MAXIMUM_CODE_REFS,
   CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS,
-  type ProjectedContextBriefV1,
+  CONTEXT_BRIEF_VERSION,
+  type ContextBriefLogicalResultV1,
 } from '@threadnote/context/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {projectContextBrief} from '@threadnote/context/projector';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {formatMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
@@ -32,6 +35,8 @@ import {loadRecallIndex} from '@threadnote/recall/index';
 import {MemoryIdentityResolutionError} from '@threadnote/recall/memory/identity';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const runtime: RuntimeConfig = {
   account: 'local',
@@ -47,7 +52,7 @@ describe('Manager Context Brief input', () => {
       managerContextBriefInput({
         budgetTokens: CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS,
         callerCwd: '/private/project',
-        codeRefs: ['src/service.ts', 'src/service.ts', `cgs_${'a'.repeat(32)}`],
+        codeRefs: ['src/service.ts', 'src/service.ts', `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`],
         detail: 'source',
         mode: 'impact',
         project: ' threadnote ',
@@ -55,7 +60,7 @@ describe('Manager Context Brief input', () => {
       }),
     ).toEqual({
       budgetTokens: CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS,
-      codeRefs: ['src/service.ts', `cgs_${'a'.repeat(32)}`],
+      codeRefs: ['src/service.ts', `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`],
       detail: 'source',
       mode: 'impact',
       responseFormat: 'agent',
@@ -89,7 +94,7 @@ describe('Manager Context Brief input', () => {
       `codeRefs may contain at most ${CONTEXT_BRIEF_MAXIMUM_CODE_REFS} entries`,
     ],
     [{callerCwd: '/private/project', task: `unsafe\u0000task`}, 'without control characters'],
-    [{callerCwd: '/private/project', task: 'a'.repeat(4_097)}, 'bounded text'],
+    [{callerCwd: '/private/project', task: Effect2.pipe('a', EffectString.repeat(4_097))}, 'bounded text'],
   ] satisfies readonly (readonly [Record<string, unknown>, string])[])(
     'rejects an invalid bounded request %#',
     (body, message) => {
@@ -101,7 +106,55 @@ describe('Manager Context Brief input', () => {
 describe('Manager context API adapter', () => {
   effectIt.effect('routes each typed POST operation through its injected Effect implementation', () =>
     Effect.gen(function* () {
-      const projected = {text: 'compiled'} as ProjectedContextBriefV1;
+      const logicalBrief = {
+        coverage: {
+          gaps: [],
+          graph: {
+            complete: true,
+            consideredRepositories: 0,
+            readyRepositories: 0,
+            requestedRepositories: 0,
+            states: {},
+          },
+          memory: {consideredCandidates: 0, durableCandidates: 0, fresh: 0, handoffCandidates: 0, stale: 0, unknown: 0},
+        },
+        durableDecisions: [],
+        recommendedFollowUps: [],
+        graph: {
+          cards: [],
+          contracts: [],
+          coverage: {
+            complete: true,
+            consideredRepositories: 0,
+            readyRepositories: 0,
+            requestedRepositories: 0,
+            states: {},
+          },
+          gaps: [],
+          resolvedSnapshots: [],
+          trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
+          warnings: [],
+        },
+        activeHandoffs: [],
+        stalenessAndConflicts: [],
+        mode: 'brief',
+        scope: {
+          freshness: 'fresh',
+          kind: 'repository',
+          name: 'fixture',
+          readyRepositories: 0,
+          requestedRepositories: 0,
+        },
+        task: 'compiled',
+        trust: {
+          compiler: {modelsRequired: false, queryPlanExposed: false},
+          graph: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
+          memory: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+        },
+        type: 'context-brief',
+        version: CONTEXT_BRIEF_VERSION,
+      } satisfies ContextBriefLogicalResultV1;
+      const projected = projectContextBrief(logicalBrief);
       const recalled = {
         request: {includeArchived: false, query: 'manager context'},
         queryExpansions: [],
@@ -247,7 +300,7 @@ describe('Manager context API adapter', () => {
         method: 'POST',
         readContext: () =>
           Effect.fail(
-            new MemoryPointerNotFound({message: `Memory resource does not exist: ${missingUri}`, uri: missingUri}),
+            MemoryPointerNotFound.make({message: `Memory resource does not exist: ${missingUri}`, uri: missingUri}),
           ),
         url: new URL('http://manager.test/api/context/read'),
       });
@@ -343,15 +396,18 @@ describe('Manager context backends', () => {
       const fs = yield* FileSystem.FileSystem;
       yield* fs.writeFileString(
         fixture.config.manifestPath,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: threadnote',
-          `    path: ${fixture.location.home}`,
-          '    uri: threadnote://resources/repos/threadnote',
-          '    seed: []',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: threadnote',
+            `    path: ${fixture.location.home}`,
+            '    uri: threadnote://resources/repos/threadnote',
+            '    seed: []',
+            '',
+          ],
+          '\n',
+        ),
       );
       for (let index = 0; index < 10; index += 1) {
         yield* runRemember(fixture.config, {
@@ -374,13 +430,17 @@ describe('Manager context backends', () => {
         query: 'MGRPAGING9 stable threadnote Manager recall contract',
       });
       expect(result.results.length).toBeGreaterThan(8);
-      expect(result.results.map(candidate => candidate.rank)).toEqual(
+      expect(EffectArray.map(result.results, candidate => candidate.rank)).toEqual(
         Array.from({length: result.results.length}, (_, index) => index + 1),
       );
-      expect(new Set(result.results.map(candidate => candidate.metadata?.topic))).toEqual(
+      expect(new Set(EffectArray.map(result.results, candidate => candidate.metadata?.topic))).toEqual(
         new Set(Array.from({length: 10}, (_, index) => `manager-recall-${index}`)),
       );
-      expect(result.results.every(candidate => candidate.snippet.includes('MGRPAGING9'))).toBe(true);
+      expect(
+        EffectArray.every(result.results, candidate =>
+          Effect2.pipe(candidate.snippet, EffectString.includes('MGRPAGING9')),
+        ),
+      ).toBe(true);
       expect(result.resultSet).toEqual({
         availableResults: result.results.length,
         maximumResults: 48,
@@ -395,7 +455,7 @@ describe('Manager context backends', () => {
       const fixture = yield* managerContextFixture('read');
       const sourceUri = 'threadnote://user/test-user/memories/durable/projects/threadnote/manager-context-source.md';
       const targetUri = 'threadnote://user/test-user/memories/durable/projects/threadnote/manager-context-target.md';
-      const body = `${'Canonical relocated Manager context. '.repeat(500)}😀 end`;
+      const body = `${Effect2.pipe('Canonical relocated Manager context. ', EffectString.repeat(500))}😀 end`;
       const content = managerMemoryContent('tn_manager_relocated', 'manager-context-target', body);
       yield* fixture.store.write(fixture.location, sourceUri, content, {mode: 'create'});
       yield* fixture.store.write(fixture.location, targetUri, content, {mode: 'create'});
@@ -493,7 +553,17 @@ describe('Manager UTF-8 context paging', () => {
         fc.integer({max: 100, min: 0}),
         fc.integer({max: 12, min: 1}),
         (length, requestedPage, pageSize) => {
-          const results = Array.from({length}, (_, index) => ({rank: index + 1}) as ManagerRecallResult);
+          const results: ManagerRecallResult[] = Array.from({length}, (_, index) => ({
+            canonicalUri: `threadnote://user/test-user/memories/durable/projects/fixture/${index}.md`,
+            category: 'memories',
+            contextType: 'memory',
+            rank: index + 1,
+            readState: 'unread',
+            reason: 'Fixture result for deterministic paging.',
+            requestedUri: `threadnote://user/test-user/memories/durable/projects/fixture/${index}.md`,
+            snippet: `Memory ${index + 1}`,
+            warnings: [],
+          }));
           const projection = projectManagerRecallPage(results, requestedPage, pageSize);
           const expectedPageCount = Math.max(1, Math.ceil(length / pageSize));
           const expectedIndex = Math.min(requestedPage, expectedPageCount - 1);
@@ -501,8 +571,11 @@ describe('Manager UTF-8 context paging', () => {
           expect(projection).toEqual(projectManagerRecallPage(results, requestedPage, pageSize));
           expect(projection.pageCount).toBe(expectedPageCount);
           expect(projection.index).toBe(expectedIndex);
-          expect(projection.results.map(result => result.rank)).toEqual(
-            results.slice(expectedIndex * pageSize, (expectedIndex + 1) * pageSize).map(result => result.rank),
+          expect(EffectArray.map(projection.results, result => result.rank)).toEqual(
+            EffectArray.map(
+              results.slice(expectedIndex * pageSize, (expectedIndex + 1) * pageSize),
+              result => result.rank,
+            ),
           );
           expect(projection.hasPrevious).toBe(expectedIndex > 0);
           expect(projection.hasNext).toBe(expectedIndex + 1 < expectedPageCount);
@@ -527,7 +600,7 @@ describe('Manager UTF-8 context paging', () => {
         const pages = chunkUtf8(content, maximumBytes);
 
         expect(pages).toEqual(chunkUtf8(content, maximumBytes));
-        expect(pages.join('')).toBe(content);
+        expect(EffectArray.join(pages, '')).toBe(content);
         expect(pages.length).toBeGreaterThan(0);
         for (const page of pages) {
           expect(new TextEncoder().encode(page).byteLength).toBeLessThanOrEqual(maximumBytes);

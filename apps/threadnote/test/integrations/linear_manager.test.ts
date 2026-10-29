@@ -11,6 +11,8 @@ import {loadExternalResourceAccess} from '@threadnote/store/external-resource';
 import {readSourceConfiguration} from '@threadnote/threadnote/integrations/config';
 import {provideLayer} from './linear-layer.js';
 import {safeFetch, source} from './linear-fixtures.js';
+import * as EffectRecord from 'effect/Record';
+
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'linear-manager-'}));
@@ -60,7 +62,7 @@ describe('Linear Manager backend composition', () => {
         }),
       );
       const location = {home: config.agentContextHome, account: config.account, user: config.user};
-      expect(Object.keys(yield* loadExternalResourceAccess(location))).not.toEqual([]);
+      expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).not.toEqual([]);
       const paused = yield* handleManagerLinearIntegrationRequest(
         request(config, {action: 'set-enabled', id: source.id, enabled: false, apply: true, confirm: true}),
       );
@@ -69,7 +71,7 @@ describe('Linear Manager backend composition', () => {
       yield* handleManagerLinearIntegrationRequest(
         request(config, {action: 'set-enabled', id: source.id, enabled: true, apply: true, confirm: true}),
       );
-      expect(Object.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
+      expect(EffectRecord.keys(yield* loadExternalResourceAccess(location))).toEqual([]);
       expect(
         (yield* handleManagerLinearIntegrationRequest(
           request(config, {action: 'remove-source', id: source.id, apply: true, confirm: true}),

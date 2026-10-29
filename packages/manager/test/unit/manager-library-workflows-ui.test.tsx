@@ -1,7 +1,10 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {afterEach, expect, it, vi} from 'vitest';
 import type {TreeNode} from '../../src/ui/contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 vi.mock('../../src/memory_editor.js', () => ({
   MemoryEditor: (props: {content: string; disabled: boolean; onChange: (value: string) => void}) => (
@@ -60,17 +63,30 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
     // Exercise the explicit REST compatibility path in this library fixture.
     if (url.pathname === '/api/live-session')
       return new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404});
-    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+    const body = init?.body
+      ? Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(JSON.parse(String(init.body)))
+      : {};
     if (init?.body) posts.push({path: url.pathname, body});
+    if (url.pathname === '/api/processes') return json({processes: [], schemaVersion: 1, truncated: false});
     if (url.pathname === '/api/state')
       return json({
         agents: [],
-        config: {user: 'test', account: 'local'},
+        config: {user: 'test', account: 'local', agentContextHome: '/tmp/threadnote-test'},
         autoUpdate: {effectivePolicy: 'notify'},
+        updateAvailable: false,
         version: 'fixture',
       });
     if (url.pathname === '/api/tree')
       return json({
+        resourcesTree: {
+          name: 'resources',
+          uri: 'threadnote://resources',
+          relativePath: '',
+          isDir: true,
+          isSystem: true,
+          isShared: false,
+          children: [],
+        },
         tree: {
           ...leaf('memories'),
           uri: rootUri,
@@ -79,7 +95,8 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
           children: [{...leaf('project'), relativePath: 'durable/projects/project', isDir: true, children: leaves}],
         },
       });
-    if (url.pathname === '/api/graphs') return json({repositories: [], builds: [], diagnostics: [], views: []});
+    if (url.pathname === '/api/graphs')
+      return json({repositories: [], builds: [], diagnostics: [], waiterCount: 0, waiters: []});
     if (url.pathname === '/api/shares') return json({shares: []});
     if (url.pathname === '/api/home')
       return json({
@@ -93,7 +110,7 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
       const before = leaves;
       leaves = leaves.slice(1);
       return json({
-        results: before.map((node, index) => ({
+        results: EffectArray.map(before, (node, index) => ({
           uri: node.uri,
           ok: index === 0,
           ...(index ? {error: 'synthetic failure'} : {}),
@@ -105,8 +122,11 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
       return json({output: `Stored ${leaves.at(-1)!.uri}`});
     }
     if (url.pathname === '/api/memory') {
-      const node = leaves.find(item => item.uri === url.searchParams.get('uri'));
-      return json({node, content: 'MEMORY\nkind: durable\n\nSaved body', record: {metadata: node?.metadata}});
+      const node = EffectOption.getOrUndefined(
+        EffectArray.findFirst(leaves, item => item.uri === url.searchParams.get('uri')),
+      );
+      const content = 'MEMORY\nkind: durable\n\nSaved body';
+      return json({node, content, record: {metadata: node?.metadata, body: content, content, uri: node?.uri}});
     }
     return json({});
   });
@@ -126,8 +146,14 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
     projectSelector.dispatchEvent(new Event('change', {bubbles: true}));
   });
   const button = (label: string) =>
-    [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-      item => item.textContent?.trim() === label || item.querySelector('strong')?.textContent === label,
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('button')],
+        item =>
+          Effect.pipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+          ) === label || item.querySelector('strong')?.textContent === label,
+      ),
     )!;
   await act(async () => button('Library').click());
   expect(container.textContent).toContain('Your private memory library');
@@ -142,10 +168,9 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
   await act(async () => button('Forget…').click());
   expect(document.querySelector('dialog')?.textContent).toContain('two.md');
   await act(async () => document.querySelector<HTMLButtonElement>('dialog button[type="submit"]')!.click());
-  expect(posts.find(post => post.path === '/api/bulk')?.body.uris).toEqual([
-    `${rootUri}/durable/projects/project/one.md`,
-    `${rootUri}/durable/projects/project/two.md`,
-  ]);
+  expect(
+    EffectOption.getOrUndefined(EffectArray.findFirst(posts, post => post.path === '/api/bulk'))?.body.uris,
+  ).toEqual([`${rootUri}/durable/projects/project/one.md`, `${rootUri}/durable/projects/project/two.md`]);
   expect(container.textContent).toContain('1 memory selected');
   expect(container.textContent).toContain('synthetic failure');
   await act(async () => button('Home').click());
@@ -155,7 +180,9 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
   const savedBody = '# Saved body\n\n```mermaid\nflowchart LR\n A-->B\n```';
   await fill(container.querySelector<HTMLTextAreaElement>('[aria-label="Test Markdown editor"]')!, savedBody);
   await act(async () => button('Save memory').click());
-  expect(posts.find(post => post.path === '/api/memory/save')?.body).toMatchObject({
+  expect(
+    EffectOption.getOrUndefined(EffectArray.findFirst(posts, post => post.path === '/api/memory/save'))?.body,
+  ).toMatchObject({
     text: savedBody,
     topic: 'New memory',
     project: 'project',
@@ -179,8 +206,8 @@ it('preserves an independent unsaved draft when an automatic update is applied a
   vi.spyOn(window, 'setInterval').mockImplementation(() => setTimeout(() => undefined, 0));
   const rootUri = 'threadnote://user/test/memories';
   const uri = `${rootUri}/durable/projects/project/ordinary.md`;
-  const hash = 'a'.repeat(64);
-  const reviewId = `review-${'a'.repeat(24)}`;
+  const hash = Effect.pipe('a', EffectString.repeat(64));
+  const reviewId = `review-${Effect.pipe('a', EffectString.repeat(24))}`;
   const node: TreeNode = {
     name: 'ordinary.md',
     uri,
@@ -214,7 +241,28 @@ it('preserves an independent unsaved draft when an automatic update is applied a
     evidenceRevision: hash,
     purpose: 'automatic',
     acceptedBody: 'Accepted prose.',
-    proposal: {body: 'Automatically updated prose.', draft: {paragraphDecisions: [], rationale: 'Updated source.'}},
+    proposal: {
+      version: 2,
+      kind: 'automatic',
+      body: updated,
+      finalBodyHash: hash,
+      changedOrdinals: [],
+      draft: {
+        version: 2,
+        kind: 'automatic',
+        purpose: 'automatic',
+        paragraphDecisions: [],
+        targetHash: hash,
+        observationRevision: hash,
+        packetDigest: hash,
+        outcome: 'propose-update',
+        operations: [],
+        reviewedHandles: [],
+        rationale: 'Updated source.',
+        unresolvedQuestions: [],
+        removedClaims: [],
+      },
+    },
     sourceEvidence: [],
     coverage,
     canApply: false,
@@ -228,7 +276,23 @@ it('preserves an independent unsaved draft when an automatic update is applied a
     content: updated,
     contentHash: hash,
     metadataDiff: [],
-    reviewedSupport: {},
+    reviewedSupport: {
+      type: 'reviewed-memory-support',
+      version: 1,
+      active: {
+        bodyHash: hash,
+        paragraphs: [],
+        sources: [],
+        acceptance: {
+          reviewId,
+          approvedAt: '2026-10-22T00:00:00Z',
+          targetBeforeHash: hash,
+          preparationDigest: hash,
+          sourceVectorDigest: hash,
+        },
+        digest: hash,
+      },
+    },
   };
   let current: Record<string, unknown> = pendingReview;
   const actions: Record<string, unknown>[] = [];
@@ -238,20 +302,39 @@ it('preserves an independent unsaved draft when an automatic update is applied a
     // Exercise the explicit REST compatibility path in this library fixture.
     if (url.pathname === '/api/live-session')
       return new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404});
+    if (url.pathname === '/api/processes') return json({processes: [], schemaVersion: 1, truncated: false});
     if (url.pathname === '/api/state')
       return json({
         agents: [],
-        config: {user: 'test', account: 'local'},
+        config: {user: 'test', account: 'local', agentContextHome: '/tmp/threadnote-test'},
         autoUpdate: {effectivePolicy: 'notify'},
+        updateAvailable: false,
         version: 'fixture',
       });
     if (url.pathname === '/api/tree')
-      return json({tree: {...node, name: 'memories', uri: rootUri, relativePath: '', isDir: true, children: [node]}});
-    if (url.pathname === '/api/graphs') return json({repositories: [], builds: [], diagnostics: [], views: []});
+      return json({
+        resourcesTree: {
+          name: 'resources',
+          uri: 'threadnote://resources',
+          relativePath: '',
+          isDir: true,
+          isSystem: true,
+          isShared: false,
+          children: [],
+        },
+        tree: {...node, name: 'memories', uri: rootUri, relativePath: '', isDir: true, children: [node]},
+      });
+    if (url.pathname === '/api/graphs')
+      return json({repositories: [], builds: [], diagnostics: [], waiterCount: 0, waiters: []});
     if (url.pathname === '/api/shares') return json({shares: []});
     if (url.pathname === '/api/home')
       return json({version: 1, project: '', lanes: [], handoffs: [], stats: {memories: 1}});
-    if (url.pathname === '/api/memory') return json({node, content: canonical, record: {metadata: node.metadata}});
+    if (url.pathname === '/api/memory')
+      return json({
+        node,
+        content: canonical,
+        record: {metadata: node.metadata, body: canonical, content: canonical, uri: node.uri},
+      });
     if (url.pathname === '/api/attention/automatic-memory')
       return json({
         version: 1,
@@ -276,7 +359,9 @@ it('preserves an independent unsaved draft when an automatic update is applied a
       });
     if (url.pathname === '/api/attention/automatic-review') {
       if (init?.body) {
-        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const body = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(
+          JSON.parse(String(init.body)),
+        );
         actions.push(body);
         if (body.action === 'preview') current = {...pendingReview, revision: 2, approval, canApply: true};
         if (body.action === 'apply') {
@@ -299,8 +384,14 @@ it('preserves an independent unsaved draft when an automatic update is applied a
   document.body.append(container);
   await act(async () => (await import('../../src/ui.js')).mountManager({integrations: []}));
   const button = (label: string) =>
-    [...container.querySelectorAll<HTMLButtonElement>('button')].find(
-      item => item.textContent?.trim() === label || item.querySelector('strong')?.textContent === label,
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...container.querySelectorAll<HTMLButtonElement>('button')],
+        item =>
+          Effect.pipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+          ) === label || item.querySelector('strong')?.textContent === label,
+      ),
     )!;
   const click = async (label: string) => {
     await act(async () => button(label).click());
@@ -311,10 +402,26 @@ it('preserves an independent unsaved draft when an automatic update is applied a
   await fill(container.querySelector<HTMLTextAreaElement>('[aria-label="Test Markdown editor"]')!, authored);
   await click('Back to Library');
   await click('Review update');
+  await act(async () => {
+    for (
+      let attempt = 0;
+      attempt < 100 && container.querySelector('.automatic-review-exact pre')?.textContent !== updated;
+      attempt++
+    )
+      await Effect.Effect.runPromise(Effect.Effect.sleep('1 millis'));
+  });
   expect(container.querySelector('.automatic-review-exact pre')?.textContent).toBe(updated);
   expect(canonical).toBe(accepted);
   expect(button('Apply update').disabled).toBe(false);
   await click('Apply update');
+  await act(async () => {
+    for (
+      let attempt = 0;
+      attempt < 100 && container.querySelector('.manager-draft-reconcile pre')?.textContent !== updated;
+      attempt++
+    )
+      await Effect.Effect.runPromise(Effect.Effect.sleep('1 millis'));
+  });
   expect(actions).toEqual([
     {action: 'preview', project: 'project', reviewId, revision: 1},
     {action: 'apply', project: 'project', reviewId, revision: 2, approvalDigest: hash, approved: true},

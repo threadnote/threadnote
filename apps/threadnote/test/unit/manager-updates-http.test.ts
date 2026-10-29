@@ -1,8 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {testHttpFetch} from '@threadnote/testing/http-fetch';
-import {Effect, Scope} from 'effect';
+import {Effect, Schema, Scope} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
@@ -13,6 +14,8 @@ import {ManagerLiveConsumerChangeHints} from '../../src/manager/live_consumer_ob
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const mock = vi.hoisted(() => ({
   running: '5.1.0',
@@ -91,13 +94,50 @@ afterEach(async () => {
   await server?.close();
   if (home) await rm(home, {recursive: true, force: true});
 });
+const runtimeNotesSchema = Schema.Struct({body: Schema.String, title: Schema.String, version: Schema.String});
+const runtimeUpdatesSchema = Schema.Struct({
+  installedVersion: Schema.String,
+  runningVersion: Schema.String,
+  channel: Schema.Literals(['latest', 'beta']),
+  developmentBuild: Schema.Boolean,
+  restartRequired: Schema.Boolean,
+  policy: Schema.Literals(['automatic', 'notify']),
+  policyManaged: Schema.Boolean,
+  automaticRunning: Schema.Boolean,
+  automaticFailure: Schema.optional(Schema.String),
+  latestVersion: Schema.optional(Schema.String),
+  updateAvailable: Schema.Boolean,
+  checkedAt: Schema.optional(Schema.String),
+  checkError: Schema.optional(Schema.String),
+  notesError: Schema.optional(Schema.String),
+  installedNotes: Schema.Array(runtimeNotesSchema),
+  availableNotes: Schema.Array(runtimeNotesSchema),
+  job: Schema.optional(
+    Schema.Struct({
+      status: Schema.Literals(['running', 'completed', 'failed']),
+      message: Schema.String,
+      output: Schema.optional(Schema.String),
+    }),
+  ),
+});
+const runtimeUpdateErrorSchema = Schema.Struct({error: Schema.String});
+
+function parseRuntimeUpdates(value: unknown): RuntimeUpdates {
+  if (!Schema.is(runtimeUpdatesSchema)(value))
+    throw TestError.make({message: 'Expected a validated runtime update response.'});
+  return value;
+}
+
 async function request(body?: Record<string, unknown>, statusOnly = false) {
   const result = await testHttpFetch(server.url + '/api/runtime/updates' + (statusOnly ? '?view=status' : ''), {
     method: body ? 'POST' : 'GET',
     headers: {authorization: 'Bearer ' + token, 'content-type': 'application/json'},
     ...(body ? {body: JSON.stringify(body)} : {}),
   });
-  return {status: result.status, body: (await result.json()) as RuntimeUpdates & {error?: string}};
+  const response: unknown = await result.json();
+  if (!Schema.is(runtimeUpdatesSchema)(response) && !Schema.is(runtimeUpdateErrorSchema)(response))
+    throw TestError.make({message: 'Expected a runtime update success or error response.'});
+  return {status: result.status, body: response};
 }
 
 // These exercise the authenticated HTTP boundary. Release discovery and installation
@@ -109,9 +149,12 @@ it('uses CLI note selectors, caches tab reads, and keeps status polls offline', 
   await request(undefined, true);
   expect(mock.latest).not.toHaveBeenCalled();
   const first = await request();
-  expect(first.body.installedNotes.map(note => note.version)).toEqual(['5.1.0']);
-  expect(first.body.availableNotes.map(note => note.version)).toEqual(['5.1.1', '5.1.2']);
-  expect(first.body.updateAvailable).toBe(true);
+  expect(EffectArray.map(parseRuntimeUpdates(first.body).installedNotes, note => note.version)).toEqual(['5.1.0']);
+  expect(EffectArray.map(parseRuntimeUpdates(first.body).availableNotes, note => note.version)).toEqual([
+    '5.1.1',
+    '5.1.2',
+  ]);
+  expect(parseRuntimeUpdates(first.body).updateAvailable).toBe(true);
   await request();
   await request(undefined, true);
   expect(mock.latest).toHaveBeenCalledOnce();
@@ -125,8 +168,10 @@ it('uses CLI note selectors, caches tab reads, and keeps status polls offline', 
 it('persists explicit policy choices and respects environment-managed policy', async () => {
   expect((await request({action: 'policy', policy: 'notify'})).status).toBe(400);
   expect(mock.setPolicy).not.toHaveBeenCalled();
-  expect((await request({action: 'policy', policy: 'notify', confirm: true})).body.policy).toBe('notify');
-  expect((await request(undefined, true)).body.policy).toBe('notify');
+  expect(parseRuntimeUpdates((await request({action: 'policy', policy: 'notify', confirm: true})).body).policy).toBe(
+    'notify',
+  );
+  expect(parseRuntimeUpdates((await request(undefined, true)).body).policy).toBe('notify');
   mock.managed = true;
   expect((await request({action: 'policy', policy: 'automatic', confirm: true})).status).toBe(409);
   expect(mock.setPolicy).toHaveBeenCalledExactlyOnceWith('notify');
@@ -149,15 +194,17 @@ it('retains a single update job across requests and reports the actual installed
   expect((await request({action: 'update'})).status).toBe(400);
   const started = await request({action: 'update', confirm: true});
   expect(started.status).toBe(202);
-  expect(started.body.job?.status).toBe('running');
+  expect(parseRuntimeUpdates(started.body).job?.status).toBe('running');
   await request({action: 'update', confirm: true});
   expect(mock.update).toHaveBeenCalledOnce();
   expect(mock.update.mock.calls[0]?.[1]).toEqual({yes: true});
-  expect((await request(undefined, true)).body.job?.status).toBe('running');
+  expect(parseRuntimeUpdates((await request(undefined, true)).body).job?.status).toBe('running');
   expect(mock.latest).not.toHaveBeenCalled();
   finish();
-  await expect.poll(async () => (await request(undefined, true)).body.job?.status).toBe('completed');
-  const completed = (await request(undefined, true)).body;
+  await expect
+    .poll(async () => parseRuntimeUpdates((await request(undefined, true)).body).job?.status)
+    .toBe('completed');
+  const completed = parseRuntimeUpdates((await request(undefined, true)).body);
   expect(completed.installedVersion).toBe('5.1.2');
   expect(completed.runningVersion).toBe('5.1.0');
   expect(completed.restartRequired).toBe(true);
@@ -166,16 +213,16 @@ it('retains a single update job across requests and reports the actual installed
 
 it('reports failed checks and installs without claiming success, and can retry', async () => {
   mock.latest.mockImplementation(() => Effect.fail(TestError.make({message: 'Release service unavailable'})));
-  const failed = (await request()).body;
+  const failed = parseRuntimeUpdates((await request()).body);
   expect(failed.checkError).toContain('Release service unavailable');
   expect(failed.updateAvailable).toBe(false);
   expect(failed.installedNotes).toHaveLength(1);
   mock.update.mockImplementation(() => Effect.fail(TestError.make({message: 'Download failed'})));
   await request({action: 'update', confirm: true});
-  await expect.poll(async () => (await request(undefined, true)).body.job?.status).toBe('failed');
-  expect((await request(undefined, true)).body.job?.message).toBe('Download failed');
+  await expect.poll(async () => parseRuntimeUpdates((await request(undefined, true)).body).job?.status).toBe('failed');
+  expect(parseRuntimeUpdates((await request(undefined, true)).body).job?.message).toBe('Download failed');
   mock.latest.mockImplementation(() => Effect.succeed('5.1.2'));
-  expect((await request({action: 'check'})).body.updateAvailable).toBe(true);
+  expect(parseRuntimeUpdates((await request({action: 'check'})).body).updateAvailable).toBe(true);
 });
 
 it('uses the beta channel and prevents replacing development installations', async () => {
@@ -183,8 +230,8 @@ it('uses the beta channel and prevents replacing development installations', asy
   await request();
   expect(mock.latest.mock.calls[0]?.[1]).toBe('beta');
   expect(mock.notes).toHaveBeenCalledWith({includePrereleases: true});
-  mock.installed = '5.2.0-local.g' + 'a'.repeat(40);
-  const development = (await request(undefined, true)).body;
+  mock.installed = '5.2.0-local.g' + Effect2.pipe('a', EffectString.repeat(40));
+  const development = parseRuntimeUpdates((await request(undefined, true)).body);
   expect(development.developmentBuild).toBe(true);
   expect(development.updateAvailable).toBe(false);
   expect((await request({action: 'update', confirm: true})).status).toBe(409);
@@ -216,7 +263,7 @@ effectIt.effect('publishes runtime policy, check, and both update terminal trans
         Effect.gen(function* () {
           expect(resource).toEqual({topic: 'runtime-updates', scope: 'account'});
           const result = yield* call('GET').pipe(provideTestLayer(ApplicationLayer), Effect.orDie);
-          const status = result?.body as RuntimeUpdates;
+          const status = parseRuntimeUpdates(result?.body);
           observed.push({job: status.job?.status, policy: status.policy, checked: status.checkedAt !== undefined});
         }),
     });
@@ -226,13 +273,13 @@ effectIt.effect('publishes runtime policy, check, and both update terminal trans
       expect((yield* call('POST', {action: 'check'}))?.status).toBe(200);
       expect(observed.at(-1)).toMatchObject({checked: true});
       expect((yield* call('POST', {action: 'update', confirm: true}))?.status).toBe(202);
-      expect(observed.some(item => item.job === 'running')).toBe(true);
-      for (let attempt = 0; attempt < 50 && !observed.some(item => item.job === 'completed'); attempt++)
+      expect(EffectArray.some(observed, item => item.job === 'running')).toBe(true);
+      for (let attempt = 0; attempt < 50 && !EffectArray.some(observed, item => item.job === 'completed'); attempt++)
         yield* Effect.yieldNow;
       expect(observed.at(-1)?.job).toBe('completed');
       mock.update.mockImplementation(() => Effect.fail(TestError.make({message: 'simulated update failure'})));
       expect((yield* call('POST', {action: 'update', confirm: true}))?.status).toBe(202);
-      for (let attempt = 0; attempt < 50 && !observed.some(item => item.job === 'failed'); attempt++)
+      for (let attempt = 0; attempt < 50 && !EffectArray.some(observed, item => item.job === 'failed'); attempt++)
         yield* Effect.yieldNow;
       expect(observed.at(-1)?.job).toBe('failed');
     }).pipe(Effect.provideService(ManagerLiveConsumerChangeHints, hints));

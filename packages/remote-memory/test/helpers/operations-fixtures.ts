@@ -1,20 +1,28 @@
+import {Array as EffectArray} from 'effect';
 import {
   OPERATIONS_ALERTS,
   OPERATIONS_CHECKS,
   OPERATIONS_CHECK_SPECIFICATIONS,
   type OperationsManifest,
 } from '@threadnote/remote-memory/operations/contract';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const checkedAt = '2026-09-18T01:00:00.000Z';
 export function operationsDraft() {
-  const owners = {operator: '1'.repeat(32), support: '2'.repeat(32), escalation: '3'.repeat(32)};
+  const owners = {
+    operator: Effect.pipe('1', EffectString.repeat(32)),
+    support: Effect.pipe('2', EffectString.repeat(32)),
+    escalation: Effect.pipe('3', EffectString.repeat(32)),
+  };
   return {
     version: 1,
-    deploymentId: 'a'.repeat(32),
+    deploymentId: Effect.pipe('a', EffectString.repeat(32)),
     plannedAt: '2026-09-18T00:00:00.000Z',
     maxEvidenceAgeSeconds: 86_400,
     owners,
-    ownerRosterDigest: '7'.repeat(64),
+    ownerRosterDigest: Effect.pipe('7', EffectString.repeat(64)),
     authority: 'git',
     backup: {
       method: 'snapshot-and-pitr',
@@ -25,14 +33,14 @@ export function operationsDraft() {
     },
     baseline: {
       expectedRecords: 1,
-      gitAuthorityDigest: '1'.repeat(64),
-      databaseCheckpointDigest: '2'.repeat(64),
-      aliasCatalogDigest: '3'.repeat(64),
-      grantPolicyDigest: '4'.repeat(64),
-      runtimeArtifactDigest: '5'.repeat(64),
-      rollbackArtifactDigest: '6'.repeat(64),
+      gitAuthorityDigest: Effect.pipe('1', EffectString.repeat(64)),
+      databaseCheckpointDigest: Effect.pipe('2', EffectString.repeat(64)),
+      aliasCatalogDigest: Effect.pipe('3', EffectString.repeat(64)),
+      grantPolicyDigest: Effect.pipe('4', EffectString.repeat(64)),
+      runtimeArtifactDigest: Effect.pipe('5', EffectString.repeat(64)),
+      rollbackArtifactDigest: Effect.pipe('6', EffectString.repeat(64)),
     },
-    alerts: OPERATIONS_ALERTS.map(kind => ({
+    alerts: EffectArray.map(OPERATIONS_ALERTS, kind => ({
       kind,
       owners: {...owners},
       safeFirstAction: 'disable-writes',
@@ -45,11 +53,11 @@ export function observedOperationsEvidence(manifest: OperationsManifest) {
   return {
     version: 1 as const,
     manifestDigest: manifest.manifestDigest,
-    drillId: 'b'.repeat(32),
-    isolatedTargetId: 'c'.repeat(32),
-    checks: OPERATIONS_CHECKS.map((check, index) => {
+    drillId: Effect.pipe('b', EffectString.repeat(32)),
+    isolatedTargetId: Effect.pipe('c', EffectString.repeat(32)),
+    checks: EffectArray.map(OPERATIONS_CHECKS, (check, index) => {
       const spec = OPERATIONS_CHECK_SPECIFICATIONS[check];
-      const metrics: Record<string, number> = Object.fromEntries(spec.metrics.map(key => [key, 0]));
+      const metrics: Record<string, number> = EffectRecord.fromEntries(EffectArray.map(spec.metrics, key => [key, 0]));
       if (check === 'backup') metrics.pitrWindowSeconds = manifest.backup.retentionSeconds;
       if (check === 'isolated-restore') metrics.elapsedSeconds = 60;
       if (check === 'readiness') metrics.recoveryElapsedSeconds = 600;
@@ -59,8 +67,8 @@ export function observedOperationsEvidence(manifest: OperationsManifest) {
         status: 'observed' as const,
         observedAt: new Date(Date.parse(manifest.plannedAt) + index * 60_000).toISOString(),
         observerId: manifest.owners.operator,
-        evidenceDigest: 'd'.repeat(64),
-        facts: Object.fromEntries(spec.facts.map(key => [key, true])),
+        evidenceDigest: Effect.pipe('d', EffectString.repeat(64)),
+        facts: EffectRecord.fromEntries(EffectArray.map(spec.facts, key => [key, true])),
         metrics,
       };
     }),

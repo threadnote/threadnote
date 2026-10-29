@@ -1,9 +1,12 @@
+import {isHomeResponse} from './api/response_guards.js';
+import {Array as EffectArray} from 'effect';
 import {FileText, HeartPulse, ListChecks, ScanText, Pencil, Blocks} from 'lucide-react';
 import React, {useEffect, useState} from 'react';
 import type {ManagerHomeLane} from './home.js';
 import {MemoryDetailModal} from './detail_modal.js';
 import {api} from './ui/support.js';
 import {useManagerLiveQuery} from './live/provider.js';
+import {Option as EffectOption} from 'effect';
 
 interface HomeResponse {
   readonly stats?: {
@@ -52,10 +55,16 @@ export function ManagerHomePanel({
     project ? {topic: 'home', project} : {topic: 'home', scope: 'account'},
     'home',
     signal =>
-      api<HomeResponse>(`/api/home?project=${encodeURIComponent(project)}`, undefined, {
-        signal,
-        timeoutMilliseconds: 8_000,
-      }),
+      api<HomeResponse>(
+        `/api/home?project=${encodeURIComponent(project)}`,
+        undefined,
+        {
+          signal,
+          timeoutMilliseconds: 8_000,
+        },
+        isHomeResponse,
+      ),
+    isHomeResponse,
   );
   const fallback = !live.active || live.snapshot.status === 'unsupported';
   useEffect(() => {
@@ -68,7 +77,11 @@ export function ManagerHomePanel({
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const visibleHome = home?.project === project ? home : undefined;
-  const healthFindingCount = visibleHome?.lanes.find(lane => lane.id === 'health')?.count;
+  const healthFindingCount = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(visibleHome?.lanes), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, lane => lane.id === 'health')),
+    ),
+  )?.count;
 
   useEffect(() => {
     if (!fallback) return;
@@ -77,10 +90,15 @@ export function ManagerHomePanel({
     setHome(undefined);
     setLoading(true);
     setError('');
-    void api<HomeResponse>(`/api/home?project=${encodeURIComponent(project)}`, undefined, {
-      signal: controller.signal,
-      timeoutMilliseconds: 8_000,
-    })
+    void api<HomeResponse>(
+      `/api/home?project=${encodeURIComponent(project)}`,
+      undefined,
+      {
+        signal: controller.signal,
+        timeoutMilliseconds: 8_000,
+      },
+      isHomeResponse,
+    )
       .then(result => {
         if (!cancelled && result.project === project) setHome(result);
       })
@@ -129,7 +147,7 @@ export function ManagerHomePanel({
             Project
             <select aria-label="Home project" onChange={event => onProjectChange(event.target.value)} value={project}>
               <option value="">All</option>
-              {projects.map(item => (
+              {EffectArray.map(projects, item => (
                 <option key={item} value={item}>
                   {item}
                 </option>
@@ -179,9 +197,9 @@ export function ManagerHomePanel({
             <header>
               <h3>Next up</h3>
             </header>
-            {visibleHome.lanes
-              .filter(lane => lane.id === 'reviews' || lane.id === 'health')
-              .map(lane => (
+            {EffectArray.map(
+              EffectArray.filter(visibleHome.lanes, lane => lane.id === 'reviews' || lane.id === 'health'),
+              lane => (
                 <div className="workspace-row" key={lane.id}>
                   {lane.id === 'reviews' ? <ListChecks aria-hidden="true" /> : <HeartPulse aria-hidden="true" />}
                   <div className="row-copy">
@@ -201,7 +219,8 @@ export function ManagerHomePanel({
                   ) : null}
                   <button onClick={() => onOpen(lane.action)}>{lane.id === 'reviews' ? 'Review' : 'Inspect'}</button>
                 </div>
-              ))}
+              ),
+            )}
             <div className="workspace-row">
               <Pencil aria-hidden="true" />
               <div className="row-copy">
@@ -224,7 +243,7 @@ export function ManagerHomePanel({
               </p>
             ) : (
               <ul>
-                {visibleHome.handoffs.map(handoff => (
+                {EffectArray.map(visibleHome.handoffs, handoff => (
                   <li className="workspace-row" key={handoff.uri}>
                     <FileText aria-hidden="true" />
                     <button className="home-handoff-button" onClick={() => setHandoff(handoff)} type="button">

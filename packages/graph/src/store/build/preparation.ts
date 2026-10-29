@@ -1,3 +1,4 @@
+import { Array as EffectArray } from "effect"
 import {Clock, DateTime, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -65,6 +66,8 @@ import {
   codeGraphColdIndexDeferralWorthwhile,
   deferCodeGraphQueryIndexesForColdBuild,
 } from '../cold_index_deferral.js';
+import { Option as EffectOption } from 'effect';
+
 
 /** @internal Exposed for deterministic SQLite snapshot-contract tests. */
 
@@ -165,8 +168,8 @@ const preparePersistedFullActivation = Effect.fn('codeGraph.preparePersistedFull
           yield* sql.unsafe(
             `INSERT OR IGNORE INTO snapshot_files (
              snapshot_id, path, content_hash, raw_content_hash, language, mode, size, source
-           ) VALUES ${retainedBatch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-            retainedBatch.flatMap(file => [
+           ) VALUES ${EffectArray.join(EffectArray.map(retainedBatch, () => '(?, ?, ?, ?, ?, ?, ?, ?)'), ', ')}`,
+            EffectArray.flatMap(retainedBatch, file => [
               snapshotId,
               file.path,
               file.contentHash,
@@ -188,11 +191,11 @@ const preparePersistedFullActivation = Effect.fn('codeGraph.preparePersistedFull
           }>(
             `SELECT path, content_hash, raw_content_hash, language, mode, size, source
            FROM snapshot_files
-           WHERE snapshot_id = ? AND path IN (${retainedBatch.map(() => '?').join(', ')})`,
-            [snapshotId, ...retainedBatch.map(file => file.path)],
+           WHERE snapshot_id = ? AND path IN (${EffectArray.join(EffectArray.map(retainedBatch, () => '?'), ', ')})`,
+            [snapshotId, ...EffectArray.map(retainedBatch, file => file.path)],
           );
-          const stored = new Map(rows.map(row => [row.path, row]));
-          const mismatch = retainedBatch.find(file => {
+          const stored = new Map(EffectArray.map(rows, row => [row.path, row]));
+          const mismatch = EffectOption.getOrUndefined(EffectArray.findFirst(retainedBatch, file => {
             const row = stored.get(file.path);
             return (
               row === undefined ||
@@ -203,7 +206,7 @@ const preparePersistedFullActivation = Effect.fn('codeGraph.preparePersistedFull
               Number(row.size) !== file.size ||
               row.source !== file.source
             );
-          });
+          }));
           if (mismatch) {
             return yield* CodeGraphStoreError.of(`Persisted full-build inventory changed at ${mismatch.path}.`);
           }
@@ -263,11 +266,11 @@ function preparePersistedFullWorkspace(
   snapshotId: string,
   workspace: CodeGraphWorkspace,
 ): PreparedPersistedFullWorkspace {
-  const workspaces = workspace.workspaces.map(scope => ({
+  const workspaces = EffectArray.map(workspace.workspaces, scope => ({
     diagnosticsJson: JSON.stringify(scope.diagnostics),
     scope,
   }));
-  const projects = workspace.projects.map(project => ({
+  const projects = EffectArray.map(workspace.projects, project => ({
     diagnosticsJson: JSON.stringify(project.diagnostics),
     languagesJson: JSON.stringify(project.languages),
     project,
@@ -385,13 +388,10 @@ function preparePersistedFullFactCapacity(batches: readonly CodeGraphStagingBatc
       finalFactBytes = saturatingCapacityAdd(finalFactBytes, batch.finalFactBytes);
     }
     const boundedReferences = sortedBy(
-      batch.references.filter(isCodeGraphReferenceWithinCandidateBudget),
+      EffectArray.filter(batch.references, (__effectFilterValue: (typeof batch.references)[number], __effectFilterIndex: number) => __effectFilterIndex in batch.references && isCodeGraphReferenceWithinCandidateBudget(__effectFilterValue)),
       reference => reference.edgeId,
     );
-    const lookupRows = batch.symbols.reduce(
-      (total, symbol) => saturatingCapacityAdd(total, symbol.lookupKeys?.length ?? 0),
-      0,
-    );
+    const lookupRows = EffectArray.reduce(batch.symbols, 0, (total, symbol) => saturatingCapacityAdd(total, symbol.lookupKeys?.length ?? 0));
     const termsBySymbol = new Map<CodeGraphSymbol, readonly (readonly [string, number])[]>();
     let termPostings = 0;
     for (const symbol of batch.symbols) {
@@ -402,10 +402,10 @@ function preparePersistedFullFactCapacity(batches: readonly CodeGraphStagingBatc
       // preceded by an under-sized capacity boundary.
       termPostings = saturatingCapacityAdd(termPostings, terms.length);
     }
-    const reexportsByReferenceBatch = [...chunk(boundedReferences, ACTIVATION_REFERENCE_BATCH_ROWS)].map(references =>
+    const reexportsByReferenceBatch = EffectArray.map([...chunk(boundedReferences, ACTIVATION_REFERENCE_BATCH_ROWS)], references =>
       [
-        ...uniqueBy(references.flatMap(normalizedReexportProvenance), reexport =>
-          [reexport.sourcePath, reexport.localName, reexport.targetPath, reexport.importedName].join('\0'),
+        ...uniqueBy(EffectArray.flatMap(references, (__effectFlatMapValue, __effectFlatMapIndex) => __effectFlatMapIndex in references ? normalizedReexportProvenance(__effectFlatMapValue) : []), reexport =>
+          EffectArray.join([reexport.sourcePath, reexport.localName, reexport.targetPath, reexport.importedName], '\0'),
         ),
       ].sort(
         (left, right) =>
@@ -413,12 +413,8 @@ function preparePersistedFullFactCapacity(batches: readonly CodeGraphStagingBatc
           compareCodeUnits(left.localName, right.localName) ||
           compareCodeUnits(left.targetPath, right.targetPath) ||
           compareCodeUnits(left.importedName, right.importedName),
-      ),
-    );
-    const reexportRows = reexportsByReferenceBatch.reduce(
-      (total, reexports) => saturatingCapacityAdd(total, reexports.length),
-      0,
-    );
+      ));
+    const reexportRows = EffectArray.reduce(reexportsByReferenceBatch, 0, (total, reexports) => saturatingCapacityAdd(total, reexports.length));
     rowCount = saturatingCapacityAdd(
       rowCount,
       // Durable symbols and their compact lexical dictionary rows.
@@ -462,7 +458,7 @@ const stagePersistedFullFactBatches = Effect.fn('codeGraph.stagePersistedFullFac
   if (batches.length === 0) return;
   if (
     prepared &&
-    (prepared.length !== batches.length || prepared.some((entry, index) => entry.batch !== batches[index]))
+    (prepared.length !== batches.length || EffectArray.some(prepared, (entry, index) => entry.batch !== batches[index]))
   ) {
     return yield* CodeGraphStoreError.of('Prepared persistent materialization batches no longer match staged batches.');
   }
@@ -536,17 +532,17 @@ const preparePersistedIncrementalActivation = Effect.fn('codeGraph.preparePersis
   ) {
     return false;
   }
-  const paths = new Set(files.map(file => file.path));
-  const factPaths = new Set(facts.map(file => file.path));
+  const paths = new Set(EffectArray.map(files, file => file.path));
+  const factPaths = new Set(EffectArray.map(facts, file => file.path));
   if (
     paths.size !== files.length ||
     factPaths.size !== facts.length ||
     factPaths.size !== paths.size ||
-    [...paths].some(path => !factPaths.has(path))
+    EffectArray.some([...paths], path => !factPaths.has(path))
   ) {
     return false;
   }
-  if (deletedPaths.some(path => paths.has(path))) return false;
+  if (EffectArray.some(deletedPaths, path => paths.has(path))) return false;
   // A committed dirty full root carries the same reusable receipt contract as
   // a clean root; layered dirty overlays remain excluded by the receipt query.
   if (!(yield* selectReusableBaseReceipt(baseSnapshotId, true))) return false;
@@ -575,25 +571,25 @@ const preparePersistedIncrementalActivation = Effect.fn('codeGraph.preparePersis
   for (const batch of chunk(incrementalPaths, ACTIVATION_FILE_BATCH_ROWS)) {
     yield* sql.unsafe(
       `INSERT INTO activation_incremental_paths (path)
-       VALUES ${batch.map(() => '(?)').join(', ')}`,
+       VALUES ${EffectArray.join(EffectArray.map(batch, () => '(?)'), ', ')}`,
       batch,
     );
   }
   yield* stageActivationFiles(sql, files);
-  const symbols = facts.flatMap(file => file.symbols);
+  const symbols = EffectArray.flatMap(facts, file => file.symbols);
   yield* stageActivationSymbols(sql, symbols);
   yield* stageActivationSymbolTerms(sql, symbols);
   yield* stageActivationEdges(
     sql,
-    facts.flatMap(file => file.edges),
+    EffectArray.flatMap(facts, file => file.edges),
   );
   yield* stageActivationReferences(
     sql,
-    facts.flatMap(file => file.references ?? []),
+    EffectArray.flatMap(facts, file => file.references ?? []),
   );
   yield* stageActivationMonikers(
     sql,
-    facts.flatMap(file => file.monikers ?? []),
+    EffectArray.flatMap(facts, file => file.monikers ?? []),
   );
   const stagedRowCounts = yield* sql<{readonly count: number}>`
     SELECT
@@ -692,7 +688,7 @@ const stageFoldForwardCarry = Effect.fn('codeGraph.stageFoldForwardCarry')(funct
     WHERE snapshot_id = ${expected.snapshotId}
     ORDER BY path
   `;
-  const priorPaths = priorPathRows.map(row => row.path);
+  const priorPaths = EffectArray.map(priorPathRows, row => row.path);
   if (
     priorPaths.length !== Number(receipt.delta_path_count) ||
     priorPaths.length === 0 ||
@@ -763,7 +759,7 @@ const stageFoldForwardCarry = Effect.fn('codeGraph.stageFoldForwardCarry')(funct
     return undefined;
   }
   const fresh = new Set(freshPaths);
-  const carryPaths = priorPaths.filter(path => !fresh.has(path));
+  const carryPaths = EffectArray.filter(priorPaths, path => !fresh.has(path));
   yield* sql.unsafe(`
     CREATE TEMP TABLE IF NOT EXISTS activation_fold_carry_paths (
       path TEXT PRIMARY KEY
@@ -772,7 +768,7 @@ const stageFoldForwardCarry = Effect.fn('codeGraph.stageFoldForwardCarry')(funct
   yield* sql.unsafe('DELETE FROM activation_fold_carry_paths');
   for (const batch of chunk(carryPaths, ACTIVATION_FILE_BATCH_ROWS)) {
     yield* sql.unsafe(
-      `INSERT INTO activation_fold_carry_paths (path) VALUES ${batch.map(() => '(?)').join(', ')}`,
+      `INSERT INTO activation_fold_carry_paths (path) VALUES ${EffectArray.join(EffectArray.map(batch, () => '(?)'), ', ')}`,
       batch,
     );
   }
@@ -870,13 +866,13 @@ const replaceStagedModifiedFiles = Effect.fn('codeGraph.replaceStagedModifiedFil
     SELECT value FROM activation_state WHERE key = 'snapshot_id' LIMIT 1
   `;
   if (staged[0]?.value !== baseSnapshotId || files.length === 0 || facts.length !== files.length) return false;
-  const paths = new Set(files.map(file => file.path));
-  if (paths.size !== files.length || facts.some(file => !paths.has(file.path))) return false;
+  const paths = new Set(EffectArray.map(files, file => file.path));
+  if (paths.size !== files.length || EffectArray.some(facts, file => !paths.has(file.path))) return false;
   yield* sql.unsafe('DELETE FROM activation_incremental_paths');
   for (const batch of chunk([...paths], ACTIVATION_FILE_BATCH_ROWS)) {
     yield* sql.unsafe(
       `INSERT INTO activation_incremental_paths (path)
-       VALUES ${batch.map(() => '(?)').join(', ')}`,
+       VALUES ${EffectArray.join(EffectArray.map(batch, () => '(?)'), ', ')}`,
       batch,
     );
   }
@@ -933,20 +929,20 @@ const replaceStagedModifiedFiles = Effect.fn('codeGraph.replaceStagedModifiedFil
         WHERE path IN (SELECT path FROM activation_incremental_paths)
       `);
       yield* stageActivationFiles(sql, files);
-      const symbols = facts.flatMap(file => file.symbols);
+      const symbols = EffectArray.flatMap(facts, file => file.symbols);
       yield* stageActivationSymbols(sql, symbols);
       yield* stageActivationSymbolTerms(sql, symbols);
       yield* stageActivationEdges(
         sql,
-        facts.flatMap(file => file.edges),
+        EffectArray.flatMap(facts, file => file.edges),
       );
       yield* stageActivationReferences(
         sql,
-        facts.flatMap(file => file.references ?? []),
+        EffectArray.flatMap(facts, file => file.references ?? []),
       );
       yield* stageActivationMonikers(
         sql,
-        facts.flatMap(file => file.monikers ?? []),
+        EffectArray.flatMap(facts, file => file.monikers ?? []),
       );
       yield* sql.unsafe('DELETE FROM activation_changed_symbol_ids');
       yield* sql.unsafe('DELETE FROM activation_resolved_reference_batch');

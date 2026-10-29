@@ -1,7 +1,12 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {MEMORY_RELATION_TYPES, type MemoryRelation, type MemoryRelationType} from '@threadnote/memory/document';
 import type {MemoryStatus} from '@threadnote/memory/types';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MEMORY_CONNECTIONS_RETRIEVAL_BENCH_ID = 'memory-connections-retrieval-bench-v1' as const;
 export const MEMORY_CONNECTIONS_RETRIEVAL_BENCH_VERSION = 1 as const;
@@ -105,13 +110,13 @@ export function evaluateMemoryConnectionsRetrievalBench(input: {
   readonly observations: readonly MemoryConnectionsRetrievalBenchObservationV1[] | unknown;
 }): MemoryConnectionsRetrievalBenchResultV1 {
   const fixture = parseMemoryConnectionsRetrievalBenchFixtureV1(input.fixture);
-  if (!Array.isArray(input.observations)) invalid('observations must be an array');
-  const observations = input.observations.map(parseObservation);
+  if (!EffectArray.isArray(input.observations)) invalid('observations must be an array');
+  const observations = EffectArray.map(input.observations, parseObservation);
   unique(
-    observations.map(observation => observation.queryId),
+    EffectArray.map(observations, observation => observation.queryId),
     'observation query ids',
   );
-  const byId = new Map(observations.map(observation => [observation.queryId, observation] as const));
+  const byId = new Map(EffectArray.map(observations, observation => [observation.queryId, observation] as const));
   const failures: string[] = [];
   let truePositiveCount = 0;
   let returnedCount = 0;
@@ -133,12 +138,22 @@ export function evaluateMemoryConnectionsRetrievalBench(input: {
     }
     const expected = new Set(testCase.expectedMemoryIds);
     const returned = new Set(observation.memoryIds);
-    truePositiveCount += observation.memoryIds.filter(id => expected.has(id)).length;
+    truePositiveCount += EffectArrayPipe(observation.memoryIds, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (id, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && expected.has(id),
+      ),
+    ).length;
     returnedCount += observation.memoryIds.length;
     expectedCount += testCase.expectedMemoryIds.length;
     duplicateResults += observation.memoryIds.length - returned.size;
-    authorizationLeaks += testCase.forbiddenMemoryIds.filter(
-      id => returned.has(id) || observation.serializedResult.includes(id),
+    authorizationLeaks += EffectArrayPipe(testCase.forbiddenMemoryIds, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (id, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues &&
+          (returned.has(id) || Effect.pipe(observation.serializedResult, EffectString.includes(id))),
+      ),
     ).length;
     for (let index = 0; index < testCase.expectedPremiseStates.length; index += 1) {
       const expectedState = testCase.expectedPremiseStates[index];
@@ -147,7 +162,8 @@ export function evaluateMemoryConnectionsRetrievalBench(input: {
       if (actualState === expectedState) correctPremiseStates += 1;
       if (expectedState !== 'current' && actualState === 'current') falseAuthorityClaims += 1;
     }
-    falseAuthorityClaims += observation.connectionStates.filter(
+    falseAuthorityClaims += EffectArray.filter(
+      observation.connectionStates,
       connection => connection.currentness === 'current' && connection.resolution !== 'resolved',
     ).length;
     if (testCase.expectedMemoryIds.length === 0) {
@@ -169,7 +185,7 @@ export function evaluateMemoryConnectionsRetrievalBench(input: {
     if (observation.estimatedTokens > 1_500) failures.push(`${testCase.id}: exceeded 1,500 estimated tokens`);
   }
   for (const observation of observations) {
-    if (!fixture.cases.some(testCase => testCase.id === observation.queryId)) {
+    if (!EffectArray.some(fixture.cases, testCase => testCase.id === observation.queryId)) {
       failures.push(`${observation.queryId}: unexpected observation`);
     }
   }
@@ -198,7 +214,7 @@ export function evaluateMemoryConnectionsRetrievalBench(input: {
     fixtureId: fixture.id,
     gate: {failures: [...new Set(failures)].sort(), passed: failures.length === 0},
     metrics,
-    observations: observations.map(({serializedResult: _serializedResult, ...observation}) => observation),
+    observations: EffectArray.map(observations, ({serializedResult: _serializedResult, ...observation}) => observation),
     version: 1,
   };
 }
@@ -212,23 +228,23 @@ export function parseMemoryConnectionsRetrievalBenchFixtureV1(
   if (fixture.version !== 1) invalid('fixture version must be 1');
   const abilities = literalArray(fixture.abilities, MEMORY_CONNECTIONS_RETRIEVAL_BENCH_ABILITIES, 'abilities');
   if (!sameSet(abilities, MEMORY_CONNECTIONS_RETRIEVAL_BENCH_ABILITIES)) invalid('all five abilities are required');
-  if (!Array.isArray(fixture.documents) || fixture.documents.length === 0) invalid('documents must be non-empty');
-  if (!Array.isArray(fixture.cases) || fixture.cases.length === 0) invalid('cases must be non-empty');
-  const documents = fixture.documents.map(parseDocument);
-  const cases = fixture.cases.map(parseCase);
+  if (!EffectArray.isArray(fixture.documents) || fixture.documents.length === 0) invalid('documents must be non-empty');
+  if (!EffectArray.isArray(fixture.cases) || fixture.cases.length === 0) invalid('cases must be non-empty');
+  const documents = EffectArray.map(fixture.documents, parseDocument);
+  const cases = EffectArray.map(fixture.cases, parseCase);
   unique(
-    documents.map(document => `${document.user}\n${document.topic}`),
+    EffectArray.map(documents, document => `${document.user}\n${document.topic}`),
     'document addresses',
   );
   unique(
-    cases.map(testCase => testCase.id),
+    EffectArray.map(cases, testCase => testCase.id),
     'case ids',
   );
   for (const scenario of MEMORY_CONNECTIONS_RETRIEVAL_BENCH_SCENARIOS) {
-    if (!cases.some(testCase => testCase.scenario === scenario)) invalid(`missing scenario ${scenario}`);
+    if (!EffectArray.some(cases, testCase => testCase.scenario === scenario)) invalid(`missing scenario ${scenario}`);
   }
   for (const ability of MEMORY_CONNECTIONS_RETRIEVAL_BENCH_ABILITIES) {
-    if (!cases.some(testCase => testCase.ability === ability)) invalid(`missing ability ${ability}`);
+    if (!EffectArray.some(cases, testCase => testCase.ability === ability)) invalid(`missing ability ${ability}`);
   }
   return {
     abilities,
@@ -271,11 +287,11 @@ function parseDocument(value: unknown): MemoryConnectionsRetrievalBenchDocumentV
     'validFrom',
     'validTo',
   ]);
-  if (!Array.isArray(document.relations) || document.relations.length > 16) invalid('relations are invalid');
+  if (!EffectArray.isArray(document.relations) || document.relations.length > 16) invalid('relations are invalid');
   return {
     body: text(document.body, 'document body'),
     memoryId: memoryId(document.memoryId),
-    relations: document.relations.map(parseRelation),
+    relations: EffectArray.map(document.relations, parseRelation),
     status: literal(document.status, ['active', 'archived', 'expired', 'superseded'] as const, 'status'),
     ...(document.supersedes === undefined ? {} : {supersedes: text(document.supersedes, 'supersedes')}),
     topic: slug(document.topic, 'topic'),
@@ -311,9 +327,9 @@ function parseCase(value: unknown): MemoryConnectionsRetrievalBenchCaseV1 {
   return {
     ability: literal(testCase.ability, MEMORY_CONNECTIONS_RETRIEVAL_BENCH_ABILITIES, 'ability'),
     expectedConnectionCount: integer(testCase.expectedConnectionCount, 'expectedConnectionCount', 0, 32),
-    expectedMemoryIds: stringArray(testCase.expectedMemoryIds, 'expectedMemoryIds').map(memoryId),
+    expectedMemoryIds: EffectArray.map(stringArray(testCase.expectedMemoryIds, 'expectedMemoryIds'), memoryId),
     expectedPremiseStates,
-    forbiddenMemoryIds: stringArray(testCase.forbiddenMemoryIds, 'forbiddenMemoryIds').map(memoryId),
+    forbiddenMemoryIds: EffectArray.map(stringArray(testCase.forbiddenMemoryIds, 'forbiddenMemoryIds'), memoryId),
     id: slug(testCase.id, 'case id'),
     ...(testCase.includeHistorical === undefined
       ? {}
@@ -349,10 +365,10 @@ function parseObservation(value: unknown): MemoryConnectionsRetrievalBenchObserv
     'responseBytes',
     'serializedResult',
   ]);
-  if (!Array.isArray(observation.connectionStates)) invalid('connectionStates must be an array');
+  if (!EffectArray.isArray(observation.connectionStates)) invalid('connectionStates must be an array');
   return {
     connectionCount: integer(observation.connectionCount, 'connectionCount', 0, 32),
-    connectionStates: observation.connectionStates.map(value => {
+    connectionStates: EffectArray.map(observation.connectionStates, value => {
       const state = record(value, 'connection state');
       exactKeys(state, ['currentness', 'resolution']);
       return {
@@ -366,7 +382,7 @@ function parseObservation(value: unknown): MemoryConnectionsRetrievalBenchObserv
     }),
     elapsedMilliseconds: finiteNumber(observation.elapsedMilliseconds, 'elapsedMilliseconds'),
     estimatedTokens: integer(observation.estimatedTokens, 'estimatedTokens', 0, 100_000),
-    memoryIds: stringArray(observation.memoryIds, 'memoryIds').map(memoryId),
+    memoryIds: EffectArray.map(stringArray(observation.memoryIds, 'memoryIds'), memoryId),
     premiseStates: literalArray(
       observation.premiseStates,
       ['conflicted', 'current', 'historical', 'unresolved'] as const,
@@ -385,8 +401,9 @@ function record(value: unknown, label: string): Record<string, unknown> {
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
   const allowed = new Set(keys);
-  const unexpected = Object.keys(value).filter(key => !allowed.has(key));
-  const missing = keys.filter(
+  const unexpected = EffectArray.filter(EffectRecord.keys(value), key => !allowed.has(key));
+  const missing = EffectArray.filter(
+    keys,
     key =>
       !(key in value) &&
       !['includeHistorical', 'limit', 'relationTypes', 'supersedes', 'validFrom', 'validTo'].includes(key),
@@ -400,21 +417,21 @@ function literal<const T extends string>(value: unknown, values: readonly T[], l
 }
 
 function isLiteral<const T extends string>(value: string, values: readonly T[]): value is T {
-  return values.some(candidate => candidate === value);
+  return EffectArray.some(values, candidate => candidate === value);
 }
 
 function literalArray<const T extends string>(value: unknown, values: readonly T[], label: string): readonly T[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
-  return value.map(item => literal(item, values, label));
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
+  return EffectArray.map(value, item => literal(item, values, label));
 }
 
 function stringArray(value: unknown, label: string): readonly string[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
-  return value.map(item => text(item, label));
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
+  return EffectArray.map(value, item => text(item, label));
 }
 
 function text(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !value.trim()) invalid(`${label} must be non-empty text`);
+  if (typeof value !== 'string' || !Effect.pipe(value, EffectString.trim)) invalid(`${label} must be non-empty text`);
   return value;
 }
 
@@ -454,11 +471,11 @@ function boolean(value: unknown, label: string): boolean {
 }
 
 function sameSet(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every(value => right.includes(value));
+  return left.length === right.length && EffectArray.every(left, value => right.includes(value));
 }
 
 function sameOrderedValues(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
+  return left.length === right.length && EffectArray.every(left, (value, index) => value === right[index]);
 }
 
 function ratio(numerator: number, denominator: number): number {

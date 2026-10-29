@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Predicate} from 'effect';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed MCP proxy owns one bounded pinned Threadnote child process. */
 
@@ -11,6 +12,9 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {Schema} from 'effect';
 import {EffectSchemaSdkTools} from '@threadnote/threadnote/mcp/effect_schema_sdk_tools';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MATCHED_EVALUATION_CONTEXT_PACKET_ENV = 'MATCHED_EVALUATION_CONTEXT_PACKET' as const;
 export const MATCHED_EVALUATION_CONTEXT_SERVER_NAME = 'matched_evaluation_context' as const;
@@ -75,12 +79,13 @@ export function hashMatchedEvaluationContextContent(value: string): string {
 
 export function hashMatchedEvaluationContextRequest(toolName: string, requestInput: unknown): string {
   const canonical = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(canonical);
+    if (EffectArray.isArray(value)) return EffectArray.map(value, canonical);
     if (typeof value === 'object' && value !== null) {
-      return Object.fromEntries(
-        Object.entries(value)
-          .sort(([a], [b]) => a.localeCompare(b, 'en'))
-          .map(([key, item]) => [key, canonical(item)]),
+      return EffectRecord.fromEntries(
+        EffectArray.map(
+          EffectRecord.toEntries(value).sort(([a], [b]) => Effect.pipe(a, EffectString.localeCompare(b, ['en']))),
+          ([key, item]) => [key, canonical(item)],
+        ),
       );
     }
     return value;
@@ -236,7 +241,7 @@ export async function handleMatchedEvaluationContextRequest(
   }
   const requestedRefs =
     request.codeRefs === undefined ? [] : typeof request.codeRefs === 'string' ? [request.codeRefs] : request.codeRefs;
-  const codeRefs = requestedRefs.map(reference => validatedCodeRef(reference, packet.repositoryRoot));
+  const codeRefs = EffectArray.map(requestedRefs, reference => validatedCodeRef(reference, packet.repositoryRoot));
   await Promise.all([
     assertPinnedExecutable(packet.threadnoteExecutable, packet.threadnoteExecutableSha256),
     assertRuntimeManifest(packet, preparedHome),
@@ -267,24 +272,28 @@ function hasExpectedResumeDelivery(
   requiredGraphQuery: string | null,
   resumeEvidenceMarker: string,
 ): boolean {
-  if (!Array.isArray(structuredContent.activeHandoffs)) return false;
-  return structuredContent.activeHandoffs.some(candidate => {
-    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return false;
-    const handoff = candidate as Record<string, unknown>;
+  if (!EffectArray.isArray(structuredContent.activeHandoffs)) return false;
+  return EffectArray.some(structuredContent.activeHandoffs, candidate => {
+    if (!Predicate.isObject(candidate)) return false;
+    const handoff = candidate;
     const card = handoff.continuationCard;
-    const cardText =
-      typeof card === 'object' && card !== null && !Array.isArray(card)
-        ? Object.values(card)
-            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-            .join('\n')
-        : '';
+    const cardText = Predicate.isObject(card)
+      ? EffectArray.join(
+          EffectArray.filter(
+            // oxlint-disable-next-line effecttsgo/prefer-effect-record -- The continuation card is arbitrary decoded JSON with heterogeneous values.
+            Object.values(card),
+            (value): value is string => typeof value === 'string' && Effect.pipe(value, EffectString.trim).length > 0,
+          ),
+          '\n',
+        )
+      : '';
     const answer = typeof structuredContent.answer === 'string' ? structuredContent.answer : '';
     const continuationEvidence = `${answer}\n${cardText}`;
     return (
       handoff.uri === automaticHandoffUri &&
-      continuationEvidence.trim().length > 0 &&
-      continuationEvidence.includes(resumeEvidenceMarker) &&
-      (requiredGraphQuery === null || continuationEvidence.includes(requiredGraphQuery))
+      Effect.pipe(continuationEvidence, EffectString.trim).length > 0 &&
+      Effect.pipe(continuationEvidence, EffectString.includes(resumeEvidenceMarker)) &&
+      (requiredGraphQuery === null || Effect.pipe(continuationEvidence, EffectString.includes(requiredGraphQuery)))
     );
   });
 }
@@ -301,17 +310,24 @@ export async function handleMatchedEvaluationFollowupRequest(
   if (toolName === 'context_brief' || !allowedTools.includes(toolName)) {
     throw new Error('Tool is not allowed by the sealed treatment.');
   }
-  const schemas = {
-    inspect_code_graph: MATCHED_EVALUATION_INSPECT_INPUT_SCHEMA,
-    analyze_code_graph: MATCHED_EVALUATION_ANALYZE_INPUT_SCHEMA,
-    recall_context: MATCHED_EVALUATION_RECALL_INPUT_SCHEMA,
-    read_context: MATCHED_EVALUATION_READ_INPUT_SCHEMA,
-  };
-  const schema = schemas[toolName as keyof typeof schemas];
-  const request = Schema.decodeUnknownSync(schema, {onExcessProperty: 'error'})(requestInput) as Record<
-    string,
-    unknown
-  >;
+  const schema = (() => {
+    switch (toolName) {
+      case 'inspect_code_graph':
+        return MATCHED_EVALUATION_INSPECT_INPUT_SCHEMA;
+      case 'analyze_code_graph':
+        return MATCHED_EVALUATION_ANALYZE_INPUT_SCHEMA;
+      case 'recall_context':
+        return MATCHED_EVALUATION_RECALL_INPUT_SCHEMA;
+      case 'read_context':
+        return MATCHED_EVALUATION_READ_INPUT_SCHEMA;
+      default:
+        throw new Error('Tool is not allowed by the sealed treatment.');
+    }
+  })();
+  const request = object(
+    Schema.decodeUnknownSync(schema, {onExcessProperty: 'error'})(requestInput),
+    'follow-up tool input',
+  );
   if (
     packet.initialBriefDelivery === 'preloaded' &&
     requiredGraphQuery !== null &&
@@ -331,14 +347,19 @@ export async function handleMatchedEvaluationFollowupRequest(
   } else {
     const uri = String(request.uri);
     const personalPrefix = `threadnote://user/${packet.threadnoteUser}/memories/`;
-    const path = uri.startsWith(personalPrefix) ? uri.slice(personalPrefix.length) : undefined;
+    const path = Effect.pipe(uri, EffectString.startsWith(personalPrefix))
+      ? Effect.pipe(uri, EffectString.slice(personalPrefix.length))
+      : undefined;
     if (
       !/^threadnote:\/\/memory\/tn_[A-Za-z0-9_-]+$/u.test(uri) &&
       !(
         path &&
         !/[\\%?#]/u.test(path) &&
-        !path.includes('\0') &&
-        path.split('/').every(part => part.length > 0 && part !== '.' && part !== '..')
+        !Effect.pipe(path, EffectString.includes('\0')) &&
+        EffectArray.every(
+          Effect.pipe(path, EffectString.split('/')),
+          part => part.length > 0 && part !== '.' && part !== '..',
+        )
       )
     ) {
       throw new Error('Memory URI is outside the isolated prepared memory namespace.');
@@ -362,10 +383,7 @@ export async function handleMatchedEvaluationFollowupRequest(
     const result = await invoke(packet, toolName, arguments_);
     // read_context has structured metadata, not a second evidence body. Prefer
     // the native text projection so neither metadata nor dual output replaces it.
-    const nativeText = (result.content as {type: string; text?: string}[])
-      .filter(item => item.type === 'text')
-      .map(item => item.text ?? '')
-      .join('\n');
+    const nativeText = EffectArray.join(textPayloads(result.content), '\n');
     const text = nativeText || (result.structuredContent === undefined ? '' : JSON.stringify(result.structuredContent));
     if (!text || Buffer.byteLength(text) > 256 * 1_024)
       throw new Error('Tool response is empty or exceeds the bounded response limit.');
@@ -574,15 +592,30 @@ async function runThreadnoteContextBrief(
     task: packet.prompt,
   });
   if (result.isError === true) throw new Error('Threadnote Context Brief tool call returned an error.');
-  const text = (result.content as readonly {readonly text?: string; readonly type: string}[]).flatMap(content =>
-    content.type === 'text' && typeof content.text === 'string' ? [content.text] : [],
-  );
-  if (text.length !== 1) throw new Error('Threadnote Context Brief tool result must contain exactly one text payload.');
+  const text = textPayloads(result.content);
+  const [onlyText] = text;
+  if (text.length !== 1 || onlyText === undefined)
+    throw new Error('Threadnote Context Brief tool result must contain exactly one text payload.');
   try {
-    return object(JSON.parse(text[0]) as unknown, 'Threadnote Context Brief');
+    return object(JSON.parse(onlyText) as unknown, 'Threadnote Context Brief');
   } catch (cause) {
     throw new Error('Threadnote returned invalid Context Brief JSON.', {cause});
   }
+}
+
+function textPayloads(value: unknown): string[] {
+  if (!EffectArray.isArray(value)) throw new Error('Threadnote tool result content is invalid.');
+  const texts: string[] = [];
+  for (const content of value) {
+    if (!Predicate.isObject(content) || typeof content.type !== 'string') {
+      throw new Error('Threadnote tool result content block is invalid.');
+    }
+    if (content.type === 'text') {
+      if (typeof content.text !== 'string') throw new Error('Threadnote tool result text payload is invalid.');
+      texts.push(content.text);
+    }
+  }
+  return texts;
 }
 
 function threadnoteEnvironment(packet: MatchedEvaluationContextProxyPacketV1): Record<string, string> {
@@ -644,12 +677,13 @@ async function assertPinnedExecutable(path: string, expectedHash: string): Promi
 }
 
 function validatedCodeRef(value: string, root: string): string {
-  const normalized = value.trim().replaceAll('\\', '/');
+  const normalized = Effect.pipe(value, EffectString.trim, EffectString.replaceAll('\\', '/'));
   if (CGS.test(normalized)) return normalized;
-  if (!normalized || normalized.includes('\0') || isAbsolute(normalized)) invalid('code reference is invalid');
+  if (!normalized || Effect.pipe(normalized, EffectString.includes('\0')) || isAbsolute(normalized))
+    invalid('code reference is invalid');
   const absolute = resolve(root, normalized);
   const fromRoot = relative(root, absolute);
-  if (fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+  if (fromRoot === '..' || Effect.pipe(fromRoot, EffectString.startsWith(`..${sep}`)) || isAbsolute(fromRoot)) {
     invalid('code reference escaped the repository');
   }
   return normalized;
@@ -657,7 +691,10 @@ function validatedCodeRef(value: string, root: string): string {
 
 function isContained(root: string, candidate: string): boolean {
   const fromRoot = relative(root, candidate);
-  return fromRoot === '' || (!fromRoot.startsWith(`..${sep}`) && fromRoot !== '..' && !isAbsolute(fromRoot));
+  return (
+    fromRoot === '' ||
+    (!Effect.pipe(fromRoot, EffectString.startsWith(`..${sep}`)) && fromRoot !== '..' && !isAbsolute(fromRoot))
+  );
 }
 
 export async function runMatchedEvaluationContextProxy(): Promise<void> {
@@ -742,14 +779,14 @@ export async function runMatchedEvaluationContextProxy(): Promise<void> {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid('object has unsupported or missing fields');
   }
 }
@@ -773,14 +810,24 @@ function nullableHash(value: unknown, label: string): string | null {
 }
 
 function absolutePath(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !isAbsolute(value) || resolve(value) !== value || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    !isAbsolute(value) ||
+    resolve(value) !== value ||
+    Effect.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} must be a normalized absolute path`);
   }
   return value;
 }
 
 function boundedText(value: unknown, minimum: number, maximum: number, label: string): string {
-  if (typeof value !== 'string' || value.length < minimum || value.length > maximum || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.length < minimum ||
+    value.length > maximum ||
+    Effect.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} is invalid`);
   }
   return value;

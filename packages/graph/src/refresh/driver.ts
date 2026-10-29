@@ -9,16 +9,17 @@ import {
 } from '../types.js';
 import type {CodeGraphRefreshFailure} from '../watcher.js';
 import type {CodeGraphRefreshDemandRegistration, CodeGraphRefreshDemandState} from './demand_scheduler.js';
+import * as EffectRecord from 'effect/Record';
 
-export class CodeGraphRefreshRetryBlocked extends Schema.TaggedError<CodeGraphRefreshRetryBlocked>()(
-  'CodeGraphRefreshRetryBlocked',
-  {message: Schema.String},
-) {}
+export class CodeGraphRefreshRetryBlocked extends Schema.TaggedError<
+  CodeGraphRefreshRetryBlocked,
+  {readonly brand: unique symbol}
+>()('CodeGraphRefreshRetryBlocked', {message: Schema.String}) {}
 
-export class CodeGraphRefreshRetryDeferred extends Schema.TaggedError<CodeGraphRefreshRetryDeferred>()(
-  'CodeGraphRefreshRetryDeferred',
-  {notBefore: Schema.Finite},
-) {}
+export class CodeGraphRefreshRetryDeferred extends Schema.TaggedError<
+  CodeGraphRefreshRetryDeferred,
+  {readonly brand: unique symbol}
+>()('CodeGraphRefreshRetryDeferred', {notBefore: Schema.Finite}) {}
 
 export const CODE_GRAPH_REFRESH_OPERATION = 'refresh code graph' as const;
 const CODE_GRAPH_REFRESH_FAILURE_METADATA = {
@@ -35,7 +36,7 @@ const CODE_GRAPH_REFRESH_FAILURE_METADATA = {
 /** Convert native/store failures into a bounded record that cannot retain paths or raw causes. */
 export function codeGraphRefreshFailure(cause: unknown): CodeGraphRefreshFailure {
   const classified = classifyCodeGraphStoreFailure(CODE_GRAPH_REFRESH_OPERATION, cause);
-  const code = Object.hasOwn(CODE_GRAPH_REFRESH_FAILURE_METADATA, classified.code) ? classified.code : 'unknown';
+  const code = EffectRecord.has(CODE_GRAPH_REFRESH_FAILURE_METADATA, classified.code) ? classified.code : 'unknown';
   const defaults = CODE_GRAPH_REFRESH_FAILURE_METADATA[code];
   const reconnectRequired = Schema.is(CodeGraphRuntimeReconnectRequiredError)(classified);
   const capacityFailure =

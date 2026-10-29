@@ -20,6 +20,7 @@ import {
   type RemoteIdempotencyKeyV1,
   type RemoteMutationIntentV1,
 } from '@threadnote/memory/remote/revisions';
+import {Array as EffectArray} from 'effect';
 
 const idempotencyKey: RemoteIdempotencyKeyV1 = {
   operationId: 'operation-1',
@@ -195,7 +196,7 @@ describe('remote memory revision, policy, and lifecycle contracts', () => {
     'removing capabilities cannot add an allowed operation',
     {mask: FC.integer({max: 15, min: 0})},
     ({mask}) => {
-      const subset = REMOTE_MEMORY_CAPABILITIES.filter((_, index) => (mask & (1 << index)) !== 0);
+      const subset = EffectArray.filter(REMOTE_MEMORY_CAPABILITIES, (_, index) => (mask & (1 << index)) !== 0);
       const fullDecision = evaluateRemoteMemoryPolicy(policyContext, policyRequest);
       const subsetDecision = evaluateRemoteMemoryPolicy({...policyContext, capabilities: subset}, policyRequest);
 

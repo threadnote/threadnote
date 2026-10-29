@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
 import {decodeNativeCycleState, nextNativeCycle, nativeCycleHasControl, type NativeCycleState} from './cycle.js';
@@ -8,6 +9,9 @@ import {
   type NativeAuthoringDocument,
 } from './authoring.js';
 import {createNativeDocument} from './templates.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const fail = (message: string): never => {
   throw WorkflowAutomationError.make({code: 'invalid-closeout', message});
@@ -15,7 +19,9 @@ const fail = (message: string): never => {
 const text = (maximum = 8192) =>
   Schema.String.check(
     Schema.makeFilter(value =>
-      !value.trim() || nativeCycleHasControl(value, true) || new TextEncoder().encode(value).byteLength > maximum
+      !Effect.pipe(value, EffectString.trim) ||
+      nativeCycleHasControl(value, true) ||
+      new TextEncoder().encode(value).byteLength > maximum
         ? 'Use bounded nonblank text without controls.'
         : undefined,
     ),
@@ -23,18 +29,21 @@ const text = (maximum = 8192) =>
 const id = text(128).check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
   Schema.makeFilter(value =>
-    value.includes('..') || ['constructor', 'prototype', '__proto__'].includes(value)
+    Effect.pipe(value, EffectString.includes('..')) || ['constructor', 'prototype', '__proto__'].includes(value)
       ? 'Reserved identifier.'
       : undefined,
   ),
 );
 const path = text(4096).check(
   Schema.makeFilter(value =>
-    value.startsWith('/') ||
-    value.includes('\\') ||
-    value.includes(':') ||
+    Effect.pipe(value, EffectString.startsWith('/')) ||
+    Effect.pipe(value, EffectString.includes('\\')) ||
+    Effect.pipe(value, EffectString.includes(':')) ||
     nativeCycleHasControl(value) ||
-    value.split('/').some(segment => !segment || segment === '.' || segment === '..')
+    EffectArray.some(
+      Effect.pipe(value, EffectString.split('/')),
+      segment => !segment || segment === '.' || segment === '..',
+    )
       ? 'Use a canonical relative source path.'
       : undefined,
   ),
@@ -43,7 +52,8 @@ const texts = (minimum = 0, maximum = 128) => Schema.Array(text()).check(Schema.
 const mermaid = text().check(
   Schema.makeFilter(value =>
     /^(?:graph|flowchart|sequenceDiagram|stateDiagram(?:-v2)?|classDiagram|erDiagram)(?:\s|$)/u.test(
-      value.trimStart().split(/\r?\n/u, 1)[0] ?? '',
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+      Effect.pipe(value, EffectString.trimStart).split(/\r?\n/u, 1)[0] ?? '',
     )
       ? undefined
       : 'Use a supported raw Mermaid declaration without fences.',
@@ -92,20 +102,25 @@ function exactMembership(actual: readonly string[], expected: readonly string[],
     new Set(actual).size !== actual.length ||
     new Set(expected).size !== expected.length ||
     actual.length !== expected.length ||
-    expected.some(value => !actual.includes(value))
+    EffectArray.some(expected, value => !actual.includes(value))
   )
     fail('Closeout ' + label + ' must match exactly, without duplicates or missing evidence.');
 }
 function freeze<A>(value: A): A {
   if (value !== null && typeof value === 'object') {
-    for (const child of Object.values(value)) freeze(child);
+    for (const child of EffectRecord.values(value)) freeze(child);
     Object.freeze(value);
   }
   return value;
 }
 const json = (value: unknown) => JSON.stringify(value, null, 2);
 const lines = (values: readonly string[]) =>
-  values.length ? values.map(value => '- ' + value).join('\n') : 'None recorded.';
+  values.length
+    ? EffectArray.join(
+        EffectArray.map(values, value => '- ' + value),
+        '\n',
+      )
+    : 'None recorded.';
 
 /** Pure admission only: the application must independently verify roots, Git and publication authority. */
 export function prepareNativeCloseout(
@@ -128,45 +143,51 @@ export function prepareNativeCloseout(
   const proposal = decodeNativeCloseoutProposal(rawProposal);
   exactMembership(proposal.architecture.codeRefs, [...new Set(proposal.architecture.codeRefs)], 'source references');
   exactMembership(
-    plan.phases.map(phase => phase.id),
-    state.plan.phases.map(phase => phase.id),
+    EffectArray.map(plan.phases, phase => phase.id),
+    EffectArray.map(state.plan.phases, phase => phase.id),
     'plan phases',
   );
   exactMembership(
-    proposal.phaseEvidence.map(phase => phase.id),
-    state.plan.phases.map(phase => phase.id),
+    EffectArray.map(proposal.phaseEvidence, phase => phase.id),
+    EffectArray.map(state.plan.phases, phase => phase.id),
     'phase evidence',
   );
-  const phaseEvidence = state.plan.phases.map(phase => {
-    const planned = plan.phases.find(item => item.id === phase.id);
-    const evidence = proposal.phaseEvidence.find(item => item.id === phase.id);
+  const phaseEvidence = EffectArray.map(state.plan.phases, phase => {
+    const planned = EffectOption.getOrUndefined(EffectArray.findFirst(plan.phases, item => item.id === phase.id));
+    const evidence = EffectOption.getOrUndefined(
+      EffectArray.findFirst(proposal.phaseEvidence, item => item.id === phase.id),
+    );
     if (!planned || !evidence) return fail('Missing closeout phase.');
     exactMembership(
-      planned.acceptance.map(item => item.criterion),
+      EffectArray.map(planned.acceptance, item => item.criterion),
       phase.acceptanceCriteria,
       'pinned acceptance criteria',
     );
     exactMembership(
-      evidence.acceptance.map(item => item.criterion),
+      EffectArray.map(evidence.acceptance, item => item.criterion),
       phase.acceptanceCriteria,
       'acceptance evidence',
     );
     return {
       ...evidence,
-      acceptance: phase.acceptanceCriteria.map(criterion => {
-        const item = evidence.acceptance.find(candidate => candidate.criterion === criterion);
+      acceptance: EffectArray.map(phase.acceptanceCriteria, criterion => {
+        const item = EffectOption.getOrUndefined(
+          EffectArray.findFirst(evidence.acceptance, candidate => candidate.criterion === criterion),
+        );
         if (!item) return fail('Missing criterion evidence.');
         return item;
       }),
     };
   });
   exactMembership(
-    proposal.decisions.map(item => item.id),
-    plan.decisions.map(item => item.id),
+    EffectArray.map(proposal.decisions, item => item.id),
+    EffectArray.map(plan.decisions, item => item.id),
     'decisions',
   );
-  const decisions = plan.decisions.map(planned => {
-    const actual = proposal.decisions.find(item => item.id === planned.id);
+  const decisions = EffectArray.map(plan.decisions, planned => {
+    const actual = EffectOption.getOrUndefined(
+      EffectArray.findFirst(proposal.decisions, item => item.id === planned.id),
+    );
     if (!actual) return fail('Missing implemented decision.');
     return {planned, implemented: actual.implemented, rationale: actual.rationale};
   });
@@ -184,22 +205,25 @@ export function prepareNativeCloseout(
     return fail('Behavior spec differs from the pinned approved spec.');
   if (spec && !proposal.behaviorVerification) return fail('Behavior verification is required with a spec.');
   exactMembership(
-    proposal.scenarios.map(item => item.id),
-    spec?.kind === 'spec' ? spec.scenarios.map(item => item.id) : [],
+    EffectArray.map(proposal.scenarios, item => item.id),
+    spec?.kind === 'spec' ? EffectArray.map(spec.scenarios, item => item.id) : [],
     'spec scenarios',
   );
   if (!spec && proposal.behaviorVerification !== undefined)
     return fail('Behavior verification needs its spec document.');
   const scenarios =
     spec?.kind === 'spec'
-      ? spec.scenarios.map(scenario => {
-          const evidence = proposal.scenarios.find(item => item.id === scenario.id);
+      ? EffectArray.map(spec.scenarios, scenario => {
+          const evidence = EffectOption.getOrUndefined(
+            EffectArray.findFirst(proposal.scenarios, item => item.id === scenario.id),
+          );
           if (!evidence) return fail('Missing scenario evidence.');
           return {scenario, evidence: evidence.evidence};
         })
       : [];
   const titleFor = (suffix: string) =>
-    plan.title.slice(0, 256 - suffix.length).replace(/[\uD800-\uDBFF]$/u, '') + suffix;
+    Effect.pipe(plan.title, EffectString.slice(0, 256 - suffix.length), EffectString.replace(/[\uD800-\uDBFF]$/u, '')) +
+    suffix;
   const architecture = createNativeDocument({
     kind: 'architecture-current',
     title: titleFor(' — Implemented architecture'),
@@ -219,7 +243,7 @@ export function prepareNativeCloseout(
     },
   });
   // Separate documents preserve complete original decisions; any individual overflow rejects before mutation.
-  const decisionDocuments = decisions.map(item =>
+  const decisionDocuments = EffectArray.map(decisions, item =>
     createNativeDocument({
       kind: 'decisions',
       title: titleFor(' — Decision ' + item.planned.id),

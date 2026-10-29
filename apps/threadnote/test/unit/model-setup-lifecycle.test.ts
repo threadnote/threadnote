@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {BunCrypto, BunFileSystem, BunPath, BunTerminal} from '@effect/platform-bun';
 import {Clock, Context, Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, PlatformError} from 'effect';
@@ -40,6 +41,8 @@ import {withSetupMutationLock} from '../../src/setup/lock.js';
 import {runInstall} from '../../src/lifecycle.js';
 import {threadnoteUpdateCommandMode} from '../../src/release/auto_update.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, BunCrypto.layer, BunTerminal.layer);
 function providePlatform<A, E, R>(effect: Effect.Effect<A, E, R>) {
@@ -89,7 +92,7 @@ const fixture = (
       minimumRamBytes: 8,
       quantization: 'Q4_0',
       repository: 'fixture/model',
-      revision: 'a'.repeat(40),
+      revision: Effect2.pipe('a', EffectString.repeat(40)),
       role: 'generation',
       runtime: {nodeLlamaCpp: '3.22.1'},
       sha256: yield* sha256Hex(payload),
@@ -100,19 +103,42 @@ const fixture = (
     const downloads: number[] = [];
     const launched = yield* Queue.unbounded<number>();
     let memory = 1000;
-    const system = {
-      processId: process.pid,
-      platform: process.platform,
-      architecture: process.arch,
-      executablePath: executable(releaseA),
-      homeDirectory: root,
-      environment: () => ({THREADNOTE_INSTALL_ROOT: installRoot}),
-      hardwareInfo: Effect.sync(() => ({effectiveMemoryBytes: memory})),
-      availableDiskBytes: () => Effect.succeed(1_000_000),
-      canonicalProcessStartIdentity: () => Effect.succeed('fixture-process'),
-      processStartIdentity: () => Effect.succeed('fixture-process'),
-      isProcessRunning: (pid: number) => pid === process.pid,
-    } as unknown as SystemInfoShape;
+    const systemContext = yield* Layer.build(
+      Layer.mock(SystemInfo, {
+        processId: process.pid,
+        currentDirectory: () => root,
+        developmentEntrypoint: executable(releaseA),
+        intendedChildEnvironment: environment => environment,
+        memoryUsage: () => ({external: 0, heapUsed: 0, rss: 0}),
+        pathDelimiter: process.platform === 'win32' ? ';' : ':',
+        processArguments: [],
+        runtimeVersion: 'test-runtime',
+        readLine: () => () => undefined,
+        signalProcess: () => undefined,
+        setExitCode: () => undefined,
+        setEnvironmentVariable: () => undefined,
+        stdinIsTTY: false,
+        stdoutIsTTY: false,
+        tempDirectory: root,
+        userName: 'tester',
+        platform: process.platform,
+        architecture: process.arch,
+        executablePath: executable(releaseA),
+        homeDirectory: root,
+        environment: () => ({THREADNOTE_INSTALL_ROOT: installRoot}),
+        hardwareInfo: Effect.sync(() => ({
+          cpuModel: 'fixture-cpu',
+          effectiveMemoryBytes: memory,
+          memoryBytes: memory,
+          operatingSystem: process.platform,
+        })),
+        availableDiskBytes: () => Effect.succeed(1_000_000),
+        canonicalProcessStartIdentity: () => Effect.succeed('fixture-process'),
+        processStartIdentity: () => Effect.succeed('fixture-process'),
+        isProcessRunning: (pid: number) => pid === process.pid,
+      }),
+    );
+    const system = Context.get(systemContext, SystemInfo);
     const http = HttpService.of({
       downloadToFile: (_url, file, transfer) =>
         Effect.gen(function* () {
@@ -237,7 +263,9 @@ describe('automatic model setup lifecycle', () => {
       for (const options of [{start: false}, {modelSetup: false}, {dryRun: true}]) {
         const f = yield* fixture();
         const embedding: LocalModelManifest = {
-          ...BUILTIN_MODEL_MANIFESTS.find(model => model.id === CORE_EMBEDDING_MODEL_ID)!,
+          ...EffectOption.getOrUndefined(
+            EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === CORE_EMBEDDING_MODEL_ID),
+          )!,
           file: 'embedding.gguf',
           sha256: f.manifest.sha256,
           size: payload.length,
@@ -512,7 +540,7 @@ describe('automatic model setup lifecycle', () => {
       yield* f.awaitLaunch(1);
       yield* f.worker();
       yield* f.activate('5.3.0-beta.5');
-      const changed = {...f.manifest, revision: 'b'.repeat(40)};
+      const changed = {...f.manifest, revision: Effect2.pipe('b', EffectString.repeat(40))};
       const catalog = yield* Layer.build(LocalModelCatalog.layer([changed]));
       const systemB = {...f.system, executablePath: f.executableB};
       // The updater parent is still A; only the explicitly selected new child owns catalog B.
@@ -548,7 +576,7 @@ describe('automatic model setup lifecycle', () => {
       Effect.gen(function* () {
         const f = yield* fixture();
         const binding = (yield* captureAutomaticModelSetupHome(f.home))!;
-        const changed = {...f.manifest, revision: 'b'.repeat(40)};
+        const changed = {...f.manifest, revision: Effect2.pipe('b', EffectString.repeat(40))};
         const catalog = yield* Layer.build(LocalModelCatalog.layer([changed]));
         const systemB = {...f.system, executablePath: f.executableB};
         const locked = yield* Deferred.make<void>();
@@ -623,7 +651,7 @@ describe('automatic model setup lifecycle', () => {
       const binding = (yield* captureAutomaticModelSetupHome(f.home))!;
       yield* runAutomaticModelSetupRequest(binding).pipe(f.provide);
       yield* f.activate('5.3.0-beta.5');
-      const changed = {...f.manifest, revision: 'b'.repeat(40)};
+      const changed = {...f.manifest, revision: Effect2.pipe('b', EffectString.repeat(40))};
       const catalog = yield* Layer.build(LocalModelCatalog.layer([changed]));
       yield* runAutomaticModelSetupRequest(binding).pipe(
         Effect.provide(catalog),
@@ -670,7 +698,7 @@ it('keeps the automatic eligibility truth table closed under environment, source
         const system = {
           environment: () => environment,
           executablePath: `/fixture/${input.executable}`,
-        } as unknown as SystemInfoShape;
+        } satisfies Pick<SystemInfoShape, 'environment' | 'executablePath'>;
         const expected =
           !(input.ci || input.test || input.vitest || input.cloud || input.cloudMcp || input.off) &&
           input.executable === 'threadnote' &&
@@ -708,7 +736,8 @@ it('preserves exclusion flags in the new child environment without inheriting pr
 });
 
 it.each(
-  [[], ['--home', '/home'], ['--home', '/home', '--identity', 'bad'], ['--identity', '1:2:3', '--home', '/home']].map(
+  EffectArray.map(
+    [[], ['--home', '/home'], ['--home', '/home', '--identity', 'bad'], ['--identity', '1:2:3', '--home', '/home']],
     args => ({args}),
   ),
 )('rejects malformed internal automatic request arguments $args', ({args}) =>

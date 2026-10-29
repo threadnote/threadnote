@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -23,6 +25,9 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ROOT = 'threadnote://user/tester/memories/';
 const ARTIFACT = `${ROOT}agent-artifacts/skills/claude/review-pr/SKILL.md`;
@@ -57,7 +62,7 @@ function fixture(shared: boolean, relations: readonly MemoryRelation[]) {
     const home = yield* fs.makeTempDirectoryScoped({prefix: 'artifact-relation-maintenance-'});
     const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
     const record = source(shared, relations);
-    const file = path.join(root, record.uri.slice(ROOT.length));
+    const file = path.join(root, Effect2.pipe(record.uri, EffectString.slice(ROOT.length)));
     yield* fs.makeDirectory(path.dirname(file), {recursive: true});
     yield* fs.writeFileString(file, record.content);
     const config: RuntimeConfig = {
@@ -104,10 +109,12 @@ describe('artifact relation maintenance', () => {
     },
     ({shared, sharedArtifact, present, body, type}) =>
       Effect.gen(function* () {
-        const uri = sharedArtifact ? ARTIFACT.replace('/memories/', '/memories/shared/default/') : ARTIFACT;
+        const uri = sharedArtifact
+          ? Effect2.pipe(ARTIFACT, EffectString.replace('/memories/', '/memories/shared/default/'))
+          : ARTIFACT;
         const relation = {type, uri};
         const f = yield* fixture(shared, [relation]);
-        const artifact = f.path.join(f.root, uri.slice(ROOT.length));
+        const artifact = f.path.join(f.root, Effect2.pipe(uri, EffectString.slice(ROOT.length)));
         const content = `---\nname: synthetic-tool\n---\n${body}`;
         if (present) {
           yield* f.fs.makeDirectory(f.path.dirname(artifact), {recursive: true});
@@ -116,11 +123,26 @@ describe('artifact relation maintenance', () => {
         expect(resolveMaintenanceRelationPolicy(f.record, relation, [f.record]).state).toBe('unknown');
         expect(safeRelationRemoval(f.record, [f.record])).toEqual([]);
         const health = yield* collectContextHealth(f.config, 'threadnote', [f.record], f.home);
-        expect(health.findings.filter(item => item.category.startsWith('relation-target-'))).toEqual([]);
+        expect(
+          EffectArray.filter(
+            health.findings,
+            (item, index) =>
+              index in health.findings && Effect2.pipe(item.category, EffectString.startsWith('relation-target-')),
+          ),
+        ).toEqual([]);
         const result = yield* runContextMaintenance(f.config, {cwd: f.home});
         expect(result.error).toBeUndefined();
         expect(result.preparation).toMatchObject({complete: true, admittedRecords: 1});
-        expect(result.cases.filter(item => ['relation', 'shared-owner-proposal'].includes(item.family))).toEqual([]);
+        expect(
+          EffectArrayPipe(result.cases, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (item, __effectArrayIndex) =>
+                __effectArrayIndex in __effectArrayValues &&
+                ['relation', 'shared-owner-proposal'].includes(item.family),
+            ),
+          ),
+        ).toEqual([]);
         expect(result.receipts).toEqual([]);
         expect(yield* f.fs.readFileString(f.file)).toBe(f.record.content);
         if (present) expect(yield* f.fs.readFileString(artifact)).toBe(content);
@@ -135,13 +157,13 @@ describe('artifact relation maintenance', () => {
       () =>
         Effect.gen(function* () {
           const f = yield* fixture(shared, [{type: 'depends_on', uri: ARTIFACT}]);
-          const artifact = f.path.join(f.root, ARTIFACT.slice(ROOT.length));
+          const artifact = f.path.join(f.root, Effect2.pipe(ARTIFACT, EffectString.slice(ROOT.length)));
           yield* f.fs.makeDirectory(f.path.dirname(artifact), {recursive: true});
           yield* f.fs.writeFileString(artifact, '---\nname: synthetic-tool\n---\nSynthetic bundle.');
           yield* runContextMaintenance(f.config, {cwd: f.home});
           const stateFile = f.path.join(f.home, 'context-maintenance', 'state-v2.json');
           const state = JSON.parse(yield* f.fs.readFileString(stateFile));
-          expect(Object.keys(state.checkpoints)).toHaveLength(1);
+          expect(EffectRecord.keys(state.checkpoints)).toHaveLength(1);
           expect(state.workSchedule.nextPhase).toBe('semantic');
           const checkpoints = structuredClone(state.checkpoints);
           state.cases = [
@@ -151,7 +173,16 @@ describe('artifact relation maintenance', () => {
           state.state = 'needs-decision';
           yield* f.fs.writeFileString(stateFile, JSON.stringify(state));
           const resumed = yield* runContextMaintenance(f.config, {cwd: f.home});
-          expect(resumed.cases.filter(item => ['relation', 'shared-owner-proposal'].includes(item.family))).toEqual([]);
+          expect(
+            EffectArrayPipe(resumed.cases, __effectArrayValues =>
+              EffectArray.filter(
+                __effectArrayValues,
+                (item, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues &&
+                  ['relation', 'shared-owner-proposal'].includes(item.family),
+              ),
+            ),
+          ).toEqual([]);
           expect(resumed.receipts).toEqual([]);
           expect((yield* readContextMaintenanceStatus(f.config)).cases).toEqual([]);
           expect(JSON.parse(yield* f.fs.readFileString(stateFile)).checkpoints).toEqual(checkpoints);

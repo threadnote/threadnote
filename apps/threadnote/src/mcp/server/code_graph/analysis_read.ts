@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import type {CodeGraphCliFreshnessPolicy} from '@threadnote/graph/cli/freshness';
 import type {CodeGraphStatus} from '@threadnote/graph/types';
@@ -6,7 +7,7 @@ import {
   copyAnonymousTelemetryMetadata,
   attachAnonymousTelemetryReportedOutcome,
 } from '../../../telemetry/diagnostic.js';
-import {renderCodeGraphAgentProvenance} from '../../code_graph_agent_provenance.js';
+import {graphAgentRecord, renderCodeGraphAgentProvenance} from '../../code_graph_agent_provenance.js';
 
 export function codeGraphAnalysisReadMetadata(
   policy: CodeGraphCliFreshnessPolicy,
@@ -41,21 +42,15 @@ export function codeGraphAnalysisReadStateResponse(
   metadata: CodeGraphAnalysisReadMetadata,
   responseFormat: 'agent' | 'dual' | undefined,
 ): CallToolResult {
-  const structured =
-    typeof response.structuredContent === 'object' && response.structuredContent !== null
-      ? (response.structuredContent as Readonly<Record<string, unknown>>)
-      : undefined;
-  const result =
-    typeof structured?.result === 'object' && structured.result !== null
-      ? (structured.result as Readonly<Record<string, unknown>>)
-      : undefined;
+  const structured = graphAgentRecord(response.structuredContent);
+  const result = graphAgentRecord(structured?.result);
   const agentProvenance = renderCodeGraphAgentProvenance({
     ...metadata,
     ...(result?.projectCoverage === undefined ? {} : {projectCoverage: result.projectCoverage}),
   });
   const formatted = {
     ...response,
-    content: response.content.map(item =>
+    content: EffectArray.map(response.content, item =>
       item.type === 'text'
         ? {
             ...item,

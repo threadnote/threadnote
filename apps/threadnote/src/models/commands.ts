@@ -8,10 +8,13 @@ import {bundledCoreEmbeddingSource} from './core-embedding-asset.js';
 import {LocalModelStore, modelDownloadUrl} from '@threadnote/inference/models/store';
 import {readModelSelection, selectLocalModel} from '@threadnote/inference/models/selection';
 
-class ModelCommandError extends Schema.TaggedError<ModelCommandError>()('ModelCommandError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class ModelCommandError extends Schema.TaggedError<ModelCommandError, {readonly brand: unique symbol}>()(
+  'ModelCommandError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export const runModelList = Effect.fn('models.command.list')(function* (config: RuntimeConfig) {
   const catalog = yield* LocalModelCatalog;

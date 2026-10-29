@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {
@@ -15,6 +16,8 @@ import {
   projectCodeMemoryLinkCodexClientConfigV1,
 } from './code-memory-link-codex-isolation.js';
 import {ScriptError} from './effect/errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface CodeMemoryLinkClientFileBindingInput {
   readonly path: string;
@@ -78,7 +81,7 @@ export const collectCodeMemoryLinkClientImplementation = Effect.fn('codeMemoryLi
       return yield* ScriptError.make({message: 'The client must execute exactly the reviewed client-bundle path.'});
     }
     const expectedClientProjection = {
-      appServerVersion: config.appServer.version.replace('codex-cli ', ''),
+      appServerVersion: Effect2.pipe(config.appServer.version, EffectString.replace('codex-cli ', '')),
       model: config.model.id,
       modelProvider: config.model.provider,
       proxyTool: {server: CODE_MEMORY_LINK_PROXY_SERVER_NAME, tool: 'context_brief'},
@@ -86,8 +89,8 @@ export const collectCodeMemoryLinkClientImplementation = Effect.fn('codeMemoryLi
     };
     const descriptor = parseCodeMemoryLinkClientImplementationDescriptorV1({
       argumentVectorHash: codeMemoryLinkClientArgumentVectorHash(input.clientArguments),
-      artifactBindings: artifactBindings.map(({path: _path, ...binding}) => binding),
-      binaryBindings: binaryBindings.map(({path: _path, ...binding}) => binding),
+      artifactBindings: EffectArray.map(artifactBindings, ({path: _path, ...binding}) => binding),
+      binaryBindings: EffectArray.map(binaryBindings, ({path: _path, ...binding}) => binding),
       configurationHash: yield* sha256FileHex(configuration),
       configurationProjectionHash: yield* sha256FileHex(configurationProjection),
       dependenciesLockHash: yield* sha256FileHex(dependenciesLock),
@@ -130,14 +133,14 @@ const collectBindings = Effect.fn('codeMemoryLinkClientImplementation.collectBin
     {concurrency: 4},
   );
   collected.sort((left, right) => (left.role < right.role ? -1 : left.role > right.role ? 1 : 0));
-  if (new Set(collected.map(binding => binding.role)).size !== collected.length) {
+  if (new Set(EffectArray.map(collected, binding => binding.role)).size !== collected.length) {
     return yield* ScriptError.make({message: `Client ${label} binding roles must be unique.`});
   }
   return collected;
 });
 
 function exactlyOneRole(bindings: readonly CollectedBinding[], role: string): CollectedBinding {
-  const matching = bindings.filter(binding => binding.role === role);
+  const matching = EffectArray.filter(bindings, binding => binding.role === role);
   if (matching.length !== 1)
     throw ScriptError.make({message: `Client implementation requires exactly one ${role} binding.`});
   return matching[0];

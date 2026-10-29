@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, Path, Predicate, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -15,6 +16,9 @@ import {
   type CodeGraphBridgeEndpointV1,
   type CodeGraphCrossRepositoryBridgeV1,
 } from './resolver.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const GENERATION_ID = /^cgwg_[0-9a-f]{40}$/u;
 const BRIDGE_ID = /^cgb_[0-9a-f]{64}$/u;
@@ -537,7 +541,10 @@ function prepareBridgeSet(input: {
   readonly generationId: string;
 }): PreparedBridgeSet {
   if (!GENERATION_ID.test(input.generationId)) throw invalid('Bridge generation identity is invalid.');
-  if (!Array.isArray(input.bridges) || input.bridges.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.bridgesPerGeneration) {
+  if (
+    !EffectArray.isArray(input.bridges) ||
+    input.bridges.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.bridgesPerGeneration
+  ) {
     throw invalid('Bridge set exceeds the supported generation bound.');
   }
   const byId = new Map<string, PreparedBridge>();
@@ -577,7 +584,7 @@ export function codeGraphCrossRepositoryBridgeReplacementRequiredFreeBytes(input
   readonly replacementBridgeBytes: number;
   readonly replacementBridgeCount: number;
 }): number {
-  for (const [label, value] of Object.entries(input)) {
+  for (const [label, value] of EffectRecord.toEntries(input)) {
     if (!Number.isSafeInteger(value) || value < 0) throw invalid(`Bridge ${label} is invalid.`);
   }
   if (
@@ -725,7 +732,7 @@ function loadGenerationMemberIdentities(sql: SqlClient.SqlClient, generationId: 
           if (rows.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.membersPerGeneration) {
             throw corrupt('Bridge generation member count exceeds the supported bound.');
           }
-          return rows.map(row => ({
+          return EffectArray.map(rows, row => ({
             repositoryId: requiredText(row.repository_id, 'repository identity'),
             repositoryKey: requiredText(row.repository_key, 'repository key'),
             snapshotId: requiredText(row.snapshot_id, 'snapshot identity'),
@@ -927,10 +934,10 @@ function canonicalCoverage(value: {
     0,
     CODE_GRAPH_WORKSET_CATALOG_LIMITS.bridgesPerGeneration,
   );
-  if (!Array.isArray(value.diagnostics)) throw invalid('Bridge coverage diagnostics are invalid.');
+  if (!EffectArray.isArray(value.diagnostics)) throw invalid('Bridge coverage diagnostics are invalid.');
   const diagnostics = [
     ...new Set(
-      value.diagnostics.map(diagnostic =>
+      EffectArray.map(value.diagnostics, diagnostic =>
         oneOf(diagnostic, CODE_GRAPH_CROSS_REPOSITORY_BRIDGE_DIAGNOSTIC_CODES, 'coverage diagnostic'),
       ),
     ),
@@ -1212,19 +1219,25 @@ function parseReference(value: unknown): CodeGraphBridgeEndpointReferenceV1 {
 
 function bridgeIdentity(bridge: CodeGraphCrossRepositoryBridgeV1): string {
   return `cgb_${sha256HexSync(
-    [
-      'threadnote-code-graph-cross-repository-bridge-v1',
-      bridge.resolver.version,
-      bridge.resolutionDomain,
-      bridge.kind,
-      bridge.identity,
-      bridge.source.repositoryId,
-      bridge.source.snapshotId,
-      bridge.source.monikerId,
-      bridge.target.repositoryId,
-      bridge.target.snapshotId,
-      bridge.target.monikerId,
-    ].join('\0'),
+    EffectArray.join(
+      EffectArray.map(
+        [
+          'threadnote-code-graph-cross-repository-bridge-v1',
+          bridge.resolver.version,
+          bridge.resolutionDomain,
+          bridge.kind,
+          bridge.identity,
+          bridge.source.repositoryId,
+          bridge.source.snapshotId,
+          bridge.source.monikerId,
+          bridge.target.repositoryId,
+          bridge.target.snapshotId,
+          bridge.target.monikerId,
+        ],
+        item => (item === null || item === undefined ? '' : String(item)),
+      ),
+      '\0',
+    ),
   )}`;
 }
 
@@ -1324,8 +1337,18 @@ function parseEndpointKey(value: unknown): CodeGraphCrossRepositoryEndpointKeyV1
 }
 
 function relativeEvidencePath(value: unknown): string {
-  const path = boundedText(value, 'evidence path', MAX_EVIDENCE_PATH_BYTES).normalize('NFC').replaceAll('\\', '/');
-  if (path.startsWith('/') || path.split('/').some(segment => !segment || segment === '.' || segment === '..')) {
+  const path = Effect2.pipe(
+    boundedText(value, 'evidence path', MAX_EVIDENCE_PATH_BYTES),
+    EffectString.normalize('NFC'),
+    EffectString.replaceAll('\\', '/'),
+  );
+  if (
+    Effect2.pipe(path, EffectString.startsWith('/')) ||
+    EffectArray.some(
+      Effect2.pipe(path, EffectString.split('/')),
+      segment => !segment || segment === '.' || segment === '..',
+    )
+  ) {
     throw invalid('Bridge evidence path is invalid.');
   }
   return path;
@@ -1345,11 +1368,24 @@ function referenceValue(reference: CodeGraphBridgeEndpointReferenceV1): string {
 
 function boundedText(value: unknown, label: string, maximumBytes: number): string {
   if (typeof value !== 'string') throw invalid(`Bridge ${label} is invalid.`);
-  const normalized = value.normalize('NFC').trim();
+  const normalized = Effect2.pipe(value, EffectString.normalize('NFC'), EffectString.trim);
   if (
     normalized.length === 0 ||
     Buffer.byteLength(normalized, 'utf8') > maximumBytes ||
-    [...normalized].some(character => character.codePointAt(0)! < 32 || character.codePointAt(0) === 127)
+    EffectArray.some(
+      [...normalized],
+      character =>
+        Effect2.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect2.Option.getOrElse(() => undefined),
+        )! < 32 ||
+        Effect2.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect2.Option.getOrElse(() => undefined),
+        ) === 127,
+    )
   ) {
     throw invalid(`Bridge ${label} is invalid.`);
   }
@@ -1386,9 +1422,9 @@ function exactRecord<const Keys extends readonly string[]>(
 }
 
 function exactKeys(value: Readonly<Record<string, unknown>>, keys: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort(compareCodeUnits);
+  const actual = EffectRecord.keys(value).sort(compareCodeUnits);
   const expected = [...keys].sort(compareCodeUnits);
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  if (actual.length !== expected.length || EffectArray.some(actual, (key, index) => key !== expected[index])) {
     throw invalid(`Bridge ${label} fields are invalid.`);
   }
 }
@@ -1403,22 +1439,25 @@ function recordValue(value: unknown, label: string): Readonly<Record<string, unk
 function structurallyEqual(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
   if (typeof left !== 'object' || left === null || typeof right !== 'object' || right === null) return false;
-  if (Array.isArray(left) || Array.isArray(right)) {
+  if (EffectArray.isArray(left) || EffectArray.isArray(right)) {
     return (
-      Array.isArray(left) &&
-      Array.isArray(right) &&
+      EffectArray.isArray(left) &&
+      EffectArray.isArray(right) &&
       left.length === right.length &&
-      left.every((value, index) => structurallyEqual(value, right[index]))
+      EffectArray.every(left, (value, index) => structurallyEqual(value, right[index]))
     );
   }
   if (!Predicate.isObject(left) || !Predicate.isObject(right)) return false;
   const leftRecord = left;
   const rightRecord = right;
-  const leftKeys = Object.keys(leftRecord).sort(compareCodeUnits);
-  const rightKeys = Object.keys(rightRecord).sort(compareCodeUnits);
+  const leftKeys = EffectRecord.keys(leftRecord).sort(compareCodeUnits);
+  const rightKeys = EffectRecord.keys(rightRecord).sort(compareCodeUnits);
   return (
     leftKeys.length === rightKeys.length &&
-    leftKeys.every((key, index) => key === rightKeys[index] && structurallyEqual(leftRecord[key], rightRecord[key]))
+    EffectArray.every(
+      leftKeys,
+      (key, index) => key === rightKeys[index] && structurallyEqual(leftRecord[key], rightRecord[key]),
+    )
   );
 }
 

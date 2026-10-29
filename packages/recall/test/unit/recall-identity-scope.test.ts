@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
@@ -12,6 +13,8 @@ import {
   type RecallSqlPredicate,
 } from '@threadnote/recall/index/scope';
 import {selectRecallDocumentRowsByMemoryIds} from '@threadnote/recall/index/selection';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const root = 'threadnote://user/me/memories/durable';
 const target = `${root}/target.md`;
@@ -36,7 +39,7 @@ const edge = fc.oneof(
   ),
   fc.array(fc.integer({min: 0, max: 0xffff}), {minLength: 1, maxLength: 3}).map(codes => String.fromCharCode(...codes)),
 );
-const uri = fc.array(edge, {minLength: 1, maxLength: 3}).map(parts => `${root}/${parts.join('/')}`);
+const uri = fc.array(edge, {minLength: 1, maxLength: 3}).map(parts => `${root}/${EffectArray.join(parts, '/')}`);
 const document = fc.record({uri, memoryId: fc.constantFrom('tn_a', 'tn_b'), contentHash: fc.constantFrom('a', 'b')});
 
 interface Row {
@@ -78,11 +81,14 @@ function selected(database: Database, scope: RecallSqlPredicate, conflicts = fal
 describe('stable identity URI scope SQL', () => {
   it('preserves unrestricted, invalid-only, normalized and exact-or-descendant boundaries', () => {
     const database = createDatabase(
-      [root, `${root}/`, target, `${target}/child`, `${root}0/neighbor`, `${root}-other/neighbor`].map(uri => ({
-        uri,
-        memoryId: 'tn_a',
-        contentHash: 'a',
-      })),
+      EffectArray.map(
+        [root, `${root}/`, target, `${target}/child`, `${root}0/neighbor`, `${root}-other/neighbor`],
+        uri => ({
+          uri,
+          memoryId: 'tn_a',
+          contentHash: 'a',
+        }),
+      ),
     );
     try {
       const scopes: readonly (readonly string[] | undefined)[] = [
@@ -125,7 +131,7 @@ describe('stable identity URI scope SQL', () => {
     ]) {
       const scope = `${root}/${suffix}`;
       const database = createDatabase(
-        [scope, `${scope}/child`, `${scope}0/neighbor`, `${root}/unrelated`].map(uri => ({
+        EffectArray.map([scope, `${scope}/child`, `${scope}0/neighbor`, `${root}/unrelated`], uri => ({
           uri,
           memoryId: 'tn_a',
           contentHash: 'a',
@@ -160,7 +166,7 @@ describe('stable identity URI scope SQL', () => {
             const scopes = restrict
               ? [
                   ...extraScopes,
-                  ...rows.slice(0, 3).map(row => `${row.uri}///#ignored`),
+                  ...EffectArray.map(rows.slice(0, 3), row => `${row.uri}///#ignored`),
                   '#invalid',
                   ...extraScopes.slice(0, 2),
                 ]
@@ -227,7 +233,7 @@ describe('stable identity URI scope SQL', () => {
       for (const count of [0, 10, 200, 1024]) {
         const scopes = [...Array.from({length: count}, (_, index) => `${root}/owned-${index}.md`), target];
         const candidates = yield* selectRecallDocumentRowsByMemoryIds(observed, ['tn_a'], scopes, undefined);
-        expect(candidates.map(row => row.uri)).toEqual([target]);
+        expect(EffectArray.map(candidates, row => row.uri)).toEqual([target]);
         const loadConflicts = createRecallIdentityConflictLoader(observed);
         expect(yield* loadConflicts(scopes, undefined, ['tn_a'])).toEqual(new Set());
         expect(yield* loadConflicts([...scopes, `${root}/duplicate.md`], undefined, ['tn_a'])).toEqual(
@@ -236,8 +242,12 @@ describe('stable identity URI scope SQL', () => {
       }
       for (const query of captured) {
         const plan = yield* sql.unsafe<{detail: string}>(`EXPLAIN QUERY PLAN ${query.text}`, query.parameters);
-        expect(plan.some(row => row.detail.includes('SEARCH d USING INDEX documents_memory_identity'))).toBe(true);
-        expect(plan.some(row => row.detail === 'SCAN d')).toBe(false);
+        expect(
+          EffectArray.some(plan, row =>
+            Effect2.pipe(row.detail, EffectString.includes('SEARCH d USING INDEX documents_memory_identity')),
+          ),
+        ).toBe(true);
+        expect(EffectArray.some(plan, row => row.detail === 'SCAN d')).toBe(false);
       }
     }).pipe(withDatabase),
   );

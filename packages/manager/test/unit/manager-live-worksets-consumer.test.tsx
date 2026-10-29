@@ -1,11 +1,15 @@
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
-import {afterEach, beforeEach, expect, it, vi} from 'vitest';
+import {assert, afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {ManagerLiveProvider} from '../../src/live/provider.js';
 import {ManagerDialogProvider} from '../../src/dialog.js';
 import {WorksetsPanel} from '../../src/worksets_view.js';
 import {FakeManagerSocket} from './live-consumer-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+
 let root: Root | undefined;
 let reads: string[];
 const catalog = {
@@ -25,7 +29,7 @@ const job = {
   workset: 'demo',
   createdAt: '2026-10-23T00:00:00Z',
   status: 'running',
-  progress: {phase: 'building', message: 'Preparing', total: 1},
+  progress: {phase: 'starting', message: 'Preparing', total: 1},
 };
 async function flush() {
   await act(async () => {
@@ -33,7 +37,7 @@ async function flush() {
   });
 }
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
   FakeManagerSocket.instances = [];
   reads = [];
@@ -46,16 +50,20 @@ beforeEach(() => {
       if (url === '/api/worksets') return new Response(JSON.stringify(catalog));
       if (url === '/api/worksets/jobs') return new Response(JSON.stringify({jobs: [job]}));
       if (url === '/api/worksets/jobs/job-one') return new Response(JSON.stringify({job}));
-      if (url.startsWith('/api/worksets/definition'))
+      if (Effect.pipe(url, EffectString.startsWith('/api/worksets/definition')))
         return new Response(JSON.stringify({name: 'demo', members: [], configuredMembers: 0, unresolvedMembers: 0}));
-      if (url.startsWith('/api/worksets/status'))
+      if (Effect.pipe(url, EffectString.startsWith('/api/worksets/status')))
         return new Response(
           JSON.stringify({
             type: 'code-graph-workset-status',
             version: 1,
             workset: 'demo',
             catalog: {state: 'missing'},
-            coverage: {current: 0, requested: 0, states: {}},
+            coverage: {
+              current: 0,
+              requested: 0,
+              states: {deferred: 0, failed: 0, stale: 0, missing: 0, excluded: 0, current: 0, uncatalogued: 0},
+            },
             manifestDigest: 'x',
             members: [],
             warnings: [],
@@ -96,9 +104,9 @@ it('keeps mounted workset queries quiet between broad live events while the prog
   await flush();
   const initial = reads.length;
   expect(initial).toBeGreaterThanOrEqual(3);
-  const create = document.querySelector('[aria-label="Create workset"]') as HTMLButtonElement;
+  const create = document.querySelector<HTMLButtonElement>('button[aria-label="Create workset"]')!;
   await act(async () => create.click());
-  const description = document.querySelector('.worksets-editor textarea') as HTMLTextAreaElement;
+  const description = requiredTextarea('.worksets-editor textarea');
   expect(description).toBeTruthy();
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(
@@ -115,9 +123,7 @@ it('keeps mounted workset queries quiet between broad live events while the prog
   });
   await flush();
   expect(reads.length - initial).toBeLessThanOrEqual(10);
-  expect((document.querySelector('.worksets-editor textarea') as HTMLTextAreaElement)?.value).toBe(
-    'Keep this draft while jobs change',
-  );
+  expect(requiredTextarea('.worksets-editor textarea')?.value).toBe('Keep this draft while jobs change');
   expect(FakeManagerSocket.instances).toHaveLength(1);
 });
 
@@ -145,7 +151,18 @@ it('surfaces an initial supported catalog failure and retries without losing the
   });
   await flush();
   expect(document.querySelector('[role=alert]')?.textContent).toContain('temporary catalog failure');
-  const retry = [...document.querySelectorAll('button')].find(button => button.textContent?.includes('Retry catalog'))!;
+  const retry = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(button =>
+          Effect.pipe(button.textContent, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.includes('Retry catalog')),
+          ))(__effectArrayValue),
+    ),
+  )!;
   await act(async () => retry.click());
   await flush();
   expect(document.querySelector('[role=alert]')).toBeNull();
@@ -173,12 +190,23 @@ it('translates a supported readiness error and recovers with the existing refres
   });
   await flush();
   await act(async () =>
-    [...document.querySelectorAll('button')].find(button => button.textContent?.includes('Open workset'))?.click(),
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll('button')],
+        __effectArrayValue =>
+          !!(button =>
+            Effect.pipe(button.textContent, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes('Open workset')),
+            ))(__effectArrayValue),
+      ),
+    )?.click(),
   );
   const original = vi.mocked(fetch).getMockImplementation();
   let fail = true;
   vi.mocked(fetch).mockImplementation(async (url, init) => {
-    if (fail && String(url).startsWith('/api/worksets/status'))
+    if (fail && Effect.pipe(String(url), EffectString.startsWith('/api/worksets/status')))
       return new Response(JSON.stringify({code: 'maintenance-busy', error: 'Busy'}), {status: 503});
     return original?.(url, init) ?? new Response(null, {status: 500});
   });
@@ -188,9 +216,18 @@ it('translates a supported readiness error and recovers with the existing refres
     'Readiness is temporarily unavailable while graph maintenance is active',
   );
   fail = false;
-  const refresh = [...document.querySelectorAll('[aria-label="Workset readiness"] button')].find(button =>
-    button.textContent?.includes('Refresh'),
-  ) as HTMLButtonElement;
+  const refresh = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('[aria-label="Workset readiness"] button')],
+      __effectArrayValue =>
+        !!(button =>
+          Effect.pipe(button.textContent, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.includes('Refresh')),
+          ))(__effectArrayValue),
+    ),
+  )!;
   await act(async () => refresh.click());
   await flush();
   expect(document.querySelector('[aria-label="Workset readiness"]')?.textContent).not.toContain(
@@ -223,12 +260,24 @@ it.each(['/api/worksets/jobs', '/api/worksets/definition', '/api/worksets/jobs/j
     await act(async () => socket.ack());
     await flush();
     await act(async () =>
-      [...document.querySelectorAll('button')].find(button => button.textContent?.includes('Open workset'))?.click(),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...document.querySelectorAll('button')],
+          __effectArrayValue =>
+            !!(button =>
+              Effect.pipe(button.textContent, effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect.pipe(effectOptionalString, EffectString.includes('Open workset')),
+              ))(__effectArrayValue),
+        ),
+      )?.click(),
     );
     const original = vi.mocked(fetch).getMockImplementation();
     let fail = true;
     vi.mocked(fetch).mockImplementation(async (url, init) => {
-      if (fail && String(url).split('?')[0] === endpoint) throw new Error('temporary scoped read failure');
+      if (fail && Effect.pipe(String(url), EffectString.split('?'))[0] === endpoint)
+        throw new Error('temporary scoped read failure');
       return original?.(url, init) ?? new Response(null, {status: 500});
     });
     await act(async () => socket.invalidate(1, {topic: 'worksets', scope: 'account'}));
@@ -241,3 +290,9 @@ it.each(['/api/worksets/jobs', '/api/worksets/definition', '/api/worksets/jobs/j
     expect(document.body.textContent).toContain('demo');
   },
 );
+
+function requiredTextarea(selector: string): HTMLTextAreaElement {
+  const element = document.querySelector(selector);
+  assert(element instanceof HTMLTextAreaElement, `Missing textarea: ${selector}`);
+  return element;
+}

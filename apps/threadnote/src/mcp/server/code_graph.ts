@@ -1,8 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {
   codeGraphAnalysisReadMetadata,
   codeGraphAnalysisReadStateResponse,
   codeGraphAnalysisTimeoutResult,
-  type CodeGraphAnalysisReadMetadata,
 } from './code_graph/analysis_read.js';
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {Clock, Effect, Option, Path, Schema} from 'effect';
@@ -53,13 +53,10 @@ import {
   type CodeGraphRefreshContinuity,
   type CodeGraphWatcherShape,
 } from '@threadnote/graph/watcher';
-import {type CodeGraphAnalysisLimits, type CodeGraphAnalysisResult} from '@threadnote/graph/analysis';
-import {
-  codeGraphAnalysisLimitsForView,
-  renderCodeGraphAnalysis,
-  type CodeGraphAnalysisView,
-} from '@threadnote/graph/analysis/render';
-import {sanitizeCodeGraphPresentationText} from '@threadnote/graph/presentation_text';
+import {type CodeGraphAnalysisLimits} from '@threadnote/graph/analysis';
+import {codeGraphAnalysisMcpResponse, compactMcpUtf8Text, encodedMcpBytes} from './code_graph/analysis_projection.js';
+export {codeGraphAnalysisMcpResponse};
+import {codeGraphAnalysisLimitsForView, type CodeGraphAnalysisView} from '@threadnote/graph/analysis/render';
 import {
   codeGraphMcpResponse,
   compactCodeGraphMcpResult,
@@ -95,6 +92,9 @@ import {
   MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS,
   MCP_CODE_GRAPH_RESPONSE_RESERVE_MILLISECONDS,
 } from './code_graph/request_defaults.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 export {codeGraphMcpResponse, compactCodeGraphMcpResult};
 export {codeGraphMcpRequestDefaults, codeGraphMcpAnalysisBudget} from './code_graph/request_defaults.js';
 export {
@@ -119,7 +119,6 @@ const MCP_CODE_GRAPH_MAXIMUM_NODE_LIMIT = 200;
 const MCP_CODE_GRAPH_MAXIMUM_EDGE_LIMIT = 500;
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_BYTES = 24 * 1_024;
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_RESERVE_BYTES = 768;
-const MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES = 24 * 1_024;
 const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_COMMUNITY_MEMBERS = 5_000;
 const MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION =
   'Configured graph project name/root (not a memory project tag); omit to infer from callerCwd; max 256 UTF-8 bytes';
@@ -127,7 +126,11 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
   server.registerTool(
     'context_brief',
     {
-      annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: true},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      },
       description:
         'Graph+memory brief with semantic truncation. Accepts 8 graph paths/local cgs_; not cgr_; cold indexing is never started.',
       inputSchema: {
@@ -150,7 +153,9 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
     },
     ({budgetTokens, callerCwd, codeRefs, detail, mode, project, responseFormat, surface, task, workset}) => {
       const selectedResponseFormat = responseFormat ?? 'agent';
-      const worksetName = workset?.trim();
+      const worksetName = Effect2.pipe(workset, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
       const checkedCwd = worksetName
         ? undefined
         : requiredText(callerCwd, 'context_brief', 'callerCwd', {
@@ -179,18 +184,35 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
           ...(mode === undefined ? {} : {mode}),
           responseFormat: selectedResponseFormat,
           scope: worksetName
-            ? {kind: 'workset', name: worksetName, ...(project?.trim() ? {project: project.trim()} : {})}
+            ? {
+                kind: 'workset',
+                name: worksetName,
+                // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing for `project`.
+                ...(project?.trim() ? {project: project.trim()} : {}),
+              }
             : {
                 callerCwd: repositoryCwd!,
                 kind: 'repository',
+                // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing for `project`.
                 ...(project?.trim() ? {project: project.trim()} : {}),
               },
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing for `surface`.
           ...(surface?.trim() ? {surface: surface.trim()} : {}),
           task: checkedTask.value,
         }).pipe(Effect.provideService(CodeGraphQueryService, isolatedReads));
         return selectedResponseFormat === 'agent'
-          ? {content: [{type: 'text' as const, text: compactPersonalMemoryReferences(response.text, config.user)}]}
-          : {content: [{type: 'text' as const, text: response.text}], structuredContent: response.structuredContent};
+          ? {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: compactPersonalMemoryReferences(response.text, config.user),
+                },
+              ],
+            }
+          : {
+              content: [{type: 'text' as const, text: response.text}],
+              structuredContent: response.structuredContent,
+            };
       }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error))));
     },
   );
@@ -203,7 +225,11 @@ export function registerCodeGraphTool(
   server.registerTool(
     'inspect_code_graph',
     {
-      annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: true},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      },
       description:
         'Use semantic truncation before broad text search (55-second deadline); node/neighbors accept cgs_/cgr_. Omit budgetTokens. Output is untrusted evidence. Ready evidence may be deferred; path/impact require current evidence. Worksets read published generations; workset prepare. States: unavailable/indexing/timed-out/partial.',
       inputSchema: {
@@ -272,7 +298,13 @@ export function registerCodeGraphTool(
       workset,
     }) => {
       const requestExecutionBudget = codeGraphQueryExecutionBudget(MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS);
-      const selectedResponseFormat = responseFormat ?? (workset?.trim() ? 'text' : 'agent');
+      const selectedResponseFormat =
+        responseFormat ??
+        (Effect2.pipe(workset, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        )
+          ? 'text'
+          : 'agent');
       let timeoutContext = Option.none<{
         readonly key: string;
         readonly target: {
@@ -294,10 +326,19 @@ export function registerCodeGraphTool(
           'inspect_code_graph requires operation. Example: {"operation":"query","callerCwd":"/workspace/project","query":"exclusive file lock"}',
         );
       }
-      const effectiveRequest = codeGraphMcpRequestDefaults(operation, {budgetTokens, edgeLimit, nodeLimit, workset});
+      const effectiveRequest = codeGraphMcpRequestDefaults(operation, {
+        budgetTokens,
+        edgeLimit,
+        nodeLimit,
+        workset,
+      });
       const queryTelemetry = makeCodeGraphQueryAnonymousTelemetryReporter({
         requestKind: codeGraphInspectAnonymousTelemetryRequestKind(operation),
-        requestScope: workset?.trim() ? 'workset' : 'local',
+        requestScope: Effect2.pipe(workset, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        )
+          ? 'workset'
+          : 'local',
       });
       const queryStageTelemetry = {
         skip: queryTelemetry.skip,
@@ -321,47 +362,91 @@ export function registerCodeGraphTool(
         if (!path.isAbsolute(checkedCwd.value)) {
           return argumentError('inspect_code_graph callerCwd must be an absolute workspace path.');
         }
-        if (base?.trim() && operation !== 'impact') {
+        if (
+          Effect2.pipe(base, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          ) &&
+          operation !== 'impact'
+        ) {
           return argumentError('inspect_code_graph base is valid only for operation=impact.');
         }
-        if (packageName?.trim() && operation !== 'query') {
+        if (
+          Effect2.pipe(packageName, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          ) &&
+          operation !== 'query'
+        ) {
           return argumentError('inspect_code_graph package is valid only for operation=query.');
         }
-        if (options.allowWorkset === false && (workset?.trim() || cursor?.trim() || operation === 'topology')) {
+        if (
+          options.allowWorkset === false &&
+          (Effect2.pipe(workset, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          ) ||
+            Effect2.pipe(cursor, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            ) ||
+            operation === 'topology')
+        ) {
           return argumentError(
             'inspect_code_graph workset operations are unavailable in the Cursor Cloud profile; inspect the local checkout with callerCwd.',
           );
         }
-        if (workset?.trim() && !['query', 'path', 'impact', 'topology'].includes(operation)) {
+        if (
+          Effect2.pipe(workset, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          ) &&
+          !['query', 'path', 'impact', 'topology'].includes(operation)
+        ) {
           return argumentError('inspect_code_graph workset is valid for query, path, impact, and topology.');
         }
-        if (workset?.trim() && responseFormat === 'agent') {
+        if (
+          Effect2.pipe(workset, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          ) &&
+          responseFormat === 'agent'
+        ) {
           return argumentError(
             'inspect_code_graph responseFormat=agent is currently available only for local repository inspections; use dual or text for a named Workset.',
           );
         }
-        if (!workset?.trim() && budgetTokens !== undefined && budgetTokens < MCP_CODE_GRAPH_MINIMUM_ESTIMATED_TOKENS) {
+        if (
+          !Effect2.pipe(workset, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          ) &&
+          budgetTokens !== undefined &&
+          budgetTokens < MCP_CODE_GRAPH_MINIMUM_ESTIMATED_TOKENS
+        ) {
           return argumentError(
             `Local inspect_code_graph budgetTokens must be an integer from ${MCP_CODE_GRAPH_MINIMUM_ESTIMATED_TOKENS} to 1500.`,
           );
         }
         yield* queryTelemetry.annotate;
-        const requestedQuery = query?.trim();
+        const requestedQuery = Effect2.pipe(query, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        );
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve native optional-chain narrowing for `workset`.
         if (workset?.trim()) {
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This read uses the value narrowed by the guard above.
           const worksetName = workset.trim();
-          const requestedCursor = cursor?.trim();
+          const requestedCursor = Effect2.pipe(cursor, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          );
           if (operation === 'path') {
             if (requestedCursor || budgetTokens !== undefined) {
               return argumentError('cursor and budgetTokens are valid only for a named workset query.');
             }
+            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chains preserve narrowing for both endpoints.
             if (!from?.trim() || !to?.trim()) {
               return argumentError('A workset path requires from and to qualified endpoints.');
             }
             const response = yield* queryTelemetry.execute(
               findCodeGraphWorksetPath(config, {
+                // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The check above narrows `from`.
                 from: from.trim(),
                 maxDepth: depth,
                 maxEdges: edgeLimit ?? MCP_CODE_GRAPH_DEFAULT_EDGE_LIMIT,
+                // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The check above narrows `to`.
                 to: to.trim(),
                 worksetName,
               }),
@@ -371,7 +456,10 @@ export function registerCodeGraphTool(
               'query-serialization',
               Effect.sync(() =>
                 formatCodeGraphMcpResponse(
-                  {text: codeGraphWorksetTraversalText(response), structuredContent: response},
+                  {
+                    text: codeGraphWorksetTraversalText(response),
+                    structuredContent: response,
+                  },
                   selectedResponseFormat,
                 ),
               ),
@@ -394,7 +482,10 @@ export function registerCodeGraphTool(
               'query-serialization',
               Effect.sync(() =>
                 formatCodeGraphMcpResponse(
-                  {text: codeGraphWorksetTraversalText(response), structuredContent: response},
+                  {
+                    text: codeGraphWorksetTraversalText(response),
+                    structuredContent: response,
+                  },
                   selectedResponseFormat,
                 ),
               ),
@@ -416,7 +507,10 @@ export function registerCodeGraphTool(
               'query-serialization',
               Effect.sync(() =>
                 formatCodeGraphMcpResponse(
-                  {text: codeGraphWorksetTopologyText(response), structuredContent: response},
+                  {
+                    text: codeGraphWorksetTopologyText(response),
+                    structuredContent: response,
+                  },
                   selectedResponseFormat,
                 ),
               ),
@@ -439,7 +533,10 @@ export function registerCodeGraphTool(
                   includeModelAssociations,
                   maximumEstimatedTokens: budgetTokens,
                   nodeLimit: nodeLimit ?? MCP_CODE_GRAPH_DEFAULT_NODE_LIMIT,
-                  packageName: packageName?.trim() || undefined,
+                  packageName:
+                    Effect2.pipe(packageName, effectOptionalString =>
+                      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+                    ) || undefined,
                   query: requestedQuery!,
                   telemetry: queryStageTelemetry,
                   worksetName,
@@ -463,9 +560,14 @@ export function registerCodeGraphTool(
             'inspect_code_graph topology requires a named workset. Run threadnote workset prepare <name> first.',
           );
         }
-        if (cursor?.trim()) {
+        if (
+          Effect2.pipe(cursor, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          )
+        ) {
           return argumentError('inspect_code_graph cursor requires a named workset query.');
         }
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Keep optional-chain narrowing for the qualified node identifier.
         const qualifiedTarget = nodeId?.startsWith('cgr_')
           ? yield* queryTelemetry.stage(
               'graph.query.status',
@@ -491,7 +593,12 @@ export function registerCodeGraphTool(
             ? yield* queryTelemetry.stage(
                 'graph.query.status',
                 'query-worktree-observation',
-                repositoryChangesSince(inspectionCwd, base?.trim() || 'HEAD~1'),
+                repositoryChangesSince(
+                  inspectionCwd,
+                  Effect2.pipe(base, effectOptionalString =>
+                    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+                  ) || 'HEAD~1',
+                ),
               )
             : undefined;
         const watcher = yield* CodeGraphWatcher;
@@ -514,12 +621,20 @@ export function registerCodeGraphTool(
           nodeId: inspectionNodeId,
           nodeLimit: effectiveRequest.nodeLimit,
           operation,
-          packageName: packageName?.trim() || undefined,
+          packageName:
+            Effect2.pipe(packageName, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            ) || undefined,
           query: requestedQuery,
           symbol,
           to,
           ...(changes?.baseCommit === undefined ? {} : {baseCommit: changes.baseCommit}),
-          ...(changes?.paths === undefined ? {} : {seedQueries: changes.paths, seedQueryCount: changes.paths.length}),
+          ...(changes?.paths === undefined
+            ? {}
+            : {
+                seedQueries: changes.paths,
+                seedQueryCount: changes.paths.length,
+              }),
           discover: true as const,
           threadnoteHome: config.agentContextHome,
         };
@@ -549,9 +664,19 @@ export function registerCodeGraphTool(
             manifestPath: config.manifestPath,
             ...(scopeRoute?.state === 'selected' ? {project: scopeRoute.project} : {}),
           };
-          timeoutContext = Option.some({key: read.identity.worktreeId, target: refreshTarget, watcher});
-          yield* watcher.ensure({...refreshTarget, key: read.identity.worktreeId});
-          const refreshStarted = yield* watcher.refresh({...refreshTarget, key: read.identity.worktreeId});
+          timeoutContext = Option.some({
+            key: read.identity.worktreeId,
+            target: refreshTarget,
+            watcher,
+          });
+          yield* watcher.ensure({
+            ...refreshTarget,
+            key: read.identity.worktreeId,
+          });
+          const refreshStarted = yield* watcher.refresh({
+            ...refreshTarget,
+            key: read.identity.worktreeId,
+          });
           if (refreshStarted) {
             yield* waitForCodeGraphRefresh(watcher, read.identity.worktreeId, refreshTarget);
           }
@@ -576,7 +701,11 @@ export function registerCodeGraphTool(
           manifestPath: config.manifestPath,
           ...(scopeRoute?.state === 'selected' ? {project: scopeRoute.project} : {}),
         };
-        timeoutContext = Option.some({key: worktreeKey, target: refreshTarget, watcher});
+        timeoutContext = Option.some({
+          key: worktreeKey,
+          target: refreshTarget,
+          watcher,
+        });
         const firstSummary = {
           readySnapshot: read.status.readySnapshotId === undefined ? undefined : {id: read.status.readySnapshotId},
           stale: read.status.stale,
@@ -594,7 +723,10 @@ export function registerCodeGraphTool(
         const backgroundRefreshRequested = codeGraphInspectionRequestsBackgroundRefresh(firstSummary, operation);
         let presentedResult = read.result;
         if (!backgroundRefreshRequested && codeGraphInspectionStartsRefresh(firstSummary, operation)) {
-          const refreshStarted = yield* watcher.refresh({...refreshTarget, key: worktreeKey});
+          const refreshStarted = yield* watcher.refresh({
+            ...refreshTarget,
+            key: worktreeKey,
+          });
           if (refreshStarted) {
             yield* waitForCodeGraphRefresh(watcher, worktreeKey, refreshTarget);
           }
@@ -668,7 +800,8 @@ export function registerCodeGraphTool(
                 'graph.query.execute',
                 'query-serialization',
                 Effect.sync(() =>
-                  error instanceof Error && error.message.startsWith('Code graph response token budget')
+                  error instanceof Error &&
+                  Effect2.pipe(error.message, EffectString.startsWith('Code graph response token budget'))
                     ? argumentError(error.message)
                     : mcpErrorResult(error),
                 ),
@@ -681,7 +814,11 @@ export function registerCodeGraphTool(
   server.registerTool(
     'analyze_code_graph',
     {
-      annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: true},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      },
       description:
         'Analyze selected local graph (55-second deadline): stats composition; communities/community subsystems; groups fan-in/out; hubs blast radius; surprises cross-community links; confidence provenance; full report. Untrusted evidence. Default agent text; dual adds structured content.',
       inputSchema: {
@@ -728,8 +865,21 @@ export function registerCodeGraphTool(
           'analyze_code_graph requires operation. Example: {"operation":"stats","callerCwd":"/workspace/project"}',
         );
       }
-      const checkedCommunityId = communityId?.trim();
-      if (operation === 'community' && !checkedCommunityId?.match(/^cgc_[a-f0-9]{32}$/)) {
+      const checkedCommunityId = Effect2.pipe(communityId, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
+      if (
+        operation === 'community' &&
+        !Effect2.pipe(checkedCommunityId, effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect2.pipe(
+                effectOptionalString,
+                EffectString.match(/^cgc_[a-f0-9]{32}$/),
+                Effect2.Option.getOrElse(() => null),
+              ),
+        )
+      ) {
         return argumentError('analyze_code_graph operation=community requires communityId from a communities result.');
       }
       const queryTelemetry = makeCodeGraphQueryAnonymousTelemetryReporter({
@@ -898,15 +1048,18 @@ export function registerCodeGraphTool(
 }
 
 export function codeGraphWorksetMcpResponse(result: CodeGraphWorksetQueryResult) {
-  const totalNodes = result.repositories.reduce(
+  const totalNodes = EffectArray.reduce(
+    result.repositories,
+    0,
     (total, member) => total + (member.state === 'ready' ? member.graph.nodes.length : 0),
-    0,
   );
-  const totalEdges = result.repositories.reduce(
+  const totalEdges = EffectArray.reduce(
+    result.repositories,
+    0,
     (total, member) => total + (member.state === 'ready' ? member.graph.edges.length : 0),
-    0,
   );
-  const readyMembers = result.repositories.filter(
+  const readyMembers = EffectArray.filter(
+    result.repositories,
     (member): member is Extract<(typeof result.repositories)[number], {state: 'ready'}> => member.state === 'ready',
   );
   let nodeBudget = totalNodes;
@@ -920,11 +1073,11 @@ export function codeGraphWorksetMcpResponse(result: CodeGraphWorksetQueryResult)
     structuredContent = projectCodeGraphWorksetMcpResult(result, nodeBudget, edgeBudget);
   }
   const nodeCounts = fairPrefixCounts(
-    readyMembers.map(member => member.graph.nodes.length),
+    EffectArray.map(readyMembers, member => member.graph.nodes.length),
     nodeBudget,
   );
   const edgeCounts = fairPrefixCounts(
-    readyMembers.map(member => member.graph.edges.length),
+    EffectArray.map(readyMembers, member => member.graph.edges.length),
     edgeBudget,
   );
   let readyIndex = 0;
@@ -938,36 +1091,41 @@ export function codeGraphWorksetMcpResponse(result: CodeGraphWorksetQueryResult)
       continue;
     }
     rendered.push(
-      renderCodeGraphResult(
-        {
-          ...member.graph,
-          edges: member.graph.edges.slice(0, edgeCounts[readyIndex]),
-          nodes: member.graph.nodes.slice(0, nodeCounts[readyIndex]),
-        },
-        'mcp',
-      ).trimEnd(),
+      Effect2.pipe(
+        renderCodeGraphResult(
+          {
+            ...member.graph,
+            edges: member.graph.edges.slice(0, edgeCounts[readyIndex]),
+            nodes: member.graph.nodes.slice(0, nodeCounts[readyIndex]),
+          },
+          'mcp',
+        ),
+        EffectString.trimEnd,
+      ),
     );
     readyIndex += 1;
   }
-  if (result.warnings.length > 0) rendered.push('', ...result.warnings.map(warning => `Warning: ${warning}`));
-  const text = compactMcpUtf8Text(`${rendered.join('\n')}\n`, MCP_CODE_GRAPH_STRUCTURED_CONTENT_BYTES);
+  if (result.warnings.length > 0)
+    rendered.push('', ...EffectArray.map(result.warnings, warning => `Warning: ${warning}`));
+  const text = compactMcpUtf8Text(`${EffectArray.join(rendered, '\n')}\n`, MCP_CODE_GRAPH_STRUCTURED_CONTENT_BYTES);
   return {structuredContent, text};
 }
 
 function projectCodeGraphWorksetMcpResult(result: CodeGraphWorksetQueryResult, nodeBudget: number, edgeBudget: number) {
-  const readyMembers = result.repositories.filter(
+  const readyMembers = EffectArray.filter(
+    result.repositories,
     (member): member is Extract<(typeof result.repositories)[number], {state: 'ready'}> => member.state === 'ready',
   );
   const nodeCounts = fairPrefixCounts(
-    readyMembers.map(member => member.graph.nodes.length),
+    EffectArray.map(readyMembers, member => member.graph.nodes.length),
     nodeBudget,
   );
   const edgeCounts = fairPrefixCounts(
-    readyMembers.map(member => member.graph.edges.length),
+    EffectArray.map(readyMembers, member => member.graph.edges.length),
     edgeBudget,
   );
   let readyIndex = 0;
-  const repositories = result.repositories.map(member => {
+  const repositories = EffectArray.map(result.repositories, member => {
     if (member.state === 'unavailable') return member;
     const graph = compactCodeGraphMcpResult({
       ...member.graph,
@@ -977,8 +1135,8 @@ function projectCodeGraphWorksetMcpResult(result: CodeGraphWorksetQueryResult, n
     readyIndex += 1;
     return {graph, project: member.project, state: member.state};
   });
-  const totalNodes = readyMembers.reduce((total, member) => total + member.graph.nodes.length, 0);
-  const totalEdges = readyMembers.reduce((total, member) => total + member.graph.edges.length, 0);
+  const totalNodes = EffectArray.reduce(readyMembers, 0, (total, member) => total + member.graph.nodes.length);
+  const totalEdges = EffectArray.reduce(readyMembers, 0, (total, member) => total + member.graph.edges.length);
   const returnedNodes = Math.min(totalNodes, nodeBudget);
   const returnedEdges = Math.min(totalEdges, edgeBudget);
   const truncated = returnedNodes < totalNodes || returnedEdges < totalEdges;
@@ -1000,7 +1158,7 @@ function projectCodeGraphWorksetMcpResult(result: CodeGraphWorksetQueryResult, n
 }
 
 function fairPrefixCounts(lengths: readonly number[], budget: number): readonly number[] {
-  const counts = lengths.map(() => 0);
+  const counts = EffectArray.map(lengths, () => 0);
   let remaining = Math.max(0, Math.floor(budget));
   for (;;) {
     let advanced = false;
@@ -1014,24 +1172,6 @@ function fairPrefixCounts(lengths: readonly number[], budget: number): readonly 
   }
 }
 
-interface CodeGraphMcpOutputCoverage {
-  readonly budgetBytes: number;
-  readonly byteLength: number;
-  readonly complete: boolean;
-  readonly truncated: boolean;
-}
-type CodeGraphMcpAnalysisTextCoverage = CodeGraphMcpOutputCoverage;
-
-interface CodeGraphMcpAnalysisStringObservation {
-  truncated: number;
-}
-
-type MutableArray<Value> = Value extends readonly (infer Item)[] ? Item[] : never;
-
-/**
- * Build the independently bounded MCP projection of a complete or partial
- * analysis result. The source result remains unchanged for CLI and Manager.
- */
 function codeGraphAnalysisFailureResult(
   operation: CodeGraphAnalysisView,
   failure: CodeGraphRefreshFailure,
@@ -1057,397 +1197,12 @@ function codeGraphAnalysisFailureResult(
   );
 }
 
-export function codeGraphAnalysisMcpResponse(
-  result: CodeGraphAnalysisResult,
-  operation: CodeGraphAnalysisView,
-  repository: {readonly displayName: string; readonly repositoryId: string},
-  metadata?: CodeGraphAnalysisReadMetadata,
-) {
-  const relevantSource = codeGraphMcpAnalysisSourceForView(result, operation);
-  const observation: CodeGraphMcpAnalysisStringObservation = {truncated: 0};
-  const compactSource = compactCodeGraphAnalysisStrings(relevantSource, observation) as CodeGraphAnalysisResult;
-  const compactRepository = compactCodeGraphAnalysisStrings(repository, observation) as typeof repository;
-  const projected = emptyCodeGraphMcpAnalysisProjection(compactSource);
-  const placeholderTextCoverage: CodeGraphMcpAnalysisTextCoverage = {
-    budgetBytes: MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES,
-    byteLength: MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES,
-    complete: false,
-    truncated: false,
-  };
-  const fits = () =>
-    finalizedCodeGraphMcpAnalysisEnvelope(
-      compactSource,
-      projected,
-      operation,
-      compactRepository,
-      observation.truncated,
-      placeholderTextCoverage,
-      metadata,
-    ).output.structuredContent.byteLength <= MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES;
-  const appendPrefix = <Value>(target: Value[], source: readonly Value[], synchronize?: () => void): void => {
-    for (const value of source) {
-      target.push(value);
-      synchronize?.();
-      if (fits()) continue;
-      target.pop();
-      synchronize?.();
-      break;
-    }
-  };
-
-  // Coverage warnings are retained before repository-derived evidence so a
-  // bounded response never hides why an analysis is partial or unavailable.
-  appendPrefix(mutableAnalysisArray(projected.warnings), compactSource.warnings);
-
-  const appendStatistics = () => {
-    appendPrefix(mutableAnalysisArray(projected.statistics.languages), compactSource.statistics.languages);
-    appendPrefix(mutableAnalysisArray(projected.statistics.kinds), compactSource.statistics.kinds);
-    appendPrefix(mutableAnalysisArray(projected.statistics.relations), compactSource.statistics.relations);
-    appendPrefix(mutableAnalysisArray(projected.statistics.provenances), compactSource.statistics.provenances);
-  };
-  const appendConfidence = () => {
-    appendPrefix(
-      mutableAnalysisArray(projected.confidenceAudit.provenances),
-      compactSource.confidenceAudit.provenances,
-    );
-    appendPrefix(mutableAnalysisArray(projected.confidenceAudit.findings), compactSource.confidenceAudit.findings);
-  };
-  const appendCommunities = () => {
-    appendPrefix(mutableAnalysisArray(projected.communities), compactSource.communities);
-    appendPrefix(mutableAnalysisArray(projected.components), compactSource.components);
-  };
-  const appendCommunityMembers = () => {
-    const sourceDrillDown = compactSource.communityDrillDown;
-    const projectedDrillDown = projected.communityDrillDown;
-    if (sourceDrillDown?.state !== 'found' || projectedDrillDown?.state !== 'found') {
-      return;
-    }
-    const members = mutableAnalysisArray(projectedDrillDown.members);
-    const synchronize = () => {
-      const mutableCoverage = projectedDrillDown.coverage as {complete: boolean; shownMemberCount: number};
-      mutableCoverage.shownMemberCount = members.length;
-      mutableCoverage.complete = sourceDrillDown.coverage.complete && members.length === sourceDrillDown.members.length;
-    };
-    appendPrefix(members, sourceDrillDown.members, synchronize);
-  };
-  const appendGroups = () => {
-    const groups = mutableAnalysisArray(projected.relationshipGroups);
-    const sourceGroups = compactSource.relationshipGroups.map(group => ({
-      ...group,
-      members: [] as MutableArray<typeof group.members>,
-      memberSampleComplete: group.memberSampleComplete && group.members.length === 0,
-    }));
-    appendPrefix(groups, sourceGroups);
-    for (const group of groups) {
-      const source = compactSource.relationshipGroups.find(candidate => candidate.id === group.id);
-      if (!source) continue;
-      const members = mutableAnalysisArray(group.members);
-      const synchronize = () => {
-        (group as {memberSampleComplete: boolean}).memberSampleComplete =
-          source.memberSampleComplete && members.length === source.members.length;
-      };
-      appendPrefix(members, source.members, synchronize);
-    }
-  };
-
-  switch (operation) {
-    case 'stats':
-      appendStatistics();
-      break;
-    case 'confidence':
-      appendConfidence();
-      break;
-    case 'communities':
-      appendCommunities();
-      break;
-    case 'community':
-      appendCommunityMembers();
-      break;
-    case 'groups':
-      appendGroups();
-      break;
-    case 'hubs':
-      appendPrefix(mutableAnalysisArray(projected.hubs), compactSource.hubs);
-      break;
-    case 'surprises':
-      appendPrefix(mutableAnalysisArray(projected.surprisingLinks), compactSource.surprisingLinks);
-      break;
-    case 'full':
-      appendStatistics();
-      appendConfidence();
-      appendCommunities();
-      appendCommunityMembers();
-      appendPrefix(mutableAnalysisArray(projected.hubs), compactSource.hubs);
-      appendGroups();
-      appendPrefix(mutableAnalysisArray(projected.surprisingLinks), compactSource.surprisingLinks);
-      break;
-  }
-  if (operation === 'communities' || operation === 'full') {
-    appendPrefix(mutableAnalysisArray(projected.memberships), compactSource.memberships);
-  }
-  appendPrefix(mutableAnalysisArray(projected.suggestedQuestions), compactSource.suggestedQuestions);
-
-  const projectionOmissions = codeGraphMcpAnalysisOmissions(compactSource, projected, operation);
-  const projectionComplete = observation.truncated === 0 && Object.keys(projectionOmissions).length === 0;
-  const rendered = renderCodeGraphAnalysis(projected, operation, 'mcp');
-  const boundedText = boundedCodeGraphMcpAnalysisText(rendered, result.coverage.topology.state, projectionComplete);
-  const structuredContent = finalizedCodeGraphMcpAnalysisEnvelope(
-    compactSource,
-    projected,
-    operation,
-    compactRepository,
-    observation.truncated,
-    boundedText.coverage,
-    metadata,
-  );
-
-  return {structuredContent, text: boundedText.text};
-}
-
-/**
- * Remove evidence that does not belong to the requested view before string
- * compaction and byte accounting. The stable analysis result shape is retained,
- * but unrelated arrays cannot consume an MCP response budget or make that view
- * appear truncated.
- */
-function codeGraphMcpAnalysisSourceForView(
-  result: CodeGraphAnalysisResult,
-  operation: CodeGraphAnalysisView,
-): CodeGraphAnalysisResult {
-  const includeStatistics = operation === 'stats' || operation === 'full';
-  const includeConfidence = operation === 'confidence' || operation === 'full';
-  const includeCommunities = operation === 'communities' || operation === 'full';
-  const includeCommunity = operation === 'community' || operation === 'full';
-  const {communityDrillDown: _communityDrillDown, ...base} = result;
-  return {
-    ...base,
-    communities: includeCommunities ? result.communities : [],
-    ...(includeCommunity && result.communityDrillDown !== undefined
-      ? {communityDrillDown: result.communityDrillDown}
-      : {}),
-    components: includeCommunities ? result.components : [],
-    confidenceAudit: {
-      ...result.confidenceAudit,
-      bands: includeStatistics || includeConfidence ? result.confidenceAudit.bands : [],
-      findings: includeConfidence ? result.confidenceAudit.findings : [],
-      provenances: includeConfidence ? result.confidenceAudit.provenances : [],
-      reviewThresholds: includeConfidence ? result.confidenceAudit.reviewThresholds : [],
-    },
-    hubs: operation === 'hubs' || operation === 'full' ? result.hubs : [],
-    memberships: includeCommunities ? result.memberships : [],
-    relationshipGroups: operation === 'groups' || operation === 'full' ? result.relationshipGroups : [],
-    statistics: {
-      ...result.statistics,
-      kinds: includeStatistics ? result.statistics.kinds : [],
-      languages: includeStatistics ? result.statistics.languages : [],
-      provenances: includeStatistics ? result.statistics.provenances : [],
-      relations: includeStatistics ? result.statistics.relations : [],
-    },
-    surprisingLinks: operation === 'surprises' || operation === 'full' ? result.surprisingLinks : [],
-  };
-}
-
-function emptyCodeGraphMcpAnalysisProjection(result: CodeGraphAnalysisResult): CodeGraphAnalysisResult {
-  const communityDrillDown =
-    result.communityDrillDown?.state === 'found'
-      ? {
-          ...result.communityDrillDown,
-          coverage: {...result.communityDrillDown.coverage, complete: false, shownMemberCount: 0},
-          members: [],
-        }
-      : result.communityDrillDown;
-  return {
-    ...result,
-    communities: [],
-    ...(communityDrillDown === undefined ? {} : {communityDrillDown}),
-    components: [],
-    confidenceAudit: {...result.confidenceAudit, findings: [], provenances: []},
-    hubs: [],
-    memberships: [],
-    relationshipGroups: [],
-    statistics: {...result.statistics, kinds: [], languages: [], provenances: [], relations: []},
-    suggestedQuestions: [],
-    surprisingLinks: [],
-    warnings: [],
-  };
-}
-
-function mutableAnalysisArray<Value>(value: readonly Value[]): Value[] {
-  return value as Value[];
-}
-
-function compactCodeGraphAnalysisStrings(value: unknown, observation: CodeGraphMcpAnalysisStringObservation): unknown {
-  if (typeof value === 'string') {
-    const sanitized = sanitizeCodeGraphPresentationText(value);
-    const compact = compactMcpUtf8Text(sanitized, 512);
-    if (compact !== sanitized) observation.truncated += 1;
-    return compact;
-  }
-  if (Array.isArray(value)) return value.map(item => compactCodeGraphAnalysisStrings(item, observation));
-  if (value === null || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [key, compactCodeGraphAnalysisStrings(item, observation)]),
-  );
-}
-
-function codeGraphMcpAnalysisOmissions(
-  source: CodeGraphAnalysisResult,
-  projected: CodeGraphAnalysisResult,
-  operation: CodeGraphAnalysisView,
-) {
-  const sourceCommunityMembers =
-    source.communityDrillDown?.state === 'found' ? source.communityDrillDown.members.length : 0;
-  const projectedCommunityMembers =
-    projected.communityDrillDown?.state === 'found' ? projected.communityDrillDown.members.length : 0;
-  const sourceGroupMembers = source.relationshipGroups.reduce((total, group) => total + group.members.length, 0);
-  const projectedGroupMembers = projected.relationshipGroups.reduce((total, group) => total + group.members.length, 0);
-  const includeStatistics = operation === 'stats' || operation === 'full';
-  const includeConfidence = operation === 'confidence' || operation === 'full';
-  const includeCommunities = operation === 'communities' || operation === 'full';
-  const includeCommunity = operation === 'community' || operation === 'full';
-  const includeGroups = operation === 'groups' || operation === 'full';
-  const counts = {
-    communities: includeCommunities ? source.communities.length - projected.communities.length : 0,
-    communityMembers: includeCommunity ? sourceCommunityMembers - projectedCommunityMembers : 0,
-    components: includeCommunities ? source.components.length - projected.components.length : 0,
-    confidenceFindings: includeConfidence
-      ? source.confidenceAudit.findings.length - projected.confidenceAudit.findings.length
-      : 0,
-    confidenceProvenances: includeConfidence
-      ? source.confidenceAudit.provenances.length - projected.confidenceAudit.provenances.length
-      : 0,
-    hubs: operation === 'hubs' || operation === 'full' ? source.hubs.length - projected.hubs.length : 0,
-    memberships: includeCommunities ? source.memberships.length - projected.memberships.length : 0,
-    relationshipGroupMembers: includeGroups ? sourceGroupMembers - projectedGroupMembers : 0,
-    relationshipGroups: includeGroups ? source.relationshipGroups.length - projected.relationshipGroups.length : 0,
-    statisticsKinds: includeStatistics ? source.statistics.kinds.length - projected.statistics.kinds.length : 0,
-    statisticsLanguages: includeStatistics
-      ? source.statistics.languages.length - projected.statistics.languages.length
-      : 0,
-    statisticsProvenances: includeStatistics
-      ? source.statistics.provenances.length - projected.statistics.provenances.length
-      : 0,
-    statisticsRelations: includeStatistics
-      ? source.statistics.relations.length - projected.statistics.relations.length
-      : 0,
-    suggestedQuestions: source.suggestedQuestions.length - projected.suggestedQuestions.length,
-    surprisingLinks:
-      operation === 'surprises' || operation === 'full'
-        ? source.surprisingLinks.length - projected.surprisingLinks.length
-        : 0,
-    warnings: source.warnings.length - projected.warnings.length,
-  };
-  return Object.fromEntries(Object.entries(counts).filter(([, count]) => count > 0));
-}
-
-function finalizedCodeGraphMcpAnalysisEnvelope(
-  source: CodeGraphAnalysisResult,
-  projected: CodeGraphAnalysisResult,
-  operation: CodeGraphAnalysisView,
-  repository: {readonly displayName: string; readonly repositoryId: string},
-  truncatedStrings: number,
-  textCoverage: CodeGraphMcpAnalysisTextCoverage,
-  metadata?: CodeGraphAnalysisReadMetadata,
-) {
-  const omitted = codeGraphMcpAnalysisOmissions(source, projected, operation);
-  const truncated = truncatedStrings > 0 || Object.keys(omitted).length > 0;
-  const build = (byteLength: number) => ({
-    ...metadata,
-    state: source.coverage.complete ? 'complete' : 'partial',
-    operation,
-    output: {
-      analysisCoverage: {
-        complete: source.coverage.complete,
-        topology: source.coverage.topology.state,
-      },
-      structuredContent: {
-        budgetBytes: MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES,
-        byteLength,
-        complete: !truncated,
-        omitted,
-        truncated,
-        truncatedStrings,
-      },
-      text: textCoverage,
-    },
-    repository,
-    result: projected,
-    sourceVersion: source.version,
-    type: 'code-graph-analysis' as const,
-    version: 1 as const,
-  });
-  let byteLength = 0;
-  let envelope = build(byteLength);
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const measured = encodedMcpBytes(envelope);
-    if (measured === byteLength) return envelope;
-    byteLength = measured;
-    envelope = build(byteLength);
-  }
-  return envelope;
-}
-
-function boundedCodeGraphMcpAnalysisText(
-  rendered: string,
-  topology: CodeGraphAnalysisResult['coverage']['topology']['state'],
-  projectionComplete: boolean,
-): {readonly coverage: CodeGraphMcpAnalysisTextCoverage; readonly text: string} {
-  const completeFooter =
-    `\nMCP text output coverage: complete within the ${MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES}-byte UTF-8 budget; ` +
-    `structured projection ${projectionComplete ? 'complete' : 'bounded'}; topology ${topology}.\n`;
-  const completeText = `${rendered.trimEnd()}${completeFooter}`;
-  if (encodedMcpBytes(completeText) <= MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES) {
-    return {
-      coverage: {
-        budgetBytes: MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES,
-        byteLength: encodedMcpBytes(completeText),
-        complete: true,
-        truncated: false,
-      },
-      text: completeText,
-    };
-  }
-  const truncatedFooter =
-    `\n…\nMCP text output coverage: truncated at the ${MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES}-byte UTF-8 budget; ` +
-    `structured projection ${projectionComplete ? 'complete' : 'bounded'}; topology ${topology}.\n`;
-  const prefixBudget = MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES - encodedMcpBytes(truncatedFooter);
-  const text = `${utf8Prefix(rendered, prefixBudget).trimEnd()}${truncatedFooter}`;
-  return {
-    coverage: {
-      budgetBytes: MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES,
-      byteLength: encodedMcpBytes(text),
-      complete: false,
-      truncated: true,
-    },
-    text,
-  };
-}
-
-function compactMcpUtf8Text(value: string, maximumBytes: number): string {
-  if (utf8Prefix(value, maximumBytes).length === value.length) return value;
-  const ellipsis = '…';
-  return `${utf8Prefix(value, Math.max(0, maximumBytes - encodedMcpBytes(ellipsis)))}${ellipsis}`;
-}
-
-function utf8Prefix(value: string, maximumBytes: number): string {
-  let bytes = 0;
-  let prefix = '';
-  for (const character of value) {
-    const characterBytes = encodedMcpBytes(character);
-    if (bytes + characterBytes > maximumBytes) break;
-    bytes += characterBytes;
-    prefix += character;
-  }
-  return prefix;
-}
-
-function encodedMcpBytes(value: unknown): number {
-  return new TextEncoder().encode(typeof value === 'string' ? value : JSON.stringify(value)).byteLength;
-}
-
 export function compactCodeGraphMcpProgress(progress: CodeGraphProgress | undefined) {
   if (progress === undefined) return undefined;
-  const envelope = {type: 'code-graph-progress' as const, version: 1 as const};
+  const envelope = {
+    type: 'code-graph-progress' as const,
+    version: 1 as const,
+  };
   switch (progress.phase) {
     case 'registering':
       return {...envelope, phase: progress.phase};
@@ -1584,7 +1339,9 @@ export function compactCodeGraphMcpTiming(timing: CodeGraphProgressTiming | unde
     ...(timing.estimateScope === undefined ? {} : {estimateScope: timing.estimateScope}),
     ...(timing.estimatedPhaseRemainingMilliseconds === undefined
       ? {}
-      : {estimatedPhaseRemainingMilliseconds: Math.ceil(timing.estimatedPhaseRemainingMilliseconds)}),
+      : {
+          estimatedPhaseRemainingMilliseconds: Math.ceil(timing.estimatedPhaseRemainingMilliseconds),
+        }),
     lastProgressAgeMilliseconds: Math.max(0, Math.ceil(timing.lastProgressAgeMilliseconds)),
     phaseElapsedMilliseconds: Math.max(0, Math.ceil(timing.phaseElapsedMilliseconds)),
     type: 'code-graph-progress-timing' as const,
@@ -1614,7 +1371,9 @@ export function codeGraphMcpAnalysisLimits(
 }
 
 function compactMcpText(value: string, maximumLength: number): string {
-  return value.length <= maximumLength ? value : `${value.slice(0, Math.max(0, maximumLength - 1))}…`;
+  return value.length <= maximumLength
+    ? value
+    : `${Effect2.pipe(value, EffectString.slice(0, Math.max(0, maximumLength - 1)))}…`;
 }
 
 export function codeGraphAnalysisRefreshResult(
@@ -1736,34 +1495,40 @@ function codeGraphRefreshRecoveryWarning(failure: CodeGraphRefreshFailure): stri
 }
 
 function codeGraphWorksetTraversalText(result: CodeGraphCrossRepositoryTraversalResultV1): string {
-  return [
-    `Workset ${result.direction === 'forward' ? 'path' : 'impact'} ${result.generationId}: ${result.stop.reason}.`,
-    `${result.edges.length} returned edge(s): ${result.coverage.acceptedLocalEdges} local, ${result.coverage.acceptedBridgeEdges} cross-repository.`,
-    ...result.edges.slice(0, 12).map(edge => {
-      const source =
-        edge.source.reference.kind === 'component' ? edge.source.reference.componentId : edge.source.reference.ref;
-      const target =
-        edge.target.reference.kind === 'component' ? edge.target.reference.componentId : edge.target.reference.ref;
-      return `${edge.source.repositoryKey}:${source} --${edge.relation}/${edge.provenance.kind}--> ${edge.target.repositoryKey}:${target}`;
-    }),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `Workset ${result.direction === 'forward' ? 'path' : 'impact'} ${result.generationId}: ${result.stop.reason}.`,
+      `${result.edges.length} returned edge(s): ${result.coverage.acceptedLocalEdges} local, ${result.coverage.acceptedBridgeEdges} cross-repository.`,
+      ...EffectArray.map(result.edges.slice(0, 12), edge => {
+        const source =
+          edge.source.reference.kind === 'component' ? edge.source.reference.componentId : edge.source.reference.ref;
+        const target =
+          edge.target.reference.kind === 'component' ? edge.target.reference.componentId : edge.target.reference.ref;
+        return `${edge.source.repositoryKey}:${source} --${edge.relation}/${edge.provenance.kind}--> ${edge.target.repositoryKey}:${target}`;
+      }),
+    ],
+    '\n',
+  );
 }
 
 function codeGraphWorksetTopologyText(result: CodeGraphWorksetTopologyResultV1): string {
-  return [
-    `Workset topology ${result.workset}: ${result.state}.`,
-    ...(result.bridgeSet === undefined
-      ? []
-      : [
-          `${result.bridgeSet.bridgeCount} bridge(s), coverage ${result.bridgeSet.coverage.state}, generation ${result.bridgeSet.generationId}.`,
-        ]),
-    ...(result.topology === undefined
-      ? []
-      : [
-          `${result.topology.nodes.length} node(s), ${result.topology.edges.length} aggregate edge(s), ${result.topology.coverage.complete ? 'complete' : 'bounded partial'} output.`,
-        ]),
-    ...result.warnings,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `Workset topology ${result.workset}: ${result.state}.`,
+      ...(result.bridgeSet === undefined
+        ? []
+        : [
+            `${result.bridgeSet.bridgeCount} bridge(s), coverage ${result.bridgeSet.coverage.state}, generation ${result.bridgeSet.generationId}.`,
+          ]),
+      ...(result.topology === undefined
+        ? []
+        : [
+            `${result.topology.nodes.length} node(s), ${result.topology.edges.length} aggregate edge(s), ${result.topology.coverage.complete ? 'complete' : 'bounded partial'} output.`,
+          ]),
+      ...result.warnings,
+    ],
+    '\n',
+  );
 }
 
 function codeGraphRefreshResult(
@@ -1924,7 +1689,9 @@ export function codeGraphQueryTimeoutResult(
         operation,
         ...(readyReadStarted
           ? {readySnapshotAvailable: true}
-          : {retryAfterMilliseconds: MCP_CODE_GRAPH_RETRY_FALLBACK_MILLISECONDS}),
+          : {
+              retryAfterMilliseconds: MCP_CODE_GRAPH_RETRY_FALLBACK_MILLISECONDS,
+            }),
         state: 'timed-out',
         type: 'code-graph-query-state',
         version: 2,

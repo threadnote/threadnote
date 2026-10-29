@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {createMemoryCodeCitation} from '../../src/code/citation.js';
@@ -16,27 +17,29 @@ import {
   validateApprovedTopicMaintenanceWrite,
   validateTopicMaintenanceAcceptancePreview,
 } from '../../src/topic-maintenance-acceptance.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/topic.md';
 const oldCitation = createMemoryCodeCitation({
   version: 1,
   evidenceRetention: 'capsule-retained',
-  repositoryId: '1'.repeat(64),
+  repositoryId: Effect.pipe('1', EffectString.repeat(64)),
   repositoryIdentityKind: 'local',
-  sourceCommit: '2'.repeat(40),
-  sourceSnapshotId: `cgsn_${'3'.repeat(40)}`,
+  sourceCommit: Effect.pipe('2', EffectString.repeat(40)),
+  sourceSnapshotId: `cgsn_${Effect.pipe('3', EffectString.repeat(40))}`,
   sourceDirty: false,
   extractorSet: 'native-test',
   path: 'src/topic.ts',
-  fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+  fileContentHash: {algorithm: 'sha256', value: Effect.pipe('4', EffectString.repeat(64))},
   target: {kind: 'file'},
 });
 const {id: _id, ...currentInput} = oldCitation;
 const currentCitation = createMemoryCodeCitation({
   ...currentInput,
-  sourceCommit: '5'.repeat(40),
-  sourceSnapshotId: `cgsn_${'6'.repeat(40)}`,
-  fileContentHash: {algorithm: 'sha256', value: '7'.repeat(64)},
+  sourceCommit: Effect.pipe('5', EffectString.repeat(40)),
+  sourceSnapshotId: `cgsn_${Effect.pipe('6', EffectString.repeat(40))}`,
+  fileContentHash: {algorithm: 'sha256', value: Effect.pipe('7', EffectString.repeat(64))},
 });
 
 function fixture(body = 'Old claim.\n\nHistorical note.', consolidated = false, extraCitations = 0) {
@@ -62,7 +65,7 @@ function fixture(body = 'Old claim.\n\nHistorical note.', consolidated = false, 
         return reviewConsolidation(
           body,
           [source],
-          consolidationSections(body).map((section, index) => ({
+          EffectArray.map(consolidationSections(body), (section, index) => ({
             section,
             disposition: 'direct' as const,
             supports: [{sourceUri: source.uri, fragment: index, citationIds: [oldCitation.id], relationIndexes: []}],
@@ -82,35 +85,38 @@ function fixture(body = 'Old claim.\n\nHistorical note.', consolidated = false, 
         ).provenance;
       })()
     : undefined;
-  const content = formatMemoryDocument(
-    'MEMORY',
-    {
-      kind: 'durable',
-      status: 'active',
-      project: 'threadnote',
-      topic: 'topic',
-      memoryId: 'tn_topic_fixture',
-      sourceAgentClient: 'test',
-      timestamp: '2026-10-16T00:00:00.000Z',
-      schemaVersion: 9,
-      codeCitations: [
-        oldCitation,
-        ...Array.from({length: extraCitations}, (_, index) =>
-          createMemoryCodeCitation({
-            ...currentInput,
-            path: `src/extra-${index}.ts`,
-          }),
-        ),
-      ],
-      owner: 'tester',
-      authority: 'user_approved',
-      visibility: 'personal',
-      ...(provenance ? {consolidation: provenance} : {}),
-    },
-    body,
-  ).replace('\n\n', '\nopaque_header: keep exactly\n\n');
+  const content = Effect.pipe(
+    formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        project: 'threadnote',
+        topic: 'topic',
+        memoryId: 'tn_topic_fixture',
+        sourceAgentClient: 'test',
+        timestamp: '2026-10-16T00:00:00.000Z',
+        schemaVersion: 9,
+        codeCitations: [
+          oldCitation,
+          ...Array.from({length: extraCitations}, (_, index) =>
+            createMemoryCodeCitation({
+              ...currentInput,
+              path: `src/extra-${index}.ts`,
+            }),
+          ),
+        ],
+        owner: 'tester',
+        authority: 'user_approved',
+        visibility: 'personal',
+        ...(provenance ? {consolidation: provenance} : {}),
+      },
+      body,
+    ),
+    EffectString.replace('\n\n', '\nopaque_header: keep exactly\n\n'),
+  );
   const enrolled = proposeTopicMaintenanceEnrollment(parseMemoryDocument(uri, content)!, {
-    paragraphs: consolidationSections(body).map((_, ordinal) => ({
+    paragraphs: EffectArray.map(consolidationSections(body), (_, ordinal) => ({
       role: ordinal === 0 ? ('descriptive' as const) : ('historical' as const),
       support: 'direct' as const,
       citationIds: [oldCitation.id],
@@ -122,8 +128,8 @@ function fixture(body = 'Old claim.\n\nHistorical note.', consolidated = false, 
     version: 1 as const,
     targetUri: uri,
     targetHash: consolidationRevision(canonicalMemoryDocumentContent(record.content)),
-    observationRevision: '8'.repeat(64),
-    packetDigest: '9'.repeat(64),
+    observationRevision: Effect.pipe('8', EffectString.repeat(64)),
+    packetDigest: Effect.pipe('9', EffectString.repeat(64)),
     body: record.body,
     paragraphs: record.metadata.topicMaintenance!.paragraphs,
     additionalDependencies: [],
@@ -153,11 +159,11 @@ function fixture(body = 'Old claim.\n\nHistorical note.', consolidated = false, 
     removedClaims: [],
   };
   const proposal = parseTopicMaintenanceDraft(basis, JSON.stringify(draft));
-  const evidence = [oldCitation, currentCitation].map((citation, index) => ({
+  const evidence = EffectArray.map([oldCitation, currentCitation], (citation, index) => ({
     handleId: `${index === 0 ? 'historical' : 'current'}:${oldCitation.id}`,
     content: 'export const topic = 1;',
     excerptHash: consolidationRevision('export const topic = 1;'),
-    fileBytesHash: `${index === 0 ? 'a' : 'b'}`.repeat(64),
+    fileBytesHash: Effect.pipe(`${index === 0 ? 'a' : 'b'}`, EffectString.repeat(64)),
     startLine: 1,
     endLine: 1,
     provenance: index === 0 ? ('historical-verified' as const) : ('current-verified' as const),
@@ -193,17 +199,22 @@ function fixture(body = 'Old claim.\n\nHistorical note.', consolidated = false, 
 
 function revalidationSupportFixture(initial: 'dependency' | 'narrow') {
   const base = fixture('Unchanged claim.\n\nHistorical note.', false, 1);
-  const additional = base.record.metadata.codeCitations!.find(item => item.path === 'src/extra-0.ts')!;
+  const additional = EffectOption.getOrUndefined(
+    EffectArray.findFirst(base.record.metadata.codeCitations!, item => item.path === 'src/extra-0.ts'),
+  )!;
   const {id: _id, ...additionalInput} = additional;
   const currentAdditional = createMemoryCodeCitation({
     ...additionalInput,
-    sourceCommit: 'a'.repeat(40),
-    sourceSnapshotId: `cgsn_${'b'.repeat(40)}`,
-    fileContentHash: {algorithm: 'sha256', value: 'c'.repeat(64)},
+    sourceCommit: Effect.pipe('a', EffectString.repeat(40)),
+    sourceSnapshotId: `cgsn_${Effect.pipe('b', EffectString.repeat(40))}`,
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe('c', EffectString.repeat(64))},
   });
-  const unenrolled = parseMemoryDocument(uri, base.record.content.replace(/^topic_maintenance:.*\n/mu, ''))!;
+  const unenrolled = parseMemoryDocument(
+    uri,
+    Effect.pipe(base.record.content, EffectString.replace(/^topic_maintenance:.*\n/mu, '')),
+  )!;
   const enrolled = proposeTopicMaintenanceEnrollment(unenrolled, {
-    paragraphs: base.review.basis.paragraphs.map(item => ({
+    paragraphs: EffectArray.map(base.review.basis.paragraphs, item => ({
       role: item.role,
       support: item.support,
       scope: item.scope,
@@ -225,7 +236,7 @@ function revalidationSupportFixture(initial: 'dependency' | 'narrow') {
   };
   const reviewEvidence = [
     ...base.review.reviewEvidence,
-    ...[additional, currentAdditional].map((citation, index) => ({
+    ...EffectArray.map([additional, currentAdditional], (citation, index) => ({
       ...base.review.reviewEvidence[index],
       handleId: `${index === 0 ? 'historical' : 'current'}:${additional.id}`,
       citation,
@@ -349,7 +360,9 @@ describe('topic maintenance accepted document', () => {
           citationId: additional.id,
           acceptedCitationId: currentAdditional.id,
         });
-      expect(preview.manifest.originCitationIds).toEqual(record.metadata.codeCitations!.map(item => item.id).sort());
+      expect(preview.manifest.originCitationIds).toEqual(
+        EffectArray.map(record.metadata.codeCitations!, item => item.id).sort(),
+      );
       for (const historical of record.metadata.codeCitations!) expect(preview.codeCitations).toContainEqual(historical);
       expect(validateTopicMaintenanceAcceptancePreview(preview, review)).toEqual(preview);
       expect(JSON.stringify({record, review})).toBe(before);
@@ -361,7 +374,7 @@ describe('topic maintenance accepted document', () => {
     const before = JSON.stringify({record, review});
     fc.assert(
       fc.property(fc.shuffledSubarray([oldCitation.id, additional.id], {minLength: 1}), selected => {
-        const supportHandles = selected.map(id => `current:${id}`);
+        const supportHandles = EffectArray.map(selected, id => `current:${id}`);
         const proposal = parseTopicMaintenanceDraft(
           review.basis,
           JSON.stringify({
@@ -378,13 +391,17 @@ describe('topic maintenance accepted document', () => {
           {...review, proposal},
           {reviewId: 'review-subset', approvedAt: '2026-10-16T12:00:00.000Z'},
         );
-        const expected = selected.map(id => (id === oldCitation.id ? currentCitation.id : currentAdditional.id)).sort();
+        const expected = EffectArray.map(selected, id =>
+          id === oldCitation.id ? currentCitation.id : currentAdditional.id,
+        ).sort();
         expect(preview.manifest.paragraphs[0].citationIds).toEqual(expected);
         for (const id of expected)
           expect(preview.manifest.acceptedSources).toContainEqual({citationId: id, acceptedCitationId: id});
         expect(preview.manifest.paragraphs[1]).toEqual(record.metadata.topicMaintenance!.paragraphs[1]);
         expect(parseMemoryDocument(uri, preview.content)!.body).toBe(record.body);
-        expect(preview.manifest.originCitationIds).toEqual(record.metadata.codeCitations!.map(item => item.id).sort());
+        expect(preview.manifest.originCitationIds).toEqual(
+          EffectArray.map(record.metadata.codeCitations!, item => item.id).sort(),
+        );
         expect(validateTopicMaintenanceAcceptancePreview(preview, {...review, proposal})).toEqual(preview);
         expect(JSON.stringify({record, review})).toBe(before);
       }),
@@ -482,7 +499,7 @@ describe('topic maintenance accepted document', () => {
       [
         {citationId: oldCitation.id, acceptedCitationId: currentCitation.id},
         {citationId: currentCitation.id, acceptedCitationId: currentCitation.id},
-      ].sort((a, b) => a.citationId.localeCompare(b.citationId)),
+      ].sort((a, b) => Effect.pipe(a.citationId, EffectString.localeCompare(b.citationId))),
     );
     expect(validateTopicMaintenanceAcceptancePreview(preview, review)).toEqual(preview);
     const approval = {version: 1 as const, reviewRevision: 2, stage: 'prepared' as const, preview};
@@ -629,7 +646,10 @@ describe('topic maintenance accepted document', () => {
         ...base,
         revision: 3,
         maintenanceApproval: conflict,
-        maintenanceClosedConflict: {...maintenanceClosedConflict, approvalDigest: 'f'.repeat(64)},
+        maintenanceClosedConflict: {
+          ...maintenanceClosedConflict,
+          approvalDigest: Effect.pipe('f', EffectString.repeat(64)),
+        },
       }),
     ).toThrow();
     expect(() =>
@@ -678,7 +698,10 @@ describe('topic maintenance accepted document', () => {
   it('prepares an existing shared enrolled target without changing its visibility', () => {
     const {record, review} = fixture();
     const sharedUri = 'threadnote://user/tester/memories/shared/team/durable/projects/threadnote/topic.md';
-    const sharedContent = record.content.replace('visibility: personal', 'visibility: shared');
+    const sharedContent = Effect.pipe(
+      record.content,
+      EffectString.replace('visibility: personal', 'visibility: shared'),
+    );
     const shared = parseMemoryDocument(sharedUri, sharedContent)!;
     const sharedReview = {
       ...review,

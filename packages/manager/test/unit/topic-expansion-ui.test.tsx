@@ -1,7 +1,9 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
+import {Predicate, Schema} from 'effect';
 import {LibraryArticle} from '../../src/library_article.js';
 import type {MemoryMetadata, TreeNode} from '../../src/ui/contracts.js';
 import {TopicExpansionPanel} from '../../src/attention/topic_expansion.js';
@@ -9,10 +11,14 @@ import type {
   ManagerTopicExpansionInspection,
   ManagerTopicExpansionPreview,
 } from '../../src/attention/topic_expansion_contracts.js';
+import {TOPIC_EXPANSION_KINDS, TOPIC_EXPANSION_PROVENANCES} from '@threadnote/memory/topic-maintenance-expansion';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
-const hash = 'a'.repeat(64);
+const hash = Effect.pipe('a', EffectString.repeat(64));
 const uri = 'threadnote://user/tester/memories/durable/projects/fixture/topic.md';
-const nextUri = uri.replace('topic.md', 'next.md');
+const nextUri = Effect.pipe(uri, EffectString.replace('topic.md', 'next.md'));
 const initial = (targetUri = uri, project = 'fixture'): ManagerTopicExpansionInspection => ({
   status: 'ready',
   sourceKind: 'code',
@@ -42,12 +48,47 @@ const prepared = vi.fn();
 const changed = vi.fn();
 const response = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {status, headers: {'content-type': 'application/json'}});
+
+const selectionSchema = Schema.Struct({
+  configDigest: Schema.String,
+  configurationPaths: Schema.Array(Schema.String),
+  depth: Schema.Literal(1),
+  direction: Schema.optionalKey(Schema.Literals(['both', 'incoming', 'outgoing'])),
+  edgeLimit: Schema.Int,
+  kinds: Schema.Array(Schema.Literals(TOPIC_EXPANSION_KINDS)),
+  minConfidence: Schema.Finite,
+  nodeLimit: Schema.Int,
+  provenances: Schema.Array(Schema.Literals(TOPIC_EXPANSION_PROVENANCES)),
+  seeds: Schema.Array(Schema.String),
+  selectedNodeIds: Schema.Array(Schema.String),
+  version: Schema.Literal(1),
+});
+function selectionFrom(value: unknown): ManagerTopicExpansionPreview['selection'] {
+  if (!Schema.is(selectionSchema)(value)) throw new Error('Expected an expansion selection');
+  return value;
+}
 const button = (text: string) =>
-  [...document.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent?.includes(text))!;
+  EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(text)),
+          ))(__effectArrayValue),
+    ),
+  )!;
 const checkbox = (text: string) =>
-  [...document.querySelectorAll<HTMLLabelElement>('label')]
-    .find(item => item.textContent?.includes(text))!
-    .querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLLabelElement>('label')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(text)),
+          ))(__effectArrayValue),
+    ),
+  )!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
 const input = (label: string) => document.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
 const click = (element: HTMLElement) => act(async () => element.click());
 const changeInput = (element: HTMLInputElement, value: string) =>
@@ -77,7 +118,7 @@ async function selectNeighbor() {
   await click(checkbox('src/dependency.ts'));
 }
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
@@ -101,7 +142,9 @@ beforeEach(() => {
         await readGate;
         return response(initial(url.searchParams.get('uri')!, url.searchParams.get('project')!));
       }
-      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const parsedBody: unknown = JSON.parse(String(init.body));
+      if (!Predicate.isObject(parsedBody)) throw new Error('Unexpected expansion request body');
+      const body = parsedBody;
       posted.push(body);
       if (body.action === 'discover') {
         await gate;
@@ -117,16 +160,19 @@ beforeEach(() => {
           status: 'preview',
           targetUri: String(body.uri),
           project: String(body.project),
-          selection: body.selection as ManagerTopicExpansionPreview['selection'],
-          revision: body.action === 'restart' ? 'c'.repeat(64) : hash,
-          approvalDigest: body.action === 'restart' ? 'd'.repeat(64) : 'b'.repeat(64),
+          selection: selectionFrom(body.selection),
+          revision: body.action === 'restart' ? Effect.pipe('c', EffectString.repeat(64)) : hash,
+          approvalDigest:
+            body.action === 'restart'
+              ? Effect.pipe('d', EffectString.repeat(64))
+              : Effect.pipe('b', EffectString.repeat(64)),
           ...(body.action === 'restart'
             ? {
                 operation: {
                   id: '11111111-1111-4111-8111-111111111111',
                   generation: 1,
                   predecessorRevision: hash,
-                  predecessorApprovalDigest: 'b'.repeat(64),
+                  predecessorApprovalDigest: Effect.pipe('b', EffectString.repeat(64)),
                 },
               }
             : {}),
@@ -134,7 +180,9 @@ beforeEach(() => {
           body: 'Accepted topic.\n\nKeep policy.',
           additions: [{kind: 'dependency', ref: 'neighbor', path: 'src/dependency.ts', citationId: 'tnc_neighbor'}],
           omissions: [],
-          metadataDiff: [{field: 'topic_maintenance', beforeHash: hash, afterHash: 'b'.repeat(64)}],
+          metadataDiff: [
+            {field: 'topic_maintenance', beforeHash: hash, afterHash: Effect.pipe('b', EffectString.repeat(64))},
+          ],
           coverage: [{seedId: 'seed-main', status: 'exhaustive', visitedNodes: 2, inspectedEdges: 1}],
         };
         return response(preview);
@@ -149,7 +197,7 @@ beforeEach(() => {
                 action: 'restart',
                 targetUri: body.uri,
                 project: body.project,
-                revision: wrongRecovery ? '0'.repeat(64) : body.revision,
+                revision: wrongRecovery ? Effect.pipe('0', EffectString.repeat(64)) : body.revision,
                 approvalDigest: body.approvalDigest,
               },
             },
@@ -201,11 +249,16 @@ it('requires explicit seeds, exact source selections, full preview and separate 
   expect(document.body.textContent).toContain('Full proposed memory and metadata');
   expect(document.body.textContent).toContain('Keep policy.');
   expect(button('Approve dependency scope').disabled).toBe(true);
-  expect(posted.some(item => item.action === 'apply')).toBe(false);
+  expect(EffectArray.some(posted, item => item.action === 'apply')).toBe(false);
   await click(checkbox('I reviewed these exact additions'));
   await click(button('Approve dependency scope'));
   expect(posted.at(-1)).toEqual(
-    expect.objectContaining({action: 'apply', revision: hash, approvalDigest: 'b'.repeat(64), approved: true}),
+    expect.objectContaining({
+      action: 'apply',
+      revision: hash,
+      approvalDigest: Effect.pipe('b', EffectString.repeat(64)),
+      approved: true,
+    }),
   );
   expect(changed).toHaveBeenCalledTimes(1);
   expect(document.body.textContent).toContain('Dependency scope saved');
@@ -217,7 +270,7 @@ it('invalidates previews and approval for selection, configuration and filter ed
   await click(checkbox('I reviewed these exact additions'));
   await changeInput(input('Configuration file path'), 'settings.json');
   expect(document.querySelector('[aria-label="Exact dependency expansion preview"]')).toBeNull();
-  expect(posted.some(item => item.action === 'apply')).toBe(false);
+  expect(EffectArray.some(posted, item => item.action === 'apply')).toBe(false);
   await click(button('Preview selected additions'));
   expect(button('Approve dependency scope').disabled).toBe(true);
   await click(checkbox('src/dependency.ts'));
@@ -261,7 +314,7 @@ it('fences double clicks, busy edits and stale source/project responses', async 
     button('Preview selected additions').click();
     button('Preview selected additions').click();
   });
-  expect(posted.filter(item => item.action === 'preview')).toHaveLength(1);
+  expect(EffectArray.filter(posted, item => item.action === 'preview')).toHaveLength(1);
   expect(checkbox('src/dependency.ts').disabled).toBe(true);
   expect(input('Dependency source limit').disabled).toBe(true);
   await render(nextUri, 'other');
@@ -292,7 +345,7 @@ it('clears approval after a failed apply and requires a fresh preview', async ()
   await click(button('Approve dependency scope'));
   expect(document.body.textContent).toContain('source, project or topic changed');
   expect(document.querySelector('[aria-label="Exact dependency expansion preview"]')).toBeNull();
-  expect(posted.filter(item => item.action === 'apply')).toHaveLength(1);
+  expect(EffectArray.filter(posted, item => item.action === 'apply')).toHaveLength(1);
   expect(changed).not.toHaveBeenCalled();
 });
 
@@ -336,7 +389,13 @@ it.each([
       />,
     ),
   );
-  expect(document.body.textContent?.includes('Review code dependency scope')).toBe(item.visible);
+  expect(
+    Effect.pipe(document.body.textContent, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect.pipe(effectOptionalString, EffectString.includes('Review code dependency scope')),
+    ),
+  ).toBe(item.visible);
   expect(document.body.textContent).toContain('Automatic memory care');
   expect(document.body.textContent).not.toContain('Topic updates from an Obsidian note');
   expectOnlyAutomaticStatusRead();
@@ -375,29 +434,29 @@ it('recovers an expired approval only through explicit restart then separate app
   await expireApprovedPreview();
   expect(document.querySelector('[aria-label="Exact dependency expansion preview"]')).toBeNull();
   expect(button('Start fresh dependency review').disabled).toBe(true);
-  expect(posted.filter(item => item.action === 'restart')).toHaveLength(0);
+  expect(EffectArray.filter(posted, item => item.action === 'restart')).toHaveLength(0);
   await click(checkbox('Replace the expired approval'));
   await click(button('Start fresh dependency review'));
   expect(posted.at(-1)).toEqual(
     expect.objectContaining({
       action: 'restart',
       revision: hash,
-      approvalDigest: 'b'.repeat(64),
+      approvalDigest: Effect.pipe('b', EffectString.repeat(64)),
       approved: true,
       selection: expect.objectContaining({selectedNodeIds: ['neighbor']}),
     }),
   );
   expect(document.body.textContent).toContain('Fresh dependency review');
   expect(button('Approve dependency scope').disabled).toBe(true);
-  expect(posted.filter(item => item.action === 'apply')).toHaveLength(1);
+  expect(EffectArray.filter(posted, item => item.action === 'apply')).toHaveLength(1);
   expiredApply = false;
   await click(checkbox('I reviewed these exact additions'));
   await click(button('Approve dependency scope'));
   expect(posted.at(-1)).toEqual(
     expect.objectContaining({
       action: 'apply',
-      revision: 'c'.repeat(64),
-      approvalDigest: 'd'.repeat(64),
+      revision: Effect.pipe('c', EffectString.repeat(64)),
+      approvalDigest: Effect.pipe('d', EffectString.repeat(64)),
       approved: true,
     }),
   );
@@ -412,7 +471,7 @@ it('invalidates restart recovery on edits and refuses unbound recovery identitie
   wrongRecovery = true;
   await click(button('Approve dependency scope'));
   expect(button('Start fresh dependency review')).toBeUndefined();
-  expect(posted.filter(item => item.action === 'restart')).toHaveLength(0);
+  expect(EffectArray.filter(posted, item => item.action === 'restart')).toHaveLength(0);
 });
 it('fences duplicate restart requests and ignores a delayed recovery response after changing target/project', async () => {
   await expireApprovedPreview();
@@ -423,7 +482,7 @@ it('fences duplicate restart requests and ignores a delayed recovery response af
     button('Start fresh dependency review').click();
     button('Start fresh dependency review').click();
   });
-  expect(posted.filter(item => item.action === 'restart')).toHaveLength(1);
+  expect(EffectArray.filter(posted, item => item.action === 'restart')).toHaveLength(1);
   expect(checkbox('Replace the expired approval').disabled).toBe(true);
   expect(input('Dependency source limit').disabled).toBe(true);
   await render(nextUri, 'other');
@@ -447,9 +506,9 @@ it('preserves exact recovery identity after an interrupted restart but requires 
   restartError = false;
   await click(checkbox('Replace the expired approval'));
   await click(button('Start fresh dependency review'));
-  expect(posted.filter(item => item.action === 'restart')).toEqual([
-    expect.objectContaining({revision: hash, approvalDigest: 'b'.repeat(64)}),
-    expect.objectContaining({revision: hash, approvalDigest: 'b'.repeat(64)}),
+  expect(EffectArray.filter(posted, item => item.action === 'restart')).toEqual([
+    expect.objectContaining({revision: hash, approvalDigest: Effect.pipe('b', EffectString.repeat(64))}),
+    expect.objectContaining({revision: hash, approvalDigest: Effect.pipe('b', EffectString.repeat(64))}),
   ]);
   expect(button('Approve dependency scope').disabled).toBe(true);
 });

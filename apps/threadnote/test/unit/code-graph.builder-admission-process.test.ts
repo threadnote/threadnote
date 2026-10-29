@@ -7,6 +7,8 @@ import {describe, expect} from 'vitest';
 import {codeGraphBuilderAdmissionSlotPath} from '@threadnote/graph/layout';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const testLayer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 
@@ -38,7 +40,7 @@ describe('builder admission process boundary', () => {
               const fs = yield* FileSystem.FileSystem;
               yield* withCodeGraphBuilderAdmission({
                 admissionClass: 'current-required',
-                identity: {checkoutId: ${JSON.stringify(checkoutId)}, worktreeId: ${JSON.stringify('e'.repeat(64))}, requestKey: ${JSON.stringify('f'.repeat(64))}},
+                identity: {checkoutId: ${JSON.stringify(checkoutId)}, worktreeId: ${JSON.stringify(Effect2.pipe('e', EffectString.repeat(64)))}, requestKey: ${JSON.stringify(Effect2.pipe('f', EffectString.repeat(64)))}},
                 onWaiting: fs.writeFileString(${JSON.stringify(path.join(home, `${name}.queued`))}, '').pipe(Effect.orDie),
                 threadnoteHome: ${JSON.stringify(home)},
               }, fs.writeFileString(${JSON.stringify(path.join(home, `${name}.started`))}, '').pipe(Effect.andThen(Effect.never)));
@@ -59,13 +61,13 @@ describe('builder admission process boundary', () => {
               while (!(yield* fs.exists(path.join(home, name)))) yield* Effect.sleep(10);
             }).pipe(Effect.timeout('10 seconds'));
 
-          const first = yield* start('first', 'a'.repeat(64));
+          const first = yield* start('first', Effect2.pipe('a', EffectString.repeat(64)));
           yield* wait('first.started');
-          yield* start('second', 'a'.repeat(64));
+          yield* start('second', Effect2.pipe('a', EffectString.repeat(64)));
           yield* wait('second.started');
-          yield* start('same', 'a'.repeat(64));
+          yield* start('same', Effect2.pipe('a', EffectString.repeat(64)));
           yield* wait('same.queued');
-          yield* start('unrelated', 'b'.repeat(64));
+          yield* start('unrelated', Effect2.pipe('b', EffectString.repeat(64)));
           yield* wait('unrelated.queued');
           expect(yield* fs.exists(path.join(home, 'unrelated.started'))).toBe(false);
           first.kill('SIGKILL');
@@ -75,7 +77,7 @@ describe('builder admission process boundary', () => {
           const ownership = JSON.parse(
             yield* fs.readFileString(`${codeGraphBuilderAdmissionSlotPath(path, home, 0)}.owner.json`),
           );
-          expect(ownership.checkoutId).toBe('b'.repeat(64));
+          expect(ownership.checkoutId).toBe(Effect2.pipe('b', EffectString.repeat(64)));
           expect(ownership.processId).not.toBe(first.pid);
         }).pipe(provideTestLayer(testLayer)),
       ),

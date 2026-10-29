@@ -1,7 +1,11 @@
+import {isSafeInteger as checkedIsSafeInteger, isOneOf as checkedIsOneOf} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Result} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {githubDocumentId, type GitHubCandidate} from './client.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface GitHubRepositoryState {
   readonly name: string;
@@ -50,18 +54,34 @@ const location = (config: RuntimeConfig) => ({
   user: config.user,
 });
 const root = (id: string) => `threadnote://resources/external/github/${id}`;
-const record = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+const record = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === 'object' && !EffectArray.isArray(v);
 const hash = (v: unknown) => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
-const integer = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0;
-const time = (v: unknown) => v === undefined || (integer(v) && (v as number) < 8_640_000_000_000_000);
+const integer = (v: unknown): v is number => checkedIsSafeInteger(v) && v >= 0;
+const time = (v: unknown) => v === undefined || (integer(v) && v < 8_640_000_000_000_000);
 const repo = (v: unknown) => typeof v === 'string' && /^[a-z0-9-]+\/[a-z0-9._-]+$/.test(v);
 const candidate = (v: unknown): v is GitHubCandidate =>
   record(v) &&
   typeof v.id === 'string' &&
   /^[1-9][0-9]*$/.test(v.id) &&
   integer(v.number) &&
-  (v.number as number) > 0 &&
+  v.number > 0 &&
   (v.kind === 'issue' || v.kind === 'pull');
+const isPositiveIntegerArray = (value: unknown): value is readonly number[] =>
+  EffectArray.isArray(value) &&
+  EffectArray.every(value, (number): number is number => typeof number === 'number' && integer(number) && number > 0);
+const isUnresolvedNumber = (value: unknown): value is {readonly number: number; readonly nextAttemptAt: number} =>
+  record(value) &&
+  typeof value.number === 'number' &&
+  integer(value.number) &&
+  value.number > 0 &&
+  typeof value.nextAttemptAt === 'number' &&
+  time(value.nextAttemptAt);
+const isUnresolvedNumberArray = (
+  value: unknown,
+): value is readonly {readonly number: number; readonly nextAttemptAt: number}[] =>
+  EffectArray.isArray(value) && value.length <= 100 && EffectArray.every(value, isUnresolvedNumber);
+
 function validState(v: unknown): v is GitHubSyncState {
   return (
     record(v) &&
@@ -69,18 +89,17 @@ function validState(v: unknown): v is GitHubSyncState {
     hash(v.fingerprint) &&
     hash(v.accessEpoch) &&
     integer(v.repositoryIndex) &&
-    ['backfill', 'issues', 'comments', 'review-comments', 'reconcile'].includes(v.phase as string) &&
+    checkedIsOneOf(['backfill', 'issues', 'comments', 'review-comments', 'reconcile'], v.phase) &&
     integer(v.page) &&
-    (v.page as number) > 0 &&
+    v.page > 0 &&
     integer(v.offset) &&
-    Array.isArray(v.items) &&
+    EffectArray.isArray(v.items) &&
     v.items.length <= 100 &&
-    v.items.every(candidate) &&
-    new Set(v.items.map(x => x.number)).size === v.items.length &&
-    (v.offset as number) <= v.items.length &&
+    EffectArray.every(v.items, candidate) &&
+    new Set(EffectArray.map(v.items, x => x.number)).size === v.items.length &&
+    v.offset <= v.items.length &&
     typeof v.hasMore === 'boolean' &&
-    (v.numbers === undefined ||
-      (Array.isArray(v.numbers) && v.numbers.length <= 100 && v.numbers.every(n => integer(n) && n > 0))) &&
+    (v.numbers === undefined || (isPositiveIntegerArray(v.numbers) && v.numbers.length <= 100)) &&
     (v.continuation === undefined || (typeof v.continuation === 'string' && v.continuation.length <= 4096)) &&
     time(v.boundary) &&
     v.boundary !== undefined &&
@@ -107,17 +126,8 @@ function validRepository(v: unknown): v is GitHubRepositoryState {
     time(v.commentsWatermark) &&
     time(v.reviewCommentsWatermark) &&
     (v.unresolvedNumbers === undefined ||
-      (Array.isArray(v.unresolvedNumbers) &&
-        v.unresolvedNumbers.length <= 100 &&
-        v.unresolvedNumbers.every(
-          item =>
-            record(item) &&
-            integer(item.number) &&
-            (item.number as number) > 0 &&
-            item.nextAttemptAt !== undefined &&
-            time(item.nextAttemptAt),
-        ) &&
-        new Set(v.unresolvedNumbers.map(item => item.number)).size === v.unresolvedNumbers.length)) &&
+      (isUnresolvedNumberArray(v.unresolvedNumbers) &&
+        new Set(EffectArray.map(v.unresolvedNumbers, item => item.number)).size === v.unresolvedNumbers.length)) &&
     time(v.lastReconciledAt) &&
     (v.reconcileAfter === undefined ||
       (typeof v.reconcileAfter === 'string' && /^r-[0-9]+-(?:issue|pull)-[0-9]+$/.test(v.reconcileAfter)))
@@ -209,7 +219,11 @@ export const readGitHubRepositoryCheckpoint = Effect.fn('github.readRepositoryCh
   repositoryId: string,
   index: number,
 ) {
-  const v = yield* readInternal(config, id, checkpointSuffix(repositoryId, index).split('/'));
+  const v = yield* readInternal(
+    config,
+    id,
+    Effect2.pipe(checkpointSuffix(repositoryId, index), EffectString.split('/')),
+  );
   return v === undefined ? undefined : validState(v) && v.repositoryIndex === index ? v : null;
 });
 export const writeGitHubRepositoryCheckpoint = Effect.fn('github.writeRepositoryCheckpoint')(function* <R>(
@@ -235,16 +249,18 @@ export const clearGitHubRepositoryCheckpoint = Effect.fn('github.clearRepository
     fence,
   );
 });
+const isGitHubRepositoryStateArray = (value: unknown): value is readonly GitHubRepositoryState[] =>
+  EffectArray.isArray(value) &&
+  value.length <= 100 &&
+  EffectArray.every(value, validRepository) &&
+  new Set(EffectArray.map(value, repository => repository.name)).size === value.length;
+
 export const readGitHubRepositoryStates = Effect.fn('github.readRepositories')(function* (
   config: RuntimeConfig,
   id: string,
 ) {
-  const v = yield* readInternal(config, id, ['.repositories.json']);
-  return v === undefined
-    ? []
-    : Array.isArray(v) && v.length <= 100 && v.every(validRepository) && new Set(v.map(x => x.name)).size === v.length
-      ? v
-      : null;
+  const value = yield* readInternal(config, id, ['.repositories.json']);
+  return value === undefined ? [] : isGitHubRepositoryStateArray(value) ? value : null;
 });
 export const writeGitHubRepositoryStates = Effect.fn('github.writeRepositories')(function* <R>(
   config: RuntimeConfig,
@@ -252,7 +268,7 @@ export const writeGitHubRepositoryStates = Effect.fn('github.writeRepositories')
   v: readonly GitHubRepositoryState[],
   fence: Effect.Effect<unknown, unknown, R>,
 ) {
-  if (v.length > 100 || !v.every(validRepository)) throw new Error('Invalid GitHub repository state.');
+  if (v.length > 100 || !EffectArray.every(v, validRepository)) throw new Error('Invalid GitHub repository state.');
   yield* write(config, id, '.repositories.json', v, fence);
 });
 export const readGitHubIdMarker = Effect.fn('github.readMarker')(function* (
@@ -279,10 +295,9 @@ export const listGitHubIdMarkers = Effect.fn('github.listMarkers')(function* (co
   const listed = yield* fs.readDirectory(dir).pipe(Effect.result);
   if (Result.isFailure(listed) && listed.failure.reason._tag !== 'NotFound') return null;
   const markers: GitHubIdMarker[] = [];
-  for (const name of (Result.isSuccess(listed) ? listed.success : [])
-    .filter(x => /^r-[0-9]+-(?:issue|pull)-[0-9]+\.json$/.test(x))
-    .sort()) {
-    const v = yield* readGitHubIdMarker(config, id, name.slice(0, -5));
+  const listedNames = Result.isSuccess(listed) ? listed.success : [];
+  for (const name of EffectArray.filter(listedNames, x => /^r-[0-9]+-(?:issue|pull)-[0-9]+\.json$/.test(x)).sort()) {
+    const v = yield* readGitHubIdMarker(config, id, Effect2.pipe(name, EffectString.slice(0, -5)));
     if (v === null) return null;
     if (v) markers.push(v);
   }

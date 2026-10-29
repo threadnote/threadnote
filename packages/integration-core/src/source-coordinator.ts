@@ -2,6 +2,8 @@ import {Clock, Context, Effect, Option, Redacted, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Descriptors contain identities, never credentials or fetched document content. */
 export interface SourceWorkDescriptor {
@@ -50,7 +52,10 @@ export interface SourceAdmissionRequest {
   readonly method: string;
 }
 
-export class SourceCoordinatorError extends Schema.TaggedError<SourceCoordinatorError>()('SourceCoordinatorError', {
+export class SourceCoordinatorError extends Schema.TaggedError<
+  SourceCoordinatorError,
+  {readonly brand: unique symbol}
+>()('SourceCoordinatorError', {
   message: Schema.String,
 }) {}
 
@@ -95,7 +100,12 @@ export const admittedSourceFetch = Effect.fn('source.admittedFetch')(function* (
   const run = Effect.runPromiseWith(context);
   const accountKey = sourceAccountKey(provider, token);
   return async (input: URL, init: RequestInit): Promise<Response> => {
-    const request = {config, provider, accountKey, method: (init.method ?? 'GET').toUpperCase()};
+    const request = {
+      config,
+      provider,
+      accountKey,
+      method: Effect2.pipe(init.method ?? 'GET', EffectString.toUpperCase),
+    };
     const signal = init.signal ?? undefined;
     await run(admission.value.admit(request), {signal});
     signal?.throwIfAborted();

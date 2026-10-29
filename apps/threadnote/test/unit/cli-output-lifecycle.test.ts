@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {CliOutput, withCliDiagnostics, withCliOutputConsole} from '@threadnote/threadnote/effect/cli/output';
@@ -55,8 +56,9 @@ const captureLifecycle = (payload: unknown) =>
       lifecycle.pipe(
         Effect.provideService(Console.Console, {
           ...parent,
-          log: (...args: readonly unknown[]) => void stdout.push(args.map(String).join(' ')),
-          error: (...args: readonly unknown[]) => void stderr.push(args.map(String).join(' ')),
+          log: (...args: readonly unknown[]) => void stdout.push(EffectArray.join(EffectArray.map(args, String), ' ')),
+          error: (...args: readonly unknown[]) =>
+            void stderr.push(EffectArray.join(EffectArray.map(args, String), ' ')),
         }),
       ),
     );
@@ -85,7 +87,7 @@ describe('CLI diagnostic lifecycle', () => {
         const result = yield* captureLifecycle(payload);
 
         expect(result.stdout).toEqual([JSON.stringify(payload)]);
-        expect(JSON.parse(result.stdout.join('\n'))).toEqual(JSON.parse(JSON.stringify(payload)));
+        expect(JSON.parse(EffectArray.join(result.stdout, '\n'))).toEqual(JSON.parse(JSON.stringify(payload)));
         expect(result.stderr).toHaveLength(4);
       }),
     {fastCheck: {numRuns: 30}},

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Context, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {
@@ -19,6 +20,9 @@ import {storeMemory} from './commands.js';
 import {localMemoryPathForUri, memoryDirectoryUri, resourceStoreLocation} from './migrations.js';
 import {discardDeferredCodeAnchorIntent} from './deferred/code_anchor.js';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const bytes = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
@@ -43,7 +47,10 @@ export const MemoryArchivePlanSchema = Schema.Struct({
   planId: digest,
 });
 export type MemoryArchivePlan = typeof MemoryArchivePlanSchema.Type;
-export class MemoryArchivePlanError extends Schema.TaggedError<MemoryArchivePlanError>()('MemoryArchivePlanError', {
+export class MemoryArchivePlanError extends Schema.TaggedError<
+  MemoryArchivePlanError,
+  {readonly brand: unique symbol}
+>()('MemoryArchivePlanError', {
   code: Schema.Literals(['invalid-request', 'unsupported-runtime', 'plan-changed', 'archive-conflict']),
   message: Schema.String,
 }) {}
@@ -54,12 +61,15 @@ export class MemoryArchiveExecutable extends Context.Service<MemoryArchiveExecut
 ) {}
 const fail = (code: MemoryArchivePlanError['code'], message: string) => MemoryArchivePlanError.make({code, message});
 const canonical = (value: unknown): string => {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (EffectArray.isArray(value)) return `[${EffectArray.join(EffectArray.map(value, canonical), ',')}]`;
   if (value !== null && typeof value === 'object')
-    return `{${Object.entries(value)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
-      .join(',')}}`;
+    return `{${EffectArray.join(
+      EffectArray.map(
+        EffectRecord.toEntries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        ([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`,
+      ),
+      ',',
+    )}}`;
   return JSON.stringify(value) ?? 'null';
 };
 const hash = (value: unknown) => sha256HexSync(canonical(value));
@@ -140,14 +150,18 @@ const build = (
     const archive = yield* Effect.try({
       try: () => {
         // Refuse a rewrite that would silently discard an unsupported legacy header.
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
         const roundTrip = formatMemoryDocument(record.headerTitle, record.metadata, record.body).split('\n\n', 1)[0];
         if (
-          raw
-            .trim()
-            .split(/\r?\n\r?\n/u, 1)[0]
-            .split(/\r?\n/u)
-            .slice(1)
-            .some(line => !roundTrip.split('\n').includes(line))
+          EffectArray.some(
+            Effect2.pipe(
+              Effect2.pipe(raw, EffectString.trim)
+                // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+                .split(/\r?\n\r?\n/u, 1)[0],
+              EffectString.split(/\r?\n/u),
+            ).slice(1),
+            line => !Effect2.pipe(roundTrip, EffectString.split('\n')).includes(line),
+          )
         )
           throw fail(
             'invalid-request',

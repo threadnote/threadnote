@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -15,18 +16,23 @@ import {
   isSupportedReleaseVersion,
   validateReleaseNotes,
 } from '../../../../scripts/prepare-release.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const PrepareReleaseTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
-const validNotes = [
-  "## What's new",
-  '',
-  'Threadnote 4.6.7 returns a complete memory from `read_context` up to 64 KiB, or refuses with an outline instead of paging.',
-  '',
-  '### Complete-or-refuse memory reads',
-  '',
-  'Agents get the full note or an outline.',
-  '',
-].join('\n');
+const validNotes = EffectArray.join(
+  [
+    "## What's new",
+    '',
+    'Threadnote 4.6.7 returns a complete memory from `read_context` up to 64 KiB, or refuses with an outline instead of paging.',
+    '',
+    '### Complete-or-refuse memory reads',
+    '',
+    'Agents get the full note or an outline.',
+    '',
+  ],
+  '\n',
+);
 
 const stableVersionArbitrary = fc
   .tuple(fc.integer({max: 20, min: 0}), fc.integer({max: 40, min: 0}), fc.integer({max: 80, min: 0}))
@@ -67,7 +73,7 @@ describe('prepare-release', () => {
   it('increments only the patch component of a stable version', () => {
     fc.assert(
       fc.property(stableVersionArbitrary, version => {
-        const [major, minor, patch] = version.split('.').map(Number);
+        const [major, minor, patch] = EffectArray.map(Effect2.pipe(version, EffectString.split('.')), Number);
         expect(nextPatchVersion(version)).toBe(`${major}.${minor}.${(patch ?? 0) + 1}`);
         expect(releaseNotesPathForVersion(nextPatchVersion(version))).toBe(
           `.github/release-notes/v${major}.${minor}.${(patch ?? 0) + 1}.md`,
@@ -80,7 +86,9 @@ describe('prepare-release', () => {
 
   it('validates curated notes the website publisher accepts', () => {
     const result = validateReleaseNotes(validNotes, '4.6.7');
-    expect(result.summary.startsWith('Threadnote 4.6.7 returns a complete memory')).toBe(true);
+    expect(Effect2.pipe(result.summary, EffectString.startsWith('Threadnote 4.6.7 returns a complete memory'))).toBe(
+      true,
+    );
     expect(result.headline.length).toBeGreaterThan(0);
     expect(result.headline.length).toBeLessThanOrEqual(240);
     expect(() => validateReleaseNotes('## Changes\nNope.', '4.6.7')).toThrow("must start with ## What's new");
@@ -124,7 +132,7 @@ describe('prepare-release', () => {
   it('replaces only the package version field', () => {
     const replaced = replacePackageVersion({name: 'threadnote', version: '4.6.6'}, '4.6.7');
     expect(JSON.parse(replaced.source)).toEqual({name: 'threadnote', version: '4.6.7'});
-    expect(replaced.source.endsWith('\n')).toBe(true);
+    expect(Effect2.pipe(replaced.source, EffectString.endsWith('\n'))).toBe(true);
   });
 
   effectIt.effect('writes the package version only after notes validate', () =>
@@ -157,8 +165,8 @@ describe('prepare-release', () => {
 
       yield* fs.writeFileString(path.join(root, '.github', 'release-notes', 'v6.2.3-beta.1.md'), validNotes);
       const beta = yield* prepareRelease({dryRun: true, json: true, patch: false, version: '6.2.3-beta.1'}, root);
-      expect(beta.nextSteps.join('\n')).toContain('protected main');
-      expect(beta.nextSteps.join('\n')).not.toContain('release/5.0.0');
+      expect(EffectArray.join(beta.nextSteps, '\n')).toContain('protected main');
+      expect(EffectArray.join(beta.nextSteps, '\n')).not.toContain('release/5.0.0');
     }).pipe(provideTestLayer(PrepareReleaseTestLayer)),
   );
 });

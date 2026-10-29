@@ -1,8 +1,9 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Exit, FileSystem, Path, Result, Scope} from 'effect';
+import {Deferred, Effect, Exit, FileSystem, Path, Result, Scope, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -39,6 +40,20 @@ import {existsSync} from '@threadnote/testing/node-fs';
 import {mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const CatalogSchema = withRest(Schema.Struct({revision: Schema.String}));
+const CatalogMutationSchema = withRest(Schema.Struct({catalog: withRest(Schema.Struct({revision: Schema.String}))}));
+const JobStartSchema = withRest(Schema.Struct({job: withRest(Schema.Struct({id: Schema.String}))}));
+const JobListSchema = withRest(Schema.Struct({jobs: Schema.Array(Schema.Unknown)}));
+const decodeCatalog = Schema.decodeUnknownSync(CatalogSchema);
+const decodeCatalogMutation = Schema.decodeUnknownSync(CatalogMutationSchema);
+const decodeJobStart = Schema.decodeUnknownSync(JobStartSchema);
+const decodeJobList = Schema.decodeUnknownSync(JobListSchema);
 
 interface WorksetFixture {
   readonly config: RuntimeConfig;
@@ -74,35 +89,41 @@ function fixture(rawForRoot: (root: string) => string) {
 }
 
 function manifest(root: string, worksets = ''): string {
-  return [
-    '# manifest heading',
-    'version: 1',
-    'projects:',
-    '  # project inventory note',
-    '  - name: api',
-    `    path: ${root}/api`,
-    '    uri: threadnote://resources/repos/api',
-    '    seed: []',
-    '  - name: billing',
-    `    path: ${root}/billing`,
-    '    uri: threadnote://resources/repos/billing',
-    '    seed: []',
-    '  - name: worker',
-    `    path: ${root}/worker`,
-    '    uri: threadnote://resources/repos/worker',
-    '    seed: []',
-    worksets,
-    '',
-  ]
-    .filter(line => line !== '')
-    .join('\n')
-    .concat('\n');
+  return EffectString.concat(
+    EffectArray.join(
+      EffectArray.filter(
+        [
+          '# manifest heading',
+          'version: 1',
+          'projects:',
+          '  # project inventory note',
+          '  - name: api',
+          `    path: ${root}/api`,
+          '    uri: threadnote://resources/repos/api',
+          '    seed: []',
+          '  - name: billing',
+          `    path: ${root}/billing`,
+          '    uri: threadnote://resources/repos/billing',
+          '    seed: []',
+          '  - name: worker',
+          `    path: ${root}/worker`,
+          '    uri: threadnote://resources/repos/worker',
+          '    seed: []',
+          worksets,
+          '',
+        ],
+        line => line !== '',
+      ),
+      '\n',
+    ),
+    '\n',
+  );
 }
 
 function updateMutation(
   revision: string,
   projects: readonly string[],
-  overrides: Partial<ManagerWorksetDefinitionMutation & {readonly name: string; readonly workset: string}> = {},
+  overrides: {readonly name?: string; readonly workset?: string} = {},
 ): ManagerWorksetDefinitionMutation {
   return {
     description: 'Shared runtime',
@@ -112,7 +133,7 @@ function updateMutation(
     projects,
     workset: 'platform',
     ...overrides,
-  } as ManagerWorksetDefinitionMutation;
+  };
 }
 
 function git(cwd: string, args: readonly string[]): void {
@@ -124,9 +145,12 @@ describe('Manager Worksets manifest transactions', () => {
     TestClock.withLive(
       Effect.gen(function* () {
         const current = yield* fixture(root =>
-          manifest(root).replace(
-            '    seed: []',
-            '    seed: []\n    graph:\n      roots: [apps/api]\n      closure: dependencies',
+          Effect2.pipe(
+            manifest(root),
+            EffectString.replace(
+              '    seed: []',
+              '    seed: []\n    graph:\n      roots: [apps/api]\n      closure: dependencies',
+            ),
           ),
         );
         const repo = current.path.join(current.root, 'api');
@@ -154,7 +178,7 @@ describe('Manager Worksets manifest transactions', () => {
         const store = yield* CodeGraphStore;
         const scopeId = `code-graph-scope:${sha256HexSync('threadnote://resources/repos/api')}`;
         for (const [index, selectedScope] of [undefined, scopeId].entries()) {
-          const snapshotId = `cgsn_${(index + 1).toString().repeat(40)}`;
+          const snapshotId = `cgsn_${Effect2.pipe((index + 1).toString(), EffectString.repeat(40))}`;
           yield* store.activate(
             layout.databasePath,
             identity,
@@ -210,15 +234,21 @@ describe('Manager Worksets manifest transactions', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const current = yield* fixture(root =>
-          manifest(root).replace(
-            '    seed: []',
-            [
+          Effect2.pipe(
+            manifest(root),
+            EffectString.replace(
               '    seed: []',
-              '    graph:',
-              '      roots: [apps/api]',
-              '      closure: dependencies',
-              '      include: [tools/generated]',
-            ].join('\n'),
+              EffectArray.join(
+                [
+                  '    seed: []',
+                  '    graph:',
+                  '      roots: [apps/api]',
+                  '      closure: dependencies',
+                  '      include: [tools/generated]',
+                ],
+                '\n',
+              ),
+            ),
           ),
         );
         const revision = (yield* readManagerWorksetCatalog(current.config)).revision;
@@ -282,9 +312,15 @@ describe('Manager Worksets manifest transactions', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const current = yield* fixture(root =>
-          manifest(root).replace(
-            '    seed: []',
-            ['    seed: []', '    graph:', '      roots: [apps/api]', '      closure: dependencies'].join('\n'),
+          Effect2.pipe(
+            manifest(root),
+            EffectString.replace(
+              '    seed: []',
+              EffectArray.join(
+                ['    seed: []', '    graph:', '      roots: [apps/api]', '      closure: dependencies'],
+                '\n',
+              ),
+            ),
           ),
         );
         const before = yield* current.fs.readFileString(current.manifestPath);
@@ -343,22 +379,39 @@ describe('Manager Worksets manifest transactions', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const current = yield* fixture(root => {
-          const withProjectComments = manifest(
-            root,
-            [
-              'worksets:',
-              '  - name: platform',
-              '    projects:',
-              '      - api # retained membership note',
-              '      - billing',
-            ].join('\n'),
-          )
-            .replace('  - name: api', '  - name: api # project name note')
-            .replace(`    path: ${root}/api`, `    path: ${root}/api # project path note`)
-            .replace(
-              '    uri: threadnote://resources/repos/api',
-              '    uri: threadnote://resources/repos/api # project URI note',
-            );
+          const withProjectComments = Effect2.pipe(
+            manifest(
+              root,
+              EffectArray.join(
+                [
+                  'worksets:',
+                  '  - name: platform',
+                  '    projects:',
+                  '      - api # retained membership note',
+                  '      - billing',
+                ],
+                '\n',
+              ),
+            ),
+            __effectPipeInput => {
+              const __effectPipeStage0 = Effect2.pipe(
+                __effectPipeInput,
+                EffectString.replace('  - name: api', '  - name: api # project name note'),
+              );
+              const __effectPipeStage1 = Effect2.pipe(
+                __effectPipeStage0,
+                EffectString.replace(`    path: ${root}/api`, `    path: ${root}/api # project path note`),
+              );
+              const __effectPipeStage2 = Effect2.pipe(
+                __effectPipeStage1,
+                EffectString.replace(
+                  '    uri: threadnote://resources/repos/api',
+                  '    uri: threadnote://resources/repos/api # project URI note',
+                ),
+              );
+              return __effectPipeStage2;
+            },
+          );
           return withProjectComments;
         });
         const revision = (yield* readManagerWorksetCatalog(current.config)).revision;
@@ -378,7 +431,11 @@ describe('Manager Worksets manifest transactions', () => {
         expect(afterRename).toContain('# project path note');
         expect(afterRename).toContain('uri: threadnote://resources/repos/gateway # project URI note');
         expect(renamedProject.path).toBe(`${current.root}/api with  two spaces`);
-        expect(renamed.catalog.projects.find(project => project.name === 'gateway')?.worksetCount).toBe(1);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(renamed.catalog.projects, project => project.name === 'gateway'),
+          )?.worksetCount,
+        ).toBe(1);
 
         const deleted = yield* mutateManagerManifestProject(current.config, {
           confirm: true,
@@ -388,7 +445,7 @@ describe('Manager Worksets manifest transactions', () => {
         });
         const definition = yield* readManagerWorksetDefinition(current.config, 'platform');
         const afterDelete = yield* current.fs.readFileString(current.manifestPath);
-        expect(deleted.warnings.join(' ')).toContain('unresolved member');
+        expect(EffectArray.join(deleted.warnings, ' ')).toContain('unresolved member');
         expect(definition.members).toContainEqual(expect.objectContaining({configured: false, project: 'gateway'}));
         expect(afterDelete).toContain('- gateway # retained membership note');
         expect(afterDelete).not.toContain('name: gateway');
@@ -400,7 +457,7 @@ describe('Manager Worksets manifest transactions', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const collision = yield* fixture(root =>
-          manifest(root, ['worksets:', '  - name: collision', '    projects: [api, gateway]'].join('\n')),
+          manifest(root, EffectArray.join(['worksets:', '  - name: collision', '    projects: [api, gateway]'], '\n')),
         );
         const before = yield* collision.fs.readFileString(collision.manifestPath);
         const collisionRevision = (yield* readManagerWorksetCatalog(collision.config)).revision;
@@ -419,13 +476,16 @@ describe('Manager Worksets manifest transactions', () => {
         const unresolved = yield* fixture(root =>
           manifest(
             root,
-            [
-              'worksets:',
-              '  - name: old-name',
-              '    projects: [api]',
-              '  - name: new-name',
-              '    projects: [gateway]',
-            ].join('\n'),
+            EffectArray.join(
+              [
+                'worksets:',
+                '  - name: old-name',
+                '    projects: [api]',
+                '  - name: new-name',
+                '    projects: [gateway]',
+              ],
+              '\n',
+            ),
           ),
         );
         const unresolvedRevision = (yield* readManagerWorksetCatalog(unresolved.config)).revision;
@@ -438,7 +498,11 @@ describe('Manager Worksets manifest transactions', () => {
           seed: [],
           uri: 'threadnote://resources/repos/gateway',
         });
-        expect(renamed.catalog.projects.find(project => project.name === 'gateway')?.worksetCount).toBe(2);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(renamed.catalog.projects, project => project.name === 'gateway'),
+          )?.worksetCount,
+        ).toBe(2);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -449,14 +513,17 @@ describe('Manager Worksets manifest transactions', () => {
         const current = yield* fixture(root =>
           manifest(
             root,
-            [
-              'worksets:',
-              '  - name: platform',
-              '    projects:',
-              '      - api # preserve membership note',
-              '  - name: unresolved',
-              '    projects: [gateway, GATEWAY]',
-            ].join('\n'),
+            EffectArray.join(
+              [
+                'worksets:',
+                '  - name: platform',
+                '    projects:',
+                '      - api # preserve membership note',
+                '  - name: unresolved',
+                '    projects: [gateway, GATEWAY]',
+              ],
+              '\n',
+            ),
           ),
         );
         const revision = (yield* readManagerWorksetCatalog(current.config)).revision;
@@ -471,7 +538,11 @@ describe('Manager Worksets manifest transactions', () => {
         });
         const afterRename = yield* current.fs.readFileString(current.manifestPath);
         expect(afterRename).toContain('- API # preserve membership note');
-        expect(renamed.catalog.projects.find(project => project.name === 'API')?.worksets).toEqual(['platform']);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(renamed.catalog.projects, project => project.name === 'API'),
+          )?.worksets,
+        ).toEqual(['platform']);
 
         const beforeCreate = yield* current.fs.readFileString(current.manifestPath);
         const createError = yield* mutateManagerManifestProject(current.config, {
@@ -565,7 +636,10 @@ describe('Manager Worksets manifest transactions', () => {
         }
 
         const current = yield* fixture(root =>
-          manifest(root).replace('threadnote://resources/repos/billing', 'threadnote://resources/repos/api'),
+          Effect2.pipe(
+            manifest(root),
+            EffectString.replace('threadnote://resources/repos/billing', 'threadnote://resources/repos/api'),
+          ),
         );
         const error = yield* readManagerWorksetCatalog(current.config).pipe(Effect.flip);
         expect(error).toMatchObject({code: 'manifest-invalid', status: 409});
@@ -594,7 +668,7 @@ describe('Manager Worksets manifest transactions', () => {
           memberCount: 2,
           name: 'platform',
         });
-        expect(definition.members.map(member => member.project)).toEqual(['api', 'billing']);
+        expect(EffectArray.map(definition.members, member => member.project)).toEqual(['api', 'billing']);
         expect(definition.members).toContainEqual(
           expect.objectContaining({configured: true, project: 'api', uri: 'threadnote://resources/repos/api'}),
         );
@@ -640,7 +714,7 @@ describe('Manager Worksets manifest transactions', () => {
         );
 
         const catalog = yield* readManagerWorksetCatalog(current.config);
-        const projects = new Map(catalog.projects.map(project => [project.name, project]));
+        const projects = new Map(EffectArray.map(catalog.projects, project => [project.name, project]));
 
         expect(projects.get('api')).toMatchObject({branch: 'feature/worksets', branchState: 'current'});
         expect(projects.get('billing')).toMatchObject({branch: 'billing-linked', branchState: 'current'});
@@ -654,10 +728,12 @@ describe('Manager Worksets manifest transactions', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const current = yield* fixture(root =>
-          manifest(root).replace(`    path: ${root}/api`, '    path: C:\\src\\api'),
+          Effect2.pipe(manifest(root), EffectString.replace(`    path: ${root}/api`, '    path: C:\\src\\api')),
         );
         const catalog = yield* readManagerWorksetCatalog(current.config);
-        expect(catalog.projects.find(project => project.name === 'api')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(catalog.projects, project => project.name === 'api')),
+        ).toMatchObject({
           branchState: 'not-observed',
           folder: 'api',
           path: 'C:\\src\\api',
@@ -778,7 +854,10 @@ describe('Manager Worksets manifest transactions', () => {
       Effect.gen(function* () {
         const current = yield* fixture(root => {
           const nested = `${root}/api/packages/app`;
-          return manifest(root).replace(`    path: ${root}/api`, `    path: ${nested} # retained nested path`);
+          return Effect2.pipe(
+            manifest(root),
+            EffectString.replace(`    path: ${root}/api`, `    path: ${nested} # retained nested path`),
+          );
         });
         const repository = current.path.join(current.root, 'api');
         const nested = current.path.join(repository, 'packages', 'app');
@@ -807,7 +886,10 @@ describe('Manager Worksets manifest transactions', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const current = yield* fixture(root =>
-          manifest(root).replace(`    path: ${root}/billing`, `    path: ${root}/api/packages/billing`),
+          Effect2.pipe(
+            manifest(root),
+            EffectString.replace(`    path: ${root}/billing`, `    path: ${root}/api/packages/billing`),
+          ),
         );
         const repository = current.path.join(current.root, 'api');
         yield* current.fs.makeDirectory(current.path.join(repository, 'packages', 'billing'), {recursive: true});
@@ -833,9 +915,12 @@ describe('Manager Worksets manifest transactions', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const current = yield* fixture(root =>
-          manifest(root).replace(
-            '    uri: threadnote://resources/repos/api',
-            '    uri: threadnote://resources/repos/api/ # legacy URI note',
+          Effect2.pipe(
+            manifest(root),
+            EffectString.replace(
+              '    uri: threadnote://resources/repos/api',
+              '    uri: threadnote://resources/repos/api/ # legacy URI note',
+            ),
           ),
         );
         const catalog = yield* readManagerWorksetCatalog(current.config);
@@ -878,7 +963,9 @@ describe('Manager Worksets manifest transactions', () => {
   effectIt.effect('preserves a legacy relative project path during an unrelated project update', () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const current = yield* fixture(root => manifest(root).replace(`    path: ${root}/api`, '    path: repos/api'));
+        const current = yield* fixture(root =>
+          Effect2.pipe(manifest(root), EffectString.replace(`    path: ${root}/api`, '    path: repos/api')),
+        );
         const catalog = yield* readManagerWorksetCatalog(current.config);
         const result = yield* mutateManagerManifestProject(current.config, {
           expectedRevision: catalog.revision,
@@ -904,9 +991,9 @@ describe('Manager Worksets manifest transactions', () => {
         yield* current.fs.makeDirectory(nested, {recursive: true});
         yield* Effect.sync(() => git(repository, ['init', '-q', '-b', 'main']));
         const canonicalRepository = yield* current.fs.realPath(repository);
-        const canonicalRaw = (yield* current.fs.readFileString(current.manifestPath)).replace(
-          `    path: ${current.root}/api`,
-          `    path: ${canonicalRepository}`,
+        const canonicalRaw = Effect2.pipe(
+          yield* current.fs.readFileString(current.manifestPath),
+          EffectString.replace(`    path: ${current.root}/api`, `    path: ${canonicalRepository}`),
         );
         yield* current.fs.writeFileString(current.manifestPath, canonicalRaw);
         const catalog = yield* readManagerWorksetCatalog(current.config);
@@ -930,7 +1017,10 @@ describe('Manager Worksets manifest transactions', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const current = yield* fixture(root =>
-          manifest(root).replace(`    path: ${root}/api`, `    path: ${root}/api # canonical root note`),
+          Effect2.pipe(
+            manifest(root),
+            EffectString.replace(`    path: ${root}/api`, `    path: ${root}/api # canonical root note`),
+          ),
         );
         const primary = current.path.join(current.root, 'api');
         const nested = current.path.join(primary, 'packages', 'app');
@@ -975,7 +1065,7 @@ describe('Manager Worksets manifest transactions', () => {
           seed: [],
           uri: 'threadnote://resources/repos/api-linked',
         });
-        expect(withLinked.catalog.projects.map(project => project.name)).toContain('api-linked');
+        expect(EffectArray.map(withLinked.catalog.projects, project => project.name)).toContain('api-linked');
         expect((yield* readManagerManifestProject(current.config, 'api-linked')).path).toBe(canonicalLinked);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -987,18 +1077,21 @@ describe('Manager Worksets manifest transactions', () => {
         const current = yield* fixture(root =>
           manifest(
             root,
-            [
-              'worksets:',
-              '  # workset note',
-              '  - name: platform # name note',
-              '    description: Shared runtime # description note',
-              '    projects:',
-              '      # API member note',
-              '      - API # owns ingress',
-              '      # billing member note',
-              '      - billing # owns invoices',
-              '      - worker # remove me',
-            ].join('\n'),
+            EffectArray.join(
+              [
+                'worksets:',
+                '  # workset note',
+                '  - name: platform # name note',
+                '    description: Shared runtime # description note',
+                '    projects:',
+                '      # API member note',
+                '      - API # owns ingress',
+                '      # billing member note',
+                '      - billing # owns invoices',
+                '      - worker # remove me',
+              ],
+              '\n',
+            ),
           ),
         );
         const catalog = yield* readManagerWorksetCatalog(current.config);
@@ -1035,7 +1128,7 @@ describe('Manager Worksets manifest transactions', () => {
         const before = yield* current.fs.readFileString(current.manifestPath);
         const error = yield* mutateManagerWorksetDefinition(
           current.config,
-          updateMutation('0'.repeat(64), ['api', 'worker']),
+          updateMutation(Effect2.pipe('0', EffectString.repeat(64)), ['api', 'worker']),
         ).pipe(Effect.flip);
 
         expect(error).toMatchObject({code: 'revision-conflict', status: 409});
@@ -1075,7 +1168,7 @@ describe('Manager Worksets manifest transactions', () => {
         const aliased = yield* fixture(root =>
           manifest(
             root,
-            ['shared: &shared', '  name: platform', '  projects: [api]', 'worksets: [*shared]'].join('\n'),
+            EffectArray.join(['shared: &shared', '  name: platform', '  projects: [api]', 'worksets: [*shared]'], '\n'),
           ),
         );
         const aliasedBefore = yield* aliased.fs.readFileString(aliased.manifestPath);
@@ -1092,17 +1185,20 @@ describe('Manager Worksets manifest transactions', () => {
         const duplicate = yield* fixture(root =>
           manifest(
             root,
-            [
-              '  - name: API',
-              `    path: ${root}/ambiguous-api`,
-              '    uri: threadnote://resources/repos/ambiguous-api',
-              '    seed: []',
-              'worksets:',
-              '  - name: platform',
-              '    projects: [api]',
-              '  - name: PLATFORM',
-              '    projects: [billing]',
-            ].join('\n'),
+            EffectArray.join(
+              [
+                '  - name: API',
+                `    path: ${root}/ambiguous-api`,
+                '    uri: threadnote://resources/repos/ambiguous-api',
+                '    seed: []',
+                'worksets:',
+                '  - name: platform',
+                '    projects: [api]',
+                '  - name: PLATFORM',
+                '    projects: [billing]',
+              ],
+              '\n',
+            ),
           ),
         );
         const duplicateBefore = yield* duplicate.fs.readFileString(duplicate.manifestPath);
@@ -1138,7 +1234,7 @@ describe('Manager Worksets manifest transactions', () => {
           anchored,
           lines =>
             Effect.gen(function* () {
-              const current = yield* fixture(root => manifest(root, lines.join('\n')));
+              const current = yield* fixture(root => manifest(root, EffectArray.join(lines, '\n')));
               const before = yield* current.fs.readFileString(current.manifestPath);
               const catalog = yield* readManagerWorksetCatalog(current.config);
               const error = yield* mutateManagerWorksetDefinition(
@@ -1159,7 +1255,9 @@ describe('Manager Worksets manifest transactions', () => {
   effectIt.effect('keeps workset edits available when only the project YAML shape is read-only', () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const current = yield* fixture(root => manifest(root).replace('projects:', 'projects: &project-inventory'));
+        const current = yield* fixture(root =>
+          Effect2.pipe(manifest(root), EffectString.replace('projects:', 'projects: &project-inventory')),
+        );
         const catalog = yield* readManagerWorksetCatalog(current.config);
         expect(catalog).toMatchObject({
           projectEditability: {reason: 'unsupported-project-yaml', state: 'read-only'},
@@ -1188,7 +1286,7 @@ describe('Manager Worksets manifest transactions', () => {
   effectIt.effect('rejects misleading long or whitespace-sensitive manifest names without truncating them', () =>
     Effect.scoped(
       Effect.gen(function* () {
-        for (const unsafeName of [' platform ', 'x'.repeat(257)]) {
+        for (const unsafeName of [' platform ', Effect2.pipe('x', EffectString.repeat(257))]) {
           const current = yield* fixture(root =>
             manifest(root, `worksets:\n  - name: ${JSON.stringify(unsafeName)}\n    projects: [api]`),
           );
@@ -1199,7 +1297,7 @@ describe('Manager Worksets manifest transactions', () => {
           expect(yield* current.fs.readFileString(current.manifestPath)).toBe(before);
         }
 
-        const maximumName = 'w'.repeat(256);
+        const maximumName = Effect2.pipe('w', EffectString.repeat(256));
         const supported = yield* fixture(root =>
           manifest(root, `worksets:\n  - name: ${maximumName}\n    projects: [api]`),
         );
@@ -1229,8 +1327,8 @@ describe('Manager Worksets manifest transactions', () => {
         );
         const catalog = yield* readManagerWorksetCatalog(current.config);
 
-        expect(outcomes.filter(Result.isSuccess)).toHaveLength(1);
-        expect(outcomes.filter(Result.isFailure)).toHaveLength(1);
+        expect(EffectArray.filter(outcomes, Result.isSuccess)).toHaveLength(1);
+        expect(EffectArray.filter(outcomes, Result.isFailure)).toHaveLength(1);
         expect(catalog.definitions).toHaveLength(1);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -1262,8 +1360,8 @@ describe('Manager Worksets manifest transactions', () => {
             {concurrency: 'unbounded'},
           ),
         );
-        expect(outcomes.filter(Result.isSuccess)).toHaveLength(1);
-        expect(outcomes.filter(Result.isFailure)).toHaveLength(1);
+        expect(EffectArray.filter(outcomes, Result.isSuccess)).toHaveLength(1);
+        expect(EffectArray.filter(outcomes, Result.isFailure)).toHaveLength(1);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -1285,8 +1383,10 @@ describe('Manager Worksets manifest transactions', () => {
         const afterRename = yield* current.fs.readFileString(current.manifestPath);
 
         expect(renamed.changed).toBe(true);
-        expect(renamed.catalog.definitions.map(definition => definition.name)).toEqual(['platform-services']);
-        expect(renamed.warnings.join(' ')).toContain('needs catalog repair before retirement');
+        expect(EffectArray.map(renamed.catalog.definitions, definition => definition.name)).toEqual([
+          'platform-services',
+        ]);
+        expect(EffectArray.join(renamed.warnings, ' ')).toContain('needs catalog repair before retirement');
         expect(afterRename).toContain('name: platform-services');
         expect(afterRename).toContain('projects: [ api, billing ]');
 
@@ -1340,15 +1440,21 @@ describe('Manager Worksets manifest transactions', () => {
       Effect.scoped(
         Effect.gen(function* () {
           const current = yield* fixture(root =>
-            manifest(root).replace(
-              '    seed: []',
-              [
+            Effect2.pipe(
+              manifest(root),
+              EffectString.replace(
                 '    seed: []',
-                '    graph:',
-                '      roots: [apps/api, packages/core]',
-                '      closure: dependencies',
-                '      include: [tools/generated, scripts/codegen]',
-              ].join('\n'),
+                EffectArray.join(
+                  [
+                    '    seed: []',
+                    '    graph:',
+                    '      roots: [apps/api, packages/core]',
+                    '      closure: dependencies',
+                    '      include: [tools/generated, scripts/codegen]',
+                  ],
+                  '\n',
+                ),
+              ),
             ),
           );
           const before = yield* current.fs.readFileString(current.manifestPath);
@@ -1381,13 +1487,16 @@ describe('Manager Worksets manifest transactions', () => {
       Effect.scoped(
         Effect.gen(function* () {
           const original = uppercase ? 'API' : 'api';
-          const worksets = [
-            'worksets:',
-            ...references.flatMap((referencesApi, index) => [
-              `  - name: workset-${index}`,
-              `    projects: [${referencesApi ? original : 'billing'}]`,
-            ]),
-          ].join('\n');
+          const worksets = EffectArray.join(
+            [
+              'worksets:',
+              ...EffectArray.flatMap(references, (referencesApi, index) => [
+                `  - name: workset-${index}`,
+                `    projects: [${referencesApi ? original : 'billing'}]`,
+              ]),
+            ],
+            '\n',
+          );
           const current = yield* fixture(root => manifest(root, worksets));
           const revision = (yield* readManagerWorksetCatalog(current.config)).revision;
           const renamed = yield* mutateManagerManifestProject(current.config, {
@@ -1411,9 +1520,13 @@ describe('Manager Worksets manifest transactions', () => {
             uri: 'threadnote://resources/repos/api',
           });
 
-          expect(parsed.worksets?.map(workset => workset.projects[0])).toEqual(
-            references.map(value => (value ? 'gateway' : 'billing')),
-          );
+          expect(
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(parsed.worksets), __effectArrayReceiver =>
+                EffectArray.map(__effectArrayReceiver, workset => workset.projects[0]),
+              ),
+            ),
+          ).toEqual(EffectArray.map(references, value => (value ? 'gateway' : 'billing')));
           expect(repeated.changed).toBe(false);
           expect(yield* current.fs.readFileString(current.manifestPath)).toBe(renamedBytes);
         }),
@@ -1438,7 +1551,7 @@ describe('Manager Worksets API and human labels', () => {
     try {
       expect((await testHttpFetch(`${server.url}/api/worksets`)).status).toBe(401);
       const catalogResponse = await testHttpFetch(`${server.url}/api/worksets`, {headers});
-      const catalog = (await catalogResponse.json()) as {readonly revision: string};
+      const catalog = decodeCatalog(await catalogResponse.json());
       expect(catalogResponse.status).toBe(200);
       const unauthorizedProject = await testHttpFetch(`${server.url}/api/worksets/projects`, {
         body: JSON.stringify({expectedRevision: catalog.revision, name: 'x', operation: 'create'}),
@@ -1458,7 +1571,7 @@ describe('Manager Worksets API and human labels', () => {
         method: 'POST',
       });
       expect(createdResponse.status).toBe(200);
-      const created = (await createdResponse.json()) as {readonly catalog: {readonly revision: string}};
+      const created = decodeCatalogMutation(await createdResponse.json());
 
       const definitionResponse = await testHttpFetch(`${server.url}/api/worksets/definition?workset=platform`, {
         headers,
@@ -1482,7 +1595,7 @@ describe('Manager Worksets API and human labels', () => {
         method: 'POST',
       });
       expect(updatedResponse.status).toBe(200);
-      const updated = (await updatedResponse.json()) as {readonly catalog: {readonly revision: string}};
+      const updated = decodeCatalogMutation(await updatedResponse.json());
       expect(
         await (await testHttpFetch(`${server.url}/api/worksets/definition?workset=platform`, {headers})).json(),
       ).toMatchObject({description: 'Shared runtime services', members: [{project: 'api'}]});
@@ -1525,9 +1638,7 @@ describe('Manager Worksets API and human labels', () => {
       expect(statusDuringMaintenance.status).toBe(409);
       expect(await statusDuringMaintenance.json()).toMatchObject({code: 'maintenance-busy'});
       expect(projectDuringMaintenance.status).toBe(200);
-      const projectMutation = (await projectDuringMaintenance.json()) as {
-        readonly catalog: {readonly revision: string};
-      };
+      const projectMutation = decodeCatalogMutation(await projectDuringMaintenance.json());
       expect(
         await (await testHttpFetch(`${server.url}/api/worksets/project?project=api`, {headers})).json(),
       ).toMatchObject({
@@ -1584,7 +1695,7 @@ describe('Manager Worksets API and human labels', () => {
           url: new URL('http://127.0.0.1/api/worksets/query'),
         });
         const nonObject = yield* handleManagerWorksetRequest({
-          body: Effect.succeed([] as unknown as Record<string, unknown>),
+          body: Effect.succeed([]),
           config,
           contextKey: {},
           jobScope,
@@ -1628,7 +1739,7 @@ describe('Manager Worksets API and human labels', () => {
         });
         if (startedResponse === undefined) return yield* TestError.make({message: 'prepare route was not handled'});
         expect(startedResponse.status).toBe(202);
-        const job = (startedResponse.body as {readonly job: {readonly id: string}}).job;
+        const job = decodeJobStart(startedResponse.body).job;
         yield* Deferred.await(started);
 
         yield* Scope.close(jobScope, Exit.void);
@@ -1694,13 +1805,13 @@ describe('Manager Worksets API and human labels', () => {
               Effect.andThen(Deferred.await(release)),
               Effect.as({
                 coverage: {complete: true, excluded: 0, failed: 0, missing: 0, ready: 1, requested: 1},
-                manifestDigest: 'd'.repeat(64),
+                manifestDigest: Effect2.pipe('d', EffectString.repeat(64)),
                 members: [
                   {
                     project: 'api',
-                    projectionDigest: 'e'.repeat(64),
-                    repositoryId: 'f'.repeat(64),
-                    snapshotId: `cgsn_${'a'.repeat(40)}-direct`,
+                    projectionDigest: Effect2.pipe('e', EffectString.repeat(64)),
+                    repositoryId: Effect2.pipe('f', EffectString.repeat(64)),
+                    snapshotId: `cgsn_${Effect2.pipe('a', EffectString.repeat(40))}-direct`,
                     state: 'ready' as const,
                     symbolCount: 10,
                   },
@@ -1714,7 +1825,7 @@ describe('Manager Worksets API and human labels', () => {
           url: new URL('http://127.0.0.1/api/worksets/prepare'),
         });
         if (started === undefined) return yield* TestError.make({message: 'prepare route was not handled'});
-        const id = (started.body as {readonly job: {readonly id: string}}).job.id;
+        const id = decodeJobStart(started.body).job.id;
         yield* Deferred.await(progressObserved);
 
         const running = yield* handleManagerWorksetRequest({
@@ -1779,7 +1890,7 @@ describe('Manager Worksets API and human labels', () => {
             prepareWorkset: (_config, workset) =>
               Effect.succeed({
                 coverage: {complete: true, excluded: 0, failed: 0, missing: 0, ready: 0, requested: 0},
-                manifestDigest: 'd'.repeat(64),
+                manifestDigest: Effect2.pipe('d', EffectString.repeat(64)),
                 members: [],
                 state: 'ready',
                 type: 'code-graph-workset-prepare',
@@ -1789,7 +1900,7 @@ describe('Manager Worksets API and human labels', () => {
             url: new URL('http://127.0.0.1/api/worksets/prepare'),
           });
           if (started === undefined) return yield* TestError.make({message: 'prepare route was not handled'});
-          const id = (started.body as {readonly job: {readonly id: string}}).job.id;
+          const id = decodeJobStart(started.body).job.id;
           yield* Effect.yieldNow;
           const detail = yield* handleManagerWorksetRequest({
             body: Effect.succeed({}),
@@ -1815,7 +1926,7 @@ describe('Manager Worksets API and human labels', () => {
           method: 'GET',
           url: new URL('http://127.0.0.1/api/worksets/jobs'),
         });
-        const listedJobs = (listed?.body as {readonly jobs: readonly unknown[]} | undefined)?.jobs;
+        const listedJobs = listed === undefined ? undefined : decodeJobList(listed.body).jobs;
         expect(listedJobs).toHaveLength(32);
         yield* Scope.close(jobScope, Exit.void);
       }),
@@ -1852,12 +1963,12 @@ describe('Manager Worksets API and human labels', () => {
     expect(managerWorksetRepositoryLabel('api', definition)).toBe(
       'api · observed branch feature/worksets · api-service · /workspace/api-service',
     );
-    expect(managerWorksetRepositoryLabel('a'.repeat(64))).toBe('Repository aaaaaaaa…');
+    expect(managerWorksetRepositoryLabel(Effect2.pipe('a', EffectString.repeat(64)))).toBe('Repository aaaaaaaa…');
   });
 
   it('renders terminal prepare receipts without repository or snapshot IDs as primary labels', () => {
-    const repositoryId = 'b'.repeat(64);
-    const snapshotId = `cgsn_${'c'.repeat(40)}-direct`;
+    const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
+    const snapshotId = `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}-direct`;
     const job = {
       createdAt: '2026-08-12T12:00:00.000Z',
       error: 'No ready generation was published; review member receipts.',
@@ -1865,11 +1976,11 @@ describe('Manager Worksets API and human labels', () => {
       progress: {completed: 2, message: 'Preparation finished without publishing.', phase: 'failed' as const, total: 2},
       result: {
         coverage: {complete: false, excluded: 0, failed: 1, missing: 0, ready: 1, requested: 2},
-        manifestDigest: 'd'.repeat(64),
+        manifestDigest: Effect2.pipe('d', EffectString.repeat(64)),
         members: [
           {
             project: 'api',
-            projectionDigest: 'e'.repeat(64),
+            projectionDigest: Effect2.pipe('e', EffectString.repeat(64)),
             repositoryId,
             snapshotId,
             state: 'ready' as const,

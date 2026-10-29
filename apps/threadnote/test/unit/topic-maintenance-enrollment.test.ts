@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -17,8 +18,14 @@ import {
 } from '../../src/memory/maintenance/topic_enrollment.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import baseline from '../evaluation/fixtures/topic-maintenance-v1/baseline.json' with {type: 'json'};
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
-const BODY = baseline.paragraphs.map(paragraph => paragraph.text).join('\n\n');
+const BODY = EffectArray.join(
+  EffectArray.map(baseline.paragraphs, paragraph => paragraph.text),
+  '\n\n',
+);
 
 const fixture = Effect.fn('topicEnrollmentTest.fixture')(function* (
   settings: {
@@ -107,15 +114,15 @@ const fixture = Effect.fn('topicEnrollmentTest.fixture')(function* (
   const store = yield* ResourceStore;
   const location = {account: 'local', home, user: 'tester'};
   yield* store.write(location, uri, content, {mode: 'create'});
-  const byPath = new Map(citations.map(citation => [citation.path, citation.id]));
+  const byPath = new Map(EffectArray.map(citations, citation => [citation.path, citation.id]));
   const input = {
-    paragraphs: baseline.paragraphs.map(paragraph => ({
+    paragraphs: EffectArray.map(baseline.paragraphs, paragraph => ({
       role: paragraph.role,
       support: paragraph.support,
       citationIds: [byPath.get(paragraph.sourcePath)!],
       ...('scope' in paragraph ? {scope: paragraph.scope} : {}),
     })),
-    additionalDependencies: baseline.additionalDependencies.map(dependency => ({
+    additionalDependencies: EffectArray.map(baseline.additionalDependencies, dependency => ({
       kind: dependency.kind,
       citationId: byPath.get(dependency.sourcePath)!,
     })),
@@ -338,13 +345,14 @@ describe('topic maintenance enrollment', () => {
         });
         expect(record.metadata.topicMaintenanceError).toBeUndefined();
         expect(record.metadata.topicMaintenance?.coverage).toBe('declared-only');
-        expect(record.metadata.topicMaintenance?.paragraphs.map(p => p.role)).toEqual([
-          'descriptive',
-          'normative',
-          'historical',
-          'descriptive',
-          'descriptive',
-        ]);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectOption.map(
+              EffectOption.fromNullishOr(record.metadata.topicMaintenance?.paragraphs),
+              __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, p => p.role),
+            ),
+          ),
+        ).toEqual(['descriptive', 'normative', 'historical', 'descriptive', 'descriptive']);
         expect(yield* applyTopicEnrollment(f.config, {...approval, approved: true})).toMatchObject({
           status: 'already-enrolled',
         });
@@ -367,7 +375,10 @@ describe('topic maintenance enrollment', () => {
         expectedContentHash: preview.proposal.expectedContentHash,
         revision: preview.proposal.revision,
       };
-      const input = {...f.options.input, paragraphs: f.options.input.paragraphs.map(p => ({...p, role: 'historical'}))};
+      const input = {
+        ...f.options.input,
+        paragraphs: EffectArray.map(f.options.input.paragraphs, p => ({...p, role: 'historical'})),
+      };
       expect(yield* applyTopicEnrollment(f.config, {...approval, input})).toMatchObject({
         status: 'conflict',
         code: 'revision-changed',
@@ -383,7 +394,10 @@ describe('topic maintenance enrollment', () => {
       const f = yield* fixture();
       const preview = yield* previewTopicEnrollment(f.config, f.options);
       if (preview.status !== 'preview') throw new Error(JSON.stringify(preview));
-      const changed = f.content.replace('owner: fixture-reviewer', 'owner: another-reviewer');
+      const changed = Effect2.pipe(
+        f.content,
+        EffectString.replace('owner: fixture-reviewer', 'owner: another-reviewer'),
+      );
       yield* f.store.write(f.location, f.options.uri, changed, {mode: 'replace'});
       expect(
         yield* applyTopicEnrollment(f.config, {

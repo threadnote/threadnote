@@ -1,4 +1,5 @@
-import type {TransactionSql} from 'postgres';
+import {Array as EffectArray} from 'effect';
+import type {ISql} from 'postgres';
 import type {AuthorizedRemotePrincipal, RemoteMemoryFeatureFlag, RemoteMemoryScope} from './authorization.js';
 import {authorizeCursorClaims, type CursorWorkloadAttestation} from './cursor_oidc.js';
 import {remoteMemoryError} from './errors.js';
@@ -22,7 +23,7 @@ export interface GrantStateRow extends ShareStateRow {
 }
 
 export async function requireShareState(
-  transaction: TransactionSql,
+  transaction: ISql,
   principal: AuthorizedRemotePrincipal,
 ): Promise<GrantStateRow> {
   const rows = await transaction<GrantStateRow[]>`
@@ -68,12 +69,12 @@ function validateShareState(state: GrantStateRow | undefined, principal: Authori
 
 function sameSetOrAll(left: ReadonlySet<string> | 'all', right: ReadonlySet<string> | 'all'): boolean {
   if (left === 'all' || right === 'all') return left === right;
-  return left.size === right.size && [...left].every(value => right.has(value));
+  return left.size === right.size && EffectArray.every([...left], value => right.has(value));
 }
 
 function setContains(current: readonly string[], authorized: ReadonlySet<string>): boolean {
   const values = new Set(current);
-  return [...authorized].every(value => values.has(value));
+  return EffectArray.every([...authorized], value => values.has(value));
 }
 
 export function principalAllowsProject(principal: AuthorizedRemotePrincipal, project: string): boolean {
@@ -114,7 +115,7 @@ export function requireFreshAttestationPolicy(
 }
 
 export async function requireActiveProject(
-  transaction: TransactionSql,
+  transaction: ISql,
   principal: AuthorizedRemotePrincipal,
   project: string,
 ): Promise<void> {

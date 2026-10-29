@@ -1,7 +1,13 @@
-import {Clock, Data, DateTime, Effect, FileSystem, Path} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Path} from 'effect';
 import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {readMemoryRecordsByUri} from '../memory/commands.js';
-import {formatMemoryDocument, type MemoryMetadata, type MemoryRelation} from '@threadnote/memory/document';
+import {
+  formatMemoryDocument,
+  MEMORY_RELATION_TYPES,
+  type MemoryMetadata,
+  type MemoryRelation,
+} from '@threadnote/memory/document';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
 import {projectRecallMcpResponse} from '@threadnote/recall/mcp/response';
 import {retrieveRecallMemoryConnections} from '@threadnote/recall/memory/connections';
@@ -15,6 +21,45 @@ import {
   type MemoryConnectionsScaleObservationV1,
   type MemoryConnectionsScaleScenarioId,
 } from './memory-connections-scale-contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const MemoryConnectionsWireSchema = Schema.Struct({
+  memoryConnections: Schema.optionalKey(
+    Schema.Struct({
+      connections: Schema.Array(
+        Schema.Struct({
+          currentness: Schema.Literals(['conflicted', 'current', 'historical', 'unresolved']),
+          direction: Schema.Literals(['incoming', 'outgoing']),
+          distance: Schema.Literal(1),
+          neighborMemoryId: Schema.optionalKey(Schema.String),
+          origin: Schema.Literals(['evidence', 'references', 'relation', 'supersedes']),
+          relationOrdinal: Schema.Finite,
+          relationType: Schema.Literals(MEMORY_RELATION_TYPES),
+          requestedOrdinal: Schema.Finite,
+          resolution: Schema.Literals(['conflicted', 'resolved', 'unresolved']),
+          sourceMemoryId: Schema.optionalKey(Schema.String),
+          targetMemoryId: Schema.optionalKey(Schema.String),
+        }),
+      ),
+      coverage: Schema.Struct({
+        connectionCount: Schema.Finite,
+        premiseCount: Schema.Finite,
+        resultCount: Schema.Finite,
+        truncated: Schema.Boolean,
+      }),
+      premises: Schema.Array(
+        Schema.Struct({
+          memoryId: Schema.optionalKey(Schema.String),
+          requestedOrdinal: Schema.Finite,
+          state: Schema.String,
+        }),
+      ),
+    }),
+  ),
+  output: Schema.Struct({truncated: Schema.Boolean}),
+  results: Schema.Array(Schema.Struct({uri: Schema.String})),
+});
 
 const MINIMUM_CORPUS_SIZE = 14;
 const WRITE_BATCH_SIZE = 1_000;
@@ -28,9 +73,10 @@ export interface MemoryConnectionsScaleWorkloadOptions {
   readonly warmups: number;
 }
 
-class MemoryConnectionsScaleError extends Data.TaggedError('MemoryConnectionsScaleError')<{
-  readonly message: string;
-}> {}
+class MemoryConnectionsScaleError extends Schema.TaggedError<
+  MemoryConnectionsScaleError,
+  {readonly brand: unique symbol}
+>()('MemoryConnectionsScaleError', {message: Schema.String}) {}
 
 /** Materialize, index, and sample the full seeded one-hop retrieval path. */
 export const runMemoryConnectionsScaleWorkload = Effect.fn('evaluation.memoryConnectionsScale')(function* (
@@ -58,7 +104,7 @@ export const runMemoryConnectionsScaleWorkload = Effect.fn('evaluation.memoryCon
         const indexFinished = yield* Clock.currentTimeNanos;
         const status = yield* recallIndexStatus(corpus.config, true);
         if (!status.ready || status.documentCount !== options.memoryCandidates) {
-          return yield* new MemoryConnectionsScaleError({
+          return yield* MemoryConnectionsScaleError.make({
             message: `Recall index contains ${status.documentCount}/${options.memoryCandidates} memories.`,
           });
         }
@@ -126,7 +172,7 @@ const materializeCorpus = Effect.fn('evaluation.memoryConnectionsScale.materiali
   const authorizedHubMemoryCount = memoryCandidates - fixed.length - 1;
   for (let offset = 0; offset < authorizedHubMemoryCount; offset += WRITE_BATCH_SIZE) {
     const end = Math.min(authorizedHubMemoryCount, offset + WRITE_BATCH_SIZE);
-    const shard = String(Math.floor(offset / WRITE_BATCH_SIZE)).padStart(3, '0');
+    const shard = Effect2.pipe(String(Math.floor(offset / WRITE_BATCH_SIZE)), EffectString.padStart(3, '0'));
     const batchBytes = yield* Effect.forEach(
       Array.from({length: end - offset}, (_, index) => offset + index),
       index =>
@@ -134,13 +180,15 @@ const materializeCorpus = Effect.fn('evaluation.memoryConnectionsScale.materiali
           fs,
           path,
           config,
-          document(`hub/${shard}/hub-${String(index).padStart(6, '0')}`, `tn_hub_${String(index).padStart(6, '0')}`, [
-            relationTo('tn_scale_hub'),
-          ]),
+          document(
+            `hub/${shard}/hub-${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}`,
+            `tn_hub_${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}`,
+            [relationTo('tn_scale_hub')],
+          ),
         ),
       {concurrency: WRITE_CONCURRENCY},
     );
-    bytes += batchBytes.reduce((total, value) => total + value, 0);
+    bytes += EffectArray.reduce(batchBytes, 0, (total, value) => total + value);
     observeRss();
     yield* Effect.yieldNow;
   }
@@ -156,7 +204,9 @@ const runScenario = Effect.fn('evaluation.memoryConnectionsScale.scenario')(func
   const cold = yield* run();
   const warmups = yield* Effect.forEach(Array.from({length: options.warmups}), run, {concurrency: 1});
   const samples = yield* Effect.forEach(Array.from({length: options.samples}), run, {concurrency: 1});
-  const fixture = MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios.find(value => value.id === id)!;
+  const fixture = EffectOption.getOrUndefined(
+    EffectArray.findFirst(MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios, value => value.id === id),
+  )!;
   return {
     cold,
     expectedMemoryIds: memoryConnectionsScaleExpectedIds(id),
@@ -171,7 +221,9 @@ const runLookup = Effect.fn('evaluation.memoryConnectionsScale.lookup')(function
   config: RuntimeConfig,
   id: MemoryConnectionsScaleScenarioId,
 ) {
-  const fixture = MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios.find(value => value.id === id)!;
+  const fixture = EffectOption.getOrUndefined(
+    EffectArray.findFirst(MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios, value => value.id === id),
+  )!;
   const started = yield* Clock.currentTimeNanos;
   const result = yield* retrieveRecallMemoryConnections(config, {
     allowedUriScopes: [memoryProjectRoot(config.user)],
@@ -185,7 +237,7 @@ const runLookup = Effect.fn('evaluation.memoryConnectionsScale.lookup')(function
       memoryConnections: result,
       queryExpansions: [],
       rankerVersion: 'memory-connections-scale-v1',
-      results: result.candidates.map(candidate => ({
+      results: EffectArray.map(result.candidates, candidate => ({
         category: 'memories',
         contextType: 'memory',
         score: 1,
@@ -195,11 +247,16 @@ const runLookup = Effect.fn('evaluation.memoryConnectionsScale.lookup')(function
     },
     {budgetTokens: 1_500},
   );
-  const wire = JSON.parse(JSON.stringify(projection.structuredContent)) as typeof projection.structuredContent;
+  const wire: unknown = JSON.parse(JSON.stringify(projection.structuredContent));
+  if (!Schema.is(MemoryConnectionsWireSchema)(wire)) {
+    throw new Error('Serialized recall projection has an invalid memory-connection shape.');
+  }
   const wireConnections = wire.memoryConnections?.connections ?? [];
   const wirePremises = wire.memoryConnections?.premises ?? [];
   const memoryIdByUri = new Map(
-    result.candidates.flatMap(candidate => (candidate.memoryId ? [[candidate.uri, candidate.memoryId] as const] : [])),
+    EffectArray.flatMap(result.candidates, candidate =>
+      candidate.memoryId ? [[candidate.uri, candidate.memoryId] as const] : [],
+    ),
   );
   const finished = yield* Clock.currentTimeNanos;
   return {
@@ -208,7 +265,7 @@ const runLookup = Effect.fn('evaluation.memoryConnectionsScale.lookup')(function
     milliseconds: elapsed(started, finished),
     omittedConnectionReceiptCount: Math.max(0, result.connections.length - wireConnections.length),
     omittedPremiseReceiptCount: Math.max(0, result.premises.length - wirePremises.length),
-    projectedConnections: wireConnections.map(connection => ({
+    projectedConnections: EffectArray.map(wireConnections, connection => ({
       currentness: connection.currentness,
       direction: connection.direction,
       distance: connection.distance,
@@ -226,14 +283,14 @@ const runLookup = Effect.fn('evaluation.memoryConnectionsScale.lookup')(function
     projectedCoverageResultCount: wire.memoryConnections?.coverage.resultCount ?? -1,
     projectedConnectionCoverageTruncated: wire.memoryConnections?.coverage.truncated ?? true,
     projectedOutputTruncated: wire.output.truncated,
-    projectedPremises: wirePremises.map(premise => ({
+    projectedPremises: EffectArray.map(wirePremises, premise => ({
       memoryId: premise.memoryId ?? null,
       requestedOrdinal: premise.requestedOrdinal,
       state: premise.state,
     })),
     rawLinkRows: result.diagnostics.rawLinkRows,
     retrievalTruncated: result.coverage.truncated,
-    returnedMemoryIds: wire.results.flatMap(candidate => {
+    returnedMemoryIds: EffectArray.flatMap(wire.results, candidate => {
       const memoryId = memoryIdByUri.get(candidate.uri);
       return memoryId ? [memoryId] : [];
     }),
@@ -287,7 +344,7 @@ const writeDocument = Effect.fn('evaluation.memoryConnectionsScale.writeDocument
     sourceAgentClient: 'memory-connections-scale',
     status: 'active',
     timestamp: FIXED_TIMESTAMP,
-    topic: item.topic.split('/').at(-1),
+    topic: Effect2.pipe(item.topic, EffectString.split('/')).at(-1),
   };
   const content = formatMemoryDocument('MEMORY', metadata, 'Deterministic one-hop scale fixture memory.');
   yield* fs.makeDirectory(path.dirname(target), {recursive: true, mode: 0o700});
@@ -310,7 +367,7 @@ function recallStorageBytes(fs: FileSystem.FileSystem, databasePath: string) {
         ),
       {concurrency: 4},
     );
-    return {database: sizes[0], total: sizes.reduce((total, size) => total + size, 0)};
+    return {database: sizes[0], total: EffectArray.reduce(sizes, 0, (total, size) => total + size)};
   });
 }
 
@@ -329,12 +386,12 @@ function elapsed(started: bigint, finished: bigint): number {
 
 function validateOptions(options: MemoryConnectionsScaleWorkloadOptions): void {
   if (!Number.isSafeInteger(options.memoryCandidates) || options.memoryCandidates < MINIMUM_CORPUS_SIZE) {
-    throw new MemoryConnectionsScaleError({message: `memoryCandidates must be at least ${MINIMUM_CORPUS_SIZE}.`});
+    throw MemoryConnectionsScaleError.make({message: `memoryCandidates must be at least ${MINIMUM_CORPUS_SIZE}.`});
   }
   if (!Number.isSafeInteger(options.samples) || options.samples < 1) {
-    throw new MemoryConnectionsScaleError({message: 'samples must be a positive safe integer.'});
+    throw MemoryConnectionsScaleError.make({message: 'samples must be a positive safe integer.'});
   }
   if (!Number.isSafeInteger(options.warmups) || options.warmups < 0) {
-    throw new MemoryConnectionsScaleError({message: 'warmups must be a non-negative safe integer.'});
+    throw MemoryConnectionsScaleError.make({message: 'warmups must be a non-negative safe integer.'});
   }
 }

@@ -17,6 +17,9 @@ import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {LocalModelStore, type LocalModelStoreLayerOptions} from '@threadnote/inference/models/store';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const modelStoreTestLayer = (options: LocalModelStoreLayerOptions = {}) =>
   LocalModelStore.layerWith(options).pipe(
@@ -30,12 +33,18 @@ describe('bundled model installation', () => {
     expect(bundledCoreEmbeddingSource(BUNDLED_CORE_EMBEDDING_MANIFEST)).toMatchObject({
       sourceUrl: `embedded://threadnote/${BUNDLED_CORE_EMBEDDING_MANIFEST.id}/${BUNDLED_CORE_EMBEDDING_MANIFEST.sha256}.gguf`,
     });
-    for (const manifest of BUILTIN_MODEL_MANIFESTS.filter(
+    for (const manifest of EffectArray.filter(
+      BUILTIN_MODEL_MANIFESTS,
       candidate => candidate.id !== BUNDLED_CORE_EMBEDDING_MANIFEST.id,
     )) {
       expect(bundledCoreEmbeddingSource(manifest)).toBeUndefined();
     }
-    expect(bundledCoreEmbeddingSource({...BUNDLED_CORE_EMBEDDING_MANIFEST, sha256: '0'.repeat(64)})).toBeUndefined();
+    expect(
+      bundledCoreEmbeddingSource({
+        ...BUNDLED_CORE_EMBEDDING_MANIFEST,
+        sha256: Effect2.pipe('0', EffectString.repeat(64)),
+      }),
+    ).toBeUndefined();
   });
 
   effectIt.layer(modelStoreTestLayer())(layerIt => {
@@ -188,7 +197,7 @@ function fixtureManifest(bytes: Uint8Array): LocalModelManifest {
     promptPrefixes: {document: '', query: ''},
     quantization: 'F32',
     repository: 'threadnote/fixtures',
-    revision: 'a'.repeat(40),
+    revision: Effect2.pipe('a', EffectString.repeat(40)),
     role: 'embedding',
     runtime: {nodeLlamaCpp: '3.19.1'},
     sha256: new Bun.CryptoHasher('sha256').update(bytes).digest('hex'),

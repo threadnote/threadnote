@@ -1,6 +1,8 @@
 import {mkdir, mkdtemp, writeFile} from './node-fs-promises.js';
 import {tmpdir} from './node-os.js';
 import {join} from './node-path.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface GitShareWorktreeFixture {
   readonly remote: string;
@@ -56,7 +58,11 @@ export async function git(args: readonly string[], cwd?: string): Promise<string
     child.exited,
   ]);
   if (exitCode !== 0) {
-    throw new Error(stderr.trim() || stdout.trim() || `git ${args[0] ?? 'command'} failed`);
+    throw new Error(
+      Effect.pipe(stderr, EffectString.trim) ||
+        Effect.pipe(stdout, EffectString.trim) ||
+        `git ${args[0] ?? 'command'} failed`,
+    );
   }
   return stdout;
 }

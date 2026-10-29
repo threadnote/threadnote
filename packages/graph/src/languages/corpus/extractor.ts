@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {unzipSync, type UnzipFileInfo} from 'fflate';
 import {getResolvedPDFJS} from 'unpdf';
 import {Option, Predicate} from 'effect';
@@ -15,6 +16,8 @@ import {
   CORPUS_PDF_EXTRACTED_TEXT_CHARACTER_LIMIT,
   CORPUS_PDF_EXTRACTION_MILLISECONDS_LIMIT,
 } from './policy.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const TEXT_CHUNK_TARGET = 1_800;
 
@@ -80,7 +83,7 @@ export async function extractCorpusFile(
       {
         diagnostics: [`${file.path}: binary media content was not loaded; indexed as deterministic asset metadata.`],
         kind: 'asset',
-        metadata: [`format ${extension.slice(1) || 'unknown'}`, `${file.size} bytes`],
+        metadata: [`format ${Effect.pipe(extension, EffectString.slice(1)) || 'unknown'}`, `${file.size} bytes`],
         sections: [],
         urls: [],
       },
@@ -95,7 +98,7 @@ export async function extractCorpusFile(
           `${file.path}: content exceeds the 64 MiB per-artifact extraction safety budget; indexed as asset metadata.`,
         ],
         kind: 'asset',
-        metadata: [`format ${extension.slice(1) || 'unknown'}`, `${file.size} bytes`],
+        metadata: [`format ${Effect.pipe(extension, EffectString.slice(1)) || 'unknown'}`, `${file.size} bytes`],
         sections: [],
         urls: [],
       },
@@ -125,7 +128,7 @@ export async function extractCorpusFile(
       {
         diagnostics: [`${file.path}: corpus extraction failed (${messageOf(cause)})`],
         kind: 'asset',
-        metadata: [`format ${extension.slice(1) || 'unknown'}`, `${file.size} bytes`],
+        metadata: [`format ${Effect.pipe(extension, EffectString.slice(1)) || 'unknown'}`, `${file.size} bytes`],
         sections: [],
         urls: [],
       },
@@ -142,14 +145,14 @@ function extractTextDocument(file: CodeGraphInventoryFile, extension: string): E
   return {
     diagnostics: [],
     kind: 'document',
-    metadata: [`format ${extension.slice(1) || 'text'}`, `${file.size} bytes`],
+    metadata: [`format ${Effect.pipe(extension, EffectString.slice(1)) || 'text'}`, `${file.size} bytes`],
     sections: sectionize(text, basename(file.path)),
     urls: extractUrls(text),
   };
 }
 
 function extractMobileResourceXml(path: string, source: string, extension: string): ExtractedCorpus | undefined {
-  const normalizedPath = path.replaceAll('\\', '/').toLowerCase();
+  const normalizedPath = Effect.pipe(path, EffectString.replaceAll('\\', '/'), EffectString.toLowerCase);
   const platform =
     extension === '.xml' &&
     /(?:^|\/)res\/(?:anim|animator|color|drawable|font|layout|menu|mipmap|navigation|raw|values|xml)(?:-[^/]*)?\//u.test(
@@ -174,7 +177,11 @@ function extractMobileResourceXml(path: string, source: string, extension: strin
       const name = attribute.name;
       const value = decodeXmlEntities(attribute.value);
       values.push(`attribute ${name} ${value}`);
-      for (const reference of value.match(/[@?](?:android:)?[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/gu) ?? []) {
+      for (const reference of Effect.pipe(
+        value,
+        EffectString.match(/[@?](?:android:)?[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/gu),
+        Effect.Option.getOrElse(() => null),
+      ) ?? []) {
         references.push(reference);
       }
       if (
@@ -187,13 +194,13 @@ function extractMobileResourceXml(path: string, source: string, extension: strin
       }
       attributes += 1;
     }
-    evidence.push(values.join(' · '));
+    evidence.push(EffectArray.join(values, ' · '));
     elements += 1;
   }
 
   const text = normalizeWhitespace(xmlToText(source));
-  const wiring = evidence.join('\n');
-  const combined = [wiring, text].filter(Boolean).join('\n\n');
+  const wiring = EffectArray.join(evidence, '\n');
+  const combined = EffectArray.join(EffectArray.filter([wiring, text], Boolean), '\n\n');
   const bounded = elements >= MOBILE_RESOURCE_XML_ELEMENT_LIMIT || attributes >= MOBILE_RESOURCE_XML_ATTRIBUTE_LIMIT;
   return {
     diagnostics: bounded
@@ -230,9 +237,11 @@ function extractSvg(file: CodeGraphInventoryFile): ExtractedCorpus {
 function svgHasTextElements(source: string): boolean {
   let cursor = 0;
   while (cursor < source.length) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const opening = source.indexOf('<', cursor);
     if (opening < 0) return false;
-    if (source.startsWith('<!--', opening)) {
+    if (Effect.pipe(source, EffectString.startsWith('<!--', opening))) {
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
       const closing = source.indexOf('-->', opening + 4);
       cursor = closing < 0 ? source.length : closing + 3;
       continue;
@@ -242,7 +251,11 @@ function svgHasTextElements(source: string): boolean {
     while (/\s/u.test(source[nameStart] ?? '')) nameStart += 1;
     let nameEnd = nameStart;
     while (/[A-Za-z0-9_.:-]/.test(source[nameEnd] ?? '')) nameEnd += 1;
-    const localName = source.slice(nameStart, nameEnd).split(':').at(-1)?.toLowerCase();
+    const localName = Effect.pipe(
+      Effect.pipe(source, EffectString.slice(nameStart, nameEnd), EffectString.split(':')).at(-1),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+    );
     if (localName === 'text' || localName === 'title' || localName === 'desc') return true;
     cursor = Math.max(opening + 1, nameEnd);
   }
@@ -311,13 +324,13 @@ async function extractPdf(file: CodeGraphInventoryFile, options: CorpusExtractio
     }
     budget.check();
     return {
-      diagnostics: text.every(page => page.trim().length === 0)
+      diagnostics: EffectArray.every(text, page => Effect.pipe(page, EffectString.trim).length === 0)
         ? [`${file.path}: PDF has no extractable text; indexed as an asset.`]
         : [],
       kind: 'document',
       metadata: ['format pdf', `${pdf.numPages} page${pdf.numPages === 1 ? '' : 's'}`, `${file.size} bytes`],
-      sections: text.flatMap((page, index) =>
-        sectionize(page, `Page ${index + 1}`).map((section, sectionIndex) => ({
+      sections: EffectArray.flatMap(text, (page, index) =>
+        EffectArray.map(sectionize(page, `Page ${index + 1}`), (section, sectionIndex) => ({
           ...section,
           name:
             section.name === `Page ${index + 1}`
@@ -325,7 +338,12 @@ async function extractPdf(file: CodeGraphInventoryFile, options: CorpusExtractio
               : `Page ${index + 1} · ${sectionIndex + 1}: ${section.name}`,
         })),
       ),
-      urls: uniqueStrings([...links, ...text.flatMap(extractUrls)]),
+      urls: uniqueStrings([
+        ...links,
+        ...EffectArray.flatMap(text, (__effectFlatMapValue, __effectFlatMapIndex) =>
+          __effectFlatMapIndex in text ? extractUrls(__effectFlatMapValue) : [],
+        ),
+      ]),
     };
   } finally {
     clearTimeout(timeout);
@@ -347,7 +365,7 @@ export function joinPdfTextItemsWithinLimit(items: readonly unknown[], maximumCh
     chunks.push(item.str);
     if (hasEndOfLine) chunks.push('\n');
   }
-  return chunks.join('');
+  return EffectArray.join(chunks, '');
 }
 
 function extractArchiveDocument(
@@ -373,7 +391,7 @@ function extractArchiveDocument(
       }
       const normalized = normalizeArchiveEntryName(entry.name);
       if (!normalized || !archiveEntryAccepted(extension, normalized)) return false;
-      const key = normalized.toLowerCase();
+      const key = Effect.pipe(normalized, EffectString.toLowerCase);
       if (selectedKeys.has(key)) return false;
       if (selectedEntries.length >= selectedEntryLimit) {
         throw new Error('archive exceeds the per-document selected entry-count safety budget');
@@ -391,9 +409,9 @@ function extractArchiveDocument(
     },
   });
   options.signal?.throwIfAborted();
-  const sections = selectedEntries
-    .sort((left, right) => compareNaturalCodeUnits(left.normalized, right.normalized))
-    .flatMap((entry, index) => {
+  const sections = EffectArray.flatMap(
+    selectedEntries.sort((left, right) => compareNaturalCodeUnits(left.normalized, right.normalized)),
+    (entry, index) => {
       const bytes = files[entry.name];
       if (!bytes) return [];
       const decoded = decodeUtf8(bytes);
@@ -401,18 +419,22 @@ function extractArchiveDocument(
       const text = xmlToText(decoded);
       if (!text) return [];
       const entryName = archiveEntryLabel(extension, entry.normalized, index);
-      return sectionize(text, entryName).map((section, sectionIndex) => ({
+      return EffectArray.map(sectionize(text, entryName), (section, sectionIndex) => ({
         ...section,
         name: section.name === entryName ? entryName : `${entryName} · ${sectionIndex + 1}: ${section.name}`,
       }));
-    });
+    },
+  );
   return {
     diagnostics:
       sections.length === 0 ? [`${file.path}: document archive has no extractable text; indexed as an asset.`] : [],
     kind: 'document',
-    metadata: [`format ${extension.slice(1)}`, `${sections.length} text section${sections.length === 1 ? '' : 's'}`],
+    metadata: [
+      `format ${Effect.pipe(extension, EffectString.slice(1))}`,
+      `${sections.length} text section${sections.length === 1 ? '' : 's'}`,
+    ],
     sections,
-    urls: uniqueStrings(sections.flatMap(section => extractUrls(section.text))),
+    urls: uniqueStrings(EffectArray.flatMap(sections, section => extractUrls(section.text))),
   };
 }
 
@@ -424,7 +446,7 @@ function extractImage(file: CodeGraphInventoryFile, extension: string): Extracte
     ],
     kind: 'asset',
     metadata: [
-      `format ${extension.slice(1)}`,
+      `format ${Effect.pipe(extension, EffectString.slice(1))}`,
       ...(dimensions ? [`${dimensions.width}×${dimensions.height} pixels`] : []),
       `${file.size} bytes`,
     ],
@@ -437,7 +459,7 @@ function extractMediaAsset(file: CodeGraphInventoryFile, extension: string, medi
   return {
     diagnostics: [`${file.path}: ${media} was not transcribed; filename and deterministic metadata remain searchable.`],
     kind: 'asset',
-    metadata: [`${media} format ${extension.slice(1)}`, `${file.size} bytes`],
+    metadata: [`${media} format ${Effect.pipe(extension, EffectString.slice(1))}`, `${file.size} bytes`],
     sections: [],
     urls: [],
   };
@@ -451,15 +473,15 @@ function buildFacts(
   const packageName = context ? Option.getOrUndefined(context.packageName) : undefined;
   const rootName = titleFromPath(file.path);
   const root = symbol(file, extracted.kind, rootName, file.path, 1, 1, {
-    documentation: [rootName, ...extracted.metadata].join('\n'),
+    documentation: EffectArray.join([rootName, ...extracted.metadata], '\n'),
     packageName,
-    signature: extracted.metadata.join(' · '),
+    signature: EffectArray.join(extracted.metadata, ' · '),
   });
   const symbols: CodeGraphSymbol[] = [root];
   const edges: CodeGraphEdge[] = [];
   let logicalLine = 2;
-  extracted.sections.forEach((section, index) => {
-    const lineCount = Math.max(1, section.text.split('\n').length);
+  EffectArray.forEach(extracted.sections, (section, index) => {
+    const lineCount = Math.max(1, Effect.pipe(section.text, EffectString.split('\n')).length);
     const child = symbol(
       file,
       'section',
@@ -473,12 +495,12 @@ function buildFacts(
     edges.push(edge(file, root, child, 'contains', logicalLine));
     logicalLine += lineCount;
   });
-  extracted.urls.forEach((url, index) => {
+  EffectArray.forEach(extracted.urls, (url, index) => {
     const child = symbol(
       file,
       'external-resource',
       url,
-      `${file.path}#url-${sha256HexSync(url).slice(0, 16)}`,
+      `${file.path}#url-${Effect.pipe(sha256HexSync(url), EffectString.slice(0, 16))}`,
       logicalLine,
       logicalLine,
       {
@@ -490,22 +512,26 @@ function buildFacts(
     symbols.push(child);
     edges.push(edge(file, root, child, 'references', logicalLine + index));
   });
-  extracted.resourceReferences?.forEach((reference, index) => {
-    const child = symbol(
-      file,
-      'resource-reference',
-      reference,
-      `${file.path}#resource-${sha256HexSync(reference).slice(0, 16)}`,
-      logicalLine + index,
-      logicalLine + index,
-      {
-        documentation: `Declared mobile resource reference ${reference}`,
-        packageName,
-      },
-    );
-    symbols.push(child);
-    edges.push(edge(file, root, child, 'references', logicalLine + index));
-  });
+  Option.getOrUndefined(
+    Option.map(Option.fromNullishOr(extracted.resourceReferences), __effectArrayReceiver =>
+      EffectArray.forEach(__effectArrayReceiver, (reference, index) => {
+        const child = symbol(
+          file,
+          'resource-reference',
+          reference,
+          `${file.path}#resource-${Effect.pipe(sha256HexSync(reference), EffectString.slice(0, 16))}`,
+          logicalLine + index,
+          logicalLine + index,
+          {
+            documentation: `Declared mobile resource reference ${reference}`,
+            packageName,
+          },
+        );
+        symbols.push(child);
+        edges.push(edge(file, root, child, 'references', logicalLine + index));
+      }),
+    ),
+  );
   return {diagnostics: extracted.diagnostics, edges, path: file.path, symbols};
 }
 
@@ -528,7 +554,7 @@ function symbol(
     contentHash: file.contentHash,
     documentation: options.documentation,
     exported: true,
-    id: `cgs_${sha256HexSync(`${file.path}\0${qualifiedName}\0${kind}`).slice(0, 40)}`,
+    id: `cgs_${Effect.pipe(sha256HexSync(`${file.path}\0${qualifiedName}\0${kind}`), EffectString.slice(0, 40))}`,
     kind,
     language,
     lookupKeys: uniqueStrings([name, qualifiedName, file.path, ...tokens(name), ...tokens(file.path)]),
@@ -553,7 +579,7 @@ function edge(
     confidence: 1,
     evidencePath: file.path,
     evidenceSpan: {column: 1, endColumn: 1, endLine: line, line},
-    id: `cge_${sha256HexSync(`${source.id}\0${relation}\0${target.id}`).slice(0, 40)}`,
+    id: `cge_${Effect.pipe(sha256HexSync(`${source.id}\0${relation}\0${target.id}`), EffectString.slice(0, 40))}`,
     provenance: 'declared',
     relation,
     sourceId: source.id,
@@ -566,26 +592,32 @@ function edge(
 function sectionize(raw: string, fallbackName: string): readonly ExtractedSection[] {
   const text = normalizeWhitespace(raw);
   if (!text) return [];
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native matchAll preserves the standard RegExpMatchArray index type.
   const headings = [...text.matchAll(/^(#{1,6}|={1,6}|\*{1,6})\s+(.+)$/gm)];
   if (headings.length === 0) return chunkSection(fallbackName, text);
   const sections: ExtractedSection[] = [];
-  const preamble = text.slice(0, headings[0].index).trim();
+  const preamble = Effect.pipe(text, __effectPipeInput => {
+    const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.slice(0, headings[0].index));
+    const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.trim);
+    return __effectPipeStage1;
+  });
   if (preamble) sections.push(...chunkSection(fallbackName, preamble));
-  headings.forEach((match, index) => {
+  EffectArray.forEach(headings, (match, index) => {
     const start = match.index + match[0].length;
     const end = headings[index + 1]?.index ?? text.length;
-    const name = match[2].trim().replace(/\s+#+$/, '') || `${fallbackName} · ${index + 1}`;
-    const body = text.slice(start, end).trim();
+    const name =
+      Effect.pipe(match[2], EffectString.trim, EffectString.replace(/\s+#+$/, '')) || `${fallbackName} · ${index + 1}`;
+    const body = Effect.pipe(text, EffectString.slice(start, end), EffectString.trim);
     sections.push(...chunkSection(name, body || name));
   });
   return sections;
 }
 
 function chunkSection(name: string, text: string): readonly ExtractedSection[] {
-  const paragraphs = text
-    .split(/\n{2,}/)
-    .map(value => value.trim())
-    .filter(Boolean);
+  const paragraphs = EffectArray.filter(
+    EffectArray.map(Effect.pipe(text, EffectString.split(/\n{2,}/)), value => Effect.pipe(value, EffectString.trim)),
+    Boolean,
+  );
   if (paragraphs.length === 0) return [];
   const output: ExtractedSection[] = [];
   let current = '';
@@ -598,7 +630,7 @@ function chunkSection(name: string, text: string): readonly ExtractedSection[] {
     if (paragraph.length > TEXT_CHUNK_TARGET) {
       flush();
       for (let offset = 0; offset < paragraph.length; offset += TEXT_CHUNK_TARGET) {
-        const part = paragraph.slice(offset, offset + TEXT_CHUNK_TARGET).trim();
+        const part = Effect.pipe(paragraph, EffectString.slice(offset, offset + TEXT_CHUNK_TARGET), EffectString.trim);
         if (part) output.push({name: output.length === 0 ? name : `${name} · part ${output.length + 1}`, text: part});
       }
       continue;
@@ -618,13 +650,15 @@ function normalizeTextDocument(content: string, extension: string): string {
   }
   if (extension === '.rtf') return rtfToText(content);
   if (extension === '.url') {
-    return content.replace(/^URL=/m, 'URL: ');
+    return Effect.pipe(content, EffectString.replace(/^URL=/m, 'URL: '));
   }
   if (extension === '.rst') {
-    return content.replace(/^(.+)\n([=\-~^"`:+*#])\2{2,}\s*$/gm, '# $1');
+    return Effect.pipe(content, EffectString.replace(/^(.+)\n([=\-~^"`:+*#])\2{2,}\s*$/gm, '# $1'));
   }
-  if (['.adoc', '.asciidoc'].includes(extension)) return content.replace(/^(={1,6})\s+/gm, '#'.repeat(1) + ' ');
+  if (['.adoc', '.asciidoc'].includes(extension))
+    return Effect.pipe(content, EffectString.replace(/^(={1,6})\s+/gm, Effect.pipe('#', EffectString.repeat(1)) + ' '));
   if (extension === '.org')
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only. The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     return content.replace(/^(\*{1,6})\s+/gm, (_match, marks: string) => `${'#'.repeat(marks.length)} `);
   if (extension === '.tex') {
     return replaceTexHeadings(content);
@@ -637,47 +671,63 @@ function replaceTexHeadings(content: string): string {
   const output: string[] = [];
   let cursor = 0;
   while (cursor < content.length) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const opening = content.indexOf('\\', cursor);
     if (opening < 0) break;
-    const command = commands.find(candidate => content.startsWith(candidate, opening + 1));
+    const command = Option.getOrUndefined(
+      EffectArray.findFirst(
+        commands,
+        __effectArrayValue =>
+          !!(candidate => Effect.pipe(content, EffectString.startsWith(candidate, opening + 1)))(__effectArrayValue),
+      ),
+    );
     if (!command) {
-      output.push(content.slice(cursor, opening + 1));
+      output.push(Effect.pipe(content, EffectString.slice(cursor, opening + 1)));
       cursor = opening + 1;
       continue;
     }
     let brace = opening + 1 + command.length;
     if (content[brace] === '*') brace += 1;
     if (content[brace] !== '{') {
-      output.push(content.slice(cursor, brace));
+      output.push(Effect.pipe(content, EffectString.slice(cursor, brace)));
       cursor = brace;
       continue;
     }
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const closing = content.indexOf('}', brace + 1);
     if (closing <= brace + 1) {
-      output.push(content.slice(cursor, brace + 1));
+      output.push(Effect.pipe(content, EffectString.slice(cursor, brace + 1)));
       cursor = brace + 1;
       continue;
     }
-    output.push(content.slice(cursor, opening), '# ', content.slice(brace + 1, closing));
+    output.push(
+      Effect.pipe(content, EffectString.slice(cursor, opening)),
+      '# ',
+      Effect.pipe(content, EffectString.slice(brace + 1, closing)),
+    );
     cursor = closing + 1;
   }
-  output.push(content.slice(cursor));
-  return output.join('');
+  output.push(Effect.pipe(content, EffectString.slice(cursor)));
+  return EffectArray.join(output, '');
 }
 
 function notebookToText(content: string): string {
   try {
     const value: unknown = JSON.parse(content);
-    if (!Predicate.isObject(value) || !Array.isArray(value.cells)) return content;
-    return value.cells
-      .flatMap((cell, index) => {
-        if (!Predicate.isObject(cell) || !Array.isArray(cell.source)) return [];
-        const source = cell.source.filter((line): line is string => typeof line === 'string').join('');
-        if (!source.trim()) return [];
+    if (!Predicate.isObject(value) || !EffectArray.isArray(value.cells)) return content;
+    return EffectArray.join(
+      EffectArray.flatMap(value.cells, (cell, index) => {
+        if (!Predicate.isObject(cell) || !EffectArray.isArray(cell.source)) return [];
+        const source = EffectArray.join(
+          EffectArray.filter(cell.source, (line): line is string => typeof line === 'string'),
+          '',
+        );
+        if (!Effect.pipe(source, EffectString.trim)) return [];
         const label = cell.cell_type === 'markdown' ? 'Markdown' : cell.cell_type === 'code' ? 'Code' : 'Cell';
         return [`# ${label} cell ${index + 1}\n${source}`];
-      })
-      .join('\n\n');
+      }),
+      '\n\n',
+    );
   } catch {
     return content;
   }
@@ -685,28 +735,35 @@ function notebookToText(content: string): string {
 
 function xmlToText(content: string): string {
   return decodeXmlEntities(
-    content
-      .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
-      .replace(
-        /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi,
-        (_match, level: string, body: string) => `\n${'#'.repeat(Number(level))} ${stripTags(body)}\n`,
-      )
-      .replace(/<\/(?:p|div|section|article|li|tr|w:p|a:p|text:p|text:h|table:table-row)>/gi, '\n')
-      .replace(/<(?:br|w:br|a:br)\s*\/?>/gi, '\n')
-      .replace(/<[^>]+>/g, ' '),
+    Effect.pipe(
+      Effect.pipe(content, EffectString.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' '))
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+        .replace(
+          /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi,
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
+          (_match, level: string, body: string) => `\n${'#'.repeat(Number(level))} ${stripTags(body)}\n`,
+        ),
+      EffectString.replace(/<\/(?:p|div|section|article|li|tr|w:p|a:p|text:p|text:h|table:table-row)>/gi, '\n'),
+      EffectString.replace(/<(?:br|w:br|a:br)\s*\/?>/gi, '\n'),
+      EffectString.replace(/<[^>]+>/g, ' '),
+    ),
   );
 }
 
 function rtfToText(content: string): string {
-  return content
-    .replace(/\\par[d]?\b/g, '\n')
-    .replace(/\\'[0-9a-fA-F]{2}/g, match => String.fromCharCode(Number.parseInt(match.slice(2), 16)))
-    .replace(/\\[a-zA-Z]+-?\d* ?/g, '')
-    .replace(/[{}]/g, ' ');
+  return Effect.pipe(
+    Effect.pipe(content, EffectString.replace(/\\par[d]?\b/g, '\n'))
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+      .replace(/\\'[0-9a-fA-F]{2}/g, match =>
+        String.fromCharCode(Number.parseInt(Effect.pipe(match, EffectString.slice(2)), 16)),
+      ),
+    EffectString.replace(/\\[a-zA-Z]+-?\d* ?/g, ''),
+    EffectString.replace(/[{}]/g, ' '),
+  );
 }
 
 function archiveEntryAccepted(extension: string, name: string): boolean {
-  const normalized = name.toLowerCase();
+  const normalized = Effect.pipe(name, EffectString.toLowerCase);
   if (extension === '.docx') {
     return /^word\/(?:document|comments|footnotes|endnotes|header\d+|footer\d+)\.xml$/.test(normalized);
   }
@@ -719,30 +776,31 @@ function archiveEntryAccepted(extension: string, name: string): boolean {
 }
 
 function normalizeArchiveEntryName(value: string): string | undefined {
-  if (value.includes('\0')) return undefined;
-  const normalized = value.normalize('NFC').replaceAll('\\', '/');
-  if (normalized.startsWith('/')) return undefined;
+  if (Effect.pipe(value, EffectString.includes('\0'))) return undefined;
+  const normalized = Effect.pipe(value, EffectString.normalize('NFC'), EffectString.replaceAll('\\', '/'));
+  if (Effect.pipe(normalized, EffectString.startsWith('/'))) return undefined;
   const segments: string[] = [];
-  for (const segment of normalized.split('/')) {
+  for (const segment of Effect.pipe(normalized, EffectString.split('/'))) {
     if (!segment || segment === '.') continue;
     if (segment === '..') return undefined;
     segments.push(segment);
   }
-  return segments.length === 0 ? undefined : segments.join('/');
+  return segments.length === 0 ? undefined : EffectArray.join(segments, '/');
 }
 
 function archiveEntryLabel(extension: string, name: string, index: number): string {
-  const normalized = name.replaceAll('\\', '/');
+  const normalized = Effect.pipe(name, EffectString.replaceAll('\\', '/'));
   const slide = /slide(\d+)\.xml$/i.exec(normalized)?.[1];
   if (extension === '.pptx' && slide) return `Slide ${slide}`;
   const sheet = /sheet(\d+)\.xml$/i.exec(normalized)?.[1];
   if (extension === '.xlsx' && sheet) return `Sheet ${sheet}`;
   if (extension === '.docx' && /document\.xml$/i.test(normalized)) return 'Document';
   return (
-    normalized
-      .split('/')
-      .at(-1)
-      ?.replace(/\.[^.]+$/, '') || `Part ${index + 1}`
+    Effect.pipe(Effect.pipe(normalized, EffectString.split('/')).at(-1), effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect.pipe(effectOptionalString, EffectString.replace(/\.[^.]+$/, '')),
+    ) || `Part ${index + 1}`
   );
 }
 
@@ -803,68 +861,85 @@ function requireText(file: CodeGraphInventoryFile): string {
 }
 
 function normalizeWhitespace(value: string): string {
-  return value
-    .replace(/\r\n?/g, '\n')
-    .replace(/[\t ]+\n/g, '\n')
-    .replace(/\n{4,}/g, '\n\n\n')
-    .trim();
+  return Effect.pipe(
+    value,
+    EffectString.replace(/\r\n?/g, '\n'),
+    EffectString.replace(/[\t ]+\n/g, '\n'),
+    EffectString.replace(/\n{4,}/g, '\n\n\n'),
+    EffectString.trim,
+  );
 }
 
 function extractUrls(value: string): readonly string[] {
   return uniqueStrings(
-    [...value.matchAll(/\bhttps?:\/\/[^\s<>"')\]}]+/gi)].map(match => match[0].replace(/[.,;:]$/, '')),
+    EffectArray.map([...Effect.pipe(value, EffectString.matchAll(/\bhttps?:\/\/[^\s<>"')\]}]+/gi))], match =>
+      Effect.pipe(match[0], EffectString.replace(/[.,;:]$/, '')),
+    ),
   );
 }
 
 function decodeXmlEntities(value: string): string {
-  return value
-    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_match, code: string) => String.fromCodePoint(Number.parseInt(code, 16)))
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&apos;', "'")
-    .replaceAll('&amp;', '&');
+  return Effect.pipe(
+    value
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+      .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code)))
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+      .replace(/&#x([0-9a-f]+);/gi, (_match, code: string) => String.fromCodePoint(Number.parseInt(code, 16))),
+    EffectString.replaceAll('&lt;', '<'),
+    EffectString.replaceAll('&gt;', '>'),
+    EffectString.replaceAll('&quot;', '"'),
+    EffectString.replaceAll('&apos;', "'"),
+    EffectString.replaceAll('&amp;', '&'),
+  );
 }
 
 function stripTags(value: string): string {
-  return value
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return Effect.pipe(
+    value,
+    EffectString.replace(/<[^>]+>/g, ' '),
+    EffectString.replace(/\s+/g, ' '),
+    EffectString.trim,
+  );
 }
 
 function titleFromPath(path: string): string {
-  return basename(path)
-    .replace(/\.[^.]+$/, '')
-    .replace(/[-_]+/g, ' ')
-    .replace(/\b\w/g, character => character.toUpperCase());
+  return (
+    Effect.pipe(basename(path), EffectString.replace(/\.[^.]+$/, ''), EffectString.replace(/[-_]+/g, ' '))
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+      .replace(/\b\w/g, character => Effect.pipe(character, EffectString.toUpperCase))
+  );
 }
 
 function basename(path: string): string {
-  return path.replaceAll('\\', '/').split('/').at(-1) ?? path;
+  return Effect.pipe(path, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1) ?? path;
 }
 
 function extensionOf(path: string): string {
-  const name = basename(path).toLowerCase();
-  const index = name.lastIndexOf('.');
-  return index < 0 ? '' : name.slice(index);
+  const name = Effect.pipe(basename(path), EffectString.toLowerCase);
+  const index = Effect.pipe(
+    name,
+    EffectString.lastIndexOf('.'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  return index < 0 ? '' : Effect.pipe(name, EffectString.slice(index));
 }
 
 function tokens(value: string): readonly string[] {
-  return value
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .split(/[^A-Za-z0-9]+/)
-    .map(token => token.toLowerCase())
-    .filter(token => token.length >= 2);
+  return EffectArray.filter(
+    EffectArray.map(
+      Effect.pipe(value, EffectString.replace(/([a-z0-9])([A-Z])/g, '$1 $2'), EffectString.split(/[^A-Za-z0-9]+/)),
+      token => Effect.pipe(token, EffectString.toLowerCase),
+    ),
+    token => token.length >= 2,
+  );
 }
 
 function slug(value: string): string {
-  return tokens(value).slice(0, 12).join('-') || 'section';
+  return EffectArray.join(tokens(value).slice(0, 12), '-') || 'section';
 }
 
 function uniqueStrings(values: readonly string[]): readonly string[] {
-  return [...new Set(values.filter(Boolean))];
+  return [...new Set(EffectArray.filter(values, Boolean))];
 }
 
 function loweredSafetyLimit(value: number | undefined, maximum: number): number {

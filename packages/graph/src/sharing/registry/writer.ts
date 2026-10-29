@@ -10,6 +10,8 @@ import {
 import {makeGraphShareRegistryHttp} from './http.js';
 import {parseGraphShareRegistryTarget} from './reference.js';
 import {parseGraphShareRegistryUploadLocation} from './upload.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const makeGraphShareRegistryWriter = Effect.fn('codeGraph.sharing.registryWriter')(function* <
   E = never,
@@ -61,7 +63,7 @@ export const makeGraphShareRegistryWriter = Effect.fn('codeGraph.sharing.registr
           location =>
             Effect.gen(function* () {
               const response = yield* request(
-                `${location}${location.includes('?') ? '&' : '?'}digest=${digest}`,
+                `${location}${Effect2.pipe(location, EffectString.includes('?')) ? '&' : '?'}digest=${digest}`,
                 0,
                 'application/json',
                 {method: 'PUT', body: bytes, acceptedStatuses: [201]},
@@ -86,7 +88,7 @@ export const makeGraphShareRegistryWriter = Effect.fn('codeGraph.sharing.registr
         const digest = sha256Digest(bytes);
         if (
           bytes.byteLength > GRAPH_SHARE_REGISTRY_MANIFEST_MAX_BYTES ||
-          (reference.startsWith('sha256:') && reference !== digest)
+          (Effect2.pipe(reference, EffectString.startsWith('sha256:')) && reference !== digest)
         )
           return yield* graphSharingFailure('Registry manifest upload is invalid.');
         const response = yield* request(pathname, 0, 'application/json', {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -10,6 +11,8 @@ import {loadRecallIndex, recallIndexDatabaseFilename} from '@threadnote/recall/i
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('stable memory identity resolution', () => {
   effectIt.effect('resolves only one active identity inside an explicit authorized scope', () =>
@@ -48,9 +51,11 @@ describe('stable memory identity resolution', () => {
       const queryPlan = yield* Effect.sync(() => {
         const database = new Database(path.join(home, 'indexes', 'lexical', recallIndexDatabaseFilename(false)));
         try {
-          return database
-            .query<{readonly detail: string}, []>(
-              `
+          return EffectArray.join(
+            EffectArray.map(
+              database
+                .query<{readonly detail: string}, []>(
+                  `
               EXPLAIN QUERY PLAN
               SELECT d.id, d.uri, d.candidate_json
               FROM documents AS d
@@ -59,10 +64,12 @@ describe('stable memory identity resolution', () => {
                 AND json_extract(d.candidate_json, '$.memoryId') IN ('tn_active_identity')
               ORDER BY d.uri
             `,
-            )
-            .all()
-            .map(row => row.detail)
-            .join('\n');
+                )
+                .all(),
+              row => row.detail,
+            ),
+            '\n',
+          );
         } finally {
           database.close();
         }
@@ -114,18 +121,22 @@ describe('stable memory identity resolution', () => {
       const store = yield* ResourceStore;
       const firstHome = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-identity-first-'});
       const secondHome = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-identity-second-'});
-      const configs = [
-        {agentContextHome: firstHome, account: 'first', user: 'me'},
-        {agentContextHome: firstHome, account: 'second', user: 'me'},
-        {agentContextHome: secondHome, account: 'first', user: 'other'},
-      ].map(config => ({
-        ...config,
-        agentId: 'threadnote',
-        manifestPath: path.join(config.agentContextHome, 'manifest.yaml'),
-      }));
+      const configs = EffectArray.map(
+        [
+          {agentContextHome: firstHome, account: 'first', user: 'me'},
+          {agentContextHome: firstHome, account: 'second', user: 'me'},
+          {agentContextHome: secondHome, account: 'first', user: 'other'},
+        ],
+        config => ({
+          ...config,
+          agentId: 'threadnote',
+          manifestPath: path.join(config.agentContextHome, 'manifest.yaml'),
+        }),
+      );
       for (const home of [firstHome, secondHome])
         yield* fs.writeFileString(path.join(home, 'manifest.yaml'), 'version: 1\nprojects: []\n');
-      const uris = configs.map(
+      const uris = EffectArray.map(
+        configs,
         (config, index) => `threadnote://user/${config.user}/memories/durable/projects/threadnote/target-${index}.md`,
       );
       for (const [index, config] of configs.entries())
@@ -155,7 +166,7 @@ describe('stable memory identity resolution', () => {
       }
       const config = configs[0];
       const location = {home: config.agentContextHome, account: config.account, user: config.user};
-      const conflictUri = uris[0].replace('target-0.md', 'conflict.md');
+      const conflictUri = Effect2.pipe(uris[0], EffectString.replace('target-0.md', 'conflict.md'));
       const scopes = [
         ...Array.from({length: 200}, (_, index) => `threadnote://user/me/memories/durable/retained-${index}.md`),
         uris[0],
@@ -195,7 +206,7 @@ describe('stable memory identity resolution', () => {
         const sourceUri = 'threadnote://user/me/memories/durable/projects/threadnote/source.md';
         const targetUri = 'threadnote://user/me/memories/shared/default/durable/projects/threadnote/destination.md';
         const original = memory('tn_receipt_identity', 'active', 'Receipt identity evidence.');
-        const missingIdentity = original.replace('memory_id: tn_receipt_identity\n', '');
+        const missingIdentity = Effect2.pipe(original, EffectString.replace('memory_id: tn_receipt_identity\n', ''));
         yield* store.write(location, sourceUri, original, {mode: 'create'});
         yield* store.write(location, targetUri, original, {mode: 'create'});
         yield* recordMemoryRelocation(config, {
@@ -295,9 +306,14 @@ describe('stable memory identity resolution', () => {
         });
         yield* store.remove(location, firstSourceUri);
         yield* store.remove(location, secondSourceUri);
-        yield* store.write(location, targetUri, first.replace('memory_id: tn_first_receipt\n', ''), {
-          mode: 'upsert',
-        });
+        yield* store.write(
+          location,
+          targetUri,
+          Effect2.pipe(first, EffectString.replace('memory_id: tn_first_receipt\n', '')),
+          {
+            mode: 'upsert',
+          },
+        );
         yield* loadRecallIndex(config, {forceRefresh: true, includeInactive: false});
 
         const conflicted = yield* Effect.flip(
@@ -336,7 +352,7 @@ describe('stable memory identity resolution', () => {
         yield* fs.makeDirectory(receiptRoot, {recursive: true, mode: 0o700});
         yield* Effect.forEach(
           Array.from({length: 1_025}, (_, index) =>
-            path.join(receiptRoot, `${index.toString().padStart(4, '0')}.json`),
+            path.join(receiptRoot, `${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}.json`),
           ),
           target => fs.writeFileString(target, '{}', {mode: 0o600}),
           {concurrency: 32, discard: true},
@@ -357,16 +373,19 @@ describe('stable memory identity resolution', () => {
 });
 
 function memory(memoryId: string, status: 'active' | 'archived', body: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    `status: ${status}`,
-    'project: threadnote',
-    `topic: ${memoryId}`,
-    `memory_id: ${memoryId}`,
-    'source_agent_client: test',
-    'timestamp: 2026-08-31T00:00:00.000Z',
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      `status: ${status}`,
+      'project: threadnote',
+      `topic: ${memoryId}`,
+      `memory_id: ${memoryId}`,
+      'source_agent_client: test',
+      'timestamp: 2026-08-31T00:00:00.000Z',
+      '',
+      body,
+    ],
+    '\n',
+  );
 }

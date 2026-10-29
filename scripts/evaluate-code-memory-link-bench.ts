@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Effect, Path} from 'effect';
@@ -6,6 +7,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {evaluateCodeMemoryLinkBenchRuntime} from '@threadnote/threadnote/evaluation/code-memory-link-bench';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {atomicWrite, printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_FIXTURE = new URL(
   '../apps/threadnote/test/evaluation/fixtures/code-memory-link-bench-v1/fixture.json',
@@ -22,7 +25,7 @@ const program = Effect.scoped(
       yield* atomicWrite(options.outputPath, `${JSON.stringify(result, undefined, 2)}\n`);
     }
     yield* printJson(result);
-    if (!result.gate.passed) return yield* ScriptError.make({message: result.gate.failures.join('\n')});
+    if (!result.gate.passed) return yield* ScriptError.make({message: EffectArray.join(result.gate.failures, '\n')});
   }),
 );
 
@@ -42,7 +45,12 @@ function parseArguments(args: readonly string[]): {readonly fixturePath?: string
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }
 

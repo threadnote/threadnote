@@ -5,6 +5,11 @@ import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {ManagerLiveProvider} from '../../src/live/provider.js';
 import {AutomaticMemoryPanel} from '../../src/attention/automatic_memory.js';
 import {FakeManagerSocket} from './live-consumer-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Option as EffectOption} from 'effect';
+
 let root: Root | undefined;
 let reads: string[];
 async function flush() {
@@ -27,7 +32,7 @@ async function render(uri?: string) {
   );
 }
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
   FakeManagerSocket.instances = [];
   reads = [];
@@ -36,7 +41,7 @@ beforeEach(() => {
     'fetch',
     vi.fn(async (url: string) => {
       if (url === '/api/live-session') return new Response(JSON.stringify({ticket: 'fixture'}));
-      if (url.startsWith('/api/attention/automatic-memory')) {
+      if (Effect.pipe(url, EffectString.startsWith('/api/attention/automatic-memory'))) {
         reads.push(url);
         const after = new URL(url, 'http://localhost').searchParams.get('afterUri');
         return new Response(
@@ -80,9 +85,18 @@ it('uses local cursor and URI query keys with no idle polling and bounded broad 
   });
   await flush();
   expect(reads.length).toBeLessThanOrEqual(initial + 2);
-  const next = [...document.querySelectorAll('button')].find(button =>
-    button.textContent?.includes('Next memories'),
-  ) as HTMLButtonElement;
+  const next = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      __effectArrayValue =>
+        !!(button =>
+          Effect.pipe(button.textContent, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.includes('Next memories')),
+          ))(__effectArrayValue),
+    ),
+  )!;
   await act(async () => next.click());
   await flush();
   await act(async () => socket.ack());
@@ -94,7 +108,7 @@ it('uses local cursor and URI query keys with no idle polling and bounded broad 
   await flush();
   expect(reads.at(-1)).toContain('uri=memory-one');
   expect(reads.at(-1)).not.toContain('afterUri=');
-  expect(socket.sent.filter(item => item.type === 'subscribe').at(-1)?.resources).toEqual([
+  expect(EffectArray.filter(socket.sent, item => item.type === 'subscribe').at(-1)?.resources).toEqual([
     {topic: 'automatic-memory', project: 'one'},
   ]);
 });

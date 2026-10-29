@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {Sun, Moon, Monitor} from 'lucide-react';
 import React, {useEffect, useState} from 'react';
 import {readManagerPreference, writeManagerPreference} from './preferences.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type ManagerTheme = 'light' | 'dark' | 'system';
 export const MANAGER_THEME_KEY = 'threadnote.manager.theme';
@@ -24,7 +27,7 @@ export function ThemeSwitch(): React.ReactElement {
     <div className="appearance-control">
       <span className="sidebar-label">Appearance</span>
       <div className="segmented-control" aria-label="Appearance">
-        {(['light', 'dark', 'system'] as const).map(value => (
+        {EffectArray.map(['light', 'dark', 'system'] as const, value => (
           <button
             key={value}
             aria-pressed={theme === value}
@@ -39,7 +42,7 @@ export function ThemeSwitch(): React.ReactElement {
             ) : (
               <Monitor aria-hidden="true" />
             )}
-            {value[0].toUpperCase() + value.slice(1)}
+            {Effect.pipe(value[0], EffectString.toUpperCase) + Effect.pipe(value, EffectString.slice(1))}
           </button>
         ))}
       </div>

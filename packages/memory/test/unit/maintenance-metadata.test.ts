@@ -8,6 +8,8 @@ import {
   type MemoryRecord,
 } from '@threadnote/memory/document';
 import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const URI = 'threadnote://user/test/memories/durable/projects/threadnote/topic.md';
 const NOW = '2026-09-18T12:00:00.000Z';
@@ -131,7 +133,7 @@ describe('maintenance metadata proposals', () => {
     expect(previewMaintenanceMetadataV1([shared], shared.uri, {owner: 'owner'})).toMatchObject({
       code: 'target-ineligible',
     });
-    const duplicate = record({memoryId: 'tn_topic'}, URI.replace('topic.md', 'second.md'));
+    const duplicate = record({memoryId: 'tn_topic'}, Effect.pipe(URI, EffectString.replace('topic.md', 'second.md')));
     expect(
       previewMaintenanceMetadataV1([source, duplicate], 'threadnote://memory/tn_topic', {owner: 'owner'}),
     ).toMatchObject({
@@ -206,7 +208,10 @@ describe('maintenance metadata proposals', () => {
         fc.constantFrom('2026-12-01', '2026-12-01T00:00:00.000Z'),
         (headerValue, body, reviewAfter) => {
           const formatted = record({schemaVersion: 4}, URI, body).content;
-          const target = parseMemoryDocument(URI, formatted.replace('\n\n', `\nopaque_header: ${headerValue}\n\n`))!;
+          const target = parseMemoryDocument(
+            URI,
+            Effect.pipe(formatted, EffectString.replace('\n\n', `\nopaque_header: ${headerValue}\n\n`)),
+          )!;
           const preview = previewMaintenanceMetadataV1([target], URI, {
             owner: 'maintainer',
             reviewAfter,

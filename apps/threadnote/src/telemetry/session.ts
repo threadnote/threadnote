@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Result} from 'effect';
 import {Base64Url} from 'effect/encoding';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -17,6 +18,8 @@ import {
   withoutThreadnoteSessionEnvironment,
   type ThreadnoteChildKind as TelemetryChildKind,
 } from '../effect/child-environment.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export {
   isAnonymousAgentSessionId,
@@ -107,7 +110,7 @@ export function deriveConsentedAgentSessionPseudonym(options: {
   const tokenBytes = new TextEncoder().encode(providerSessionToken);
   if (tokenBytes.byteLength > MAXIMUM_PROVIDER_SESSION_TOKEN_BYTES) return undefined;
   const message = new TextEncoder().encode(`threadnote-agent-session-v1\0${provider}\0${providerSessionToken}`);
-  return `${AGENT_SESSION_ID_PREFIX}${hmacSha256Hex(consentSalt, message).slice(0, AGENT_SESSION_RANDOM_BYTES * 2)}`;
+  return `${AGENT_SESSION_ID_PREFIX}${Effect.pipe(hmacSha256Hex(consentSalt, message), EffectString.slice(0, AGENT_SESSION_RANDOM_BYTES * 2))}`;
 }
 
 /** Resolves an explicit host integration only behind valid persisted consent. */
@@ -155,9 +158,12 @@ export function resolveAgentSession(options: {
 export function telemetryConsentGeneration(
   configuration: Pick<EnabledTelemetryConfiguration, 'endpoint' | 'sessionSalt'>,
 ): string {
-  return `${CONSENT_GENERATION_PREFIX}${sha256HexSync(
-    `threadnote-telemetry-consent-generation-v1\0${configuration.endpoint}\0${configuration.sessionSalt}`,
-  ).slice(0, 32)}`;
+  return `${CONSENT_GENERATION_PREFIX}${Effect.pipe(
+    sha256HexSync(
+      `threadnote-telemetry-consent-generation-v1\0${configuration.endpoint}\0${configuration.sessionSalt}`,
+    ),
+    EffectString.slice(0, 32),
+  )}`;
 }
 
 /** Installs only the current opaque alias and marker; generic child launchers still scrub both. */
@@ -217,7 +223,13 @@ function hmacSha256Hex(key: Uint8Array, message: Uint8Array): string {
 }
 
 function agentSessionProvider(value: string | undefined): AgentSessionProvider | undefined {
-  const normalized = value?.trim().toLowerCase();
+  const normalized: string | undefined = Effect.pipe(
+    value,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   return normalized === 'claude' || normalized === 'codex' || normalized === 'copilot' || normalized === 'cursor'
     ? normalized
     : undefined;
@@ -270,11 +282,14 @@ function concatenate(left: Uint8Array, right: Uint8Array): Uint8Array {
 }
 
 function hex(value: Uint8Array): string {
-  return [...value].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  return EffectArray.join(
+    EffectArray.map([...value], byte => Effect.pipe(byte.toString(16), EffectString.padStart(2, '0'))),
+    '',
+  );
 }
 
 function fromHex(value: string): Uint8Array {
   return Uint8Array.from({length: value.length / 2}, (_, index) =>
-    Number.parseInt(value.slice(index * 2, index * 2 + 2), 16),
+    Number.parseInt(Effect.pipe(value, EffectString.slice(index * 2, index * 2 + 2)), 16),
   );
 }

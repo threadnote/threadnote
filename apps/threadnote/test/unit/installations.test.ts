@@ -1,8 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Predicate} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -49,6 +50,25 @@ describe('standalone release lifecycle', () => {
         expect(validated).toBeUndefined();
       }),
   );
+
+  function parseReleasePointer(text: string): {readonly releaseRoot: string; readonly version: string} {
+    const value: unknown = JSON.parse(text);
+    if (!Predicate.isObject(value) || typeof value.version !== 'string' || typeof value.releaseRoot !== 'string') {
+      throw new Error('Expected an active release pointer with a version.');
+    }
+    return {releaseRoot: value.releaseRoot, version: value.version};
+  }
+
+  function parseProcessLease(text: string): {readonly processStartIdentity?: string} {
+    const value: unknown = JSON.parse(text);
+    if (
+      !Predicate.isObject(value) ||
+      (value.processStartIdentity !== undefined && typeof value.processStartIdentity !== 'string')
+    ) {
+      throw new Error('Expected a process lease with a string identity when present.');
+    }
+    return value.processStartIdentity === undefined ? {} : {processStartIdentity: value.processStartIdentity};
+  }
 
   effectIt.effect('tracks the active release and retains only it plus the running rollback version', () =>
     Effect.gen(function* () {
@@ -272,9 +292,7 @@ describe('standalone release lifecycle', () => {
 
           yield* activateStandaloneRelease(newRelease, false).pipe(Effect.provideService(SystemInfo, testSystem));
           return {
-            active: JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))) as {
-              version: string;
-            },
+            active: parseReleasePointer(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))),
             activeMissingAfterCrash,
             backupExists: yield* fs.exists(path.join(installRoot, 'active-release.previous.json')),
             gapAfterRead,
@@ -320,9 +338,7 @@ describe('standalone release lifecycle', () => {
 
           yield* withStandaloneInstallationLock(Effect.void).pipe(Effect.provideService(SystemInfo, testSystem));
           return {
-            active: JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))) as {
-              version: string;
-            },
+            active: parseReleasePointer(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))),
             backupExists: yield* fs.exists(path.join(installRoot, 'active-release.previous.json')),
             journalExists: yield* fs.exists(path.join(installRoot, 'active-release.promotion.json')),
           };
@@ -520,7 +536,7 @@ describe('standalone release lifecycle', () => {
         [40_002, 'SIGTERM'],
       ]);
       expect(result.activeStillRunning).toBe(true);
-      expect(result.termination.signaled.map(lease => lease.processId)).toEqual([40_001, 40_002]);
+      expect(EffectArray.map(result.termination.signaled, lease => lease.processId)).toEqual([40_001, 40_002]);
       expect(result.termination.remaining).toEqual([]);
       expect(result.termination.skippedUnverified).toEqual([]);
     }),
@@ -563,7 +579,7 @@ describe('standalone release lifecycle', () => {
 
       expect(result.signals).toEqual([]);
       expect(result.termination.signaled).toEqual([]);
-      expect(result.termination.remaining.map(lease => lease.processId)).toEqual([41_001]);
+      expect(EffectArray.map(result.termination.remaining, lease => lease.processId)).toEqual([41_001]);
     }),
   );
 
@@ -601,13 +617,13 @@ describe('standalone release lifecycle', () => {
             const termination = yield* terminateSupersededStandaloneProcesses('4.0.1', {
               gracefulWaitMilliseconds: 0,
             }).pipe(Effect.provideService(SystemInfo, testSystem));
-            const rewritten = JSON.parse(yield* fs.readFileString(leasePath)) as {processStartIdentity?: string};
+            const rewritten = parseProcessLease(yield* fs.readFileString(leasePath));
             return {rewrittenIdentity: rewritten.processStartIdentity, signals, termination};
           }),
         ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive);
 
         expect(result.signals).toEqual([[43_001, 'SIGTERM']]);
-        expect(result.termination.signaled.map(lease => lease.processId)).toEqual([43_001]);
+        expect(EffectArray.map(result.termination.signaled, lease => lease.processId)).toEqual([43_001]);
         expect(result.termination.remaining).toEqual([]);
         expect(result.termination.skippedUnverified).toEqual([]);
         expect(result.rewrittenIdentity).toBe('darwin-v2:Thu Sep 10 14:44:09 2026');
@@ -646,7 +662,7 @@ describe('standalone release lifecycle', () => {
 
       expect(result.signals).toEqual([]);
       expect(result.termination.remaining).toEqual([]);
-      expect(result.termination.skippedUnverified.map(lease => lease.processId)).toEqual([42_001]);
+      expect(EffectArray.map(result.termination.skippedUnverified, lease => lease.processId)).toEqual([42_001]);
     }),
   );
 
@@ -707,8 +723,8 @@ describe('standalone release lifecycle', () => {
         [44_004, 'SIGTERM'],
         [44_003, 'SIGTERM'],
       ]);
-      expect(result.termination.preserved.map(lease => lease.processId)).toEqual([44_001]);
-      expect(result.termination.signaled.map(lease => lease.processId)).toEqual([44_002, 44_003, 44_004]);
+      expect(EffectArray.map(result.termination.preserved, lease => lease.processId)).toEqual([44_001]);
+      expect(EffectArray.map(result.termination.signaled, lease => lease.processId)).toEqual([44_002, 44_003, 44_004]);
       expect([...result.running]).toEqual([44_001]);
     }),
   );

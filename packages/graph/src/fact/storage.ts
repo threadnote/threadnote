@@ -5,6 +5,8 @@ import {
   type BoundedCodeGraphFact,
 } from './budget.js';
 import {Predicate} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_STORED_FACT_CODEC = 'zlib-base64-v1' as const;
 export const CODE_GRAPH_STORED_FACT_COMPRESSION_LEVEL = 3 as const;
@@ -145,10 +147,11 @@ function decodeCanonicalBase64(value: string): Uint8Array {
 
 function serializedPathOccurrences(json: string, path: string): number {
   const quoted = JSON.stringify(path);
-  const needle = quoted.slice(1, -1);
+  const needle = Effect.pipe(quoted, EffectString.slice(1, -1));
   if (needle.length === 0) throw new Error('Code graph fact path cannot be empty.');
   let count = 0;
   for (let offset = 0; ;) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const next = json.indexOf(needle, offset);
     if (next < 0) return count;
     count += 1;

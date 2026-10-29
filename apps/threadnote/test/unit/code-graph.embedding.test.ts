@@ -1,8 +1,9 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {renameSync, rmSync} from '@threadnote/testing/node-fs';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
@@ -35,7 +36,12 @@ import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
 import {mkdtemp, rm} from '../helpers/effect-filesystem.js';
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const manifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
 describe('native code graph vector generations', () => {
   effectIt.effect('isolates scoped vector build, status, search, force rebuild, and cleanup in one worktree', () =>
     Effect.gen(function* () {
@@ -45,9 +51,14 @@ describe('native code graph vector generations', () => {
       const catalog = yield* LocalModelCatalog;
       yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
       const vectors = yield* CodeGraphEmbeddingIndex;
-      const scopeA = `code-graph-scope:${'a'.repeat(64)}`;
-      const scopeB = `code-graph-scope:${'b'.repeat(64)}`;
-      const full = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+      const scopeA = `code-graph-scope:${Effect2.pipe('a', EffectString.repeat(64))}`;
+      const scopeB = `code-graph-scope:${Effect2.pipe('b', EffectString.repeat(64))}`;
+      const full = codeGraphLayout(
+        path,
+        home,
+        Effect2.pipe('a', EffectString.repeat(64)),
+        Effect2.pipe('b', EffectString.repeat(64)),
+      );
       const a = {...full, scopeId: scopeA};
       const b = {...full, scopeId: scopeB};
       const source = [symbol('alpha', 'AlphaCoordinator', 'Coordinates alpha deployments.')];
@@ -89,9 +100,9 @@ describe('native code graph vector generations', () => {
         const database = new Database(path.join(full.vectorRoot, manifest.id, 'vectors-v2.sqlite'));
         try {
           expect(database.query('SELECT worktree_id FROM vector_pointers ORDER BY worktree_id').all()).toEqual(
-            [full.worktreeId, codeGraphVectorViewId(full.worktreeId, scopeB)]
-              .sort()
-              .map(worktree_id => ({worktree_id})),
+            EffectArray.map([full.worktreeId, codeGraphVectorViewId(full.worktreeId, scopeB)].sort(), worktree_id => ({
+              worktree_id,
+            })),
           );
           expect(database.query('SELECT snapshot_id FROM vector_generation_retirements').all()).toEqual([
             {snapshot_id: 'a-snapshot'},
@@ -118,7 +129,12 @@ describe('native code graph vector generations', () => {
         const catalog = yield* LocalModelCatalog;
         yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
         const vectors = yield* CodeGraphEmbeddingIndex;
-        const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+        const layout = codeGraphLayout(
+          path,
+          home,
+          Effect2.pipe('a', EffectString.repeat(64)),
+          Effect2.pipe('b', EffectString.repeat(64)),
+        );
         const target = snapshot('pinned-ready');
         const atAttach = yield* Deferred.make<void>();
         const release = yield* Deferred.make<void>();
@@ -152,7 +168,7 @@ describe('native code graph vector generations', () => {
         });
         yield* Deferred.succeed(release, undefined);
         expect(yield* Fiber.join(pending)).toMatchObject({ready: true, embedded: 1});
-        const sibling = {...layout, worktreeId: 'd'.repeat(64)};
+        const sibling = {...layout, worktreeId: Effect2.pipe('d', EffectString.repeat(64))};
         const adoptionReady = yield* Deferred.make<void>();
         const adopt = yield* Deferred.make<void>();
         const adoption = yield* Effect.forkScoped(
@@ -205,7 +221,12 @@ describe('native code graph vector generations', () => {
       const catalog = yield* LocalModelCatalog;
       yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
       const vectors = yield* CodeGraphEmbeddingIndex;
-      const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+      const layout = codeGraphLayout(
+        path,
+        home,
+        Effect2.pipe('a', EffectString.repeat(64)),
+        Effect2.pipe('b', EffectString.repeat(64)),
+      );
       const target = snapshot('future-schema');
       yield* vectors.ensure(home, layout, target, [symbol('alpha-future', 'Alpha', 'alpha')]);
       const databasePath = path.join(layout.vectorRoot, manifest.id, 'vectors-v2.sqlite');
@@ -243,7 +264,12 @@ describe('native code graph vector generations', () => {
       const catalog = yield* LocalModelCatalog;
       yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
       const vectors = yield* CodeGraphEmbeddingIndex;
-      const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+      const layout = codeGraphLayout(
+        path,
+        home,
+        Effect2.pipe('a', EffectString.repeat(64)),
+        Effect2.pipe('b', EffectString.repeat(64)),
+      );
       const source = [symbol('alpha-capacity', 'Alpha', 'alpha')];
       yield* vectors.ensure(home, layout, snapshot('before-pressure'), source);
       const databasePath = path.join(layout.vectorRoot, manifest.id, 'vectors-v2.sqlite');
@@ -284,8 +310,18 @@ describe('native code graph vector generations', () => {
         const vectors = yield* CodeGraphEmbeddingIndex;
         const runtime = yield* LocalModelRuntime;
         const modelStore = yield* LocalModelStore;
-        const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
-        const clean = codeGraphLayout(path, home, 'c'.repeat(64), 'd'.repeat(64));
+        const layout = codeGraphLayout(
+          path,
+          home,
+          Effect2.pipe('a', EffectString.repeat(64)),
+          Effect2.pipe('b', EffectString.repeat(64)),
+        );
+        const clean = codeGraphLayout(
+          path,
+          home,
+          Effect2.pipe('c', EffectString.repeat(64)),
+          Effect2.pipe('d', EffectString.repeat(64)),
+        );
         const symbols = Array.from({length: 9}, (_, n) =>
           symbol(`resume-${n}`, n % 2 ? 'Beta' : 'Alpha', n % 2 ? 'beta' : 'alpha'),
         );
@@ -348,8 +384,13 @@ describe('native code graph vector generations', () => {
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-real-publication-'});
       const catalog = yield* LocalModelCatalog;
       yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
-      const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
-      const target = {...snapshot(`cgsn_${'1'.repeat(40)}`), symbolCount: 1};
+      const layout = codeGraphLayout(
+        path,
+        home,
+        Effect2.pipe('a', EffectString.repeat(64)),
+        Effect2.pipe('b', EffectString.repeat(64)),
+      );
+      const target = {...snapshot(`cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`), symbolCount: 1};
       const identity: RepositoryIdentity = {
         caseMode: 'sensitive',
         checkoutId: layout.checkoutId,
@@ -432,8 +473,18 @@ describe('native code graph vector generations', () => {
           const catalog = yield* LocalModelCatalog;
           yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
           const vectors = yield* CodeGraphEmbeddingIndex;
-          const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
-          const otherWorktreeLayout = codeGraphLayout(path, home, 'a'.repeat(64), 'd'.repeat(64));
+          const layout = codeGraphLayout(
+            path,
+            home,
+            Effect2.pipe('a', EffectString.repeat(64)),
+            Effect2.pipe('b', EffectString.repeat(64)),
+          );
+          const otherWorktreeLayout = codeGraphLayout(
+            path,
+            home,
+            Effect2.pipe('a', EffectString.repeat(64)),
+            Effect2.pipe('d', EffectString.repeat(64)),
+          );
           const first = yield* vectors.ensure(home, layout, snapshot('snapshot-one'), [
             symbol('alpha', 'AlphaCoordinator', 'Coordinates alpha deployments.'),
             symbol('beta', 'BetaStore', 'Stores beta records.'),
@@ -554,7 +605,12 @@ describe('native code graph vector generations', () => {
           const catalog = yield* LocalModelCatalog;
           yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
           const vectors = yield* CodeGraphEmbeddingIndex;
-          const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+          const layout = codeGraphLayout(
+            path,
+            home,
+            Effect2.pipe('a', EffectString.repeat(64)),
+            Effect2.pipe('b', EffectString.repeat(64)),
+          );
           const target = snapshot('snapshot-pointer-load');
           yield* vectors.ensure(home, layout, target, [
             symbol('pointer-load', 'PointerLoad', 'Exercises pointer pruning.'),
@@ -576,11 +632,21 @@ describe('native code graph vector generations', () => {
             strict: true,
           });
           try {
-            const indexes = database.query("PRAGMA index_list('vector_pointers')").all() as readonly {
-              readonly name: string;
-            }[];
+            const indexes = database
+              .query<
+                {
+                  readonly name: string;
+                },
+                SQLQueryBindings[]
+              >("PRAGMA index_list('vector_pointers')")
+              .all();
             const plan = database
-              .query(
+              .query<
+                {
+                  readonly detail: string;
+                },
+                SQLQueryBindings[]
+              >(
                 `EXPLAIN QUERY PLAN
              SELECT generation
              FROM vector_generations
@@ -588,21 +654,23 @@ describe('native code graph vector generations', () => {
              ORDER BY vector_generations.generation
              LIMIT 1`,
               )
-              .all('') as readonly {
-              readonly detail: string;
-            }[];
-            const details = plan.map(row => row.detail);
+              .all('');
+            const details = EffectArray.map(plan, row => row.detail);
             expect(database.query('PRAGMA user_version').get()).toEqual({user_version: 3});
-            expect(result.databasePath.endsWith('/vectors-v2.sqlite')).toBe(true);
+            expect(Effect2.pipe(result.databasePath, EffectString.endsWith('/vectors-v2.sqlite'))).toBe(true);
             expect(result.refreshed).toMatchObject({
               embedded: 0,
               ready: true,
               reused: 1,
             });
-            expect(indexes.map(index => index.name)).toContain('vector_pointer_generation_lookup');
+            expect(EffectArray.map(indexes, index => index.name)).toContain('vector_pointer_generation_lookup');
             expect(details).toContainEqual(expect.stringContaining('SEARCH vector_generations USING'));
-            expect(details.some(detail => detail.includes('SCAN '))).toBe(false);
-            expect(details.some(detail => detail.includes('USE TEMP B-TREE'))).toBe(false);
+            expect(EffectArray.some(details, detail => Effect2.pipe(detail, EffectString.includes('SCAN ')))).toBe(
+              false,
+            );
+            expect(
+              EffectArray.some(details, detail => Effect2.pipe(detail, EffectString.includes('USE TEMP B-TREE'))),
+            ).toBe(false);
             expect(database.query('SELECT COUNT(*) AS count FROM vector_pointers').get()).toEqual({
               count: pointerCount + 1,
             });
@@ -640,14 +708,23 @@ describe('native code graph vector generations', () => {
               length: 901,
             },
             (_, index) =>
-              symbol(`paged-${index.toString().padStart(4, '0')}`, `Paged${index}`, `Paged symbol ${index}.`),
+              symbol(
+                `paged-${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}`,
+                `Paged${index}`,
+                `Paged symbol ${index}.`,
+              ),
           );
           const result = yield* Effect.gen(function* () {
             const path = yield* Path.Path;
             const catalog = yield* LocalModelCatalog;
             yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
             const vectors = yield* CodeGraphEmbeddingIndex;
-            const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+            const layout = codeGraphLayout(
+              path,
+              home,
+              Effect2.pipe('a', EffectString.repeat(64)),
+              Effect2.pipe('b', EffectString.repeat(64)),
+            );
             const source = {
               count: Effect.succeed(symbols.length),
               loadPage: (
@@ -659,7 +736,12 @@ describe('native code graph vector generations', () => {
                 limit: number,
               ) => {
                 pageLimits.push(limit);
-                const start = cursor ? symbols.findIndex(candidate => candidate.id === cursor.id) + 1 : 0;
+                const start = cursor
+                  ? EffectOption.getOrElse(
+                      EffectArray.findFirstIndex(symbols, candidate => candidate.id === cursor.id),
+                      () => -1,
+                    ) + 1
+                  : 0;
                 return Effect.succeed(symbols.slice(start, start + limit));
               },
             };
@@ -730,7 +812,12 @@ describe('native code graph vector generations', () => {
               call =>
                 (call === 1 ? Effect.promise(() => firstRelease) : Effect.void).pipe(
                   Effect.as(
-                    inputs.map(input => unitVector(requested.dimensions ?? 0, input.includes('alpha') ? 0 : 1)),
+                    EffectArray.map(inputs, input =>
+                      unitVector(
+                        requested.dimensions ?? 0,
+                        Effect2.pipe(input, EffectString.includes('alpha')) ? 0 : 1,
+                      ),
+                    ),
                   ),
                 ),
               () =>
@@ -748,8 +835,18 @@ describe('native code graph vector generations', () => {
               const catalog = yield* LocalModelCatalog;
               yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
               const vectors = yield* CodeGraphEmbeddingIndex;
-              const firstLayout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
-              const secondLayout = codeGraphLayout(path, home, 'a'.repeat(64), 'd'.repeat(64));
+              const firstLayout = codeGraphLayout(
+                path,
+                home,
+                Effect2.pipe('a', EffectString.repeat(64)),
+                Effect2.pipe('b', EffectString.repeat(64)),
+              );
+              const secondLayout = codeGraphLayout(
+                path,
+                home,
+                Effect2.pipe('a', EffectString.repeat(64)),
+                Effect2.pipe('d', EffectString.repeat(64)),
+              );
               const first = yield* Effect.forkScoped(
                 vectors.ensure(home, firstLayout, snapshot('snapshot-concurrent-one'), [
                   symbol('alpha-concurrent', 'AlphaConcurrent', 'alpha concurrent symbol'),
@@ -829,7 +926,12 @@ function testEmbeddingLayer(
           embeddedBatches.push(inputs.length);
           embeddingContextPools?.push(embeddingContextPoolSize);
           return Effect.succeed(
-            inputs.map(input => unitVector(requested.dimensions ?? 0, input.toLowerCase().includes('alpha') ? 0 : 1)),
+            EffectArray.map(inputs, input =>
+              unitVector(
+                requested.dimensions ?? 0,
+                Effect2.pipe(input, EffectString.toLowerCase, EffectString.includes('alpha')) ? 0 : 1,
+              ),
+            ),
           );
         },
         generate: () => Effect.die(TestError.make({message: 'Unexpected generation'})),
@@ -909,7 +1011,7 @@ function rebuildReleasedVectorPointerLoad(databasePath: string, pointerCount: nu
       database.exec(`INSERT INTO vectors (generation, symbol_id, fingerprint, vector)
          SELECT generation, symbol_id, fingerprint, vector FROM source.vectors`);
       for (let index = 0; index < pointerCount; index += 1) {
-        const generation = `referenced-${index.toString().padStart(4, '0')}`;
+        const generation = `referenced-${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}`;
         insertGeneration.run(
           generation,
           `snapshot-${index}`,
@@ -919,11 +1021,11 @@ function rebuildReleasedVectorPointerLoad(databasePath: string, pointerCount: nu
           template.template_version,
           template.created_at,
         );
-        insertPointer.run(index.toString(16).padStart(64, '0'), generation);
+        insertPointer.run(Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')), generation);
       }
       for (let index = 0; index < orphanCount; index += 1) {
         insertGeneration.run(
-          `orphan-${index.toString().padStart(4, '0')}`,
+          `orphan-${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}`,
           `orphan-snapshot-${index}`,
           template.model_id,
           template.model_sha256,
@@ -971,7 +1073,7 @@ function rebuildReleasedVectorPointerLoad(databasePath: string, pointerCount: nu
 }
 function symbol(id: string, name: string, documentation: string): CodeGraphSymbol {
   return {
-    contentHash: id.repeat(64).slice(0, 64),
+    contentHash: Effect2.pipe(id, EffectString.repeat(64), EffectString.slice(0, 64)),
     documentation,
     exported: true,
     id,
@@ -990,16 +1092,16 @@ function symbol(id: string, name: string, documentation: string): CodeGraphSymbo
 }
 function snapshot(id: string): CodeGraphSnapshot {
   return {
-    commit: 'c'.repeat(40),
+    commit: Effect2.pipe('c', EffectString.repeat(40)),
     dirty: false,
     edgeCount: 0,
     extractorSet: 'test',
     fileCount: 2,
     id,
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
     state: 'ready',
     symbolCount: 2,
-    worktreeId: 'b'.repeat(64),
+    worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
   };
 }
 function installation(home: string) {

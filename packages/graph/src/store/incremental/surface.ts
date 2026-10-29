@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '../../fact/budget.js';
@@ -127,15 +128,15 @@ function decodePersistedIncrementalSurfaceSymbol(
   };
 }
 
+const isPersistedLookupKeyArray = (value: unknown): value is readonly string[] =>
+  EffectArray.isArray(value) &&
+  EffectArray.every(value, (key): key is string => typeof key === 'string' && key.length > 0 && key.length <= 4_096);
+
 function decodePersistedIncrementalLookupKeys(value: unknown): readonly string[] | undefined {
   if (typeof value !== 'string' || value.length > CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM) return undefined;
   try {
     const parsed: unknown = JSON.parse(value);
-    if (
-      !Array.isArray(parsed) ||
-      parsed.some(key => typeof key !== 'string' || key.length === 0 || key.length > 4_096) ||
-      new Set(parsed).size !== parsed.length
-    ) {
+    if (!isPersistedLookupKeyArray(parsed) || new Set(parsed).size !== parsed.length) {
       return undefined;
     }
     return parsed;

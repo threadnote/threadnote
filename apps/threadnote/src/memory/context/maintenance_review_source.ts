@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -35,8 +37,14 @@ import {
   sameRelevantBasis,
   sameRelevantEvidence,
 } from './maintenance_draft.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
-export class TopicReviewSourceError extends Schema.TaggedError<TopicReviewSourceError>()('TopicReviewSourceError', {
+export class TopicReviewSourceError extends Schema.TaggedError<
+  TopicReviewSourceError,
+  {readonly brand: unique symbol}
+>()('TopicReviewSourceError', {
   message: Schema.String,
   reason: Schema.optionalKey(
     Schema.Literals(['target-changed', 'source-changed', 'source-unavailable', 'scope-changed', 'policy-changed']),
@@ -54,11 +62,19 @@ const fail = (
 
 /** Reconstruct only the previously reviewed vector; it never authorizes a new capture. */
 function reviewedObservation(record: MemoryRecord, review: TopicMaintenanceReviewPayloadV1) {
-  const byHandle = new Map(review.reviewEvidence.map(entry => [entry.handleId, entry]));
-  const citations = (record.metadata.codeCitations ?? []).filter(citation =>
-    review.basis.handles.some(handle => handle.variant === 'historical' && handle.citationId === citation.id),
+  const byHandle = new Map(EffectArray.map(review.reviewEvidence, entry => [entry.handleId, entry]));
+  const citations = EffectArrayPipe(record.metadata.codeCitations ?? [], __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (citation, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues &&
+        EffectArray.some(
+          review.basis.handles,
+          handle => handle.variant === 'historical' && handle.citationId === citation.id,
+        ),
+    ),
   );
-  const sources = citations.map(original => {
+  const sources = EffectArray.map(citations, original => {
     const entry = byHandle.get(`current:${original.id}`);
     if (!entry) throw fail('The reviewed current source capture is missing.');
     const current: MemoryCodeCitationV1 = entry.citation;
@@ -145,7 +161,7 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
   const manifest = yield* readSeedManifest(config.manifestPath).pipe(Effect.result);
   let root: string | undefined;
   if (Result.isSuccess(manifest)) {
-    const matches = manifest.success.projects.filter(project => project.name === record.metadata.project);
+    const matches = EffectArray.filter(manifest.success.projects, project => project.name === record.metadata.project);
     if (matches.length === 1) root = yield* expandPath(matches[0].path);
   }
   if (sourceCwd !== undefined) {
@@ -180,7 +196,7 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
     }
   const ordinarySources = [];
   for (const read of review.basis.reads) {
-    if (read.uri === record.uri || read.uri.startsWith('code:')) continue;
+    if (read.uri === record.uri || Effect2.pipe(read.uri, EffectString.startsWith('code:'))) continue;
     const routed = portableReads.get(read.uri);
     const current = routed
       ? {record: routed.record, hash: sha256HexSync(routed.record.content)}
@@ -204,13 +220,18 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
   }
   // Exact physical bytes alone cannot detect a newly ambiguous stable identity.
   yield* verifyAuthoredMemoryRelationTargetIdentities(config, ordinarySources);
-  const expectedCode = review.basis.reads.filter(read => read.uri.startsWith('code:'));
+  const expectedReads = review.basis.reads;
+  const expectedCode = EffectArray.filter(
+    expectedReads,
+    (read, __effectArrayIndex) =>
+      __effectArrayIndex in expectedReads && Effect2.pipe(read.uri, EffectString.startsWith('code:')),
+  );
   let code: Effect.Success<ReturnType<typeof readAutomaticCodeEvidence>> | undefined;
   if (expectedCode.length) {
     code = yield* readAutomaticCodeEvidence(config, record, root);
     if (
-      JSON.stringify([...code.reads].sort((a, b) => a.uri.localeCompare(b.uri))) !==
-      JSON.stringify([...expectedCode].sort((a, b) => a.uri.localeCompare(b.uri)))
+      JSON.stringify([...code.reads].sort((a, b) => Effect2.pipe(a.uri, EffectString.localeCompare(b.uri)))) !==
+      JSON.stringify([...expectedCode].sort((a, b) => Effect2.pipe(a.uri, EffectString.localeCompare(b.uri))))
     )
       return yield* fail('The exact automatic code preparation vector changed.');
   }
@@ -224,7 +245,10 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
       if (
         current.hash !== source.canonicalHash ||
         current.record.metadata.memoryId !== source.memoryId ||
-        current.record.body.slice(source.fragment.startOffset, source.fragment.endOffset) !== entry.content ||
+        Effect2.pipe(
+          current.record.body,
+          EffectString.slice(source.fragment.startOffset, source.fragment.endOffset),
+        ) !== entry.content ||
         sha256HexSync(entry.content) !== source.fragment.hash ||
         current.record.metadata.status !== 'active' ||
         (current.record.metadata.project ?? '') !== (record.metadata.project ?? '')
@@ -256,10 +280,11 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
         excerpt.content === entry.content &&
         excerpt.excerptHash === entry.contentHash &&
         excerpt.source.sourceDirty === source.citation.sourceDirty;
-      if (!selected.excerpts.some(exactBytes)) {
+      if (!EffectArray.some(selected.excerpts, exactBytes)) {
         // A retained approved pin may need a separately fenced current proof after extractor-context drift.
         // Only the just-reconstructed exact code vector is authoritative here, never persisted cache/review proof.
-        const active = (record.metadata.reviewedSupport?.active.sources ?? []).filter(
+        const active = EffectArray.filter(
+          record.metadata.reviewedSupport?.active.sources ?? [],
           descriptor =>
             descriptor.id === entry.descriptor.id &&
             descriptor.scope === entry.descriptor.scope &&
@@ -267,26 +292,39 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
             descriptor.source.citation.id === source.citation.id &&
             JSON.stringify(descriptor.locator ?? null) === JSON.stringify(entry.descriptor.locator ?? null),
         );
-        const own = code?.evidence.find(
-          evidence =>
-            evidence.id === entry.descriptor.id &&
-            evidence.source.kind === 'code' &&
-            evidence.source.citation.id === source.citation.id &&
-            evidence.availability === 'available' &&
-            evidence.authority === 'recorded',
+        const own = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(code?.evidence), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                __effectArrayReceiver,
+                evidence =>
+                  evidence.id === entry.descriptor.id &&
+                  evidence.source.kind === 'code' &&
+                  evidence.source.citation.id === source.citation.id &&
+                  evidence.availability === 'available' &&
+                  evidence.authority === 'recorded',
+              ),
+            ),
+          ),
         );
         const supported =
           active.length === 1 &&
           own &&
-          code?.candidates.some(
-            candidate =>
-              candidate.evidenceId === own.id &&
-              candidate.excerpt &&
-              !candidate.excerpt.truncated &&
-              candidate.excerpt.startLine === entry.codeExcerpt!.startLine &&
-              candidate.excerpt.endLine === entry.codeExcerpt!.endLine &&
-              exactBytes(candidate.excerpt) &&
-              automaticSupportedSymbolMatchesExcerpt(source.citation, candidate.excerpt),
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(code?.candidates), __effectArrayReceiver =>
+              EffectArray.some(
+                __effectArrayReceiver,
+                __effectArrayValue =>
+                  !!(candidate =>
+                    candidate.evidenceId === own.id &&
+                    candidate.excerpt &&
+                    !candidate.excerpt.truncated &&
+                    candidate.excerpt.startLine === entry.codeExcerpt!.startLine &&
+                    candidate.excerpt.endLine === entry.codeExcerpt!.endLine &&
+                    exactBytes(candidate.excerpt) &&
+                    automaticSupportedSymbolMatchesExcerpt(source.citation, candidate.excerpt))(__effectArrayValue),
+              ),
+            ),
           );
         if (!supported) return yield* fail('The exact reviewed current code bytes or authority changed.');
       }

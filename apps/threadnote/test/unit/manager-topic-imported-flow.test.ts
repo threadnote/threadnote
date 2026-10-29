@@ -9,7 +9,7 @@ import {loadCandidateReview} from '@threadnote/memory/candidate';
 import {runObsidianSourceRemove} from '@threadnote/integration-obsidian/source';
 import {handleManagerAttentionRequest} from '../../src/manager/attention.js';
 import {topicObsidianReviewId} from '../../src/memory/context/maintenance_obsidian.js';
-import type {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {EffectMcpServerRegistry} from '../../src/effect/ai/mcp.js';
 import {registerContextMaintenanceTools} from '../../src/mcp/server/context/maintenance.js';
 
 effectIt.effect(
@@ -17,15 +17,9 @@ effectIt.effect(
   () =>
     Effect.gen(function* () {
       const f = yield* managerImportedTopicFixture();
-      type ToolResult = {readonly isError?: boolean; readonly structuredContent?: unknown};
-      const handlers = new Map<string, (input: Record<string, unknown>) => Effect.Effect<ToolResult>>();
-      const server = {
-        registerTool: (name: string, _definition: unknown, handler: unknown) => {
-          handlers.set(name, handler as (input: Record<string, unknown>) => Effect.Effect<ToolResult>);
-        },
-      } as unknown as EffectMcpServerAdapter;
+      const server = new EffectMcpServerRegistry();
       registerContextMaintenanceTools(server, f.config);
-      const packet = handlers.get('context_maintenance_packet')!;
+      const packet = (input: Record<string, unknown>) => server.invokeTool('context_maintenance_packet', input);
       const pinDirectory = f.path.join(f.home, 'threadnote', 'sources', 'obsidian', 'notes', 'evidence');
       const before = yield* f.store.read(f.location, f.uri);
       const pins = yield* f.fs.readDirectory(pinDirectory);
@@ -45,7 +39,7 @@ effectIt.effect(
       }
       expect(yield* f.fs.readDirectory(pinDirectory)).toEqual(pins);
       expect(yield* f.store.read(f.location, f.uri)).toBe(before);
-      const captured = yield* handlers.get('context_maintenance_capture')!(f.captureInput);
+      const captured = yield* server.invokeTool('context_maintenance_capture', f.captureInput);
       expect(captured.isError).not.toBe(true);
       const afterCapture = yield* f.fs.readDirectory(pinDirectory);
       expect(afterCapture).toHaveLength(2);

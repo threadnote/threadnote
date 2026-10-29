@@ -1,63 +1,131 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {readPreparedInventory} from '../prepare.mjs';
 import fc from 'fast-check';
 import {ciRequiredLongRunningTestGroupNames} from '../../ci/vitest-plan.js';
 import {selectTargets} from '../../ci/selection.mjs';
 import {createVitestConfig} from '../../../vitest.config.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import * as Schema from 'effect/Schema';
 
 interface TargetInventoryEntry {
   readonly dependsOn?: readonly string[];
-  readonly entries: readonly string[];
-  readonly env: Readonly<Record<string, string>>;
+  readonly entries?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
   readonly inputs: readonly string[];
   readonly kind: string;
   readonly label: string;
-  readonly requiresNetwork: boolean;
-  readonly timeout: string | null;
-  readonly workspace: boolean;
+  readonly requiresNetwork?: boolean;
+  readonly timeout?: string | null;
+  readonly workspace?: boolean;
 }
 
+const targetInventoryEntrySchema = Schema.StructWithRest(
+  Schema.Struct({
+    dependsOn: Schema.String.pipe(Schema.Array, Schema.optional),
+    entries: Schema.String.pipe(Schema.Array, Schema.optional),
+    env: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+    inputs: Schema.Array(Schema.String),
+    kind: Schema.String,
+    label: Schema.String,
+    requiresNetwork: Schema.optional(Schema.Boolean),
+    timeout: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
+    workspace: Schema.optional(Schema.Boolean),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const inventorySchema = Schema.StructWithRest(
+  Schema.Struct({
+    testSuites: Schema.Array(
+      Schema.StructWithRest(
+        Schema.Struct({name: Schema.String, package: Schema.String, tests: Schema.Array(Schema.String)}),
+        [Schema.Record(Schema.String, Schema.Unknown)],
+      ),
+    ),
+    targets: Schema.Array(targetInventoryEntrySchema),
+    version: Schema.Literal(1),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
 const {inventory: preparedInventory} = await readPreparedInventory({allowStaged: true});
-const inventory = preparedInventory as {
-  readonly testSuites: readonly {readonly name: string; readonly package: string; readonly tests: readonly string[]}[];
-  readonly targets: readonly TargetInventoryEntry[];
+const inventory = Schema.decodeUnknownSync(inventorySchema)(preparedInventory);
+const packageManifestSchema = Schema.StructWithRest(Schema.Struct({version: Schema.String}), [
+  Schema.Record(Schema.String, Schema.Unknown),
+]);
+const packageManifest = await Bun.file('package.json').json();
+const rootManifest = Schema.decodeUnknownSync(packageManifestSchema)(packageManifest);
+const targetEntries = (entry: TargetInventoryEntry): readonly string[] => {
+  if (!entry.entries) throw new Error(`Generated target ${entry.label} omitted entries`);
+  return entry.entries;
 };
-const rootManifest = (await Bun.file('package.json').json()) as {readonly version: string};
+const targetEnvironmentValue = (entry: TargetInventoryEntry, key: string): string => {
+  const value = entry.env?.[key];
+  if (value === undefined) throw new Error(`Generated target ${entry.label} omitted environment value ${key}`);
+  return value;
+};
 const target = (label: string) => {
-  const found = inventory.targets.find(candidate => candidate.label === label);
+  const found = EffectOption.getOrUndefined(
+    EffectArray.findFirst(inventory.targets, candidate => candidate.label === label),
+  );
   if (!found) throw new Error(`Missing generated target ${label}`);
   return found;
 };
 const applicationTargets = () =>
-  inventory.targets.filter(
-    candidate =>
-      candidate.label.startsWith('//apps/threadnote:test_standard_') ||
-      candidate.label.startsWith('//apps/threadnote:test_integration_'),
+  EffectArrayPipe(inventory.targets, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (candidate, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues &&
+        (Effect.pipe(candidate.label, EffectString.startsWith('//apps/threadnote:test_standard_')) ||
+          Effect.pipe(candidate.label, EffectString.startsWith('//apps/threadnote:test_integration_'))),
+    ),
   );
 const applicationTargetForEntry = (entry: string) => {
-  const found = applicationTargets().find(candidate => candidate.entries.includes(entry));
+  const found = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      applicationTargets(),
+      __effectArrayValue => !!(candidate => candidate.entries?.includes(entry) ?? false)(__effectArrayValue),
+    ),
+  );
   if (!found) throw new Error(`Missing generated application target for ${entry}`);
   return found;
 };
-const integrationPackageTargets = () =>
-  inventory.targets
-    .filter(candidate => /^\/\/packages\/integration-[^:]+:test$/u.test(candidate.label))
-    .sort((left, right) => left.label.localeCompare(right.label));
+const integrationPackageTargets = () => {
+  const targets = inventory.targets;
+  return EffectArray.filter(
+    targets,
+    (candidate, __effectArrayIndex) =>
+      __effectArrayIndex in targets && /^\/\/packages\/integration-[^:]+:test$/u.test(candidate.label),
+  ).sort((left, right) => Effect.pipe(left.label, EffectString.localeCompare(right.label)));
+};
 const integrationPackageTarget = (name: string) =>
-  integrationPackageTargets().find(candidate => candidate.label === `//packages/${name}:test`)!;
+  EffectOption.getOrUndefined(
+    EffectArray.findFirst(integrationPackageTargets(), candidate => candidate.label === `//packages/${name}:test`),
+  )!;
 const selectForChangedInput = (changedFile: string) =>
   selectTargets({
-    inventory: inventory.targets.map(candidate => candidate.label),
+    inventory: EffectArray.map(inventory.targets, candidate => candidate.label),
     impacted: [],
     changedFiles: [changedFile],
-    knownInputs: inventory.targets.flatMap(candidate => candidate.inputs),
-    targetDependencies: Object.fromEntries(
-      inventory.targets.map(candidate => [candidate.label, candidate.dependsOn ?? []]),
+    knownInputs: EffectArray.flatMap(inventory.targets, candidate => candidate.inputs),
+    targetDependencies: EffectRecord.fromEntries(
+      EffectArray.map(inventory.targets, candidate => [candidate.label, candidate.dependsOn ?? []]),
     ),
-    targetInputs: Object.fromEntries(inventory.targets.map(candidate => [candidate.label, candidate.inputs])),
+    targetInputs: EffectRecord.fromEntries(
+      EffectArray.map(inventory.targets, candidate => [candidate.label, candidate.inputs]),
+    ),
   });
-const selectedIntegrationPackageTests = (changedFile: string) =>
-  selectForChangedInput(changedFile).targets.filter(label => /^\/\/packages\/integration-[^:]+:test$/u.test(label));
+const selectedIntegrationPackageTests = (changedFile: string) => {
+  const targets = selectForChangedInput(changedFile).targets;
+  return EffectArray.filter(
+    targets,
+    (label, __effectArrayIndex) =>
+      __effectArrayIndex in targets && /^\/\/packages\/integration-[^:]+:test$/u.test(label),
+  );
+};
 
 describe('generated Bazel test contracts', () => {
   it('selects Windows smoke when its workflow changes', () => {
@@ -79,14 +147,14 @@ describe('generated Bazel test contracts', () => {
   });
 
   it('keeps the inventory byte-stable across filesystem enumeration orders', () => {
-    const labels = inventory.targets.map(candidate => candidate.label);
+    const labels = EffectArray.map(inventory.targets, candidate => candidate.label);
     expect(labels).toEqual([...labels].sort());
   });
 
   it('excludes ignored install artifacts from generated inputs', () => {
-    const inputs = inventory.targets.flatMap(candidate => candidate.inputs);
+    const inputs = EffectArray.flatMap(inventory.targets, candidate => candidate.inputs);
 
-    expect(inputs.some(input => input.startsWith('.husky/_/'))).toBe(false);
+    expect(EffectArray.some(inputs, input => Effect.pipe(input, EffectString.startsWith('.husky/_/')))).toBe(false);
   });
 
   it('owns every PostgreSQL-gated suite in the localhost-enabled target', () => {
@@ -104,36 +172,48 @@ describe('generated Bazel test contracts', () => {
       'apps/threadnote/test/integration/remote-memory-runtime-privileges.test.ts',
     ];
     const postgres = target('//apps/threadnote:test_postgres');
-    const standardEntries = applicationTargets().flatMap(candidate => candidate.entries);
+    const standardEntries = EffectArray.flatMap(applicationTargets(), candidate => candidate.entries ?? []);
 
     expect(postgres.entries).toEqual(expected);
     expect(postgres.workspace).toBe(false);
     expect(postgres.requiresNetwork).toBe(true);
-    expect(postgres.env.THREADNOTE_TEST_POSTGRES_URL).toContain('127.0.0.1:5432');
+    expect(targetEnvironmentValue(postgres, 'THREADNOTE_TEST_POSTGRES_URL')).toContain('127.0.0.1:5432');
     expect(postgres.inputs).toContain('packages/remote-memory/src/migrations/001_initial.sql');
-    expect(expected.every(entry => !standardEntries.includes(entry))).toBe(true);
+    expect(EffectArray.every(expected, entry => !standardEntries.includes(entry))).toBe(true);
   });
 
   it('keeps the application suite contributor-friendly while generating bounded feature targets', () => {
     const targets = applicationTargets();
-    const entries = targets.flatMap(candidate => candidate.entries);
-    const suite = inventory.testSuites.find(candidate => candidate.package === 'apps/threadnote');
+    const entries = EffectArray.flatMap(targets, candidate => targetEntries(candidate));
+    const suite = EffectOption.getOrUndefined(
+      EffectArray.findFirst(inventory.testSuites, candidate => candidate.package === 'apps/threadnote'),
+    );
 
     expect(targets.length).toBeGreaterThan(8);
     // Bound grouping overhead with corpus growth while retaining isolated provider targets.
-    const integrationTargets = targets.filter(candidate =>
-      candidate.label.startsWith('//apps/threadnote:test_integration_'),
+    const integrationTargets = EffectArray.filter(
+      targets,
+      __effectArrayValue =>
+        !!(candidate => Effect.pipe(candidate.label, EffectString.startsWith('//apps/threadnote:test_integration_')))(
+          __effectArrayValue,
+        ),
     );
     const standardEntryCount =
-      entries.length - integrationTargets.reduce((count, candidate) => count + candidate.entries.length, 0);
+      entries.length -
+      EffectArray.reduce(integrationTargets, 0, (count, candidate) => count + targetEntries(candidate).length);
     expect(targets.length).toBeLessThanOrEqual(integrationTargets.length + Math.ceil(standardEntryCount / 12));
-    expect(targets.every(candidate => candidate.workspace)).toBe(true);
-    expect(targets.every(candidate => candidate.entries.length > 0 && candidate.entries.length <= 40)).toBe(true);
+    expect(EffectArray.every(targets, candidate => candidate.workspace === true)).toBe(true);
+    expect(
+      EffectArray.every(
+        targets,
+        candidate => targetEntries(candidate).length > 0 && targetEntries(candidate).length <= 40,
+      ),
+    ).toBe(true);
     expect(new Set(entries).size).toBe(entries.length);
     expect(suite).toEqual({
       name: 'test',
       package: 'apps/threadnote',
-      tests: targets.map(candidate => `:${candidate.label.split(':')[1]}`),
+      tests: EffectArray.map(targets, candidate => `:${Effect.pipe(candidate.label, EffectString.split(':'))[1]}`),
     });
   });
 
@@ -148,31 +228,54 @@ describe('generated Bazel test contracts', () => {
       'integration-linear',
     ];
     const providerTargets = integrationPackageTargets();
-    const entries = providerTargets.flatMap(candidate => candidate.entries);
+    const entries = EffectArray.flatMap(providerTargets, candidate => targetEntries(candidate));
 
-    expect(providerTargets.map(candidate => candidate.label)).toEqual(
-      expectedPackages.map(name => `//packages/${name}:test`).sort(),
+    expect(EffectArray.map(providerTargets, candidate => candidate.label)).toEqual(
+      EffectArray.map(expectedPackages, name => `//packages/${name}:test`).sort(),
     );
-    expect(providerTargets.every(candidate => candidate.entries.length > 0)).toBe(true);
+    expect(EffectArray.every(providerTargets, candidate => targetEntries(candidate).length > 0)).toBe(true);
     expect(new Set(entries).size).toBe(entries.length);
     expect(createVitestConfig().test?.include).toContain('packages/*/test/**/*.test.{ts,tsx}');
     for (const entry of entries) {
-      expect(inventory.targets.filter(candidate => candidate.entries?.includes(entry))).toHaveLength(1);
+      expect(
+        EffectArrayPipe(inventory.targets, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (candidate, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues && (candidate.entries?.includes(entry) ?? false),
+          ),
+        ),
+      ).toHaveLength(1);
     }
   });
 
   it('keeps application integration composition tests in separate Bazel targets', () => {
-    const targets = inventory.targets.filter(candidate =>
-      candidate.label.startsWith('//apps/threadnote:test_integration_'),
+    const targets = EffectArrayPipe(inventory.targets, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (candidate, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues &&
+          Effect.pipe(candidate.label, EffectString.startsWith('//apps/threadnote:test_integration_')),
+      ),
     );
-    const entries = targets.flatMap(candidate => candidate.entries);
-    const suite = inventory.testSuites.find(candidate => candidate.package === 'apps/threadnote');
+    const entries = EffectArray.flatMap(targets, candidate => targetEntries(candidate));
+    const suite = EffectOption.getOrUndefined(
+      EffectArray.findFirst(inventory.testSuites, candidate => candidate.package === 'apps/threadnote'),
+    );
 
     expect(entries.length).toBeGreaterThan(0);
-    expect(entries.every(entry => entry.startsWith('apps/threadnote/test/integrations/'))).toBe(true);
+    expect(
+      EffectArray.every(entries, entry =>
+        Effect.pipe(entry, EffectString.startsWith('apps/threadnote/test/integrations/')),
+      ),
+    ).toBe(true);
     expect(new Set(entries).size).toBe(entries.length);
     expect(createVitestConfig().test?.include).toContain('apps/threadnote/test/**/*.test.{ts,tsx}');
-    expect(suite?.tests).toEqual(expect.arrayContaining(targets.map(candidate => `:${candidate.label.split(':')[1]}`)));
+    expect(suite?.tests).toEqual(
+      expect.arrayContaining(
+        EffectArray.map(targets, candidate => `:${Effect.pipe(candidate.label, EffectString.split(':'))[1]}`),
+      ),
+    );
   });
 
   it.each([
@@ -183,8 +286,14 @@ describe('generated Bazel test contracts', () => {
     'integration-linear',
   ])('selects only the owning provider suite for %s source, test, and manifest edits', packageName => {
     const provider = integrationPackageTarget(packageName);
-    const source = provider.inputs.find(path => path.startsWith(`packages/${packageName}/src/`));
-    const test = provider.entries[0];
+    const source = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        provider.inputs,
+        __effectArrayValue =>
+          !!(path => Effect.pipe(path, EffectString.startsWith(`packages/${packageName}/src/`)))(__effectArrayValue),
+      ),
+    );
+    const test = targetEntries(provider)[0];
     const manifest = `packages/${packageName}/package.json`;
 
     expect(source).toBeDefined();
@@ -193,17 +302,25 @@ describe('generated Bazel test contracts', () => {
       const result = selectForChangedInput(changedFile);
 
       expect(result.mode).toBe('selective');
-      expect(result.targets).not.toEqual(inventory.targets.map(candidate => candidate.label));
+      expect(result.targets).not.toEqual(EffectArray.map(inventory.targets, candidate => candidate.label));
       expect(selectedIntegrationPackageTests(changedFile)).toEqual([provider.label]);
       if (changedFile === source || changedFile === manifest) {
-        const standardApplicationTargets = result.targets.filter(label =>
-          label.startsWith('//apps/threadnote:test_standard_'),
+        const standardApplicationTargets = EffectArrayPipe(result.targets, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (label, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues &&
+              Effect.pipe(label, EffectString.startsWith('//apps/threadnote:test_standard_')),
+          ),
         );
-        const providerName = packageName.slice('integration-'.length);
+        const providerName = Effect.pipe(packageName, EffectString.slice('integration-'.length));
 
         expect(
-          standardApplicationTargets.every(
-            label => label.includes(`test_standard_integration_${providerName}_`) || label.includes('integration_all_'),
+          EffectArray.every(
+            standardApplicationTargets,
+            label =>
+              Effect.pipe(label, EffectString.includes(`test_standard_integration_${providerName}_`)) ||
+              Effect.pipe(label, EffectString.includes('integration_all_')),
           ),
         ).toBe(true);
       }
@@ -282,11 +399,20 @@ describe('generated Bazel test contracts', () => {
 
   it('infers runtime and repository inputs without coupling every application target to them', () => {
     const runtime = applicationTargetForEntry('apps/threadnote/test/unit/command-shim.test.ts');
-    const runtimeOwners = applicationTargets().filter(candidate =>
-      candidate.inputs.includes('apps/threadnote/src/standalone.ts'),
+    const runtimeOwners = EffectArrayPipe(applicationTargets(), __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (candidate, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && candidate.inputs.includes('apps/threadnote/src/standalone.ts'),
+      ),
     );
-    const graphFeatureOwners = applicationTargets().filter(candidate =>
-      candidate.inputs.includes('packages/graph/src/git/worktree/registration_worker.ts'),
+    const graphFeatureOwners = EffectArrayPipe(applicationTargets(), __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (candidate, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues &&
+          candidate.inputs.includes('packages/graph/src/git/worktree/registration_worker.ts'),
+      ),
     );
 
     expect(runtime.inputs).toContain('apps/threadnote/src/standalone.ts');
@@ -302,14 +428,16 @@ describe('generated Bazel test contracts', () => {
   ])('selects the owning generated target when the dynamic input %s reads changes', (entry, changedFile) => {
     const owner = applicationTargetForEntry(entry);
     const result = selectTargets({
-      inventory: inventory.targets.map(candidate => candidate.label),
+      inventory: EffectArray.map(inventory.targets, candidate => candidate.label),
       impacted: [],
       changedFiles: [changedFile],
-      knownInputs: inventory.targets.flatMap(candidate => candidate.inputs),
-      targetDependencies: Object.fromEntries(
-        inventory.targets.map(candidate => [candidate.label, candidate.dependsOn ?? []]),
+      knownInputs: EffectArray.flatMap(inventory.targets, candidate => candidate.inputs),
+      targetDependencies: EffectRecord.fromEntries(
+        EffectArray.map(inventory.targets, candidate => [candidate.label, candidate.dependsOn ?? []]),
       ),
-      targetInputs: Object.fromEntries(inventory.targets.map(candidate => [candidate.label, candidate.inputs])),
+      targetInputs: EffectRecord.fromEntries(
+        EffectArray.map(inventory.targets, candidate => [candidate.label, candidate.inputs]),
+      ),
     });
 
     expect(owner.inputs).toContain(changedFile);
@@ -320,18 +448,27 @@ describe('generated Bazel test contracts', () => {
   it('does not select telemetry or graph suites for a website source change', () => {
     const changedFile = 'apps/website/src/main.tsx';
     const result = selectTargets({
-      inventory: inventory.targets.map(candidate => candidate.label),
+      inventory: EffectArray.map(inventory.targets, candidate => candidate.label),
       impacted: [],
       changedFiles: [changedFile],
-      knownInputs: inventory.targets.flatMap(candidate => candidate.inputs),
-      targetDependencies: Object.fromEntries(
-        inventory.targets.map(candidate => [candidate.label, candidate.dependsOn ?? []]),
+      knownInputs: EffectArray.flatMap(inventory.targets, candidate => candidate.inputs),
+      targetDependencies: EffectRecord.fromEntries(
+        EffectArray.map(inventory.targets, candidate => [candidate.label, candidate.dependsOn ?? []]),
       ),
-      targetInputs: Object.fromEntries(inventory.targets.map(candidate => [candidate.label, candidate.inputs])),
+      targetInputs: EffectRecord.fromEntries(
+        EffectArray.map(inventory.targets, candidate => [candidate.label, candidate.inputs]),
+      ),
     });
-    const selectedEntries = inventory.targets
-      .filter(candidate => result.targets.includes(candidate.label))
-      .flatMap(candidate => candidate.entries);
+    const selectedEntries = EffectArray.flatMap(
+      EffectArrayPipe(inventory.targets, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (candidate, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && result.targets.includes(candidate.label),
+        ),
+      ),
+      candidate => targetEntries(candidate),
+    );
 
     expect(result.mode).toBe('selective');
     expect(result.targets).not.toContain('//packages/graph:test');
@@ -339,16 +476,27 @@ describe('generated Bazel test contracts', () => {
   });
 
   it('models required long groups while leaving scheduled load evidence to its dedicated workflow', () => {
-    const generatedGroups = inventory.targets
-      .filter(candidate => candidate.label.startsWith('//apps/threadnote:test_long_'))
-      .map(candidate => candidate.env.THREADNOTE_VITEST_LONG_GROUP)
-      .sort();
+    const generatedGroups = EffectArray.map(
+      EffectArrayPipe(inventory.targets, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (candidate, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues &&
+            Effect.pipe(candidate.label, EffectString.startsWith('//apps/threadnote:test_long_')),
+        ),
+      ),
+      candidate => targetEnvironmentValue(candidate, 'THREADNOTE_VITEST_LONG_GROUP'),
+    ).sort();
 
     expect(generatedGroups).toEqual([...ciRequiredLongRunningTestGroupNames].sort());
     expect(generatedGroups).not.toContain('load-evidence');
     for (const group of generatedGroups) {
-      expect(target(`//apps/threadnote:test_long_${group.replaceAll('-', '_')}`).timeout).toBe('long');
-      expect(target(`//apps/threadnote:test_long_${group.replaceAll('-', '_')}`).workspace).toBe(true);
+      expect(
+        target(`//apps/threadnote:test_long_${Effect.pipe(group, EffectString.replaceAll('-', '_'))}`).timeout,
+      ).toBe('long');
+      expect(
+        target(`//apps/threadnote:test_long_${Effect.pipe(group, EffectString.replaceAll('-', '_'))}`).workspace,
+      ).toBe(true);
     }
   });
 
@@ -456,7 +604,9 @@ describe('generated Bazel test contracts', () => {
     expect(preflight.inputs).toContain('.github/workflows/production-large-evidence.yml');
     expect(preflight.inputs).toContain('scripts/benchmark-code-graph.ts');
     expect(preflight.inputs).toContain('scripts/code-graph-benchmark-sampler.ts');
-    expect(preflight.inputs.some(input => input.startsWith('artifacts/'))).toBe(false);
+    expect(EffectArray.some(preflight.inputs, input => Effect.pipe(input, EffectString.startsWith('artifacts/')))).toBe(
+      false,
+    );
   });
 
   it('keeps application runtime closure out of ordinary package tests', () => {
@@ -480,14 +630,16 @@ describe('generated Bazel test contracts', () => {
     ['apps/threadnote/test/helpers/runtime-policy.ts', '//:windows_smoke_inputs', '//:windows_smoke'],
   ])('selects %s via the transitive lane contract', (changedFile, impactedTarget, lane) => {
     const result = selectTargets({
-      inventory: inventory.targets.map(candidate => candidate.label),
+      inventory: EffectArray.map(inventory.targets, candidate => candidate.label),
       impacted: [impactedTarget],
       changedFiles: [changedFile],
-      knownInputs: inventory.targets.flatMap(candidate => candidate.inputs),
-      targetDependencies: Object.fromEntries(
-        inventory.targets.map(candidate => [candidate.label, candidate.dependsOn ?? []]),
+      knownInputs: EffectArray.flatMap(inventory.targets, candidate => candidate.inputs),
+      targetDependencies: EffectRecord.fromEntries(
+        EffectArray.map(inventory.targets, candidate => [candidate.label, candidate.dependsOn ?? []]),
       ),
-      targetInputs: Object.fromEntries(inventory.targets.map(candidate => [candidate.label, candidate.inputs])),
+      targetInputs: EffectRecord.fromEntries(
+        EffectArray.map(inventory.targets, candidate => [candidate.label, candidate.inputs]),
+      ),
     });
 
     expect(result.targets).toContain(lane);
@@ -502,11 +654,12 @@ describe('generated Bazel test contracts', () => {
       'lifecycle-delta': 'native code graph lifecycle > reconciles an unknown verb',
     } as const;
 
-    for (const [group, title] of Object.entries(examples)) {
+    for (const [group, title] of EffectRecord.toEntries(examples)) {
       const config = createVitestConfig(group);
       const pattern = config.test?.testNamePattern;
       expect(pattern).toBeInstanceOf(RegExp);
-      expect(Object.entries(examples).filter(([, candidate]) => (pattern as RegExp).test(candidate))).toEqual([
+      if (!(pattern instanceof RegExp)) throw new Error(`Expected a RegExp for group ${group}`);
+      expect(EffectArray.filter(EffectRecord.toEntries(examples), ([, candidate]) => pattern.test(candidate))).toEqual([
         [group, title],
       ]);
       expect(config.test?.testTimeout).toBe(180_000);
@@ -526,7 +679,7 @@ describe('generated Bazel test contracts', () => {
       {group: 'lifecycle-delta', title: 'reconciles an unknown verb'},
     ];
     const groups = ['lifecycle-alpha', 'lifecycle-beta', 'lifecycle-gamma', 'lifecycle-delta'];
-    const patterns = groups.map(group => {
+    const patterns = EffectArray.map(groups, group => {
       const pattern = createVitestConfig(group).test?.testNamePattern;
       if (!(pattern instanceof RegExp)) throw new Error(`Missing lifecycle pattern for ${group}`);
       return {group, pattern};
@@ -537,7 +690,10 @@ describe('generated Bazel test contracts', () => {
     fc.assert(
       fc.property(fc.constantFrom(...cases), suffix, (example, tail) => {
         const name = `native code graph lifecycle > ${example.title} ${tail}`;
-        const selected = patterns.filter(({pattern}) => pattern.test(name)).map(({group}) => group);
+        const selected = EffectArray.map(
+          EffectArray.filter(patterns, ({pattern}) => pattern.test(name)),
+          ({group}) => group,
+        );
         expect(selected).toEqual([example.group]);
       }),
       {numRuns: 40},

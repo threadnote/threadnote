@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Layer} from 'effect';
@@ -9,6 +10,9 @@ import type {RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {postingLexicalScore} from '@threadnote/recall/index/lexical';
 import {selectRecallQueryTermStatistics, selectTopRecallPostingsByTerms} from '@threadnote/recall/index/selection';
 import type {RecallCorpusStatistics} from '@threadnote/recall/rank';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const root = 'threadnote://user/allowed/memories';
 const terms = ['alpha', 'beta'];
@@ -59,19 +63,29 @@ describe('recall posting access cost', () => {
         statistics,
         {...statistics, physicalDocumentCount: documents.length},
       );
-      expect(selected.map(row => row.uri)).toEqual(documents.slice(0, 8).map(row => row.uri));
+      expect(EffectArray.map(selected, row => row.uri)).toEqual(EffectArray.map(documents.slice(0, 8), row => row.uri));
       const plan = yield* queryPlan(sql, captured.at(-1)!);
-      expect(plan.some(row => row.detail.includes('SEARCH p USING PRIMARY KEY (term=?)'))).toBe(true);
-      expect(plan.some(row => row.detail.includes('SEARCH d USING INTEGER PRIMARY KEY (rowid=?)'))).toBe(true);
-      expect(plan.some(row => row.detail.includes('documents_uri'))).toBe(false);
+      expect(
+        EffectArray.some(plan, row =>
+          Effect2.pipe(row.detail, EffectString.includes('SEARCH p USING PRIMARY KEY (term=?)')),
+        ),
+      ).toBe(true);
+      expect(
+        EffectArray.some(plan, row =>
+          Effect2.pipe(row.detail, EffectString.includes('SEARCH d USING INTEGER PRIMARY KEY (rowid=?)')),
+        ),
+      ).toBe(true);
+      expect(EffectArray.some(plan, row => Effect2.pipe(row.detail, EffectString.includes('documents_uri')))).toBe(
+        false,
+      );
     }).pipe(withDatabase),
   );
 
   effectIt.effect('retains the URI plan for a small user root beside another user common-term corpus', () =>
     Effect.gen(function* () {
-      const documents = fixtureDocuments(200, 200).map((row, index) => ({
+      const documents = EffectArray.map(fixtureDocuments(200, 200), (row, index) => ({
         ...row,
-        uri: index < 24 ? row.uri : row.uri.replace('/allowed/', '/other/'),
+        uri: index < 24 ? row.uri : Effect2.pipe(row.uri, EffectString.replace('/allowed/', '/other/')),
       }));
       const sql = yield* createDocuments(documents);
       const {observed, captured} = observeQueries(sql);
@@ -88,17 +102,21 @@ describe('recall posting access cost', () => {
         statistics,
         {...modelStatistics(documents), physicalDocumentCount: documents.length},
       );
-      expect(selected.map(row => row.uri)).toEqual(documents.slice(0, 8).map(row => row.uri));
-      expect((yield* queryPlan(sql, captured.at(-1)!)).some(row => row.detail.includes('documents_uri'))).toBe(true);
+      expect(EffectArray.map(selected, row => row.uri)).toEqual(EffectArray.map(documents.slice(0, 8), row => row.uri));
+      expect(
+        EffectArray.some(yield* queryPlan(sql, captured.at(-1)!), row =>
+          Effect2.pipe(row.detail, EffectString.includes('documents_uri')),
+        ),
+      ).toBe(true);
     }).pipe(withDatabase),
   );
 
   effectIt.effect('bounds hidden physical aliases and falls back when statistics are missing or inconsistent', () =>
     Effect.gen(function* () {
-      const documents = fixtureDocuments(40, 40).map((row, index) => ({
+      const documents = EffectArray.map(fixtureDocuments(40, 40), (row, index) => ({
         ...row,
         logicalKey: index < 4 ? row.logicalKey : 'hidden-alias',
-        uri: index < 4 ? row.uri : row.uri.replace('/allowed/', '/other/'),
+        uri: index < 4 ? row.uri : Effect2.pipe(row.uri, EffectString.replace('/allowed/', '/other/')),
       }));
       const sql = yield* createDocuments(documents);
       const {observed, captured} = observeQueries(sql);
@@ -124,7 +142,11 @@ describe('recall posting access cost', () => {
           scoped,
           evidence,
         );
-        expect((yield* queryPlan(sql, captured.at(-1)!)).some(row => row.detail.includes('documents_uri'))).toBe(true);
+        expect(
+          EffectArray.some(yield* queryPlan(sql, captured.at(-1)!), row =>
+            Effect2.pipe(row.detail, EffectString.includes('documents_uri')),
+          ),
+        ).toBe(true);
       }
     }).pipe(withDatabase),
   );
@@ -142,11 +164,11 @@ describe('recall posting access cost', () => {
     },
     ({rows, aliases, queryTerms, scope, policy, limit}) =>
       Effect.gen(function* () {
-        const documents: Document[] = rows.map((row, index) => ({
+        const documents: Document[] = EffectArray.map(rows, (row, index) => ({
           ...row,
           id: rows.length - index,
           logicalKey: `logical-${aliases ? row.logical : index}`,
-          uri: `${row.location === 'allowed' ? root : row.location === 'other-user' ? 'threadnote://user/other/memories' : `${root}-neighbor`}/${String(index).padStart(4, '0')}`,
+          uri: `${row.location === 'allowed' ? root : row.location === 'other-user' ? 'threadnote://user/other/memories' : `${root}-neighbor`}/${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`,
         }));
         const scopes =
           scope === 'all'
@@ -170,15 +192,18 @@ describe('recall posting access cost', () => {
                   ? {mode: 'projectless-only'}
                   : {mode: 'unrestricted'},
         };
-        const eligible = documents.filter(
-          row =>
+        const eligible = EffectArray.filter(
+          documents,
+          (row, index) =>
+            index in documents &&
             (scope === 'all' ||
               (scope === 'exact'
                 ? row.uri === documents[0].uri
                 : scope === 'root'
-                  ? row.uri.startsWith(`${root}/`)
+                  ? Effect2.pipe(row.uri, EffectString.startsWith(`${root}/`))
                   : scope === 'both-users' &&
-                    (row.uri.startsWith(`${root}/`) || row.uri.startsWith('threadnote://user/other/memories/')))) &&
+                    (Effect2.pipe(row.uri, EffectString.startsWith(`${root}/`)) ||
+                      Effect2.pipe(row.uri, EffectString.startsWith('threadnote://user/other/memories/'))))) &&
             policy !== 'deny' &&
             (policy !== 'approved' || row.approved) &&
             (policy !== 'project' || row.kind === 'preference' || row.project === null || row.project === 'p') &&
@@ -217,39 +242,51 @@ describe('recall posting access cost', () => {
           statistics,
           global,
         );
-        if (scope !== 'all' && !captured.at(-1)!.text.includes('INDEXED BY documents_uri')) {
-          const physicalPostings = documents.reduce(
-            (count, row) => count + queryTerms.filter(term => row.terms.includes(term)).length,
+        if (
+          scope !== 'all' &&
+          !Effect2.pipe(captured.at(-1)!.text, EffectString.includes('INDEXED BY documents_uri'))
+        ) {
+          const physicalPostings = EffectArray.reduce(
+            documents,
             0,
+            (count, row) =>
+              count +
+              EffectArray.filter(
+                queryTerms,
+                (term, __effectArrayIndex) => __effectArrayIndex in queryTerms && row.terms.includes(term),
+              ).length,
           );
           expect(physicalPostings).toBeLessThanOrEqual(eligible.length);
         }
-        const expected = [...queryTerms].sort().flatMap(term =>
-          eligible
-            .filter(row => row.terms.includes(term))
-            .map(row => ({
-              row,
-              score: postingLexicalScore(
-                {documentLength: row.length, fieldWeight: row.weight, termFrequency: row.frequency},
-                term,
-                statistics,
-              ),
-            }))
-            .sort(
-              (a, b) =>
-                b.score - a.score ||
-                b.row.weight - a.row.weight ||
-                (a.row.uri < b.row.uri ? -1 : a.row.uri > b.row.uri ? 1 : 0),
+        const expected = EffectArray.flatMap([...queryTerms].sort(), term =>
+          EffectArray.map(
+            EffectArray.map(
+              EffectArray.filter(eligible, row => row.terms.includes(term)),
+              row => ({
+                row,
+                score: postingLexicalScore(
+                  {documentLength: row.length, fieldWeight: row.weight, termFrequency: row.frequency},
+                  term,
+                  statistics,
+                ),
+              }),
             )
-            .slice(0, limit)
-            .map(({row}) => ({
+              .sort(
+                (a, b) =>
+                  b.score - a.score ||
+                  b.row.weight - a.row.weight ||
+                  (a.row.uri < b.row.uri ? -1 : a.row.uri > b.row.uri ? 1 : 0),
+              )
+              .slice(0, limit),
+            ({row}) => ({
               term,
               document_id: row.id,
               document_length: row.length,
               field_weight: row.weight,
               term_frequency: row.frequency,
               uri: row.uri,
-            })),
+            }),
+          ),
         );
         expect(selected).toEqual(previous);
         expect(selected).toEqual(expected);
@@ -262,7 +299,7 @@ describe('recall posting access cost', () => {
 function fixtureDocuments(count: number, matches: number): Document[] {
   return Array.from({length: count}, (_, index) => ({
     id: count - index,
-    uri: `${root}/${String(index).padStart(4, '0')}`,
+    uri: `${root}/${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`,
     logicalKey: `logical-${index}`,
     length: 20,
     project: 'p',
@@ -276,15 +313,25 @@ function fixtureDocuments(count: number, matches: number): Document[] {
 
 function modelStatistics(documents: readonly Document[]): RecallCorpusStatistics {
   const lengths = new Map<string, number>();
-  documents.forEach(row => lengths.set(row.logicalKey, Math.max(lengths.get(row.logicalKey) ?? 0, row.length)));
-  const totalDocumentLength = [...lengths.values()].reduce((sum, length) => sum + length, 0);
+  EffectArray.forEach(documents, row =>
+    lengths.set(row.logicalKey, Math.max(lengths.get(row.logicalKey) ?? 0, row.length)),
+  );
+  const totalDocumentLength = EffectArray.reduce([...lengths.values()], 0, (sum, length) => sum + length);
   return {
     documentCount: lengths.size,
     totalDocumentLength,
     averageDocumentLength: lengths.size === 0 ? 1 : totalDocumentLength / lengths.size,
-    documentFrequency: Object.fromEntries(
-      terms.flatMap(term => {
-        const count = new Set(documents.filter(row => row.terms.includes(term)).map(row => row.logicalKey)).size;
+    documentFrequency: EffectRecord.fromEntries(
+      EffectArray.flatMap(terms, term => {
+        const count = new Set(
+          EffectArray.map(
+            EffectArray.filter(
+              documents,
+              (row, __effectArrayIndex) => __effectArrayIndex in documents && row.terms.includes(term),
+            ),
+            row => row.logicalKey,
+          ),
+        ).size;
         return count === 0 ? [] : [[term, count]];
       }),
     ),

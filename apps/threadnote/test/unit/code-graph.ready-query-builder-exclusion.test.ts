@@ -13,6 +13,8 @@ import {withCodeGraphMaintenanceRegistration} from '@threadnote/graph/maintenanc
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const LOCK_OPTIONS = {
   heartbeatIntervalMilliseconds: 20,
@@ -28,7 +30,7 @@ describe('ready-query builder exclusion', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-ready-query-exclusion-'});
-        const checkoutId = 'a'.repeat(64);
+        const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
         const ownerOneAcquired = yield* Deferred.make<void>();
         const ownerTwoAcquired = yield* Deferred.make<void>();
         const releaseOwnerOne = yield* Deferred.make<void>();
@@ -43,8 +45,12 @@ describe('ready-query builder exclusion', () => {
             {...LOCK_OPTIONS, onAcquired: () => Deferred.succeed(acquired, undefined).pipe(Effect.asVoid)},
             Deferred.await(release),
           );
-        const ownerOne = yield* Effect.forkScoped(owner('b'.repeat(64), ownerOneAcquired, releaseOwnerOne));
-        const ownerTwo = yield* Effect.forkScoped(owner('c'.repeat(64), ownerTwoAcquired, releaseOwnerTwo));
+        const ownerOne = yield* Effect.forkScoped(
+          owner(Effect2.pipe('b', EffectString.repeat(64)), ownerOneAcquired, releaseOwnerOne),
+        );
+        const ownerTwo = yield* Effect.forkScoped(
+          owner(Effect2.pipe('c', EffectString.repeat(64)), ownerTwoAcquired, releaseOwnerTwo),
+        );
         yield* Deferred.await(ownerOneAcquired);
         yield* Deferred.await(ownerTwoAcquired);
 
@@ -94,7 +100,7 @@ describe('ready-query builder exclusion', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-ready-query-interrupt-'});
-        const checkoutId = 'd'.repeat(64);
+        const checkoutId = Effect2.pipe('d', EffectString.repeat(64));
         const bodyEntered = yield* Deferred.make<void>();
         const benchmark = yield* Effect.forkScoped(
           withReadyQueryBuilderExclusion(

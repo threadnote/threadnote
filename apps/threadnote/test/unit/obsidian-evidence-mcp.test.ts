@@ -1,11 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
-import type {EffectMcpServerAdapter} from '@threadnote/threadnote/effect/ai/mcp';
+import {EffectMcpServerAdapter} from '@threadnote/threadnote/effect/ai/mcp';
 import {
   inspectObsidianNote,
   obsidianSourceWork,
@@ -37,17 +38,20 @@ describe('MCP Obsidian evidence acceptance', () => {
       yield* obsidianSourceWork.run(config, 'notes', {mode: 'automatic', requestId: 'test', credentialEnvironment: {}});
       const reviewed = yield* inspectObsidianNote(config, 'notes', 'Decision.md');
 
-      type ToolResult = {readonly isError?: boolean};
-      const handlers = new Map<string, (input: Record<string, unknown>) => Effect.Effect<ToolResult>>();
-      const server = {
-        registerTool: (name: string, _definition: unknown, handle: (input: Record<string, unknown>) => unknown) => {
-          handlers.set(name, handle as (input: Record<string, unknown>) => Effect.Effect<ToolResult>);
-        },
-      } as unknown as EffectMcpServerAdapter;
+      const server = new EffectMcpServerAdapter('test', '1', 'Test adapter');
+      const registration = vi.spyOn(server, 'registerTool');
       registerObsidianEvidenceTools(server, config);
-      expect([...handlers.keys()]).toEqual(['inspect_obsidian_note', 'derive_from_obsidian', 'read_source_evidence']);
-      const derive = handlers.get('derive_from_obsidian');
-      expect(derive).toBeDefined();
+      expect(EffectArray.map(registration.mock.calls, ([name]) => name)).toEqual([
+        'inspect_obsidian_note',
+        'derive_from_obsidian',
+        'read_source_evidence',
+      ]);
+      const inspected = yield* server.invokeTool('inspect_obsidian_note', {
+        sourceId: 'notes',
+        relativePath: 'Decision.md',
+      });
+      expect(inspected.isError).not.toBe(true);
+      const derive = (input: Record<string, unknown>) => server.invokeTool('derive_from_obsidian', input);
       const input = {
         sourceId: 'notes',
         relativePath: 'Decision.md',
@@ -63,7 +67,7 @@ describe('MCP Obsidian evidence acceptance', () => {
       const relocationRoot = path.join(home, 'data', 'local', 'user', 'tester', 'private', 'memory-relocations', 'v1');
       yield* fs.makeDirectory(relocationRoot, {recursive: true});
       yield* fs.chmod(relocationRoot, 0o755);
-      const failedAfterCommit = yield* derive!(input);
+      const failedAfterCommit = yield* derive(input);
       expect(failedAfterCommit.isError).toBe(true);
 
       const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/postcommit.md';
@@ -76,7 +80,7 @@ describe('MCP Obsidian evidence acceptance', () => {
       yield* fs.chmod(relocationRoot, 0o700);
       const evidenceDirectory = path.join(home, 'threadnote', 'sources', 'obsidian', 'notes', 'evidence');
       expect(yield* fs.readDirectory(evidenceDirectory)).toHaveLength(1);
-      const duplicate = yield* derive!(input);
+      const duplicate = yield* derive(input);
       expect(duplicate.isError).toBe(true);
       expect(yield* fs.readDirectory(evidenceDirectory)).toHaveLength(1);
       expect((yield* readObsidianEvidence(config, citation!)).historical).toBe('available');

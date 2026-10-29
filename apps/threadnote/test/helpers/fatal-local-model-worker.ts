@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {
   LocalModelWorkerProcess,
   LocalModelWorkerSpawner,
@@ -28,13 +29,16 @@ function spawnFatalLocalModelWorker(): LocalModelWorkerProcess {
     cmd: [
       process.execPath,
       '-e',
-      [
-        "process.stdin.once('data', () => {",
-        "  process.stderr.write('FATAL ERROR: synthetic native generation crash\\n');",
-        '  process.exit(134);',
-        '});',
-        'process.stdin.resume();',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          "process.stdin.once('data', () => {",
+          "  process.stderr.write('FATAL ERROR: synthetic native generation crash\\n');",
+          '  process.exit(134);',
+          '});',
+          'process.stdin.resume();',
+        ],
+        '\n',
+      ),
     ],
     env: {...process.env},
     stdin: 'pipe',

@@ -1,21 +1,26 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {mkdtemp, mkdir, writeFile, readFile, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {testHttpFetch} from '@threadnote/testing/http-fetch';
-import {Effect} from 'effect';
+import {Effect, Schema} from 'effect';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {startManagerTestServer, type ManagerTestServer} from '../helpers/manager-test-server.js';
 import * as utils from '../../src/utils.js';
 import * as consolidator from '../../src/effect/ai/consolidator.js';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
-import type {ConsolidationJobResponse, ConsolidationModelOption} from '@threadnote/manager/ui/contracts';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 // Real HTTP and child-process boundaries deliberately use Promise tests.
 let home: string;
 let server: ManagerTestServer;
 let generationMarker: string;
 const token = 'consolidation-model-test-token';
-const uris = [0, 1].map(i => `threadnote://user/tester/memories/durable/projects/threadnote/source-${i}.md`);
+const uris = EffectArray.map(
+  [0, 1],
+  i => `threadnote://user/tester/memories/durable/projects/threadnote/source-${i}.md`,
+);
 const body = {agent: 'codex', uris, kind: 'durable', status: 'active', project: 'threadnote', topic: 'result'};
 beforeEach(async () => {
   vi.stubEnv('THREADNOTE_EFFECT_AI', '');
@@ -57,17 +62,20 @@ fi
   for (let i = 0; i < 2; i++)
     await writeFile(
       join(memoryRoot, `source-${i}.md`),
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: threadnote',
-        `topic: source-${i}`,
-        'source_agent_client: test',
-        'timestamp: 2026-10-08T00:00:00.000Z',
-        '',
-        `Source decision ${i}.`,
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          `topic: source-${i}`,
+          'source_agent_client: test',
+          'timestamp: 2026-10-08T00:00:00.000Z',
+          '',
+          `Source decision ${i}.`,
+        ],
+        '\n',
+      ),
     );
   server = await startManagerTestServer(
     {
@@ -86,6 +94,18 @@ afterEach(async () => {
   vi.unstubAllEnvs();
   if (home) await rm(home, {recursive: true, force: true});
 });
+const modelOptionResponseSchema = Schema.StructWithRest(
+  Schema.Struct({id: Schema.String, label: Schema.String, isDefault: Schema.Boolean}),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const consolidationResponseSchema = Schema.StructWithRest(
+  Schema.Struct({
+    error: Schema.optional(Schema.String),
+    job: Schema.optional(Schema.Unknown),
+    models: Schema.optional(Schema.Array(modelOptionResponseSchema)),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
 async function request(path: string, payload?: Record<string, unknown>, authorized = true) {
   const response = await testHttpFetch(server.url + path, {
     method: payload ? 'POST' : 'GET',
@@ -94,11 +114,7 @@ async function request(path: string, payload?: Record<string, unknown>, authoriz
   });
   return {
     status: response.status,
-    body: (await response.json()) as {
-      error?: string;
-      models?: ConsolidationModelOption[];
-      job?: ConsolidationJobResponse;
-    },
+    body: Schema.decodeUnknownSync(consolidationResponseSchema)(await response.json()),
   };
 }
 
@@ -118,7 +134,7 @@ describe('Manager consolidation model HTTP boundary', () => {
     ]);
     await expect(readFile(generationMarker, 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
   });
-  it.each([undefined, '', ' ', 'stale-choice', 'x'.repeat(257)])(
+  it.each([undefined, '', ' ', 'stale-choice', Effect2.pipe('x', EffectString.repeat(257))])(
     'rejects missing, invalid or stale model before generation: %s',
     async model => {
       const result = await request('/api/consolidations', {...body, ...(model === undefined ? {} : {model})});
@@ -139,11 +155,15 @@ describe('Manager consolidation model HTTP boundary', () => {
     expect(await readFile(generationMarker, 'utf8')).toBe('current-choice\nmodel_reasoning_effort="low"');
   });
   it('exposes installed generation choices without a global selection and never leaks paths or receipts', async () => {
-    const model = BUILTIN_MODEL_MANIFESTS.find(model => model.role === 'generation')!;
+    const model = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.role === 'generation'),
+    )!;
     const directory = join(home, 'models', 'generation', model.id);
     await mkdir(directory, {recursive: true});
     await writeFile(join(directory, `${model.sha256}.gguf`), 'disposable installation fixture');
-    const embedding = BUILTIN_MODEL_MANIFESTS.find(model => model.role === 'embedding')!;
+    const embedding = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.role === 'embedding'),
+    )!;
     const embeddingDirectory = join(home, 'models', 'embedding', embedding.id);
     await mkdir(embeddingDirectory, {recursive: true});
     await writeFile(join(embeddingDirectory, `${embedding.sha256}.gguf`), 'disposable embedding fixture');
@@ -162,7 +182,9 @@ describe('Manager consolidation model HTTP boundary', () => {
     const native = vi
       .spyOn(consolidator, 'runNativeAiConsolidation')
       .mockImplementation(() => Effect.succeed('Unexpected draft.'));
-    const model = BUILTIN_MODEL_MANIFESTS.find(model => model.role === 'generation')!;
+    const model = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.role === 'generation'),
+    )!;
     const directory = join(home, 'models', 'generation', model.id);
     const file = join(directory, `${model.sha256}.gguf`);
     await mkdir(directory, {recursive: true});
@@ -190,7 +212,9 @@ describe('Manager consolidation model HTTP boundary', () => {
     const remote = vi
       .spyOn(consolidator, 'runEffectAiConsolidation')
       .mockImplementation(() => Effect.succeed('Remote draft.'));
-    const model = BUILTIN_MODEL_MANIFESTS.find(model => model.role === 'generation')!;
+    const model = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.role === 'generation'),
+    )!;
     const directory = join(home, 'models', 'generation', model.id);
     await mkdir(directory, {recursive: true});
     await writeFile(join(directory, `${model.sha256}.gguf`), 'disposable installation fixture');

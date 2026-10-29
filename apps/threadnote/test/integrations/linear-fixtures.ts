@@ -1,6 +1,9 @@
 import type {LinearSourceConfig} from '@threadnote/integration-linear/config';
 import type {LinearComment, LinearIssue} from '@threadnote/integration-linear/schema';
-export const uuid = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`;
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+export const uuid = (n: number) => `00000000-0000-0000-0000-${Effect.pipe(String(n), EffectString.padStart(12, '0'))}`;
 export const time = '2026-10-08T12:00:00.000Z';
 export const source: LinearSourceConfig = {
   type: 'linear',
@@ -64,11 +67,12 @@ export type GraphRequest = {query: string; variables: Record<string, unknown>};
 export const request = (init: RequestInit): GraphRequest => JSON.parse(String(init.body));
 export const safeFetch = async (_url: URL, init: RequestInit): Promise<Response> => {
   const req = request(init);
-  if (req.query.includes('LinearIdentity')) return response({organization: {id: uuid(1)}, viewer: {id: uuid(2)}});
-  if (req.query.includes('LinearTeam'))
+  if (Effect.pipe(req.query, EffectString.includes('LinearIdentity')))
+    return response({organization: {id: uuid(1)}, viewer: {id: uuid(2)}});
+  if (Effect.pipe(req.query, EffectString.includes('LinearTeam')))
     return response({team: {id: uuid(3), name: 'Synthetic team', organization: {id: uuid(1)}}});
-  if (req.query.includes('LinearIssue(')) return response({issue});
-  if (req.query.includes('LinearComments'))
+  if (Effect.pipe(req.query, EffectString.includes('LinearIssue('))) return response({issue});
+  if (Effect.pipe(req.query, EffectString.includes('LinearComments')))
     return response({issue: {id: issue.id, comments: connection([comment(10)])}});
   throw new Error('Unrecognized synthetic GraphQL operation');
 };

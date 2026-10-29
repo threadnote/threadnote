@@ -5,6 +5,8 @@ import {graphShareProfileOciArtifact, parseGraphShareProfileOciArtifact} from '.
 import type {GraphShareProfileV1} from '../profile.js';
 import type {makeGraphShareRegistryReader} from '../registry/reader.js';
 import type {makeGraphShareRegistryWriter} from '../registry/writer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type Writer = Pick<
   Effect.Success<ReturnType<typeof makeGraphShareRegistryWriter<never, never>>>,
@@ -24,7 +26,7 @@ export const publishGraphShareProfileArtifact = Effect.fn('codeGraph.sharing.pub
     try: () => graphShareProfileOciArtifact(profile),
     catch: () => graphSharingFailure('Publisher profile cannot be encoded as an OCI artifact.'),
   });
-  const tag = `tn-profile-${artifact.manifestDigest.slice('sha256:'.length)}`;
+  const tag = `tn-profile-${Effect2.pipe(artifact.manifestDigest, EffectString.slice('sha256:'.length))}`;
   const existing = yield* writer.headManifest(tag);
   if (existing !== undefined && existing !== artifact.manifestDigest)
     return yield* graphSharingFailure('Registry profile retention tag conflicts with its pinned manifest.');

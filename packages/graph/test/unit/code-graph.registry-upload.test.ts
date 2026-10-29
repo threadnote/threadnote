@@ -2,6 +2,9 @@ import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {parseGraphShareRegistryTarget} from '@threadnote/graph/sharing/registry/reference';
 import {parseGraphShareRegistryUploadLocation} from '@threadnote/graph/sharing/registry/upload';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const target = parseGraphShareRegistryTarget('oci://registry.example.test/acme/canonical');
 const path = '/v2/acme/canonical/blobs/uploads/session-123';
@@ -14,7 +17,9 @@ describe('registry upload session authority', () => {
   });
 
   it('confines generated session locations without reserializing signed query bytes', () => {
-    const component = FC.array(FC.constantFrom(...'abcXYZ012_-'), {minLength: 1, maxLength: 64}).map(x => x.join(''));
+    const component = FC.array(FC.constantFrom(...'abcXYZ012_-'), {minLength: 1, maxLength: 64}).map(x =>
+      EffectArray.join(x, ''),
+    );
     FC.assert(
       FC.property(component, component, FC.boolean(), (session, state, absolute) => {
         const location = `/v2/acme/canonical/blobs/uploads/${session}?_state=${state}%2f%3D+x`;
@@ -22,7 +27,7 @@ describe('registry upload session authority', () => {
         expect(accepted).toBe(location);
         const url = new URL(accepted, target.origin);
         expect(url.origin).toBe(target.origin);
-        expect(url.pathname.startsWith('/v2/acme/canonical/blobs/uploads/')).toBe(true);
+        expect(Effect.pipe(url.pathname, EffectString.startsWith('/v2/acme/canonical/blobs/uploads/'))).toBe(true);
         expect(url.search).toBe(`?_state=${state}%2f%3D+x`);
         expect(() =>
           parseGraphShareRegistryUploadLocation(target, 'https://foreign.example.test' + location),
@@ -51,7 +56,7 @@ describe('registry upload session authority', () => {
       path + '?_state=one&%5fstate=two',
       path + '?a=raw space',
       path + '?',
-      path + '?_state=' + 'x'.repeat(8192),
+      path + '?_state=' + Effect.pipe('x', EffectString.repeat(8192)),
     ]) {
       expect(() => parseGraphShareRegistryUploadLocation(target, location)).toThrow(
         'Registry upload location is invalid.',

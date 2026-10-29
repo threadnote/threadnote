@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {
   RECALL_EVALUATION_CATEGORIES,
@@ -5,6 +6,7 @@ import {
   type RecallEvaluationMetricSetV1,
   type RecallEvaluationResultV1,
 } from './recall.js';
+import * as EffectRecord from 'effect/Record';
 
 export const RECALL_BASELINE_VERSION = 1 as const;
 export const CURRENT_RECALL_BASELINE_PATH =
@@ -63,10 +65,9 @@ const MetricSet = Schema.Struct({
   staleHitRate: Rate,
 });
 const Categories = Schema.Struct(
-  Object.fromEntries(RECALL_EVALUATION_CATEGORIES.map(category => [category, Schema.optionalKey(MetricSet)])) as Record<
-    RecallEvaluationCategory,
-    ReturnType<typeof Schema.optionalKey<typeof MetricSet>>
-  >,
+  EffectRecord.fromEntries(
+    EffectArray.map(RECALL_EVALUATION_CATEGORIES, category => [category, Schema.optionalKey(MetricSet)]),
+  ),
 );
 
 export const RecallEvaluationBaselineSchemaV1 = Schema.Struct({
@@ -137,5 +138,5 @@ export function exceedsReviewedContractFailureLimit(
   if (candidateFailures.length > baseline.knownContractFailures) return true;
   if (!baseline.reviewedContractFailures) return false;
   const reviewed = new Set(baseline.reviewedContractFailures);
-  return candidateFailures.some(failure => !reviewed.has(failure));
+  return EffectArray.some(candidateFailures, failure => !reviewed.has(failure));
 }

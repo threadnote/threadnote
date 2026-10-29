@@ -4,7 +4,7 @@ export const BUN_STANDALONE_TARGETS = [
   'bun-linux-arm64',
   'bun-linux-arm64-musl',
   'bun-linux-x64-baseline',
-  'bun-linux-x64-musl-baseline',
+  'bun-linux-x64-baseline-musl',
   'bun-windows-arm64',
   'bun-windows-x64-baseline',
 ] as const satisfies readonly Bun.Build.CompileTarget[];

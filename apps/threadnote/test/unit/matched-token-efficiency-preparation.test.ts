@@ -1,8 +1,10 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import {afterEach, describe, expect, it} from 'vitest';
+import {Predicate} from 'effect';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {
@@ -28,12 +30,41 @@ import {
   type MatchedTokenEfficiencyAgentContextBriefRequestV1,
 } from '../../../../scripts/prepare-matched-token-efficiency-study.js';
 import {parseMatchedEvaluationRuntimeV1} from '../../../../scripts/run-matched-evaluation.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+const requiredObject = (value: unknown, description: string): {readonly [key: PropertyKey]: unknown} => {
+  if (!Predicate.isObject(value)) throw new Error(`Expected ${description} to be an object.`);
+  return value;
+};
+const requiredProperty = (value: unknown, key: string): unknown =>
+  Predicate.isObject(value) && key in value ? value[key] : undefined;
+const requiredArrayProperty = (value: unknown, key: string): readonly unknown[] => {
+  const candidate = requiredProperty(value, key);
+  if (!EffectArray.isArray(candidate)) throw new Error(`Expected ${key} to be an array.`);
+  return candidate;
+};
+const requiredStringProperty = (value: unknown, key: string): string => {
+  const candidate = requiredProperty(value, key);
+  if (typeof candidate !== 'string') throw new Error(`Expected ${key} to be a string.`);
+  return candidate;
+};
+const requiredStringArrayProperty = (value: unknown, key: string): readonly string[] => {
+  const candidate = requiredArrayProperty(value, key);
+  const strings: string[] = [];
+  for (const item of candidate) {
+    if (typeof item !== 'string') throw new Error(`Expected ${key} to contain only strings.`);
+    strings.push(item);
+  }
+  return strings;
+};
 
 describe('matched token-efficiency study preparation', () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('binds plain production version output to the reviewed immutable release digest and source', () => {
@@ -54,11 +85,11 @@ describe('matched token-efficiency study preparation', () => {
     expect(() => check()).not.toThrow();
     expect(() => check(`threadnote v5.0.7-local.g${release.sourceCommit}\n`)).toThrow('exact production');
     expect(() => check('threadnote v5.0.6\n')).toThrow('exact production');
-    expect(() => check(undefined, undefined, 'f'.repeat(64))).toThrow('hash differs');
+    expect(() => check(undefined, undefined, Effect.pipe('f', EffectString.repeat(64)))).toThrow('hash differs');
     expect(() =>
       assertMatchedTokenEfficiencyProductionReleaseV1(
         'threadnote v5.0.7\n',
-        'f'.repeat(40),
+        Effect.pipe('f', EffectString.repeat(40)),
         release.executableSha256,
         release,
       ),
@@ -68,19 +99,22 @@ describe('matched token-efficiency study preparation', () => {
         'threadnote v5.0.7\n',
         release.sourceCommit,
         release.executableSha256,
-        {...release, archiveSha256: 'f'.repeat(64)},
+        {...release, archiveSha256: Effect.pipe('f', EffectString.repeat(64))},
       ),
     ).toThrow('provenance');
   });
 
   it('accepts only an exact commit-reporting 5.0.6 local build', () => {
-    const commit = 'a'.repeat(40);
+    const commit = Effect.pipe('a', EffectString.repeat(40));
 
     expect(() => assertMatchedTokenEfficiencyThreadnoteVersionOutputV1('threadnote v5.0.6\n', commit)).toThrow(
       'exact commit-reporting',
     );
     expect(() =>
-      assertMatchedTokenEfficiencyThreadnoteVersionOutputV1(`threadnote v5.0.6-local.g${'b'.repeat(40)}\n`, commit),
+      assertMatchedTokenEfficiencyThreadnoteVersionOutputV1(
+        `threadnote v5.0.6-local.g${Effect.pipe('b', EffectString.repeat(40))}\n`,
+        commit,
+      ),
     ).toThrow('differs');
     expect(() =>
       assertMatchedTokenEfficiencyThreadnoteVersionOutputV1(`threadnote v5.0.6-local.g${commit}\n`, commit),
@@ -109,7 +143,7 @@ describe('matched token-efficiency study preparation', () => {
       baseDirectory: base.directory,
       fixDirectory: fix.directory,
       fixRevision,
-      taskId: `tsk_${'1'.repeat(24)}`,
+      taskId: `tsk_${Effect.pipe('1', EffectString.repeat(24))}`,
     } as const;
     await ensureMatchedEvaluationFixCommitAvailableV1(input);
     expect(await gitOutput(base.directory, ['cat-file', '-t', fixRevision])).toBe('commit');
@@ -324,35 +358,47 @@ describe('matched token-efficiency study preparation', () => {
     await mkdir(dependencySource);
     await writeFile(join(dependencySource, 'fixture-package.js'), 'export const fixture = true;\n');
     await writeFile(join(repositories[0].directory, '.git', 'info', 'exclude'), 'node_modules/\n');
-    const fixtureInput = JSON.parse(
-      await readFile(
-        join(process.cwd(), 'apps/threadnote/test/evaluation/fixtures/matched-evaluation-v1/fixture.json'),
-        'utf8',
+    const fixtureInput = requiredObject(
+      JSON.parse(
+        await readFile(
+          join(process.cwd(), 'apps/threadnote/test/evaluation/fixtures/matched-evaluation-v1/fixture.json'),
+          'utf8',
+        ),
       ),
-    ) as {tasks: Array<Record<string, unknown>>; version: 1; corpusId: string};
+      'matched evaluation fixture',
+    );
     const corpusInput = {
       ...fixtureInput,
-      tasks: fixtureInput.tasks.map((task, index) => ({
-        ...task,
-        memoryFixtures: (task.memoryFixtures as Array<Record<string, unknown>>).map(memory => ({
-          ...memory,
-          source:
-            memory.source === null
-              ? null
-              : {...(memory.source as Record<string, unknown>), endLine: 1, path: 'service.ts', startLine: 1},
-        })),
-        repositoryFixtureHash: repositories[index % 2].fixtureHash,
-        sourceGold: (task.sourceGold as Array<Record<string, unknown>>).map(sourceGold => ({
-          ...sourceGold,
+      tasks: EffectArray.map(requiredArrayProperty(fixtureInput, 'tasks'), (task, index) => {
+        const taskRecord = requiredObject(task, 'matched evaluation task');
+        const memoryFixtures = EffectArray.map(requiredArrayProperty(taskRecord, 'memoryFixtures'), memory => {
+          const memoryRecord = requiredObject(memory, 'memory fixture');
+          const source = requiredProperty(memoryRecord, 'source');
+          return {
+            ...memoryRecord,
+            source:
+              source === null
+                ? null
+                : {...requiredObject(source, 'memory source'), endLine: 1, path: 'service.ts', startLine: 1},
+          };
+        });
+        const sourceGold = EffectArray.map(requiredArrayProperty(taskRecord, 'sourceGold'), source => ({
+          ...requiredObject(source, 'source gold'),
           endLine: 1,
           path: 'service.ts',
           startLine: 1,
-        })),
-      })),
+        }));
+        return {
+          ...taskRecord,
+          memoryFixtures,
+          repositoryFixtureHash: repositories[index % 2].fixtureHash,
+          sourceGold,
+        };
+      }),
     };
     const corpus = parseMatchedEvaluationCorpusV1(corpusInput);
     const fixRepositories = await Promise.all(
-      corpus.tasks.map(async (_task, index) => {
+      EffectArray.map(corpus.tasks, async (_task, index) => {
         const base = repositories[index % 2];
         const fix = await cloneHeldOutRepository(join(root, `fix-repository-${index}`), base);
         await writeFile(join(fix.directory, 'service.ts'), 'export const value = 2;\n');
@@ -364,8 +410,8 @@ describe('matched token-efficiency study preparation', () => {
     );
     const corpusPath = join(root, 'corpus.json');
     await writeFile(corpusPath, `${JSON.stringify(corpus, undefined, 2)}\n`);
-    const graphSnapshotId = `cgsn_${'1'.repeat(40)}`;
-    const graphContentId = `cgc_${'2'.repeat(40)}`;
+    const graphSnapshotId = `cgsn_${Effect.pipe('1', EffectString.repeat(40))}`;
+    const graphContentId = `cgc_${Effect.pipe('2', EffectString.repeat(40))}`;
     const assessmentFile = join(root, 'assessment.json');
     await writeFile(assessmentFile, '{"review":"no manual context"}\n');
     const taskContexts = [];
@@ -384,7 +430,7 @@ describe('matched token-efficiency study preparation', () => {
       const linkedMemoryIdentities: Array<{fixtureMemoryId: string; managedMemoryId: string}> = [];
       for (let memoryIndex = 0; memoryIndex < task.memoryFixtures.length; memoryIndex += 1) {
         const fixture = task.memoryFixtures[memoryIndex];
-        const managedMemoryId = `tn_${String(index + 1).repeat(8)}${String(memoryIndex + 1).repeat(8)}`;
+        const managedMemoryId = `tn_${Effect.pipe(String(index + 1), EffectString.repeat(8))}${Effect.pipe(String(memoryIndex + 1), EffectString.repeat(8))}`;
         linkedMemoryIdentities.push({fixtureMemoryId: fixture.memoryId, managedMemoryId});
         const citations =
           fixture.source === null
@@ -392,9 +438,9 @@ describe('matched token-efficiency study preparation', () => {
             : [
                 createMemoryCodeCitation({
                   extractorSet: 'matched-preparation-test-v1',
-                  fileContentHash: {algorithm: 'sha256', value: '3'.repeat(64)},
+                  fileContentHash: {algorithm: 'sha256', value: Effect.pipe('3', EffectString.repeat(64))},
                   path: fixture.source.path,
-                  repositoryId: '4'.repeat(64),
+                  repositoryId: Effect.pipe('4', EffectString.repeat(64)),
                   repositoryIdentityKind: 'remote',
                   sourceCommit: repository.revision,
                   sourceDirty: false,
@@ -434,11 +480,11 @@ describe('matched token-efficiency study preparation', () => {
       }
       expectedReceipts.set(
         task.taskId,
-        taskReceipts.sort((left, right) => left.memoryId.localeCompare(right.memoryId)),
+        taskReceipts.sort((left, right) => Effect.pipe(left.memoryId, EffectString.localeCompare(right.memoryId))),
       );
       taskContexts.push({
         asIssuedContext: {assessmentFile, contentFile: null, sufficiency: 'none'},
-        clusterId: `cluster_${String((index % 2) + 1).repeat(16)}`,
+        clusterId: `cluster_${Effect.pipe(String((index % 2) + 1), EffectString.repeat(16))}`,
         graphHomeDirectory: graphHome,
         linkedHomeDirectory: linkedHome,
         linkedMemoryIdentities,
@@ -507,15 +553,19 @@ describe('matched token-efficiency study preparation', () => {
             taskBudget: {steps: 100, tokens: 100_000},
             temporaryRoot: adapterTemporaryRoot,
           },
-          bootstrap: {confidenceLevelBasisPoints: 9_500, iterations: 200, seed: '7'.repeat(64)},
+          bootstrap: {
+            confidenceLevelBasisPoints: 9_500,
+            iterations: 200,
+            seed: Effect.pipe('7', EffectString.repeat(64)),
+          },
           clusters: [
             {
-              clusterId: `cluster_${'1'.repeat(16)}`,
+              clusterId: `cluster_${Effect.pipe('1', EffectString.repeat(16))}`,
               repositoryDirectory: repositories[0].directory,
               repositoryUrl: repositories[0].url,
             },
             {
-              clusterId: `cluster_${'2'.repeat(16)}`,
+              clusterId: `cluster_${Effect.pipe('2', EffectString.repeat(16))}`,
               repositoryDirectory: repositories[1].directory,
               repositoryUrl: repositories[1].url,
             },
@@ -534,7 +584,7 @@ describe('matched token-efficiency study preparation', () => {
           lifecycle: lifecycle(),
           project: 'threadnote',
           repetitions: 6,
-          scheduleSeed: '8'.repeat(64),
+          scheduleSeed: Effect.pipe('8', EffectString.repeat(64)),
           studyId: 'matched-preparation-test',
           taskContexts,
           threadnote: {
@@ -551,7 +601,7 @@ describe('matched token-efficiency study preparation', () => {
             interpreter: verificationInterpreter,
             runner: verificationRunner,
             sandboxExecutable: verificationSandbox,
-            tasks: corpus.tasks.map((task, index) => ({
+            tasks: EffectArray.map(corpus.tasks, (task, index) => ({
               fixRepositoryDirectory: fixRepositories[index].directory,
               protectedPaths: ['tests'],
               qualificationCommands: [['qualification-check']],
@@ -592,12 +642,17 @@ describe('matched token-efficiency study preparation', () => {
     const runtime = parseMatchedEvaluationRuntimeV1(
       JSON.parse(await readFile(join(outputRoot, 'runtime.json'), 'utf8')),
     );
-    const qualification = JSON.parse(await readFile(join(outputRoot, 'qualification-receipt.json'), 'utf8')) as {
-      readonly receiptHash: string;
-      readonly tasks: readonly {readonly appliedPaths: readonly string[]; readonly commands: readonly unknown[]}[];
-    };
+    const qualification: unknown = JSON.parse(await readFile(join(outputRoot, 'qualification-receipt.json'), 'utf8'));
+    const qualificationRecord = requiredObject(qualification, 'qualification receipt');
+    const qualificationTasks = EffectArray.map(requiredArrayProperty(qualificationRecord, 'tasks'), task => {
+      const taskRecord = requiredObject(task, 'qualification task');
+      return {
+        appliedPaths: requiredStringArrayProperty(taskRecord, 'appliedPaths'),
+        commands: requiredArrayProperty(taskRecord, 'commands'),
+      };
+    });
     const configs = await Promise.all(
-      manifest.arms.map(async definition => {
+      EffectArray.map(manifest.arms, async definition => {
         const bytes = await readFile(join(outputRoot, 'adapter-config', `${definition.arm}.json`));
         return {
           config: parseMatchedEvaluationCodexAdapterConfigV1(JSON.parse(bytes.toString('utf8'))),
@@ -611,30 +666,34 @@ describe('matched token-efficiency study preparation', () => {
       manifestHash: manifest.manifestHash,
       referenceArm: 'unavailable',
       requiredProductVersion: MATCHED_TOKEN_EFFICIENCY_REQUIRED_PRODUCT_VERSION,
-      qualificationReceiptHash: qualification.receiptHash,
+      qualificationReceiptHash: requiredStringProperty(qualificationRecord, 'receiptHash'),
       studyHash: study.studyHash,
       threadnoteSourceCommit: sourceCommit,
     });
     expect(await realpath(adapterTemporaryRoot)).toBe(adapterTemporaryRoot);
-    expect(qualification.tasks).toHaveLength(corpus.tasks.length);
-    expect(qualification.tasks.every(task => task.appliedPaths.join(',') === 'service.ts')).toBe(true);
-    expect(qualification.tasks.every(task => task.commands.length === 1)).toBe(true);
+    expect(qualificationTasks).toHaveLength(corpus.tasks.length);
+    expect(
+      EffectArray.every(qualificationTasks, task => EffectArray.join(task.appliedPaths, ',') === 'service.ts'),
+    ).toBe(true);
+    expect(EffectArray.every(qualificationTasks, task => task.commands.length === 1)).toBe(true);
     expect(manifest.schedule).toHaveLength(108);
-    expect(runtime.arms.map(arm => arm.arm)).toEqual([
+    expect(EffectArray.map(runtime.arms, arm => arm.arm)).toEqual([
       'files',
       'threadnote-graph',
       'threadnote-compact',
       'threadnote-source',
     ]);
-    for (const [path, expectedHash] of Object.entries(receipt.outputHashes)) {
+    for (const [path, expectedHash] of EffectRecord.toEntries(receipt.outputHashes)) {
       expect(sha256(await readFile(join(outputRoot, path))), path).toBe(expectedHash);
     }
     for (const {definition, hash} of configs) {
       expect(hash, definition.arm).toBe(definition.adapterConfigurationHash);
       expect(hash, definition.arm).toBe(receipt.adapterConfigurationHashes[definition.arm]);
     }
-    expect(configs.every(entry => entry.config.approvedCommands[0]?.taskId === corpus.tasks[0].taskId)).toBe(true);
-    expect(configs.every(entry => entry.config.dependencyProjections.length === 1)).toBe(true);
+    expect(
+      EffectArray.every(configs, entry => entry.config.approvedCommands[0]?.taskId === corpus.tasks[0].taskId),
+    ).toBe(true);
+    expect(EffectArray.every(configs, entry => entry.config.dependencyProjections.length === 1)).toBe(true);
     expect(configs[0].config.dependencyProjections[0]).toMatchObject({
       lockFileRelativePath: 'dependency.lock',
       sourceDirectory: dependencySource,
@@ -642,37 +701,61 @@ describe('matched token-efficiency study preparation', () => {
       targetRelativePath: 'node_modules',
       taskId: corpus.tasks[0].taskId,
     });
-    const graphConfig = configs.find(entry => entry.config.arm === 'threadnote-graph')?.config;
-    const compactConfig = configs.find(entry => entry.config.arm === 'threadnote-compact')?.config;
+    const graphConfig = EffectOption.getOrUndefined(
+      EffectArray.findFirst(configs, entry => entry.config.arm === 'threadnote-graph'),
+    )?.config;
+    const compactConfig = EffectOption.getOrUndefined(
+      EffectArray.findFirst(configs, entry => entry.config.arm === 'threadnote-compact'),
+    )?.config;
     expect(graphConfig?.contextHomes).toHaveLength(corpus.tasks.length);
     expect(compactConfig?.contextHomes).toHaveLength(corpus.tasks.length);
-    expect(new Set(graphConfig?.contextHomes.map(home => home.homeDirectory))).toHaveProperty(
-      'size',
-      corpus.tasks.length,
-    );
-    expect(new Set(compactConfig?.contextHomes.map(home => home.homeFixtureHash))).toHaveProperty(
-      'size',
-      corpus.tasks.length,
-    );
+    expect(
+      new Set(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(graphConfig?.contextHomes), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, home => home.homeDirectory),
+          ),
+        ),
+      ),
+    ).toHaveProperty('size', corpus.tasks.length);
+    expect(
+      new Set(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(compactConfig?.contextHomes), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, home => home.homeFixtureHash),
+          ),
+        ),
+      ),
+    ).toHaveProperty('size', corpus.tasks.length);
     for (const graphHome of graphConfig?.contextHomes ?? []) {
-      const linkedHome = compactConfig?.contextHomes.find(home => home.taskId === graphHome.taskId);
+      const linkedHome = EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(compactConfig?.contextHomes), __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(__effectArrayReceiver, home => home.taskId === graphHome.taskId),
+          ),
+        ),
+      );
       expect(linkedHome).toBeDefined();
       expect(graphHome.homeDirectory).not.toBe(linkedHome?.homeDirectory);
       expect(graphHome.homeFixtureHash).not.toBe(linkedHome?.homeFixtureHash);
       expect(graphHome.expectedContext.memoryAccess).toBe('disabled');
       expect(linkedHome?.expectedContext.memoryAccess).toBe('linked');
     }
-    expect(JSON.stringify(configs.map(entry => entry.config))).not.toContain('studyHash');
+    expect(JSON.stringify(EffectArray.map(configs, entry => entry.config))).not.toContain('studyHash');
     expect(study.clusters).toHaveLength(2);
     expect(study.verificationPlanHash).toBe(receipt.verificationPlanHash);
     expect(runtime.verificationPlanHash).toBe(study.verificationPlanHash);
-    expect(configs.every(entry => entry.config.verificationPlan?.planHash === study.verificationPlanHash)).toBe(true);
-    expect(study.taskContexts.every(context => context.linkReceipts.length > 0)).toBe(true);
+    expect(
+      EffectArray.every(configs, entry => entry.config.verificationPlan?.planHash === study.verificationPlanHash),
+    ).toBe(true);
+    expect(EffectArray.every(study.taskContexts, context => context.linkReceipts.length > 0)).toBe(true);
     for (const context of study.taskContexts) {
-      const expected = taskContexts.find(candidate => candidate.taskId === context.taskId);
+      const expected = EffectOption.getOrUndefined(
+        EffectArray.findFirst(taskContexts, candidate => candidate.taskId === context.taskId),
+      );
       expect(context.clusterId).toBe(expected?.clusterId);
       expect(context.repositoryFixtureHash).toBe(
-        repositories[context.clusterId === `cluster_${'1'.repeat(16)}` ? 0 : 1].fixtureHash,
+        repositories[context.clusterId === `cluster_${Effect.pipe('1', EffectString.repeat(16))}` ? 0 : 1].fixtureHash,
       );
       expect(context.linkReceipts).toEqual(expectedReceipts.get(context.taskId));
     }
@@ -681,7 +764,9 @@ describe('matched token-efficiency study preparation', () => {
       reason: 'reference-scope runtime is not configured by the production Codex preparer',
       version: 1,
     });
-    const referenceDefinition = manifest.arms.find(arm => arm.arm === 'reference-scope');
+    const referenceDefinition = EffectOption.getOrUndefined(
+      EffectArray.findFirst(manifest.arms, arm => arm.arm === 'reference-scope'),
+    );
     expect(referenceDefinition?.tool.artifactHash).toBe(sha256(referencePayload));
     expect(referenceDefinition?.tool.lockIdentityHash).toBe(sha256(referencePayload));
   }, 30_000);
@@ -702,7 +787,7 @@ async function readFixtureAgentContextBrief(
     throw cause;
   });
   const topics = await Promise.all(
-    files.map(async file => {
+    EffectArray.map(files, async file => {
       const match = /^topic: (.+)$/mu.exec(await readFile(join(memoryDirectory, file), 'utf8'));
       if (!match) throw new Error(`Fixture memory ${file} is missing its topic.`);
       return match[1];
@@ -710,13 +795,14 @@ async function readFixtureAgentContextBrief(
   );
   return {
     activeHandoffs: [],
-    durableDecisions: topics
-      .sort((left, right) => left.localeCompare(right))
-      .map(topic => ({
+    durableDecisions: EffectArray.map(
+      topics.sort((left, right) => Effect.pipe(left, EffectString.localeCompare(right))),
+      topic => ({
         kind: 'durable',
         project: request.project,
         topic,
-      })),
+      }),
+    ),
     type: 'context-brief',
     version: 3,
   };
@@ -801,11 +887,11 @@ async function gitOutput(cwd: string, arguments_: readonly string[]): Promise<st
     maxOutputBytes: 64 * 1_024,
     timeoutMilliseconds: 10_000,
   });
-  return result.stdout.trim();
+  return Effect.pipe(result.stdout, EffectString.trim);
 }
 
 function fakeThreadnoteProgram(snapshotId: string, graphContentId: string, sourceCommit: string): string {
-  const repositoryId = '4'.repeat(64);
+  const repositoryId = Effect.pipe('4', EffectString.repeat(64));
   return `#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo "threadnote v5.0.6-local.g${sourceCommit}"
@@ -855,11 +941,14 @@ printf '{"type":"code-graph-status","version":5,"stale":false,"identity":{"headC
 
 function lifecycle() {
   const zero = {cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0};
-  return ['files', 'threadnote-graph', 'threadnote-compact', 'threadnote-source', 'reference-scope'].map(arm => ({
-    arm,
-    setupMilliseconds: 0,
-    setupUsage: {graphPreparation: zero, memoryAuthoring: zero, memoryReview: zero},
-  }));
+  return EffectArray.map(
+    ['files', 'threadnote-graph', 'threadnote-compact', 'threadnote-source', 'reference-scope'],
+    arm => ({
+      arm,
+      setupMilliseconds: 0,
+      setupUsage: {graphPreparation: zero, memoryAuthoring: zero, memoryReview: zero},
+    }),
+  );
 }
 
 function sha256(bytes: Uint8Array): string {

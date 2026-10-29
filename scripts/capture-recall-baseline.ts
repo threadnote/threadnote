@@ -5,6 +5,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {evaluateRecallFixture, parseRecallEvaluationFixture} from '@threadnote/recall/evaluate';
 import {RECALL_RANKER_VERSION} from '@threadnote/recall/rank';
 import {atomicWrite, fixtureHash, printJson, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const FIXTURE_PATH = 'apps/threadnote/test/evaluation/fixtures/recall-v1/fixture.json';
 const DEFAULT_CREATED_AT = '2026-07-27T00:00:00.000Z';
@@ -48,13 +50,23 @@ function parseArguments(args: readonly string[]): {readonly createdAt: string; r
     const argument = args[index];
     if (argument === '--created-at') {
       const value = args[++index];
-      if (!value?.trim() || Number.isNaN(new Date(value).getTime())) {
+      if (
+        !Effect2.pipe(value, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) ||
+        Number.isNaN(new Date(value).getTime())
+      ) {
         throw ScriptError.make({message: '--created-at requires an ISO timestamp'});
       }
       createdAt = new Date(value).toISOString();
     } else if (argument === '--output') {
       const value = args[++index];
-      if (!value?.trim()) throw ScriptError.make({message: '--output requires a path'});
+      if (
+        !Effect2.pipe(value, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        )
+      )
+        throw ScriptError.make({message: '--output requires a path'});
       outputPath = value;
     } else {
       throw ScriptError.make({message: `Unknown recall baseline option: ${argument}`});

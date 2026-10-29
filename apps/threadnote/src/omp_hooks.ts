@@ -2,6 +2,8 @@ import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {resolveAgentHostPaths} from './agent_integration/host_paths.js';
 import {readFileIfExists} from './utils.js';
 import type {HooksInstallOptions} from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /**
  * omp loads hook factories from `<agentDir>/hooks/pre/*.{ts,js}`. The managed
@@ -46,9 +48,12 @@ export default function threadnoteHooks(pi: {
 }
 `;
 
-class OmpHooksConfigError extends Schema.TaggedError<OmpHooksConfigError>()('OmpHooksConfigError', {
-  message: Schema.String,
-}) {}
+class OmpHooksConfigError extends Schema.TaggedError<OmpHooksConfigError, {readonly brand: unique symbol}>()(
+  'OmpHooksConfigError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export const runOmpHooksInstall = Effect.fn('hooks.installOmp')(function* (options: HooksInstallOptions) {
   const fs = yield* FileSystem.FileSystem;
@@ -63,7 +68,7 @@ export const runOmpHooksInstall = Effect.fn('hooks.installOmp')(function* (optio
       yield* Console.log(`No managed omp hook found: ${hookPath}`);
       return;
     }
-    if (!current.startsWith(OMP_HOOK_FILE_MARKER)) {
+    if (!Effect2.pipe(current, EffectString.startsWith(OMP_HOOK_FILE_MARKER))) {
       yield* Console.log(`WARN ${hookPath} is not managed by Threadnote; not removing it`);
       return;
     }
@@ -76,7 +81,7 @@ export const runOmpHooksInstall = Effect.fn('hooks.installOmp')(function* (optio
     return;
   }
 
-  if (current !== undefined && !current.startsWith(OMP_HOOK_FILE_MARKER)) {
+  if (current !== undefined && !Effect2.pipe(current, EffectString.startsWith(OMP_HOOK_FILE_MARKER))) {
     return yield* OmpHooksConfigError.make({
       message: `${hookPath} exists and is not managed by Threadnote; not modifying it.`,
     });
@@ -109,9 +114,9 @@ export const relocateManagedOmpHook = Effect.fn('hooks.relocateManagedOmp')(func
   const previousPath = (yield* resolveAgentHostPaths('omp', previousHostRoot))!.hookPath;
   const nextPath = (yield* resolveAgentHostPaths('omp', nextHostRoot))!.hookPath;
   const previous = yield* readFileIfExists(previousPath);
-  if (previous === undefined || !previous.startsWith(OMP_HOOK_FILE_MARKER)) return;
+  if (previous === undefined || !Effect2.pipe(previous, EffectString.startsWith(OMP_HOOK_FILE_MARKER))) return;
   const next = yield* readFileIfExists(nextPath);
-  if (next !== undefined && !next.startsWith(OMP_HOOK_FILE_MARKER)) {
+  if (next !== undefined && !Effect2.pipe(next, EffectString.startsWith(OMP_HOOK_FILE_MARKER))) {
     return yield* OmpHooksConfigError.make({
       message: `${nextPath} exists and is not managed by Threadnote; not modifying it.`,
     });
@@ -128,7 +133,7 @@ export const relocateManagedOmpHook = Effect.fn('hooks.relocateManagedOmp')(func
 
 export const hasManagedOmpHooks = Effect.fn('hooks.hasManagedOmpHooks')(function* (hostRoot?: string) {
   const current = yield* readFileIfExists((yield* resolveAgentHostPaths('omp', hostRoot))!.hookPath);
-  return current !== undefined && current.startsWith(OMP_HOOK_FILE_MARKER);
+  return current !== undefined && Effect2.pipe(current, EffectString.startsWith(OMP_HOOK_FILE_MARKER));
 });
 
 export const hasCurrentOmpHooks = Effect.fn('hooks.hasCurrentOmpHooks')(function* (hostRoot?: string) {

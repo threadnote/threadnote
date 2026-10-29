@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptError} from '../effect/errors.js';
 import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const RECALL_RERANKER_PARITY_FIXTURE_VERSION = 1 as const;
 export const DEFAULT_RERANKER_PARITY_MAXIMUM_ABSOLUTE_ERROR = 0.02;
@@ -150,7 +153,7 @@ export function parseRecallRerankerParityFixtureV1(value: unknown): RecallRerank
     fixture.run.modelTreeSha256,
     fixture.run.runJsonSha256,
   ];
-  if (shaValues.some(value => !/^[0-9a-f]{64}$/.test(value))) {
+  if (EffectArray.some(shaValues, value => !/^[0-9a-f]{64}$/.test(value))) {
     throw ScriptError.make({message: 'Recall reranker parity fixture contains an invalid SHA-256.'});
   }
   if (!/^[0-9a-f]{40}$/.test(fixture.run.trainingCodeRevision)) {
@@ -168,7 +171,11 @@ export function parseRecallRerankerParityFixtureV1(value: unknown): RecallRerank
   }
   const groupIds = new Set<string>();
   for (const group of fixture.groups) {
-    if (!group.groupId.trim() || !group.query.trim() || groupIds.has(group.groupId)) {
+    if (
+      !Effect.pipe(group.groupId, EffectString.trim) ||
+      !Effect.pipe(group.query, EffectString.trim) ||
+      groupIds.has(group.groupId)
+    ) {
       throw ScriptError.make({message: 'Recall reranker parity fixture contains an invalid or duplicate group.'});
     }
     groupIds.add(group.groupId);
@@ -180,8 +187,8 @@ export function parseRecallRerankerParityFixtureV1(value: unknown): RecallRerank
     const candidateIds = new Set<string>();
     for (const candidate of group.candidates) {
       if (
-        !candidate.candidateId.trim() ||
-        !candidate.document.trim() ||
+        !Effect.pipe(candidate.candidateId, EffectString.trim) ||
+        !Effect.pipe(candidate.document, EffectString.trim) ||
         candidateIds.has(candidate.candidateId) ||
         !Number.isFinite(candidate.pythonScore) ||
         !Number.isInteger(candidate.relevance) ||
@@ -214,10 +221,14 @@ export function evaluateRecallRerankerParity(
 
   for (const group of fixture.groups) {
     const scores = nativeScores.get(group.groupId);
-    if (!scores || scores.length !== group.candidates.length || scores.some(score => !Number.isFinite(score))) {
+    if (
+      !scores ||
+      scores.length !== group.candidates.length ||
+      EffectArray.some(scores, score => !Number.isFinite(score))
+    ) {
       throw ScriptError.make({message: `Native reranker returned invalid scores for parity group ${group.groupId}.`});
     }
-    const candidates = group.candidates.map((candidate, index) => {
+    const candidates = EffectArray.map(group.candidates, (candidate, index) => {
       const nativeScore = scores[index];
       const absoluteError = Math.abs(nativeScore - candidate.pythonScore);
       pairs += 1;

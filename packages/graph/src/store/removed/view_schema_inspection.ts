@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -15,6 +16,8 @@ import {
 } from '../schema/metadata.js';
 import {normalizeSchemaDefinition} from '../schema/normalization.js';
 import {codeGraphScopeAuthorityInstalled, codeGraphScopeAuthoritySchemaCompatible} from '../scope/schema.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const removedViewAuthorityTableState = Effect.fn('codeGraph.removedViewAuthorityTableState')(function* (
   sql: SqlClient.SqlClient,
@@ -71,7 +74,7 @@ export const removedViewAuthorityTableState = Effect.fn('codeGraph.removedViewAu
   ] as const;
   if (
     columns.length !== expected.length ||
-    columns.some((column, index) => {
+    EffectArray.some(columns, (column, index) => {
       const contract = expected[index];
       return (
         contract === undefined ||
@@ -117,17 +120,16 @@ export const removedViewAuthorityTableState = Effect.fn('codeGraph.removedViewAu
     primary[0]?.desc === 0 &&
     primary[0]?.coll === 'BINARY' &&
     primary[0]?.key === 1 &&
-    primary
-      .slice(1)
-      .every(
-        (column, index) =>
-          column.seqno === index + 1 &&
-          column.cid === index + 1 &&
-          column.name === expected[index + 1]?.name &&
-          column.desc === 0 &&
-          column.coll === 'BINARY' &&
-          column.key === 0,
-      )
+    EffectArray.every(
+      primary.slice(1),
+      (column, index) =>
+        column.seqno === index + 1 &&
+        column.cid === index + 1 &&
+        column.name === expected[index + 1]?.name &&
+        column.desc === 0 &&
+        column.coll === 'BINARY' &&
+        column.key === 0,
+    )
     ? ('compatible' as const)
     : ('incompatible' as const);
 });
@@ -139,7 +141,7 @@ export const removedViewCleanupSchemaState = Effect.fn('codeGraph.removedViewCle
     return (yield* codeGraphScopeAuthoritySchemaCompatible(sql, [
       'removed_view_cleanup',
       'removed_view_cleanup_due',
-      ...REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS.map(trigger => trigger.name),
+      ...EffectArray.map(REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS, trigger => trigger.name),
     ]))
       ? ('compatible' as const)
       : ('incompatible' as const);
@@ -166,12 +168,13 @@ export const removedViewCleanupSchemaState = Effect.fn('codeGraph.removedViewCle
   const expectedNames = new Set([
     'removed_view_cleanup',
     'removed_view_cleanup_due',
-    ...REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS.map(trigger => trigger.name),
+    ...EffectArray.map(REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS, trigger => trigger.name),
   ]);
   if (
-    objects.some(
+    EffectArray.some(
+      objects,
       object =>
-        object.name !== object.name.toLowerCase() ||
+        object.name !== Effect2.pipe(object.name, EffectString.toLowerCase) ||
         !expectedNames.has(object.name) ||
         typeof object.sql_bytes !== 'number' ||
         !Number.isSafeInteger(object.sql_bytes) ||
@@ -180,10 +183,13 @@ export const removedViewCleanupSchemaState = Effect.fn('codeGraph.removedViewCle
   ) {
     return 'incompatible' as const;
   }
-  const tables = objects.filter(object => object.name === 'removed_view_cleanup');
-  const dueObjects = objects.filter(object => object.name === 'removed_view_cleanup_due');
-  const triggerObjects = objects.filter(object =>
-    REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS.some(trigger => trigger.name === object.name),
+  const tables = EffectArray.filter(objects, object => object.name === 'removed_view_cleanup');
+  const dueObjects = EffectArray.filter(objects, object => object.name === 'removed_view_cleanup_due');
+  const triggerObjects = EffectArray.filter(
+    objects,
+    (object, __effectArrayIndex) =>
+      __effectArrayIndex in objects &&
+      EffectArray.some(REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS, trigger => trigger.name === object.name),
   );
   if (tables.length === 0) {
     return dueObjects.length === 0 && triggerObjects.length === 0 ? ('absent' as const) : ('incompatible' as const);
@@ -193,10 +199,12 @@ export const removedViewCleanupSchemaState = Effect.fn('codeGraph.removedViewCle
     tables[0]?.type !== 'table' ||
     tables[0]?.tbl_name !== 'removed_view_cleanup' ||
     typeof tables[0]?.sql !== 'string' ||
-    dueObjects.some(object => object.type !== 'index' || object.tbl_name !== 'removed_view_cleanup') ||
+    EffectArray.some(dueObjects, object => object.type !== 'index' || object.tbl_name !== 'removed_view_cleanup') ||
     triggerObjects.length !== REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS.length ||
-    REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS.some(expected => {
-      const observed = triggerObjects.find(object => object.name === expected.name);
+    EffectArray.some(REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS, expected => {
+      const observed = EffectOption.getOrUndefined(
+        EffectArray.findFirst(triggerObjects, object => object.name === expected.name),
+      );
       return (
         observed?.type !== 'trigger' ||
         observed.tbl_name !== 'removed_views' ||
@@ -216,13 +224,13 @@ export const removedViewCleanupSchemaState = Effect.fn('codeGraph.removedViewCle
   }>(`SELECT * FROM pragma_table_xinfo('removed_view_cleanup') LIMIT ${REMOVED_VIEW_CLEANUP_COLUMNS.length + 1}`);
   const compatibleColumns =
     columns.length === REMOVED_VIEW_CLEANUP_COLUMNS.length &&
-    columns.every((column, index) => {
+    EffectArray.every(columns, (column, index) => {
       const expected = REMOVED_VIEW_CLEANUP_COLUMNS[index];
       return (
         expected !== undefined &&
         Number(column.hidden) === 0 &&
         column.name === expected.name &&
-        column.type.toUpperCase() === expected.type &&
+        Effect2.pipe(column.type, EffectString.toUpperCase) === expected.type &&
         Number(column.notnull) === Number(expected.notNull) &&
         Number(column.pk) === expected.primaryKeyPosition
       );
@@ -246,8 +254,10 @@ export const removedViewCleanupSchemaState = Effect.fn('codeGraph.removedViewCle
     readonly unique: number;
   }>(`SELECT name, origin, partial, "unique" AS "unique"
       FROM pragma_index_list('removed_view_cleanup') LIMIT 3`);
-  const primary = indexes.find(index => index.origin === 'pk');
-  const due = indexes.find(index => index.name === 'removed_view_cleanup_due');
+  const primary = EffectOption.getOrUndefined(EffectArray.findFirst(indexes, index => index.origin === 'pk'));
+  const due = EffectOption.getOrUndefined(
+    EffectArray.findFirst(indexes, index => index.name === 'removed_view_cleanup_due'),
+  );
   if (due === undefined) {
     // Building this index over an existing queue would be unbounded startup
     // work. Revision 8 creates the empty table and index atomically instead.
@@ -267,7 +277,8 @@ export const removedViewCleanupSchemaState = Effect.fn('codeGraph.removedViewCle
   );
   if (
     primaryColumns.length !== REMOVED_VIEW_CLEANUP_COLUMNS.length ||
-    primaryColumns.some(
+    EffectArray.some(
+      primaryColumns,
       (column, index) =>
         column.seqno !== index ||
         column.name !== REMOVED_VIEW_CLEANUP_COLUMNS[index]?.name ||

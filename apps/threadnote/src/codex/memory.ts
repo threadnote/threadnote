@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectRecord from 'effect/Record';
 import {errorMessage} from '@threadnote/platform/errors';
 import {Cause, Console, Effect, Exit} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -35,9 +37,15 @@ export const runCodexCloudMemory = Effect.fn('codexCloud.memory')(function* (
   registerReadTool(registry, config, 'read', 'Read Codex Cloud memories', scope);
   registerListTool(registry, config, 'list', 'List Codex Cloud memories', scope);
   registerStoreTool(registry, config, 'remember', 'Remember Codex Cloud context', scope);
-  const args = Object.fromEntries(
-    Object.entries({...options, sourceAgentClient: 'codex', ...(json ? {responseFormat: 'dual'} : {})}).filter(
-      ([, value]) => value !== undefined && (!Array.isArray(value) || value.length > 0),
+  const input: Record<string, unknown> = {
+    ...options,
+    sourceAgentClient: 'codex',
+    ...(json ? {responseFormat: 'dual'} : {}),
+  };
+  const args = EffectRecord.fromEntries(
+    EffectArray.filter(
+      EffectRecord.toEntries(input),
+      ([, value]) => value !== undefined && (!EffectArray.isArray(value) || value.length > 0),
     ),
   );
   const outcome = yield* captureConsoleWithoutProgress(registry.invokeTool(operation, args)).pipe(Effect.exit);

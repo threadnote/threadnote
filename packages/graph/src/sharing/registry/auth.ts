@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {graphSharingFailure} from '../errors.js';
 import type {GraphShareRegistryTarget} from './reference.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type GraphShareRegistryChallenge =
   {readonly kind: 'basic'} | {readonly kind: 'bearer'; readonly realm: string; readonly service?: string};
@@ -12,7 +15,20 @@ export function parseGraphShareRegistryChallenge(
   if (
     value === undefined ||
     value.length > 4096 ||
-    [...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+    EffectArray.some(
+      [...value],
+      character =>
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) < 32 ||
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) === 127,
+    )
   )
     throw graphSharingFailure('Registry authentication is unsupported.');
   const head = /^(Basic|Bearer) +(.+)$/iu.exec(value);
@@ -21,13 +37,13 @@ export function parseGraphShareRegistryChallenge(
   let remaining = head[2];
   while (remaining.length > 0) {
     const field = /^([a-z_]+)="([^"\\]*)"(?:, *|$)/iu.exec(remaining);
-    if (field === null || fields.has(field[1].toLowerCase())) {
+    if (field === null || fields.has(Effect.pipe(field[1], EffectString.toLowerCase))) {
       throw graphSharingFailure('Registry authentication challenge is invalid.');
     }
-    fields.set(field[1].toLowerCase(), field[2]);
-    remaining = remaining.slice(field[0].length);
+    fields.set(Effect.pipe(field[1], EffectString.toLowerCase), field[2]);
+    remaining = Effect.pipe(remaining, EffectString.slice(field[0].length));
   }
-  if (head[1].toLowerCase() === 'basic') return {kind: 'basic'};
+  if (Effect.pipe(head[1], EffectString.toLowerCase) === 'basic') return {kind: 'basic'};
   const realm = fields.get('realm');
   if (realm === undefined) throw graphSharingFailure('Registry token realm is missing.');
   let url: URL;
@@ -53,12 +69,12 @@ export function parseGraphShareRegistryChallenge(
   const scope = fields.get('scope');
   if (scope !== undefined) {
     const prefix = `repository:${target.repository}:`;
-    const actions = scope.slice(prefix.length).split(',');
+    const actions = Effect.pipe(scope, EffectString.slice(prefix.length), EffectString.split(','));
     const allowed = access === 'write' ? ['pull', 'push'] : ['pull'];
     if (
-      !scope.startsWith(prefix) ||
+      !Effect.pipe(scope, EffectString.startsWith(prefix)) ||
       new Set(actions).size !== actions.length ||
-      actions.some(action => !allowed.includes(action))
+      EffectArray.some(actions, action => !allowed.includes(action))
     )
       throw graphSharingFailure('Registry authentication requested a different scope.');
   }

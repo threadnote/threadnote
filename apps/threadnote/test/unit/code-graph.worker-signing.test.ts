@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
@@ -10,6 +11,8 @@ import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {makeGraphWorkerSigner, verifyGraphWorkerSignature} from '@threadnote/graph/sharing/worker/signing';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 const identity = sha256Digest('approved provider, principal, repository and profile');
@@ -17,7 +20,11 @@ const fixture = Effect.fn('test.workerSigning.fixture')(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-worker-signing-'});
-  return {fs, home, target: path.join(home, 'graph-sharing/worker-keys', identity.slice(7) + '.json')};
+  return {
+    fs,
+    home,
+    target: path.join(home, 'graph-sharing/worker-keys', Effect2.pipe(identity, EffectString.slice(7)) + '.json'),
+  };
 });
 
 describe('graph worker signing identities', () => {
@@ -28,7 +35,7 @@ describe('graph worker signing identities', () => {
         const signers = yield* Effect.forEach(Array.from({length: 8}), () => makeGraphWorkerSigner(f.home, identity), {
           concurrency: 8,
         });
-        expect(new Set(signers.map(signer => signer.publicKey)).size).toBe(1);
+        expect(new Set(EffectArray.map(signers, signer => signer.publicKey)).size).toBe(1);
         expect((yield* makeGraphWorkerSigner(f.home, identity)).publicKey).toBe(signers[0].publicKey);
         expect((yield* makeGraphWorkerSigner(f.home, sha256Digest('another principal'))).publicKey).not.toBe(
           signers[0].publicKey,
@@ -56,8 +63,8 @@ describe('graph worker signing identities', () => {
         for (const [key, kind, bytes, signed] of [
           [signer.publicKey, 'attestation', changed, signature],
           [signer.publicKey, 'announcement', body, signature],
-          ['0'.repeat(64), 'attestation', body, signature],
-          [signer.publicKey, 'attestation', body, '0'.repeat(128)],
+          [Effect2.pipe('0', EffectString.repeat(64)), 'attestation', body, signature],
+          [signer.publicKey, 'attestation', body, Effect2.pipe('0', EffectString.repeat(128))],
         ] as const)
           expect((yield* Effect.result(verifyGraphWorkerSignature(key, kind, bytes, signed)))._tag).toBe('Failure');
       }).pipe(provideTestLayer(layer)),
@@ -70,7 +77,10 @@ describe('graph worker signing identities', () => {
       yield* makeGraphWorkerSigner(f.home, identity);
       const saved = JSON.parse(yield* f.fs.readFileString(f.target));
       const other = yield* generateGraphSharePublisherKey();
-      for (const override of [{publicKey: 'a'.repeat(64)}, {privateKey: other.privateKey}]) {
+      for (const override of [
+        {publicKey: Effect2.pipe('a', EffectString.repeat(64))},
+        {privateKey: other.privateKey},
+      ]) {
         const invalid = JSON.stringify({...saved, ...override});
         yield* f.fs.writeFileString(f.target, invalid);
         const rejected = yield* Effect.result(makeGraphWorkerSigner(f.home, identity));

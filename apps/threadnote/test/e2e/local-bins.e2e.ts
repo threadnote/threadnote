@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {
   chmod,
@@ -16,20 +18,115 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {promisify} from '@threadnote/testing/node-util';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
+import * as Schema from 'effect/Schema';
 import {windowsCommandLauncherInvocation} from '@threadnote/testing/windows-command-launcher';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {vectorIndexDatabaseFilename} from '@threadnote/recall/vector-index';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execute = promisify(execFile);
+const childProcessOutput = (cause: unknown, key: string): unknown =>
+  typeof cause === 'object' && cause !== null && key in cause ? Reflect.get(cause, key) : undefined;
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const SelectionSchema = withRest(
+  Schema.Struct({
+    roles: Schema.optionalKey(Schema.Struct({embedding: Schema.optionalKey(Schema.String)}).pipe(withRest)),
+  }),
+);
+const EmbeddingReceiptSchema = withRest(Schema.Struct({sha256: Schema.String, size: Schema.Finite}));
+const CoordinatorEndpointSchema = withRest(Schema.Struct({home: Schema.String, pid: Schema.Finite}));
+const ExportedGraphSchema = withRest(
+  Schema.Struct({
+    edges: Schema.optionalKey(Schema.Unknown.pipe(Schema.Array)),
+    nodes: Schema.optionalKey(Schema.Unknown.pipe(Schema.Array)),
+    schema: Schema.optionalKey(Schema.String),
+    type: Schema.optionalKey(Schema.String),
+    version: Schema.optionalKey(Schema.Finite),
+    summary: Schema.optionalKey(
+      Schema.Struct({
+        edges: Schema.optionalKey(Schema.Struct({written: Schema.optionalKey(Schema.Finite)}).pipe(withRest)),
+        nodes: Schema.optionalKey(Schema.Struct({written: Schema.optionalKey(Schema.Finite)}).pipe(withRest)),
+      }).pipe(withRest),
+    ),
+  }),
+);
+const CapturedIssueSchema = withRest(
+  Schema.Struct({body: Schema.optionalKey(Schema.String), title: Schema.optionalKey(Schema.String)}),
+);
+const MigrationReceiptSchema = withRest(Schema.Struct({preservedCurrentEntries: Schema.optionalKey(Schema.Finite)}));
+const AgentRegistrySchema = withRest(Schema.Struct({hosts: Schema.optionalKey(JsonRecordSchema)}));
+const GraphNodeSchema = withRest(
+  Schema.Struct({id: Schema.optionalKey(Schema.String), name: Schema.optionalKey(Schema.String)}),
+);
+const PathResultSchema = withRest(
+  Schema.Struct({
+    edges: Schema.optionalKey(
+      Schema.Struct({
+        relation: Schema.optionalKey(Schema.String),
+        targetName: Schema.optionalKey(Schema.String),
+        targetId: Schema.optionalKey(Schema.String),
+        provenance: Schema.optionalKey(Schema.String),
+      }).pipe(withRest, Schema.Array),
+    ),
+    nodes: Schema.optionalKey(GraphNodeSchema.pipe(Schema.Array)),
+    operation: Schema.optionalKey(Schema.String),
+  }),
+);
+const NeighborResultSchema = withRest(
+  Schema.Struct({
+    edges: Schema.optionalKey(
+      Schema.Struct({provenance: Schema.optionalKey(Schema.String), targetId: Schema.optionalKey(Schema.String)}).pipe(
+        withRest,
+        Schema.Array,
+      ),
+    ),
+    nodes: Schema.optionalKey(Schema.Struct({id: Schema.optionalKey(Schema.String)}).pipe(withRest, Schema.Array)),
+    operation: Schema.optionalKey(Schema.String),
+  }),
+);
+const SemanticResultSchema = withRest(
+  Schema.Struct({
+    edges: Schema.optionalKey(Schema.Unknown.pipe(Schema.Array)),
+    freshness: Schema.optionalKey(Schema.String),
+    operation: Schema.optionalKey(Schema.String),
+    warnings: Schema.optionalKey(Schema.String.pipe(Schema.Array)),
+    snapshot: Schema.optionalKey(
+      Schema.Struct({
+        id: Schema.optionalKey(Schema.String),
+        worktreeId: Schema.optionalKey(Schema.String),
+        commit: Schema.optionalKey(Schema.String),
+        dirty: Schema.optionalKey(Schema.Boolean),
+      }).pipe(withRest),
+    ),
+    nodes: Schema.optionalKey(
+      Schema.Struct({
+        id: Schema.optionalKey(Schema.String),
+        kind: Schema.optionalKey(Schema.String),
+        path: Schema.optionalKey(Schema.String),
+        score: Schema.optionalKey(Schema.Finite),
+      }).pipe(withRest, Schema.Array),
+    ),
+  }),
+);
+const MissingGraphResultSchema = withRest(
+  Schema.Struct({nodes: Schema.optionalKey(Schema.Unknown.pipe(Schema.Array))}),
+);
+
 const root = process.cwd();
 const cli = join(root, 'dist', process.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
 const coreEmbeddingModelId = CORE_EMBEDDING_MODEL_ID;
-const coreEmbeddingManifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.id === coreEmbeddingModelId);
+const coreEmbeddingManifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.id === coreEmbeddingModelId),
+);
 const realModelTimeoutMs = 300_000;
 const coldGraphReadTimeoutMs = process.platform === 'win32' && process.arch === 'arm64' ? 60_000 : 25_000;
 const cliOutputMaxBytes = 16 * 1024 * 1024;
@@ -78,13 +175,13 @@ beforeAll(async () => {
   await writeFile(join(home, 'cache', 'recall-index-v6.json'), '{"legacy":true}\n', 'utf8');
   installOutput = await runCli(['install']);
   installedFiles = await readdir(home, {recursive: true});
-  const selection = JSON.parse(await readFile(join(home, 'models', 'selection.json'), 'utf8')) as {
-    readonly roles?: {readonly embedding?: string};
-  };
+  const selection = Schema.decodeUnknownSync(SelectionSchema)(
+    JSON.parse(await readFile(join(home, 'models', 'selection.json'), 'utf8')),
+  );
   expect(selection.roles?.embedding).toBe(coreEmbeddingModelId);
-  const receipt = JSON.parse(
-    await readFile(join(home, 'models', 'embedding', coreEmbeddingModelId, 'manifest.json'), 'utf8'),
-  ) as {readonly sha256: string; readonly size: number};
+  const receipt = Schema.decodeUnknownSync(EmbeddingReceiptSchema)(
+    JSON.parse(await readFile(join(home, 'models', 'embedding', coreEmbeddingModelId, 'manifest.json'), 'utf8')),
+  );
   installedModelPath = join(home, 'models', 'embedding', coreEmbeddingModelId, `${receipt.sha256}.gguf`);
   const installedModel = await stat(installedModelPath);
   expect(installedModel.size).toBe(receipt.size);
@@ -105,7 +202,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   const endpoint = await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')
-    .then(text => JSON.parse(text) as {readonly home: string; readonly pid: number})
+    .then(text => Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text)))
     .catch(() => undefined);
   if (endpoint) {
     expect(await realpath(endpoint.home)).toBe(await realpath(home));
@@ -113,19 +210,25 @@ afterAll(async () => {
     try {
       process.kill(endpoint.pid, 'SIGKILL');
     } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== 'ESRCH') throw cause;
+      if (childProcessOutput(cause, 'code') !== 'ESRCH') throw cause;
     }
     await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
   }
   await rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50});
 });
 
+function requiredMapValue(map: ReadonlyMap<string, string>, key: string): string {
+  const value = map.get(key);
+  if (value === undefined) throw TestError.make({message: `Missing expected fixture value: ${key}`});
+  return value;
+}
+
 function isProcessRunning(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
   } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    if (childProcessOutput(cause, 'code') === 'ESRCH') return false;
     throw cause;
   }
 }
@@ -154,7 +257,7 @@ describe('built self-contained distribution', () => {
     expect(installedFiles).toContain(join('indexes', 'lexical', recallIndexDatabaseFilename(false)));
     expect(installedFiles).toContain(join('indexes', 'vectors', coreEmbeddingModelId, vectorIndexDatabaseFilename()));
     expect(installedFiles).not.toContain(join('cache', 'recall-index-v6.json'));
-    expect(installedFiles.some(file => /\.py$|server\.pid|server\.lock|ov\.conf/i.test(file))).toBe(false);
+    expect(EffectArray.some(installedFiles, file => /\.py$|server\.pid|server\.lock|ov\.conf/i.test(file))).toBe(false);
     const commandShim = installedLauncher();
     expect(installOutput).toContain(`Wrote command launcher: ${commandShim}`);
     expect(await readFile(commandShim, 'utf8')).toContain(
@@ -164,7 +267,7 @@ describe('built self-contained distribution', () => {
       const posixShim = installedLauncher('cli', 'posix');
       expect(installOutput).toContain(`Wrote command launcher: ${posixShim}`);
       const posixContent = await readFile(posixShim, 'utf8');
-      expect(posixContent.startsWith('#!/usr/bin/env sh\n')).toBe(true);
+      expect(Effect.pipe(posixContent, EffectString.startsWith('#!/usr/bin/env sh\n'))).toBe(true);
       expect(posixContent).toContain('threadnote.exe');
       expect(posixContent).not.toContain('\r');
       expect(posixContent).not.toContain('\\');
@@ -242,11 +345,7 @@ describe('built self-contained distribution', () => {
     expect(rebuilt).toContain('Indexing code graph: code-graph-repository');
     expect(rebuilt).toContain('Code graph ready for code-graph-repository:');
 
-    const pathResult = await runCliJson<{
-      readonly edges?: ReadonlyArray<{readonly relation?: string; readonly targetName?: string}>;
-      readonly nodes?: ReadonlyArray<{readonly id?: string; readonly name?: string}>;
-      readonly operation?: string;
-    }>([
+    const pathResult = await runCliJson(PathResultSchema, [
       'graph',
       'path',
       '--cwd',
@@ -261,26 +360,39 @@ describe('built self-contained distribution', () => {
     expect(pathResult.edges).toEqual(
       expect.arrayContaining([expect.objectContaining({relation: 'calls', targetName: 'withExclusiveFileLock'})]),
     );
-    const runApplicationId = pathResult.nodes?.find(node => node.name === 'runApplication')?.id;
-    const lockId = pathResult.nodes?.find(node => node.name === 'withExclusiveFileLock')?.id;
+    const runApplicationId = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(pathResult.nodes), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver, node => node.name === 'runApplication'),
+        ),
+      ),
+    )?.id;
+    const lockId = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(pathResult.nodes), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver, node => node.name === 'withExclusiveFileLock'),
+        ),
+      ),
+    )?.id;
     expect(runApplicationId).toMatch(/^cgs_[a-f0-9]{32,64}$/);
     expect(lockId).toMatch(/^cgs_[a-f0-9]{32,64}$/);
     if (!runApplicationId || !lockId) throw TestError.make({message: 'Expected packaged graph fixture node IDs.'});
 
-    const exactNode = await runCliJson<{
-      readonly nodes?: ReadonlyArray<{readonly id?: string; readonly name?: string}>;
-      readonly operation?: string;
-    }>(['graph', 'node', '--cwd', graphRepository, '--node-id', lockId, '--json']);
+    const exactNode = await runCliJson(PathResultSchema, [
+      'graph',
+      'node',
+      '--cwd',
+      graphRepository,
+      '--node-id',
+      lockId,
+      '--json',
+    ]);
     expect(exactNode).toMatchObject({
       nodes: [expect.objectContaining({id: lockId, name: 'withExclusiveFileLock'})],
       operation: 'node',
     });
 
-    const neighbors = await runCliJson<{
-      readonly edges?: ReadonlyArray<{readonly provenance?: string; readonly targetId?: string}>;
-      readonly nodes?: ReadonlyArray<{readonly id?: string}>;
-      readonly operation?: string;
-    }>([
+    const neighbors = await runCliJson(NeighborResultSchema, [
       'graph',
       'neighbors',
       '--cwd',
@@ -299,10 +411,17 @@ describe('built self-contained distribution', () => {
       expect.arrayContaining([expect.objectContaining({provenance: 'resolved', targetId: lockId})]),
     );
 
-    const stableIdPath = await runCliJson<{
-      readonly edges?: ReadonlyArray<{readonly relation?: string; readonly targetId?: string}>;
-      readonly operation?: string;
-    }>(['graph', 'path', '--cwd', graphRepository, '--from', runApplicationId, '--to', lockId, '--json']);
+    const stableIdPath = await runCliJson(PathResultSchema, [
+      'graph',
+      'path',
+      '--cwd',
+      graphRepository,
+      '--from',
+      runApplicationId,
+      '--to',
+      lockId,
+      '--json',
+    ]);
     expect(stableIdPath.operation).toBe('path');
     expect(stableIdPath.edges).toEqual(
       expect.arrayContaining([expect.objectContaining({relation: 'calls', targetId: lockId})]),
@@ -310,50 +429,60 @@ describe('built self-contained distribution', () => {
 
     const semanticQuery = 'serialize concurrent tasks via mutual exclusion';
     const repositoryTokens = new Set(
-      (
-        await Promise.all(
-          (await readdir(graphRepository, {recursive: true})).map(async relative => {
-            if (relative.replaceAll('\\', '/').match(/^\.git(?:\/|$)/)) return '';
-            const target = join(graphRepository, relative);
-            return (await stat(target)).isFile() ? await readFile(target, 'utf8') : '';
-          }),
-        )
-      )
-        .join('\n')
-        .toLowerCase()
-        .match(/[a-z0-9_]+/g) ?? [],
+      Effect.pipe(
+        EffectArray.join(
+          await Promise.all(
+            EffectArray.map(await readdir(graphRepository, {recursive: true}), async relative => {
+              if (
+                Effect.pipe(relative, __effectPipeInput1 => {
+                  const __effectPipeStage20 = Effect.pipe(__effectPipeInput1, EffectString.replaceAll('\\', '/'));
+                  const __effectPipeStage21 = Effect.pipe(
+                    __effectPipeStage20,
+                    EffectString.match(/^\.git(?:\/|$)/),
+                    Effect.Option.getOrElse(() => null),
+                  );
+                  return __effectPipeStage21;
+                })
+              )
+                return '';
+              const target = join(graphRepository, relative);
+              return (await stat(target)).isFile() ? await readFile(target, 'utf8') : '';
+            }),
+          ),
+          '\n',
+        ),
+        __effectPipeInput => {
+          const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.toLowerCase);
+          const __effectPipeStage1 = Effect.pipe(
+            __effectPipeStage0,
+            EffectString.match(/[a-z0-9_]+/g),
+            Effect.Option.getOrElse(() => null),
+          );
+          return __effectPipeStage1;
+        },
+      ) ?? [],
     );
-    expect(semanticQuery.split(' ').every(term => !repositoryTokens.has(term))).toBe(true);
+    expect(
+      EffectArray.every(Effect.pipe(semanticQuery, EffectString.split(' ')), term => !repositoryTokens.has(term)),
+    ).toBe(true);
     const semanticStartedAt = new Date().toISOString();
     const semanticStart = performance.now();
     let semanticOutput: {readonly stderr: string; readonly stdout: string} | undefined;
-    const semantic = await runCliJson<{
-      readonly edges?: readonly unknown[];
-      readonly freshness?: string;
-      readonly operation?: string;
-      readonly warnings?: readonly string[];
-      readonly snapshot?: {
-        readonly id?: string;
-        readonly worktreeId?: string;
-        readonly commit?: string;
-        readonly dirty?: boolean;
-      };
-      readonly nodes?: ReadonlyArray<{
-        readonly id?: string;
-        readonly kind?: string;
-        readonly path?: string;
-        readonly score?: number;
-      }>;
-    }>(['graph', 'query', '--cwd', graphRepository, '--query', semanticQuery, '--json'], {}, output => {
-      semanticOutput = output;
-    });
+    const semantic = await runCliJson(
+      SemanticResultSchema,
+      ['graph', 'query', '--cwd', graphRepository, '--query', semanticQuery, '--json'],
+      {},
+      output => {
+        semanticOutput = output;
+      },
+    );
     const semanticElapsedMs = performance.now() - semanticStart;
     try {
       expect(semantic).toMatchObject({
         freshness: 'current',
         operation: 'query',
         snapshot: {
-          commit: (await runGit(['rev-parse', 'HEAD'], graphRepository)).trim(),
+          commit: Effect.pipe(await runGit(['rev-parse', 'HEAD'], graphRepository), EffectString.trim),
           dirty: false,
           id: expect.stringMatching(/^cgsn_[a-f0-9]{40}$/),
           worktreeId: expect.stringMatching(/^[a-f0-9]{64}$/),
@@ -381,13 +510,20 @@ describe('built self-contained distribution', () => {
             [temporaryRoot, '<fixture>'],
             [root, '<checkout>'],
           ])
-            for (const spelling of [path, path.replaceAll('\\', '/'), path.replaceAll('/', '\\')])
-              value = value.replaceAll(spelling, replacement);
-          return value.slice(0, limit);
+            for (const spelling of [
+              path,
+              Effect.pipe(path, EffectString.replaceAll('\\', '/')),
+              Effect.pipe(path, EffectString.replaceAll('/', '\\')),
+            ])
+              value = Effect.pipe(value, EffectString.replaceAll(spelling, replacement));
+          return Effect.pipe(value, EffectString.slice(0, limit));
         };
         const packet = {
           schemaVersion: 1,
-          sourceCommit: process.env.GITHUB_SHA?.slice(0, 64) ?? 'unavailable',
+          sourceCommit:
+            Effect.pipe(process.env.GITHUB_SHA, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.slice(0, 64)),
+            ) ?? 'unavailable',
           platform: process.platform,
           arch: process.arch,
           queryCase: 'mutual-exclusion',
@@ -398,11 +534,13 @@ describe('built self-contained distribution', () => {
             stderr: scrub(semanticOutput?.stderr, 2_048),
           },
           indexOutput: scrub(rebuilt, 4_096),
-          indexProgress: rebuilt
-            .split('\n')
-            .filter(line => /^(?:Semantic vectors:|Embedding)/.test(line))
-            .slice(-3)
-            .map(line => scrub(line, 256)),
+          indexProgress: EffectArray.map(
+            EffectArray.filter(
+              Effect.pipe(rebuilt, EffectString.split('\n')),
+              __effectArrayValue2 => !!(line => /^(?:Semantic vectors:|Embedding)/.test(line))(__effectArrayValue2),
+            ).slice(-3),
+            line => scrub(line, 256),
+          ),
           query: {
             operation: 'query',
             freshness: scrub(semantic.freshness, 128),
@@ -413,10 +551,10 @@ describe('built self-contained distribution', () => {
             },
             warningCount: semantic.warnings?.length ?? 0,
             omittedWarnings: Math.max(0, (semantic.warnings?.length ?? 0) - 8),
-            warnings: (semantic.warnings ?? []).slice(0, 8).map(warning => scrub(warning, 256)),
+            warnings: EffectArray.map((semantic.warnings ?? []).slice(0, 8), warning => scrub(warning, 256)),
             nodeCount: semantic.nodes?.length ?? 0,
             omittedNodes: Math.max(0, (semantic.nodes?.length ?? 0) - 12),
-            nodes: (semantic.nodes ?? []).slice(0, 12).map(node => ({
+            nodes: EffectArray.map((semantic.nodes ?? []).slice(0, 12), node => ({
               id: scrub(node.id, 128),
               path: scrub(node.path, 256),
               kind: scrub(node.kind, 64),
@@ -457,7 +595,7 @@ describe('built self-contained distribution', () => {
       throw cause;
     }
 
-    const missing = await runCliJson<{readonly nodes?: readonly unknown[]}>([
+    const missing = await runCliJson(MissingGraphResultSchema, [
       'graph',
       'query',
       '--cwd',
@@ -486,17 +624,7 @@ describe('built self-contained distribution', () => {
     expect(
       await runCli(['graph', 'export', '--cwd', graphRepository, '--format', 'json', '--output', exportPath]),
     ).toContain('Exported');
-    const exported = JSON.parse(await readFile(exportPath, 'utf8')) as {
-      readonly edges?: readonly unknown[];
-      readonly nodes?: readonly unknown[];
-      readonly schema?: string;
-      readonly summary?: {
-        readonly edges?: {readonly written?: number};
-        readonly nodes?: {readonly written?: number};
-      };
-      readonly type?: string;
-      readonly version?: number;
-    };
+    const exported = Schema.decodeUnknownSync(ExportedGraphSchema)(JSON.parse(await readFile(exportPath, 'utf8')));
     expect(exported.type).toBe('threadnote-code-graph-export');
     expect(exported.schema).toBe('threadnote.code-graph-export');
     expect(exported.version).toBe(1);
@@ -527,7 +655,9 @@ describe('built self-contained distribution', () => {
       runCli(['read', 'threadnote://user/e2e-user/memories/durable/projects/threadnote/missing.md']),
     ).rejects.toThrow();
     const entriesBeforeDryRun = parseProductionLog(await readFile(logPath, 'utf8'));
-    expect(entriesBeforeDryRun.slice(entriesAfterRecall.length).filter(entry => entry.operation === 'read')).toEqual([
+    expect(
+      EffectArray.filter(entriesBeforeDryRun.slice(entriesAfterRecall.length), entry => entry.operation === 'read'),
+    ).toEqual([
       expect.objectContaining({event: 'invocation.started', operation: 'read'}),
       expect.objectContaining({
         errorType: expect.any(String),
@@ -538,19 +668,20 @@ describe('built self-contained distribution', () => {
     ]);
 
     await runCli(['seed', '--dry-run']);
-    expect(parseProductionLog(await readFile(logPath, 'utf8')).filter(entry => entry.operation === 'seed')).toEqual(
-      entriesBeforeDryRun.filter(entry => entry.operation === 'seed'),
-    );
+    expect(
+      EffectArray.filter(parseProductionLog(await readFile(logPath, 'utf8')), entry => entry.operation === 'seed'),
+    ).toEqual(EffectArray.filter(entriesBeforeDryRun, entry => entry.operation === 'seed'));
 
     const concurrentProcessCount = 8;
     await Promise.all(Array.from({length: concurrentProcessCount}, () => runCli(['logs'])));
     const entriesAfterConcurrentWrites = parseProductionLog(await readFile(logPath, 'utf8'));
-    const newEntries = entriesAfterConcurrentWrites
-      .slice(entriesBeforeDryRun.length)
-      .filter(entry => entry.operation === 'logs');
+    const newEntries = EffectArray.filter(
+      entriesAfterConcurrentWrites.slice(entriesBeforeDryRun.length),
+      entry => entry.operation === 'logs',
+    );
     expect(newEntries).toHaveLength(concurrentProcessCount * 2);
-    expect(new Set(newEntries.map(entry => entry.invocationId)).size).toBe(concurrentProcessCount);
-    expect(newEntries.every(entry => entry.operation === 'logs')).toBe(true);
+    expect(new Set(EffectArray.map(newEntries, entry => entry.invocationId)).size).toBe(concurrentProcessCount);
+    expect(EffectArray.every(newEntries, entry => entry.operation === 'logs')).toBe(true);
     expect(await runCli(['logs'])).toContain(join(home, 'logs'));
   });
 
@@ -591,21 +722,24 @@ describe('built self-contained distribution', () => {
     await mkdir(fakeBin, {recursive: true});
     await writeFile(
       fakeGh,
-      [
-        '#!/bin/sh',
-        'request_path=',
-        'while [ "$#" -gt 0 ]; do',
-        '  if [ "$1" = "--input" ]; then',
-        '    request_path=$2',
-        '    shift 2',
-        '  else',
-        '    shift',
-        '  fi',
-        'done',
-        'cp "$request_path" "$THREADNOTE_TEST_ISSUE_CAPTURE"',
-        'printf "%s\\n" "https://github.com/threadnote/threadnote/issues/987"',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          '#!/bin/sh',
+          'request_path=',
+          'while [ "$#" -gt 0 ]; do',
+          '  if [ "$1" = "--input" ]; then',
+          '    request_path=$2',
+          '    shift 2',
+          '  else',
+          '    shift',
+          '  fi',
+          'done',
+          'cp "$request_path" "$THREADNOTE_TEST_ISSUE_CAPTURE"',
+          'printf "%s\\n" "https://github.com/threadnote/threadnote/issues/987"',
+          '',
+        ],
+        '\n',
+      ),
       'utf8',
     );
     await chmod(fakeGh, 0o755);
@@ -620,15 +754,12 @@ describe('built self-contained distribution', () => {
     ] as const;
     const preview = await runCli(reportArguments, {PATH: ''});
     const approval = /Approval digest: (sha256:[a-f0-9]{64})/.exec(preview)?.[1];
-    expect(approval).toBeDefined();
-    const output = await runCli([...reportArguments, '--apply', '--approval', approval as string], {
+    if (approval === undefined) throw TestError.make({message: 'Expected packaged issue approval digest.'});
+    const output = await runCli([...reportArguments, '--apply', '--approval', approval], {
       PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
       THREADNOTE_TEST_ISSUE_CAPTURE: capturedRequest,
     });
-    const request = JSON.parse(await readFile(capturedRequest, 'utf8')) as {
-      readonly body?: string;
-      readonly title?: string;
-    };
+    const request = Schema.decodeUnknownSync(CapturedIssueSchema)(JSON.parse(await readFile(capturedRequest, 'utf8')));
 
     expect(output).toContain('Created GitHub issue: https://github.com/threadnote/threadnote/issues/987');
     expect(request.title).toBe('Approved packaged report');
@@ -770,9 +901,9 @@ describe('built self-contained distribution', () => {
       timeout: realModelTimeoutMs,
     });
     const output = `${migration.stdout}${migration.stderr}`;
-    const receipt = JSON.parse(await readFile(join(migrationHome, 'migration', 'openviking-home-v1.json'), 'utf8')) as {
-      readonly preservedCurrentEntries?: number;
-    };
+    const receipt = Schema.decodeUnknownSync(MigrationReceiptSchema)(
+      JSON.parse(await readFile(join(migrationHome, 'migration', 'openviking-home-v1.json'), 'utf8')),
+    );
 
     expect(output).toContain('Preserved 2 current Threadnote entries');
     expect(receipt.preservedCurrentEntries).toBe(2);
@@ -834,7 +965,10 @@ describe('built self-contained distribution', () => {
       ['index', 'legacy staged state'],
       ['logs/HEAD', 'legacy HEAD reflog\n'],
       ['refs/heads/main', `${unpublishedCommit}\n`],
-      [`objects/${unpublishedCommit.slice(0, 2)}/${unpublishedCommit.slice(2)}`, 'legacy unpublished object'],
+      [
+        `objects/${Effect.pipe(unpublishedCommit, EffectString.slice(0, 2))}/${Effect.pipe(unpublishedCommit, EffectString.slice(2))}`,
+        'legacy unpublished object',
+      ],
     ]);
 
     await mkdir(join(legacyWorktree, dirname(memoryRelative)), {recursive: true});
@@ -872,7 +1006,7 @@ describe('built self-contained distribution', () => {
     for (const relativePath of ['HEAD', 'config', 'logs/HEAD'] as const) {
       const file = join(currentGitdir, relativePath);
       await mkdir(dirname(file), {recursive: true});
-      await writeFile(file, legacyShareState.get(relativePath) as string, 'utf8');
+      await writeFile(file, requiredMapValue(legacyShareState, relativePath), 'utf8');
     }
     await writeFile(join(currentGitdir, 'FETCH_HEAD'), 'different current transient fetch state\n', 'utf8');
     await writeFile(join(migrationHome, 'layout.json'), '{"createdBy":"threadnote","version":2}\n', 'utf8');
@@ -894,7 +1028,15 @@ describe('built self-contained distribution', () => {
     expect(await readFile(join(currentGitdir, 'index'), 'utf8')).toBe('legacy staged state');
     await expect(readFile(join(currentGitdir, 'FETCH_HEAD'), 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
     expect(
-      await readFile(join(currentGitdir, 'objects', unpublishedCommit.slice(0, 2), unpublishedCommit.slice(2)), 'utf8'),
+      await readFile(
+        join(
+          currentGitdir,
+          'objects',
+          Effect.pipe(unpublishedCommit, EffectString.slice(0, 2)),
+          Effect.pipe(unpublishedCommit, EffectString.slice(2)),
+        ),
+        'utf8',
+      ),
     ).toBe('legacy unpublished object');
     expect(await readFile(join(legacyGitdir, 'logs', 'HEAD'), 'utf8')).toBe('legacy HEAD reflog\n');
   });
@@ -912,7 +1054,7 @@ describe('built self-contained distribution', () => {
           files: 0,
           id: 'openviking-home-v1',
           legacyHome,
-          sourceTreeSha256: '0'.repeat(64),
+          sourceTreeSha256: Effect.pipe('0', EffectString.repeat(64)),
           symlinks: 0,
           targetHome: home,
           version: 1,
@@ -933,7 +1075,13 @@ describe('built self-contained distribution', () => {
   it('streams index rebuild progress from the repair command used by update', async () => {
     const output = await runCli(['repair', '--mcp', 'none', '--no-post-update']);
 
-    expect(output.match(/Rebuilding lexical recall index from canonical documents\./g)).toHaveLength(1);
+    expect(
+      Effect.pipe(
+        output,
+        EffectString.match(/Rebuilding lexical recall index from canonical documents\./g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(1);
     expect(output).toMatch(
       /Building lexical recall index: \d+\/\d+ changed document\(s\) indexed \(\d+%; \d+ canonical document\(s\) scanned\)\./,
     );
@@ -964,10 +1112,10 @@ describe('built self-contained distribution', () => {
     const install = await runCli(['mcp-install', 'cursor', '--apply']);
     expect(install).toContain('Registered cursor agent integration.');
 
-    const registry = JSON.parse(await readFile(join(home, 'integrations', 'agents.json'), 'utf8')) as {
-      readonly hosts?: Record<string, unknown>;
-    };
-    expect(Object.keys(registry.hosts ?? {})).toEqual(['cursor']);
+    const registry = Schema.decodeUnknownSync(AgentRegistrySchema)(
+      JSON.parse(await readFile(join(home, 'integrations', 'agents.json'), 'utf8')),
+    );
+    expect(EffectRecord.keys(registry.hosts ?? {})).toEqual(['cursor']);
     await expect(readFile(join(userHome, '.cursor', 'rules', 'threadnote.mdc'), 'utf8')).resolves.toContain(
       'Route non-trivial work by situation',
     );
@@ -1000,17 +1148,20 @@ describe('built self-contained distribution', () => {
     await writeFile(join(repo, '.claude', 'guide.md'), '# Explicit hidden guidance\n', 'utf8');
     await writeFile(
       join(home, 'seed-manifest.yaml'),
-      [
-        'version: 1',
-        'projects:',
-        '  - name: windows-guidance',
-        `    path: ${repo}`,
-        '    uri: threadnote://resources/repos/windows-guidance',
-        '    seed:',
-        '      - "**/*.md"',
-        '      - ".claude/**/*.md"',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'version: 1',
+          'projects:',
+          '  - name: windows-guidance',
+          `    path: ${repo}`,
+          '    uri: threadnote://resources/repos/windows-guidance',
+          '    seed:',
+          '      - "**/*.md"',
+          '      - ".claude/**/*.md"',
+          '',
+        ],
+        '\n',
+      ),
       'utf8',
     );
 
@@ -1041,17 +1192,20 @@ describe('built self-contained distribution', () => {
     );
     await writeFile(
       join(inbox, 'Candidate.md'),
-      [
-        '---',
-        'threadnote_candidate: true',
-        'kind: durable',
-        'project: e2e-obsidian',
-        'topic: reviewed-inbox',
-        '---',
-        '',
-        'Keep Obsidian writeback behind explicit candidate review.',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          '---',
+          'threadnote_candidate: true',
+          'kind: durable',
+          'project: e2e-obsidian',
+          'topic: reviewed-inbox',
+          '---',
+          '',
+          'Keep Obsidian writeback behind explicit candidate review.',
+          '',
+        ],
+        '\n',
+      ),
       'utf8',
     );
 
@@ -1100,9 +1254,16 @@ describe('built self-contained distribution', () => {
     );
     await runCli(['projection', 'publish', projectionId, '--uri', memoryUri, '--apply']);
     const projectedDirectory = join(vault, 'Threadnote', 'Memories', 'e2e-obsidian', 'durable');
-    const projectedFilename = (await readdir(projectedDirectory)).find(name => name.startsWith('projection-bridge--'));
+    const projectedFilename = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        await readdir(projectedDirectory),
+        __effectArrayValue =>
+          !!(name => Effect.pipe(name, EffectString.startsWith('projection-bridge--')))(__effectArrayValue),
+      ),
+    );
     expect(projectedFilename).toBeDefined();
-    const projected = await readFile(join(projectedDirectory, projectedFilename as string), 'utf8');
+    if (projectedFilename === undefined) throw TestError.make({message: 'Expected projected note filename.'});
+    const projected = await readFile(join(projectedDirectory, projectedFilename), 'utf8');
     expect(projected).toContain(`threadnote_uri: ${memoryUri}`);
     expect(projected).toContain('Changes to this file are not imported.');
     expect(await readdir(join(vault, 'Threadnote', 'Memories'), {recursive: true})).not.toEqual(
@@ -1160,7 +1321,7 @@ describe('built self-contained distribution', () => {
     const client = new Client({name: 'threadnote-e2e', version: '4.0.0'});
     try {
       await client.connect(transport);
-      const names = (await client.listTools()).tools.map(tool => tool.name);
+      const names = EffectArray.map((await client.listTools()).tools, tool => tool.name);
       expect(names).toEqual(
         expect.arrayContaining([
           'recall_context',
@@ -1173,7 +1334,7 @@ describe('built self-contained distribution', () => {
           'glob',
         ]),
       );
-      expect(names.some(name => name.startsWith('ov_'))).toBe(false);
+      expect(EffectArray.some(names, name => Effect.pipe(name, EffectString.startsWith('ov_')))).toBe(false);
       const health = await client.callTool({arguments: {}, name: 'health'});
       expect(health.structuredContent).toMatchObject({status: 'ok', storage: 'native'});
       const privatePayloadMarker = 'MCP-PRIVATE-PAYLOAD-7719';
@@ -1187,13 +1348,18 @@ describe('built self-contained distribution', () => {
         .poll(
           async () => {
             productionLog = await readFile(join(home, 'logs', 'threadnote.log'), 'utf8');
-            const mcpLogEntries = parseProductionLog(productionLog).filter(entry => entry.component === 'mcp');
+            const mcpLogEntries = EffectArray.filter(
+              parseProductionLog(productionLog),
+              entry => entry.component === 'mcp',
+            );
             return {
-              health: mcpLogEntries.some(
+              health: EffectArray.some(
+                mcpLogEntries,
                 entry =>
                   entry.event === 'invocation.finished' && entry.operation === 'health' && entry.outcome === 'success',
               ),
-              invalidRecall: mcpLogEntries.some(
+              invalidRecall: EffectArray.some(
+                mcpLogEntries,
                 entry =>
                   entry.errorType === 'McpToolError' &&
                   entry.event === 'invocation.finished' &&
@@ -1238,7 +1404,16 @@ describe('built self-contained distribution', () => {
         undefined,
         {timeout: realModelTimeoutMs},
       );
-      const text = (recalled.content as Array<{readonly text?: string}>).map(item => item.text ?? '').join('\n');
+      const recalledContent = Schema.decodeUnknownSync(
+        Schema.Array(Schema.Struct({type: Schema.String, text: Schema.optionalKey(Schema.String)}).pipe(withRest)),
+      )(recalled.content);
+      const text = EffectArray.join(
+        EffectArray.map(
+          EffectArray.filter(recalledContent, item => item.type === 'text'),
+          item => item.text ?? '',
+        ),
+        '\n',
+      );
       expect(recalled.isError, text).not.toBe(true);
       expect(text).toContain('native-e2e.md');
       const graph = await client.callTool(
@@ -1298,7 +1473,11 @@ describe('built self-contained distribution', () => {
       });
       expect(publish.structuredContent).toMatchObject({applied: true, projection: projectionId, uris: [memoryUri]});
       const projectedDirectory = join(vault, 'Threadnote', 'Memories', 'threadnote', 'durable');
-      expect((await readdir(projectedDirectory)).some(name => name.startsWith('native-e2e--'))).toBe(true);
+      expect(
+        EffectArray.some(await readdir(projectedDirectory), name =>
+          Effect.pipe(name, EffectString.startsWith('native-e2e--')),
+        ),
+      ).toBe(true);
     } finally {
       await client.close();
       await runCli(['source', 'remove', sourceId, '--apply']);
@@ -1437,15 +1616,17 @@ async function activeVectorRevision(): Promise<string> {
   });
   try {
     const pointer = database
-      .query(
+      .query<{readonly job_id?: string} | null, SQLQueryBindings[]>(
         `SELECT generation.job_id
          FROM vector_pointer AS pointer
          JOIN vector_generations AS generation ON generation.generation = pointer.generation
          WHERE pointer.singleton = 1`,
       )
-      .get() as {readonly job_id?: string} | null;
-    expect(pointer?.job_id).toMatch(/^[a-f0-9]{64}$/);
-    return pointer!.job_id as string;
+      .get();
+    const jobId = pointer?.job_id;
+    if (typeof jobId !== 'string') throw TestError.make({message: 'Expected a vector generation job ID.'});
+    expect(jobId).toMatch(/^[a-f0-9]{64}$/);
+    return jobId;
   } finally {
     database.close();
   }
@@ -1460,15 +1641,18 @@ async function runCli(
   return `${result.stdout}${result.stderr}`;
 }
 
-async function runCliJson<T>(
+async function runCliJson<S extends Schema.ConstraintDecoder<unknown>>(
+  schema: S,
   args: readonly string[],
   environment: NodeJS.ProcessEnv = {},
   observeOutput?: (output: {readonly stderr: string; readonly stdout: string}) => void,
-): Promise<T> {
+): Promise<S['Type']> {
   const result = await runCliOutput(args, environment);
   observeOutput?.(result);
   expect(result.stdout).not.toContain('[node-llama-cpp]');
-  return JSON.parse(result.stdout.trim().split('\n').at(-1) ?? '{}') as T;
+  return Schema.decodeUnknownSync(schema)(
+    JSON.parse(Effect.pipe(result.stdout, EffectString.trim, EffectString.split('\n')).at(-1) ?? '{}'),
+  );
 }
 
 async function runCliOutput(
@@ -1485,23 +1669,21 @@ async function runCliOutput(
     });
     return {stderr: result.stderr, stdout: result.stdout};
   } catch (cause) {
-    const failure = cause as {
-      readonly code?: unknown;
-      readonly stderr?: unknown;
-      readonly stdout?: unknown;
-    };
     throw TestError.make({
       cause,
-      message: [
-        `Packaged Threadnote command exited with ${String(failure.code ?? 'an unknown status')}:`,
-        `${cli} --home ${targetHome} ${args.join(' ')}`,
-        `stdout:\n${boundedFailureOutput(failure.stdout)}`,
-        `stderr:\n${boundedFailureOutput(failure.stderr)}`,
-        ...(args[0] === 'source' && args[1] === 'sync'
-          ? [await coordinatorFailureEvidence(targetHome, environment)]
-          : []),
-        ...(args[0] === 'graph' && args[1] === 'index' ? [await graphIndexFailureEvidence(targetHome)] : []),
-      ].join('\n'),
+      message: EffectArray.join(
+        [
+          `Packaged Threadnote command exited with ${String(childProcessOutput(cause, 'code') ?? 'an unknown status')}:`,
+          `${cli} --home ${targetHome} ${EffectArray.join(args, ' ')}`,
+          `stdout:\n${boundedFailureOutput(childProcessOutput(cause, 'stdout'))}`,
+          `stderr:\n${boundedFailureOutput(childProcessOutput(cause, 'stderr'))}`,
+          ...(args[0] === 'source' && args[1] === 'sync'
+            ? [await coordinatorFailureEvidence(targetHome, environment)]
+            : []),
+          ...(args[0] === 'graph' && args[1] === 'index' ? [await graphIndexFailureEvidence(targetHome)] : []),
+        ],
+        '\n',
+      ),
     });
   }
 }
@@ -1513,7 +1695,11 @@ async function graphIndexFailureEvidence(
   // Read only bounded fixture state after failure; never launch another index or copy source/model payloads.
   const repositoriesRoot = join(targetHome, 'indexes', 'code-graph', 'repositories');
   const repositoryEntries = await readdir(repositoriesRoot).catch(() => undefined);
-  const repositories = (repositoryEntries ?? []).filter(name => /^[a-f0-9]{64}$/.test(name)).slice(0, 3);
+  const presentRepositories = repositoryEntries ?? [];
+  const repositories = EffectArray.filter(
+    presentRepositories,
+    (name, index) => index in presentRepositories && /^[a-f0-9]{64}$/.test(name),
+  ).slice(0, 3);
   const inspect = (
     filename: string,
     queries: Readonly<Record<string, {readonly sql: string; readonly parameters?: readonly (string | null)[]}>>,
@@ -1522,8 +1708,8 @@ async function graphIndexFailureEvidence(
     try {
       database = new Database(filename, {readonly: true});
       database.exec('PRAGMA busy_timeout = 50');
-      return Object.fromEntries(
-        Object.entries(queries).map(([name, query]) => {
+      return EffectRecord.fromEntries(
+        EffectArray.map(EffectRecord.toEntries(queries), ([name, query]) => {
           try {
             return [name, database!.query(query.sql).all(...(query.parameters ?? []))];
           } catch {
@@ -1541,9 +1727,14 @@ async function graphIndexFailureEvidence(
   for (const repository of repositories) {
     const directory = join(repositoriesRoot, repository);
     const modelEntries = await readdir(join(directory, 'vectors'), {withFileTypes: true}).catch(() => undefined);
-    const models = (modelEntries ?? [])
-      .filter(entry => entry.isDirectory() && entry.name === coreEmbeddingModelId)
-      .map(entry => entry.name);
+    const entries = modelEntries ?? [];
+    const models = EffectArray.map(
+      EffectArray.filter(
+        entries,
+        (entry, index) => index in entries && entry.isDirectory() && entry.name === coreEmbeddingModelId,
+      ),
+      entry => entry.name,
+    );
     catalogs.push({
       repository,
       metadataUnavailable: modelEntries ? undefined : 'vector-directory',
@@ -1557,7 +1748,7 @@ async function graphIndexFailureEvidence(
           parameters: [view?.worktreeId ?? null, view?.id ?? null],
         },
       }),
-      vectors: models.map(model => ({
+      vectors: EffectArray.map(models, model => ({
         model,
         ...inspect(join(directory, 'vectors', model, 'vectors-v2.sqlite'), {
           generations: {
@@ -1582,14 +1773,19 @@ async function graphIndexFailureEvidence(
 async function coordinatorFailureEvidence(targetHome: string, environment: NodeJS.ProcessEnv): Promise<string> {
   const directory = join(targetHome, 'threadnote', 'integration-coordinator');
   const endpoint = await readFile(join(directory, 'endpoint.json'), 'utf8')
-    .then(text => JSON.parse(text) as {readonly pid: number; readonly home: string})
+    .then(text => Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text)))
     .catch(() => undefined);
   const alive =
     endpoint !== undefined && Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && isProcessRunning(endpoint.pid);
   const evidence = JSON.stringify({
     endpoint: endpoint ? {pid: endpoint.pid, alive, homeMatches: endpoint.home === (await realpath(targetHome))} : null,
-    files: (await readdir(directory).catch(() => [])).filter(file =>
-      ['endpoint.json', 'worker.lock', 'jobs.sqlite', 'jobs.sqlite-wal', 'jobs.sqlite-shm'].includes(file),
+    files: EffectArrayPipe(await readdir(directory).catch(() => []), __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (file, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues &&
+          ['endpoint.json', 'worker.lock', 'jobs.sqlite', 'jobs.sqlite-wal', 'jobs.sqlite-shm'].includes(file),
+      ),
     ),
   });
   if (alive) return `Coordinator fixture state: ${evidence}`;
@@ -1599,13 +1795,20 @@ async function coordinatorFailureEvidence(targetHome: string, environment: NodeJ
     timeout: 2_000,
     killSignal: 'SIGKILL',
     maxBuffer: cliOutputMaxBytes,
-  }).catch(cause => cause as {readonly stdout?: unknown; readonly stderr?: unknown; readonly code?: unknown});
-  return [
-    `Coordinator fixture state: ${evidence}`,
-    `Foreground fixture worker probe: ${'code' in probe ? String(probe.code) : 'exited successfully'}`,
-    `stdout:\n${boundedFailureOutput(probe.stdout)}`,
-    `stderr:\n${boundedFailureOutput(probe.stderr)}`,
-  ].join('\n');
+  }).catch(cause => ({
+    code: childProcessOutput(cause, 'code'),
+    stdout: childProcessOutput(cause, 'stdout'),
+    stderr: childProcessOutput(cause, 'stderr'),
+  }));
+  return EffectArray.join(
+    [
+      `Coordinator fixture state: ${evidence}`,
+      `Foreground fixture worker probe: ${'code' in probe ? String(probe.code) : 'exited successfully'}`,
+      `stdout:\n${boundedFailureOutput(probe.stdout)}`,
+      `stderr:\n${boundedFailureOutput(probe.stderr)}`,
+    ],
+    '\n',
+  );
 }
 
 function cliEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -1623,7 +1826,7 @@ function cliEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 function boundedFailureOutput(value: unknown): string {
   const text = typeof value === 'string' ? value : String(value ?? '');
-  return text.length <= 8_192 ? text : `${text.slice(0, 8_192)}\n[output truncated]`;
+  return text.length <= 8_192 ? text : `${Effect.pipe(text, EffectString.slice(0, 8_192))}\n[output truncated]`;
 }
 
 async function seedCoreEmbeddingFixture(): Promise<void> {
@@ -1660,9 +1863,8 @@ function parseProductionLog(content: string): ReadonlyArray<{
   readonly operation: string;
   readonly outcome?: string;
 }> {
-  return content
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-    .map(line => JSON.parse(line));
+  return EffectArray.map(
+    EffectArray.filter(Effect.pipe(content, EffectString.trim, EffectString.split('\n')), Boolean),
+    line => JSON.parse(line),
+  );
 }

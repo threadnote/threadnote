@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {canonicalJson} from '../../checkpoint/canonical_json.js';
 import {
   GRAPH_SHARE_OCI_EMPTY_CONFIG_MEDIA_TYPE,
@@ -5,9 +6,10 @@ import {
   GRAPH_SHARE_PROFILE_MEDIA_TYPE,
 } from '../artifacts.js';
 import {GRAPH_SHARE_OCI_EMPTY_CONFIG_BYTES, GRAPH_SHARE_OCI_EMPTY_CONFIG_DIGEST} from '../descriptor.js';
-import {SHA256_DIGEST, sha256Digest, type Sha256Digest} from '../digest.js';
+import {parseSha256Digest, SHA256_DIGEST, sha256Digest, type Sha256Digest} from '../digest.js';
 import {graphSharingFailure} from '../errors.js';
 import {parseGraphShareProfile, type GraphShareProfileV1} from '../profile.js';
+import * as EffectRecord from 'effect/Record';
 
 export const GRAPH_SHARE_PROFILE_OCI_MANIFEST_MAX_BYTES = 8_192;
 export const GRAPH_SHARE_PROFILE_OCI_BODY_MAX_BYTES = 65_536;
@@ -85,7 +87,7 @@ function parseManifest(value: unknown): GraphShareProfileOciManifest {
     value.schemaVersion !== 2 ||
     value.mediaType !== GRAPH_SHARE_OCI_IMAGE_MANIFEST_MEDIA_TYPE ||
     value.artifactType !== GRAPH_SHARE_PROFILE_MEDIA_TYPE ||
-    !Array.isArray(value.layers) ||
+    !EffectArray.isArray(value.layers) ||
     value.layers.length !== 1
   ) {
     throw graphSharingFailure('OCI graph profile manifest type or layer count is invalid.');
@@ -123,7 +125,7 @@ function parseEntry(value: unknown, mediaType: string): GraphShareProfileOciEntr
   ) {
     throw graphSharingFailure('OCI graph profile descriptor entry is invalid.');
   }
-  return {digest: value.digest as Sha256Digest, mediaType, size: value.size};
+  return {digest: parseSha256Digest(value.digest), mediaType, size: value.size};
 }
 
 function decodeCanonicalJson(bytes: Uint8Array, label: string): unknown {
@@ -140,10 +142,10 @@ function decodeCanonicalJson(bytes: Uint8Array, label: string): unknown {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  return actual.length === keys.length && actual.every((key, index) => key === keys[index]);
+  const actual = EffectRecord.keys(value).sort();
+  return actual.length === keys.length && EffectArray.every(actual, (key, index) => key === keys[index]);
 }

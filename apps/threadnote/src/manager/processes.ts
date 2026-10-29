@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Effect, Schema} from 'effect';
 import {
   readManageableThreadnoteProcessDiagnostics,
@@ -5,6 +6,8 @@ import {
   ThreadnoteProcessTerminationError,
 } from '../process/diagnostics.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ManagerProcessApiResponse {
   readonly body: unknown;
@@ -18,18 +21,21 @@ export interface ManagerProcessApiRequest {
   readonly url: URL;
 }
 
-class ManagerProcessApiError extends Schema.TaggedError<ManagerProcessApiError>()('ManagerProcessApiError', {
-  code: Schema.String,
-  message: Schema.String,
-  status: Schema.Finite,
-}) {
+class ManagerProcessApiError extends Schema.TaggedError<ManagerProcessApiError, {readonly brand: unique symbol}>()(
+  'ManagerProcessApiError',
+  {
+    code: Schema.String,
+    message: Schema.String,
+    status: Schema.Finite,
+  },
+) {
   static of(code: string, message: string, status: number): ManagerProcessApiError {
     return ManagerProcessApiError.make({code, message, status});
   }
 }
 
 export function isManagerProcessApiPath(pathname: string): boolean {
-  return pathname === '/api/processes' || pathname.startsWith('/api/processes/');
+  return pathname === '/api/processes' || Effect2.pipe(pathname, EffectString.startsWith('/api/processes/'));
 }
 
 export const handleManagerProcessRequest = Effect.fn('managerProcesses.handleRequest')(function* (
@@ -52,7 +58,7 @@ function routeManagerProcessRequest(request: ManagerProcessApiRequest) {
     const body = yield* request.body.pipe(
       Effect.mapError(() => ManagerProcessApiError.of('invalid-json', 'Provide a JSON object request body.', 400)),
     );
-    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    if (typeof body !== 'object' || body === null || EffectArray.isArray(body)) {
       throw ManagerProcessApiError.of('invalid-json', 'Provide a JSON object request body.', 400);
     }
     if (body.confirm !== true) {

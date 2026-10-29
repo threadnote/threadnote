@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {existsSync} from '@threadnote/testing/node-fs';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {mkdtemp, mkdir, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -12,6 +13,7 @@ import type {CommandResult} from '@threadnote/platform/command';
 import type {ShareRuntime} from '@threadnote/threadnote/types';
 import * as utils from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
+import {Option as EffectOption} from 'effect';
 
 const runSharePublish = (...args: Parameters<typeof runSharePublishEffect>) =>
   runEffect(runSharePublishEffect(...args));
@@ -85,7 +87,12 @@ function mockPublishCommands(sourcePath: string, pushResult: CommandResult, sour
   vi.mocked(utils.runCommand).mockImplementation((executable, args) => {
     if (executable === 'git' && args.includes('rev-parse') && args.includes('--git-path')) {
       return Effect.succeed(
-        ok(Array.from({length: 6}, (_, index) => `${sourcePath}.git-operation-${index}`).join('\n')),
+        ok(
+          EffectArray.join(
+            Array.from({length: 6}, (_, index) => `${sourcePath}.git-operation-${index}`),
+            '\n',
+          ),
+        ),
       );
     }
     if (executable === 'git' && args.includes('add')) {
@@ -120,7 +127,7 @@ describe('runSharePublish transaction ordering', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('pushes the shared memory before removing the personal source', async () => {
@@ -168,9 +175,24 @@ describe('runSharePublish transaction ordering', () => {
     await runSharePublish(config, sourceUri, {});
 
     expect(sourcePresentAtPush).toEqual([true]);
-    const gitCommands = vi.mocked(utils.runCommand).mock.calls.filter(([executable]) => executable === 'git');
-    const commitIndex = gitCommands.findIndex(([, args]) => args.includes('commit'));
-    const pushIndex = gitCommands.findIndex(([, args]) => args.includes('push'));
+    const gitCommands = EffectArray.filter(
+      vi.mocked(utils.runCommand).mock.calls,
+      ([executable]) => executable === 'git',
+    );
+    const commitIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        gitCommands,
+        __effectArrayValue => !!(([, args]) => args.includes('commit'))(__effectArrayValue),
+      ),
+      () => -1,
+    );
+    const pushIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        gitCommands,
+        __effectArrayValue => !!(([, args]) => args.includes('push'))(__effectArrayValue),
+      ),
+      () => -1,
+    );
     expect(commitIndex).toBeGreaterThanOrEqual(0);
     expect(pushIndex).toBeGreaterThanOrEqual(0);
     expect(commitIndex).toBeLessThan(pushIndex);
@@ -225,20 +247,23 @@ describe('runSharePublish transaction ordering', () => {
     );
     await writeFile(
       sourcePath,
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: foo',
-        'topic: bar',
-        'memory_id: tn_share_publish',
-        'relation: related_to threadnote://memory/tn_e7d22dadd14756e7d665',
-        'relation: related_to threadnote://user/test-user/memories/durable/projects/foo/private.md',
-        'candidate_id: review-local-1',
-        '',
-        'Body',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: foo',
+          'topic: bar',
+          'memory_id: tn_share_publish',
+          'relation: related_to threadnote://memory/tn_e7d22dadd14756e7d665',
+          'relation: related_to threadnote://user/test-user/memories/durable/projects/foo/private.md',
+          'candidate_id: review-local-1',
+          '',
+          'Body',
+          '',
+        ],
+        '\n',
+      ),
     );
     mockPublishCommands(sourcePath, ok('pushed'), []);
 
@@ -381,7 +406,7 @@ describe('runSharePublish transaction ordering', () => {
     await expect(readFile(sourcePath, 'utf8')).resolves.toContain('Body');
     await expect(readFile(canonicalTargetPath, 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
     await expect(readFile(worktreeTargetPath, 'utf8')).resolves.toContain('Newer teammate content');
-    expect(vi.mocked(utils.runCommand).mock.calls.some(([, args]) => args.includes('add'))).toBe(false);
+    expect(EffectArray.some(vi.mocked(utils.runCommand).mock.calls, ([, args]) => args.includes('add'))).toBe(false);
   });
 
   it('does not remove the personal source when git push fails', async () => {

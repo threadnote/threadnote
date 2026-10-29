@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Clock, DateTime, Effect} from 'effect';
@@ -20,6 +21,9 @@ import {RECALL_RANKER_VERSION} from '@threadnote/recall/rank';
 import {recallCrossScopeLaneBudgets} from '@threadnote/recall/runtime';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {atomicWrite, fixtureHash, printJson, scriptArguments} from './effect/script.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 const MAXIMUM_PHYSICAL_CANDIDATES_PER_SCENARIO = 250_000;
@@ -35,11 +39,11 @@ interface StressPass {
 const benchmarkRecallMonorepoShares = Effect.gen(function* () {
   const system = yield* SystemInfo;
   const options = parseRecallMonorepoSharesBenchmarkArguments(yield* scriptArguments());
-  const fixtures = MONOREPO_SHARE_RECALL_STRESS_SCENARIOS.map(scenario =>
+  const fixtures = EffectArray.map(MONOREPO_SHARE_RECALL_STRESS_SCENARIOS, scenario =>
     createMonorepoShareRecallStressFixture(options.fixture, scenario),
   );
-  const passes: readonly StressPass[] = fixtures.flatMap(fixture =>
-    MONOREPO_SHARE_RECALL_STRESS_MODES.map(mode => ({
+  const passes: readonly StressPass[] = EffectArray.flatMap(fixtures, fixture =>
+    EffectArray.map(MONOREPO_SHARE_RECALL_STRESS_MODES, mode => ({
       candidates: monorepoShareRecallStressCandidates(fixture, mode),
       fixture,
       key: `${fixture.scenario}:${mode}` as const,
@@ -52,7 +56,7 @@ const benchmarkRecallMonorepoShares = Effect.gen(function* () {
     for (const pass of passes) runMonorepoShareRecallStressPass(pass.fixture, pass.candidates);
   }
 
-  const durations = new Map(passes.map(pass => [pass.key, [] as number[]]));
+  const durations = new Map(EffectArray.map(passes, pass => [pass.key, [] as number[]]));
   for (let index = 0; index < options.samples; index += 1) {
     for (const pass of rotateRecallBenchmarkPasses(passes, index)) {
       const startedAt = yield* Clock.currentTimeNanos;
@@ -63,16 +67,17 @@ const benchmarkRecallMonorepoShares = Effect.gen(function* () {
     yield* Effect.yieldNow;
   }
 
-  const summaries = Object.fromEntries(
-    MONOREPO_SHARE_RECALL_STRESS_SCENARIOS.map(scenario => [
+  const summaries = EffectRecord.fromEntries(
+    EffectArray.map(MONOREPO_SHARE_RECALL_STRESS_SCENARIOS, scenario => [
       scenario,
-      Object.fromEntries(
-        passes
-          .filter(pass => pass.scenario === scenario)
-          .map(pass => [
+      EffectRecord.fromEntries(
+        EffectArray.map(
+          EffectArray.filter(passes, pass => pass.scenario === scenario),
+          pass => [
             pass.mode,
             summarizeMonorepoShareRecallStressPass(pass.fixture, pass.mode, pass.candidates, runPass(pass)),
-          ]),
+          ],
+        ),
       ),
     ]),
   );
@@ -98,7 +103,7 @@ const benchmarkRecallMonorepoShares = Effect.gen(function* () {
       operatingSystem: hardware.operatingSystem,
       runtime: `bun/${system.runtimeVersion}`,
     },
-    measurements: passes.map(pass =>
+    measurements: EffectArray.map(passes, pass =>
       benchmarkMeasurement(`${pass.scenario}-${pass.mode}-rank-latency`, 'milliseconds', durations.get(pass.key)!),
     ),
     metadata: {
@@ -111,8 +116,8 @@ const benchmarkRecallMonorepoShares = Effect.gen(function* () {
       laneBudgets: recallCrossScopeLaneBudgets(options.fixture.topK),
       personalCopies: options.fixture.packages * options.fixture.logicalMemoriesPerPackage,
       physicalCandidatesPerScenario: fixtures[0].candidates.length,
-      scenarios: Object.fromEntries(
-        fixtures.map(fixture => [
+      scenarios: EffectRecord.fromEntries(
+        EffectArray.map(fixtures, fixture => [
           fixture.scenario,
           {
             relevantWorkspaceScope: fixture.relevantWorkspaceScope,
@@ -208,7 +213,9 @@ export function rotateRecallBenchmarkPasses<T>(passes: readonly T[], sample: num
 }
 
 const git = Effect.fn('benchmark.git')((arguments_: readonly string[]) =>
-  runCommandEffect('git', arguments_, {timeoutMs: 30_000}).pipe(Effect.map(result => result.stdout.trim())),
+  runCommandEffect('git', arguments_, {timeoutMs: 30_000}).pipe(
+    Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+  ),
 );
 
 function positiveInteger(value: string | undefined, option: string): number {
@@ -228,6 +235,7 @@ function nonNegativeInteger(value: string | undefined, option: string): number {
 }
 
 function requiredValue(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }

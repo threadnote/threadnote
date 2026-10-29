@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {serializeSourceEvidenceCitation, validSourceEvidenceCitation} from '@threadnote/store/source-evidence-citation';
@@ -25,17 +26,21 @@ import {
   type TopicMaintenanceClaimRole,
   type TopicMaintenanceSupport,
 } from './topic-maintenance.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const REVIEWED_MEMORY_SUPPORT_HEADER = 'reviewed_support';
 export const MAX_REVIEWED_MEMORY_SUPPORT_BYTES = 384 * 1024;
 /** Same paragraph geometry as legacy maintenance, without the automatic drafting size limit. */
 export function reviewedSupportSections(body: string): readonly string[] {
   if (body.length > 1_000_000) fail();
-  const sections = body
-    .trim()
-    .split(/\n[\t ]*\n/u)
-    .map(section => section.trim())
-    .filter(Boolean);
+  const sections = EffectArray.filter(
+    EffectArray.map(Effect.pipe(body, EffectString.trim, EffectString.split(/\n[\t ]*\n/u)), section =>
+      Effect.pipe(section, EffectString.trim),
+    ),
+    Boolean,
+  );
   if (!sections.length || sections.length > 4096) fail();
   return sections;
 }
@@ -96,14 +101,16 @@ export function currentMemoryCodeCitations(record: MemoryRecord): readonly Memor
   if (record.metadata.reviewedSupportError !== undefined) fail();
   const support = record.metadata.reviewedSupport;
   if (support === undefined) {
-    const header = record.content.trim().replace(/\r\n?/gu, '\n').split('\n\n', 1)[0] ?? '';
+    const header =
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+      Effect.pipe(record.content, EffectString.trim, EffectString.replace(/\r\n?/gu, '\n')).split('\n\n', 1)[0] ?? '';
     if (/^\s*reviewed_support\s*:/imu.test(header)) fail();
     return record.metadata.codeCitations ?? [];
   }
   if (record.metadata.schemaVersion !== 11) fail();
   const active = validateReviewedMemorySupport(support, record.body).active;
-  const referenced = new Set(active.paragraphs.flatMap(paragraph => paragraph.evidenceIds));
-  return active.sources.flatMap(descriptor =>
+  const referenced = new Set(EffectArray.flatMap(active.paragraphs, paragraph => paragraph.evidenceIds));
+  return EffectArray.flatMap(active.sources, descriptor =>
     referenced.has(descriptor.id) && descriptor.source.kind === 'code' ? [descriptor.source.citation] : [],
   );
 }
@@ -120,9 +127,11 @@ function shape(
   if (
     !value ||
     typeof value !== 'object' ||
-    Array.isArray(value) ||
-    !required.every(key => Object.hasOwn(value, key)) ||
-    Object.keys(value).some(
+    EffectArray.isArray(value) ||
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    !EffectArray.every(required, key => Object.hasOwn(value, key)) ||
+    EffectArray.some(
+      EffectRecord.keys(value),
       key =>
         (!required.includes(key) && !optional.includes(key)) ||
         (optional.includes(key) && Reflect.get(value, key) === undefined),
@@ -138,12 +147,25 @@ function text(value: unknown, max = 512): asserts value is string {
     typeof value !== 'string' ||
     !value.length ||
     value.length > max ||
-    [...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+    EffectArray.some(
+      [...value],
+      character =>
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) < 32 ||
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) === 127,
+    )
   )
     fail();
 }
 function list(value: unknown, max: number): asserts value is unknown[] {
-  if (!Array.isArray(value) || value.length > max) fail();
+  if (!EffectArray.isArray(value) || value.length > max) fail();
 }
 function payloadDigest(value: {readonly digest?: unknown}): string {
   const {digest: _digest, ...payload} = value;
@@ -170,14 +192,17 @@ export function assertApprovedSourceDescriptor(value: unknown): asserts value is
     const resource = parseResourceId(value.source.uri);
     if (
       decodeURIComponent(resource.segments[3] ?? '') !== value.locator.teamId ||
-      resource.segments.slice(4).map(decodeURIComponent).join('/') !== value.locator.path
+      EffectArray.join(EffectArray.map(resource.segments.slice(4), decodeURIComponent), '/') !== value.locator.path
     )
       fail();
     if (
       !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(value.locator.teamId) ||
-      value.locator.path.startsWith('/') ||
-      value.locator.path.includes('\\') ||
-      value.locator.path.split('/').some(part => !part || part === '.' || part === '..')
+      Effect.pipe(value.locator.path, EffectString.startsWith('/')) ||
+      Effect.pipe(value.locator.path, EffectString.includes('\\')) ||
+      EffectArray.some(
+        Effect.pipe(value.locator.path, EffectString.split('/')),
+        part => !part || part === '.' || part === '..',
+      )
     )
       fail();
   }
@@ -187,9 +212,9 @@ function validReviewedSupportSnapshot(value: unknown, body?: string): value is R
   hash(value.bodyHash);
   hash(value.digest);
   list(value.sources, MAX_MEMORY_CODE_CITATIONS);
-  value.sources.forEach(assertApprovedSourceDescriptor);
+  EffectArray.forEach(value.sources, assertApprovedSourceDescriptor);
   const ids = new Set(
-    value.sources.map(source => {
+    EffectArray.map(value.sources, source => {
       assertApprovedSourceDescriptor(source);
       return source.id;
     }),
@@ -218,7 +243,7 @@ function validReviewedSupportSnapshot(value: unknown, body?: string): value is R
     list(paragraph.evidenceIds, MAX_MEMORY_CODE_CITATIONS);
     if (
       new Set(paragraph.evidenceIds).size !== paragraph.evidenceIds.length ||
-      paragraph.evidenceIds.some(id => typeof id !== 'string' || !ids.has(id)) ||
+      EffectArray.some(paragraph.evidenceIds, id => typeof id !== 'string' || !ids.has(id)) ||
       (paragraph.support === 'unresolved') !== (paragraph.evidenceIds.length === 0)
     )
       fail();
@@ -249,7 +274,8 @@ export function validateReviewedSupportSnapshot(value: unknown, body?: string): 
 export function createReviewedSupportSnapshot(
   input: Omit<ReviewedSupportSnapshotV1, 'digest'>,
 ): ReviewedSupportSnapshotV1 {
-  const payload = Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'digest'));
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+  const payload = Object.fromEntries(EffectArray.filter(Object.entries(input), ([key]) => key !== 'digest'));
   const snapshot = {...payload, digest: sha256HexSync(JSON.stringify(payload))};
   validateReviewedSupportSnapshot(snapshot);
   return structuredClone(validateReviewedSupportSnapshot(snapshot));
@@ -281,9 +307,9 @@ function assertReviewedSupportLegacyOriginShape(value: unknown): asserts value i
   )
     fail();
   list(value.codeCitations, MAX_MEMORY_CODE_CITATIONS);
-  value.codeCitations.forEach(assertMemoryCodeCitation);
+  EffectArray.forEach(value.codeCitations, assertMemoryCodeCitation);
   if (
-    new Set(value.codeCitations.map(citation => assertMemoryCodeCitation(citation).id)).size !==
+    new Set(EffectArray.map(value.codeCitations, citation => assertMemoryCodeCitation(citation).id)).size !==
     value.codeCitations.length
   )
     fail();
@@ -351,7 +377,7 @@ export function captureReviewedSupportLegacyOrigin(record: MemoryRecord): Valida
   if (!record.metadata.topicMaintenance && !record.metadata.consolidation) return undefined;
   const payload = {
     version: 1 as const,
-    revision: sha256HexSync(record.content.trim()),
+    revision: sha256HexSync(Effect.pipe(record.content, EffectString.trim)),
     body: record.body,
     ...(record.metadata.memoryId === undefined ? {} : {memoryId: record.metadata.memoryId}),
     kind: record.metadata.kind,
@@ -417,8 +443,13 @@ export function reviewedSupportReplacementError(
 
 function rootCodeCitationLines(content: string): readonly string[] {
   // Browser newline normalization does not change the retained citation header bytes.
-  const header = content.trim().replace(/\r\n?/gu, '\n').split('\n\n', 1)[0] ?? '';
-  return header.split('\n').filter(line => /^\s*code_citation\s*:/iu.test(line));
+  const header =
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+    Effect.pipe(content, EffectString.trim, EffectString.replace(/\r\n?/gu, '\n')).split('\n\n', 1)[0] ?? '';
+  return EffectArray.filter(
+    Effect.pipe(header, EffectString.split('\n')),
+    __effectArrayValue => !!(line => /^\s*code_citation\s*:/iu.test(line))(__effectArrayValue),
+  );
 }
 
 export type ReviewedSupportSharingBlocker =

@@ -1,10 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
 import {codeGraphAdjacencyQueryStatement} from '@threadnote/graph/store/query/core';
 import type {CodeGraphProvenance} from '@threadnote/graph/types';
 import {fcProp} from '@threadnote/testing/fast-check-property';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import * as FC from 'fast-check';
 import {codeGraphEdgesByIdsQueryStatement, codeGraphTraversalQueryStatement} from '../../src/store/query/traversal.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const baseSnapshot = 'base';
 const currentSnapshot = 'current';
@@ -73,8 +76,8 @@ describe('code graph traversal projection SQL', () => {
       limit: FC.integer({min: -2, max: 25}).map(value => value + 0.75),
     },
     ({base, current, deleted, overlay, nodes, allowed, limit}) => {
-      const baseRows = base.map(row => ({...row, snapshot_id: baseSnapshot}));
-      const currentRows = current.map(row => ({...row, snapshot_id: currentSnapshot}));
+      const baseRows = EffectArray.map(base, row => ({...row, snapshot_id: baseSnapshot}));
+      const currentRows = EffectArray.map(current, row => ({...row, snapshot_id: currentSnapshot}));
       const effective = effectiveRows(overlay ? baseRows : [], currentRows, deleted);
       withDatabase(baseRows, currentRows, deleted, database => {
         for (const direction of directions) {
@@ -84,9 +87,9 @@ describe('code graph traversal projection SQL', () => {
           const traversal = rows<TraversalRow>(database, codeGraphTraversalQueryStatement(...args));
 
           expect(baseline).toEqual(expected);
-          expect(traversal).toEqual(expected.map(project));
-          expect(new Set(traversal.map(row => row.id)).size).toBe(traversal.length);
-          const ids = traversal.map(row => row.id).reverse();
+          expect(traversal).toEqual(EffectArray.map(expected, project));
+          expect(new Set(EffectArray.map(traversal, row => row.id)).size).toBe(traversal.length);
+          const ids = EffectArray.map(traversal, row => row.id).reverse();
           const hydrated = rows<EdgeRow>(
             database,
             codeGraphEdgesByIdsQueryStatement(currentSnapshot, overlay ? baseSnapshot : undefined, [
@@ -103,9 +106,9 @@ describe('code graph traversal projection SQL', () => {
   );
 
   it('preserves priority ties, all provenance tiers, parallel edges, self-loops, and unresolved endpoints', () => {
-    const base = provenances.flatMap((provenance, provenanceIndex) =>
-      relations.flatMap((relation, relationIndex) =>
-        [0, 1].map(parallel =>
+    const base = EffectArray.flatMap(provenances, (provenance, provenanceIndex) =>
+      EffectArray.flatMap(relations, (relation, relationIndex) =>
+        EffectArray.map([0, 1], parallel =>
           edge(baseSnapshot, `${provenanceIndex}-${relationIndex}-${parallel}`, {
             provenance,
             relation,
@@ -130,7 +133,7 @@ describe('code graph traversal projection SQL', () => {
           const expected = adjacentRows(effective, ['node-0'], direction, limit, provenances);
           expect(rows<EdgeRow>(database, codeGraphAdjacencyQueryStatement(...args))).toEqual(expected);
           expect(rows<TraversalRow>(database, codeGraphTraversalQueryStatement(...args))).toEqual(
-            expected.map(project),
+            EffectArray.map(expected, project),
           );
         }
       }
@@ -138,7 +141,9 @@ describe('code graph traversal projection SQL', () => {
   });
 
   it('suppresses base rows even when their replacements no longer match the requested node or provenance', () => {
-    const base = ['moved', 'disallowed', 'deleted', 'recreated', 'retained'].map(id => edge(baseSnapshot, id));
+    const base = EffectArray.map(['moved', 'disallowed', 'deleted', 'recreated', 'retained'], id =>
+      edge(baseSnapshot, id),
+    );
     const current = [
       edge(currentSnapshot, 'moved', {source_id: 'node-5', target_id: 'node-5'}),
       edge(currentSnapshot, 'disallowed', {provenance: 'model'}),
@@ -149,7 +154,7 @@ describe('code graph traversal projection SQL', () => {
         database,
         codeGraphTraversalQueryStatement(currentSnapshot, baseSnapshot, ['node-0'], 'both', 100, ['declared']),
       );
-      expect(actual.map(row => row.id)).toEqual(['recreated', 'retained']);
+      expect(EffectArray.map(actual, row => row.id)).toEqual(['recreated', 'retained']);
       const hydrated = rows<EdgeRow>(
         database,
         codeGraphEdgesByIdsQueryStatement(currentSnapshot, baseSnapshot, [
@@ -170,7 +175,7 @@ describe('code graph traversal projection SQL', () => {
     const current = Array.from({length: 501}, (_, index) =>
       edge(currentSnapshot, `edge-${index}`, {source_id: `node-${index}`, target_id: `node-${index}`}),
     );
-    const nodes = current.flatMap(row => [row.source_id!, row.source_id!]);
+    const nodes = EffectArray.flatMap(current, row => [row.source_id!, row.source_id!]);
     withDatabase([], current, [], database => {
       for (const direction of directions) {
         for (const requested of [nodes, [...nodes].reverse()]) {
@@ -179,7 +184,7 @@ describe('code graph traversal projection SQL', () => {
           expect(expected).toHaveLength(500);
           expect(rows<EdgeRow>(database, codeGraphAdjacencyQueryStatement(...args))).toEqual(expected);
           expect(rows<TraversalRow>(database, codeGraphTraversalQueryStatement(...args))).toEqual(
-            expected.map(project),
+            EffectArray.map(expected, project),
           );
         }
       }
@@ -188,10 +193,10 @@ describe('code graph traversal projection SQL', () => {
 
   it('caps a mixed base and overlay hub at 5000 globally ordered distinct edges', () => {
     const base = Array.from({length: 5_002}, (_, index) =>
-      edge(baseSnapshot, `base-${index.toString().padStart(4, '0')}`),
+      edge(baseSnapshot, `base-${Effect.pipe(index.toString(), EffectString.padStart(4, '0'))}`),
     );
     const current = Array.from({length: 5_002}, (_, index) =>
-      edge(currentSnapshot, `current-${index.toString().padStart(4, '0')}`, {
+      edge(currentSnapshot, `current-${Effect.pipe(index.toString(), EffectString.padStart(4, '0'))}`, {
         confidence: index % 2 === 0 ? 1 : 0.5,
         target_id: 'node-0',
       }),
@@ -203,7 +208,7 @@ describe('code graph traversal projection SQL', () => {
       const args = [currentSnapshot, baseSnapshot, ['node-0'], 'both', 10_000, provenances] as const;
       const actual = rows<TraversalRow>(database, codeGraphTraversalQueryStatement(...args));
       expect(actual).toHaveLength(5_000);
-      expect(actual).toEqual(expected.map(project));
+      expect(actual).toEqual(EffectArray.map(expected, project));
       expect(rows<EdgeRow>(database, codeGraphAdjacencyQueryStatement(...args))).toEqual(expected);
     });
   });
@@ -211,18 +216,18 @@ describe('code graph traversal projection SQL', () => {
   it('hydrates only the first 400 unique requested identities without admitting another snapshot', () => {
     const base = Array.from({length: 401}, (_, index) => edge(baseSnapshot, `edge-${index}`));
     const current = [edge(currentSnapshot, 'edge-0', {evidence_path: 'src/replacement.ts'})];
-    const requested = [...base].reverse().flatMap(row => [row.id, row.id]);
-    const effective = new Map(effectiveRows(base, current, ['edge-5']).map(row => [row.id, row]));
-    const expected = [...new Set(requested)]
-      .slice(0, 400)
-      .flatMap(id => (effective.has(id) ? [effective.get(id)!] : []));
+    const requested = EffectArray.flatMap([...base].reverse(), row => [row.id, row.id]);
+    const effective = new Map(EffectArray.map(effectiveRows(base, current, ['edge-5']), row => [row.id, row]));
+    const expected = EffectArray.flatMap([...new Set(requested)].slice(0, 400), id =>
+      effective.has(id) ? [effective.get(id)!] : [],
+    );
     withDatabase(base, current, ['edge-5'], database => {
       const hydrated = rows<EdgeRow>(
         database,
         codeGraphEdgesByIdsQueryStatement(currentSnapshot, baseSnapshot, requested),
       );
       expect(byIdentity(hydrated)).toEqual(byIdentity(expected));
-      expect(hydrated.some(row => row.id === 'edge-0')).toBe(false);
+      expect(EffectArray.some(hydrated, row => row.id === 'edge-0')).toBe(false);
       expect(rows(database, codeGraphEdgesByIdsQueryStatement(currentSnapshot, baseSnapshot, []))).toEqual([]);
     });
   });
@@ -238,17 +243,41 @@ describe('code graph traversal projection SQL', () => {
         provenances,
       );
       const plan = rows<{detail: string}>(database, {...statement, text: `EXPLAIN QUERY PLAN ${statement.text}`});
-      expect(plan.filter(row => row.detail.includes('edges_source'))).toHaveLength(2);
-      expect(plan.filter(row => row.detail.includes('edges_target_resolved'))).toHaveLength(2);
-      expect(plan.map(row => row.detail).join('\n')).not.toMatch(/SCAN (?:current_edges|base_edges)/u);
+      expect(
+        EffectArray.filter(
+          plan,
+          (row, __effectArrayIndex) =>
+            __effectArrayIndex in plan && Effect.pipe(row.detail, EffectString.includes('edges_source')),
+        ),
+      ).toHaveLength(2);
+      expect(
+        EffectArray.filter(
+          plan,
+          (row, __effectArrayIndex) =>
+            __effectArrayIndex in plan && Effect.pipe(row.detail, EffectString.includes('edges_target_resolved')),
+        ),
+      ).toHaveLength(2);
+      expect(
+        EffectArray.join(
+          EffectArray.map(plan, row => row.detail),
+          '\n',
+        ),
+      ).not.toMatch(/SCAN (?:current_edges|base_edges)/u);
       const hydration = codeGraphEdgesByIdsQueryStatement(currentSnapshot, baseSnapshot, ['example']);
       const hydrationPlan = rows<{detail: string}>(database, {
         ...hydration,
         text: `EXPLAIN QUERY PLAN ${hydration.text}`,
       });
-      expect(hydrationPlan.map(row => row.detail).join('\n')).not.toMatch(/SCAN (?:current_edges|base_edges)/u);
       expect(
-        hydrationPlan.filter(row => /SEARCH (?:current_edges|base_edges).*snapshot_id=\? AND id=\?/u.test(row.detail)),
+        EffectArray.join(
+          EffectArray.map(hydrationPlan, row => row.detail),
+          '\n',
+        ),
+      ).not.toMatch(/SCAN (?:current_edges|base_edges)/u);
+      expect(
+        EffectArray.filter(hydrationPlan, row =>
+          /SEARCH (?:current_edges|base_edges).*snapshot_id=\? AND id=\?/u.test(row.detail),
+        ),
       ).toHaveLength(2);
     });
   });
@@ -272,7 +301,7 @@ function edge(snapshot_id: string, id: string, overrides: Partial<EdgeRow> = {})
 }
 
 function effectiveRows(base: readonly EdgeRow[], current: readonly EdgeRow[], deleted: readonly string[]): EdgeRow[] {
-  const effective = new Map(base.map(row => [row.id, row]));
+  const effective = new Map(EffectArray.map(base, row => [row.id, row]));
   for (const id of deleted) effective.delete(id);
   for (const row of current) effective.set(row.id, row);
   return [...effective.values()];
@@ -286,15 +315,14 @@ function adjacentRows(
   allowed: readonly CodeGraphProvenance[],
 ): EdgeRow[] {
   const requested = new Set([...new Set(nodes)].slice(0, 500));
-  return effective
-    .filter(row => {
-      const outgoing = row.source_id !== null && requested.has(row.source_id);
-      const incoming = row.target_id !== null && requested.has(row.target_id);
-      return (
-        allowed.includes(row.provenance) &&
-        (direction === 'both' ? outgoing || incoming : direction === 'outgoing' ? outgoing : incoming)
-      );
-    })
+  return EffectArray.filter(effective, row => {
+    const outgoing = row.source_id !== null && requested.has(row.source_id);
+    const incoming = row.target_id !== null && requested.has(row.target_id);
+    return (
+      allowed.includes(row.provenance) &&
+      (direction === 'both' ? outgoing || incoming : direction === 'outgoing' ? outgoing : incoming)
+    );
+  })
     .sort((left, right) => compareTuple(priority(left), priority(right)))
     .slice(0, Math.max(1, Math.min(5_000, Math.floor(limit))));
 }
@@ -337,7 +365,7 @@ function byIdentity(input: readonly EdgeRow[]): EdgeRow[] {
 }
 
 function rows<Row>(database: Database, statement: Statement): Row[] {
-  return database.query(statement.text).all(...statement.parameters) as Row[];
+  return database.query<Row, SQLQueryBindings[]>(statement.text).all(...statement.parameters);
 }
 
 function withDatabase(

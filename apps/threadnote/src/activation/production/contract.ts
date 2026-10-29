@@ -1,4 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const ACTIVATION_REQUEST_VERSION = 1 as const;
 export const ACTIVATION_REQUEST_MAX_BYTES = 256 * 1_024;
@@ -111,8 +114,13 @@ export function parseActivationProductionRequestV1(value: unknown): ActivationPr
 }
 
 function hasControlCharacter(value: string): boolean {
-  return [...value].some(character => {
-    const codePoint = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const codePoint =
+      Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return codePoint < 0x20 && codePoint !== 0x09 && codePoint !== 0x0a;
   });
 }

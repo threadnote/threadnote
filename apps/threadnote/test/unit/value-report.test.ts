@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {
@@ -7,16 +8,25 @@ import {
 } from '@threadnote/threadnote/value_report/index';
 import {summarizeLocalValueEvents, type LocalValueEventV1} from '@threadnote/threadnote/value_report/events';
 import {summarizeRecallFeedback, type RecallFeedbackEvent} from '@threadnote/recall/feedback';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const feedbackEvent = (action: RecallFeedbackEvent['action'], timestamp: string): RecallFeedbackEvent => ({
   action,
   project: 'local-project',
-  queryFingerprint: 'a'.repeat(64),
+  queryFingerprint: Effect.pipe('a', EffectString.repeat(64)),
   rankerVersion: 'hybrid-v1',
   timestamp,
   uri: 'threadnote://private/memory',
   version: 1,
 });
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 describe('value report', () => {
   it('projects bounded count-only metrics from feedback and explicit inputs', () => {
@@ -84,8 +94,8 @@ describe('value report', () => {
     const current = aggregateValueReportV1({
       period: {from: '2026-09-01T00:00:00.000Z', to: '2026-09-30T00:00:00.000Z'},
     });
-    const legacy = JSON.parse(JSON.stringify(current)) as Record<string, unknown>;
-    const feedback = legacy.feedback as Record<string, unknown>;
+    const legacy = requireJsonObject(JSON.parse(JSON.stringify(current)));
+    const feedback = requireJsonObject(legacy.feedback);
     delete feedback.applied;
     delete feedback.appliedRate;
 
@@ -148,7 +158,7 @@ describe('value report', () => {
   it('summarizes local count-only events independently of storage order', () => {
     FC.assert(
       FC.property(FC.array(FC.integer({min: 0, max: 1_000}), {maxLength: 40}), durations => {
-        const events: readonly LocalValueEventV1[] = durations.map((durationMilliseconds, index) => ({
+        const events: readonly LocalValueEventV1[] = EffectArray.map(durations, (durationMilliseconds, index) => ({
           coverageGaps: index % 3,
           durationMilliseconds,
           estimatedTokens: index,
@@ -157,7 +167,7 @@ describe('value report', () => {
           requestedCodeAnchors: index % 4,
           resolvedCodeAnchors: index % 4,
           successful: index % 5 !== 0,
-          timestamp: `2026-09-${String((index % 20) + 1).padStart(2, '0')}T00:00:00.000Z`,
+          timestamp: `2026-09-${Effect.pipe(String((index % 20) + 1), EffectString.padStart(2, '0'))}T00:00:00.000Z`,
           version: 1,
         }));
         const options = {
@@ -197,14 +207,14 @@ describe('value report', () => {
           {maxLength: 40},
         ),
         selections => {
-          const events = selections.map((selection, index): RecallFeedbackEvent => ({
+          const events = EffectArray.map(selections, (selection, index): RecallFeedbackEvent => ({
             ...selection,
-            queryFingerprint: 'a'.repeat(64),
+            queryFingerprint: Effect.pipe('a', EffectString.repeat(64)),
             rankerVersion: 'test',
             uri: `threadnote://private/${index}`,
             version: 1,
           }));
-          const expected = Object.fromEntries(actions.map(action => [action, 0])) as Record<
+          const expected = EffectRecord.fromEntries(EffectArray.map(actions, action => [action, 0])) as Record<
             (typeof actions)[number],
             number
           >;

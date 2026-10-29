@@ -21,7 +21,8 @@
     "./omp-environment": "./src/omp-environment.ts",
     "./process-environment": "./src/process-environment.ts",
     "./test-error": "./src/test-error.ts",
-    "./windows-command-launcher": "./src/windows-command-launcher.ts"
+    "./windows-command-launcher": "./src/windows-command-launcher.ts",
+    "./node-stream": "./src/node-stream.ts"
   },
   "dependencies": {
     "@effect/vitest": "4.0.7",

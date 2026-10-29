@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {mkdtemp, open, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -30,6 +31,9 @@ import {
   samplerTemporaryTelemetryContract,
   temporaryFileObservationFromStats,
 } from '../../../../scripts/code-graph-benchmark-sampler.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 import {parseCodeGraphBenchmarkArguments} from '../../../../scripts/benchmark-code-graph.js';
 
@@ -374,7 +378,7 @@ describe('code graph benchmark sampler artifact', () => {
     fields[12] = '45';
     fields[19] = '987654321';
 
-    expect(parseLinuxProcessStat(`42 (worker ) name) ${fields.join(' ')}`)).toEqual({
+    expect(parseLinuxProcessStat(`42 (worker ) name) ${EffectArray.join(fields, ' ')}`)).toEqual({
       parentProcessId: 0,
       startIdentity: '987654321',
       systemTicks: 45,
@@ -440,7 +444,7 @@ describe('code graph benchmark sampler artifact', () => {
         fc.integer({min: 0, max: 59}),
         fc.integer({min: 0, max: 99}),
         (minutes, seconds, centiseconds) => {
-          const encoded = `${minutes}:${String(seconds).padStart(2, '0')}.${String(centiseconds).padStart(2, '0')}`;
+          const encoded = `${minutes}:${Effect.pipe(String(seconds), EffectString.padStart(2, '0'))}.${Effect.pipe(String(centiseconds), EffectString.padStart(2, '0'))}`;
           expect(parseProcessCpuTime(encoded)).toBe(minutes * 60_000 + seconds * 1_000 + centiseconds * 10);
         },
       ),
@@ -656,11 +660,14 @@ describe('code graph benchmark sampler artifact', () => {
         const ready = join(root, 'ready.json');
         await writeFile(phase, 'scanning');
         const childProgram = `while (!(await Bun.file(${JSON.stringify(parentStop)}).exists())) await Bun.sleep(10);`;
-        const parentProgram = [
-          `const child=Bun.spawn([process.execPath,'-e',${JSON.stringify(childProgram)}]);`,
-          `await Bun.write(${JSON.stringify(parentReady)},'ready');`,
-          'await child.exited;',
-        ].join('');
+        const parentProgram = EffectArray.join(
+          [
+            `const child=Bun.spawn([process.execPath,'-e',${JSON.stringify(childProgram)}]);`,
+            `await Bun.write(${JSON.stringify(parentReady)},'ready');`,
+            'await child.exited;',
+          ],
+          '',
+        );
         parent = Bun.spawn({
           cmd: [process.execPath, '-e', parentProgram],
           stderr: 'ignore',
@@ -704,13 +711,21 @@ describe('code graph benchmark sampler artifact', () => {
           scope: 'recursive-process-tree',
         });
         expect(
-          Math.max(...Object.values(artifact.phases).map(sample => sample.processPeakCount ?? 0)),
+          Math.max(...EffectArray.map(EffectRecord.values(artifact.phases), sample => sample.processPeakCount ?? 0)),
         ).toBeGreaterThanOrEqual(2);
         expect(
-          Object.values(artifact.phases).reduce((total, sample) => total + (sample.processSampleAttempts ?? 0), 0),
+          EffectArray.reduce(
+            EffectRecord.values(artifact.phases),
+            0,
+            (total, sample) => total + (sample.processSampleAttempts ?? 0),
+          ),
         ).toBeGreaterThanOrEqual(1);
         expect(
-          Object.values(artifact.phases).reduce((total, sample) => total + (sample.processSampleFailures ?? 0), 0),
+          EffectArray.reduce(
+            EffectRecord.values(artifact.phases),
+            0,
+            (total, sample) => total + (sample.processSampleFailures ?? 0),
+          ),
         ).toBe(0);
         expect(JSON.stringify(artifact)).not.toContain('command');
         await writeFile(parentStop, 'complete');
@@ -874,11 +889,14 @@ describe('code graph benchmark sampler artifact', () => {
       const checkpoint = join(root, 'artifacts', 'production-large.cold.sampler.json');
       const ready = join(root, 'ready.json');
       await writeFile(phase, 'scanning');
-      const parentProgram = [
-        `await Bun.write(${JSON.stringify(parentReady)},'ready');`,
-        `while (!(await Bun.file(${JSON.stringify(crash)}).exists())) await Bun.sleep(10);`,
-        'process.exit(17);',
-      ].join('');
+      const parentProgram = EffectArray.join(
+        [
+          `await Bun.write(${JSON.stringify(parentReady)},'ready');`,
+          `while (!(await Bun.file(${JSON.stringify(crash)}).exists())) await Bun.sleep(10);`,
+          'process.exit(17);',
+        ],
+        '',
+      );
       parent = Bun.spawn({
         cmd: [process.execPath, '-e', parentProgram],
         stderr: 'ignore',
@@ -1003,6 +1021,54 @@ describe('optional RSS peak diagnostics', () => {
     expect(enabled.tokenize(10, 'root-secret')).toBe(tokenize(10, 'root-secret'));
   });
 
+  it('preserves valid artifact and checkpoint field order and unknown rest fields', () => {
+    const reorder = (source: Record<string, unknown>, keys: readonly string[]) => {
+      const ordered: Record<string, unknown> = {};
+      for (const key of keys) ordered[key] = source[key];
+      return ordered;
+    };
+    const phaseSource: Record<string, unknown> = {
+      ...validArtifact.phases.scanning,
+      phaseExtension: {opaque: true, values: ['b', 'a']},
+    };
+    const artifactSource: Record<string, unknown> = {
+      ...validArtifact,
+      phases: {scanning: phaseSource},
+      producerExtension: {opaque: 'retained', nested: {order: ['second', 'first']}},
+    };
+    const checkpointSource: Record<string, unknown> = {
+      state: 'complete',
+      sampler: artifactSource,
+      updatedAt: '2026-10-29T00:00:00.000Z',
+      version: validArtifact.version,
+      checkpointExtension: {opaque: true},
+    };
+    const phaseKeys = EffectRecord.keys(phaseSource);
+    const artifactKeys = EffectRecord.keys(artifactSource);
+    const checkpointKeys = EffectRecord.keys(checkpointSource);
+    fc.assert(
+      fc.property(
+        fc.shuffledSubarray(phaseKeys, {minLength: phaseKeys.length, maxLength: phaseKeys.length}),
+        fc.shuffledSubarray(artifactKeys, {minLength: artifactKeys.length, maxLength: artifactKeys.length}),
+        fc.shuffledSubarray(checkpointKeys, {minLength: checkpointKeys.length, maxLength: checkpointKeys.length}),
+        (phaseOrder, artifactOrder, checkpointOrder) => {
+          const phase = reorder(phaseSource, phaseOrder);
+          const artifact = reorder({...artifactSource, phases: {scanning: phase}}, artifactOrder);
+          const checkpoint = reorder({...checkpointSource, sampler: artifact}, checkpointOrder);
+          const artifactBefore = JSON.stringify(artifact);
+          const checkpointBefore = JSON.stringify(checkpoint);
+
+          expect(parseCodeGraphBenchmarkSamplerArtifact(artifact)).toBe(artifact);
+          expect(JSON.stringify(artifact)).toBe(artifactBefore);
+          expect(parseCodeGraphBenchmarkSamplerCheckpoint(checkpoint)).toBe(checkpoint);
+          expect(JSON.stringify(checkpoint)).toBe(checkpointBefore);
+          expect(JSON.stringify(artifact)).toBe(artifactBefore);
+        },
+      ),
+      {numRuns: 100},
+    );
+  });
+
   it('keeps fixed default v4 JSON bytes and default benchmark option shape', () => {
     const actual = samplerArtifact(
       25,
@@ -1080,7 +1146,7 @@ describe('optional RSS peak diagnostics', () => {
           maxLength: 48,
         }),
         nodes => {
-          const entries = nodes.map((node, index) =>
+          const entries = EffectArray.map(nodes, (node, index) =>
             processEntry(
               100 + index,
               index === 0 ? 1 : 100 + (node.parent % index),
@@ -1092,7 +1158,7 @@ describe('optional RSS peak diagnostics', () => {
             ),
           );
           // Independent parent-chain model: node 1 and every node whose ancestry contains it are excluded.
-          const admitted = entries.filter(entry => {
+          const admitted = EffectArray.filter(entries, entry => {
             let index = entry.processId - 100;
             while (index > 0) {
               if (index === 1) return false;
@@ -1107,24 +1173,22 @@ describe('optional RSS peak diagnostics', () => {
           const legacy = aggregateProcessTree(shuffled, 100, 'identity-0', excluded)!;
           const {rssContributors: projection, ...unchanged} = observed;
           expect(unchanged).toEqual(legacy);
-          const model = admitted
-            .map(entry => ({
-              token: tokenize(entry.processId, entry.startIdentity),
-              parentToken:
-                entry.processId === 100
-                  ? null
-                  : tokenize(entry.parentProcessId, entries[entry.parentProcessId - 100].startIdentity),
-              role: entry.processId === 100 ? 'root' : 'descendant',
-              rssBytes: entry.rssBytes,
-            }))
-            .sort((a, b) => b.rssBytes - a.rssBytes || (a.token < b.token ? -1 : a.token > b.token ? 1 : 0));
+          const model = EffectArray.map(admitted, entry => ({
+            token: tokenize(entry.processId, entry.startIdentity),
+            parentToken:
+              entry.processId === 100
+                ? null
+                : tokenize(entry.parentProcessId, entries[entry.parentProcessId - 100].startIdentity),
+            role: entry.processId === 100 ? 'root' : 'descendant',
+            rssBytes: entry.rssBytes,
+          })).sort((a, b) => b.rssBytes - a.rssBytes || (a.token < b.token ? -1 : a.token > b.token ? 1 : 0));
           expect(projection?.contributors).toEqual(model.slice(0, 16));
           expect(projection).toMatchObject({
             admittedAccountingComplete: true,
             processCount: admitted.length,
             omittedProcessCount: Math.max(0, admitted.length - 16),
-            omittedRssBytes: model.slice(16).reduce((sum, entry) => sum + entry.rssBytes, 0),
-            rssBytes: admitted.reduce((sum, entry) => sum + entry.rssBytes, 0),
+            omittedRssBytes: EffectArray.reduce(model.slice(16), 0, (sum, entry) => sum + entry.rssBytes),
+            rssBytes: EffectArray.reduce(admitted, 0, (sum, entry) => sum + entry.rssBytes),
           });
           expect(aggregateProcessTree(entries, 100, 'identity-0', excluded, tokenize)?.rssContributors).toEqual(
             projection,
@@ -1144,17 +1208,21 @@ describe('optional RSS peak diagnostics', () => {
     const sample = aggregateProcessTree(entries, 10, undefined, [], tokenize)!;
     expect(sample.rssContributors?.contributors).toHaveLength(16);
     expect(
-      sample.rssContributors?.contributors.every(
-        entry => entry.role === 'descendant' && entry.parentToken === tokenize(10, 'root-secret'),
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(sample.rssContributors), contributors =>
+          EffectArray.every(
+            contributors.contributors,
+            entry => entry.role === 'descendant' && entry.parentToken === tokenize(10, 'root-secret'),
+          ),
+        ),
       ),
     ).toBe(true);
     expect(sample.rssContributors?.omittedRssBytes).toBe(400);
     expect(parseCodeGraphBenchmarkSamplerArtifact(artifactFor(sample))).toBeDefined();
-    const zeros = entries.map(entry => ({...entry, rssBytes: 0}));
+    const zeros = EffectArray.map(entries, entry => ({...entry, rssBytes: 0}));
     const zeroProjection = aggregateProcessTree(zeros, 10, undefined, [], tokenize)!.rssContributors!;
-    expect(zeroProjection.contributors.map(entry => entry.token)).toEqual(
-      entries
-        .map(entry => tokenize(entry.processId, entry.startIdentity))
+    expect(EffectArray.map(zeroProjection.contributors, entry => entry.token)).toEqual(
+      EffectArray.map(entries, entry => tokenize(entry.processId, entry.startIdentity))
         .sort()
         .slice(0, 16),
     );
@@ -1255,8 +1323,8 @@ describe('optional RSS peak diagnostics', () => {
         ...treeArtifact,
         rssPeakDiagnostic: {
           ...treePeak,
-          contributors: treePeak.contributors.map(entry =>
-            entry.role === 'descendant' ? {...entry, parentToken: 'a'.repeat(64)} : entry,
+          contributors: EffectArray.map(treePeak.contributors, entry =>
+            entry.role === 'descendant' ? {...entry, parentToken: Effect.pipe('a', EffectString.repeat(64))} : entry,
           ),
         },
       }),
@@ -1278,7 +1346,10 @@ describe('optional RSS peak diagnostics', () => {
       {...peak, contributors: Array(17).fill(contributor)},
       {...peak, contributors: [{...contributor, token: '10:root-secret'}]},
       {...peak, contributors: [{...contributor, role: 'worker'}]},
-      {...peak, contributors: [{...contributor, role: 'descendant', parentToken: 'a'.repeat(64)}]},
+      {
+        ...peak,
+        contributors: [{...contributor, role: 'descendant', parentToken: Effect.pipe('a', EffectString.repeat(64))}],
+      },
       {...peak, contributors: [{...contributor, parentToken: contributor.token}]},
       {...peak, contributors: [{...contributor, rssBytes: -1}]},
       {...peak, contributors: [{...contributor, executable: '/bin/secret'}]},

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import type {CodeGraphWorkspace, CodeGraphWorkspaceProject} from '@threadnote/graph/languages/types';
@@ -9,6 +10,8 @@ import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/regist
 import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {codeGraphPackageMoniker} from '@threadnote/graph/cross_repository/monikers';
 import {classifyWorkspaceTransition} from '@threadnote/graph/workspace/transition';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph workspace compatibility properties', () => {
   it('ignores repository fingerprint churn when every project surface stays identical', () => {
@@ -31,7 +34,7 @@ describe('code graph workspace compatibility properties', () => {
         const projects = Array.from({length: projectCount}, (_, index) => project(index));
         const changedIndex = salt % projectCount;
         const dependencyIndex = (changedIndex + 1) % projectCount;
-        const changed = projects.map((value, index) =>
+        const changed = EffectArray.map(projects, (value, index) =>
           index === changedIndex
             ? {
                 ...value,
@@ -118,7 +121,10 @@ describe('code graph workspace compatibility properties', () => {
 
   it('explains only roster-related external dependencies when an unchanged manifest gains a local provider', () => {
     const provider = nodeProject('new', 'packages/new');
-    const consumer = {...nodeProject('consumer', 'packages/consumer'), id: `cgp_${'1'.repeat(32)}`};
+    const consumer = {
+      ...nodeProject('consumer', 'packages/consumer'),
+      id: `cgp_${Effect.pipe('1', EffectString.repeat(32))}`,
+    };
     const dependency = {
       ecosystem: 'npm' as const,
       evidence: {path: 'packages/consumer/package.json'},
@@ -391,7 +397,10 @@ describe('code graph workspace compatibility properties', () => {
     ).toEqual({mode: 'fallback', reason: 'ambiguous-owner'});
     const changedWorkspace = {
       ...base,
-      workspace: {...base.workspace, workspaces: base.workspace.workspaces.map(value => ({...value, name: 'changed'}))},
+      workspace: {
+        ...base.workspace,
+        workspaces: EffectArray.map(base.workspace.workspaces, value => ({...value, name: 'changed'})),
+      },
     };
     expect(
       classifyWorkspaceTransition({base, current: changedWorkspace, resolverExtractorContextUnchanged: true}),
@@ -483,7 +492,8 @@ describe('code graph workspace compatibility properties', () => {
           resolverExtractorContextUnchanged: true,
         });
         expect(result.mode).toBe('eligible');
-        if (result.mode === 'eligible') expect(result.ownerChangedPaths).toEqual(files.map(file => file.path).sort());
+        if (result.mode === 'eligible')
+          expect(result.ownerChangedPaths).toEqual(EffectArray.map(files, file => file.path).sort());
       }),
       {numRuns: 75},
     );
@@ -495,7 +505,7 @@ function nodeProject(id: string, root: string, dependencies: readonly string[] =
     ...project(0),
     buildSystem: 'node',
     dependencies,
-    dependencyDetails: dependencies.map(targetId => ({
+    dependencyDetails: EffectArray.map(dependencies, targetId => ({
       evidence: `${root}/package.json`,
       provenance: 'declared' as const,
       targetId,
@@ -515,7 +525,7 @@ function transitionFile(path: string, size = 1, resolutionDomains = ['typescript
 function side(projects: readonly CodeGraphWorkspaceProject[], files: readonly ReturnType<typeof transitionFile>[]) {
   const workspaces = [
     ...new Map(
-      projects.map(value => [
+      EffectArray.map(projects, value => [
         value.workspaceId,
         {
           buildSystem: value.buildSystem,
@@ -560,7 +570,7 @@ function inventoryFile(path: string, language: string, content?: string): CodeGr
     path,
     language,
     content,
-    blobId: 'a'.repeat(40),
+    blobId: Effect.pipe('a', EffectString.repeat(40)),
     contentHash: `hash-${path}`,
     mode: '100644',
     size: 1,

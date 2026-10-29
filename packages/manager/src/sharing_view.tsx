@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import React, {useState} from 'react';
 import {AlertTriangle, Check, GitBranch, Pencil, Plus, RefreshCw, Unlink, Users} from 'lucide-react';
 import {ActionMenu} from './action_menu.js';
@@ -6,6 +7,8 @@ import {PageActions} from './workspace.js';
 import {SharingConflicts} from './sharing_conflicts.js';
 import type {ShareSummary} from './ui/contracts.js';
 import {api, errorMessage} from './ui/support.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function SharingPanel(props: {
   readonly shares: readonly ShareSummary[];
@@ -27,7 +30,11 @@ export function SharingPanel(props: {
       await api(path, body);
       await props.onChanged();
       setRefreshVersion(value => value + 1);
-      setNotice(path.endsWith('/sync') ? 'Sync finished. Review any conflicts below.' : 'Team settings updated.');
+      setNotice(
+        Effect.pipe(path, EffectString.endsWith('/sync'))
+          ? 'Sync finished. Review any conflicts below.'
+          : 'Team settings updated.',
+      );
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
@@ -120,7 +127,7 @@ export function SharingPanel(props: {
       <div className="workspace-stack">
         <SharingConflicts refreshVersion={refreshVersion} onChanged={props.onChanged} onLoaded={setConflictCounts} />
         {props.shares.length ? (
-          props.shares.map(share => (
+          EffectArray.map(props.shares, share => (
             <section className="workspace-card" key={share.name}>
               <header>
                 <h3>

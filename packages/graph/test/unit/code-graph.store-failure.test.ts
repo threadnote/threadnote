@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, pipe as EffectPipe} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {classifyCodeGraphStoreFailure, codeGraphStoreSchemaAdditiveRequired} from '@threadnote/graph/store/failure';
@@ -116,10 +117,11 @@ describe('code graph store failure classification', () => {
   it('fails closed when an additive-schema preflight does not prove every non-destructive invariant', () => {
     expect(() =>
       codeGraphStoreSchemaAdditiveRequired('initialize code graph database', {
+        // @ts-expect-error -- This negative fixture verifies rejection of a preflight that does not prove createsOnly.
         createsOnly: false,
         preservesActivePointers: true,
         preservesSnapshots: true,
-      } as never),
+      }),
     ).toThrow(CodeGraphStoreError);
   });
 
@@ -137,7 +139,7 @@ describe('code graph store failure classification', () => {
         stableCodes,
         fc
           .array(fc.constantFrom(...'0123456789abcdef'), {maxLength: 32, minLength: 8})
-          .map(characters => `PRIVATE_${characters.join('')}`),
+          .map(characters => `PRIVATE_${EffectArray.join(characters, '')}`),
         fc.integer({max: 5, min: 0}),
         ([code, expected], privateToken, depth) => {
           const privatePath = `/Users/private/${privateToken}/graph.sqlite`;
@@ -187,12 +189,20 @@ describe('code graph store failure classification', () => {
     );
     fc.assert(
       fc.property(fc.array(evidence, {maxLength: 20, minLength: 1}), observations => {
-        const expected = observations.reduce((best, candidate) => (candidate.rank < best.rank ? candidate : best));
+        const expected = EffectPipe(observations, __effectReduceValues =>
+          EffectArray.reduce(
+            EffectArray.drop(__effectReduceValues, 1),
+            EffectOption.getOrElse(EffectArray.head(__effectReduceValues), () => {
+              throw new TypeError('Reduce of empty array with no initial value');
+            }),
+            (best, candidate) => (candidate.rank < best.rank ? candidate : best),
+          ),
+        );
         const forward = classifyCodeGraphStoreFailure('load code graph snapshot', {
-          errors: observations.map(({code}) => ({code})),
+          errors: EffectArray.map(observations, ({code}) => ({code})),
         });
         const reversed = classifyCodeGraphStoreFailure('load code graph snapshot', {
-          errors: [...observations].reverse().map(({code}) => ({code})),
+          errors: EffectArray.map([...observations].reverse(), ({code}) => ({code})),
         });
 
         expect(forward.code).toBe(expected.expected);

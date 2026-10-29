@@ -1,11 +1,13 @@
+import {TestError} from '@threadnote/testing/test-error';
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it} from '@effect/vitest';
-import {Context, Effect, Layer, Option, Path} from 'effect';
+import {Context, Effect, Layer, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {CommandExecutor} from '@threadnote/platform/command';
@@ -38,6 +40,13 @@ import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 describe('cross-session code graph increments', () => {
   it.effect('shares a clean structural root across divergent sibling worktrees', () => {
@@ -76,12 +85,16 @@ describe('cross-session code graph increments', () => {
       const database = new Database(first.databasePath, {readonly: true});
       try {
         const rows = database
-          .query('SELECT snapshot_id, component_surfaces_json FROM snapshot_reuse_receipts WHERE snapshot_id = ?')
-          .all(first.summary.snapshot.id) as readonly {component_surfaces_json: string | null; snapshot_id: string}[];
+          .query<{component_surfaces_json: string | null; snapshot_id: string}, SQLQueryBindings[]>(
+            'SELECT snapshot_id, component_surfaces_json FROM snapshot_reuse_receipts WHERE snapshot_id = ?',
+          )
+          .all(first.summary.snapshot.id);
         expect(rows[0]?.component_surfaces_json).not.toBeNull();
-        const physical = database
-          .query('SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?')
-          .get(sibling.summary.snapshot.id) as {count: number};
+        const physical = requiredRow(
+          database
+            .query<{count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?')
+            .get(sibling.summary.snapshot.id),
+        );
         expect(physical.count).toBeLessThan(sibling.summary.snapshot.symbolCount);
       } finally {
         database.close();
@@ -158,8 +171,11 @@ describe('cross-session code graph increments', () => {
         );
         const citedFile = initialEvidence.filesByPaths[0]?.file;
         expect(citedFile).toMatchObject({path: originalPath, source: 'commit'});
-        const citedSymbol = initial.graph.symbols.find(
-          symbol => symbol.path === originalPath && symbol.name === 'useHelper',
+        const citedSymbol = Option.getOrUndefined(
+          EffectArray.findFirst(
+            initial.graph.symbols,
+            symbol => symbol.path === originalPath && symbol.name === 'useHelper',
+          ),
         );
         expect(citedSymbol).toBeDefined();
         const config = {
@@ -194,12 +210,15 @@ describe('cross-session code graph increments', () => {
           {contentHash: normalizedHash, path: relocatedPath, size: relocatedBytes.byteLength},
         ]);
         const legacyFingerprint = sha256HexSync(
-          [
-            'build-request-overlay-v1',
-            `I\0${sha256HexSync('')}`,
-            ...dirtyObservation.overlay.deletedPaths.map(relative => `D\0${relative}`),
-            `F\0${relocatedPath}\0${rawHash}`,
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'build-request-overlay-v1',
+              `I\0${sha256HexSync('')}`,
+              ...EffectArray.map(dirtyObservation.overlay.deletedPaths, relative => `D\0${relative}`),
+              `F\0${relocatedPath}\0${rawHash}`,
+            ],
+            '\n',
+          ),
         );
         expect(dirtyObservation.state.fingerprint).not.toBe(legacyFingerprint);
         const dirty = yield* indexAndLoadEffect(root, home);
@@ -265,7 +284,7 @@ describe('cross-session code graph increments', () => {
           }),
         ]);
 
-        const citation = captured.find(item => item.target.kind === 'file')!;
+        const citation = Option.getOrUndefined(EffectArray.findFirst(captured, item => item.target.kind === 'file'))!;
         expect(
           validateContextBriefFileCitation(
             citation,
@@ -311,7 +330,9 @@ describe('cross-session code graph increments', () => {
           ),
         ).toMatchObject({observedPath: relocatedPath, reason: 'relocated', status: 'relocated'});
 
-        const capturedSymbolCitation = captured.find(item => item.target.kind === 'symbol')!;
+        const capturedSymbolCitation = Option.getOrUndefined(
+          EffectArray.findFirst(captured, item => item.target.kind === 'symbol'),
+        )!;
         const symbolValidations = yield* validateContextBriefMemoryCitations(
           config,
           {callerCwd: root, kind: 'repository'},
@@ -427,6 +448,7 @@ describe('cross-session code graph increments', () => {
         expect(citedFile).toBeDefined();
         expect(initialEvidence.fileInventoryCoverage).toBe('complete');
 
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const citedContent = JSON.stringify({value: 'x'.repeat(CODE_GRAPH_GENERIC_JSON_EXCLUSION_BYTES)});
         writeFileSync(join(root, citedPath), citedContent);
         git(root, ['add', citedPath]);
@@ -500,6 +522,7 @@ describe('cross-session code graph increments', () => {
         const skippedPath = 'data/skipped.json';
         writeFileSync(
           join(root, skippedPath),
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           JSON.stringify({value: 'x'.repeat(CODE_GRAPH_GENERIC_JSON_EXCLUSION_BYTES)}),
         );
         writeUseFile(root, 'eligible change beside a skipped file');
@@ -966,7 +989,7 @@ describe('cross-session code graph increments', () => {
       const observedCommand = CommandExecutor.of({
         ...command,
         execute: (executable, args, options) => {
-          if (executable === 'git') gitCommands.push(args.join(' '));
+          if (executable === 'git') gitCommands.push(EffectArray.join(args, ' '));
           return command.execute(executable, args, options);
         },
       });
@@ -984,7 +1007,9 @@ describe('cross-session code graph increments', () => {
         overlayObservation: observation.overlay,
       }).pipe(Effect.provideService(CommandExecutor, observedCommand));
       expect(Option.isSome(fastInventory)).toBe(true);
-      expect(gitCommands.some(command => command.includes(' ls-tree '))).toBe(false);
+      expect(EffectArray.some(gitCommands, command => Effect2.pipe(command, EffectString.includes(' ls-tree ')))).toBe(
+        false,
+      );
 
       const incremental = yield* indexAndLoadEffect(root, incrementalHome);
       const full = yield* indexer.index({
@@ -1020,7 +1045,8 @@ describe('cross-session code graph increments', () => {
       );
       expect(incremental.health).toMatchObject({foreignKeyViolations: 0, integrity: 'ok'});
       expect(
-        incremental.graph.edges.some(
+        EffectArray.some(
+          incremental.graph.edges,
           edge => edge.sourceName === 'useHelper' && edge.relation === 'calls' && edge.targetName === 'helper',
         ),
       ).toBe(true);
@@ -1112,8 +1138,8 @@ describe('cross-session code graph increments', () => {
 
       const dirty = yield* indexAndLoadEffect(root, home);
       expect(
-        dirty.summary.diagnostics.some(diagnostic =>
-          diagnostic.startsWith('Reused persisted clean inventory admission for '),
+        EffectArray.some(dirty.summary.diagnostics, diagnostic =>
+          Effect2.pipe(diagnostic, EffectString.startsWith('Reused persisted clean inventory admission for ')),
         ),
       ).toBe(false);
     }).pipe(
@@ -1196,7 +1222,8 @@ describe('cross-session code graph increments', () => {
         expect(incremental.summary.materialization?.mode).toBe('incremental-overlay');
         expect(projectGraph(incremental.graph)).toEqual(projectGraph(full));
         expect(
-          incremental.graph.edges.some(
+          EffectArray.some(
+            incremental.graph.edges,
             edge => edge.sourceName === 'useHelper' && edge.relation === 'calls' && edge.targetName === 'helper',
           ),
         ).toBe(operation === 'add');
@@ -1238,25 +1265,38 @@ describe('cross-session code graph increments', () => {
         totalFiles: 3,
       });
       expect(projectGraph(incremental.graph)).toEqual(projectGraph(full));
-      const implementation = incremental.graph.symbols.find(
-        symbol => symbol.name === 'helper' && symbol.signature?.includes('string | number'),
+      const implementation = Option.getOrUndefined(
+        EffectArray.findFirst(
+          incremental.graph.symbols,
+          __effectArrayValue =>
+            !!(symbol =>
+              symbol.name === 'helper' &&
+              Effect2.pipe(symbol.signature, effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect2.pipe(effectOptionalString, EffectString.includes('string | number')),
+              ))(__effectArrayValue),
+        ),
       );
-      const decodeDeclarations = incremental.graph.symbols.filter(symbol => symbol.name === 'decode');
+      const decodeDeclarations = EffectArray.filter(incremental.graph.symbols, symbol => symbol.name === 'decode');
       expect(implementation).toBeDefined();
       expect(
-        incremental.graph.edges.some(
+        EffectArray.some(
+          incremental.graph.edges,
           edge => edge.relation === 'calls' && edge.sourceName === 'useHelper' && edge.targetId === implementation?.id,
         ),
       ).toBe(true);
       expect(
         new Set(
-          incremental.graph.edges
-            .filter(
+          EffectArray.map(
+            EffectArray.filter(
+              incremental.graph.edges,
               edge => edge.relation === 'calls' && edge.sourceName === 'useHelper' && edge.targetName === 'decode',
-            )
-            .map(edge => edge.targetId),
+            ),
+            edge => edge.targetId,
+          ),
         ),
-      ).toEqual(new Set(decodeDeclarations.map(symbol => symbol.id)));
+      ).toEqual(new Set(EffectArray.map(decodeDeclarations, symbol => symbol.id)));
     }).pipe(
       provideTestLayer(ApplicationLayer),
       TestClock.withLive,
@@ -1303,7 +1343,7 @@ describe('cross-session code graph increments', () => {
         referenceHome = mkdtempSync(join(tmpdir(), 'threadnote-pack-rollout-reference-home-'));
         const initialRegistry = createCodeGraphLanguagePackRegistry(BUILTIN_LANGUAGE_PACK_REGISTRY.packs);
         const nextRegistry = createCodeGraphLanguagePackRegistry(
-          BUILTIN_LANGUAGE_PACK_REGISTRY.packs.map(pack =>
+          EffectArray.map(BUILTIN_LANGUAGE_PACK_REGISTRY.packs, pack =>
             pack.id === 'typescript'
               ? {...pack, extractor: {...pack.extractor, version: `${pack.extractor.version}-compatible-next`}}
               : pack,
@@ -1349,9 +1389,9 @@ describe('cross-session code graph increments', () => {
         git(root, ['commit', '--amend', '-qm', 'fixture with AXL source']);
 
         const legacyRegistry = createCodeGraphLanguagePackRegistry(
-          BUILTIN_LANGUAGE_PACK_REGISTRY.packs.map(pack =>
+          EffectArray.map(BUILTIN_LANGUAGE_PACK_REGISTRY.packs, pack =>
             pack.id === 'bazel'
-              ? {...pack, files: pack.files.filter(matcher => matcher.value !== '.axl'), version: '1.0.0'}
+              ? {...pack, files: EffectArray.filter(pack.files, matcher => matcher.value !== '.axl'), version: '1.0.0'}
               : pack,
           ),
         );
@@ -1554,18 +1594,24 @@ const indexWithRegistry = Effect.fn('test.indexWithRegistry')(function* (
   );
 });
 
+const projectedGraphSchema = Schema.Struct({
+  edges: Schema.Array(Schema.Unknown),
+  symbols: Schema.Array(Schema.Unknown),
+});
+const isProjectedGraph = Schema.is(projectedGraphSchema);
+
 function projectGraph(graph: {readonly edges: readonly unknown[]; readonly symbols: readonly unknown[]}) {
-  return JSON.parse(JSON.stringify({edges: graph.edges, symbols: graph.symbols})) as {
-    readonly edges: readonly unknown[];
-    readonly symbols: readonly unknown[];
-  };
+  const parsed: unknown = JSON.parse(JSON.stringify({edges: graph.edges, symbols: graph.symbols}));
+  if (!isProjectedGraph(parsed)) throw new Error('Invalid projected graph fixture.');
+  return parsed;
 }
 
 function persistedSnapshotState(databasePath: string, snapshotId: string): string | undefined {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return (database.query('SELECT state FROM snapshots WHERE id = ?').get(snapshotId) as {state?: string} | null)
-      ?.state;
+    return database
+      .query<{state?: string} | null, SQLQueryBindings[]>('SELECT state FROM snapshots WHERE id = ?')
+      .get(snapshotId)?.state;
   } finally {
     database.close(false);
   }
@@ -1650,7 +1696,10 @@ function createConvergentIncrementalRepository(): {readonly root: string; readon
   configureTestGitIdentity(root);
   git(root, ['add', '.']);
   git(root, ['commit', '-qm', 'common']);
-  const common = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
+  const common = Effect2.pipe(
+    execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}),
+    EffectString.trim,
+  );
 
   git(root, ['checkout', '-qb', 'target-a', common]);
   writeFileSync(join(root, 'src/b.ts'), 'export const b = "final-b";\n');
@@ -1680,14 +1729,17 @@ function createBarrelRepository(): string {
   mkdirSync(join(root, 'src'), {recursive: true});
   writeFileSync(
     join(root, 'src', 'helper.ts'),
-    [
-      'export function helper(value: string): string;',
-      'export function helper(value: number): number;',
-      'export function helper(value: string | number): string | number { return value; }',
-      'export declare function decode(): string;',
-      'export declare function decode(left: string, right: string): string;',
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'export function helper(value: string): string;',
+        'export function helper(value: number): number;',
+        'export function helper(value: string | number): string | number { return value; }',
+        'export declare function decode(): string;',
+        'export declare function decode(left: string, right: string): string;',
+        '',
+      ],
+      '\n',
+    ),
   );
   writeFileSync(join(root, 'src', 'index.ts'), 'export {decode, helper} from "./helper.js";\n');
   writeBarrelConsumer(root, 'clean');
@@ -1701,42 +1753,51 @@ function createBarrelRepository(): string {
 function writeUseFile(root: string, revision: string): void {
   writeFileSync(
     join(root, 'src', 'use.ts'),
-    [
-      'import {helper} from "./helper.js";',
-      'export function useHelper(): string {',
-      `  const revision = ${JSON.stringify(revision)};`,
-      '  return `${revision}:${helper()}`;',
-      '}',
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'import {helper} from "./helper.js";',
+        'export function useHelper(): string {',
+        `  const revision = ${JSON.stringify(revision)};`,
+        '  return `${revision}:${helper()}`;',
+        '}',
+        '',
+      ],
+      '\n',
+    ),
   );
 }
 
 function writeUseFileWithoutCall(root: string, revision: string): void {
   writeFileSync(
     join(root, 'src', 'use.ts'),
-    [
-      'import {helper} from "./helper.js";',
-      'export function useHelper(): string {',
-      `  const revision = ${JSON.stringify(revision)};`,
-      '  void helper;',
-      '  return revision;',
-      '}',
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'import {helper} from "./helper.js";',
+        'export function useHelper(): string {',
+        `  const revision = ${JSON.stringify(revision)};`,
+        '  void helper;',
+        '  return revision;',
+        '}',
+        '',
+      ],
+      '\n',
+    ),
   );
 }
 
 function writeBarrelConsumer(root: string, revision: string): void {
   writeFileSync(
     join(root, 'src', 'use.ts'),
-    [
-      'import {decode, helper} from "./index.js";',
-      'export function useHelper(): string {',
-      `  return helper(${JSON.stringify(revision)}) + decode() + decode("a", "b");`,
-      '}',
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'import {decode, helper} from "./index.js";',
+        'export function useHelper(): string {',
+        `  return helper(${JSON.stringify(revision)}) + decode() + decode("a", "b");`,
+        '}',
+        '',
+      ],
+      '\n',
+    ),
   );
 }
 
@@ -1744,12 +1805,14 @@ function persistedDeltaStats(databasePath: string, snapshotId: string) {
   const database = new Database(databasePath, {readonly: true});
   try {
     const paths = (table: 'edges' | 'snapshot_files' | 'symbols', column: 'evidence_path' | 'path') =>
-      database
-        .query<{readonly path: string}, [string]>(
-          `SELECT DISTINCT ${column} AS path FROM ${table} WHERE snapshot_id = ? ORDER BY path`,
-        )
-        .all(snapshotId)
-        .map(row => row.path);
+      EffectArray.map(
+        database
+          .query<{readonly path: string}, [string]>(
+            `SELECT DISTINCT ${column} AS path FROM ${table} WHERE snapshot_id = ? ORDER BY path`,
+          )
+          .all(snapshotId),
+        row => row.path,
+      );
     return {
       activeLeases: Number(
         database.query<{readonly count: number}, []>('SELECT COUNT(*) AS count FROM snapshot_leases').get()?.count ?? 0,
@@ -1777,12 +1840,14 @@ function foldForwardProofStats(
       .get(snapshotId);
     if (!receipt) return undefined;
     return {
-      paths: database
-        .query<{readonly path: string}, [string]>(
-          'SELECT path FROM snapshot_fold_forward_paths WHERE snapshot_id = ? ORDER BY path',
-        )
-        .all(snapshotId)
-        .map(row => row.path),
+      paths: EffectArray.map(
+        database
+          .query<{readonly path: string}, [string]>(
+            'SELECT path FROM snapshot_fold_forward_paths WHERE snapshot_id = ? ORDER BY path',
+          )
+          .all(snapshotId),
+        row => row.path,
+      ),
       rootSnapshotId: receipt.rootSnapshotId,
     };
   } finally {

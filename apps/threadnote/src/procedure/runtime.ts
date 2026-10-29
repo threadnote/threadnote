@@ -9,14 +9,19 @@ import {
   type ProcedureStatusInput,
   type ProcedureVerificationReceipt,
 } from '@threadnote/context/procedure/contract';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const MAX_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_COMMAND_OUTPUT_BYTES = 65_536;
 
-export class ProcedureRuntimeError extends Schema.TaggedError<ProcedureRuntimeError>()('ProcedureRuntimeError', {
-  message: Schema.String,
-}) {}
+export class ProcedureRuntimeError extends Schema.TaggedError<ProcedureRuntimeError, {readonly brand: unique symbol}>()(
+  'ProcedureRuntimeError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export interface ProcedureVerificationMetadata {
   readonly hostVersion: string;
@@ -85,7 +90,7 @@ export function procedureRuntimeStatus(input: ProcedureRuntimeStatusInput): Proc
 }
 
 function assertLocalManifestPath(path: string): void {
-  if (!/^(?:\/|[A-Za-z]:[\\/])/.test(path) || path.includes('://')) {
+  if (!/^(?:\/|[A-Za-z]:[\\/])/.test(path) || Effect2.pipe(path, EffectString.includes('://'))) {
     throw ProcedureRuntimeError.make({message: 'Verification requires an author-selected local manifest path.'});
   }
 }

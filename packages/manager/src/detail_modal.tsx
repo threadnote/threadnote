@@ -1,6 +1,8 @@
+import {isContentResponse} from './api/response_guards.js';
 import React, {useEffect, useId, useRef, useState} from 'react';
 import {MarkdownViewer} from './ui/controls.js';
 import {api, errorMessage} from './ui/support.js';
+import {Array as EffectArray} from 'effect';
 
 export function DetailModal(props: {
   readonly title: string;
@@ -23,7 +25,12 @@ export function DetailModal(props: {
   return (
     <dialog
       ref={ref}
-      className={['detail-modal', props.className].filter(Boolean).join(' ')}
+      className={EffectArray.join(
+        EffectArray.map(EffectArray.filter(['detail-modal', props.className], Boolean), item =>
+          item === null || item === undefined ? '' : String(item),
+        ),
+        ' ',
+      )}
       aria-labelledby={titleId}
       aria-modal="true"
       onCancel={event => {
@@ -63,7 +70,12 @@ export function MemoryDetailModal(props: {
   const [error, setError] = useState('');
   useEffect(() => {
     let cancelled = false;
-    void api<{content: string}>(`/api/memory?uri=${encodeURIComponent(props.uri)}`)
+    void api<{content: string}>(
+      `/api/memory?uri=${encodeURIComponent(props.uri)}`,
+      undefined,
+      undefined,
+      isContentResponse,
+    )
       .then(result => {
         if (!cancelled) setContent(result.content);
       })

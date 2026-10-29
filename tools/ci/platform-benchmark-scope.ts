@@ -1,10 +1,15 @@
+import {Array as EffectArray} from 'effect';
 import {isPurePrivateReleaseEvidenceDiff} from './private-release-evidence-family.js';
 import {CI_TEST_POLICY_PATHS} from './code-graph-production-ratchet-scope.js';
+import {isJsonObject, type JsonObject} from '@threadnote/platform/json';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface PlatformBenchmarkDiff {
   readonly afterPackageJson?: string;
   readonly beforePackageJson?: string;
-  readonly changedPaths: Iterable<string>;
+  readonly changedPaths: Iterable<unknown>;
 }
 
 export interface PlatformBenchmarkScope {
@@ -14,8 +19,6 @@ export interface PlatformBenchmarkScope {
   readonly runCodeGraphPr: boolean;
   readonly runRecallPr: boolean;
 }
-
-type JsonObject = Readonly<Record<string, unknown>>;
 
 const RECALL_SCRIPTS = /^(?:bench:recall|eval:recall|capture-recall|recall-vector)/u;
 const CODE_GRAPH_SCRIPTS = /^(?:bench:code-graph|eval:code-graph|code-graph)/u;
@@ -102,12 +105,15 @@ const PACKAGE_RELEASE_METADATA_KEYS = new Set([
 ]);
 
 function normalizeGitPath(path: string): string | undefined {
-  if (path.includes('\\')) return undefined;
+  if (Effect.pipe(path, EffectString.includes('\\'))) return undefined;
   if (
     path.length === 0 ||
-    path.startsWith('/') ||
-    path.includes('\0') ||
-    path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect.pipe(path, EffectString.startsWith('/')) ||
+    Effect.pipe(path, EffectString.includes('\0')) ||
+    EffectArray.some(
+      Effect.pipe(path, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     return undefined;
   }
@@ -118,7 +124,7 @@ function parseJsonObject(source: string | undefined): JsonObject | undefined {
   if (source === undefined) return undefined;
   try {
     const value: unknown = JSON.parse(source);
-    return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as JsonObject) : undefined;
+    return isJsonObject(value) ? value : undefined;
   } catch {
     return undefined;
   }
@@ -126,22 +132,25 @@ function parseJsonObject(source: string | undefined): JsonObject | undefined {
 
 function jsonValuesEqual(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
-  if (Array.isArray(left) || Array.isArray(right)) {
+  if (EffectArray.isArray(left) || EffectArray.isArray(right)) {
     return (
-      Array.isArray(left) &&
-      Array.isArray(right) &&
+      EffectArray.isArray(left) &&
+      EffectArray.isArray(right) &&
       left.length === right.length &&
-      left.every((value, index) => jsonValuesEqual(value, right[index]))
+      EffectArray.every(left, (value, index) => jsonValuesEqual(value, right[index]))
     );
   }
-  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') return false;
-  const leftObject = left as JsonObject;
-  const rightObject = right as JsonObject;
-  const leftKeys = Object.keys(leftObject).sort();
-  const rightKeys = Object.keys(rightObject).sort();
+  if (!isJsonObject(left) || !isJsonObject(right)) return false;
+  const leftObject = left;
+  const rightObject = right;
+  const leftKeys = EffectRecord.keys(leftObject).sort();
+  const rightKeys = EffectRecord.keys(rightObject).sort();
   return (
     leftKeys.length === rightKeys.length &&
-    leftKeys.every((key, index) => key === rightKeys[index] && jsonValuesEqual(leftObject[key], rightObject[key]))
+    EffectArray.every(
+      leftKeys,
+      (key, index) => key === rightKeys[index] && jsonValuesEqual(leftObject[key], rightObject[key]),
+    )
   );
 }
 
@@ -152,8 +161,8 @@ function changedPackageKeys(
   const before = parseJsonObject(beforeSource);
   const after = parseJsonObject(afterSource);
   if (!before || !after) return undefined;
-  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
-  return new Set([...keys].filter(key => !jsonValuesEqual(before[key], after[key])));
+  const keys = new Set([...EffectRecord.keys(before), ...EffectRecord.keys(after)]);
+  return new Set(EffectArray.filter([...keys], key => !jsonValuesEqual(before[key], after[key])));
 }
 
 function packageScope(
@@ -170,21 +179,12 @@ function packageScope(
     if (key === 'scripts') {
       const before = parseJsonObject(beforeSource)?.scripts;
       const after = parseJsonObject(afterSource)?.scripts;
-      if (
-        before === undefined ||
-        after === undefined ||
-        before === null ||
-        after === null ||
-        typeof before !== 'object' ||
-        typeof after !== 'object' ||
-        Array.isArray(before) ||
-        Array.isArray(after)
-      ) {
+      if (!isJsonObject(before) || !isJsonObject(after)) {
         return {runCodeGraphPr: true, runRecallPr: true};
       }
-      const beforeScripts = before as JsonObject;
-      const afterScripts = after as JsonObject;
-      const scriptNames = new Set([...Object.keys(beforeScripts), ...Object.keys(afterScripts)]);
+      const beforeScripts = before;
+      const afterScripts = after;
+      const scriptNames = new Set([...EffectRecord.keys(beforeScripts), ...EffectRecord.keys(afterScripts)]);
       for (const script of scriptNames) {
         if (jsonValuesEqual(beforeScripts[script], afterScripts[script])) continue;
         if (RECALL_SCRIPTS.test(script)) runRecallPr = true;
@@ -212,8 +212,8 @@ function isIgnoredPath(path: string): boolean {
     path === 'README.md' ||
     path === 'LICENSE' ||
     path === 'THIRD_PARTY.md' ||
-    path.startsWith('docs/') ||
-    path.startsWith('.github/release-notes/')
+    Effect.pipe(path, EffectString.startsWith('docs/')) ||
+    Effect.pipe(path, EffectString.startsWith('.github/release-notes/'))
   );
 }
 
@@ -222,39 +222,39 @@ function markPath(path: string): {readonly runCodeGraphPr: boolean; readonly run
   if (CODE_GRAPH_PATHS.has(path)) return {runCodeGraphPr: true, runRecallPr: false};
   if (SHARED_PATHS.has(path)) return {runCodeGraphPr: true, runRecallPr: true};
   if (
-    path.startsWith('packages/recall/') ||
-    path.startsWith('apps/threadnote/test/evaluation/fixtures/recall-v1/') ||
-    path.startsWith('src/recall/') ||
-    path.startsWith('apps/threadnote/test/evaluation/fixtures/recall-v1/')
+    Effect.pipe(path, EffectString.startsWith('packages/recall/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/evaluation/fixtures/recall-v1/')) ||
+    Effect.pipe(path, EffectString.startsWith('src/recall/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/evaluation/fixtures/recall-v1/'))
   ) {
     return {runCodeGraphPr: false, runRecallPr: true};
   }
   if (
-    path.startsWith('packages/inference/') ||
-    path.startsWith('apps/threadnote/src/effect/ai/') ||
-    path.startsWith('apps/threadnote/src/models/') ||
-    path.startsWith('apps/threadnote/src/crypto/') ||
-    path.startsWith('src/effect/ai/') ||
-    path.startsWith('src/models/') ||
-    path.startsWith('src/crypto/')
+    Effect.pipe(path, EffectString.startsWith('packages/inference/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/src/effect/ai/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/src/models/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/src/crypto/')) ||
+    Effect.pipe(path, EffectString.startsWith('src/effect/ai/')) ||
+    Effect.pipe(path, EffectString.startsWith('src/models/')) ||
+    Effect.pipe(path, EffectString.startsWith('src/crypto/'))
   ) {
     return {runCodeGraphPr: true, runRecallPr: true};
   }
   if (
-    path.startsWith('packages/graph/') ||
-    path.startsWith('apps/threadnote/src/code_graph/') ||
-    path.startsWith('apps/threadnote/test/evaluation/baselines/code-graph-v1/') ||
-    path.startsWith('apps/threadnote/test/evaluation/baselines/code-graph-workset-v1/') ||
-    path.startsWith('apps/threadnote/test/evaluation/fixtures/code-graph-v1/') ||
-    path.startsWith('apps/threadnote/test/evaluation/fixtures/code-graph-workset-v1/') ||
-    path.startsWith('apps/threadnote/test/unit/code-graph.') ||
-    path.startsWith('packages/graph/test/') ||
-    path.startsWith('src/code_graph/') ||
-    path.startsWith('apps/threadnote/test/evaluation/baselines/code-graph-v1/') ||
-    path.startsWith('apps/threadnote/test/evaluation/baselines/code-graph-workset-v1/') ||
-    path.startsWith('apps/threadnote/test/evaluation/fixtures/code-graph-v1/') ||
-    path.startsWith('apps/threadnote/test/evaluation/fixtures/code-graph-workset-v1/') ||
-    path.startsWith('test/unit/code-graph.')
+    Effect.pipe(path, EffectString.startsWith('packages/graph/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/src/code_graph/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/evaluation/baselines/code-graph-v1/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/evaluation/baselines/code-graph-workset-v1/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/evaluation/fixtures/code-graph-v1/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/evaluation/fixtures/code-graph-workset-v1/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/unit/code-graph.')) ||
+    Effect.pipe(path, EffectString.startsWith('packages/graph/test/')) ||
+    Effect.pipe(path, EffectString.startsWith('src/code_graph/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/evaluation/baselines/code-graph-v1/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/evaluation/baselines/code-graph-workset-v1/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/evaluation/fixtures/code-graph-v1/')) ||
+    Effect.pipe(path, EffectString.startsWith('apps/threadnote/test/evaluation/fixtures/code-graph-workset-v1/')) ||
+    Effect.pipe(path, EffectString.startsWith('test/unit/code-graph.'))
   ) {
     return {runCodeGraphPr: true, runRecallPr: false};
   }
@@ -341,11 +341,14 @@ function classifyCurrentDiff(
   });
   if (!isCommitId(base) || !isCommitId(head)) return failSafe('missing-or-invalid-commit-range');
   const mergeBaseResult = runGit(['merge-base', base, head]);
-  const mergeBase = new TextDecoder().decode(mergeBaseResult.stdout).trim();
+  const mergeBase = Effect.pipe(new TextDecoder().decode(mergeBaseResult.stdout), EffectString.trim);
   if (mergeBaseResult.exitCode !== 0 || !isCommitId(mergeBase)) return failSafe('git-merge-base-failed');
   const diffResult = runGit(['diff', '--name-only', '--no-renames', '-z', `${mergeBase}..${head}`, '--']);
   if (diffResult.exitCode !== 0) return failSafe(`git-diff-failed-${diffResult.exitCode}`);
-  const changedPaths = new TextDecoder().decode(diffResult.stdout).split('\0').filter(Boolean);
+  const changedPaths = EffectArray.filter(
+    Effect.pipe(new TextDecoder().decode(diffResult.stdout), EffectString.split('\0')),
+    Boolean,
+  );
   const scope = classifyPlatformBenchmarkScope({
     afterPackageJson: readGitFile(head, 'package.json'),
     beforePackageJson: readGitFile(mergeBase, 'package.json'),

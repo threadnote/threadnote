@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {appendFile} from '@threadnote/testing/node-fs-promises';
@@ -42,7 +43,7 @@ describe('workset cross-repository traversal integration', () => {
         fixture =>
           Effect.gen(function* () {
             expect(fixture.repositories).toHaveLength(MEMBER_COUNT);
-            expect(fixture.repositories.every(repository => repository.state === 'clean')).toBe(true);
+            expect(EffectArray.every(fixture.repositories, repository => repository.state === 'clean')).toBe(true);
 
             yield* indexPreparedCodeGraphWorksetFixture(fixture);
             yield* publishIndexedCodeGraphWorksetCatalog(fixture, [WORKSET_NAME]);
@@ -50,7 +51,7 @@ describe('workset cross-repository traversal integration', () => {
             const published = yield* readPublishedCodeGraphWorksetCatalogGeneration(fixture.home, WORKSET_NAME);
             expect(published).toBeDefined();
             if (published === undefined) return yield* TestError.make({message: 'Fixture workset was not published.'});
-            expect(published.members.map(member => member.repositoryKey)).toEqual([
+            expect(EffectArray.map(published.members, member => member.repositoryKey)).toEqual([
               'workset-repo-000',
               'workset-repo-001',
               'workset-repo-002',
@@ -84,11 +85,18 @@ describe('workset cross-repository traversal integration', () => {
               totalBridges: summary.bridgeCount,
               worksetName: WORKSET_NAME,
             });
-            const packageBridge = page?.bridges.find(
-              candidate =>
-                candidate.identity === 'package:npm:@threadnote-fixture/session-contract' &&
-                candidate.source.repositoryKey === 'workset-repo-001' &&
-                candidate.target.repositoryKey === 'workset-repo-000',
+            const packageBridge = EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(page?.bridges), __effectArrayReceiver =>
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    __effectArrayReceiver,
+                    candidate =>
+                      candidate.identity === 'package:npm:@threadnote-fixture/session-contract' &&
+                      candidate.source.repositoryKey === 'workset-repo-001' &&
+                      candidate.target.repositoryKey === 'workset-repo-000',
+                  ),
+                ),
+              ),
             );
             expect(packageBridge).toMatchObject({
               confidence: 1,
@@ -113,11 +121,18 @@ describe('workset cross-repository traversal integration', () => {
             ) {
               return yield* TestError.make({message: 'Fixture exact npm package bridge is not component-qualified.'});
             }
-            const bridge = page?.bridges.find(
-              candidate =>
-                candidate.identity === 'protobuf:file:threadnote/session/v1/session.proto' &&
-                candidate.source.repositoryKey === 'workset-repo-003' &&
-                candidate.target.repositoryKey === 'workset-repo-000',
+            const bridge = EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(page?.bridges), __effectArrayReceiver =>
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    __effectArrayReceiver,
+                    candidate =>
+                      candidate.identity === 'protobuf:file:threadnote/session/v1/session.proto' &&
+                      candidate.source.repositoryKey === 'workset-repo-003' &&
+                      candidate.target.repositoryKey === 'workset-repo-000',
+                  ),
+                ),
+              ),
             );
             expect(bridge).toMatchObject({
               confidence: 1,
@@ -178,7 +193,9 @@ describe('workset cross-repository traversal integration', () => {
               expect.arrayContaining([expectedTraversalBridge(packageBridge, published.id)]),
             );
 
-            const protobufQuery = fixture.plan.queries.find(query => query.id === 'protobuf-session-directory');
+            const protobufQuery = EffectOption.getOrUndefined(
+              EffectArray.findFirst(fixture.plan.queries, query => query.id === 'protobuf-session-directory'),
+            );
             expect(protobufQuery).toMatchObject({
               expectedEdges: [
                 {
@@ -208,14 +225,18 @@ describe('workset cross-repository traversal integration', () => {
             expect(query.instrumentation.bridgeEdgesConsidered).toBeGreaterThanOrEqual(1);
             expect(query.instrumentation.relationships).toBeGreaterThanOrEqual(1);
             expect(
-              query.logicalResult.cards
-                .filter(card => card.ref === sourceReference.ref || card.ref === targetReference.ref)
-                .map(card => ({
+              EffectArray.map(
+                EffectArray.filter(
+                  query.logicalResult.cards,
+                  card => card.ref === sourceReference.ref || card.ref === targetReference.ref,
+                ),
+                card => ({
                   name: card.symbol.name,
                   path: card.symbol.path,
                   ref: card.ref,
                   repositoryKey: card.repositoryKey,
-                })),
+                }),
+              ),
             ).toEqual(
               expect.arrayContaining([
                 {
@@ -232,7 +253,7 @@ describe('workset cross-repository traversal integration', () => {
                 },
               ]),
             );
-            expect(query.logicalResult.cards.flatMap(card => card.relationships)).toEqual(
+            expect(EffectArray.flatMap(query.logicalResult.cards, card => card.relationships)).toEqual(
               expect.arrayContaining([
                 expect.objectContaining({
                   authority: 'authoritative',
@@ -321,7 +342,10 @@ async function prepareFourMemberWorksetFixture(): Promise<PreparedCodeGraphWorks
       `  - name: ${WORKSET_NAME}\n` +
         '    description: "Deterministic four-repository traversal integration workset"\n' +
         '    projects:\n' +
-        repositories.map(repository => `      - ${repository.projectName}\n`).join(''),
+        EffectArray.join(
+          EffectArray.map(repositories, repository => `      - ${repository.projectName}\n`),
+          '',
+        ),
       'utf8',
     );
     return {...fixture, repositories};

@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import {trimTrailingCharacters} from '@threadnote/platform/string-boundaries';
 import type {TreeSitterImport, TreeSitterReferenceInput, TreeSitterSymbolInput} from '../../tree_sitter/extractor.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function jvmSymbolLookupKeys(input: TreeSitterSymbolInput): readonly string[] {
   const keys = [`jvm:q:${input.qualifiedName}`];
@@ -10,19 +13,21 @@ export function jvmSymbolLookupKeys(input: TreeSitterSymbolInput): readonly stri
 
 export function jvmReferenceLookupTiers(input: TreeSitterReferenceInput): readonly (readonly string[])[] {
   if (input.relation === 'imports') {
-    return input.targetName.endsWith('.*') ? [] : withArity(`jvm:q:${input.targetName}`, input.arity);
+    return Effect.pipe(input.targetName, EffectString.endsWith('.*'))
+      ? []
+      : withArity(`jvm:q:${input.targetName}`, input.arity);
   }
-  const target = input.targetName.replace(/\?$/, '');
+  const target = Effect.pipe(input.targetName, EffectString.replace(/\?$/, ''));
   if (!target || /^(?:super|this)(?:\.|$)/.test(target)) return [];
   const namespace = Option.getOrUndefined(input.metadata.namespace);
   const ownerType = ownerTypeName(input.owner.qualifiedName, namespace);
   const tiers: string[][] = [];
 
-  if (target.includes('.')) {
-    const [head, ...tail] = target.split('.');
+  if (Effect.pipe(target, EffectString.includes('.'))) {
+    const [head, ...tail] = Effect.pipe(target, EffectString.split('.'));
     const imported = importForLocalName(input.metadata.imports, head);
     if (Option.isSome(imported)) {
-      tiers.push(...withArity(`jvm:q:${[imported.value.module, ...tail].join('.')}`, input.arity));
+      tiers.push(...withArity(`jvm:q:${EffectArray.join([imported.value.module, ...tail], '.')}`, input.arity));
     } else if (/^[A-Z]/.test(head)) {
       tiers.push(...withArity(`jvm:q:${namespace ? `${namespace}.` : ''}${target}`, input.arity));
     }
@@ -42,9 +47,14 @@ export function parseJvmImport(value: string): Option.Option<TreeSitterImport> {
   const withoutKeywords = trimJvmTerminator(stripJvmKeyword(stripJvmKeyword(value, 'import'), 'static'));
   if (!withoutKeywords) return Option.none();
   const aliasMatch = /\s+as\s+([A-Za-z_$][\w$]*)$/.exec(withoutKeywords);
-  const module = (aliasMatch ? withoutKeywords.slice(0, aliasMatch.index) : withoutKeywords).trim();
-  const wildcard = module.endsWith('.*');
-  const importedName = wildcard ? Option.none<string>() : Option.some(module.split('.').at(-1)!);
+  const module = Effect.pipe(
+    aliasMatch ? Effect.pipe(withoutKeywords, EffectString.slice(0, aliasMatch.index)) : withoutKeywords,
+    EffectString.trim,
+  );
+  const wildcard = Effect.pipe(module, EffectString.endsWith('.*'));
+  const importedName = wildcard
+    ? Option.none<string>()
+    : Option.some(Effect.pipe(module, EffectString.split('.')).at(-1)!);
   return Option.some({
     alias: aliasMatch ? Option.some(aliasMatch[1]) : Option.none(),
     importedName,
@@ -59,10 +69,12 @@ export function parseJvmNamespace(value: string): Option.Option<string> {
 }
 
 function stripJvmKeyword(value: string, keyword: string): string {
-  const trimmed = value.trimStart();
-  if (!trimmed.startsWith(keyword)) return trimmed;
+  const trimmed = Effect.pipe(value, EffectString.trimStart);
+  if (!Effect.pipe(trimmed, EffectString.startsWith(keyword))) return trimmed;
   const boundary = trimmed[keyword.length];
-  return boundary !== undefined && /\s/u.test(boundary) ? trimmed.slice(keyword.length).trimStart() : trimmed;
+  return boundary !== undefined && /\s/u.test(boundary)
+    ? Effect.pipe(trimmed, EffectString.slice(keyword.length), EffectString.trimStart)
+    : trimmed;
 }
 
 function trimJvmTerminator(value: string): string {
@@ -70,7 +82,7 @@ function trimJvmTerminator(value: string): string {
 }
 
 function importForLocalName(imports: readonly TreeSitterImport[], name: string): Option.Option<TreeSitterImport> {
-  const candidates = imports.filter(item => {
+  const candidates = EffectArray.filter(imports, item => {
     const localName = Option.getOrElse(item.alias, () => Option.getOrElse(item.importedName, () => ''));
     return !item.wildcard && localName === name;
   });
@@ -78,10 +90,12 @@ function importForLocalName(imports: readonly TreeSitterImport[], name: string):
 }
 
 function ownerTypeName(qualifiedName: string, namespace: string | undefined): string | undefined {
-  const withoutNamespace = namespace ? qualifiedName.replace(`${namespace}.`, '') : qualifiedName;
-  const components = withoutNamespace.split('.');
+  const withoutNamespace = namespace
+    ? Effect.pipe(qualifiedName, EffectString.replace(`${namespace}.`, ''))
+    : qualifiedName;
+  const components = Effect.pipe(withoutNamespace, EffectString.split('.'));
   if (components.length <= 1) return undefined;
-  const owner = components.slice(0, -1).join('.');
+  const owner = EffectArray.join(components.slice(0, -1), '.');
   return namespace ? `${namespace}.${owner}` : owner;
 }
 
@@ -91,8 +105,8 @@ function withArity(key: string, arity: Option.Option<number>): readonly string[]
 
 function deduplicateTiers(tiers: readonly (readonly string[])[]): readonly (readonly string[])[] {
   const seen = new Set<string>();
-  return tiers.flatMap(tier => {
-    const unique = tier.filter(key => {
+  return EffectArray.flatMap(tiers, tier => {
+    const unique = EffectArray.filter(tier, key => {
       if (seen.has(key)) return false;
       seen.add(key);
       return true;

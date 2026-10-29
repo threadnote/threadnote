@@ -13,6 +13,8 @@ import {
 } from '../../../memory/context/health_selector.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {argumentError, mcpErrorResult, requiredText} from '../common.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export function registerContextHealthRepairTools(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   server.registerTool(
@@ -105,11 +107,11 @@ export function registerContextHealthRepairTools(server: EffectMcpServerAdapter,
       const checked = repairToolScope('context_health_repair_apply', callerCwd, project);
       if (!checked.ok) return checked.error;
       const checkedProposal = requiredText(proposalId, 'context_health_repair_apply', 'proposalId', {
-        proposalId: `health-repair-${'0'.repeat(40)}`,
+        proposalId: `health-repair-${Effect2.pipe('0', EffectString.repeat(40))}`,
       });
       if (!checkedProposal.ok) return checkedProposal.error;
       const checkedRevision = requiredText(revision, 'context_health_repair_apply', 'revision', {
-        revision: '0'.repeat(64),
+        revision: Effect2.pipe('0', EffectString.repeat(64)),
       });
       if (!checkedRevision.ok) return checkedRevision.error;
       return Effect.gen(function* () {

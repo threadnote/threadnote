@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Path, Schema} from 'effect';
 import {CODE_GRAPH_CITATION_CAPSULE_RETENTION} from '@threadnote/graph/citation/capsule';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
@@ -38,10 +40,15 @@ import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/rec
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readMemoryRecordsByUri, writeApprovedTopicDependencyExpansion} from '../../mcp/server/memory.js';
 import {resolveLocalMemoryReplacementTarget} from '../replacement_target.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class TopicExpansionError extends Schema.TaggedError<TopicExpansionError>()('TopicExpansionError', {
-  message: Schema.String,
-}) {}
+export class TopicExpansionError extends Schema.TaggedError<TopicExpansionError, {readonly brand: unique symbol}>()(
+  'TopicExpansionError',
+  {
+    message: Schema.String,
+  },
+) {}
 const fail = (message: string) => TopicExpansionError.make({message});
 const checked = <A>(run: () => A) =>
   Effect.try({
@@ -65,7 +72,7 @@ const targetRecord = Effect.fn('topicExpansion.target')(function* (config: Runti
     record.metadata.obsidianEvidence ||
     record.metadata.sourceEvidence ||
     record.metadata.visibility === 'shared' ||
-    !record.uri.startsWith(`threadnote://user/${config.user}/memories/durable/`)
+    !Effect2.pipe(record.uri, EffectString.startsWith(`threadnote://user/${config.user}/memories/durable/`))
   )
     return yield* fail('Dependency expansion is available only for private code topics.');
   return record;
@@ -160,8 +167,8 @@ export const inspectTopicDependencyExpansion = Effect.fn('topicExpansion.inspect
     return yield* fail('The topic belongs to a different repository.');
   const declared = [
     ...new Set([
-      ...manifest.paragraphs.flatMap(p => p.citationIds),
-      ...manifest.additionalDependencies.map(d => d.citationId),
+      ...EffectArray.flatMap(manifest.paragraphs, p => p.citationIds),
+      ...EffectArray.map(manifest.additionalDependencies, d => d.citationId),
     ]),
   ];
   const seeds = [];
@@ -175,16 +182,22 @@ export const inspectTopicDependencyExpansion = Effect.fn('topicExpansion.inspect
       edgeLimit: 1,
     });
     if (!sameResult(scope.status, result)) return yield* fail('Declared seed evidence is unavailable or changed.');
-    for (const node of result.nodes.filter(
-      node =>
-        node.path === citation.path &&
-        (citation.target.kind === 'symbol'
-          ? node.id === citation.target.nodeId
-          : ['asset', 'document', 'file', 'module', 'resource'].includes(node.kind)),
+    for (const node of EffectArrayPipe(result.nodes, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (node, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues &&
+          node.path === citation.path &&
+          (citation.target.kind === 'symbol'
+            ? node.id === citation.target.nodeId
+            : ['asset', 'document', 'file', 'module', 'resource'].includes(node.kind)),
+      ),
     ))
       seeds.push({id: node.id, label: node.name, path: node.path, kind: node.kind, citationId: id});
   }
-  const unique = [...new Map(seeds.map(seed => [seed.id, seed])).values()].sort((a, b) => a.id.localeCompare(b.id));
+  const unique = [...new Map(EffectArray.map(seeds, seed => [seed.id, seed])).values()].sort((a, b) =>
+    Effect2.pipe(a.id, EffectString.localeCompare(b.id)),
+  );
   const suggestions =
     options.input === undefined
       ? undefined
@@ -211,7 +224,7 @@ export const inspectTopicDependencyExpansion = Effect.fn('topicExpansion.inspect
     ...(suggestions
       ? {
           choices: topicDependencyExpansionChoices(suggestions.request, suggestions.proof),
-          coverage: suggestions.proof.reads.map(read => ({seedId: read.seedId, ...read.coverage})),
+          coverage: EffectArray.map(suggestions.proof.reads, read => ({seedId: read.seedId, ...read.coverage})),
         }
       : {}),
   };
@@ -235,12 +248,15 @@ const readExpansionProof = Effect.fn('topicExpansion.proof')(function* (
     request.configDigest !== scope.configDigest
   )
     return yield* fail('The selected repository or project configuration changed. Inspect it again.');
-  const declared = [
-    ...new Set([
-      ...manifest.paragraphs.flatMap(p => p.citationIds),
-      ...manifest.additionalDependencies.map(d => d.citationId),
-    ]),
-  ].map(id => topicMaintenanceAcceptedCitation(record, id));
+  const declared = EffectArray.map(
+    [
+      ...new Set([
+        ...EffectArray.flatMap(manifest.paragraphs, p => p.citationIds),
+        ...EffectArray.map(manifest.additionalDependencies, d => d.citationId),
+      ]),
+    ],
+    id => topicMaintenanceAcceptedCitation(record, id),
+  );
   const reads: TopicDependencyExpansionProof['reads'][number][] = [];
   for (const seedId of request.seeds) {
     const result = yield* query.inspect({
@@ -268,10 +284,11 @@ const readExpansionProof = Effect.fn('topicExpansion.proof')(function* (
       return yield* fail(
         'The requested neighborhood is incomplete, bounded or unavailable. Choose a new explicit scope and preview.',
       );
-    const seed = result.nodes.find(node => node.id === seedId);
+    const seed = EffectOption.getOrUndefined(EffectArray.findFirst(result.nodes, node => node.id === seedId));
     if (
       !seed ||
-      !declared.some(
+      !EffectArray.some(
+        declared,
         citation =>
           citation.path === seed.path && (citation.target.kind === 'file' || citation.target.nodeId === seedId),
       )
@@ -286,7 +303,8 @@ const readExpansionProof = Effect.fn('topicExpansion.proof')(function* (
       )
         return yield* fail('Graph endpoint is ambiguous or outside the chosen project.');
       ids.add(node.id);
-      const key = status.identity.caseMode === 'insensitive' ? node.path.toLowerCase() : node.path;
+      const key =
+        status.identity.caseMode === 'insensitive' ? Effect2.pipe(node.path, EffectString.toLowerCase) : node.path;
       const prior = paths.get(key);
       if (prior && prior !== node.path) return yield* fail('Graph paths collide in this repository.');
       paths.set(key, node.path);
@@ -294,19 +312,19 @@ const readExpansionProof = Effect.fn('topicExpansion.proof')(function* (
     const coverage = result.searchCoverage;
     reads.push({
       seedId,
-      nodes: result.nodes
-        .map(node => ({id: node.id, path: node.path, contentHash: node.contentHash}))
-        .sort((a, b) => a.id.localeCompare(b.id)),
-      edges: result.edges
-        .map(edge => ({
-          id: edge.id,
-          sourceId: edge.sourceId!,
-          targetId: edge.targetId!,
-          kind: edge.relation,
-          provenance: edge.provenance,
-          confidence: edge.confidence,
-        }))
-        .sort((a, b) => a.id.localeCompare(b.id)),
+      nodes: EffectArray.map(result.nodes, node => ({
+        id: node.id,
+        path: node.path,
+        contentHash: node.contentHash,
+      })).sort((a, b) => Effect2.pipe(a.id, EffectString.localeCompare(b.id))),
+      edges: EffectArray.map(result.edges, edge => ({
+        id: edge.id,
+        sourceId: edge.sourceId!,
+        targetId: edge.targetId!,
+        kind: edge.relation,
+        provenance: edge.provenance,
+        confidence: edge.confidence,
+      })).sort((a, b) => Effect2.pipe(a.id, EffectString.localeCompare(b.id))),
       coverage: {
         status: 'exhaustive',
         limitsReached: [],
@@ -377,7 +395,7 @@ const prepareExpansion = Effect.fn('topicExpansion.prepare')(function* (
   // Capture returns refs in requested order and deduplicates identities. A collision is rejected, never guessed.
   if (citations.length !== refs.length)
     return yield* fail('Selected references collide or cannot be captured exactly.');
-  const additions = refs.map((ref, index): TopicDependencyExpansionAddition => ({
+  const additions = EffectArray.map(refs, (ref, index): TopicDependencyExpansionAddition => ({
     kind: index < request.selectedNodeIds.length ? 'dependency' : 'configuration',
     ref,
     citation: citations[index],
@@ -401,7 +419,7 @@ export const previewTopicDependencyExpansion = Effect.fn('topicExpansion.preview
   return {status: 'preview' as const, preview};
 });
 
-const expansionReviewId = (revision: string) => `review-${revision.slice(0, 24)}`;
+const expansionReviewId = (revision: string) => `review-${Effect2.pipe(revision, EffectString.slice(0, 24))}`;
 const expansionJournal = (
   preview: TopicDependencyExpansionPreview,
   createdAt: string,
@@ -434,7 +452,7 @@ const exactExpansionApproval = (config: RuntimeConfig, input: ExpansionApproval)
       input.approved !== true ||
       input.revision !== preview.revision ||
       input.approvalDigest !== preview.approvalDigest ||
-      !preview.targetUri.startsWith(`threadnote://user/${config.user}/memories/durable/`)
+      !Effect2.pipe(preview.targetUri, EffectString.startsWith(`threadnote://user/${config.user}/memories/durable/`))
     )
       throw new Error('Approve the exact selected additions, revision and full preview.');
     return preview;

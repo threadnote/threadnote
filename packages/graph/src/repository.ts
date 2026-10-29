@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Fiber, FileSystem, Option, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {type CommandExecutor, runBinaryCommandEffect, runCommandEffect} from '@threadnote/platform/command';
@@ -8,6 +9,8 @@ import {
   type CodeGraphUntrackedStatusCacheOptions,
 } from './git/status_cache.js';
 import {CodeGraphRepositoryError, type RepositoryIdentity, type RepositoryIdentityExpectation} from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const IDENTITY_FORMAT_VERSION = 1;
 const GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM = 16 * 1_024;
@@ -151,7 +154,7 @@ const resolveRepositoryIdentityDetailFromObservation = Effect.fn(
           Effect.mapError(cause => CodeGraphRepositoryError.make({message: `Not a Git repository: ${cause.message}`})),
         )
       : {stdout: metadata.repoRoot};
-  const repoRoot = yield* fs.realPath(rootResult.stdout.trim());
+  const repoRoot = yield* fs.realPath(Effect2.pipe(rootResult.stdout, EffectString.trim));
   const [directories, formatResult, commitResult, ignoreCaseResult, remoteResult, branch] = yield* Effect.all(
     [
       metadata === undefined
@@ -179,19 +182,23 @@ const resolveRepositoryIdentityDetailFromObservation = Effect.fn(
   const commonRaw = directories.commonDirectory;
   const commonAbsolute = path.isAbsolute(commonRaw) ? commonRaw : path.resolve(repoRoot, commonRaw);
   const gitCommonDirectory = yield* fs.realPath(commonAbsolute);
-  const objectFormat = formatResult.stdout.trim();
+  const objectFormat = Effect2.pipe(formatResult.stdout, EffectString.trim);
   if (objectFormat !== 'sha1' && objectFormat !== 'sha256') {
     return yield* CodeGraphRepositoryError.make({message: `Unsupported Git object format: ${objectFormat}`});
   }
   const remoteIdentity =
-    remoteResult.exitCode === 0 ? normalizeCredentialFreeRemote(remoteResult.stdout.trim()) : undefined;
+    remoteResult.exitCode === 0
+      ? normalizeCredentialFreeRemote(Effect2.pipe(remoteResult.stdout, EffectString.trim))
+      : undefined;
   const repositorySource = remoteIdentity ?? `local:${normalizeLocalIdentity(gitCommonDirectory, system.platform)}`;
-  const headCommit = commitResult.exitCode === 0 ? commitResult.stdout.trim() : zeroObjectId(objectFormat);
+  const headCommit =
+    commitResult.exitCode === 0 ? Effect2.pipe(commitResult.stdout, EffectString.trim) : zeroObjectId(objectFormat);
   const displayName = repositoryDisplayName(remoteIdentity, repoRoot);
   const identity = {
     ...(branch.state === 'current' ? {branch: branch.branch} : {}),
     caseMode:
-      ignoreCaseResult.exitCode === 0 && ignoreCaseResult.stdout.trim().toLowerCase() === 'true'
+      ignoreCaseResult.exitCode === 0 &&
+      Effect2.pipe(ignoreCaseResult.stdout, EffectString.trim, EffectString.toLowerCase) === 'true'
         ? 'insensitive'
         : 'sensitive',
     checkoutId: checkoutIdForGitCommonDirectory(gitCommonDirectory),
@@ -235,12 +242,20 @@ export function parseRepositoryIdentityMetadata(
     return undefined;
   try {
     const decoded = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(output);
-    if (!decoded.endsWith('\n')) return undefined;
-    const records = decoded.slice(0, -1).split('\n');
-    if (
-      records.length !== (includeIndex ? 7 : 6) ||
-      records.some(record => !record || record.includes('\0') || record.includes('\r'))
-    ) {
+    if (!Effect2.pipe(decoded, EffectString.endsWith('\n'))) return undefined;
+    const records = Effect2.pipe(decoded, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+      const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.split('\n'));
+      return __effectPipeStage1;
+    });
+    const containsInvalidRecord: boolean = EffectArray.some(
+      records,
+      record =>
+        !record ||
+        Effect2.pipe(record, EffectString.includes('\0')) ||
+        Effect2.pipe(record, EffectString.includes('\r')),
+    );
+    if (records.length !== (includeIndex ? 7 : 6) || containsInvalidRecord) {
       return undefined;
     }
     const [repoRoot, commonDirectory, gitDirectory, objectFormat, headCommit] = records;
@@ -255,7 +270,11 @@ export function parseRepositoryIdentityMetadata(
     if (branch === undefined) return undefined;
     // Full discovery trims the root output. Preserve that behavior by declining
     // the fast path for roots whose edge whitespace would select a different path.
-    if (repoRoot !== repoRoot.trim() || byteLength(`${repoRoot}\n`) > GIT_TEXT_OUTPUT_BYTES_MAXIMUM) return undefined;
+    if (
+      repoRoot !== Effect2.pipe(repoRoot, EffectString.trim) ||
+      byteLength(`${repoRoot}\n`) > GIT_TEXT_OUTPUT_BYTES_MAXIMUM
+    )
+      return undefined;
     if (byteLength(`${commonDirectory}\n${gitDirectory}\n`) > GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM) return undefined;
     if (objectFormat !== 'sha1' && objectFormat !== 'sha256') return undefined;
     if (!(objectFormat === 'sha1' ? /^[0-9a-f]{40}$/u : /^[0-9a-f]{64}$/u).test(headCommit)) return undefined;
@@ -275,7 +294,7 @@ export function parseRepositoryIdentityMetadata(
 }
 
 export function normalizeRepositoryBranchName(value: string): string | undefined {
-  const branch = value.trim();
+  const branch = Effect2.pipe(value, EffectString.trim);
   return branch.length > 0 &&
     new TextEncoder().encode(branch).byteLength <= GIT_BRANCH_BYTES_MAXIMUM &&
     !hasControlCharacter(branch) &&
@@ -300,7 +319,11 @@ export const observeRepositoryBranch = Effect.fn('codeGraph.observeRepositoryBra
 
 function hasControlCharacter(value: string): boolean {
   for (const character of value) {
-    const codePoint = character.codePointAt(0);
+    const codePoint = Effect2.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect2.Option.getOrElse(() => undefined),
+    );
     if (codePoint !== undefined && (codePoint <= 31 || codePoint === 127)) return true;
   }
   return false;
@@ -351,7 +374,11 @@ export const revalidateRepositoryIdentityFence = Effect.fn('codeGraph.revalidate
   ).pipe(
     Effect.mapError(() => CodeGraphRepositoryError.make({message: 'Repository identity could not be revalidated.'})),
   );
-  const metadata = metadataResult.stdout.replace(/\r?\n$/u, '').split(/\r?\n/u);
+  const metadata = Effect2.pipe(
+    metadataResult.stdout,
+    EffectString.replace(/\r?\n$/u, ''),
+    EffectString.split(/\r?\n/u),
+  );
   if (metadata.length !== 4) {
     return yield* CodeGraphRepositoryError.make({message: 'Git repository identity metadata is invalid.'});
   }
@@ -372,7 +399,9 @@ export const revalidateRepositoryIdentityFence = Effect.fn('codeGraph.revalidate
     return yield* CodeGraphRepositoryError.make({message: `Unsupported Git object format: ${objectFormat}`});
   }
   const remoteIdentity =
-    remoteResult.exitCode === 0 ? normalizeCredentialFreeRemote(remoteResult.stdout.trim()) : undefined;
+    remoteResult.exitCode === 0
+      ? normalizeCredentialFreeRemote(Effect2.pipe(remoteResult.stdout, EffectString.trim))
+      : undefined;
   const repositorySource = remoteIdentity ?? `local:${normalizeLocalIdentity(gitCommonDirectory, system.platform)}`;
   const identity = {
     ...(previous.branch === undefined ? {} : {branch: previous.branch}),
@@ -422,7 +451,9 @@ export const resolvePublishedRepositoryReadFence = Effect.fn('codeGraph.resolveP
       ),
     );
     const remoteIdentity =
-      remoteResult.exitCode === 0 ? normalizeCredentialFreeRemote(remoteResult.stdout.trim()) : undefined;
+      remoteResult.exitCode === 0
+        ? normalizeCredentialFreeRemote(Effect2.pipe(remoteResult.stdout, EffectString.trim))
+        : undefined;
     const repositorySource =
       remoteIdentity ?? `local:${normalizeLocalIdentity(observed.gitCommonDirectory, system.platform)}`;
     const identity = {
@@ -519,7 +550,7 @@ const readRepositoryWorktreeWithCache = Effect.fn('codeGraph.readRepositoryWorkt
           '--no-optional-locks',
           '-C',
           cwd,
-          ...statusArguments.map(argument =>
+          ...EffectArray.map(statusArguments, argument =>
             argument === '--untracked-files=normal' ? '--untracked-files=no' : argument,
           ),
         ],
@@ -547,7 +578,12 @@ const readRepositoryWorktreeWithCache = Effect.fn('codeGraph.readRepositoryWorkt
     const records = parseRepositoryUntrackedStatusRecords(result.untracked.stdout);
     if (records === undefined)
       return yield* CodeGraphRepositoryError.make({message: 'Private untracked status frame is invalid.'});
-    const stdout = result.tracked.stdout + records.map(record => `${record}\0`).join('');
+    const stdout =
+      result.tracked.stdout +
+      EffectArray.join(
+        EffectArray.map(records, record => `${record}\0`),
+        '',
+      );
     if (new TextEncoder().encode(stdout).byteLength > REPOSITORY_STATUS_OBSERVATION_BYTES_MAXIMUM)
       return yield* CodeGraphRepositoryError.make({message: 'Combined repository status exceeded its read bound.'});
     return {...result.tracked, stdout};
@@ -562,17 +598,26 @@ const readRepositoryWorktreeWithCache = Effect.fn('codeGraph.readRepositoryWorkt
 
 /** @internal Preserve rename source framing while selecting only real untracked records. */
 export function parseRepositoryUntrackedStatusRecords(output: string): readonly string[] | undefined {
-  if (!output.endsWith('\0')) return undefined;
-  const records = output.slice(0, -1).split('\0');
+  if (!Effect2.pipe(output, EffectString.endsWith('\0'))) return undefined;
+  const records = Effect2.pipe(output, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.split('\0'));
+    return __effectPipeStage1;
+  });
   const untracked: string[] = [];
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
-    if (record.startsWith('? ')) {
+    if (Effect2.pipe(record, EffectString.startsWith('? '))) {
       if (record.length === 2) return undefined;
       untracked.push(record);
-    } else if (record.startsWith('2 ')) {
+    } else if (Effect2.pipe(record, EffectString.startsWith('2 '))) {
       if (!records[++index]) return undefined;
-    } else if (!record.startsWith('# ') && !record.startsWith('1 ') && !record.startsWith('u ')) return undefined;
+    } else if (
+      !Effect2.pipe(record, EffectString.startsWith('# ')) &&
+      !Effect2.pipe(record, EffectString.startsWith('1 ')) &&
+      !Effect2.pipe(record, EffectString.startsWith('u '))
+    )
+      return undefined;
   }
   return untracked;
 }
@@ -617,10 +662,14 @@ export function parseRepositoryReadFenceSetupObservation(
   } as const;
   const matches = {gitCommonDirectory: [] as string[], worktree: [] as string[]};
   const markerKeys: (keyof typeof markers)[] = ['gitCommonDirectory', 'worktree'];
-  for (const line of output.split(/\r?\n/u)) {
+  for (const line of Effect2.pipe(output, EffectString.split(/\r?\n/u))) {
     for (const key of markerKeys) {
-      const index = line.indexOf(markers[key]);
-      if (index >= 0) matches[key].push(line.slice(index + markers[key].length));
+      const index = Effect2.pipe(
+        line,
+        EffectString.indexOf(markers[key]),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      if (index >= 0) matches[key].push(Effect2.pipe(line, EffectString.slice(index + markers[key].length)));
     }
   }
   if (matches.gitCommonDirectory.length !== 1 || matches.worktree.length !== 1) return undefined;
@@ -673,7 +722,7 @@ const observeRepositoryReadFenceMetadata = Effect.fn('codeGraph.observeRepositor
   ]).pipe(
     Effect.mapError(() => CodeGraphRepositoryError.make({message: 'Repository read fence could not be revalidated.'})),
   );
-  const metadata = result.stdout.replace(/\r?\n$/u, '').split(/\r?\n/u);
+  const metadata = Effect2.pipe(result.stdout, EffectString.replace(/\r?\n$/u, ''), EffectString.split(/\r?\n/u));
   if (metadata.length !== 4) {
     return yield* CodeGraphRepositoryError.make({message: 'Git repository identity metadata is invalid.'});
   }
@@ -744,7 +793,11 @@ const resolveExpectedRepositoryIdentity = Effect.fn('codeGraph.resolveExpectedRe
   ]).pipe(
     Effect.mapError(() => CodeGraphRepositoryError.make({message: 'Repository identity could not be revalidated.'})),
   );
-  const metadata = metadataResult.stdout.replace(/\r?\n$/u, '').split(/\r?\n/u);
+  const metadata = Effect2.pipe(
+    metadataResult.stdout,
+    EffectString.replace(/\r?\n$/u, ''),
+    EffectString.split(/\r?\n/u),
+  );
   if (metadata.length !== (cache === undefined ? 4 : 5)) {
     return yield* CodeGraphRepositoryError.make({message: 'Git repository identity metadata is invalid.'});
   }
@@ -795,12 +848,15 @@ const resolveExpectedRepositoryIdentity = Effect.fn('codeGraph.resolveExpectedRe
   }
   const branch = observed.kind === 'branch' ? observed.branch : worktree!.branch;
   const remoteIdentity =
-    remoteResult.exitCode === 0 ? normalizeCredentialFreeRemote(remoteResult.stdout.trim()) : undefined;
+    remoteResult.exitCode === 0
+      ? normalizeCredentialFreeRemote(Effect2.pipe(remoteResult.stdout, EffectString.trim))
+      : undefined;
   const repositorySource = remoteIdentity ?? `local:${normalizeLocalIdentity(gitCommonDirectory, system.platform)}`;
   const identity = {
     ...(branch.state === 'current' ? {branch: branch.branch} : {}),
     caseMode:
-      ignoreCaseResult.exitCode === 0 && ignoreCaseResult.stdout.trim().toLowerCase() === 'true'
+      ignoreCaseResult.exitCode === 0 &&
+      Effect2.pipe(ignoreCaseResult.stdout, EffectString.trim, EffectString.toLowerCase) === 'true'
         ? 'insensitive'
         : 'sensitive',
     checkoutId: checkoutIdForGitCommonDirectory(gitCommonDirectory),
@@ -832,15 +888,25 @@ export function parseRepositoryIdentityWorktreeObservation(
       readonly headCommit: string;
     }
   | undefined {
-  if (!output.endsWith('\0')) return undefined;
-  const records = output.slice(0, -1).split('\0');
-  const heads = records.filter(record => record.startsWith('# branch.oid '));
-  const branches = records.filter(record => record.startsWith('# branch.head '));
+  if (!Effect2.pipe(output, EffectString.endsWith('\0'))) return undefined;
+  const records = Effect2.pipe(output, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.split('\0'));
+    return __effectPipeStage1;
+  });
+  const heads = EffectArray.filter(records, record => Effect2.pipe(record, EffectString.startsWith('# branch.oid ')));
+  const branches = EffectArray.filter(records, record =>
+    Effect2.pipe(record, EffectString.startsWith('# branch.head ')),
+  );
   if (heads.length !== 1 || branches.length > 1) return undefined;
-  const headCommit = heads[0].slice('# branch.oid '.length);
+  const headCommit = Effect2.pipe(heads[0], EffectString.slice('# branch.oid '.length));
   const expectedLength = objectFormat === 'sha256' ? 64 : 40;
   if (!new RegExp(`^[0-9a-f]{${expectedLength}}$`, 'u').test(headCommit)) return undefined;
-  const rawBranch = branches[0]?.slice('# branch.head '.length);
+  const rawBranch = Effect2.pipe(branches[0], effectOptionalString =>
+    effectOptionalString == null
+      ? undefined
+      : Effect2.pipe(effectOptionalString, EffectString.slice('# branch.head '.length)),
+  );
   const branch =
     rawBranch === '(detached)'
       ? ({state: 'detached'} as const)
@@ -851,7 +917,7 @@ export function parseRepositoryIdentityWorktreeObservation(
           : ({branch: normalizeRepositoryBranchName(rawBranch), state: 'current'} as const);
   return {
     branch,
-    changed: records.some(record => !record.startsWith('# ')),
+    changed: EffectArray.some(records, record => !Effect2.pipe(record, EffectString.startsWith('# '))),
     headCommit,
   };
 }
@@ -889,9 +955,11 @@ export function parseRepositoryWorktreeRegistryOutput(
   output: string,
   platform: NodeJS.Platform,
 ): readonly RepositoryWorktreeRegistryIdentity[] {
-  return parseRegisteredRepositoryWorktrees(output, platform)
-    .map(({locked, prunable, worktreeId}) => ({locked, prunable, worktreeId}))
-    .sort((left, right) => compareCodeUnits(left.worktreeId, right.worktreeId));
+  return EffectArray.map(parseRegisteredRepositoryWorktrees(output, platform), ({locked, prunable, worktreeId}) => ({
+    locked,
+    prunable,
+    worktreeId,
+  })).sort((left, right) => compareCodeUnits(left.worktreeId, right.worktreeId));
 }
 
 function parseRegisteredRepositoryWorktrees(
@@ -902,31 +970,41 @@ function parseRegisteredRepositoryWorktrees(
   if (
     byteLength(output) > CODE_GRAPH_WORKTREE_REGISTRY_LIMITS.maxOutputBytes ||
     output.length === 0 ||
-    !output.endsWith('\0\0')
+    !Effect2.pipe(output, EffectString.endsWith('\0\0'))
   ) {
     throw invalid();
   }
-  const body = output.slice(0, -2);
+  const body = Effect2.pipe(output, EffectString.slice(0, -2));
   if (body.length === 0) throw invalid();
-  const records = body.split('\0\0');
+  const records = Effect2.pipe(body, EffectString.split('\0\0'));
   if (records.length > CODE_GRAPH_WORKTREE_REGISTRY_LIMITS.maxRecords) throw invalid();
   const path = platformPathFor(platform);
   const seen = new Set<string>();
-  return records.map(record => {
-    const fields = record.split('\0');
-    if (fields.some(field => field.length === 0)) throw invalid();
-    const worktreeFields = fields.filter(field => field.startsWith('worktree '));
+  return EffectArray.map(records, record => {
+    const fields = Effect2.pipe(record, EffectString.split('\0'));
+    const containsEmptyField: boolean = EffectArray.some(fields, field => field.length === 0);
+    if (containsEmptyField) throw invalid();
+    const worktreeFields = EffectArray.filter(
+      fields,
+      __effectArrayValue => !!(field => Effect2.pipe(field, EffectString.startsWith('worktree ')))(__effectArrayValue),
+    );
     if (worktreeFields.length !== 1) throw invalid();
-    const rawRoot = worktreeFields[0].slice('worktree '.length);
+    const rawRoot = Effect2.pipe(worktreeFields[0], EffectString.slice('worktree '.length));
     if (!rawRoot || byteLength(rawRoot) > CODE_GRAPH_WORKTREE_REGISTRY_LIMITS.maxPathBytes) throw invalid();
     const root = path.normalize(rawRoot);
     if (!path.isAbsolute(rawRoot) || !path.isAbsolute(root)) throw invalid();
-    const key = platform === 'win32' ? root.toLowerCase() : root;
+    const key = platform === 'win32' ? Effect2.pipe(root, EffectString.toLowerCase) : root;
     if (seen.has(key)) throw invalid();
     seen.add(key);
     return {
-      locked: fields.some(field => field === 'locked' || field.startsWith('locked ')),
-      prunable: fields.some(field => field === 'prunable' || field.startsWith('prunable ')),
+      locked: EffectArray.some(
+        fields,
+        field => field === 'locked' || Effect2.pipe(field, EffectString.startsWith('locked ')),
+      ),
+      prunable: EffectArray.some(
+        fields,
+        field => field === 'prunable' || Effect2.pipe(field, EffectString.startsWith('prunable ')),
+      ),
       root,
       worktreeId: worktreeIdForRoot(root),
     };
@@ -945,7 +1023,7 @@ export const repositoryChangesSince = Effect.fn('codeGraph.repositoryChangesSinc
       timeoutMs: 30_000,
     },
   );
-  const objectId = verified.stdout.trim();
+  const objectId = Effect2.pipe(verified.stdout, EffectString.trim);
   if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(objectId)) {
     return yield* CodeGraphRepositoryError.make({message: `Git resolved ${base} to an invalid object ID.`});
   }
@@ -962,7 +1040,11 @@ export const repositoryChangesSince = Effect.fn('codeGraph.repositoryChangesSinc
     ],
     {concurrency: 2},
   );
-  const paths = [...new Set(`${tracked.stdout}\0${untracked.stdout}`.split('\0').filter(Boolean))].sort();
+  const paths = [
+    ...new Set(
+      EffectArray.filter(Effect2.pipe(`${tracked.stdout}\0${untracked.stdout}`, EffectString.split('\0')), Boolean),
+    ),
+  ].sort();
   if (paths.length === 0)
     return yield* CodeGraphRepositoryError.make({message: `No changed paths found relative to ${base}.`});
   return {baseCommit: objectId, paths};
@@ -996,9 +1078,11 @@ function runGit(cwd: string, args: readonly string[], allowFailure = false) {
 }
 
 export function normalizeCredentialFreeRemote(value: string): string | undefined {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.includes('\0') || /[\r\n]/.test(trimmed)) return undefined;
-  const scp = trimmed.includes('://') ? undefined : /^(?:[^@/:]+@)?([^/:]+):(.+)$/.exec(trimmed);
+  const trimmed = Effect2.pipe(value, EffectString.trim);
+  if (!trimmed || Effect2.pipe(trimmed, EffectString.includes('\0')) || /[\r\n]/.test(trimmed)) return undefined;
+  const scp = Effect2.pipe(trimmed, EffectString.includes('://'))
+    ? undefined
+    : /^(?:[^@/:]+@)?([^/:]+):(.+)$/.exec(trimmed);
   if (scp && !/^[A-Za-z]:[\\/]/.test(trimmed)) {
     return normalizeRemoteParts(scp[1], scp[2]);
   }
@@ -1012,32 +1096,36 @@ export function normalizeCredentialFreeRemote(value: string): string | undefined
 }
 
 function normalizeRemoteParts(host: string, pathname: string): string | undefined {
-  const safeHost = host
-    .trim()
-    .toLowerCase()
-    .replace(/^\[|\]$/g, '');
-  const safePath = pathname
-    .replaceAll('\\', '/')
-    .replace(/^\/+/, '')
-    .replace(/\/+$/, '')
-    .replace(/\.git$/i, '');
-  if (!safeHost || !safePath || safePath.includes('..')) return undefined;
+  const safeHost = Effect2.pipe(
+    host,
+    EffectString.trim,
+    EffectString.toLowerCase,
+    EffectString.replace(/^\[|\]$/g, ''),
+  );
+  const safePath = Effect2.pipe(
+    pathname,
+    EffectString.replaceAll('\\', '/'),
+    EffectString.replace(/^\/+/, ''),
+    EffectString.replace(/\/+$/, ''),
+    EffectString.replace(/\.git$/i, ''),
+  );
+  if (!safeHost || !safePath || Effect2.pipe(safePath, EffectString.includes('..'))) return undefined;
   return `${safeHost}/${safePath}`;
 }
 
 function normalizeLocalIdentity(value: string, platform: NodeJS.Platform): string {
-  const normalized = value.replaceAll('\\', '/').replace(/\/+$/, '');
-  return platform === 'win32' ? normalized.toLowerCase() : normalized;
+  const normalized = Effect2.pipe(value, EffectString.replaceAll('\\', '/'), EffectString.replace(/\/+$/, ''));
+  return platform === 'win32' ? Effect2.pipe(normalized, EffectString.toLowerCase) : normalized;
 }
 
 function repositoryDisplayName(remoteIdentity: string | undefined, repoRoot: string): string {
-  const source = remoteIdentity ?? repoRoot.replaceAll('\\', '/');
-  const parts = source.split('/').filter(Boolean);
-  return (remoteIdentity ? parts.slice(-2).join('/') : parts.at(-1)) || 'repository';
+  const source = remoteIdentity ?? Effect2.pipe(repoRoot, EffectString.replaceAll('\\', '/'));
+  const parts = EffectArray.filter(Effect2.pipe(source, EffectString.split('/')), Boolean);
+  return (remoteIdentity ? EffectArray.join(parts.slice(-2), '/') : parts.at(-1)) || 'repository';
 }
 
 function zeroObjectId(format: 'sha1' | 'sha256'): string {
-  return '0'.repeat(format === 'sha256' ? 64 : 40);
+  return Effect2.pipe('0', EffectString.repeat(format === 'sha256' ? 64 : 40));
 }
 
 function byteLength(value: string): number {
@@ -1054,11 +1142,21 @@ function parseGitDirectoryOutput(
   if (output.byteLength === 0 || output.byteLength > GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM) return undefined;
   try {
     const decoded = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(output);
-    if (!decoded.endsWith('\n')) return undefined;
-    const records = decoded.slice(0, -1).split('\n');
+    if (!Effect2.pipe(decoded, EffectString.endsWith('\n'))) return undefined;
+    const records = Effect2.pipe(decoded, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+      const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.split('\n'));
+      return __effectPipeStage1;
+    });
     if (
       records.length !== 2 ||
-      records.some(record => record.length === 0 || record.includes('\0') || record.includes('\r'))
+      EffectArray.some(
+        records,
+        record =>
+          record.length === 0 ||
+          Effect2.pipe(record, EffectString.includes('\0')) ||
+          Effect2.pipe(record, EffectString.includes('\r')),
+      )
     ) {
       return undefined;
     }

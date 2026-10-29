@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {
   assertMatchedContinuationRuntimeMatchesStudyV1,
   parseMatchedContinuationStudyRuntimeV1,
@@ -28,8 +29,10 @@ export async function assertMatchedContinuationRuntimeFilesV1(
       false,
       'continuation matched preparation receipt',
     ),
-    ...runtime.tasks.map(runtimeTask => {
-      const task = study.tasks.find(candidate => candidate.taskId === runtimeTask.taskId);
+    ...EffectArray.map(runtime.tasks, runtimeTask => {
+      const task = EffectOption.getOrUndefined(
+        EffectArray.findFirst(study.tasks, candidate => candidate.taskId === runtimeTask.taskId),
+      );
       if (task === undefined) throw new Error(`Continuation runtime task ${runtimeTask.taskId} is not sealed.`);
       return assertMatchedEvaluationPinnedFileV1(
         runtimeTask.planPath,

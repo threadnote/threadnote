@@ -1,15 +1,20 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
+import {isJsonObject} from '@threadnote/platform/json';
 import fc from 'fast-check';
 import {ManagerDialogProvider} from '../../src/dialog.js';
 import {DevSkillsPanel} from '../../src/dev_skills/view.js';
+import type {RuntimeUpdates} from '../../src/update_contracts.js';
 import type {
   ManagerDevSkillsCatalog,
   ManagerDevSkillsPlan,
   ManagerDevSkillsTargetStatus,
 } from '../../src/dev_skills/contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 let root: Root | undefined;
 let catalog: ManagerDevSkillsCatalog;
@@ -23,13 +28,42 @@ let recorded: ManagerDevSkillsTargetStatus[] | undefined;
 let projectsFail: boolean;
 let inventoryFail: boolean;
 let registeredProjects: {name: string; path: string}[];
-const digest = 'a'.repeat(64);
-const previewDigest = 'b'.repeat(64);
+const digest = Effect.pipe('a', EffectString.repeat(64));
+const previewDigest = Effect.pipe('b', EffectString.repeat(64));
+const runtimeUpdates: RuntimeUpdates = {
+  installedVersion: '5.3.1',
+  runningVersion: '5.3.1',
+  channel: 'latest',
+  developmentBuild: false,
+  restartRequired: false,
+  policy: 'automatic',
+  policyManaged: false,
+  automaticRunning: false,
+  updateAvailable: false,
+  installedNotes: [],
+  availableNotes: [],
+};
+function requireAction(value: unknown): ManagerDevSkillsPlan['action'] {
+  if (value === 'install' || value === 'update' || value === 'remove') return value;
+  throw new Error('Expected a manager dev-skills action.');
+}
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function selectElement(label: string): HTMLSelectElement {
+  const element = document.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`);
+  if (element === null) throw new Error(`Missing select ${label}.`);
+  return element;
+}
+
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {status});
-function plan(action = 'install'): ManagerDevSkillsPlan {
+function plan(action: ManagerDevSkillsPlan['action'] = 'install'): ManagerDevSkillsPlan {
   return {
     schemaVersion: 1,
-    action: action as ManagerDevSkillsPlan['action'],
+    action,
     target: target.target,
     consumerId: 'one',
     installationState: target.installationState,
@@ -45,7 +79,7 @@ function status() {
   return {schemaVersion: 1, bundle: catalog.bundle, targets: [target]};
 }
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   calls = [];
   recorded = undefined;
   projectsFail = false;
@@ -142,7 +176,7 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init: RequestInit) => {
-      const body = init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+      const body = init.body ? requireJsonObject(JSON.parse(String(init.body))) : undefined;
       calls.push({url, body});
       if (url === '/api/dev-skills/catalog') return json(catalog);
       if ((url === '/api/worksets' || url === '/api/dev-skills/projects') && projectsFail)
@@ -152,19 +186,27 @@ beforeEach(() => {
           ? json({error: 'Inventory unavailable'}, 503)
           : json({...status(), targets: recorded ?? [target]});
       if (url === '/api/worksets')
-        return json({projects: registeredProjects.map(project => ({...project, path: project.path.trim()}))});
+        return json({
+          projects: EffectArray.map(registeredProjects, project => ({
+            ...project,
+            path: Effect.pipe(project.path, EffectString.trim),
+          })),
+        });
       if (url === '/api/dev-skills/projects') return json({schemaVersion: 1, projects: registeredProjects});
-      if (url.startsWith('/api/runtime/updates')) return json({policy: 'automatic', automaticRunning: false});
-      if ((deferStatus && url.startsWith('/api/dev-skills/status')) || (deferPreview && url.endsWith('/preview'))) {
+      if (Effect.pipe(url, EffectString.startsWith('/api/runtime/updates'))) return json(runtimeUpdates);
+      if (
+        (deferStatus && Effect.pipe(url, EffectString.startsWith('/api/dev-skills/status'))) ||
+        (deferPreview && Effect.pipe(url, EffectString.endsWith('/preview')))
+      ) {
         const deferred = Promise.withResolvers<Response>();
         pending.push({url, resolve: deferred.resolve});
         return deferred.promise;
       }
-      if (url.startsWith('/api/dev-skills/status')) return json(status());
-      if (url.endsWith('/preview')) return json(plan(String(body?.action)));
-      if (url.endsWith('/apply')) {
+      if (Effect.pipe(url, EffectString.startsWith('/api/dev-skills/status'))) return json(status());
+      if (Effect.pipe(url, EffectString.endsWith('/preview'))) return json(plan(requireAction(body?.action)));
+      if (Effect.pipe(url, EffectString.endsWith('/apply'))) {
         if (stale) return json({code: 'stale-preview', error: 'Files changed after preview', recovery: 'preview'}, 409);
-        const action = String(body?.action);
+        const action = requireAction(body?.action);
         target = {
           ...target,
           installationState: action === 'remove' ? 'absent' : 'current',
@@ -209,7 +251,15 @@ async function render() {
   );
 }
 function button(label: string): HTMLButtonElement {
-  const found = [...document.querySelectorAll('button')].find(node => node.textContent?.trim() === label);
+  const found = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      node =>
+        Effect.pipe(node.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label,
+    ),
+  );
   if (!found) throw new Error('Missing button ' + label);
   return found;
 }
@@ -218,7 +268,7 @@ async function click(label: string) {
 }
 async function select(label: string, value: string) {
   await act(async () => {
-    const element = document.querySelector(`select[aria-label="${label}"]`) as HTMLSelectElement;
+    const element = selectElement(label);
     element.value = value;
     element.dispatchEvent(new Event('change', {bubbles: true}));
   });
@@ -247,12 +297,19 @@ it('explains the linked workflow and completes preview-confirm-install-update-re
   expect(button('Preview install').disabled).toBe(false);
   expect(button('Preview update').disabled).toBe(true);
   await click('Preview install');
-  expect(calls.some(call => call.url.endsWith('/apply'))).toBe(false);
+  expect(EffectArray.some(calls, call => Effect.pipe(call.url, EffectString.endsWith('/apply')))).toBe(false);
   expect(document.body.textContent).toContain(previewDigest);
   await click('Review and confirm install');
   expect(document.querySelector('dialog')).not.toBeNull();
   await click('Confirm install');
-  expect(calls.find(call => call.url.endsWith('/apply'))?.body).toEqual({
+  expect(
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        calls,
+        __effectArrayValue => !!(call => Effect.pipe(call.url, EffectString.endsWith('/apply')))(__effectArrayValue),
+      ),
+    )?.body,
+  ).toEqual({
     action: 'install',
     selector: {agent: 'codex', profile: 'desktop', scope: 'user'},
     previewDigest,
@@ -264,9 +321,16 @@ it('explains the linked workflow and completes preview-confirm-install-update-re
   expect(document.body.textContent).toContain('Retained files: /skills/edited.md');
   expect(document.body.textContent).toContain('removed · disabled');
   expect(button('Preview remove').disabled).toBe(true);
-  expect((vi.mocked(fetch).mock.calls[0]?.[1]?.headers as Record<string, string> | undefined)?.authorization).toBe(
-    'Bearer ',
-  );
+  const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers;
+  const authorization =
+    headers instanceof Headers
+      ? headers.get('authorization')
+      : EffectArray.isArray(headers)
+        ? EffectOption.getOrUndefined(
+            EffectArray.findFirst(headers, ([name]) => EffectString.toLowerCase(name) === 'authorization'),
+          )?.[1]
+        : headers?.authorization;
+  expect(authorization).toBe('Bearer ');
 });
 
 it('requires a fresh preview after a stale 409 and permits keyboard cancellation without applying', async () => {
@@ -275,14 +339,26 @@ it('requires a fresh preview after a stale 409 and permits keyboard cancellation
   await apply('install');
   expect(document.querySelector('[role=alert]')?.textContent).toContain('Review a fresh preview');
   expect(document.body.textContent).not.toContain('Review and confirm install');
-  expect(calls.filter(call => call.url.endsWith('/apply'))).toHaveLength(1);
+  expect(
+    EffectArray.filter(
+      calls,
+      (call, __effectArrayIndex) =>
+        __effectArrayIndex in calls && Effect.pipe(call.url, EffectString.endsWith('/apply')),
+    ),
+  ).toHaveLength(1);
   await click('Preview install');
   await click('Review and confirm install');
   await act(async () =>
     document.querySelector('dialog')!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true})),
   );
   expect(document.querySelector('dialog')).toBeNull();
-  expect(calls.filter(call => call.url.endsWith('/apply'))).toHaveLength(1);
+  expect(
+    EffectArray.filter(
+      calls,
+      (call, __effectArrayIndex) =>
+        __effectArrayIndex in calls && Effect.pipe(call.url, EffectString.endsWith('/apply')),
+    ),
+  ).toHaveLength(1);
 });
 
 it('uses an explicit registered project path and rejects late status/preview responses from an older selection', async () => {
@@ -309,7 +385,8 @@ it('uses an explicit registered project path and rejects late status/preview res
   );
   expect(document.body.textContent).toContain('/registered/repo/.cursor/skills');
   await act(async () => {
-    for (const item of pending) item.resolve(json(item.url.endsWith('/preview') ? plan() : status()));
+    for (const item of pending)
+      item.resolve(json(Effect.pipe(item.url, EffectString.endsWith('/preview')) ? plan() : status()));
   });
   expect(document.body.textContent).toContain('/registered/repo/.cursor/skills');
   expect(document.body.textContent).not.toContain('Review and confirm install');
@@ -367,7 +444,7 @@ it('invalidates old approval across bounded generated selector/action changes, i
         await click('Review and confirm install');
         for (const change of changes) {
           if (change === 'host') {
-            const element = document.querySelector('select[aria-label="Host / profile"]') as HTMLSelectElement;
+            const element = selectElement('Host / profile');
             await select('Host / profile', element.value === 'codex' ? 'cursor' : 'codex');
           } else if (change === 'scope') {
             await select('Scope', 'project');
@@ -377,7 +454,13 @@ it('invalidates old approval across bounded generated selector/action changes, i
           }
         }
         await click('Confirm install');
-        expect(calls.filter(call => call.url.endsWith('/apply'))).toHaveLength(0);
+        expect(
+          EffectArray.filter(
+            calls,
+            (call, __effectArrayIndex) =>
+              __effectArrayIndex in calls && Effect.pipe(call.url, EffectString.endsWith('/apply')),
+          ),
+        ).toHaveLength(0);
         await act(async () => root!.unmount());
         root = undefined;
         document.body.replaceChildren();
@@ -447,7 +530,7 @@ it('keeps an enrolled project installation addressable after registration is rem
   projectsFail = true;
   await render();
   await select('Scope', 'project');
-  const picker = document.querySelector('select[aria-label="Registered project path"]') as HTMLSelectElement;
+  const picker = selectElement('Registered project path');
   expect(picker.textContent).toContain('Existing installation · /previous/repo');
   expect(picker.textContent).not.toContain('/removed/repo');
   expect(picker.textContent).not.toContain('/cursor/repo');
@@ -456,8 +539,17 @@ it('keeps an enrolled project installation addressable after registration is rem
   await apply('update');
   inventoryFail = true;
   await apply('remove');
-  expect(calls.filter(call => call.url.endsWith('/apply')).map(call => call.body)).toEqual(
-    ['update', 'remove'].map(action => ({
+  expect(
+    EffectArray.map(
+      EffectArray.filter(
+        calls,
+        (call, __effectArrayIndex) =>
+          __effectArrayIndex in calls && Effect.pipe(call.url, EffectString.endsWith('/apply')),
+      ),
+      call => call.body,
+    ),
+  ).toEqual(
+    EffectArray.map(['update', 'remove'], action => ({
       action,
       selector: {agent: 'codex', profile: 'desktop', scope: 'project', cwd: '/previous/repo'},
       previewDigest,
@@ -483,16 +575,24 @@ it('preserves the authoritative whitespace-suffixed project identity through pre
   registeredProjects = [{name: 'Whitespace-suffixed repository', path: exactPath}];
   await render();
   await select('Scope', 'project');
-  const picker = document.querySelector('select[aria-label="Registered project path"]') as HTMLSelectElement;
-  expect([...picker.options].map(option => option.value)).toContain(exactPath);
-  expect([...picker.options].map(option => option.value)).not.toContain(exactPath.trim());
+  const picker = selectElement('Registered project path');
+  expect(EffectArray.map([...picker.options], option => option.value)).toContain(exactPath);
+  expect(EffectArray.map([...picker.options], option => option.value)).not.toContain(
+    Effect.pipe(exactPath, EffectString.trim),
+  );
   await select('Registered project path', exactPath);
   await apply('install');
-  const mutationCalls = calls.filter(call => call.url.endsWith('/preview') || call.url.endsWith('/apply'));
+  const mutationCalls = EffectArray.filter(
+    calls,
+    (call, __effectArrayIndex) =>
+      __effectArrayIndex in calls &&
+      (Effect.pipe(call.url, EffectString.endsWith('/preview')) ||
+        Effect.pipe(call.url, EffectString.endsWith('/apply'))),
+  );
   expect(mutationCalls).toHaveLength(2);
   for (const call of mutationCalls)
     expect(call.body?.selector).toEqual({agent: 'codex', profile: 'desktop', scope: 'project', cwd: exactPath});
-  expect(calls.some(call => call.url === '/api/worksets')).toBe(false);
+  expect(EffectArray.some(calls, call => call.url === '/api/worksets')).toBe(false);
 });
 
 it.each(['update', 'remove'] as const)(
@@ -527,12 +627,20 @@ it.each(['update', 'remove'] as const)(
     expect(button('Preview remove').disabled).toBe(false);
     expect(document.body.textContent).toContain('Planning: blocked');
     await click('Preview ' + action);
-    expect(calls.find(call => call.url.endsWith('/preview'))?.body).toEqual({
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          calls,
+          __effectArrayValue =>
+            !!(call => Effect.pipe(call.url, EffectString.endsWith('/preview')))(__effectArrayValue),
+        ),
+      )?.body,
+    ).toEqual({
       action,
       selector: {agent: 'codex', profile: 'desktop', scope: 'user'},
     });
     expect(document.body.textContent).toContain(previewDigest);
-    expect(calls.some(call => call.url.endsWith('/apply'))).toBe(false);
+    expect(EffectArray.some(calls, call => Effect.pipe(call.url, EffectString.endsWith('/apply')))).toBe(false);
   },
 );
 
@@ -559,6 +667,6 @@ it.each(['modified', 'incompatible', 'historical-ownership-conflict'])(
     await render();
     expect(button('Preview update').disabled).toBe(true);
     expect(button('Preview remove').disabled).toBe(true);
-    expect(calls.some(call => call.url.endsWith('/preview'))).toBe(false);
+    expect(EffectArray.some(calls, call => Effect.pipe(call.url, EffectString.endsWith('/preview')))).toBe(false);
   },
 );

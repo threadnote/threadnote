@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -7,27 +8,34 @@ import {
   verifyCodeMemoryLinkRetainedBundleV1,
   type CodeMemoryLinkRetainedArtifactRole,
 } from '@threadnote/threadnote/evaluation/code-memory-link-retained-bundle';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const CANDIDATE = 'a'.repeat(40);
+const CANDIDATE = Effect.pipe('a', EffectString.repeat(40));
 const CLIENTS = [
   {
-    clientId: `cli_${'1'.repeat(16)}`,
-    configProjection: json({appServerVersion: '0.149.0-alpha.4.1', model: 'gpt-5.6-luna', roleBinding: 'b'.repeat(64)}),
-    descriptor: json({descriptorHash: 'c'.repeat(64), version: 1}),
+    clientId: `cli_${Effect.pipe('1', EffectString.repeat(16))}`,
+    configProjection: json({
+      appServerVersion: '0.149.0-alpha.4.1',
+      model: 'gpt-5.6-luna',
+      roleBinding: Effect.pipe('b', EffectString.repeat(64)),
+    }),
+    descriptor: json({descriptorHash: Effect.pipe('c', EffectString.repeat(64)), version: 1}),
   },
   {
-    clientId: `cli_${'2'.repeat(16)}`,
+    clientId: `cli_${Effect.pipe('2', EffectString.repeat(16))}`,
     configProjection: json({
       appServerVersion: '0.149.0-alpha.4.1',
       model: 'gpt-5.6-terra',
-      roleBinding: 'd'.repeat(64),
+      roleBinding: Effect.pipe('d', EffectString.repeat(64)),
     }),
-    descriptor: json({descriptorHash: 'e'.repeat(64), version: 1}),
+    descriptor: json({descriptorHash: Effect.pipe('e', EffectString.repeat(64)), version: 1}),
   },
 ] as const;
 const SEALED_FILES = [
-  {content: json({task: 'hidden'}), path: `tasks/tsk_${'3'.repeat(16)}/packet.json`},
-  {content: 'export const judge = 1;\n', path: `artifacts/judge/art_${'4'.repeat(16)}.ts`},
+  {content: json({task: 'hidden'}), path: `tasks/tsk_${Effect.pipe('3', EffectString.repeat(16))}/packet.json`},
+  {content: 'export const judge = 1;\n', path: `artifacts/judge/art_${Effect.pipe('4', EffectString.repeat(16))}.ts`},
 ] as const;
 
 describe('Code Memory Link retained evidence bundle', () => {
@@ -41,10 +49,14 @@ describe('Code Memory Link retained evidence bundle', () => {
     const verified = verifyCodeMemoryLinkRetainedBundleV1({blobs: bundle.blobs, indexContent: bundle.indexContent});
 
     expect(codeMemoryLinkRetainedBundleHashV1(bundle.indexContent)).toBe(bundle.bundleHash);
-    expect(Object.keys(verified.artifacts)).toEqual(CODE_MEMORY_LINK_RETAINED_ARTIFACT_ROLES);
-    expect(verified.clients.map(client => client.clientId)).toEqual(CLIENTS.map(client => client.clientId));
-    expect(verified.sealedFiles.map(file => file.path)).toEqual([...SEALED_FILES].map(file => file.path).sort());
-    expect(bundle.index.blobs.every(blob => blob.path === `blobs/${blob.sha256}`)).toBe(true);
+    expect(EffectRecord.keys(verified.artifacts)).toEqual(CODE_MEMORY_LINK_RETAINED_ARTIFACT_ROLES);
+    expect(EffectArray.map(verified.clients, client => client.clientId)).toEqual(
+      EffectArray.map(CLIENTS, client => client.clientId),
+    );
+    expect(EffectArray.map(verified.sealedFiles, file => file.path)).toEqual(
+      EffectArray.map([...SEALED_FILES], file => file.path).sort(),
+    );
+    expect(EffectArray.every(bundle.index.blobs, blob => blob.path === `blobs/${blob.sha256}`)).toBe(true);
   });
 
   it('rejects changed bytes, unreferenced blobs, and noncanonical indexes', () => {
@@ -61,7 +73,7 @@ describe('Code Memory Link retained evidence bundle', () => {
       /byte length or SHA-256/u,
     );
     const extra = new Map(bundle.blobs);
-    extra.set('f'.repeat(64), json({extra: true}));
+    extra.set(Effect.pipe('f', EffectString.repeat(64)), json({extra: true}));
     expect(() => verifyCodeMemoryLinkRetainedBundleV1({blobs: extra, indexContent: bundle.indexContent})).toThrow(
       /blob map differs/u,
     );
@@ -153,7 +165,7 @@ describe('Code Memory Link retained evidence bundle', () => {
         fc.array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz'), {minLength: 1, maxLength: 20}),
         characters => {
           const input = artifacts();
-          input.sealedLayout = json({observed: `/home/${characters.join('')}/private.json`});
+          input.sealedLayout = json({observed: `/home/${EffectArray.join(characters, '')}/private.json`});
           expect(() =>
             createCodeMemoryLinkRetainedBundleV1({
               artifacts: input,
@@ -171,15 +183,15 @@ describe('Code Memory Link retained evidence bundle', () => {
 
 function artifacts(): Record<CodeMemoryLinkRetainedArtifactRole, string> {
   return {
-    assignment: json({assignmentHash: '1'.repeat(64), version: 1}),
-    attempts: jsonl({attemptHash: '2'.repeat(64), version: 1}),
-    dogfood: json({artifactHash: '3'.repeat(64), version: 1}),
-    evidence: jsonl({evidenceHash: '4'.repeat(64), version: 1}),
-    manifest: json({manifestHash: '5'.repeat(64), version: 1}),
+    assignment: json({assignmentHash: Effect.pipe('1', EffectString.repeat(64)), version: 1}),
+    attempts: jsonl({attemptHash: Effect.pipe('2', EffectString.repeat(64)), version: 1}),
+    dogfood: json({artifactHash: Effect.pipe('3', EffectString.repeat(64)), version: 1}),
+    evidence: jsonl({evidenceHash: Effect.pipe('4', EffectString.repeat(64)), version: 1}),
+    manifest: json({manifestHash: Effect.pipe('5', EffectString.repeat(64)), version: 1}),
     result: json({gate: {status: 'passed'}, version: 1}),
-    sealedLayout: json({layoutArtifactId: `art_${'6'.repeat(16)}`, version: 1}),
-    sealedSuite: json({suiteHash: '7'.repeat(64), version: 1}),
-    trials: jsonl({receiptHash: '8'.repeat(64), version: 1}),
+    sealedLayout: json({layoutArtifactId: `art_${Effect.pipe('6', EffectString.repeat(16))}`, version: 1}),
+    sealedSuite: json({suiteHash: Effect.pipe('7', EffectString.repeat(64)), version: 1}),
+    trials: jsonl({receiptHash: Effect.pipe('8', EffectString.repeat(64)), version: 1}),
   };
 }
 

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- Filesystem directory creation/removal and baseline capability probes are native OS boundaries; file contents use Bun. */
 import {existsSync, mkdirSync, mkdtempSync, renameSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -5,6 +6,10 @@ import {join, resolve} from 'node:path';
 import {bazelDiffPath, bazelPath} from '../bazel/cli-tools.mjs';
 import {readPreparedInventory} from '../bazel/prepare.mjs';
 import {selectTargets} from './selection.mjs';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const root = resolve(import.meta.dir, '../..');
 const option = name => process.argv[process.argv.indexOf(name) + 1];
@@ -34,8 +39,9 @@ const run = async (args, cwd = root, raw = false) => {
     new Response(child.stderr).text(),
     child.exited,
   ]);
-  if (code !== 0) throw new Error(`${args[0]} ${args[1]} failed (${code}): ${stderr.slice(-1500)}`);
-  return raw ? stdout : stdout.trim();
+  if (code !== 0)
+    throw new Error(`${args[0]} ${args[1]} failed (${code}): ${Effect.pipe(stderr, EffectString.slice(-1500))}`);
+  return raw ? stdout : Effect.pipe(stdout, EffectString.trim);
 };
 // Capture authored paths before preparation publishes generated files.
 let revision;
@@ -46,7 +52,13 @@ try {
   revision = await run(['git', 'rev-parse', '--verify', `${base}^{commit}`]);
   const tracked = await run(['git', 'diff', '--name-only', '--no-renames', '-z', revision], root, true);
   const untracked = await run(['git', 'ls-files', '--others', '--exclude-standard', '-z'], root, true);
-  changedFiles = [...new Set([tracked, untracked].flatMap(value => value.split('\0').filter(Boolean)))].sort();
+  changedFiles = [
+    ...new Set(
+      EffectArray.flatMap([tracked, untracked], value =>
+        EffectArray.filter(Effect.pipe(value, EffectString.split('\0')), Boolean),
+      ),
+    ),
+  ].sort();
 } catch (error) {
   changeFailure = error instanceof Error ? error.message : String(error);
 }
@@ -128,10 +140,12 @@ try {
     join(output, 'impacted.txt'),
   ]);
   const impactedText = await Bun.file(join(output, 'impacted.txt')).text();
-  impacted = impactedText
-    .split('\n')
-    .map(value => value.trim())
-    .filter(Boolean);
+  impacted = EffectArray.filter(
+    EffectArray.map(Effect.pipe(impactedText, EffectString.split('\n')), value =>
+      Effect.pipe(value, EffectString.trim),
+    ),
+    Boolean,
+  );
 } catch (error) {
   failure = error instanceof Error ? error.message : String(error);
 } finally {
@@ -150,18 +164,27 @@ try {
     }
   }
 }
-const modeledInputs = [...inventory.targets, ...(baseInventory?.targets ?? [])].flatMap(target => target.inputs);
-const declarations = [...inventory.targets, ...(baseInventory?.targets ?? [])].map(target => {
-  const packagePath = target.label.slice(2).split(':')[0];
-  return packagePath ? `${packagePath}/BUILD.bazel` : 'BUILD.bazel';
-});
+const modeledInputs = EffectArray.flatMap(
+  [...inventory.targets, ...(baseInventory?.targets ?? [])],
+  target => target.inputs,
+);
+const declarations = EffectOption.getOrUndefined(
+  EffectOption.map(
+    EffectOption.fromNullishOr([...inventory.targets, ...(baseInventory?.targets ?? [])]),
+    __effectArrayReceiver =>
+      EffectArray.map(__effectArrayReceiver, target => {
+        const packagePath = target.label.slice(2).split(':')[0];
+        return packagePath ? `${packagePath}/BUILD.bazel` : 'BUILD.bazel';
+      }),
+  ),
+);
 const result = selectTargets({
   inventory: inventory.targets.map(target => target.label),
   impacted,
   changedFiles,
   knownInputs: [...modeledInputs, ...declarations, 'tools/bazel/targets.json'],
-  targetDependencies: Object.fromEntries(inventory.targets.map(target => [target.label, target.dependsOn ?? []])),
-  targetInputs: Object.fromEntries(inventory.targets.map(target => [target.label, target.inputs])),
+  targetDependencies: EffectRecord.fromEntries(inventory.targets.map(target => [target.label, target.dependsOn ?? []])),
+  targetInputs: EffectRecord.fromEntries(inventory.targets.map(target => [target.label, target.inputs])),
   failure,
 });
 await Bun.write(
@@ -169,7 +192,10 @@ await Bun.write(
   JSON.stringify({...result, base, changedFiles, generation, modeledTargetCount: inventory.targets.length}, null, 2) +
     '\n',
 );
-await Bun.write(join(output, 'targets.txt'), result.targets.join('\n') + (result.targets.length ? '\n' : ''));
+await Bun.write(
+  join(output, 'targets.txt'),
+  EffectArray.join(result.targets, '\n') + (result.targets.length ? '\n' : ''),
+);
 const appendOutput = async text =>
   Bun.write(
     process.env.GITHUB_OUTPUT,

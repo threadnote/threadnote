@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
@@ -22,6 +23,8 @@ import {
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphStore} from '@threadnote/graph/store';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface ProjectionCapture {
   readonly metadata: CodeGraphCheckpointMetadataV1;
@@ -193,7 +196,7 @@ describe('code graph checkpoint projection', () => {
                 package_name, component_id, evidence_path, evidence_span_json
               ) VALUES (
                 ${indexed.snapshot.id},
-                ${`cgm_${'d'.repeat(64)}`},
+                ${`cgm_${Effect2.pipe('d', EffectString.repeat(64))}`},
                 ${1},
                 ${'package'},
                 ${'export'},
@@ -218,7 +221,10 @@ describe('code graph checkpoint projection', () => {
           writeRecords: page => Effect.sync(() => records.push(...page)),
         });
         expect(
-          records.filter(record => record.kind === 'moniker' && record.evidencePath === 'scratchpad/package.json'),
+          EffectArray.filter(
+            records,
+            record => record.kind === 'moniker' && record.evidencePath === 'scratchpad/package.json',
+          ),
         ).toEqual([]);
       }).pipe(
         Effect.ensuring(
@@ -278,11 +284,12 @@ describe('code graph checkpoint projection', () => {
           writeRecords: page => Effect.sync(() => records.push(...page)),
         });
         expect(
-          records.some(
+          EffectArray.some(
+            records,
             record =>
               'evidencePath' in record &&
               typeof record.evidencePath === 'string' &&
-              record.evidencePath.startsWith('scratchpad/'),
+              Effect2.pipe(record.evidencePath, EffectString.startsWith('scratchpad/')),
           ),
         ).toBe(false);
       }).pipe(

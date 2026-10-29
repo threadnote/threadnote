@@ -8,8 +8,10 @@ import {
 } from '@threadnote/workflow-automations/native';
 import type {WorkflowWriteIntent} from '@threadnote/workflow-automations/contracts';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const bindingHash = 'a'.repeat(64);
+const bindingHash = Effect.pipe('a', EffectString.repeat(64));
 const workflowState: NativeWorkflowState = {
   format: 'threadnote-native-workflow',
   stateVersion: 1,
@@ -36,11 +38,16 @@ function intent(overrides: Partial<WorkflowWriteIntent> = {}): WorkflowWriteInte
   };
 }
 
+function errorCode(error: unknown): unknown {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined;
+  return error.code;
+}
+
 function outcome(input: unknown, hash: (value: string) => string): unknown {
   try {
     return {accepted: true, value: decodeNativeWorkflowState(input, hash)};
   } catch (error) {
-    return {accepted: false, code: (error as {code?: unknown}).code};
+    return {accepted: false, code: errorCode(error)};
   }
 }
 
@@ -75,16 +82,26 @@ describe('native SHA-256 adapter', () => {
         fc.boolean(),
         fc.integer({min: 1, max: 9999}),
         (generated, includeLocation, includeRelations, includeEvidence, suffix) => {
-          const referenceUri = `threadnote://memory/tn_${String(suffix).padStart(10, '0')}`;
+          const referenceUri = `threadnote://memory/tn_${Effect.pipe(String(suffix), EffectString.padStart(10, '0'))}`;
           const writeIntent = intent({
             operationId: `write-${suffix}`,
             body: `${generated} — 日本語 🧭 ${suffix}\n`,
-            ...(includeLocation ? {uri: referenceUri, storageKind: 'durable' as const, codeRefs: ['src/雪.ts']} : {}),
+            ...(includeLocation
+              ? {
+                  uri: referenceUri,
+                  storageKind: 'durable' as const,
+                  codeRefs: ['src/雪.ts'],
+                }
+              : {}),
             ...(includeRelations ? {relations: [{type: 'references', uri: referenceUri}]} : {}),
             ...(includeEvidence
               ? {
                   evidenceRefs: [
-                    {uri: referenceUri, memoryId: `tn_${String(suffix).padStart(10, '0')}`, revision: bindingHash},
+                    {
+                      uri: referenceUri,
+                      memoryId: `tn_${Effect.pipe(String(suffix), EffectString.padStart(10, '0'))}`,
+                      revision: bindingHash,
+                    },
                   ],
                 }
               : {}),
@@ -106,7 +123,10 @@ describe('native SHA-256 adapter', () => {
       intent: preparedIntent,
       intentDigest: nativeWorkflowIntentDigest(preparedIntent, portableSha256HexSync),
     };
-    const verifiedIntent = intent({operationId: 'write-2', artifactKey: 'plan-summary'});
+    const verifiedIntent = intent({
+      operationId: 'write-2',
+      artifactKey: 'plan-summary',
+    });
     const artifact = {
       uri: 'threadnote://user/tester/memories/durable/projects/repo/plan-summary.md',
       memoryId: 'tn_1234567890',
@@ -129,17 +149,31 @@ describe('native SHA-256 adapter', () => {
 
     const tamperedHistory = {
       ...workflowState,
-      operations: [{...prepared, intent: {...preparedIntent, body: 'Changed after preparation.'}}],
+      operations: [
+        {
+          ...prepared,
+          intent: {...preparedIntent, body: 'Changed after preparation.'},
+        },
+      ],
     };
     const unknownField = {...validState, unexpected: true};
-    const preparedWithArtifact = {...workflowState, operations: [{...prepared, artifact}]};
-    const verifiedWithoutArtifact = {...workflowState, operations: [{...verified, artifact: undefined}]};
+    const preparedWithArtifact = {
+      ...workflowState,
+      operations: [{...prepared, artifact}],
+    };
+    const verifiedWithoutArtifact = {
+      ...workflowState,
+      operations: [{...verified, artifact: undefined}],
+    };
 
     for (const invalidState of [tamperedHistory, unknownField, preparedWithArtifact, verifiedWithoutArtifact]) {
       const nativeResult = outcome(invalidState, sha256HexSync);
       const portableResult = outcome(invalidState, portableSha256HexSync);
       expect(nativeResult).toEqual(portableResult);
-      expect(nativeResult).toMatchObject({accepted: false, code: 'invalid-state'});
+      expect(nativeResult).toMatchObject({
+        accepted: false,
+        code: 'invalid-state',
+      });
     }
   });
 });

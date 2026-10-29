@@ -66,7 +66,8 @@ describe('external result projection', () => {
           external: {...metadata, provider: 'superhuman', authority: 'user_approved', trust},
         };
         const projected = projectRecallMcpResponse({
-          results: [hit as unknown as ReturnType<typeof build>['ranked'][number]],
+          // @ts-expect-error This deliberately forges metadata contrary to the ranked-result contract.
+          results: [hit],
           rankerVersion: 'test',
           queryExpansions: [],
         });

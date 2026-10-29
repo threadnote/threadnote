@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
 
@@ -93,16 +94,18 @@ const calibration = Schema.decodeSync(
 describe('hosted Linux production-ratchet paired-wall calibration', () => {
   it('retains reproducible historical and candidate-control-candidate evidence', () => {
     const historical = calibration.historicalHostedObservations;
-    const values = historical.map(observation => observation.hotExactLexicalQueryP95Milliseconds).sort((a, b) => a - b);
+    const values = EffectArray.map(historical, observation => observation.hotExactLexicalQueryP95Milliseconds).sort(
+      (a, b) => a - b,
+    );
 
     expect(historical).toHaveLength(calibration.historicalHostedSummary.count);
-    expect(new Set(historical.map(observation => observation.runId)).size).toBe(historical.length);
-    expect(new Set(historical.map(observation => observation.artifactId)).size).toBe(historical.length);
-    expect(new Set(historical.map(observation => observation.archiveSha256)).size).toBe(historical.length);
+    expect(new Set(EffectArray.map(historical, observation => observation.runId)).size).toBe(historical.length);
+    expect(new Set(EffectArray.map(historical, observation => observation.artifactId)).size).toBe(historical.length);
+    expect(new Set(EffectArray.map(historical, observation => observation.archiveSha256)).size).toBe(historical.length);
     expect(Math.min(...values)).toBe(calibration.historicalHostedSummary.minimumMilliseconds);
     expect(Math.max(...values)).toBe(calibration.historicalHostedSummary.maximumMilliseconds);
     expect(values[Math.floor(values.length / 2)]).toBe(calibration.historicalHostedSummary.upperMiddleMilliseconds);
-    expect(calibration.observations.map(observation => observation.role)).toEqual([
+    expect(EffectArray.map(calibration.observations, observation => observation.role)).toEqual([
       'screening-candidate',
       'protected-base-control',
       'confirmatory-candidate',

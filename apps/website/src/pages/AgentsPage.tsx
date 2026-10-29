@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {SiteShell} from '../components/SiteShell';
 import {
   agentCapabilityNames,
@@ -47,7 +48,7 @@ export default function AgentsPage() {
 
       <section className="content-section agents-grid-section" aria-label="Supported agent catalog">
         <div className="agents-grid">
-          {agentIntegrations.map(integration => (
+          {EffectArray.map(agentIntegrations, integration => (
             <article className="agent-card" data-agent-id={integration.id} key={integration.id}>
               <header className="agent-card__header">
                 <div>
@@ -64,11 +65,15 @@ export default function AgentsPage() {
                 </div>
                 <div>
                   <dt>Scopes</dt>
-                  <dd>{integration.scopes.length ? integration.scopes.join(', ') : 'No managed install scope'}</dd>
+                  <dd>
+                    {integration.scopes.length
+                      ? EffectArray.join(integration.scopes, ', ')
+                      : 'No managed install scope'}
+                  </dd>
                 </div>
                 <div>
                   <dt>Platforms</dt>
-                  <dd>{integration.platforms.join(', ')}</dd>
+                  <dd>{EffectArray.join(integration.platforms, ', ')}</dd>
                 </div>
                 <div>
                   <dt>Last verified</dt>
@@ -77,7 +82,7 @@ export default function AgentsPage() {
               </dl>
 
               <ul className="agent-card__capabilities" aria-label={`${integration.displayName} capabilities`}>
-                {agentCapabilityNames.map(capability => {
+                {EffectArray.map(agentCapabilityNames, capability => {
                   const details = integration.capabilities[capability];
                   return (
                     <li key={capability}>
@@ -89,12 +94,14 @@ export default function AgentsPage() {
               </ul>
 
               <p className="agent-card__verification">{integration.verification}</p>
-              {integration.caveats.length > 0 && <p className="agent-card__caveat">{integration.caveats.join(' ')}</p>}
+              {integration.caveats.length > 0 && (
+                <p className="agent-card__caveat">{EffectArray.join(integration.caveats, ' ')}</p>
+              )}
               {integration.setup.length > 0 && <p className="agent-card__setup">{integration.setup[0]}</p>}
 
               <footer className="agent-card__footer">
                 <a href={docsArticleHref(`agent-${integration.id}`)}>Surface details</a>
-                {integration.officialDocs.map((url, index) => (
+                {EffectArray.map(integration.officialDocs, (url, index) => (
                   <a href={url} key={url} rel="noreferrer" target="_blank">
                     Official docs {integration.officialDocs.length > 1 ? index + 1 : ''} ↗
                   </a>

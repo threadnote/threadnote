@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Result} from 'effect';
 import {resolveRecallScope} from '../../memory/recall_scope.js';
 import {errorMessage} from '@threadnote/platform/errors';
@@ -62,7 +63,10 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
     const thresholdConfigured = thresholdPolicy.source !== 'default';
     const passes: Array<readonly RecallHit[]> = [];
     const scopedRecallUris = new Set(
-      [params.pinnedUri, ...(params.allowedUriScopes ?? [])].filter((uri): uri is string => uri !== undefined),
+      EffectArray.filter(
+        [params.pinnedUri, ...(params.allowedUriScopes ?? [])],
+        (uri): uri is string => uri !== undefined,
+      ),
     );
     for (const scope of projectMemoryScopeUris(config, recallProjectName, params.includeArchived)) {
       if (!scopedRecallUris.has(scope)) {
@@ -70,6 +74,7 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
       }
     }
     const seededUri = project ? trimTrailingSlash(project.uri) : undefined;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native optional-chain guard narrows `seededUri` for insertion.
     if (seededUri?.startsWith('threadnote://') && seededUri !== params.pinnedUri) {
       scopedRecallUris.add(seededUri);
     }
@@ -77,7 +82,12 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
     const sections: string[] = [];
     const workset = scope.workset;
     if (workset && workset.projects.length > 0) {
-      sections.push(`Workset scope: ${workset.name} (${workset.projects.map(member => member.name).join(', ')})`);
+      sections.push(
+        `Workset scope: ${workset.name} (${EffectArray.join(
+          EffectArray.map(workset.projects, member => member.name),
+          ', ',
+        )})`,
+      );
       for (const uri of worksetScopeUris(config, workset).slice(0, MAX_WORKSET_PASSES)) scopedRecallUris.add(uri);
     }
     const eligibility = scope.eligibility;

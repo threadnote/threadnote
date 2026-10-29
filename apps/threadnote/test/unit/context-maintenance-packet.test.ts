@@ -6,6 +6,8 @@ import {
   sharedMaintenanceOwnerProposal,
   withMaintenancePacketRevision,
 } from '../../src/memory/context/maintenance_packet.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const uri = 'threadnote://user/tester/memories/shared/default/durable/projects/threadnote/source.md';
 const target = 'threadnote://user/tester/memories/shared/default/durable/projects/threadnote/missing.md';
@@ -58,7 +60,10 @@ describe('revision-bound maintenance packets', () => {
   );
   it('binds exact shared canonical edits and base without mutating or exporting personal bodies', () => {
     const original = record.content;
-    const base = {commit: 'a'.repeat(40), repositoryId: 'b'.repeat(64)};
+    const base = {
+      commit: Effect2.pipe('a', EffectString.repeat(40)),
+      repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+    };
     const proposal = sharedMaintenanceOwnerProposal(record, [record], base);
     expect(proposal.readOnly).toBe(true);
     expect(proposal.selectedEdits).toEqual([
@@ -70,7 +75,8 @@ describe('revision-bound maintenance packets', () => {
     ]);
     expect(proposal.sharedBase).toEqual({state: 'available', ...base});
     expect(proposal.proposalRevision).not.toBe(
-      sharedMaintenanceOwnerProposal(record, [record], {...base, commit: 'c'.repeat(40)}).proposalRevision,
+      sharedMaintenanceOwnerProposal(record, [record], {...base, commit: Effect2.pipe('c', EffectString.repeat(40))})
+        .proposalRevision,
     );
     expect(JSON.stringify(proposal)).not.toContain('Preserve the original claim.');
     expect(record.content).toBe(original);

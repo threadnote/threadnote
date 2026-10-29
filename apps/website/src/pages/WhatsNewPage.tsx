@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {useEffect} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -21,6 +22,8 @@ import {
   type WhatsNewIndexView,
 } from '../lib/routes';
 import {docsArticleHref, setDocumentMeta, siteHref, whatsNewArticleHref, whatsNewReleaseHref} from '../lib/site';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const postDate = new Intl.DateTimeFormat('en', {
   day: 'numeric',
@@ -47,7 +50,7 @@ type WebsiteUpdate = Readonly<{
 
 function websiteUpdates(): readonly WebsiteUpdate[] {
   return orderWebsiteUpdatesDescending([
-    ...articles.map(article => ({
+    ...EffectArray.map(articles, article => ({
       author: article.author,
       body: article.body,
       canonicalUrl: new URL(whatsNewArticlePath(article.slug), 'https://threadnote.io/').href,
@@ -60,7 +63,7 @@ function websiteUpdates(): readonly WebsiteUpdate[] {
       summary: article.summary,
       title: article.title,
     })),
-    ...releases.map(release => ({
+    ...EffectArray.map(releases, release => ({
       author: 'Threadnote',
       body: release.body,
       canonicalUrl: new URL(whatsNewReleasePath(release.version), 'https://threadnote.io/').href,
@@ -72,7 +75,7 @@ function websiteUpdates(): readonly WebsiteUpdate[] {
       socialImage: websiteSocialImageForRelease(release),
       stableId: `release:${release.version}`,
       summary: release.summary,
-      title: `Threadnote ${release.version.replace(/^v/, '')}`,
+      title: `Threadnote ${Effect.pipe(release.version, EffectString.replace(/^v/, ''))}`,
       version: release.version,
     })),
   ]);
@@ -220,9 +223,9 @@ function WhatsNewIndex({
             <strong>{isArticles ? 'A' : 'R'}</strong>
           </div>
           <ol>
-            {latest.highlights.slice(0, 4).map((highlight, index) => (
+            {EffectArray.map(latest.highlights.slice(0, 4), (highlight, index) => (
               <li key={highlight}>
-                <span>{String(index + 1).padStart(2, '0')}</span>
+                <span>{Effect.pipe(String(index + 1), EffectString.padStart(2, '0'))}</span>
                 <strong>{highlight}</strong>
               </li>
             ))}
@@ -245,17 +248,17 @@ function WhatsNewIndex({
         </header>
 
         <div className="release-grid">
-          {earlier.map((update, index) => (
+          {EffectArray.map(earlier, (update, index) => (
             <article className={`release-card release-card--${update.kind}`} key={update.stableId}>
               <UpdateMeta update={update} />
               <div className="release-card__number" aria-hidden="true">
-                {String(index + 2).padStart(2, '0')}
+                {Effect.pipe(String(index + 2), EffectString.padStart(2, '0'))}
               </div>
               <h3>{update.title}</h3>
               <p>{update.summary}</p>
               {update.highlights.length > 0 ? (
                 <ul>
-                  {update.highlights.slice(0, 3).map(highlight => (
+                  {EffectArray.map(update.highlights.slice(0, 3), highlight => (
                     <li key={highlight}>{highlight}</li>
                   ))}
                 </ul>
@@ -277,10 +280,12 @@ export default function WhatsNewPage() {
   const route = whatsNewPostForPathname(window.location.pathname, import.meta.env.BASE_URL);
   const view = whatsNewIndexViewForSearch(window.location.search);
   const selected = route
-    ? updates.find(update =>
-        route.kind === 'article'
-          ? update.stableId === `article:${route.slug}`
-          : update.stableId === `release:${route.version}`,
+    ? EffectOption.getOrUndefined(
+        EffectArray.findFirst(updates, update =>
+          route.kind === 'article'
+            ? update.stableId === `article:${route.slug}`
+            : update.stableId === `release:${route.version}`,
+        ),
       )
     : undefined;
 

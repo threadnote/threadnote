@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -14,6 +15,8 @@ import {
   isCodeGraphStoreError,
   type CodeGraphStoreFailure,
 } from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const upsertRepository = Effect.fn('codeGraph.upsertRepository')(function* (
   sql: SqlClient.SqlClient,
@@ -48,29 +51,45 @@ function addTerms(target: Map<string, number>, value: string, weight: number): v
 }
 
 export function normalizedTerms(value: string): readonly string[] {
-  const expanded = value
-    .normalize('NFKC')
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
-    .toLowerCase();
-  return [...new Set(expanded.match(/[\p{L}\p{N}_$.-]{2,}/gu) ?? [])].slice(0, 32);
+  const expanded = Effect2.pipe(
+    value,
+    EffectString.normalize('NFKC'),
+    EffectString.replace(/([a-z0-9])([A-Z])/g, '$1 $2'),
+    EffectString.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2'),
+    EffectString.toLowerCase,
+  );
+  return [
+    ...new Set(
+      Effect2.pipe(
+        expanded,
+        EffectString.match(/[\p{L}\p{N}_$.-]{2,}/gu),
+        Effect2.Option.getOrElse(() => null),
+      ) ?? [],
+    ),
+  ].slice(0, 32);
 }
 
 /** Preserve explicit code identities embedded in a longer natural-language query. */
 export function codeGraphIdentitySelectors(value: string): readonly string[] {
   const candidates =
-    value
-      .normalize('NFKC')
-      .replaceAll('\\', '/')
-      .match(/[\p{L}\p{N}_$@./:-]{2,}/gu) ?? [];
-  const selectors = candidates.flatMap(candidate => {
-    if (candidate.includes('/')) return [];
+    Effect2.pipe(value, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.normalize('NFKC'));
+      const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replaceAll('\\', '/'));
+      const __effectPipeStage2 = Effect2.pipe(
+        __effectPipeStage1,
+        EffectString.match(/[\p{L}\p{N}_$@./:-]{2,}/gu),
+        Effect2.Option.getOrElse(() => null),
+      );
+      return __effectPipeStage2;
+    }) ?? [];
+  const selectors = EffectArray.flatMap(candidates, candidate => {
+    if (Effect2.pipe(candidate, EffectString.includes('/'))) return [];
     const identityBearing =
       /[\p{L}\p{N}_$][.:][\p{L}\p{N}_$]/u.test(candidate) ||
       /[_$]/u.test(candidate) ||
       /[\p{Ll}\p{N}][\p{Lu}]/u.test(candidate);
     if (!identityBearing) return [];
-    const leaf = candidate.split(/[.:]/u).at(-1);
+    const leaf = Effect2.pipe(candidate, EffectString.split(/[.:]/u)).at(-1);
     return leaf && leaf !== candidate && /[_$]|[\p{Ll}\p{N}][\p{Lu}]/u.test(leaf) ? [candidate, leaf] : [candidate];
   });
   return [...new Set(selectors)].slice(0, 8);
@@ -95,9 +114,11 @@ function boundedVisualizationCatalogOffset(value: number | undefined): number {
 }
 
 function boundedVisualizationCatalogQuery(value: Option.Option<string> | undefined): string {
-  return Option.getOrElse(value ?? Option.none(), () => '')
-    .trim()
-    .slice(0, 256);
+  return Effect2.pipe(
+    Option.getOrElse(value ?? Option.none(), () => ''),
+    EffectString.trim,
+    EffectString.slice(0, 256),
+  );
 }
 
 function boundedAggregatePageLimit(value: number): number {
@@ -124,8 +145,12 @@ function uniqueBy<Value>(values: readonly Value[], key: (value: Value) => string
 function parseLookupKeys(value: string): readonly string[] {
   try {
     const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed)
-      ? [...new Set(parsed.filter((entry): entry is string => typeof entry === 'string' && entry.length <= 4_096))]
+    return EffectArray.isArray(parsed)
+      ? [
+          ...new Set(
+            EffectArray.filter(parsed, (entry): entry is string => typeof entry === 'string' && entry.length <= 4_096),
+          ),
+        ]
       : [];
   } catch {
     return [];
@@ -135,15 +160,21 @@ function parseLookupKeys(value: string): readonly string[] {
 function parseStringArray(value: string): readonly string[] {
   try {
     const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string').slice(0, 100) : [];
+    return EffectArray.isArray(parsed)
+      ? EffectArray.filter(parsed, (item): item is string => typeof item === 'string').slice(0, 100)
+      : [];
   } catch {
     return [];
   }
 }
 
 function lookupDomain(key: string, fallback: string | undefined): string {
-  const separator = key.indexOf(':');
-  return separator > 0 ? key.slice(0, separator) : (fallback ?? 'generic');
+  const separator = Effect2.pipe(
+    key,
+    EffectString.indexOf(':'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  return separator > 0 ? Effect2.pipe(key, EffectString.slice(0, separator)) : (fallback ?? 'generic');
 }
 
 function activationEdgeId(
@@ -155,9 +186,10 @@ function activationEdgeId(
   provenance: string,
   path: string,
 ): string {
-  return `cge_${sha256HexSync(
-    `edge-v1\n${sourceId ?? sourceName}\n${relation}\n${targetId ?? targetName}\n${provenance}\n${path}`,
-  ).slice(0, 32)}`;
+  return `cge_${Effect2.pipe(
+    sha256HexSync(`edge-v1\n${sourceId ?? sourceName}\n${relation}\n${targetId ?? targetName}\n${provenance}\n${path}`),
+    EffectString.slice(0, 32),
+  )}`;
 }
 
 function storeError(operation: string, cause: unknown): CodeGraphStoreFailure {

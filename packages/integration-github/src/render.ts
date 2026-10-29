@@ -1,13 +1,22 @@
-import {Data} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
+
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {applyScrubber, credentialScrubberBlocker} from '@threadnote/platform/scrubber';
 import {splitUtf8} from '@threadnote/integration-core/render';
 import type {GitHubConversation, GitHubComment} from './client.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const GITHUB_RENDERER_VERSION = 'github-conversation-v1';
 export const GITHUB_SCRUBBER_VERSION = 'credential-scrubber-v1';
-export class GitHubSecretBlocked extends Data.TaggedError('GitHubSecretBlocked')<{readonly message: string}> {}
-export class GitHubRenderDeferred extends Data.TaggedError('GitHubRenderDeferred')<{readonly message: string}> {}
+export class GitHubSecretBlocked extends Schema.TaggedError<GitHubSecretBlocked, {readonly brand: unique symbol}>()(
+  'GitHubSecretBlocked',
+  {message: Schema.String},
+) {}
+export class GitHubRenderDeferred extends Schema.TaggedError<GitHubRenderDeferred, {readonly brand: unique symbol}>()(
+  'GitHubRenderDeferred',
+  {message: Schema.String},
+) {}
 export interface GitHubChunk {
   readonly pageId: string;
   readonly chunkId: string;
@@ -26,18 +35,25 @@ function scrub(value: string): string {
     /\bbearer\s+\S{8,}/iu.test(value) ||
     /\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})\b/u.test(value)
   )
-    throw new GitHubSecretBlocked({message: 'GitHub conversation contains credential-like content.'});
+    throw GitHubSecretBlocked.make({message: 'GitHub conversation contains credential-like content.'});
   const result = applyScrubber(value, {redact: true});
-  if (result.blocker) throw new GitHubSecretBlocked({message: 'GitHub conversation contains credential-like content.'});
-  return [...result.cleaned.replace(/\r\n?/g, '\n')]
-    .filter(character => {
-      const code = character.charCodeAt(0);
+  if (result.blocker)
+    throw GitHubSecretBlocked.make({message: 'GitHub conversation contains credential-like content.'});
+  return EffectArray.join(
+    EffectArray.filter([...Effect.pipe(result.cleaned, EffectString.replace(/\r\n?/g, '\n'))], character => {
+      const code = Effect.pipe(
+        character,
+        EffectString.charCodeAt(0),
+        Effect.Option.getOrElse(() => NaN),
+      );
       return (code >= 32 || code === 10 || code === 9) && (code < 127 || code > 159);
-    })
-    .join('');
+    }),
+    '',
+  );
 }
 export function renderGitHubConversation(value: GitHubConversation): readonly GitHubChunk[] {
-  const title = splitUtf8(scrub(value.title).replaceAll('\n', ' '), 512)[0] ?? `#${value.number}`;
+  const title =
+    splitUtf8(Effect.pipe(scrub(value.title), EffectString.replaceAll('\n', ' ')), 512)[0] ?? `#${value.number}`;
   const prefix = scrub(
     `GitHub ${value.kind} ${value.repository.name}#${value.number}: ${title}\nStatus: ${value.state}${value.merged === undefined ? '' : `; merged=${value.merged}; draft=${value.draft}`}\nConversation: ${value.url}\nCreated: ${value.createdAt}; updated: ${value.updatedAt}\n`,
   );
@@ -47,7 +63,7 @@ export function renderGitHubConversation(value: GitHubConversation): readonly Gi
     const cleanText = scrub(text);
     const budget = Math.min(12 * 1024, 16 * 1024 - Buffer.byteLength(prefix) - Buffer.byteLength(cleanContext) - 8);
     if (budget < 128)
-      throw new GitHubRenderDeferred({message: 'GitHub conversation context exceeds the chunk budget.'});
+      throw GitHubRenderDeferred.make({message: 'GitHub conversation context exceeds the chunk budget.'});
     for (const [ordinal, fragment] of splitUtf8(cleanText || '(empty)', budget).entries()) {
       const body = `${prefix}\n${cleanContext}\n${fragment}`;
       output.push({
@@ -60,7 +76,7 @@ export function renderGitHubConversation(value: GitHubConversation): readonly Gi
         contentHash: sha256HexSync(`${GITHUB_RENDERER_VERSION}\n${GITHUB_SCRUBBER_VERSION}\n${body}`),
       });
       if (output.length > 2048)
-        throw new GitHubRenderDeferred({message: 'GitHub conversation exceeds the chunk inventory budget.'});
+        throw GitHubRenderDeferred.make({message: 'GitHub conversation exceeds the chunk inventory budget.'});
     }
   }
   function provenance(comment: GitHubComment): string {
@@ -93,7 +109,7 @@ export function renderGitHubConversation(value: GitHubConversation): readonly Gi
           ? ''
           : `Reply to ${parent.author} (${parent.url})\n${splitUtf8(scrub(parent.body), 512)[0] ?? ''}\n`;
       emit(
-        `thread-${sha256HexSync(thread.id).slice(0, 32)}-${sha256HexSync(comment.id).slice(0, 32)}`,
+        `thread-${Effect.pipe(sha256HexSync(thread.id), EffectString.slice(0, 32))}-${Effect.pipe(sha256HexSync(comment.id), EffectString.slice(0, 32))}`,
         context + reply + provenance(comment),
         comment.body,
         comment.url,

@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Console, Effect, Schema} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {randomUuidV4} from '@threadnote/threadnote/crypto/uuid';
 import {parseRemoteShareAddress} from '@threadnote/memory/remote/address';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -37,7 +40,7 @@ interface JsonRpcResponse {
   };
 }
 
-class CanaryFailure extends Schema.TaggedError<CanaryFailure>()('CanaryFailure', {
+class CanaryFailure extends Schema.TaggedError<CanaryFailure, {readonly brand: unique symbol}>()('CanaryFailure', {
   code: Schema.String,
   message: Schema.String,
 }) {
@@ -63,7 +66,9 @@ async function run(signal: AbortSignal): Promise<{
   checks.push({name: 'initialize', status: 'ok'});
 
   const tools = requireResult(await rpc(config, signal, 'tools/list', {}), 'tools_list_failed').tools ?? [];
-  const names = tools.flatMap(tool => (typeof tool.name === 'string' ? [tool.name] : [])).sort(compareCodeUnits);
+  const names = EffectArray.flatMap(tools, (tool, __effectArrayIndex) =>
+    __effectArrayIndex in tools ? (typeof tool.name === 'string' ? [tool.name] : []) : [],
+  ).sort(compareCodeUnits);
   if (JSON.stringify(names) !== JSON.stringify([...EXPECTED_TOOLS].sort(compareCodeUnits))) {
     throw CanaryFailure.of('unexpected_tool_surface');
   }
@@ -130,8 +135,14 @@ async function run(signal: AbortSignal): Promise<{
         rememberArguments(config, raceTopic, `Fixture race B ${race}.`, `${race}-b`),
       ),
     ]);
-    const winners = raceResults.filter(result => !result.result?.isError).length;
-    const conflicts = raceResults.filter(result => toolErrorCode(result) === 'conflict').length;
+    const winners = EffectArray.filter(
+      raceResults,
+      (result, __effectArrayIndex) => __effectArrayIndex in raceResults && !result.result?.isError,
+    ).length;
+    const conflicts = EffectArray.filter(
+      raceResults,
+      (result, __effectArrayIndex) => __effectArrayIndex in raceResults && toolErrorCode(result) === 'conflict',
+    ).length;
     if (winners !== 1 || conflicts !== 1) throw CanaryFailure.of('cas_race_contract_failed');
     checks.push({name: 'single_topic_cas_race', status: 'ok'});
 
@@ -160,7 +171,7 @@ async function run(signal: AbortSignal): Promise<{
         ),
       ),
     ]);
-    if (independentResults.some(result => result.result?.isError || result.error)) {
+    if (EffectArray.some(independentResults, result => result.result?.isError === true || result.error !== undefined)) {
       throw CanaryFailure.of('independent_write_progress_failed');
     }
     checks.push({name: 'independent_write_progress', status: 'ok'});
@@ -242,10 +253,32 @@ async function boundedJson(response: Response): Promise<JsonRpcResponse> {
     offset += chunk.byteLength;
   }
   try {
-    return JSON.parse(new TextDecoder().decode(bytes)) as JsonRpcResponse;
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    if (!isJsonRpcResponse(parsed)) throw CanaryFailure.of('invalid_json_response');
+    return parsed;
   } catch {
     throw CanaryFailure.of('invalid_json_response');
   }
+}
+
+function isJsonRpcResponse(value: unknown): value is JsonRpcResponse {
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
+  if ('error' in value && value.error !== undefined) {
+    if (typeof value.error !== 'object' || value.error === null || EffectArray.isArray(value.error)) return false;
+    if ('code' in value.error && typeof value.error.code !== 'number') return false;
+  }
+  if ('result' in value && value.result !== undefined) {
+    if (typeof value.result !== 'object' || value.result === null || EffectArray.isArray(value.result)) return false;
+    if ('isError' in value.result && typeof value.result.isError !== 'boolean') return false;
+    if ('tools' in value.result) {
+      if (!EffectArray.isArray(value.result.tools)) return false;
+      for (const tool of value.result.tools) {
+        if (typeof tool !== 'object' || tool === null || EffectArray.isArray(tool)) return false;
+        if ('name' in tool && typeof tool.name !== 'string') return false;
+      }
+    }
+  }
+  return true;
 }
 
 function requireResult(response: JsonRpcResponse, code: string): NonNullable<JsonRpcResponse['result']> {
@@ -278,20 +311,23 @@ function structuredUri(config: CanaryConfig, result: NonNullable<JsonRpcResponse
 }
 
 function required(value: string | undefined, name: string): string {
-  const normalized = value?.trim();
-  if (!normalized) throw CanaryFailure.of(`missing_${name.replaceAll(' ', '_')}`);
+  const normalized = Effect2.pipe(value, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
+  if (!normalized) throw CanaryFailure.of(`missing_${Effect2.pipe(name, EffectString.replaceAll(' ', '_'))}`);
   return normalized;
 }
 
 function portable(value: string, name: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/u.test(value))
-    throw CanaryFailure.of(`invalid_${name.replaceAll(' ', '_')}`);
+    throw CanaryFailure.of(`invalid_${Effect2.pipe(name, EffectString.replaceAll(' ', '_'))}`);
   return value;
 }
 
 function optionalIdentifier(value: string | undefined): string | undefined {
-  if (!value?.trim()) return undefined;
-  return portable(value.trim(), 'attestation_id');
+  if (value === undefined) return undefined;
+  const normalized = Effect2.pipe(value, EffectString.trim);
+  return normalized === '' ? undefined : portable(normalized, 'attestation_id');
 }
 
 function canaryConfig(environment: Readonly<Record<string, string | undefined>>): CanaryConfig {
@@ -300,16 +336,27 @@ function canaryConfig(environment: Readonly<Record<string, string | undefined>>)
   return {
     attestationId: optionalIdentifier(environment.THREADNOTE_CANARY_ATTESTATION_ID),
     endpoint: canaryEndpoint(required(environment.THREADNOTE_CANARY_ENDPOINT, 'endpoint')),
-    expectedUri: environment.THREADNOTE_CANARY_EXPECT_URI?.trim() || undefined,
+    expectedUri:
+      Effect2.pipe(environment.THREADNOTE_CANARY_EXPECT_URI, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || undefined,
     mode: canaryMode(environment.THREADNOTE_CANARY_MODE),
-    project: portable(environment.THREADNOTE_CANARY_PROJECT?.trim() || 'threadnote-canary', 'project'),
+    project: portable(
+      Effect2.pipe(environment.THREADNOTE_CANARY_PROJECT, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || 'threadnote-canary',
+      'project',
+    ),
     shareId: portable(required(environment.THREADNOTE_CANARY_SHARE_ID, 'share id'), 'share id'),
     token,
   };
 }
 
 function canaryMode(value: string | undefined): CanaryMode {
-  const normalized = value?.trim() || 'read';
+  const normalized =
+    Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || 'read';
   if (normalized === 'read' || normalized === 'write' || normalized === 'concurrency') return normalized;
   throw CanaryFailure.of('invalid_mode');
 }

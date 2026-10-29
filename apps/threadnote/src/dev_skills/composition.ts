@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Path} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {DevSkillsEnsureOptions, DevSkillsEnsureResult, DevSkillsSelector, DevSkillsTarget} from './contract.js';
@@ -10,6 +11,8 @@ import {disableEnrollment} from './enablement.js';
 import {recoverTransaction} from './transaction.js';
 import {restoreOwnedProjection} from './maintenance.js';
 import {validateLease, withDevSkillsMutationLease, withPhysicalLock, type DevSkillsMutationLease} from './lease.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface Checkpoint {
   readonly schemaVersion: 1;
@@ -28,23 +31,35 @@ const validOperationId = (value: unknown): value is string =>
   typeof value === 'string' &&
   value.length > 0 &&
   value.length <= 256 &&
-  [...value].every(character => character.charCodeAt(0) >= 32);
-function parseCheckpoint(value: unknown): Checkpoint {
-  requireValue(
-    isRecord(value) &&
-      value.schemaVersion === 1 &&
-      validOperationId(value.operationId) &&
-      typeof value.home === 'string' &&
-      typeof value.installationRoot === 'string' &&
-      typeof value.bundleDigest === 'string' &&
-      /^[a-f0-9]{64}$/u.test(value.bundleDigest) &&
-      ['default', 'disabled'].includes(String(value.choice)) &&
-      typeof value.createdConsumer === 'boolean' &&
-      typeof value.undone === 'boolean' &&
-      (value.choice !== 'disabled' || !value.createdConsumer),
-    'Invalid setup workflow checkpoint.',
+  EffectArray.every(
+    [...value],
+    character =>
+      Effect2.pipe(
+        character,
+        EffectString.charCodeAt(0),
+        Effect2.Option.getOrElse(() => NaN),
+      ) >= 32,
   );
-  return {...value, target: parseTarget(value.target)} as unknown as Checkpoint;
+function isSetupCheckpoint(
+  value: unknown,
+): value is Record<string, unknown> & Omit<Checkpoint, 'target'> & {readonly target: unknown} {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 1 &&
+    validOperationId(value.operationId) &&
+    typeof value.home === 'string' &&
+    typeof value.installationRoot === 'string' &&
+    typeof value.bundleDigest === 'string' &&
+    /^[a-f0-9]{64}$/u.test(value.bundleDigest) &&
+    (value.choice === 'default' || value.choice === 'disabled') &&
+    typeof value.createdConsumer === 'boolean' &&
+    typeof value.undone === 'boolean' &&
+    (value.choice !== 'disabled' || !value.createdConsumer)
+  );
+}
+function parseCheckpoint(value: unknown): Checkpoint {
+  requireValue(isSetupCheckpoint(value), 'Invalid setup workflow checkpoint.');
+  return {...value, target: parseTarget(value.target)};
 }
 export const ensureDevSkills = Effect.fn('devSkills.ensure')(function* (
   config: RuntimeConfig,

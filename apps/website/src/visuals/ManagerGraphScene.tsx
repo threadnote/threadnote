@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {useEffect, useRef, useState} from 'react';
 import type {Line, Mesh, MeshBasicMaterial, MeshStandardMaterial, WebGLRenderer} from 'three';
 
@@ -103,7 +104,7 @@ export function ManagerGraphScene({project, relation, selectedNodeId}: ManagerGr
         scene.add(ambient, key, fill);
 
         const positions = new Map(
-          managerDemoNodes.map(node => [node.id, new THREE.Vector3(node.x, node.y, node.z)] as const),
+          EffectArray.map(managerDemoNodes, node => [node.id, new THREE.Vector3(node.x, node.y, node.z)] as const),
         );
 
         const edgeLines: {
@@ -302,7 +303,7 @@ export function ManagerGraphScene({project, relation, selectedNodeId}: ManagerGr
           muted connections are heuristic.
         </p>
         <ul>
-          {managerDemoNodes.map(node => (
+          {EffectArray.map(managerDemoNodes, node => (
             <li key={node.id}>{describeNode(node)}</li>
           ))}
         </ul>

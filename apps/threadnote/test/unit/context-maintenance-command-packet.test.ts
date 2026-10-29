@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -14,6 +15,10 @@ import {registerContextMaintenanceTools} from '../../src/mcp/server/context/main
 import {runContextMaintainCommand} from '../../src/memory/context/maintenance_commands.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {managerImportedTopicFixture} from '../helpers/manager-imported-topic.js';
+
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import * as EffectRecord from 'effect/Record';
 
 const refreshConfig = {
   account: 'local',
@@ -99,7 +104,9 @@ effectIt.effect('registered MCP refresh validates its exact scope and preserves 
     for (const invalid of [{project: undefined}, {caseId: undefined}, {callerCwd: 'relative'}]) {
       const refused = yield* server.invokeTool(
         'context_maintain',
-        Object.fromEntries(Object.entries({...input, ...invalid}).filter(([, value]) => value !== undefined)),
+        EffectRecord.fromEntries(
+          EffectArray.filter(EffectRecord.toEntries({...input, ...invalid}), ([, value]) => value !== undefined),
+        ),
       );
       expect(refused.isError).toBe(true);
     }
@@ -212,9 +219,14 @@ effectIt.effect.each(['source', 'target'] as const)(
         });
       } else {
         const original = yield* f.store.read(f.location, f.uri);
-        yield* f.store.write(f.location, f.uri, original.replace('Old descriptive claim.', 'Edited target claim.'), {
-          mode: 'replace',
-        });
+        yield* f.store.write(
+          f.location,
+          f.uri,
+          Effect2.pipe(original, EffectString.replace('Old descriptive claim.', 'Edited target claim.')),
+          {
+            mode: 'replace',
+          },
+        );
       }
       const target = yield* f.store.read(f.location, f.uri);
       const source = yield* f.fs.readFileString(f.notePath);
@@ -291,6 +303,7 @@ effectIt.effect.prop(
         expect(receivedConfig).toBe(config);
         expect(receivedCase).toBe('selected-case');
         expect(receivedSelection).toEqual(selection);
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
         expect(Object.keys(receivedSelection!).sort()).toEqual([
           'citationId',
           'maximumLines',

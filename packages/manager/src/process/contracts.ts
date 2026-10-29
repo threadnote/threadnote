@@ -1,3 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export type ManagerProcessRole =
   | 'cli'
   | 'graph-builder'
@@ -39,16 +43,16 @@ export interface ManagerProcessDiagnostics {
 export function orderManagerProcessesByAttention<T extends ManageableManagerProcess>(
   processes: readonly T[],
 ): readonly T[] {
-  return processes
-    .map((process, inputIndex) => ({inputIndex, process}))
-    .sort(
+  return EffectArray.map(
+    EffectArray.map(processes, (process, inputIndex) => ({inputIndex, process})).sort(
       (left, right) =>
         attentionRank(left.process) - attentionRank(right.process) ||
-        left.process.startedAt.localeCompare(right.process.startedAt) ||
+        Effect.pipe(left.process.startedAt, EffectString.localeCompare(right.process.startedAt)) ||
         left.process.processId - right.process.processId ||
         left.inputIndex - right.inputIndex,
-    )
-    .map(entry => entry.process);
+    ),
+    entry => entry.process,
+  );
 }
 
 function attentionRank(process: ManageableManagerProcess): number {

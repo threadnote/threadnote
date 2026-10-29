@@ -1,3 +1,5 @@
+import {Predicate} from 'effect';
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- Tests of the private process/filesystem collection boundary. */
 import {
   copyFile,
@@ -55,12 +57,15 @@ import {
   runVerifiedCollectionProcess,
 } from '../../../../scripts/threadnote-5-collection-transport.js';
 import fixture from '../evaluation/fixtures/threadnote-5-task-loop-v1/fixture.json' with {type: 'json'};
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const candidate: Threadnote5SourceV1 = {
   id: 'threadnote-5.0.0',
-  version: `5.0.0-local.g${'1'.repeat(40)}`,
-  commit: '1'.repeat(40),
-  executableSha256: '2'.repeat(64),
+  version: `5.0.0-local.g${Effect.pipe('1', EffectString.repeat(40))}`,
+  commit: Effect.pipe('1', EffectString.repeat(40)),
+  executableSha256: Effect.pipe('2', EffectString.repeat(64)),
 };
 const macosIt = process.platform === 'darwin' ? it : it.skip;
 
@@ -71,11 +76,11 @@ function plan() {
     candidate,
     measuredTrials: 10,
     retentionHours: 24,
-    recipes: THREADNOTE_5_COLLECTION_MATRIX.map(([scenario, kinds]) => ({
+    recipes: EffectArray.map(THREADNOTE_5_COLLECTION_MATRIX, ([scenario, kinds]) => ({
       scenario,
       steps: [{id: 'native', type: 'cli', surface: 'primary', argv: ['--version'], expectedExit: 0}],
-      exports: Object.fromEntries(
-        kinds.map(([kind, count]): [string, NativeProjection] => [
+      exports: EffectRecord.fromEntries(
+        EffectArray.map(kinds, ([kind, count]): [string, NativeProjection] => [
           kind,
           count === 1
             ? {select: 'native', pointer: '/json', trial: 0}
@@ -97,7 +102,7 @@ function plan() {
 describe('private Threadnote 5 collection', () => {
   it('covers exactly 15 scenarios and 24 sources with asymmetric static cardinalities', () => {
     expect(THREADNOTE_5_COLLECTION_MATRIX).toHaveLength(15);
-    expect(THREADNOTE_5_COLLECTION_MATRIX.reduce((count, [, kinds]) => count + kinds.length, 0)).toBe(24);
+    expect(EffectArray.reduce(THREADNOTE_5_COLLECTION_MATRIX, 0, (count, [, kinds]) => count + kinds.length)).toBe(24);
     expect(previewThreadnote5Collection(plan())).toMatchObject({
       scenarioCount: 15,
       sourceRecordCount: 24,
@@ -121,16 +126,18 @@ describe('private Threadnote 5 collection', () => {
       parseThreadnote5CollectionPlan({...value, recipes: [value.recipes[0], ...value.recipes.slice(0, 14)]}),
     ).toThrow();
     expect(() => parseThreadnote5CollectionPlan({...value, fabricated: true})).toThrow();
-    value.recipes[0].exports.activation = {literal: {passed: true}} as never;
+    // @ts-expect-error This negative parser fixture replaces the activation binding with the invalid literal form.
+    value.recipes[0].exports.activation = {literal: {passed: true}};
     expect(() => parseThreadnote5CollectionPlan(value)).toThrow();
     value.recipes[0].steps[0] = {
       id: 'native',
       type: 'write',
       surface: 'primary',
+      // @ts-expect-error This negative parser fixture includes a field outside the declared write-step shape.
       root: 'home',
       path: 'source.json',
       text: '{}',
-    } as never;
+    };
     value.recipes[0].exports.activation = {select: 'native', pointer: '', trial: 0};
     expect(() => parseThreadnote5CollectionPlan(value)).toThrow();
   });
@@ -142,11 +149,11 @@ describe('private Threadnote 5 collection', () => {
         expect(threadnote5CollectionPlanHash(value)).toBe(
           threadnote5CollectionPlanHash({...value, recipes: [...value.recipes].reverse()}),
         );
-        const identities = THREADNOTE_5_COLLECTION_MATRIX.flatMap(([scenario]) =>
+        const identities = EffectArray.flatMap(THREADNOTE_5_COLLECTION_MATRIX, ([scenario]) =>
           Array.from({length: count}, (_, index) => collectionTrialIdentity(runId, scenario, index)),
         );
         for (const key of ['laneId', 'trialId', 'reviewId', 'proposalId', 'activationId'] as const)
-          expect(new Set(identities.map(item => item[key])).size).toBe(15 * count);
+          expect(new Set(EffectArray.map(identities, item => item[key])).size).toBe(15 * count);
       }),
       {numRuns: 20},
     );
@@ -155,7 +162,7 @@ describe('private Threadnote 5 collection', () => {
         expect(
           projectNativeCapture(
             {collect: 'native', pointer: '/value', flatten: false},
-            values.map(value => ({native: {value}})),
+            EffectArray.map(values, value => ({native: {value}})),
           ),
         ).toEqual(values);
       }),
@@ -193,6 +200,7 @@ describe('private Threadnote 5 collection', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 12}), fc.boolean(), (depth, encoded) => {
         const parent = encoded ? '%2e%2e%2f' : '../';
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         expect(() => assertIsolatedCollectionArguments([`prefix/${parent.repeat(depth)}outside`], root)).toThrow(
           'isolated trial',
         );
@@ -377,7 +385,7 @@ describe('private Threadnote 5 collection', () => {
     await expect(
       collectThreadnote5Candidate({
         plan: plan(),
-        approvedPlanHash: '0'.repeat(64),
+        approvedPlanHash: Effect.pipe('0', EffectString.repeat(64)),
         executable: '/missing',
         privateOutput: '/missing',
       }),
@@ -529,19 +537,19 @@ describe('private Threadnote 5 collection', () => {
         sealThreadnote5Collection({
           collection: {
             version: 1,
-            planHash: '0'.repeat(64),
+            planHash: Effect.pipe('0', EffectString.repeat(64)),
             records: [],
             runtimeBoundaries: [],
-            transcriptDigest: '1'.repeat(64),
+            transcriptDigest: Effect.pipe('1', EffectString.repeat(64)),
           },
           plan: plan(),
           transcripts: [],
           collectionAuthorityBinding: {},
-          expectedCollectionBindingSha256: '0'.repeat(64),
+          expectedCollectionBindingSha256: Effect.pipe('0', EffectString.repeat(64)),
           fixture: {},
           candidate,
           authorityManifest: {private: 'private memory'},
-          expectedAuthorityManifestSha256: '1'.repeat(64),
+          expectedAuthorityManifestSha256: Effect.pipe('1', EffectString.repeat(64)),
           publicOutput: resolve(root, 'public'),
         }),
       ).rejects.toThrow();
@@ -640,7 +648,8 @@ async function waitForCollectionMarker(path: string): Promise<void> {
       await stat(path);
       return;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || performance.now() >= deadline) throw error;
+      if ((Predicate.hasProperty(error, 'code') ? error.code : undefined) !== 'ENOENT' || performance.now() >= deadline)
+        throw error;
       await new Promise<void>(resolvePromise => setTimeout(resolvePromise, 10));
     }
   }

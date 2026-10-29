@@ -3,19 +3,49 @@ import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {ManagerLiveProvider} from '../../src/live/provider.js';
+import type {ManagerContextHealthResponseV1} from '../../src/attention/contracts.js';
 import {ContextHealthPanel} from '../../src/attention_view.js';
 import {FakeManagerSocket} from './live-consumer-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 let root: Root | undefined;
 let healthReads: number;
 let jobReads: number;
 let jobStatus: 'running' | 'completed';
+const healthResponse = (): ManagerContextHealthResponseV1 => ({
+  findings: [],
+  limit: 100,
+  omittedFindings: 0,
+  project: 'one',
+  recordPreviews: [],
+  recordsScanned: 0,
+  repositoryEvidence: {state: 'available'},
+  semanticCompleteness: {
+    version: 2,
+    state: 'complete',
+    eligibleRecords: 0,
+    analyzedRecords: 0,
+    unknownRecords: 0,
+    claimsAnalyzed: 0,
+    supportedClaims: 0,
+    unsupportedClaims: 0,
+    coverage: 'bounded-English-extraction',
+    contradictionCount: 0,
+    pairsCompared: 0,
+    omittedContradictions: 0,
+    unknownReasons: [],
+  },
+  status: 'clean',
+  version: 1,
+});
 async function flush() {
   await act(async () => {
     for (let i = 0; i < 10; i++) await Promise.resolve();
   });
 }
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
   FakeManagerSocket.instances = [];
   healthReads = jobReads = 0;
@@ -25,7 +55,7 @@ beforeEach(() => {
     'fetch',
     vi.fn(async (url: string) => {
       if (url === '/api/live-session') return new Response(JSON.stringify({ticket: 'fixture'}));
-      if (url.startsWith('/api/context-health/citations/jobs')) {
+      if (Effect.pipe(url, EffectString.startsWith('/api/context-health/citations/jobs'))) {
         jobReads++;
         return new Response(
           JSON.stringify({
@@ -49,22 +79,9 @@ beforeEach(() => {
           }),
         );
       }
-      if (url.startsWith('/api/context-health')) {
+      if (Effect.pipe(url, EffectString.startsWith('/api/context-health'))) {
         healthReads++;
-        return new Response(
-          JSON.stringify({
-            findings: [],
-            limit: 100,
-            omittedFindings: 0,
-            project: 'one',
-            recordPreviews: [],
-            recordsScanned: 0,
-            repositoryEvidence: {state: 'available'},
-            semanticCompleteness: {reason: 'complete', state: 'complete'},
-            status: 'healthy',
-            version: 1,
-          }),
-        );
+        return new Response(JSON.stringify(healthResponse()));
       }
       throw new Error(`Unexpected ${url}`);
     }),
@@ -167,23 +184,7 @@ it('keeps supported health content mounted while revalidating and retains the fa
   await flush();
   expect(status?.querySelector('[role=alert]')).toBe(alert);
   expect(document.querySelector('.attention-metrics')).toBe(metrics);
-  await act(async () =>
-    retry.resolve(
-      new Response(
-        JSON.stringify({
-          version: 1,
-          project: 'one',
-          findings: [],
-          recordPreviews: [],
-          recordsScanned: 0,
-          omittedFindings: 0,
-          repositoryEvidence: {state: 'available'},
-          semanticCompleteness: {state: 'complete'},
-          status: 'healthy',
-        }),
-      ),
-    ),
-  );
+  await act(async () => retry.resolve(new Response(JSON.stringify(healthResponse()))));
   await flush();
   expect(status?.querySelector('[role=alert]')).toBeNull();
   expect(document.querySelector('.attention-metrics')).toBe(metrics);

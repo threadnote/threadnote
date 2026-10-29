@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import React from 'react';
 import type {
   ManagerDevSkillsIssue,
@@ -5,6 +6,8 @@ import type {
   ManagerDevSkillsReadiness,
   ManagerDevSkillsTargetStatus,
 } from './contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function WorkflowCards(): React.ReactElement {
   return (
@@ -18,17 +21,20 @@ export function WorkflowCards(): React.ReactElement {
           produces evidence; approved knowledge returns to Threadnote at closeout.
         </p>
         <div className="worksets-member-grid">
-          {[
-            ['Specify', 'dev-spec', 'Define behavior, requirements and acceptance scenarios.'],
-            ['Plan', 'dev-plan', 'Connect architecture and verifiable implementation phases.'],
-            ['Implement', 'dev-cycle', 'Implement, review and validate the approved plan.'],
-          ].map(([label, skill, description]) => (
-            <article className="worksets-card" key={skill}>
-              <h4>{label}</h4>
-              <strong>{skill}</strong>
-              <p>{description}</p>
-            </article>
-          ))}
+          {EffectArray.map(
+            [
+              ['Specify', 'dev-spec', 'Define behavior, requirements and acceptance scenarios.'],
+              ['Plan', 'dev-plan', 'Connect architecture and verifiable implementation phases.'],
+              ['Implement', 'dev-cycle', 'Implement, review and validate the approved plan.'],
+            ],
+            ([label, skill, description]) => (
+              <article className="worksets-card" key={skill}>
+                <h4>{label}</h4>
+                <strong>{skill}</strong>
+                <p>{description}</p>
+              </article>
+            ),
+          )}
         </div>
         <p>
           <strong>Support dependency: watch-pr</strong> monitors CI and review feedback and proactively fixes scoped
@@ -51,7 +57,7 @@ export function Issues({issues}: {readonly issues: readonly ManagerDevSkillsIssu
   if (!issues.length) return null;
   return (
     <ul>
-      {issues.map((issue, index) => (
+      {EffectArray.map(issues, (issue, index) => (
         <li key={`${issue.code}:${index}`}>
           <strong>{issue.code}</strong>: {issue.message}
           {issue.path ? (
@@ -71,10 +77,19 @@ export function Readiness({readiness}: {readonly readiness?: ManagerDevSkillsRea
     <section aria-label="Workflow readiness">
       <h4>Workflow readiness</h4>
       <p>File installation and operation prerequisites are assessed separately.</p>
-      {(['planning', 'publication', 'watch'] as const).map(operation => (
+      {EffectArray.map(['planning', 'publication', 'watch'] as const, operation => (
         <div key={operation}>
           <strong>
-            {operation.charAt(0).toUpperCase() + operation.slice(1)}: {readiness?.[operation].state ?? 'unchecked'}
+            {Effect.pipe(operation, __effectPipeInput => {
+              const __effectPipeStage0 = Effect.pipe(
+                __effectPipeInput,
+                EffectString.charAt(0),
+                Effect.Option.getOrElse(() => ''),
+              );
+              const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.toUpperCase);
+              return __effectPipeStage1;
+            }) + Effect.pipe(operation, EffectString.slice(1))}
+            : {readiness?.[operation].state ?? 'unchecked'}
           </strong>
           <Issues issues={readiness?.[operation].reasons ?? []} />
         </div>
@@ -136,7 +151,7 @@ function Consumers({consumers}: {readonly consumers: ManagerDevSkillsPlan['consu
       <h4>Shared consumers ({consumers.length})</h4>
       {consumers.length ? (
         <ul>
-          {consumers.map((consumer, index) => (
+          {EffectArray.map(consumers, (consumer, index) => (
             <li key={index}>
               {consumer.target.surfaceId} · {consumer.target.profile} · <code>{consumer.home}</code> · installation{' '}
               <code>{consumer.installationRoot}</code>
@@ -170,7 +185,7 @@ export function PreviewDetails({plan}: {readonly plan: ManagerDevSkillsPlan}): R
         <Consumers consumers={plan.consumers} />
         {plan.changes.length ? (
           <div className="worksets-evidence-list">
-            {plan.changes.map(change => (
+            {EffectArray.map(plan.changes, change => (
               <details className="worksets-receipt" key={change.path}>
                 <summary>
                   <code>{change.path}</code>

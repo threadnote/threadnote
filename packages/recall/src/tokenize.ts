@@ -1,3 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 const RECALL_TOKEN_PATTERN =
   /[\p{L}\p{N}](?:[\p{L}\p{M}\p{N}]|[._/'\u02bc\u2010-\u2015\u2019\u2212-](?=[\p{L}\p{N}]))*/gu;
 const RECALL_CONNECTOR_PATTERN = /[._/'\u02bc\u2010-\u2015\u2019\u2212-]+/u;
@@ -8,22 +12,34 @@ const RECALL_CONNECTOR_PATTERN = /[._/'\u02bc\u2010-\u2015\u2019\u2212-]+/u;
  * exact substring search, while NFC keeps canonically equivalent input stable.
  */
 export function recallTokens(value: string): readonly string[] {
-  return [...normalizeRecallSearchText(value).matchAll(RECALL_TOKEN_PATTERN)]
-    .map(match => match[0])
-    .filter(token => {
+  return EffectArray.filter(
+    EffectArray.map(
+      [...Effect.pipe(normalizeRecallSearchText(value), EffectString.matchAll(RECALL_TOKEN_PATTERN))],
+      match => match[0],
+    ),
+    token => {
       const characters = [...token];
       return (
         characters.length >= 3 ||
         (characters.length === 2 &&
           /\p{L}/u.test(token) &&
-          characters.some(character => (character.codePointAt(0) ?? 0) > 0x7f))
+          EffectArray.some(
+            characters,
+            character =>
+              (Effect.pipe(
+                character,
+                EffectString.codePointAt(0),
+                Effect.Option.getOrElse(() => undefined),
+              ) ?? 0) > 0x7f,
+          ))
       );
-    });
+    },
+  );
 }
 
 /** Normalize canonically equivalent text and common human connector variants. */
 export function normalizeRecallSearchText(value: string): string {
-  return canonicalizeConnectors(value.normalize('NFC'));
+  return canonicalizeConnectors(Effect.pipe(value, EffectString.normalize('NFC')));
 }
 
 /**
@@ -32,18 +48,28 @@ export function normalizeRecallSearchText(value: string): string {
  * hyphenated identifiers match even when clients use different typography.
  */
 export function recallLexicalTerms(value: string): readonly string[] {
-  return recallTokens(value).flatMap(token => {
+  return EffectArray.flatMap(recallTokens(value), token => {
     const canonical = canonicalizeConnectors(token);
-    const normalized = canonical.toLowerCase();
-    const components = canonical
-      .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
-      .split(RECALL_CONNECTOR_PATTERN)
-      .map(term => term.toLowerCase())
-      .filter(term => [...term].length >= 2 && term !== normalized);
+    const normalized = Effect.pipe(canonical, EffectString.toLowerCase);
+    const components = EffectArray.filter(
+      EffectArray.map(
+        Effect.pipe(
+          canonical,
+          EffectString.replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2'),
+          EffectString.split(RECALL_CONNECTOR_PATTERN),
+        ),
+        term => Effect.pipe(term, EffectString.toLowerCase),
+      ),
+      term => [...term].length >= 2 && term !== normalized,
+    );
     return [normalized, ...components];
   });
 }
 
 function canonicalizeConnectors(value: string): string {
-  return value.replace(/[\u02bc\u2019]/gu, "'").replace(/[\u2010-\u2015\u2212]/gu, '-');
+  return Effect.pipe(
+    value,
+    EffectString.replace(/[\u02bc\u2019]/gu, "'"),
+    EffectString.replace(/[\u2010-\u2015\u2212]/gu, '-'),
+  );
 }

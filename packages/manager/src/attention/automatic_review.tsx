@@ -1,3 +1,5 @@
+import {isManagerAutomaticReviewOrManagerTopicReviewRecoveryV1} from '../api/response_guards.js';
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
 import {DetailModal, MemoryBody} from '../detail_modal.js';
 import {MemoryExcerpt, ReviewBadge, ReviewNotice} from '../review_presentation.js';
@@ -5,6 +7,8 @@ import {api, errorMessage} from '../ui/support.js';
 import {ReviewProgress} from '../review_progress.js';
 import {SourceExcerpt} from '../source_code.js';
 import type {ManagerAutomaticReview, ManagerAutomaticReviewResponse} from './topic_contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function automaticReviewIsVerified(review: ManagerAutomaticReview): boolean {
   return (
@@ -117,6 +121,7 @@ export function AutomaticMemoryReviewDialog(props: {
                 `/api/attention/automatic-review?project=${encodeURIComponent(props.project)}&reviewId=${encodeURIComponent(props.reviewId)}`,
                 undefined,
                 {signal: controller.signal, timeoutMilliseconds: 30_000},
+                isManagerAutomaticReviewOrManagerTopicReviewRecoveryV1,
               );
         if (!isCurrent() || owned.current) return;
         validateResult(result);
@@ -139,6 +144,7 @@ export function AutomaticMemoryReviewDialog(props: {
               '/api/attention/automatic-review',
               {action: 'preview', project: props.project, reviewId: result.reviewId, revision: result.revision},
               {signal: controller.signal, timeoutMilliseconds: 30_000},
+              isManagerAutomaticReviewOrManagerTopicReviewRecoveryV1,
             );
           } catch (cause) {
             if (!isCurrent()) return;
@@ -153,6 +159,7 @@ export function AutomaticMemoryReviewDialog(props: {
               `/api/attention/automatic-review?project=${encodeURIComponent(props.project)}&reviewId=${encodeURIComponent(props.reviewId)}`,
               undefined,
               {signal: controller.signal, timeoutMilliseconds: 30_000},
+              isManagerAutomaticReviewOrManagerTopicReviewRecoveryV1,
             );
             if (!isCurrent() || owned.current) return;
             validateResult(recovered, targetUri);
@@ -225,13 +232,18 @@ export function AutomaticMemoryReviewDialog(props: {
     setAction(nextAction);
     setError('');
     try {
-      const result = await api<ManagerAutomaticReviewResponse>('/api/attention/automatic-review', {
-        action: nextAction,
-        project: props.project,
-        reviewId: selected.reviewId,
-        revision: selected.revision,
-        ...(nextAction === 'apply' ? {approvalDigest: current?.approval?.approvalDigest, approved: true} : {}),
-      });
+      const result = await api<ManagerAutomaticReviewResponse>(
+        '/api/attention/automatic-review',
+        {
+          action: nextAction,
+          project: props.project,
+          reviewId: selected.reviewId,
+          revision: selected.revision,
+          ...(nextAction === 'apply' ? {approvalDigest: current?.approval?.approvalDigest, approved: true} : {}),
+        },
+        undefined,
+        isManagerAutomaticReviewOrManagerTopicReviewRecoveryV1,
+      );
       if (!mounted.current || active.current !== selection || epoch.current !== requestEpoch) return;
       if (
         !['automatic-memory-review', 'topic-maintenance-recovery'].includes(result.kind) ||
@@ -367,7 +379,8 @@ export function AutomaticMemoryReviewDialog(props: {
             </ReviewBadge>
             <ReviewBadge tone="neutral">{current.state}</ReviewBadge>
             <ReviewBadge tone="neutral">
-              {current.coverage.outcome} coverage · {current.coverage.scope.replaceAll('-', ' ')}
+              {current.coverage.outcome} coverage ·{' '}
+              {Effect.pipe(current.coverage.scope, EffectString.replaceAll('-', ' '))}
             </ReviewBadge>
           </div>
           <p className="muted">
@@ -378,7 +391,7 @@ export function AutomaticMemoryReviewDialog(props: {
             <details className="review-disclosure">
               <summary>Source search bounds</summary>
               <ul>
-                {current.coverage.searchedScopes.map(scope => (
+                {EffectArray.map(current.coverage.searchedScopes, scope => (
                   <li key={scope}>{scope}</li>
                 ))}
               </ul>
@@ -413,7 +426,7 @@ export function AutomaticMemoryReviewDialog(props: {
               <p>Automatic assessment can try again when material evidence changes.</p>
               {current.proposal.draft.unresolvedQuestions.length ? (
                 <ul>
-                  {current.proposal.draft.unresolvedQuestions.map(question => (
+                  {EffectArray.map(current.proposal.draft.unresolvedQuestions, question => (
                     <li key={question}>{question}</li>
                   ))}
                 </ul>
@@ -433,7 +446,7 @@ export function AutomaticMemoryReviewDialog(props: {
           </div>
           <section className="automatic-review-roles">
             <h3>Paragraph roles & support</h3>
-            {current.proposal.draft.paragraphDecisions.map(item => (
+            {EffectArray.map(current.proposal.draft.paragraphDecisions, item => (
               <div className="attention-tags" key={item.ordinal}>
                 <span>Paragraph {item.ordinal + 1}</span>
                 <ReviewBadge tone={item.role === 'unknown' ? 'warning' : 'neutral'}>{item.role}</ReviewBadge>
@@ -445,7 +458,7 @@ export function AutomaticMemoryReviewDialog(props: {
           <section>
             <h3>Source evidence</h3>
             {current.sourceEvidence.length ? (
-              current.sourceEvidence.map(source => (
+              EffectArray.map(current.sourceEvidence, source => (
                 <details className="review-disclosure" key={source.handleId}>
                   <summary>
                     {source.descriptor.source.kind === 'memory'

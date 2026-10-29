@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {afterEach, describe, expect, it} from 'vitest';
 import {mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -48,6 +50,8 @@ import {
   type MatchedEvaluationContinuationPilotPlanV3,
   type MatchedEvaluationContinuationPilotPlanV4,
 } from '../../../../scripts/run-matched-evaluation.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 type TestContinuationPlan = MatchedEvaluationContinuationPilotPlanV3 | MatchedEvaluationContinuationPilotPlanV4;
 
@@ -55,7 +59,7 @@ describe('matched continuation finalization', () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('seals exactly one supported diagnostic parser from each approved command', () => {
@@ -92,7 +96,7 @@ describe('matched continuation finalization', () => {
       fc.property(
         fc
           .array(fc.constantFrom('a', 'b', 'c', '0', '1', '-'), {minLength: 1, maxLength: 16})
-          .map(characters => characters.join('')),
+          .map(characters => EffectArray.join(characters, '')),
         suffix => {
           expect(
             matchedContinuationDiagnosticParserForCommandV1([
@@ -159,7 +163,10 @@ describe('matched continuation finalization', () => {
       fc.property(
         fc
           .string({minLength: 1, maxLength: 256})
-          .filter(summary => !summary.includes('\0') && summary.trim().length > 0),
+          .filter(
+            summary =>
+              !Effect.pipe(summary, EffectString.includes('\0')) && Effect.pipe(summary, EffectString.trim).length > 0,
+          ),
         fc.integer({min: 1, max: 10_000}),
         (summary, startLine) => {
           const transcript = phaseOneTranscript({
@@ -174,7 +181,7 @@ describe('matched continuation finalization', () => {
             extractMatchedEvaluationContinuationPhaseOneEvidenceV1(transcript, ['tests/regression.test.ts']),
           ).toEqual(first);
           expect(first.anchors).toBe(`tests/regression.test.ts:${startLine}-${startLine + 1}`);
-          expect(first.observations).toBe(summary.replace(/\s+/gu, ' ').trim());
+          expect(first.observations).toBe(Effect.pipe(summary, EffectString.replace(/\s+/gu, ' '), EffectString.trim));
         },
       ),
       {numRuns: 64},
@@ -182,15 +189,18 @@ describe('matched continuation finalization', () => {
   });
 
   it('admits only a seven-line diagnosis with regression and production-source evidence', () => {
-    const summary = [
-      'Diagnosis: The production normalizer drops the wrapper before the suggestion is rendered.',
-      'Rejected hypothesis: The parser still preserves the wrapper in its intermediate node.',
-      'Verified invariant: The focused regression fails only when the wrapper is absent.',
-      'Untested invariant: Nested wrappers still need verification after the production correction.',
-      'Unresolved gap: Identify the caller that strips the wrapper before rendering.',
-      'Graph question: Which production caller passes the normalized node into the renderer?',
-      'Graph query: find callers from normalizeNode to renderSuggestion',
-    ].join('\n');
+    const summary = EffectArray.join(
+      [
+        'Diagnosis: The production normalizer drops the wrapper before the suggestion is rendered.',
+        'Rejected hypothesis: The parser still preserves the wrapper in its intermediate node.',
+        'Verified invariant: The focused regression fails only when the wrapper is absent.',
+        'Untested invariant: Nested wrappers still need verification after the production correction.',
+        'Unresolved gap: Identify the caller that strips the wrapper before rendering.',
+        'Graph question: Which production caller passes the normalized node into the renderer?',
+        'Graph query: find callers from normalizeNode to renderSuggestion',
+      ],
+      '\n',
+    );
     const transcript = phaseOneTranscript({
       citations: [
         {endLine: 42, path: 'tests/regression.test.ts', startLine: 31},
@@ -269,8 +279,26 @@ describe('matched continuation finalization', () => {
     const selected = selectMatchedEvaluationContinuationInBoundsSourceCitationsV1({
       sourceCitations,
       trackedRegularFiles: new Map([
-        ['src/fields.py', `${Array.from({length: 20}, (_, index) => index).join('\n')}\n`],
-        ['src/html.py', `${Array.from({length: 95}, (_, index) => index).join('\n')}\n`],
+        [
+          'src/fields.py',
+          `${EffectArray.join(
+            EffectArray.map(
+              Array.from({length: 20}, (_, index) => index),
+              item => (item === null || item === undefined ? '' : String(item)),
+            ),
+            '\n',
+          )}\n`,
+        ],
+        [
+          'src/html.py',
+          `${EffectArray.join(
+            EffectArray.map(
+              Array.from({length: 95}, (_, index) => index),
+              item => (item === null || item === undefined ? '' : String(item)),
+            ),
+            '\n',
+          )}\n`,
+        ],
       ]),
     });
 
@@ -315,7 +343,16 @@ describe('matched continuation finalization', () => {
           ),
         ({endLine, lineCount, startLine}) => {
           const trackedRegularFiles = new Map([
-            ['src/source.ts', `${Array.from({length: lineCount}, (_, index) => index).join('\n')}\n`],
+            [
+              'src/source.ts',
+              `${EffectArray.join(
+                EffectArray.map(
+                  Array.from({length: lineCount}, (_, index) => index),
+                  item => (item === null || item === undefined ? '' : String(item)),
+                ),
+                '\n',
+              )}\n`,
+            ],
           ]);
           const first = selectMatchedEvaluationContinuationInBoundsSourceCitationsV1({
             sourceCitations: [{endLine, path: 'src/source.ts', startLine}],
@@ -409,7 +446,7 @@ describe('matched continuation finalization', () => {
   it('keeps graph queries semantic instead of injecting source paths or tool-call prose', () => {
     const query = buildMatchedEvaluationContinuationAnchoredGraphQueryV1({
       fallbackQuery: 'inspect_code_graph("Node.search find the transition to staticChild")',
-      graphQuestion: `Which transition advances the queue? ${'detail '.repeat(80)}`,
+      graphQuestion: `Which transition advances the queue? ${Effect.pipe('detail ', EffectString.repeat(80))}`,
       sourceCitations: [{path: 'src/router/node.ts'}],
     });
     expect(query).toBe('Node.search find the transition to staticChild');
@@ -419,7 +456,7 @@ describe('matched continuation finalization', () => {
       Buffer.byteLength(
         buildMatchedEvaluationContinuationAnchoredGraphQueryV1({
           fallbackQuery: 'find the transition',
-          graphQuestion: `Which transition? ${'é'.repeat(300)}`,
+          graphQuestion: `Which transition? ${Effect.pipe('é', EffectString.repeat(300))}`,
           sourceCitations: [{path: 'src/router/node.ts'}],
         }),
         'utf8',
@@ -429,7 +466,7 @@ describe('matched continuation finalization', () => {
       buildMatchedEvaluationContinuationAnchoredGraphQueryV1({
         fallbackQuery: 'inspect_code_graph for find the transition',
         graphQuestion: 'Which transition advances the queue?',
-        sourceCitations: [{path: `src/${'nested/'.repeat(30)}node.ts`}],
+        sourceCitations: [{path: `src/${Effect.pipe('nested/', EffectString.repeat(30))}node.ts`}],
       }),
     ).toBe('find the transition');
   });
@@ -501,13 +538,13 @@ describe('matched continuation finalization', () => {
       fc.property(fc.array(fc.string({maxLength: 32}), {maxLength: 16}), unrelatedIds => {
         const nodes = [
           {id: 'cited', path: 'src/normalizer.ts', resolutionDomain: 'degraded'},
-          ...unrelatedIds.map((id, index) => ({
+          ...EffectArray.map(unrelatedIds, (id, index) => ({
             id: `${index}-${id}`,
             path: `src/unrelated-${index}.ts`,
             resolutionDomain: 'typescript',
           })),
         ];
-        const edges = nodes.map(node => ({sourceId: 'cited', targetId: node.id}));
+        const edges = EffectArray.map(nodes, node => ({sourceId: 'cited', targetId: node.id}));
         expect(() =>
           assertMatchedEvaluationContinuationGraphEvidenceResultV1({edges, nodes, operation: 'query'}, [
             {path: 'src/normalizer.ts'},
@@ -523,34 +560,37 @@ describe('matched continuation finalization', () => {
       JSON.stringify({
         id,
         path,
-        sourceCommit: 'a'.repeat(40),
+        sourceCommit: Effect.pipe('a', EffectString.repeat(40)),
         sourceDirty: false,
         sourceGraphContentId: 'graph-content',
         sourceSnapshotId: 'snapshot',
         target: {kind: 'file'},
       });
-    const stdout = [
-      'memory_id: tn_handoff',
-      `code_citation: ${citation(`tncc_${'1'.repeat(40)}`, 'tests/regression.test.ts')}`,
-      `code_citation: ${citation(`tncc_${'2'.repeat(40)}`, 'src/normalizer.ts')}`,
-    ].join('\n');
+    const stdout = EffectArray.join(
+      [
+        'memory_id: tn_handoff',
+        `code_citation: ${citation(`tncc_${Effect.pipe('1', EffectString.repeat(40))}`, 'tests/regression.test.ts')}`,
+        `code_citation: ${citation(`tncc_${Effect.pipe('2', EffectString.repeat(40))}`, 'src/normalizer.ts')}`,
+      ],
+      '\n',
+    );
 
     expect(
       parseMatchedEvaluationContinuationAutomaticHandoffReadV1({
         expectedCodeRefs: ['tests/regression.test.ts', 'src/normalizer.ts'],
         graphContentId: 'graph-content',
         regressionPath: 'tests/regression.test.ts',
-        repositoryRevision: 'a'.repeat(40),
+        repositoryRevision: Effect.pipe('a', EffectString.repeat(40)),
         snapshotId: 'snapshot',
         stdout,
       }),
-    ).toEqual({citationId: `tncc_${'1'.repeat(40)}`, managedMemoryId: 'tn_handoff'});
+    ).toEqual({citationId: `tncc_${Effect.pipe('1', EffectString.repeat(40))}`, managedMemoryId: 'tn_handoff'});
     expect(() =>
       parseMatchedEvaluationContinuationAutomaticHandoffReadV1({
         expectedCodeRefs: ['tests/regression.test.ts'],
         graphContentId: 'graph-content',
         regressionPath: 'tests/regression.test.ts',
-        repositoryRevision: 'a'.repeat(40),
+        repositoryRevision: Effect.pipe('a', EffectString.repeat(40)),
         snapshotId: 'snapshot',
         stdout,
       }),
@@ -565,7 +605,7 @@ describe('matched continuation finalization', () => {
     const plan = continuationPlan(task, study.sourceEvidence.verificationPlanHash);
     expect(parseMatchedEvaluationContinuationPilotPlanV1(JSON.parse(JSON.stringify(plan)))).toEqual(plan);
     const attempts = await Promise.all(
-      plan.attempts.map(attempt =>
+      EffectArray.map(plan.attempts, attempt =>
         completedReportAttempt(
           root,
           plan,
@@ -659,7 +699,7 @@ describe('matched continuation finalization', () => {
     const study = createStudy();
     const plan = continuationPlanV4(continuationPlan(study.tasks[0], study.sourceEvidence.verificationPlanHash));
     const attempts = await Promise.all(
-      plan.attempts.map(attempt =>
+      EffectArray.map(plan.attempts, attempt =>
         completedReportAttempt(
           root,
           plan,
@@ -735,7 +775,7 @@ describe('matched continuation finalization', () => {
       variant: first.variant,
     } as const;
     await writeFile(join(runDirectory, 'terminal-attempt.json'), `${JSON.stringify(terminal)}\n`);
-    const selected = plan.attempts.map(attempt => ({
+    const selected = EffectArray.map(plan.attempts, attempt => ({
       arm: underlyingArm(attempt.variant),
       row: {runNonce: attempt.runNonce, runOrder: attempt.runOrder},
       variant: attempt.variant,
@@ -783,8 +823,8 @@ describe('matched continuation finalization', () => {
     const reports = new Map<string, ParsedTaskReport>();
     for (const task of study.tasks) {
       const plan = continuationPlan(task, study.sourceEvidence.verificationPlanHash);
-      const scheduled = study.schedule.filter(entry => entry.taskId === task.taskId);
-      const attempts: ParsedAttempt[] = scheduled.map((entry, index) => {
+      const scheduled = EffectArray.filter(study.schedule, entry => entry.taskId === task.taskId);
+      const attempts: ParsedAttempt[] = EffectArray.map(scheduled, (entry, index) => {
         if (entry.globalRunOrder === 1) {
           return {
             accountingStatus: 'retained-agent-checkpoint',
@@ -860,7 +900,9 @@ describe('matched continuation finalization', () => {
     const outcomes = projectMatchedContinuationOutcomesV1({reports, study});
 
     expect(outcomes).toHaveLength(25);
-    expect(outcomes.map(outcome => outcome.globalRunOrder)).toEqual(Array.from({length: 25}, (_, index) => index + 1));
+    expect(EffectArray.map(outcomes, outcome => outcome.globalRunOrder)).toEqual(
+      Array.from({length: 25}, (_, index) => index + 1),
+    );
     expect(outcomes[0]).toMatchObject({
       assessment: null,
       phaseOne: {elapsedMilliseconds: 50, providerTokens: {totalTokens: 10}},
@@ -885,11 +927,11 @@ describe('matched continuation finalization', () => {
     fc.assert(
       fc.property(
         fc.shuffledSubarray(
-          study.tasks.map(task => task.taskId),
+          EffectArray.map(study.tasks, task => task.taskId),
           {minLength: study.tasks.length, maxLength: study.tasks.length},
         ),
         taskOrder => {
-          const reordered = new Map(taskOrder.map(taskId => [taskId, reports.get(taskId)!]));
+          const reordered = new Map(EffectArray.map(taskOrder, taskId => [taskId, reports.get(taskId)!]));
           expect(projectMatchedContinuationOutcomesV1({reports: reordered, study})).toEqual(outcomes);
         },
       ),
@@ -923,8 +965,8 @@ describe('matched continuation finalization', () => {
       publishMatchedContinuationFinalizationV1(output, second),
     ]);
 
-    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
-    expect(results.filter(result => result.status === 'rejected')).toHaveLength(1);
+    expect(EffectArray.filter(results, result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(EffectArray.filter(results, result => result.status === 'rejected')).toHaveLength(1);
     const receipt = await readFile(join(output, 'continuation-finalization-receipt.json'), 'utf8');
     const selected = receipt === 'first-receipt' ? first : second;
     expect(receipt).toBe(Buffer.from(selected.receipt).toString('utf8'));
@@ -938,7 +980,15 @@ describe('matched continuation finalization', () => {
       Buffer.from(selected.articleEvidence).toString('utf8'),
     );
     await expect(publishMatchedContinuationFinalizationV1(output, first)).rejects.toThrow('overwrite is not allowed');
-    expect((await readdir(join(root, '.context'))).filter(entry => entry.includes('.staging-'))).toEqual([]);
+    expect(
+      EffectArrayPipe(await readdir(join(root, '.context')), __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (entry, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && Effect.pipe(entry, EffectString.includes('.staging-')),
+        ),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -947,18 +997,21 @@ function phaseOneTranscript(finalAnswer: {
   readonly completed: boolean;
   readonly summary: string;
 }): string {
-  return [
-    JSON.stringify({
-      events: [
-        {
-          method: 'item/completed',
-          params: {item: {phase: 'final_answer', text: JSON.stringify(finalAnswer), type: 'agentMessage'}},
-        },
-      ],
-      kind: 'agent',
-    }),
-    JSON.stringify({events: [], kind: 'judge'}),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      JSON.stringify({
+        events: [
+          {
+            method: 'item/completed',
+            params: {item: {phase: 'final_answer', text: JSON.stringify(finalAnswer), type: 'agentMessage'}},
+          },
+        ],
+        kind: 'agent',
+      }),
+      JSON.stringify({events: [], kind: 'judge'}),
+    ],
+    '\n',
+  );
 }
 
 function finalizationArtifacts(label: string) {
@@ -1034,7 +1087,9 @@ function taskReport(
     comparativeClaimsEligible: false,
     identities: {
       manifestHash: study.sourceEvidence.manifestHash,
-      planFileHash: study.tasks.find(task => task.taskId === plan.taskId)!.planSha256,
+      planFileHash: EffectOption.getOrUndefined(
+        EffectArray.findFirst(study.tasks, task => task.taskId === plan.taskId),
+      )!.planSha256,
       runtimeVersion: 4,
       studyHash: study.sourceEvidence.matchedStudyHash,
       verificationPlanHash: study.sourceEvidence.verificationPlanHash,
@@ -1043,7 +1098,7 @@ function taskReport(
     phaseTwoPromptSha256: plan.phaseTwoPromptSha256,
     phaseTwoVerificationPlanHash: plan.phaseTwoVerification.planHash,
     planVersion: plan.version,
-    rows: plan.attempts.map(attempt => ({
+    rows: EffectArray.map(plan.attempts, attempt => ({
       arm: underlyingArm(attempt.variant),
       blindLabel: attempt.blindLabel,
       position: attempt.runOrder,
@@ -1074,9 +1129,9 @@ function continuationPlan(
   const marker = 'resume-marker-1';
   const handoff = `Task: Continue\nDecisions: frozen\nConstraints: no retries\nRationale: matched\nVerification: ${verificationPlanHash}\nNext step: ${marker}\n`;
   return {
-    attempts: Array.from({length: 5}, (_, index) => ({
-      blindLabel: ['A', 'B', 'C', 'D', 'E'][index] as 'A' | 'B' | 'C' | 'D' | 'E',
-      runNonce: `run_${(index + 1).toString(16).padStart(32, '0')}`,
+    attempts: EffectArray.map(['A', 'B', 'C', 'D', 'E'] as const, (blindLabel, index) => ({
+      blindLabel,
+      runNonce: `run_${Effect.pipe((index + 1).toString(16), EffectString.padStart(32, '0'))}`,
       runOrder: index + 1,
       variant: MATCHED_CONTINUATION_VARIANTS[index],
     })),
@@ -1178,7 +1233,7 @@ function continuationPlanV4(plan: MatchedEvaluationContinuationPilotPlanV3): Mat
 function passingPhaseTwoVerification(plan: TestContinuationPlan, artifactHash: string) {
   return createMatchedContinuationPhaseTwoVerificationReceiptV1({
     artifactHash,
-    checks: plan.phaseTwoVerification.checks.map(check =>
+    checks: EffectArray.map(plan.phaseTwoVerification.checks, check =>
       createMatchedContinuationPhaseTwoVerificationCheckReceiptV1({
         artifactHash,
         check,
@@ -1197,7 +1252,7 @@ function passingPhaseTwoVerification(plan: TestContinuationPlan, artifactHash: s
 function failingPhaseTwoVerification(plan: TestContinuationPlan, artifactHash: string) {
   return createMatchedContinuationPhaseTwoVerificationReceiptV1({
     artifactHash,
-    checks: plan.phaseTwoVerification.checks.map(check =>
+    checks: EffectArray.map(plan.phaseTwoVerification.checks, check =>
       createMatchedContinuationPhaseTwoVerificationCheckReceiptV1({
         artifactHash,
         check,
@@ -1276,12 +1331,12 @@ function createStudy() {
   const tasks = Array.from({length: 5}, (_, index): MatchedContinuationStudyTaskV1 => ({
     checkpointRepositoryFixtureHash: hex(index + 40),
     checkpointRevision: commit(index + 40),
-    clusterId: `cluster_${hex(index + 10).slice(-16)}`,
+    clusterId: `cluster_${Effect.pipe(hex(index + 10), EffectString.slice(-16))}`,
     planSha256: hex(index + 50),
     repositoryUrl: `https://example.com/org/repository-${index}.git`,
     sourceRepositoryFixtureHash: hex(index + 20),
     sourceRevision: commit(index + 20),
-    taskId: `tsk_${hex(index + 30).slice(-16)}`,
+    taskId: `tsk_${Effect.pipe(hex(index + 30), EffectString.slice(-16))}`,
   }));
   let globalRunOrder = 0;
   return createMatchedContinuationStudyV1({
@@ -1301,12 +1356,12 @@ function createStudy() {
       minimumCorrectnessScoreMilli: 1_000,
       minimumTokenReductionBasisPoints: 500,
     },
-    schedule: tasks.flatMap((task, taskIndex) =>
+    schedule: EffectArray.flatMap(tasks, (task, taskIndex) =>
       Array.from({length: 5}, (_, position) => {
         globalRunOrder += 1;
         return {
           globalRunOrder,
-          runNonce: `run_${globalRunOrder.toString(16).padStart(32, '0')}`,
+          runNonce: `run_${Effect.pipe(globalRunOrder.toString(16), EffectString.padStart(32, '0'))}`,
           taskId: task.taskId,
           variant: MATCHED_CONTINUATION_VARIANTS[(position + taskIndex) % 5],
           withinTaskRunOrder: position + 1,
@@ -1345,9 +1400,9 @@ function underlyingArm(variant: (typeof MATCHED_CONTINUATION_VARIANTS)[number]) 
 }
 
 function hex(seed: number): string {
-  return seed.toString(16).padStart(64, '0');
+  return Effect.pipe(seed.toString(16), EffectString.padStart(64, '0'));
 }
 
 function commit(seed: number): string {
-  return seed.toString(16).padStart(40, '0');
+  return Effect.pipe(seed.toString(16), EffectString.padStart(40, '0'));
 }

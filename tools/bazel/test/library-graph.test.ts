@@ -1,6 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {buildLibraryGraph} from '../library-graph.mjs';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 type Node = {files: string[]; npm: string[]};
 type Declaration = {srcs: string[]; deps: string[]; npm: string[]};
@@ -29,7 +33,7 @@ const reachable = (graph: Map<string, Node>, entries: string[]) => {
   }
   return {files: [...files].sort(), npm: [...npm].sort()};
 };
-const owner = (path: string) => path.split('/')[0];
+const owner = (path: string) => Effect.pipe(path, EffectString.split('/'))[0];
 const build = (graph: Map<string, Node>) =>
   buildLibraryGraph(graph, {owner, generatedOwner: (path: string) => path !== 'manual'});
 
@@ -45,7 +49,12 @@ it('keeps mixed-owner cycles and manual slices explicit while preserving outgoin
   expect(libraries.size).toBe(2);
   const expected = reachable(graph, ['app/root.ts']);
   expect(expand(factor(expected.files, expected.npm), libraries)).toEqual(expected);
-  const root = [...libraries.values()].find(value => value.srcs.includes('app/root.ts'))!;
+  const root = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...libraries.values()],
+      __effectArrayValue => !!(value => value.srcs.includes('app/root.ts'))(__effectArrayValue),
+    ),
+  )!;
   expect(root.srcs).toEqual(['app/a.ts', 'app/root.ts', 'domain/b.ts', 'manual/c.ts']);
   expect(root.deps).toHaveLength(1);
 });
@@ -63,10 +72,17 @@ it('preserves independent reachability through cycles, mutations, permutations, 
         );
         for (const mutation of [edges, [...edges, [entry, excluded]]]) {
           const graph = new Map<string, Node>(
-            paths.map((path, node) => [
+            EffectArray.map(paths, (path, node) => [
               path,
               {
-                files: [...new Set(mutation.filter(([from]) => from === node).map(([, to]) => paths[to]))].sort(),
+                files: [
+                  ...new Set(
+                    EffectArray.map(
+                      EffectArray.filter(mutation, ([from]) => from === node),
+                      ([, to]) => paths[to],
+                    ),
+                  ),
+                ].sort(),
                 npm: node % 2 === 0 ? [`npm-${node}`] : [],
               },
             ]),
@@ -74,14 +90,19 @@ it('preserves independent reachability through cycles, mutations, permutations, 
           const expected = reachable(graph, [paths[entry]]);
           const {libraries, factor} = build(graph);
           expect(expand(factor(expected.files, expected.npm), libraries)).toEqual(expected);
-          const excludedFiles = expected.files.filter(path => path !== paths[excluded]);
+          const excludedFiles = EffectArray.filter(expected.files, path => path !== paths[excluded]);
           expect(expand(factor(excludedFiles, expected.npm), libraries)).toEqual({
             files: excludedFiles,
             npm: expected.npm,
           });
           expect(expand(factor(expected.files, expected.npm, [paths[excluded]]), libraries)).toEqual(expected);
           const reversed = build(
-            new Map([...graph].reverse().map(([path, node]) => [path, {...node, files: [...node.files].reverse()}])),
+            new Map(
+              EffectArray.map([...graph].reverse(), ([path, node]) => [
+                path,
+                {...node, files: [...node.files].reverse()},
+              ]),
+            ),
           );
           expect([...reversed.libraries]).toEqual([...libraries]);
           expect(reversed.factor(expected.files, expected.npm)).toEqual(factor(expected.files, expected.npm));
@@ -111,7 +132,10 @@ it('deduplicates shared manual diamond boundaries before expanding their parents
   const graph = new Map<string, Node>();
   for (let node = 0; node < 30; node++) {
     graph.set(`manual/${node}.ts`, {
-      files: [node + 1, node + 2].filter(child => child < 30).map(child => `manual/${child}.ts`),
+      files: EffectArray.map(
+        EffectArray.filter([node + 1, node + 2], child => child < 30),
+        child => `manual/${child}.ts`,
+      ),
       npm: ['shared-npm'],
     });
   }

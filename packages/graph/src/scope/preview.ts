@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import type {ProjectManifest} from '@threadnote/workspace/config';
 import {resolveRepositoryIdentity} from '../repository.js';
@@ -8,6 +9,8 @@ import {
   type ResolvedCodeGraphIndexScope,
 } from '../index_scope.js';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '../languages/registry.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_PROJECT_SCOPE_PREVIEW_VERSION = 1 as const;
 
@@ -36,10 +39,10 @@ export interface CodeGraphProjectScopePreview {
   readonly version: typeof CODE_GRAPH_PROJECT_SCOPE_PREVIEW_VERSION;
 }
 
-export class CodeGraphProjectScopePreviewError extends Schema.TaggedError<CodeGraphProjectScopePreviewError>()(
-  'CodeGraphProjectScopePreviewError',
-  {message: Schema.String},
-) {}
+export class CodeGraphProjectScopePreviewError extends Schema.TaggedError<
+  CodeGraphProjectScopePreviewError,
+  {readonly brand: unique symbol}
+>()('CodeGraphProjectScopePreviewError', {message: Schema.String}) {}
 
 /**
  * Resolves one manifest project's graph definition against the current local
@@ -77,12 +80,16 @@ export const previewCodeGraphProjectScope = Effect.fn('codeGraph.previewProjectS
       }),
   });
   const rootComponents = new Set(resolved.rootProjectIds);
-  const included = inventory.files.filter(file => scopeAdmitsPath(resolved, file.path));
-  const includedBytes = included.reduce((total, file) => total + file.size, 0);
+  const inventoryFiles = inventory.files;
+  const included = EffectArray.filter(
+    inventoryFiles,
+    (file, __effectArrayIndex) => __effectArrayIndex in inventoryFiles && scopeAdmitsPath(resolved, file.path),
+  );
+  const includedBytes = EffectArray.reduce(included, 0, (total, file) => total + file.size);
   return {
     inventory: {
       excluded: {
-        bytes: inventory.files.reduce((total, file) => total + file.size, 0) - includedBytes,
+        bytes: EffectArray.reduce(inventory.files, 0, (total, file) => total + file.size) - includedBytes,
         files: inventory.files.length - included.length,
       },
       included: {bytes: includedBytes, files: included.length},
@@ -92,7 +99,7 @@ export const previewCodeGraphProjectScope = Effect.fn('codeGraph.previewProjectS
     scope: {
       completeness: resolved.completeness,
       controlPaths: resolved.controlPaths,
-      dependencyComponents: resolved.includedProjectIds.filter(id => !rootComponents.has(id)),
+      dependencyComponents: EffectArray.filter(resolved.includedProjectIds, id => !rootComponents.has(id)),
       diagnostics: resolved.diagnostics,
       includes: project.graph?.include ?? [],
       rootComponents: resolved.rootProjectIds,
@@ -107,6 +114,9 @@ export const previewCodeGraphProjectScope = Effect.fn('codeGraph.previewProjectS
 function scopeAdmitsPath(scope: ResolvedCodeGraphIndexScope, path: string): boolean {
   return (
     scope.controlPaths.includes(path) ||
-    scope.admittedPrefixes.some(prefix => prefix === '' || path === prefix || path.startsWith(`${prefix}/`))
+    EffectArray.some(
+      scope.admittedPrefixes,
+      prefix => prefix === '' || path === prefix || Effect2.pipe(path, EffectString.startsWith(`${prefix}/`)),
+    )
   );
 }

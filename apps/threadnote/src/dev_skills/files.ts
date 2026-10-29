@@ -1,21 +1,23 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Path, PlatformError, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {DevSkillsError} from './contract.js';
+import * as EffectRecord from 'effect/Record';
 
 export const fail = (code: string, message: string) => DevSkillsError.make({code, message});
 export const hash = (content: string | Uint8Array) => sha256HexSync(content);
 export function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (EffectArray.isArray(value)) return `[${EffectArray.join(EffectArray.map(value, stableJson), ',')}]`;
   if (isRecord(value))
-    return `{${Object.keys(value)
-      .sort()
-      .map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`)
-      .join(',')}}`;
+    return `{${EffectArray.join(
+      EffectArray.map(EffectRecord.keys(value).sort(), key => `${JSON.stringify(key)}:${stableJson(value[key])}`),
+      ',',
+    )}}`;
   return JSON.stringify(value);
 }
 export const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
+  typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 export function requireValue(condition: unknown, message: string): asserts condition {
   if (!condition) throw fail('invalid-state', message);
 }

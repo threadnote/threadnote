@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {unzlibSync, zlibSync} from 'fflate';
 import {describe, expect, it, vi} from 'vitest';
@@ -10,14 +11,35 @@ import {budgetCachedCodeGraphFacts, serializeBoundedCodeGraphFact} from '@thread
 import {parseCodeGraphFileFacts} from '@threadnote/graph/fact/validation';
 import * as factValidation from '@threadnote/graph/fact/validation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {isJsonObject} from '@threadnote/platform/json';
 import type {CodeGraphFileFacts} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireJsonObjectArray(value: unknown): Record<string, unknown>[] {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array of JSON objects.');
+  return EffectArray.map(value, requireJsonObject);
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Expected a string.');
+  return value;
+}
 
 const factEncoder = new TextEncoder();
 const factDecoder = new TextDecoder();
 
 const pathArbitrary = fc
-  .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789_-'.split('')), {maxLength: 30, minLength: 1})
-  .map(value => `src/${value.join('')}.ts`);
+  .array(fc.constantFrom(...Effect.pipe('abcdefghijklmnopqrstuvwxyz0123456789_-', EffectString.split(''))), {
+    maxLength: 30,
+    minLength: 1,
+  })
+  .map(value => `src/${EffectArray.join(value, '')}.ts`);
 
 const factArbitrary = fc
   .record({
@@ -44,13 +66,13 @@ describe('compact code graph fact storage', () => {
         fc.boolean(),
         (characters, ceiling, duplicates) => {
           const base = richFacts();
-          const documentation = characters.join('');
+          const documentation = EffectArray.join(characters, '');
           const facts: CodeGraphFileFacts = {
             ...base,
             diagnostics: [documentation],
             edges: duplicates ? [...base.edges, ...base.edges] : base.edges,
             references: duplicates ? [...base.references!, ...base.references!] : base.references,
-            symbols: base.symbols.map(symbol => ({...symbol, documentation})),
+            symbols: EffectArray.map(base.symbols, symbol => ({...symbol, documentation})),
           };
           const before = structuredClone(facts);
           const parsed = parseCodeGraphFileFacts(facts);
@@ -116,7 +138,7 @@ describe('compact code graph fact storage', () => {
     };
     const bounded = serializeBoundedCodeGraphFact(facts);
     const stored = encodeStoredCodeGraphFact(bounded);
-    const envelope = JSON.parse(stored.json) as {readonly codec: string; readonly path: string};
+    const envelope = requireJsonObject(JSON.parse(stored.json));
 
     expect(stored.codec).toBe(CODE_GRAPH_STORED_FACT_CODEC);
     expect(stored.storedBytes).toBeLessThan(bounded.bytes / 2);
@@ -133,15 +155,8 @@ describe('compact code graph fact storage', () => {
     };
     const bounded = serializeBoundedCodeGraphFact(facts);
     const stored = encodeStoredCodeGraphFact(bounded);
-    const nativeEnvelope = JSON.parse(stored.json) as {
-      readonly codec: string;
-      readonly path: string;
-      readonly pathOccurrences: number;
-      readonly payload: string;
-      readonly rawBytes: number;
-      readonly sha256: string;
-    };
-    const legacyDecoded = unzlibSync(Buffer.from(nativeEnvelope.payload, 'base64'), {
+    const nativeEnvelope = requireJsonObject(JSON.parse(stored.json));
+    const legacyDecoded = unzlibSync(Buffer.from(requireString(nativeEnvelope.payload), 'base64'), {
       out: new Uint8Array(bounded.bytes),
     });
     expect(factDecoder.decode(legacyDecoded)).toBe(bounded.json);
@@ -196,7 +211,7 @@ describe('compact code graph fact storage', () => {
           ],
           symbols: [
             {
-              contentHash: '0'.repeat(64),
+              contentHash: Effect.pipe('0', EffectString.repeat(64)),
               exported: true,
               id: 'symbol-control',
               kind: 'heading',
@@ -226,13 +241,15 @@ describe('compact code graph fact storage', () => {
       symbols: [],
     });
     const stored = encodeStoredCodeGraphFact(facts);
-    const envelope = JSON.parse(stored.json) as Record<string, unknown>;
+    const envelope = requireJsonObject(JSON.parse(stored.json));
     expect(stored.codec).toBe(CODE_GRAPH_STORED_FACT_CODEC);
     expect(() => decodeStoredCodeGraphFact(stored.json, 'src/other.ts')).toThrow(/path/);
-    expect(() => decodeStoredCodeGraphFact(JSON.stringify({...envelope, sha256: '0'.repeat(64)}))).toThrow(/integrity/);
+    expect(() =>
+      decodeStoredCodeGraphFact(JSON.stringify({...envelope, sha256: Effect.pipe('0', EffectString.repeat(64))})),
+    ).toThrow(/integrity/);
     expect(() => decodeStoredCodeGraphFact(JSON.stringify({...envelope, rawBytes: 1_024}))).toThrow();
     expect(() =>
-      decodeStoredCodeGraphFact(JSON.stringify({...envelope, payload: `${envelope.payload as string}\n`})),
+      decodeStoredCodeGraphFact(JSON.stringify({...envelope, payload: `${requireString(envelope.payload)}\n`})),
     ).toThrow(/malformed|base64/);
   });
 
@@ -240,16 +257,16 @@ describe('compact code graph fact storage', () => {
     fc.assert(
       fc.property(fc.integer({max: 7, min: 0}), mutation => {
         const facts = richFacts();
-        const candidate = structuredClone(facts) as unknown as Record<string, unknown>;
-        const symbols = candidate.symbols as Array<Record<string, unknown>>;
-        const edges = candidate.edges as Array<Record<string, unknown>>;
-        const references = candidate.references as Array<Record<string, unknown>>;
+        const candidate = requireJsonObject(structuredClone(facts));
+        const symbols = requireJsonObjectArray(candidate.symbols);
+        const edges = requireJsonObjectArray(candidate.edges);
+        const references = requireJsonObjectArray(candidate.references);
         switch (mutation) {
           case 0:
             symbols[0].unexpected = true;
             break;
           case 1:
-            symbols[0].span = {...(symbols[0].span as object), line: 0};
+            symbols[0].span = {...requireJsonObject(symbols[0].span), line: 0};
             break;
           case 2:
             edges[0].confidence = 2;
@@ -312,7 +329,7 @@ function richFacts(): CodeGraphFileFacts {
     ],
     symbols: [
       {
-        contentHash: '0'.repeat(64),
+        contentHash: Effect.pipe('0', EffectString.repeat(64)),
         exported: true,
         id: 'symbol-1',
         kind: 'function',

@@ -39,6 +39,8 @@ import {
 import {makeGraphShareRegistryWriter} from './writer.js';
 import {uploadGraphShareRegistryArtifacts} from './publication_upload.js';
 import {graphShareContributionRetryDelay} from '../contribution/retry_state.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface GraphShareRegistryPublicationOptions {
   readonly home: string;
@@ -71,7 +73,7 @@ export function graphShareRegistryPublicationScope(
 export const publishGraphShareRegistryFrontier = Effect.fn('codeGraph.sharing.publishRegistryFrontier')(function* (
   input: GraphShareRegistryPublicationOptions,
 ) {
-  if (!input.profile.registry.canonical.startsWith('oci://'))
+  if (!Effect2.pipe(input.profile.registry.canonical, EffectString.startsWith('oci://')))
     return {status: 'local', changed: false} satisfies GraphShareRegistryPublicationResult;
   const scope = yield* Effect.try({
     try: () => graphShareRegistryPublicationScope(input),
@@ -214,7 +216,7 @@ export const publishGraphShareRegistryFrontier = Effect.fn('codeGraph.sharing.pu
               lastFailure: Schema.is(GraphSharingError)(error)
                 ? {
                     kind: error.kind,
-                    message: error.message.slice(0, 512),
+                    message: Effect2.pipe(error.message, EffectString.slice(0, 512)),
                     ...(error.httpStatus === undefined ? {} : {httpStatus: error.httpStatus}),
                   }
                 : {kind: 'unavailable', message: 'Registry publication could not be completed.'},

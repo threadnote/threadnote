@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import {
   codeGraphSourceSpanFragment,
@@ -7,10 +8,11 @@ import {
   type CodeGraphSymbolSemanticLocatorV1,
 } from '@threadnote/graph/citation/primitives';
 import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_identity';
-import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {CodeGraphQueryService, type CodeGraphStatusOptions} from '@threadnote/graph/query';
+import {CodeGraphRepositoryError} from '@threadnote/graph/types';
 import {CodeGraphStore} from '@threadnote/graph/store';
-import type {CodeGraphStoreShape} from '@threadnote/graph/store/shape';
 import type {
+  RepositoryIdentityExpectation,
   CodeGraphInventoryFile,
   CodeGraphSnapshot,
   CodeGraphStatus,
@@ -45,17 +47,19 @@ import {
   type CodeMemoryLinkBenchResultV1,
   type CodeMemoryLinkBenchScenarioKind,
 } from './code-memory-link-bench-contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const USER = 'code-memory-bench';
 const PROJECT = 'threadnote';
-const REPOSITORY_ID = '1'.repeat(64);
-const FOREIGN_REPOSITORY_ID = '2'.repeat(64);
-const SOURCE_COMMIT = '3'.repeat(40);
-const CURRENT_COMMIT = '4'.repeat(40);
-const SOURCE_SNAPSHOT_ID = `cgsn_${'5'.repeat(40)}`;
-const CURRENT_SNAPSHOT_ID = `cgsn_${'6'.repeat(40)}`;
+const REPOSITORY_ID = Effect2.pipe('1', EffectString.repeat(64));
+const FOREIGN_REPOSITORY_ID = Effect2.pipe('2', EffectString.repeat(64));
+const SOURCE_COMMIT = Effect2.pipe('3', EffectString.repeat(40));
+const CURRENT_COMMIT = Effect2.pipe('4', EffectString.repeat(40));
+const SOURCE_SNAPSHOT_ID = `cgsn_${Effect2.pipe('5', EffectString.repeat(40))}`;
+const CURRENT_SNAPSHOT_ID = `cgsn_${Effect2.pipe('6', EffectString.repeat(40))}`;
 const EXTRACTOR_SET = 'code-memory-link-bench-v1';
-const GRAPH_CONTENT_ID = `cgc_${'7'.repeat(40)}`;
+const GRAPH_CONTENT_ID = `cgc_${Effect2.pipe('7', EffectString.repeat(40))}`;
 const WARM_SAMPLES = 25;
 const WARM_COHORTS = CODE_MEMORY_LINK_BENCH_MINIMUM_WARMUPS + WARM_SAMPLES;
 const HIGH_NOISE_MEMORIES = 256;
@@ -167,7 +171,7 @@ function observationForBrief(
 ): CodeMemoryLinkBenchObservationV1 {
   if (
     brief.structuredContent.graph.continuation?.state === 'rerun-required' &&
-    !brief.structuredContent.recommendedFollowUps.some(followUp => followUp.operation === 'inspect-node')
+    !EffectArray.some(brief.structuredContent.recommendedFollowUps, followUp => followUp.operation === 'inspect-node')
   ) {
     throw new Error(`CodeMemoryLinkBench query ${query.id} returned no executable graph recovery.`);
   }
@@ -176,7 +180,7 @@ function observationForBrief(
   const memories = [...brief.structuredContent.activeHandoffs, ...brief.structuredContent.durableDecisions].sort(
     (left, right) => left.rank - right.rank || compareText(left.uri, right.uri),
   );
-  const rankedMemories: CodeMemoryLinkBenchRankedMemoryV1[] = memories.map(memory => ({
+  const rankedMemories: CodeMemoryLinkBenchRankedMemoryV1[] = EffectArray.map(memories, memory => ({
     freshness: memory.freshness,
     relationStatus: memory.codeRelations?.[0]?.status ?? null,
     selectionBasis: memory.selectionBasis ?? 'lexical',
@@ -227,7 +231,7 @@ function scenarioDefinition(query: CodeMemoryLinkBenchQueryV1): ScenarioDefiniti
   switch (query.scenario) {
     case 'exact-symbol': {
       const file = runtimeFile('src/exact-symbol.ts', 'export function exactSymbol() { return 1; }\n');
-      const symbol = runtimeSymbol('1'.repeat(32), file, 'exactSymbol');
+      const symbol = runtimeSymbol(Effect2.pipe('1', EffectString.repeat(32)), file, 'exactSymbol');
       return {...standard([file], [symbolCitation(symbol, file.content)]), symbols: [symbol]};
     }
     case 'exact-file': {
@@ -236,9 +240,9 @@ function scenarioDefinition(query: CodeMemoryLinkBenchQueryV1): ScenarioDefiniti
     }
     case 'relocated-symbol': {
       const oldFile = runtimeFile('src/old/relocated-symbol.ts', 'export function relocatedSymbol() { return 2; }\n');
-      const oldSymbol = runtimeSymbol('3'.repeat(32), oldFile, 'relocatedSymbol');
+      const oldSymbol = runtimeSymbol(Effect2.pipe('3', EffectString.repeat(32)), oldFile, 'relocatedSymbol');
       const currentFile = runtimeFile('src/new/relocated-symbol.ts', oldFile.content);
-      const currentSymbol = runtimeSymbol('2'.repeat(32), currentFile, 'relocatedSymbol');
+      const currentSymbol = runtimeSymbol(Effect2.pipe('2', EffectString.repeat(32)), currentFile, 'relocatedSymbol');
       return {
         ...standard([currentFile], [symbolCitation(oldSymbol, oldFile.content)]),
         symbols: [currentSymbol],
@@ -301,7 +305,7 @@ function scenarioDefinition(query: CodeMemoryLinkBenchQueryV1): ScenarioDefiniti
       const file = runtimeFile('src/high-noise.ts', 'export const highNoise = true;\n');
       const cohorts = Array.from({length: WARM_COHORTS}, (_, index) =>
         runtimeFile(
-          `src/warm-cohorts/high-noise-${index.toString().padStart(2, '0')}.ts`,
+          `src/warm-cohorts/high-noise-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}.ts`,
           `export const highNoiseCohort${index} = true;\n`,
         ),
       );
@@ -309,17 +313,17 @@ function scenarioDefinition(query: CodeMemoryLinkBenchQueryV1): ScenarioDefiniti
         ...standard([file, ...cohorts], [fileCitation(file)]),
         memories: [
           {citations: [fileCitation(file)], topic},
-          ...cohorts.map((cohort, index) => ({
+          ...EffectArray.map(cohorts, (cohort, index) => ({
             body: `Unseen validation rotation cohort ${index}.`,
             citations: [fileCitation(cohort)],
-            topic: `rotation-${index.toString().padStart(2, '0')}`,
+            topic: `rotation-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`,
           })),
           ...Array.from({length: HIGH_NOISE_MEMORIES}, (_, index) => ({
             raw: 'legacy' as const,
-            topic: `${query.id}-noise-${index.toString().padStart(3, '0')}`,
+            topic: `${query.id}-noise-${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
           })),
         ],
-        warmCodeRefs: cohorts.map(cohort => cohort.path),
+        warmCodeRefs: EffectArray.map(cohorts, cohort => cohort.path),
       };
     }
   }
@@ -353,7 +357,7 @@ function runtimeSymbol(seed: string, file: RuntimeFile, name: string): CodeGraph
     path: file.path,
     qualifiedName: name,
     signature: `${name}(): number`,
-    span: {column: 1, endColumn: file.content.trimEnd().length + 1, endLine: 1, line: 1},
+    span: {column: 1, endColumn: Effect2.pipe(file.content, EffectString.trimEnd).length + 1, endLine: 1, line: 1},
   };
 }
 
@@ -472,34 +476,40 @@ const writeScenarioMemories = Effect.fn('evaluation.codeMemoryLinkBenchRuntime.w
 });
 
 function legacyMemory(topic: string, body: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    `project: ${PROJECT}`,
-    `topic: ${topic}`,
-    'source_agent_client: codex',
-    'timestamp: 2026-08-28T00:00:00.000Z',
-    'schema_version: 1',
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      `project: ${PROJECT}`,
+      `topic: ${topic}`,
+      'source_agent_client: codex',
+      'timestamp: 2026-08-28T00:00:00.000Z',
+      'schema_version: 1',
+      '',
+      body,
+    ],
+    '\n',
+  );
 }
 
 function malformedMemory(topic: string, body: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    `project: ${PROJECT}`,
-    `topic: ${topic}`,
-    'source_agent_client: codex',
-    'timestamp: 2026-08-28T00:00:00.000Z',
-    `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-    'code_citation: {not-canonical-json',
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      `project: ${PROJECT}`,
+      `topic: ${topic}`,
+      'source_agent_client: codex',
+      'timestamp: 2026-08-28T00:00:00.000Z',
+      `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+      'code_citation: {not-canonical-json',
+      '',
+      body,
+    ],
+    '\n',
+  );
 }
 
 interface RuntimeGraph {
@@ -510,13 +520,22 @@ interface RuntimeGraph {
 }
 
 function makeRuntimeGraph(root: string, definition: ScenarioDefinition): RuntimeGraph {
-  const files = definition.files.map(file => inventoryFile(file, definition.dirty));
-  const filesByPath = new Map(files.map(file => [file.path, file]));
+  const files = EffectArray.map(definition.files, file => inventoryFile(file, definition.dirty));
+  const filesByPath = new Map(EffectArray.map(files, file => [file.path, file]));
   let acquired = 0;
   let released = 0;
   let maintenance = 0;
   let validationEvidenceCalls = 0;
-  const store = CodeGraphStore.of({
+  const store = {
+    activateCleanSnapshotAlias: undefined,
+    discardInvalidCachedFacts: undefined,
+    existingSnapshotFilePaths: undefined,
+    loadSnapshotMaterializedFileShards: undefined,
+    reusableCleanBase: undefined,
+    reusableCleanBaseForCommitPaths: undefined,
+    reusableFoldForwardBase: undefined,
+    reusableOverlayBase: undefined,
+    snapshotProjectClosureFiles: undefined,
     acquireSnapshotLease: () => Effect.sync(() => `code-memory-bench-lease-${++acquired}`),
     effectiveSnapshotCitationEvidence: (
       _databasePath: string,
@@ -534,17 +553,39 @@ function makeRuntimeGraph(root: string, definition: ScenarioDefinition): Runtime
         );
       }),
     releaseSnapshotLease: () => Effect.sync(() => void ++released),
-  } as unknown as CodeGraphStoreShape);
+  };
   const status = runtimeStatus(root, definition);
-  const query = CodeGraphQueryService.of({
-    status: (_threadnoteHome: string, _cwd: string, options: {readonly requestMaintenance?: boolean}) =>
+  const query = {
+    withStatusSession: undefined,
+    status: (_threadnoteHome: string, _cwd: string, options?: {readonly requestMaintenance?: boolean}) =>
       Effect.sync(() => {
-        if (options.requestMaintenance) maintenance += 1;
+        if (options?.requestMaintenance) maintenance += 1;
         return status;
       }),
-  } as unknown as Parameters<typeof CodeGraphQueryService.of>[0]);
+    statusForPublishedIdentity: (
+      _threadnoteHome: string,
+      _cwd: string,
+      expected: RepositoryIdentityExpectation,
+      options?: CodeGraphStatusOptions,
+    ) =>
+      Effect.sync(() => {
+        if (options?.requestMaintenance) maintenance += 1;
+        return status;
+      }).pipe(
+        Effect.filterOrFail(
+          observed =>
+            observed.identity.checkoutId === expected.checkoutId &&
+            observed.identity.repositoryId === expected.repositoryId &&
+            observed.identity.worktreeId === expected.worktreeId,
+          () =>
+            CodeGraphRepositoryError.make({
+              message: 'Evaluation graph status identity did not match the published identity.',
+            }),
+        ),
+      ),
+  };
   return {
-    layer: Layer.merge(Layer.succeed(CodeGraphStore, store), Layer.succeed(CodeGraphQueryService, query)),
+    layer: Layer.merge(Layer.mock(CodeGraphStore, store), Layer.mock(CodeGraphQueryService, query)),
     leaseBalance: () => acquired - released,
     maintenanceRequests: () => maintenance,
     validationEvidenceCalls: () => validationEvidenceCalls,
@@ -559,28 +600,37 @@ function runtimeCitationEvidence(
   fileInventoryCoverage: CodeGraphEffectiveSnapshotCitationEvidence['fileInventoryCoverage'],
 ): CodeGraphEffectiveSnapshotCitationEvidence {
   const paths = [
-    ...new Set([...(request.paths ?? []), ...(request.fileRelocationFallbacks ?? []).map(item => item.path)]),
+    ...new Set([
+      ...(request.paths ?? []),
+      ...EffectArray.map(request.fileRelocationFallbacks ?? [], item => item.path),
+    ]),
   ];
   const hashes = selectCodeGraphCitationContentHashTargets(
     [...new Set(request.contentHashes ?? [])],
     request.fileRelocationFallbacks ?? [],
-    new Set(files.map(file => file.path)),
+    new Set(EffectArray.map(files, file => file.path)),
   );
   return {
     fileInventoryCoverage,
-    filesByContentHashes: hashes.map(contentHash => ({
+    filesByContentHashes: EffectArray.map(hashes, contentHash => ({
       contentHash,
-      files: files.filter(file => file.contentHash === contentHash),
+      files: EffectArray.filter(files, file => file.contentHash === contentHash),
       truncated: false,
     })),
-    filesByPaths: paths.map(repositoryPath => ({
+    filesByPaths: EffectArray.map(paths, repositoryPath => ({
       ...(filesByPath.get(repositoryPath) === undefined ? {} : {file: filesByPath.get(repositoryPath)!}),
       path: repositoryPath,
     })),
-    symbolsByIds: symbols.filter(symbol => request.symbolIds?.includes(symbol.id) ?? false),
-    symbolsBySemanticLocators: (request.semanticLocators ?? []).map(locator => ({
+    symbolsByIds: EffectArray.filter(
+      symbols,
+      (symbol, index) => index in symbols && (request.symbolIds?.includes(symbol.id) ?? false),
+    ),
+    symbolsBySemanticLocators: EffectArray.map(request.semanticLocators ?? [], locator => ({
       locator,
-      symbols: symbols.filter(symbol => matchesLocator(symbol, locator)),
+      symbols: EffectArray.filter(
+        symbols,
+        (symbol, __effectArrayIndex) => __effectArrayIndex in symbols && matchesLocator(symbol, locator),
+      ),
       truncated: false,
     })),
   };
@@ -608,7 +658,7 @@ function runtimeSnapshot(definition: ScenarioDefinition): CodeGraphSnapshot {
     repositoryId: REPOSITORY_ID,
     state: 'ready',
     symbolCount: definition.symbols.length,
-    worktreeId: sha256HexSync(`code-memory-link-bench\0${definition.dirty}`).slice(0, 64),
+    worktreeId: Effect2.pipe(sha256HexSync(`code-memory-link-bench\0${definition.dirty}`), EffectString.slice(0, 64)),
   };
 }
 
@@ -645,7 +695,7 @@ function runtimeGraphEvidence(definition: ScenarioDefinition): ContextBriefGraph
             id: 'code-memory-link-bench-card',
             rank: 0,
             reason: 'Exact ready graph evidence for the backlink benchmark.',
-            ref: `cgs_${'a'.repeat(32)}`,
+            ref: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
             repositoryKey: 'code-memory-link-bench',
             symbol: {
               kind: 'file',

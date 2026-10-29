@@ -2,9 +2,9 @@ import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Layer, Path} from 'effect';
 import * as FC from 'fast-check';
 import {
   type CodeGraphVectorRetirementCapacityProtector,
@@ -12,6 +12,14 @@ import {
   prepareCodeGraphVectorRetirement,
   retireCodeGraphVectorGenerationPage,
 } from '@threadnote/graph/vector/maintenance';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const VectorRetirementPropertyLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
 const identityCapacityProtector: CodeGraphVectorRetirementCapacityProtector = (_boundary, transaction) => transaction;
@@ -44,7 +52,7 @@ describe('code graph vector retirement schema properties', () => {
             const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-retirement-property-'});
             const databasePath = path.join(root, 'vectors-v2.sqlite');
             const generation = 'generation-property';
-            const worktreeId = 'a'.repeat(64);
+            const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
             yield* Effect.sync(() => seedVectorDatabase(databasePath, generation, worktreeId, vectorCount));
             yield* prepareUntilReady(databasePath);
             yield* deleteCodeGraphVectorPointerWithRetirement(databasePath, {
@@ -153,10 +161,15 @@ function seedVectorDatabase(databasePath: string, generation: string, worktreeId
       'INSERT INTO vectors (generation, symbol_id, fingerprint, vector) VALUES (?, ?, ?, ?)',
     );
     database.transaction(() => {
-      insertGeneration.run(generation, 'f'.repeat(64), vectorCount, '1970-01-01T00:00:00.000Z');
+      insertGeneration.run(
+        generation,
+        Effect2.pipe('f', EffectString.repeat(64)),
+        vectorCount,
+        '1970-01-01T00:00:00.000Z',
+      );
       const payload = new Uint8Array(16);
       for (let index = 0; index < vectorCount; index += 1) {
-        const symbolId = `symbol-${index.toString().padStart(6, '0')}`;
+        const symbolId = `symbol-${Effect2.pipe(index.toString(), EffectString.padStart(6, '0'))}`;
         insertVector.run(generation, symbolId, `fingerprint-${symbolId}`, payload);
       }
       database.query('INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, ?)').run(worktreeId, generation);
@@ -169,13 +182,18 @@ function seedVectorDatabase(databasePath: string, generation: string, worktreeId
 function readRetirementEpoch(databasePath: string): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const marker = database.query('SELECT * FROM vector_generation_retirements').get() as Record<string, unknown>;
-    const candidates = Object.entries(marker).filter(
+    const marker = requiredRow(
+      database.query<Record<string, unknown>, SQLQueryBindings[]>('SELECT * FROM vector_generation_retirements').get(),
+    );
+    const candidates = EffectArray.filter(
+      EffectRecord.toEntries(marker),
       ([key, value]) =>
         /epoch|retirement.*id/i.test(key) && typeof value === 'number' && Number.isSafeInteger(value) && value > 0,
     );
     expect(candidates).toHaveLength(1);
-    return candidates[0][1] as number;
+    const candidate = candidates[0]?.[1];
+    if (typeof candidate !== 'number') throw TestError.make({message: 'Expected a numeric retirement epoch.'});
+    return candidate;
   } finally {
     database.close(false);
   }
@@ -186,10 +204,15 @@ function readCounts(databasePath: string, generation: string) {
   try {
     const count = (table: string) =>
       Number(
-        (
-          database.query(`SELECT COUNT(*) AS count FROM ${table} WHERE generation = ?`).get(generation) as {
-            readonly count: number;
-          }
+        requiredRow(
+          database
+            .query<
+              {
+                readonly count: number;
+              },
+              SQLQueryBindings[]
+            >(`SELECT COUNT(*) AS count FROM ${table} WHERE generation = ?`)
+            .get(generation),
         ).count,
       );
     return {

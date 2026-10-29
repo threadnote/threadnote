@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it} from '@effect/vitest';
 import {Effect, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -10,6 +11,9 @@ import {decodeNativeCloseoutProposal} from '@threadnote/workflow-automations/clo
 import {nativeCloseoutFixture} from './native-closeout-fixture.js';
 import {provideNative} from './native-automation-fixture.js';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type Fixture = Effect.Success<ReturnType<typeof nativeCloseoutFixture>>;
 const decode = Schema.decodeUnknownEffect;
@@ -65,13 +69,19 @@ const prepare = (f: Fixture, withSpec = true) =>
       combinedChecks: [
         {command: 'private complete-read check', result: 'passed', evidence: 'Every field was observed.'},
       ],
-      phaseEvidence: input.phases.map(p => ({
+      phaseEvidence: EffectArray.map(input.phases, p => ({
         id: p.id,
-        acceptance: p.acceptanceCriteria.map(criterion => ({criterion, evidence: 'Observed: ' + criterion})),
+        acceptance: EffectArray.map(p.acceptanceCriteria, criterion => ({
+          criterion,
+          evidence: 'Observed: ' + criterion,
+        })),
       })),
-      scenarios: input.scenarios.map(s => ({id: s.id, evidence: 'Observed complete saved data for ' + s.id})),
+      scenarios: EffectArray.map(input.scenarios, s => ({
+        id: s.id,
+        evidence: 'Observed complete saved data for ' + s.id,
+      })),
       ...(withSpec ? {behaviorVerification: 'All approved scenarios returned complete saved data.'} : {}),
-      decisions: input.decisions.map(d => ({
+      decisions: EffectArray.map(input.decisions, d => ({
         id: d.id,
         implemented: d.selected + ' Independently verified against the durable graph.',
         rationale:
@@ -80,7 +90,7 @@ const prepare = (f: Fixture, withSpec = true) =>
     });
     yield* f.closeout('prepare', {proposal});
     const projected = yield* decode(preview)(yield* f.closeout('publication-preview'));
-    expect(projected.publication.nodes.map(n => n.key).sort()).toEqual(
+    expect(EffectArray.map(projected.publication.nodes, n => n.key).sort()).toEqual(
       withSpec ? ['architecture', 'spec'] : ['architecture'],
     );
     return {proposal, projected};
@@ -96,13 +106,13 @@ const readRemote = (f: Fixture, projected: Preview) =>
   Effect.gen(function* () {
     const bodies: Record<string, string> = {};
     for (const node of projected.publication.nodes) {
-      const relative = node.canonicalUri.split('/shared/default/')[1];
+      const relative = Effect2.pipe(node.canonicalUri, EffectString.split('/shared/default/'))[1];
       expect(relative).toBeTruthy();
       const content = (yield* git(f, ['show', 'main:' + relative])).stdout;
       const record = parseMemoryDocument(node.canonicalUri, content);
       expect(record).toBeDefined();
       if (!record) throw new Error('Missing durable memory document.');
-      expect(sha256HexSync(record.body.trim() + '\n')).toBe(node.bodySha256);
+      expect(sha256HexSync(Effect2.pipe(record.body, EffectString.trim) + '\n')).toBe(node.bodySha256);
       expect(content).not.toContain(f.root);
       expect(content).not.toContain(f.home);
       expect(content).not.toContain('.context');
@@ -122,7 +132,7 @@ const verifyRetirement = (f: Fixture, owned: readonly {runId: string; uri: strin
     const image = yield* decode(receipt)(
       JSON.parse(yield* f.fs.readFileString(f.statePath('controller') + '.closeout.json')),
     );
-    expect(Object.keys(image.archives).sort()).toEqual(owned.map(i => i.uri).sort());
+    expect(EffectRecord.keys(image.archives).sort()).toEqual(EffectArray.map(owned, i => i.uri).sort());
     for (const item of owned) {
       const archived = image.archives[item.uri];
       expect(
@@ -146,12 +156,12 @@ describe.skipIf(process.platform === 'win32' && !manualCloud)('verified personal
           const f = yield* nativeCloseoutFixture(true, profile);
           const loaded = yield* f.load();
           expect(loaded.spec?.kind).toBe('spec');
-          expect(new Set(loaded.owned.map(i => i.runId))).toEqual(new Set(['plan-run']));
+          expect(new Set(EffectArray.map(loaded.owned, i => i.runId))).toEqual(new Set(['plan-run']));
           const {proposal, projected} = yield* prepare(f);
           yield* active(f, loaded.owned);
           const wrong = yield* f
             .closeout('publication-approve', {
-              approvalDigest: '0'.repeat(64),
+              approvalDigest: Effect2.pipe('0', EffectString.repeat(64)),
               decision: 'approve',
               approvalEvidence: 'Wrong digest must not authorize publication.',
             })
@@ -169,7 +179,7 @@ describe.skipIf(process.platform === 'win32' && !manualCloud)('verified personal
               options?: Parameters<typeof store.remove>[2],
             ) =>
               Effect.gen(function* () {
-                if (!verifiedBeforeFirstRemoval && loaded.owned.some(i => i.uri === uri)) {
+                if (!verifiedBeforeFirstRemoval && EffectArray.some(loaded.owned, i => i.uri === uri)) {
                   yield* readRemote(f, projected);
                   verifiedBeforeFirstRemoval = true;
                 }
@@ -191,7 +201,7 @@ describe.skipIf(process.platform === 'win32' && !manualCloud)('verified personal
           }
           expect(bodies.spec).toContain('Saved data.');
           for (const item of loaded.owned)
-            for (const body of Object.values(bodies)) expect(body).not.toContain(item.uri);
+            for (const body of EffectRecord.values(bodies)) expect(body).not.toContain(item.uri);
           yield* verifyRetirement(f, loaded.owned);
           const head = (yield* git(f, ['rev-parse', 'main'])).stdout;
           const bytes = yield* f.fs.readFileString(f.statePath('controller') + '.closeout.json');
@@ -246,10 +256,13 @@ describe.skipIf(process.platform === 'win32' && !manualCloud)('verified personal
           expect(rejected.failure.message).not.toContain('Shared publication commit content changed.');
         }
         // The actual commit exists locally, before receipt persistence or push.
-        expect((yield* runCommandEffect('git', ['-C', worktree, 'rev-list', '--count', 'HEAD'])).stdout.trim()).toBe(
-          '2',
-        );
-        expect((yield* git(f, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
+        expect(
+          Effect2.pipe(
+            (yield* runCommandEffect('git', ['-C', worktree, 'rev-list', '--count', 'HEAD'])).stdout,
+            EffectString.trim,
+          ),
+        ).toBe('2');
+        expect(Effect2.pipe((yield* git(f, ['rev-list', '--count', 'main'])).stdout, EffectString.trim)).toBe('1');
         const committedHead = (yield* runCommandEffect('git', ['-C', worktree, 'rev-parse', 'HEAD'])).stdout;
         yield* active(f, loaded.owned);
         const state = yield* readNativeWorkflowState(f.config, f.controllerRunId);
@@ -269,10 +282,13 @@ describe.skipIf(process.platform === 'win32' && !manualCloud)('verified personal
         expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(committedHead);
         yield* readRemote(f, projected);
         yield* verifyRetirement(f, loaded.owned);
-        expect((yield* git(f, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('2');
-        expect((yield* runCommandEffect('git', ['-C', worktree, 'rev-list', '--count', 'HEAD'])).stdout.trim()).toBe(
-          '2',
-        );
+        expect(Effect2.pipe((yield* git(f, ['rev-list', '--count', 'main'])).stdout, EffectString.trim)).toBe('2');
+        expect(
+          Effect2.pipe(
+            (yield* runCommandEffect('git', ['-C', worktree, 'rev-list', '--count', 'HEAD'])).stdout,
+            EffectString.trim,
+          ),
+        ).toBe('2');
         const head = (yield* git(f, ['rev-parse', 'main'])).stdout;
         yield* f.closeout('finish');
         expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(head);
@@ -309,7 +325,7 @@ describe.skipIf(process.platform === 'win32' && !manualCloud)('verified personal
         expect(finished.closeout.state).toBe('complete');
         yield* readRemote(f, projected);
         yield* verifyRetirement(f, loaded.owned);
-        expect((yield* git(f, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
+        expect(Effect2.pipe((yield* git(f, ['rev-list', '--count', 'main'])).stdout, EffectString.trim)).toBe('4');
         const head = (yield* git(f, ['rev-parse', 'main'])).stdout;
         yield* f.closeout('finish');
         expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(head);

@@ -1,3 +1,7 @@
+import {Option as EffectOption} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import {makeTopicDraftWireFixture, topicDraftEvidenceFromPrompt} from '../helpers/topic-draft-wire.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -38,6 +42,9 @@ import {
   applyTopicMaintenanceReview,
 } from '../../src/memory/context/maintenance_review.js';
 import {runObsidianSourceRemove} from '@threadnote/integration-obsidian/source';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const reviewedFixture = Effect.gen(function* () {
   const f = yield* managerImportedTopicFixture();
@@ -45,7 +52,15 @@ const reviewedFixture = Effect.gen(function* () {
   const packet = readyEvidence(yield* readContextMaintenancePacket(f.config, f.caseId));
   const basis = basisFromPacket(packet);
   const prior = yield* loadCandidateReview(f.home, topicObsidianReviewId(f.uri));
-  const handles = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
+  const handles = EffectArray.map(
+    EffectArrayPipe(basis.handles, __effectFilterValues =>
+      EffectArray.filter(
+        __effectFilterValues,
+        (handle, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && handle.variant === 'current',
+      ),
+    ),
+    handle => handle.id,
+  );
   const draft = {
     version: 1,
     targetHash: basis.targetHash,
@@ -106,7 +121,10 @@ effectIt.effect(
       const f = yield* reviewedFixture;
       const edited = {
         ...f.draft,
-        operations: f.draft.operations.map(operation => ({...operation, text: 'Edited current descriptive claim.'})),
+        operations: EffectArray.map(f.draft.operations, operation => ({
+          ...operation,
+          text: 'Edited current descriptive claim.',
+        })),
       };
       const previewed = yield* prepareTopicMaintenanceReview(f.config, {
         reviewId: f.review.reviewId,
@@ -116,8 +134,18 @@ effectIt.effect(
       const preview = previewed.maintenanceApproval!.preview;
       expect(preview.content).toContain('Historical constraint.');
       expect(preview.content).toContain('Edited current descriptive claim.');
-      expect(preview.content.split('\n').find(line => line.startsWith('obsidian_evidence:'))).toBe(
-        f.record.content.split('\n').find(line => line.startsWith('obsidian_evidence:')),
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(Effect2.pipe(preview.content, EffectString.split('\n')), line =>
+            Effect2.pipe(line, EffectString.startsWith('obsidian_evidence:')),
+          ),
+        ),
+      ).toBe(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(Effect2.pipe(f.record.content, EffectString.split('\n')), line =>
+            Effect2.pipe(line, EffectString.startsWith('obsidian_evidence:')),
+          ),
+        ),
       );
       expect(memoryCodeCitationContentSharingBlocker(f.uri, preview.content)).toBe('private-obsidian-evidence');
       expect(() => projectKnowledgeDeltaV1(previewed)).toThrow('Private imported');
@@ -141,7 +169,7 @@ effectIt.effect(
       yield* saveCandidateReview(f.home, {
         ...previewed,
         revision: previewed.revision + 1,
-        candidates: previewed.candidates.map(candidate => ({...candidate, state: 'applying'})),
+        candidates: EffectArray.map(previewed.candidates, candidate => ({...candidate, state: 'applying'})),
         maintenanceApproval: {...previewed.maintenanceApproval!, stage: 'prepared'},
       });
       const recovered = yield* applyTopicMaintenanceReview(f.config, args);
@@ -247,16 +275,28 @@ effectIt.effect(
           const semantic = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
           const current = topicDraftEvidenceFromPrompt(prompt, basis);
           expect(current).toEqual(
-            Object.fromEntries(
-              expectedEvidence.filter(e => e.handleId.startsWith('current:')).map(e => [e.handleId, e.content]),
+            EffectRecord.fromEntries(
+              EffectArray.map(
+                EffectArray.filter<(typeof expectedEvidence)[number]>(
+                  expectedEvidence,
+                  (e, index) =>
+                    index in expectedEvidence && Effect2.pipe(e.handleId, EffectString.startsWith('current:')),
+                ),
+                e => [e.handleId, e.content],
+              ),
             ),
           );
           expect(new Set(semantic.historicalSources.map((source: unknown) => JSON.stringify(source))).size).toBe(
             semantic.historicalSources.length,
           );
           for (const source of semantic.sources) {
-            const handle = Object.keys(current)[source.sourceIndex];
-            const prior = expectedEvidence.find(e => e.handleId === handle.replace('current:', 'historical:'))!;
+            const handle = EffectRecord.keys(current)[source.sourceIndex];
+            const prior = EffectOption.getOrUndefined(
+              EffectArray.findFirst<ReturnType<typeof reviewEvidenceFromPacket>[number]>(
+                expectedEvidence,
+                e => e.handleId === Effect2.pipe(handle, EffectString.replace('current:', 'historical:')),
+              ),
+            )!;
             expect(
               source.historicalSourceIndices.map((index: number) => semantic.historicalSources[index].excerpt),
             ).toEqual([prior.content]);
@@ -356,16 +396,19 @@ effectIt.effect('refuses pack export and Obsidian projection for imported root a
       apply: true,
     });
     const projection = yield* runObsidianProjectionSync(f.config, {id: 'private-test', apply: true});
-    expect(projection.some(entry => entry.uri === f.uri && entry.action === 'add')).toBe(false);
-    const malformed = f.record.content
-      .split('\n')
-      .filter(line => !line.startsWith('obsidian_evidence:'))
-      .join('\n');
+    expect(EffectArray.some(projection, entry => entry.uri === f.uri && entry.action === 'add')).toBe(false);
+    const malformed = EffectArray.join(
+      EffectArray.filter(
+        Effect2.pipe(f.record.content, EffectString.split('\n')),
+        line => !Effect2.pipe(line, EffectString.startsWith('obsidian_evidence:')),
+      ),
+      '\n',
+    );
     yield* f.store.write(f.location, f.uri, malformed, {mode: 'replace'});
     expect(Result.isFailure(yield* runExportPack(f.config, {uri: f.uri, path: output}).pipe(Effect.result))).toBe(true);
     expect(yield* f.fs.exists(output)).toBe(false);
     const nested = yield* runObsidianProjectionSync(f.config, {id: 'private-test', apply: true});
-    expect(nested.some(entry => entry.uri === f.uri && entry.action === 'add')).toBe(false);
+    expect(EffectArray.some(nested, entry => entry.uri === f.uri && entry.action === 'add')).toBe(false);
   }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
 );
 

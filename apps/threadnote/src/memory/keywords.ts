@@ -2,6 +2,7 @@ import {Console, Effect} from 'effect';
 import {isMemoryKeywordEnrichmentEligible, normalizeManualMemoryKeywords} from '../effect/ai/enrichment.js';
 import {MemoryOperationError} from './migrations.js';
 import type {MemoryKind} from '@threadnote/memory/types';
+import {Array as EffectArray} from 'effect';
 
 export type MemoryKeywordPlan =
   | {readonly mode: 'explicit'; readonly keywords: readonly string[]}
@@ -35,7 +36,7 @@ export function resolveMemoryKeywordPlan(input: MemoryKeywordPlanInput): MemoryK
   const explicit = input.keywords !== undefined;
   const clear = input.clearKeywords === true;
   const regenerate = input.regenerateKeywords === true;
-  if ([explicit, clear, regenerate].filter(Boolean).length > 1) {
+  if (EffectArray.filter([explicit, clear, regenerate], Boolean).length > 1) {
     throw MemoryOperationError.make({message: `Choose only one of ${names}.`});
   }
   const hasPriorKeywords = (input.replacedKeywords?.length ?? 0) > 0;

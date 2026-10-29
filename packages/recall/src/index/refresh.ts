@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {forEachFileWithinBoundary} from '@threadnote/platform/safe_scan';
@@ -13,6 +14,8 @@ import {stripRecallAnchor} from './lexical.js';
 import {normalizeRecallWorkspaceScope} from './scope.js';
 import {normalizedRecallRecordedAt} from './selection.js';
 import {recallCandidateLogicalCorpusKey, type RecallCandidate} from '../rank.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface RecallIndexSource {
   readonly modifiedAt?: string;
@@ -113,8 +116,11 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
     return sql.unsafe(
       `INSERT INTO ${RECALL_REFRESH_SOURCE_TABLE} (
         uri, uri_locator_digest, source_path, source_modified_at, source_size, authority_policy_key, invalidated
-      ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-      batch.flatMap(source => [
+      ) VALUES ${EffectArray.join(
+        EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?)'),
+        ', ',
+      )}`,
+      EffectArray.flatMap(batch, source => [
         source.uri,
         source.uriLocatorDigest,
         source.path,
@@ -141,10 +147,10 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
             skippedOversizedDocumentCount += 1;
             return;
           }
-          const relativeSegments = path
-            .relative(root.path, file.path)
-            .split(path.sep)
-            .map(segment => segment.normalize('NFC'));
+          const relativeSegments = EffectArray.map(
+            Effect2.pipe(path.relative(root.path, file.path), EffectString.split(path.sep)),
+            segment => Effect2.pipe(segment, EffectString.normalize('NFC')),
+          );
           const uri = canonicalResourceUri(rootId.namespace, [...rootId.segments, ...relativeSegments]);
           if (isExternalResourceUri(uri) && externalAccess[uri] === undefined) return;
           pendingSources.push({
@@ -227,7 +233,7 @@ export function forEachChangedRecallSourcePage<A, E, R>(
       );
       if (rows.length === 0) break;
       yield* visitPage(
-        rows.map(row => ({
+        EffectArray.map(rows, row => ({
           modifiedAt: row.source_modified_at ?? undefined,
           path: row.source_path,
           size: row.source_size,
@@ -253,8 +259,11 @@ export function insertIndexedRecallSources(sql: SqlClient.SqlClient, indexedSour
         uri, project, approved_authoritative, workspace_scope, recorded_at,
         candidate_json, logical_key, document_length, exact_search_text,
         memory_links_json, memory_links_truncated
-      ) VALUES ${indexedSources.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-      indexedSources.flatMap(indexed => [
+      ) VALUES ${EffectArray.join(
+        EffectArray.map(indexedSources, () => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+        ', ',
+      )}`,
+      EffectArray.flatMap(indexedSources, indexed => [
         stripRecallAnchor(indexed.candidate.uri),
         recallIndexedProject(indexed.candidate),
         recallApprovedAuthoritative(indexed.candidate.authority, indexed.candidate.trust) ? 1 : 0,
@@ -268,8 +277,9 @@ export function insertIndexedRecallSources(sql: SqlClient.SqlClient, indexedSour
         indexed.memoryLinksTruncated ? 1 : 0,
       ]),
     );
-    const codeLinks = indexedSources.flatMap(indexed =>
-      indexed.codeLinks.map(
+    const codeLinks = EffectArray.flatMap(indexedSources, indexed =>
+      EffectArray.map(
+        indexed.codeLinks,
         link => [indexed.source.uri, link.citationOrdinal, link.selectorKind, link.selectorDigest] as const,
       ),
     );
@@ -278,12 +288,16 @@ export function insertIndexedRecallSources(sql: SqlClient.SqlClient, indexedSour
       yield* sql.unsafe(
         `INSERT INTO temp.${RECALL_REFRESH_INDEXED_CODE_LINK_TABLE} (
           uri, citation_ordinal, selector_kind, selector_digest
-        ) VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')}`,
+        ) VALUES ${EffectArray.join(
+          EffectArray.map(batch, () => '(?, ?, ?, ?)'),
+          ', ',
+        )}`,
         batch.flat(),
       );
     }
-    const memoryLinks = indexedSources.flatMap(indexed =>
-      indexed.memoryLinks.map(
+    const memoryLinks = EffectArray.flatMap(indexedSources, indexed =>
+      EffectArray.map(
+        indexed.memoryLinks,
         link =>
           [
             indexed.source.uri,
@@ -302,7 +316,10 @@ export function insertIndexedRecallSources(sql: SqlClient.SqlClient, indexedSour
         `INSERT INTO temp.${RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE} (
           uri, source_memory_id, target_memory_id, target_locator_digest,
           relation_type, relation_origin, relation_ordinal
-        ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
+        ) VALUES ${EffectArray.join(
+          EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?)'),
+          ', ',
+        )}`,
         batch.flat(),
       );
     }
@@ -314,7 +331,10 @@ export function insertIndexedRecallSources(sql: SqlClient.SqlClient, indexedSour
       return sql.unsafe(
         `INSERT INTO temp.${RECALL_REFRESH_INDEXED_POSTING_TABLE} (
           uri, term, field_weight, term_frequency
-        ) VALUES ${current.map(() => '(?, ?, ?, ?)').join(', ')}`,
+        ) VALUES ${EffectArray.join(
+          EffectArray.map(current, () => '(?, ?, ?, ?)'),
+          ', ',
+        )}`,
         current.flat(),
       );
     };
@@ -544,21 +564,28 @@ function recallIndexRoots(config: RecallRefreshConfig, path: Path.Path) {
 }
 
 function excludedDirectory(path: string, includeInactive: boolean): boolean {
-  const normalized = path.replaceAll('\\', '/');
-  if (normalized.includes('/agent-artifacts/packs/')) return true;
+  const normalized = Effect2.pipe(path, EffectString.replaceAll('\\', '/'));
+  if (Effect2.pipe(normalized, EffectString.includes('/agent-artifacts/packs/'))) return true;
   return (
     !includeInactive &&
-    (normalized.includes('/archived/') || normalized.includes('/expired/') || normalized.includes('/superseded/'))
+    (Effect2.pipe(normalized, EffectString.includes('/archived/')) ||
+      Effect2.pipe(normalized, EffectString.includes('/expired/')) ||
+      Effect2.pipe(normalized, EffectString.includes('/superseded/')))
   );
 }
 
 function excludedFile(path: string): boolean {
-  const extensionIndex = path.lastIndexOf('.');
-  const extension = extensionIndex === -1 ? '' : path.slice(extensionIndex).toLowerCase();
-  const normalized = path.replaceAll('\\', '/');
+  const extensionIndex = Effect2.pipe(
+    path,
+    EffectString.lastIndexOf('.'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const extension =
+    extensionIndex === -1 ? '' : Effect2.pipe(path, EffectString.slice(extensionIndex), EffectString.toLowerCase);
+  const normalized = Effect2.pipe(path, EffectString.replaceAll('\\', '/'));
   return (
     !TEXT_EXTENSIONS.has(extension) ||
     /\/\.(?:abstract|overview)\.md$/.test(normalized) ||
-    normalized.includes('/agent-artifacts/packs/')
+    Effect2.pipe(normalized, EffectString.includes('/agent-artifacts/packs/'))
   );
 }

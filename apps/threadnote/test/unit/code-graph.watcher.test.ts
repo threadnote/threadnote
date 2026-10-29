@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
@@ -45,6 +46,9 @@ import {
   type RepositoryIdentity,
 } from '@threadnote/graph/types';
 import {orderCodeGraphBuilderAdmissionTickets} from '@threadnote/graph/builder/admission';
+import type {CodeGraphStoreShape} from '@threadnote/graph/store';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const options: CodeGraphWatchOptions = {
   cwd: '/fixture/repository',
@@ -52,9 +56,35 @@ const options: CodeGraphWatchOptions = {
   threadnoteHome: '/fixture/home',
 };
 
-const demandCheckoutId = 'a'.repeat(64);
-const demandWorktreeId = 'b'.repeat(64);
-const demandKey = (value: string) => value.repeat(64).slice(0, 64);
+const demandCheckoutId = Effect2.pipe('a', EffectString.repeat(64));
+const demandWorktreeId = Effect2.pipe('b', EffectString.repeat(64));
+const demandKey = (value: string) => Effect2.pipe(value, EffectString.repeat(64), EffectString.slice(0, 64));
+
+type WatchPathOperations = Pick<Path.Path, 'isAbsolute' | 'join' | 'relative' | 'sep'>;
+
+function watchFileSystem(adapter: Pick<FileSystem.FileSystem, 'watch'>): FileSystem.FileSystem {
+  // @ts-expect-error -- watchRepository only calls watch; a full filesystem would obscure this focused adapter.
+  return adapter;
+}
+
+function watchPath(adapter: WatchPathOperations): Path.Path {
+  // @ts-expect-error -- watchRepository only reads these four path operations from its test adapter.
+  return adapter;
+}
+
+const inertWatchPath: WatchPathOperations = {
+  isAbsolute: () => false,
+  join: (...values) => EffectArray.join(values, '/'),
+  relative: () => '',
+  sep: '/',
+};
+
+function summaryStore(
+  adapter: Pick<CodeGraphStoreShape, 'readySnapshot' | 'snapshotPackProvenance'>,
+): CodeGraphStoreShape {
+  // @ts-expect-error -- The summary path reads only readySnapshot and snapshotPackProvenance in this test.
+  return adapter;
+}
 
 function makeDemandDriverHarness(input: {
   readonly initialTarget: string;
@@ -70,7 +100,7 @@ function makeDemandDriverHarness(input: {
     const currentTarget = yield* Ref.make(input.initialTarget);
     const state = yield* Ref.make(emptyCodeGraphRefreshDemand(demandCheckoutId, demandWorktreeId));
     let tokenOrdinal = 0;
-    const nextToken = () => `cgdq_${(++tokenOrdinal).toString(16).padStart(32, '0')}`;
+    const nextToken = () => `cgdq_${Effect2.pipe((++tokenOrdinal).toString(16), EffectString.padStart(32, '0'))}`;
     const queue = (targetKey: string) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
@@ -349,7 +379,7 @@ describe('CodeGraphWatcher', () => {
       const changedTarget = {requestKey: demandKey('b')};
       const registration = registerCodeGraphRefreshDemand(
         emptyCodeGraphRefreshDemand(demandCheckoutId, demandWorktreeId),
-        {now: 1, targetKey: oldTarget.requestKey, token: `cgdq_${'1'.repeat(32)}`},
+        {now: 1, targetKey: oldTarget.requestKey, token: `cgdq_${Effect2.pipe('1', EffectString.repeat(32))}`},
       );
       const observed = yield* Ref.make(0);
       const ran = yield* Ref.make<string | undefined>(undefined);
@@ -402,12 +432,13 @@ describe('CodeGraphWatcher', () => {
                 phase: 'claimed',
                 requestedAt: 1,
                 targetKey: demandKey('c'),
-                targetToken: `cgdq_${'2'.repeat(32)}`,
+                targetToken: `cgdq_${Effect2.pipe('2', EffectString.repeat(32))}`,
                 updatedAt: 1,
               },
               type: 'claimed',
             },
-            target: {} as never,
+            // @ts-expect-error -- This scheduler test intentionally exercises a prepared claim without a target payload.
+            target: {},
           },
         });
         yield* Deferred.succeed(releaseFirst, undefined);
@@ -433,12 +464,12 @@ describe('CodeGraphWatcher', () => {
               phase: 'claimed' as const,
               requestedAt: 1,
               targetKey: demandKey('e'),
-              targetToken: `cgdq_${'3'.repeat(32)}`,
+              targetToken: `cgdq_${Effect2.pipe('3', EffectString.repeat(32))}`,
               updatedAt: 1,
             },
             type: 'claimed' as const,
           },
-          target: {} as never,
+          target: {},
         };
         const watcher = yield* makeCodeGraphWatcher(
           () => Effect.never,
@@ -462,6 +493,7 @@ describe('CodeGraphWatcher', () => {
         );
         yield* watcher.refresh({...options, admissionClass: 'background'});
         yield* Deferred.await(firstStarted);
+        // @ts-expect-error -- The prepared-claim test preserves scheduling with an intentionally absent target payload.
         yield* watcher.refresh({...options, admissionClass: 'background', refreshDemandPrepared: prepared});
         yield* watcher.refresh({...options, admissionClass: 'background'});
         yield* Deferred.succeed(releaseFirst, undefined);
@@ -479,12 +511,12 @@ describe('CodeGraphWatcher', () => {
         refresh: {state: 'active' as const, type: 'code-graph-refresh-continuity' as const, version: 1 as const},
       };
       const result = yield* handoffCodeGraphPreparedDemand({
-        defer: Ref.set(deferred, `cgdq_${'d'.repeat(32)}`),
+        defer: Ref.set(deferred, `cgdq_${Effect2.pipe('d', EffectString.repeat(32))}`),
         receipt,
         schedule: Effect.fail(TestError.make({message: 'deterministic scheduling failure'})),
       }).pipe(Effect.exit);
       expect(result._tag).toBe('Failure');
-      expect(yield* Ref.get(deferred)).toBe(`cgdq_${'d'.repeat(32)}`);
+      expect(yield* Ref.get(deferred)).toBe(`cgdq_${Effect2.pipe('d', EffectString.repeat(32))}`);
     }),
   );
 
@@ -766,20 +798,26 @@ describe('CodeGraphWatcher', () => {
     fc.assert(
       fc.property(fc.array(fc.constantFrom('background' as const, 'current-required' as const)), classes => {
         const ordered = orderCodeGraphBuilderAdmissionTickets(
-          classes.map((admissionClass, index) => ({
+          EffectArray.map(classes, (admissionClass, index) => ({
             admissionClass,
             createdAt: index,
-            token: `${index}`.padStart(4, '0'),
+            token: Effect2.pipe(`${index}`, EffectString.padStart(4, '0')),
           })),
         );
-        const firstBackground = ordered.findIndex(ticket => ticket.admissionClass === 'background');
+        const firstBackground = EffectOption.getOrElse(
+          EffectArray.findFirstIndex(ordered, ticket => ticket.admissionClass === 'background'),
+          () => -1,
+        );
         if (firstBackground >= 0) {
-          expect(ordered.slice(firstBackground).every(ticket => ticket.admissionClass === 'background')).toBe(true);
+          expect(
+            EffectArray.every(ordered.slice(firstBackground), ticket => ticket.admissionClass === 'background'),
+          ).toBe(true);
         }
         for (const admissionClass of ['current-required', 'background'] as const) {
-          const arrivals = ordered
-            .filter(ticket => ticket.admissionClass === admissionClass)
-            .map(ticket => ticket.createdAt);
+          const arrivals = EffectArray.map(
+            EffectArray.filter(ordered, ticket => ticket.admissionClass === admissionClass),
+            ticket => ticket.createdAt,
+          );
           expect(arrivals).toEqual([...arrivals].sort((left, right) => left - right));
         }
       }),
@@ -788,9 +826,12 @@ describe('CodeGraphWatcher', () => {
   });
 
   it('admits at most two unique non-current ref tips for prewarming', () => {
-    const objectId = fc
-      .array(fc.integer({max: 15, min: 0}), {maxLength: 40, minLength: 40})
-      .map(values => values.map(value => value.toString(16)).join(''));
+    const objectId = fc.array(fc.integer({max: 15, min: 0}), {maxLength: 40, minLength: 40}).map(values =>
+      EffectArray.join(
+        EffectArray.map(values, value => value.toString(16)),
+        '',
+      ),
+    );
     fc.assert(
       fc.property(
         fc.array(objectId, {maxLength: 20}),
@@ -798,14 +839,14 @@ describe('CodeGraphWatcher', () => {
         fc.integer({max: 20, min: -5}),
         (ids, current, limit) => {
           const candidates = prewarmCandidatesFromRefOutput(
-            [...ids, current, 'not-an-object-id', ...ids].join('\n'),
+            EffectArray.join([...ids, current, 'not-an-object-id', ...ids], '\n'),
             current,
             limit,
           );
           expect(candidates.length).toBeLessThanOrEqual(2);
           expect(new Set(candidates).size).toBe(candidates.length);
           expect(candidates).not.toContain(current);
-          expect(candidates.every(value => /^[0-9a-f]{40}$/u.test(value))).toBe(true);
+          expect(EffectArray.every(candidates, value => /^[0-9a-f]{40}$/u.test(value))).toBe(true);
         },
       ),
       {numRuns: 250},
@@ -1182,7 +1223,7 @@ describe('CodeGraphWatcher', () => {
       ).pipe(provideTestLayer(Logger.layer([logger])));
 
       expect(result.starts).toBe(1);
-      expect(result.requests.filter(Boolean)).toHaveLength(1);
+      expect(EffectArray.filter(result.requests, Boolean)).toHaveLength(1);
       expect(result.whileHeld).toMatchObject({_tag: 'Some', value: {state: 'indexing'}});
       expect(result.settled).toMatchObject({
         _tag: 'Some',
@@ -1195,9 +1236,9 @@ describe('CodeGraphWatcher', () => {
       expect(serialized).not.toContain('/Users/private');
       expect(serialized).not.toContain('private writer detail');
       expect(logs).toContain('Code graph background refresh deferred (busy; recovery: defer).');
-      expect(logs.join('\n')).not.toContain('/fixture/repository');
-      expect(logs.join('\n')).not.toContain('/Users/private');
-      expect(logs.join('\n')).not.toContain('private writer detail');
+      expect(EffectArray.join(logs, '\n')).not.toContain('/fixture/repository');
+      expect(EffectArray.join(logs, '\n')).not.toContain('/Users/private');
+      expect(EffectArray.join(logs, '\n')).not.toContain('private writer detail');
       expect(observedFailures).toEqual([
         {code: 'busy', operation: 'refresh code graph', recovery: 'defer', retryable: true},
       ]);
@@ -1294,7 +1335,10 @@ describe('CodeGraphWatcher', () => {
           modelVersion: 1,
           recovery: 'defer' as const,
           retryable: true,
-          scope: {checkoutId: 'a'.repeat(64), scopeId: `code-graph-scope:${'b'.repeat(64)}`},
+          scope: {
+            checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+            scopeId: `code-graph-scope:${Effect2.pipe('b', EffectString.repeat(64))}`,
+          },
         };
         const watcher = yield* makeCodeGraphWatcher(
           () => Effect.never,
@@ -1335,13 +1379,13 @@ describe('CodeGraphWatcher', () => {
     };
     const timestamp = '2026-09-28T00:00:00.000Z';
     const status: ObservedCodeGraphBuildStatus = {
-      buildId: 'a'.repeat(32),
+      buildId: Effect2.pipe('a', EffectString.repeat(32)),
       counters: {},
       identity: {
-        checkoutId: 'b'.repeat(64),
-        commit: 'c'.repeat(40),
-        repositoryId: 'd'.repeat(64),
-        worktreeId: 'e'.repeat(64),
+        checkoutId: Effect2.pipe('b', EffectString.repeat(64)),
+        commit: Effect2.pipe('c', EffectString.repeat(40)),
+        repositoryId: Effect2.pipe('d', EffectString.repeat(64)),
+        worktreeId: Effect2.pipe('e', EffectString.repeat(64)),
       },
       owner: {processId: 42, runtime: 'bun', runtimeVersion: '1.4.2'},
       phase: 'materializing',
@@ -1410,7 +1454,7 @@ describe('CodeGraphWatcher', () => {
         },
       });
       expect(logs).toContain('Code graph background refresh deferred (unknown; recovery: diagnose).');
-      expect(`${JSON.stringify(status)}\n${logs.join('\n')}`).not.toContain(privateMarker);
+      expect(`${JSON.stringify(status)}\n${EffectArray.join(logs, '\n')}`).not.toContain(privateMarker);
     }),
   );
 
@@ -1434,7 +1478,9 @@ describe('CodeGraphWatcher', () => {
         }),
       ).pipe(provideTestLayer(Logger.layer([logger])));
 
-      expect(logs.some(message => message.includes('background refresh deferred'))).toBe(false);
+      expect(
+        EffectArray.some(logs, message => Effect2.pipe(message, EffectString.includes('background refresh deferred'))),
+      ).toBe(false);
     }),
   );
 
@@ -1447,8 +1493,8 @@ describe('CodeGraphWatcher', () => {
     return Effect.gen(function* () {
       const refreshes = yield* Ref.make(0);
       const fiber = yield* watchRepository(
-        {watch: () => Stream.die(TestError.make({message: `watch defect ${privateMarker}`}))} as never,
-        {} as never,
+        watchFileSystem({watch: () => Stream.die(TestError.make({message: `watch defect ${privateMarker}`}))}),
+        watchPath(inertWatchPath),
         options,
         false,
         () => Ref.update(refreshes, count => count + 1),
@@ -1460,7 +1506,7 @@ describe('CodeGraphWatcher', () => {
 
       expect(yield* Ref.get(refreshes)).toBeGreaterThan(beforeReconciliation);
       expect(logs).toContain('Code graph filesystem watch stopped; periodic reconciliation remains active.');
-      expect(logs.join('\n')).not.toContain(privateMarker);
+      expect(EffectArray.join(logs, '\n')).not.toContain(privateMarker);
       yield* Fiber.interrupt(fiber);
     }).pipe(provideTestLayer(Logger.layer([logger])), Effect.scoped);
   });
@@ -1469,13 +1515,13 @@ describe('CodeGraphWatcher', () => {
     Effect.gen(function* () {
       const events = yield* Ref.make<string[]>([]);
       const fiber = yield* watchRepository(
-        {watch: () => Stream.make({path: 'source.ts'})} as never,
-        {
-          isAbsolute: (value: string) => value.startsWith('/'),
-          join: (...values: string[]) => values.join('/'),
+        watchFileSystem({watch: () => Stream.make({_tag: 'Update', path: 'source.ts'})}),
+        watchPath({
+          isAbsolute: (value: string) => Effect2.pipe(value, EffectString.startsWith('/')),
+          join: (...values: string[]) => EffectArray.join(values, '/'),
           relative: () => 'source.ts',
           sep: '/',
-        } as never,
+        }),
         options,
         false,
         () => Ref.update(events, current => [...current, 'refresh']),
@@ -1501,18 +1547,21 @@ describe('CodeGraphWatcher', () => {
       const events = yield* Ref.make<string[]>([]);
       let watchOptions: {readonly recursive?: boolean} | undefined;
       const fiber = yield* watchRepository(
-        {
+        watchFileSystem({
           watch: (_root: string, observedOptions?: {readonly recursive?: boolean}) => {
             watchOptions = observedOptions;
-            return Stream.make({path: 'src/nested/value.ts'});
+            return Stream.make({_tag: 'Update', path: 'src/nested/value.ts'});
           },
-        } as never,
-        {
-          isAbsolute: (value: string) => value.startsWith('/'),
-          join: (...values: string[]) => values.join('/'),
-          relative: (from: string, to: string) => (to.startsWith(`${from}/`) ? to.slice(from.length + 1) : to),
+        }),
+        watchPath({
+          isAbsolute: (value: string) => Effect2.pipe(value, EffectString.startsWith('/')),
+          join: (...values: string[]) => EffectArray.join(values, '/'),
+          relative: (from: string, to: string) =>
+            Effect2.pipe(to, EffectString.startsWith(`${from}/`))
+              ? Effect2.pipe(to, EffectString.slice(from.length + 1))
+              : to,
           sep: '/',
-        } as never,
+        }),
         options,
         false,
         () => Ref.update(events, current => [...current, 'refresh']),
@@ -1537,13 +1586,13 @@ describe('CodeGraphWatcher', () => {
       const latestTarget = yield* Ref.make('f2');
       const requestedTargets = yield* Ref.make<string[]>([]);
       const fiber = yield* watchRepository(
-        {watch: () => Stream.make({path: 'source.ts'})} as never,
-        {
-          isAbsolute: (value: string) => value.startsWith('/'),
-          join: (...values: string[]) => values.join('/'),
+        watchFileSystem({watch: () => Stream.make({_tag: 'Update', path: 'source.ts'})}),
+        watchPath({
+          isAbsolute: (value: string) => Effect2.pipe(value, EffectString.startsWith('/')),
+          join: (...values: string[]) => EffectArray.join(values, '/'),
           relative: () => 'source.ts',
           sep: '/',
-        } as never,
+        }),
         options,
         false,
         () =>
@@ -1607,13 +1656,13 @@ describe('CodeGraphWatcher', () => {
     Effect.gen(function* () {
       const refreshes = yield* Ref.make(0);
       const fiber = yield* watchRepository(
-        {watch: () => Stream.make({path: 'source.ts'})} as never,
-        {
-          isAbsolute: (value: string) => value.startsWith('/'),
-          join: (...values: string[]) => values.join('/'),
+        watchFileSystem({watch: () => Stream.make({_tag: 'Update', path: 'source.ts'})}),
+        watchPath({
+          isAbsolute: (value: string) => Effect2.pipe(value, EffectString.startsWith('/')),
+          join: (...values: string[]) => EffectArray.join(values, '/'),
           relative: () => 'source.ts',
           sep: '/',
-        } as never,
+        }),
         options,
         false,
         () => Ref.update(refreshes, count => count + 1),
@@ -1639,13 +1688,13 @@ describe('CodeGraphWatcher', () => {
     Effect.gen(function* () {
       const events = yield* Ref.make<string[]>([]);
       const fiber = yield* watchRepository(
-        {watch: () => Stream.make({path: 'source.ts'})} as never,
-        {
-          isAbsolute: (value: string) => value.startsWith('/'),
-          join: (...values: string[]) => values.join('/'),
+        watchFileSystem({watch: () => Stream.make({_tag: 'Update', path: 'source.ts'})}),
+        watchPath({
+          isAbsolute: (value: string) => Effect2.pipe(value, EffectString.startsWith('/')),
+          join: (...values: string[]) => EffectArray.join(values, '/'),
           relative: () => 'source.ts',
           sep: '/',
-        } as never,
+        }),
         options,
         false,
         () => Ref.update(events, current => [...current, 'refresh']),
@@ -1677,8 +1726,8 @@ describe('CodeGraphWatcher', () => {
         yield* Effect.scoped(
           Effect.gen(function* () {
             const fiber = yield* watchRepository(
-              {watch: () => Stream.never} as never,
-              {} as never,
+              watchFileSystem({watch: () => Stream.never}),
+              watchPath(inertWatchPath),
               options,
               false,
               () => Ref.update(refreshes, count => count + 1),
@@ -1725,25 +1774,25 @@ describe('CodeGraphWatcher', () => {
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-watcher-refresh-reuse-'});
         const identity: RepositoryIdentity = {
           caseMode: 'sensitive',
-          checkoutId: 'a'.repeat(64),
+          checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
           displayName: 'fixture/repository',
           gitCommonDirectory: '/fixture/repository/.git',
-          headCommit: 'b'.repeat(40),
+          headCommit: Effect2.pipe('b', EffectString.repeat(40)),
           objectFormat: 'sha1',
           repoRoot: '/fixture/repository',
-          repositoryId: 'c'.repeat(64),
-          worktreeId: 'd'.repeat(64),
+          repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+          worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
         };
         const scopeEvidence = {
-          catalogFingerprint: 'g'.repeat(64),
-          closureDigest: 'e'.repeat(64),
-          definitionDigest: 'f'.repeat(64),
+          catalogFingerprint: Effect2.pipe('g', EffectString.repeat(64)),
+          closureDigest: Effect2.pipe('e', EffectString.repeat(64)),
+          definitionDigest: Effect2.pipe('f', EffectString.repeat(64)),
           extractorSet: extractorSetIdentity([], BUILTIN_LANGUAGE_PACK_REGISTRY),
-          inventoryFingerprint: '1'.repeat(64),
+          inventoryFingerprint: Effect2.pipe('1', EffectString.repeat(64)),
           observedCommit: identity.headCommit,
-          policyFingerprint: '2'.repeat(64),
+          policyFingerprint: Effect2.pipe('2', EffectString.repeat(64)),
           repositoryId: identity.repositoryId,
-          scopeKey: `code-graph-scope:${'3'.repeat(64)}`,
+          scopeKey: `code-graph-scope:${Effect2.pipe('3', EffectString.repeat(64))}`,
           worktreeId: identity.worktreeId,
         } as const;
         const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId, scopeEvidence.scopeKey);
@@ -1753,7 +1802,7 @@ describe('CodeGraphWatcher', () => {
           edgeCount: 13,
           extractorSet: scopeEvidence.extractorSet,
           fileCount: 5,
-          id: `cgsn_${'4'.repeat(40)}`,
+          id: `cgsn_${Effect2.pipe('4', EffectString.repeat(40))}`,
           repositoryId: identity.repositoryId,
           scopeId: scopeEvidence.scopeKey,
           state: 'ready' as const,
@@ -1784,10 +1833,10 @@ describe('CodeGraphWatcher', () => {
             scopeEvidence,
             scopeId: scopeEvidence.scopeKey,
           },
-          {
+          summaryStore({
             readySnapshot: () => Effect.succeed(ready),
             snapshotPackProvenance: () => Effect.succeed([]),
-          } as never,
+          }),
           BUILTIN_LANGUAGE_PACK_REGISTRY,
         );
         expect(summary).toEqual({edges: ready.edgeCount, symbols: ready.symbolCount});

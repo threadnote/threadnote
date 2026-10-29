@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, Path, Schema} from 'effect';
 import {THREADNOTE_MCP_CLIENT_ENV} from '../constants.js';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -46,10 +47,16 @@ import {
   type AgentIntegrationRegistry,
   type AgentSurfaceReceipt,
 } from './registry.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class AgentSurfaceError extends Schema.TaggedError<AgentSurfaceError>()('AgentSurfaceError', {
-  message: Schema.String,
-}) {}
+export class AgentSurfaceError extends Schema.TaggedError<AgentSurfaceError, {readonly brand: unique symbol}>()(
+  'AgentSurfaceError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 function attempt<A>(body: () => A) {
   return Effect.try({try: body, catch: cause => AgentSurfaceError.make({message: errorMessage(cause)})});
@@ -88,14 +95,21 @@ export function installJsonAgentSurface(
     const strategy = plan.adapter.json!;
     const container = agentServerContainer(parsed, plan.container);
     const current = isJsonObject(container) ? container[plan.name] : undefined;
-    const peers = Object.values(registry.surfaces ?? {}).filter(
-      receipt =>
-        receipt.surfaceId !== id &&
-        receipt.mcp.path === plan.mcpPath &&
-        receipt.mcp.name === plan.name &&
-        sameAgentContainer(receipt.strategy.container, plan.container),
+    const peers = EffectArray.filter(
+      EffectRecord.values(registry.surfaces ?? {}),
+      __effectArrayValue =>
+        !!(receipt =>
+          receipt.surfaceId !== id &&
+          receipt.mcp.path === plan.mcpPath &&
+          receipt.mcp.name === plan.name &&
+          sameAgentContainer(receipt.strategy.container, plan.container))(__effectArrayValue),
     );
-    if (peers.some(receipt => receipt.agentId !== adapter.catalog.agentId || receipt.mcp.toolset !== plan.toolset))
+    if (
+      EffectArray.some(
+        peers,
+        receipt => receipt.agentId !== adapter.catalog.agentId || receipt.mcp.toolset !== plan.toolset,
+      )
+    )
       return yield* AgentSurfaceError.make({
         message: 'Shared MCP consumers require the same agent identity and toolset.',
       });
@@ -124,7 +138,7 @@ export function installJsonAgentSurface(
     const next = yield* attempt(() => mergeAgentServer(parsed, plan.container, plan.name, entry));
     if (!options.apply) {
       yield* Console.log(
-        `Would merge ${typeof plan.container === 'string' ? plan.container : plan.container.join('.')}.${plan.name} in ${plan.mcpPath}`,
+        `Would merge ${typeof plan.container === 'string' ? plan.container : EffectArray.join(plan.container, '.')}.${plan.name} in ${plan.mcpPath}`,
       );
       for (const artifact of plan.artifacts) yield* Console.log(`Would install ${artifact.name}: ${artifact.path}`);
       return;
@@ -140,8 +154,8 @@ export function installJsonAgentSurface(
       cwd: plan.cwd,
       installedVersion: yield* getThreadnoteVersion(),
       status: 'pending',
-      artifacts: Object.fromEntries(plan.artifacts.map(artifact => [artifact.path, artifact.hash])),
-      artifactDescriptors: plan.artifacts.map(({hash, kind, name, path}) => ({hash, kind, name, path})),
+      artifacts: EffectRecord.fromEntries(EffectArray.map(plan.artifacts, artifact => [artifact.path, artifact.hash])),
+      artifactDescriptors: EffectArray.map(plan.artifacts, ({hash, kind, name, path}) => ({hash, kind, name, path})),
       strategy: {codec: strategy.codec ?? 'json', container: plan.container, kind: 'json'},
       mcp: {
         root: plan.mcpRoot,
@@ -185,7 +199,7 @@ function isOwnedEntry(value: unknown, agentId: string, home: string): value is J
   const environment = isJsonObject(value) ? (value.env ?? value.environment) : undefined;
   return (
     isJsonObject(value) &&
-    (typeof value.command === 'string' || Array.isArray(value.command)) &&
+    (typeof value.command === 'string' || EffectArray.isArray(value.command)) &&
     isJsonObject(environment) &&
     environment[THREADNOTE_MCP_CLIENT_ENV] === agentId &&
     environment.THREADNOTE_HOME === home
@@ -201,7 +215,7 @@ export const agentSurfaceStatus = Effect.fn('agentSurfaces.status')(function* (
   if (!adapter.json)
     return {
       state: adapter.catalog.tier === 'manual' ? ('manual' as const) : ('unsupported' as const),
-      detail: adapter.catalog.caveats.join(' '),
+      detail: EffectArray.join(adapter.catalog.caveats, ' '),
     };
   if (!receipt) return {state: 'absent' as const, detail: 'No managed installation receipt.'};
   if (receipt.status === 'pending')
@@ -225,7 +239,8 @@ export const agentSurfaceStatus = Effect.fn('agentSurfaces.status')(function* (
     JSON.stringify(entry.args) !== JSON.stringify(plan.entry.args) ||
     !isJsonObject(entry[environmentKey]) ||
     !isJsonObject(plan.entry[environmentKey]) ||
-    Object.entries(plan.entry[environmentKey]).some(
+    EffectArray.some(
+      EffectRecord.toEntries(plan.entry[environmentKey]),
       ([key, value]) => !isJsonObject(entry[environmentKey]) || entry[environmentKey][key] !== value,
     )
   ) {
@@ -301,7 +316,8 @@ const removeAgentSurfaceFromRegistry = Effect.fn('agentSurfaces.removeFromRegist
   if (!apply) yield* Console.log(`Would remove owned MCP entry from ${receipt.mcp.path}`);
   else if (
     entry !== undefined &&
-    !Object.values(registry.surfaces ?? {}).some(
+    !EffectArray.some(
+      EffectRecord.values(registry.surfaces ?? {}),
       peer =>
         peer.surfaceId !== receipt.surfaceId &&
         peer.mcp.path === receipt.mcp.path &&
@@ -320,7 +336,7 @@ const removeAgentSurfaceFromRegistry = Effect.fn('agentSurfaces.removeFromRegist
     const rendered = writeAgentServer(raw, receipt.strategy.codec, receipt.strategy.container, receipt.mcp.name, next);
     if (
       receipt.mcp.createdFile &&
-      Object.keys(next).length === 0 &&
+      EffectRecord.keys(next).length === 0 &&
       (receipt.strategy.codec === 'json' || !agentJsonHasComments(rendered))
     )
       yield* removeAgentTargetIfUnchanged(receipt.mcp.path, raw!);
@@ -386,7 +402,10 @@ const assertSurfaceTargets = Effect.fn('agentSurfaces.assertTargets')(function* 
   const path = yield* Path.Path;
   const targets = [
     [plan.mcpPath, plan.mcpRoot],
-    ...plan.artifacts.map(artifact => [artifact.path, artifact.name.startsWith('skill ') ? plan.skillRoot : plan.root]),
+    ...EffectArray.map(plan.artifacts, artifact => [
+      artifact.path,
+      Effect2.pipe(artifact.name, EffectString.startsWith('skill ')) ? plan.skillRoot : plan.root,
+    ]),
   ];
   const checked = new Set<string>();
   for (const [target, root] of targets) {
@@ -416,8 +435,8 @@ function receiptMatchesPlan(
   ) {
     return false;
   }
-  const installed = receipt.artifactDescriptors.map(({kind, path}) => `${kind}:${path}`).sort();
-  const current = plan.artifacts.map(({kind, path}) => `${kind}:${path}`).sort();
+  const installed = EffectArray.map(receipt.artifactDescriptors, ({kind, path}) => `${kind}:${path}`).sort();
+  const current = EffectArray.map(plan.artifacts, ({kind, path}) => `${kind}:${path}`).sort();
   return JSON.stringify(installed) === JSON.stringify(current);
 }
 

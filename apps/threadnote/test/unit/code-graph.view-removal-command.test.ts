@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
@@ -31,12 +32,14 @@ import {
   readAnonymousTelemetryDiagnostic,
   readAnonymousTelemetryReportedOutcome,
 } from '@threadnote/threadnote/telemetry/diagnostic';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
-const WORKTREE_ID = '1'.repeat(64);
-const SNAPSHOT_ID = `cgsn_${'c'.repeat(40)}-direct`;
-const SCOPED_SNAPSHOT_ID = `cgsn_${'d'.repeat(40)}-direct`;
-const SCOPE_ID = `code-graph-scope:${'e'.repeat(64)}`;
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
+const WORKTREE_ID = Effect2.pipe('1', EffectString.repeat(64));
+const SNAPSHOT_ID = `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}-direct`;
+const SCOPED_SNAPSHOT_ID = `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-direct`;
+const SCOPE_ID = `code-graph-scope:${Effect2.pipe('e', EffectString.repeat(64))}`;
 const ViewRemovalCommandTestLayer = Layer.merge(CodeGraphStore.layer, TestCommandExecutorLayer).pipe(
   Layer.provideMerge(TestSystemInfoLayer),
   Layer.provideMerge(BunServices.layer),
@@ -51,8 +54,14 @@ describe('code graph remove-view command core', () => {
           const target = {checkoutId: CHECKOUT_ID, snapshotId: SNAPSHOT_ID, worktreeId: WORKTREE_ID};
 
           const preview = yield* removeCodeGraphView(fixture.home, target);
-          const stale = yield* removeCodeGraphView(fixture.home, {...target, snapshotId: `cgsn_${'d'.repeat(40)}`});
-          const notFound = yield* removeCodeGraphView(fixture.home, {...target, worktreeId: '2'.repeat(64)});
+          const stale = yield* removeCodeGraphView(fixture.home, {
+            ...target,
+            snapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
+          });
+          const notFound = yield* removeCodeGraphView(fixture.home, {
+            ...target,
+            worktreeId: Effect2.pipe('2', EffectString.repeat(64)),
+          });
           expect(preview).toMatchObject({applied: false, cleanup: {provenance: null, vectors: null}, state: 'ready'});
           expect(activeView(fixture.databasePath)).toBe(SNAPSHOT_ID);
           expect(removedView(fixture.databasePath)).toBeUndefined();
@@ -398,15 +407,23 @@ describe('code graph remove-view command core', () => {
             {concurrency: 'unbounded'},
           );
           const elapsed = (yield* TestClock.withLive(Clock.currentTimeMillis)) - startedAt;
-          const successes = outcomes.filter(outcome => outcome.state === 'succeeded').map(outcome => outcome.result);
-          const failures = outcomes.filter(outcome => outcome.state === 'failed').map(outcome => outcome.error);
-
-          expect(successes.filter(result => result.state === 'removed')).toHaveLength(1);
-          expect(successes.every(result => result.state === 'removed' || result.state === 'already-removed')).toBe(
-            true,
+          const successes = EffectArray.map(
+            EffectArray.filter(outcomes, outcome => outcome.state === 'succeeded'),
+            outcome => outcome.result,
           );
-          expect(failures.every(error => Schema.is(CodeGraphStoreBusyError)(error))).toBe(true);
-          expect(failures.every(error => !String(error).includes(fixture.home))).toBe(true);
+          const failures = EffectArray.map(
+            EffectArray.filter(outcomes, outcome => outcome.state === 'failed'),
+            outcome => outcome.error,
+          );
+
+          expect(EffectArray.filter(successes, result => result.state === 'removed')).toHaveLength(1);
+          expect(
+            EffectArray.every(successes, result => result.state === 'removed' || result.state === 'already-removed'),
+          ).toBe(true);
+          expect(EffectArray.every(failures, error => Schema.is(CodeGraphStoreBusyError)(error))).toBe(true);
+          expect(
+            EffectArray.every(failures, error => !Effect2.pipe(String(error), EffectString.includes(fixture.home))),
+          ).toBe(true);
           expect(elapsed).toBeLessThan(5_000);
 
           const retries = yield* Effect.forEach(
@@ -414,7 +431,7 @@ describe('code graph remove-view command core', () => {
             () => removeCodeGraphView(fixture.home, target, {apply: true}),
             {concurrency: 1},
           );
-          expect(retries.every(result => result.state === 'already-removed')).toBe(true);
+          expect(EffectArray.every(retries, result => result.state === 'already-removed')).toBe(true);
         }),
       ),
     );
@@ -471,7 +488,7 @@ function seedGraph(databasePath: string): void {
         `INSERT INTO repositories (id, display_name, object_format, created_at, last_used_at)
          VALUES (?, 'threadnote/view-command', 'sha1', ?, ?)`,
       )
-      .run('b'.repeat(64), new Date(0).toISOString(), new Date(0).toISOString());
+      .run(Effect2.pipe('b', EffectString.repeat(64)), new Date(0).toISOString(), new Date(0).toISOString());
     database
       .query(
         `INSERT INTO snapshots (
@@ -482,9 +499,9 @@ function seedGraph(databasePath: string): void {
       )
       .run(
         SNAPSHOT_ID,
-        'b'.repeat(64),
+        Effect2.pipe('b', EffectString.repeat(64)),
         WORKTREE_ID,
-        'f'.repeat(40),
+        Effect2.pipe('f', EffectString.repeat(40)),
         new Date(0).toISOString(),
         new Date(1).toISOString(),
       );
@@ -512,10 +529,10 @@ function seedScopedView(databasePath: string): void {
       )
       .run(
         SCOPED_SNAPSHOT_ID,
-        'b'.repeat(64),
+        Effect2.pipe('b', EffectString.repeat(64)),
         WORKTREE_ID,
         SCOPE_ID,
-        'f'.repeat(40),
+        Effect2.pipe('f', EffectString.repeat(40)),
         new Date(0).toISOString(),
         new Date(1).toISOString(),
       );
@@ -549,7 +566,12 @@ function seedVectorDatabase(home: string) {
         database.run('CREATE TABLE vector_pointers (worktree_id TEXT PRIMARY KEY, generation TEXT NOT NULL)');
         database
           .query(`INSERT INTO vector_generations VALUES (?, ?, 'model-command', ?, 3, 1, 0, 'ready', ?)`)
-          .run('generation-command', SNAPSHOT_ID, 'e'.repeat(64), DateTime.formatIso(DateTime.makeUnsafe(0)));
+          .run(
+            'generation-command',
+            SNAPSHOT_ID,
+            Effect2.pipe('e', EffectString.repeat(64)),
+            DateTime.formatIso(DateTime.makeUnsafe(0)),
+          );
         database
           .query('INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, ?)')
           .run(WORKTREE_ID, 'generation-command');
@@ -645,10 +667,10 @@ function localProvenanceRecord(canonicalWorktreePath: string, observedAt: string
   return {
     canonicalWorktreePath,
     checkoutId: CHECKOUT_ID,
-    headCommit: 'f'.repeat(40),
+    headCommit: Effect2.pipe('f', EffectString.repeat(40)),
     observedAt,
     registration: {kind: 'main'},
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
     schemaVersion: 2,
     worktreeId: WORKTREE_ID,
   };

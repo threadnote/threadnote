@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -17,6 +18,9 @@ import {
   recallUriScopePredicate,
   type RecallSqlPredicate,
 } from '../index/scope.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export const MAX_INDEXED_MEMORY_LINKS_PER_SOURCE = 64;
 
@@ -144,24 +148,24 @@ export function deriveIndexedRecallMemoryLinks(
     ...(memory.metadata.supersedes
       ? [{ordinal: 0, origin: 'supersedes' as const, type: 'supersedes' as const, uri: memory.metadata.supersedes}]
       : []),
-    ...(memory.metadata.relations ?? []).map((relation, ordinal) => ({
+    ...EffectArray.map(memory.metadata.relations ?? [], (relation, ordinal) => ({
       ...relation,
       ordinal,
       origin: 'relation' as const,
     })),
-    ...(memory.metadata.references ?? []).map((uri, ordinal) => ({
+    ...EffectArray.map(memory.metadata.references ?? [], (uri, ordinal) => ({
       ordinal,
       origin: 'references' as const,
       type: 'references' as const,
       uri,
     })),
-    ...(memory.metadata.evidence ?? []).flatMap((uri, ordinal) =>
-      uri.startsWith('threadnote://')
+    ...EffectArray.flatMap(memory.metadata.evidence ?? [], (uri, ordinal) =>
+      Effect2.pipe(uri, EffectString.startsWith('threadnote://'))
         ? [{ordinal, origin: 'evidence' as const, type: 'evidence_for' as const, uri}]
         : [],
     ),
   ];
-  const projected = relations.flatMap(relation => {
+  const projected = EffectArray.flatMap(relations, relation => {
     let uri: string;
     try {
       uri = parseResourceId(relation.uri).canonicalUri;
@@ -267,7 +271,7 @@ export const selectRecallMemoryLinks = Effect.fn('recall.selectMemoryLinks')(fun
         rowsBySeed.set(key, seedRows);
       }
       if (direction === 'outgoing') {
-        const witnessedBatch = seedBatch.flatMap(seed => {
+        const witnessedBatch = EffectArray.flatMap(seedBatch, seed => {
           const witnessed = witnessedSourceBySeed.get(memoryLinkSeedKey(seed.memoryId, seed.requestedOrdinal));
           return witnessed === undefined ? [] : [witnessed];
         });
@@ -307,9 +311,10 @@ export const selectRecallMemoryLinks = Effect.fn('recall.selectMemoryLinks')(fun
         attemptedRowCount += batch.length;
         const unreadPaths = [
           ...new Map(
-            batch
-              .filter(row => !canonicalMemoryByPath.has(row.source_path))
-              .map(row => [row.source_path, row] as const),
+            EffectArray.map(
+              EffectArray.filter(batch, row => !canonicalMemoryByPath.has(row.source_path)),
+              row => [row.source_path, row] as const,
+            ),
           ).values(),
         ];
         canonicalRereadCount += unreadPaths.length;
@@ -323,7 +328,7 @@ export const selectRecallMemoryLinks = Effect.fn('recall.selectMemoryLinks')(fun
           {concurrency: RECALL_MEMORY_LINK_CANONICAL_READ_CONCURRENCY},
         );
         for (const [sourcePath, memory] of newlyRead) canonicalMemoryByPath.set(sourcePath, memory);
-        const batchResults: RecallMemoryLinkCanonicalSelectionResult[] = batch.map(row => {
+        const batchResults: RecallMemoryLinkCanonicalSelectionResult[] = EffectArray.map(batch, row => {
           const memory = canonicalMemoryByPath.get(row.source_path);
           const witnessedSource = witnessedSourceBySeed.get(
             memoryLinkSeedKey(row.requested_memory_id, row.requested_ordinal),
@@ -342,8 +347,11 @@ export const selectRecallMemoryLinks = Effect.fn('recall.selectMemoryLinks')(fun
           if (!canonicalMemoryLinkSourceLifecycleIsSelected(memory, options)) {
             return {canonicalMismatch: false};
           }
-          const link = deriveIndexedRecallMemoryLinks(memory).links.find(candidate =>
-            indexedMemoryLinkMatchesRow(candidate, row),
+          const link = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              deriveIndexedRecallMemoryLinks(memory).links,
+              __effectArrayValue => !!(candidate => indexedMemoryLinkMatchesRow(candidate, row))(__effectArrayValue),
+            ),
           );
           if (!link) return {canonicalMismatch: true};
           verifiedCanonicalRecordsByUri.set(
@@ -366,11 +374,16 @@ export const selectRecallMemoryLinks = Effect.fn('recall.selectMemoryLinks')(fun
             },
           };
         });
-        canonicalMismatchCount += batchResults.filter(result => result.canonicalMismatch).length;
-        verified.push(...batchResults.flatMap(result => (result.match === undefined ? [] : [result.match])));
+        canonicalMismatchCount += EffectArray.filter(
+          batchResults,
+          (result, __effectArrayIndex) => __effectArrayIndex in batchResults && result.canonicalMismatch,
+        ).length;
+        verified.push(
+          ...EffectArray.flatMap(batchResults, result => (result.match === undefined ? [] : [result.match])),
+        );
       }
       if (seedRows.length > attemptedRowCount) truncatedSeeds.add(seed.requestedOrdinal);
-      selected.push(...verified.map((match, laneRank) => ({...match, laneRank})));
+      selected.push(...EffectArray.map(verified, (match, laneRank) => ({...match, laneRank})));
     }
   }
 
@@ -391,7 +404,7 @@ export const selectRecallMemoryLinks = Effect.fn('recall.selectMemoryLinks')(fun
   );
   for (const omitted of ranked.slice(limit)) truncatedSeeds.add(omitted.requestedOrdinal);
   if (truncatedSeeds.size > 0) options.onSearchTruncated?.([...truncatedSeeds].sort((a, b) => a - b));
-  return ranked.slice(0, limit).map(({laneRank: _laneRank, ...match}) => match);
+  return EffectArray.map(ranked.slice(0, limit), ({laneRank: _laneRank, ...match}) => match);
 });
 
 function canonicalMemoryLinkSourceMatches(
@@ -480,7 +493,7 @@ function normalizeWitnessedMemoryLinkSources(
   sources: readonly RecallMemoryLinkWitnessedSource[],
   seeds: readonly RecallMemoryLinkSeed[],
 ): ReadonlyMap<string, RecallMemoryLinkWitnessedSource> {
-  const allowedSeeds = new Set(seeds.map(seed => memoryLinkSeedKey(seed.memoryId, seed.requestedOrdinal)));
+  const allowedSeeds = new Set(EffectArray.map(seeds, seed => memoryLinkSeedKey(seed.memoryId, seed.requestedOrdinal)));
   const candidates = new Map<string, Map<string, RecallMemoryLinkWitnessedSource>>();
   for (const source of sources) {
     const key = memoryLinkSeedKey(source.memoryId, source.requestedOrdinal);
@@ -497,7 +510,9 @@ function normalizeWitnessedMemoryLinkSources(
     candidates.set(key, byUri);
   }
   return new Map(
-    [...candidates].flatMap(([key, byUri]) => (byUri.size === 1 ? [[key, [...byUri.values()][0]] as const] : [])),
+    EffectArray.flatMap([...candidates], ([key, byUri]) =>
+      byUri.size === 1 ? [[key, [...byUri.values()][0]] as const] : [],
+    ),
   );
 }
 
@@ -517,7 +532,7 @@ function normalizeMemoryLinkDirections(
 ): readonly ('outgoing' | 'incoming')[] {
   if (directions === undefined) return ['outgoing', 'incoming'];
   const selected = new Set(directions);
-  return (['outgoing', 'incoming'] as const).filter(direction => selected.has(direction));
+  return EffectArray.filter(['outgoing', 'incoming'] as const, direction => selected.has(direction));
 }
 
 function memoryLinkSelectionContext(
@@ -530,7 +545,12 @@ function memoryLinkSelectionContext(
   return {
     relationParams,
     relationPredicate:
-      relationParams.length > 0 ? `AND memory_link.relation_type IN (${relationParams.map(() => '?').join(', ')})` : '',
+      relationParams.length > 0
+        ? `AND memory_link.relation_type IN (${EffectArray.join(
+            EffectArray.map(relationParams, () => '?'),
+            ', ',
+          )})`
+        : '',
     scope: combineRecallSqlPredicates(
       recallUriScopePredicate('document', options.allowedUriScopes),
       recallEligibilityPredicate('document', options.eligibility),
@@ -557,7 +577,8 @@ function buildBoundedRecallMemoryLinkRawQueryWithContext(
   // SQLite requires the explicit partial-index predicate; equality to a
   // bound non-empty memory ID is not enough for it to prove eligibility.
   const selectorIndexPredicate = direction === 'incoming' ? "AND memory_link.target_memory_id <> ''" : '';
-  const selectorQueries = seeds.map(
+  const selectorQueries = EffectArray.map(
+    seeds,
     () => `SELECT * FROM (
       SELECT
         memory_link.source_memory_id,
@@ -592,7 +613,7 @@ function buildBoundedRecallMemoryLinkRawQueryWithContext(
     )`,
   );
   return {
-    params: seeds.flatMap(seed => [
+    params: EffectArray.flatMap(seeds, seed => [
       seed.requestedOrdinal,
       seed.memoryId,
       seed.memoryId,
@@ -600,7 +621,7 @@ function buildBoundedRecallMemoryLinkRawQueryWithContext(
       ...context.relationParams,
       queryLimit,
     ]),
-    sql: `SELECT * FROM (${selectorQueries.join(' UNION ALL ')}) AS selected_links
+    sql: `SELECT * FROM (${EffectArray.join(selectorQueries, ' UNION ALL ')}) AS selected_links
       ORDER BY
         requested_ordinal,
         requested_memory_id COLLATE BINARY,
@@ -619,7 +640,8 @@ function buildBoundedWitnessedRecallMemoryLinkRawQueryWithContext(
   queryLimit: number,
 ): RecallMemoryLinkRawSelectionQuery | undefined {
   if (!Number.isSafeInteger(queryLimit) || queryLimit < 1 || sources.length === 0) return undefined;
-  const selectorQueries = sources.map(
+  const selectorQueries = EffectArray.map(
+    sources,
     () => `SELECT * FROM (
       SELECT
         memory_link.source_memory_id,
@@ -652,7 +674,7 @@ function buildBoundedWitnessedRecallMemoryLinkRawQueryWithContext(
     )`,
   );
   return {
-    params: sources.flatMap(source => [
+    params: EffectArray.flatMap(sources, source => [
       source.requestedOrdinal,
       source.memoryId,
       source.uri,
@@ -660,7 +682,7 @@ function buildBoundedWitnessedRecallMemoryLinkRawQueryWithContext(
       ...context.relationParams,
       queryLimit,
     ]),
-    sql: `SELECT * FROM (${selectorQueries.join(' UNION ALL ')}) AS selected_links
+    sql: `SELECT * FROM (${EffectArray.join(selectorQueries, ' UNION ALL ')}) AS selected_links
       ORDER BY
         requested_ordinal,
         requested_memory_id COLLATE BINARY,

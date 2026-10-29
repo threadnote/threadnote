@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -45,7 +46,7 @@ describe('current graph admission freshness', () => {
           requestMaintenance: false,
         });
         expect(inspected.freshness).toBe('current');
-        expect(inspected.nodes.some(node => node.name === 'excludedSymbol')).toBe(false);
+        expect(EffectArray.some(inspected.nodes, node => node.name === 'excludedSymbol')).toBe(false);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     60_000,
   );
@@ -136,16 +137,16 @@ describe('current graph admission freshness', () => {
               requestMaintenance: false,
             });
             expect(restrictedQuery.freshness).toBe('current');
-            expect(restrictedQuery.nodes.some(node => node.name === 'excludedSymbol')).toBe(false);
+            expect(EffectArray.some(restrictedQuery.nodes, node => node.name === 'excludedSymbol')).toBe(false);
           }
           yield* fs.writeFileString(exclude, 'src/excluded.ts\n');
           const excluded = yield* inspect();
           expect(excluded.freshness).toBe('current');
-          expect(excluded.nodes.some(node => node.name === 'excludedSymbol')).toBe(false);
+          expect(EffectArray.some(excluded.nodes, node => node.name === 'excludedSymbol')).toBe(false);
           yield* fs.writeFileString(exclude, '# comment-only policy\n');
           const restored = yield* inspect();
           expect(restored.freshness).toBe('current');
-          expect(restored.nodes.some(node => node.name === 'excludedSymbol')).toBe(true);
+          expect(EffectArray.some(restored.nodes, node => node.name === 'excludedSymbol')).toBe(true);
           yield* fs.writeFileString(exclude, '# different comment, same admission\n');
           expect((yield* inspect()).freshness).toBe('current');
         }
@@ -168,7 +169,7 @@ describe('current graph admission freshness', () => {
           },
         });
         expect(raced.freshness).toBe('current');
-        expect(raced.nodes.some(node => node.name === 'excludedSymbol')).toBe(false);
+        expect(EffectArray.some(raced.nodes, node => node.name === 'excludedSymbol')).toBe(false);
         yield* fs.writeFileString(exclude, '');
         let changedDuringIndex = false;
         yield* indexer.index({
@@ -186,7 +187,7 @@ describe('current graph admission freshness', () => {
         expect(changedDuringIndex).toBe(true);
         const afterLateIndexChange = yield* inspect();
         expect(afterLateIndexChange.freshness).toBe('current');
-        expect(afterLateIndexChange.nodes.some(node => node.name === 'excludedSymbol')).toBe(false);
+        expect(EffectArray.some(afterLateIndexChange.nodes, node => node.name === 'excludedSymbol')).toBe(false);
         yield* fs.writeFileString(exclude, '');
         yield* git(['add', 'src/included.ts']);
         yield* git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'next layer']);
@@ -196,7 +197,7 @@ describe('current graph admission freshness', () => {
         yield* fs.writeFileString(exclude, 'src/excluded.ts\n');
         const afterLayerPolicyChange = yield* inspect();
         expect(afterLayerPolicyChange.freshness).toBe('current');
-        expect(afterLayerPolicyChange.nodes.some(node => node.name === 'excludedSymbol')).toBe(false);
+        expect(EffectArray.some(afterLayerPolicyChange.nodes, node => node.name === 'excludedSymbol')).toBe(false);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     60_000,
   );

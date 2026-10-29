@@ -1,8 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {projectRecallMcpResponse, RECALL_MCP_RESPONSE_MINIMUM_ESTIMATED_TOKENS} from '@threadnote/recall/mcp/response';
 import {lexicalIndexUnavailableWarning} from '@threadnote/recall/warning';
 import type {RecallHit} from '@threadnote/recall/results';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 function hit(index: number, options: Partial<RecallHit> = {}): RecallHit {
   return {
@@ -55,7 +59,7 @@ function seededNavigation(results: readonly RecallHit[]) {
     },
     memoryConnections: {
       candidates: [],
-      connections: results.map((result, relationOrdinal) => ({
+      connections: EffectArray.map(results, (result, relationOrdinal) => ({
         currentness: 'current' as const,
         direction: 'outgoing' as const,
         distance: 1 as const,
@@ -123,13 +127,13 @@ describe('recall MCP response projection', () => {
     const projectBoundary = {
       mode: 'allow-projects-and-projectless' as const,
       reason: 'workspace-checkout' as const,
-      projects: Array.from({length: 4}, (_, index) => `${index}${'p'.repeat(47)}`),
+      projects: Array.from({length: 4}, (_, index) => `${index}${Effect.pipe('p', EffectString.repeat(47))}`),
       omittedProjects: 2,
     };
     const input = {
       ...logical(
         [],
-        Array.from({length: 4}, (_, index) => `${index}${'x'.repeat(179)}`),
+        Array.from({length: 4}, (_, index) => `${index}${Effect.pipe('x', EffectString.repeat(179))}`),
       ),
       confidence: {
         level: 'no_answer' as const,
@@ -162,11 +166,11 @@ describe('recall MCP response projection', () => {
       projectBoundary: {
         mode: 'allow-projects-and-projectless' as const,
         reason: 'workspace-checkout' as const,
-        projects: Array.from({length: 4}, (_, index) => `${index}${'p'.repeat(47)}`),
+        projects: Array.from({length: 4}, (_, index) => `${index}${Effect.pipe('p', EffectString.repeat(47))}`),
         omittedProjects: 2,
       },
       warnings: [lexicalIndexUnavailableWarning()],
-      notices: Array.from({length: 4}, (_, index) => `${index}${'x'.repeat(179)}`),
+      notices: Array.from({length: 4}, (_, index) => `${index}${Effect.pipe('x', EffectString.repeat(179))}`),
     };
     for (const budgetTokens of [700, 1500])
       for (const responseFormat of ['agent', 'dual'] as const) {
@@ -183,12 +187,22 @@ describe('recall MCP response projection', () => {
         } else {
           expect(result.structuredContent.confidence?.basis).toBe('explicit-memory-connection');
           expect(
-            result.structuredContent.memoryConnections?.connections.some(
-              connection => connection.resolution === 'resolved',
+            EffectOption.getOrUndefined(
+              EffectOption.map(
+                EffectOption.fromNullishOr(result.structuredContent.memoryConnections?.connections),
+                __effectArrayReceiver =>
+                  EffectArray.some(__effectArrayReceiver, connection => connection.resolution === 'resolved'),
+              ),
             ),
           ).toBe(true);
           expect(
-            result.structuredContent.memoryConnections?.premises.some(premise => premise.state === 'current'),
+            EffectOption.getOrUndefined(
+              EffectOption.map(
+                EffectOption.fromNullishOr(result.structuredContent.memoryConnections?.premises),
+                __effectArrayReceiver =>
+                  EffectArray.some(__effectArrayReceiver, premise => premise.state === 'current'),
+              ),
+            ),
           ).toBe(true);
         }
       }
@@ -302,7 +316,7 @@ describe('recall MCP response projection', () => {
     expect(first.responseFormat).toBe('agent');
     expect(first.measurement.structuredBytes).toBe(0);
     expect(first.text).toMatch(/^TN-RECALL\/1\n/);
-    expect(first.text).toContain(firstHit.uri.replace(/\s+/gu, ' '));
+    expect(first.text).toContain(Effect.pipe(firstHit.uri, EffectString.replace(/\s+/gu, ' ')));
     expect(first.text).toContain('1. Memory, confidence');
     expect(first.text).toContain('Connection 1:');
     expect(first.text).toContain('Premise 1:');
@@ -621,7 +635,10 @@ describe('recall MCP response projection', () => {
       },
     });
 
-    expect(projected.structuredContent.results.map(result => result.uri)).toEqual([directHit.uri, topicalHit.uri]);
+    expect(EffectArray.map(projected.structuredContent.results, result => result.uri)).toEqual([
+      directHit.uri,
+      topicalHit.uri,
+    ]);
     expect(projected.structuredContent.memoryConnections).toMatchObject({
       connections: [{neighborUri: directHit.uri}],
       coverage: {connectionCount: 1, resultCount: 1, truncated: false},
@@ -688,13 +705,16 @@ describe('recall MCP response projection', () => {
       reason: 'Verified one-hop relation; confidence covers navigation only, not entailment.',
       score: 1,
     });
-    expect(projected.structuredContent.results.map(result => result.uri)).toEqual([topicalHit.uri, directHit.uri]);
+    expect(EffectArray.map(projected.structuredContent.results, result => result.uri)).toEqual([
+      topicalHit.uri,
+      directHit.uri,
+    ]);
     expect(projected.structuredContent.nextAction.uris[0]).toBe(directHit.uri);
   });
 
   it('marks a verified seed connection as budget-limited when 700 tokens omit its pointer', () => {
     const directHit = hit(1, {
-      uri: `threadnote://user/test/memories/durable/projects/threadnote/${'verified-connection-'.repeat(4)}.md`,
+      uri: `threadnote://user/test/memories/durable/projects/threadnote/${Effect.pipe('verified-connection-', EffectString.repeat(4))}.md`,
     });
     const response = seededNavigation([directHit]);
     const narrow = projectRecallMcpResponse(response, {budgetTokens: 700, responseFormat: 'dual'});
@@ -716,7 +736,7 @@ describe('recall MCP response projection', () => {
   it('preserves topical confidence when a later verified neighbor is budget-omitted', () => {
     const topical = hit(1);
     const neighbor = hit(2, {
-      uri: `threadnote://user/test/memories/durable/projects/threadnote/${'verified-neighbor-'.repeat(5)}.md`,
+      uri: `threadnote://user/test/memories/durable/projects/threadnote/${Effect.pipe('verified-neighbor-', EffectString.repeat(5))}.md`,
     });
     const seeded = seededNavigation([topical, neighbor]);
     const response = {
@@ -730,7 +750,7 @@ describe('recall MCP response projection', () => {
     };
     const projected = projectRecallMcpResponse(response, {budgetTokens: 700, responseFormat: 'dual'});
 
-    expect(projected.structuredContent.results.map(result => result.uri)).toEqual([topical.uri]);
+    expect(EffectArray.map(projected.structuredContent.results, result => result.uri)).toEqual([topical.uri]);
     expect(projected.structuredContent.confidence).toMatchObject({basis: 'ranked-relevance', level: 'medium'});
     expect(projected.structuredContent.output).toMatchObject({budgetLimited: true, retryBudgetTokens: 1_500});
   });
@@ -741,8 +761,9 @@ describe('recall MCP response projection', () => {
         fc.array(fc.integer({min: 1, max: 140}), {minLength: 1, maxLength: 8}),
         fc.integer({min: 700, max: 1_500}),
         (uriLengths, budgetTokens) => {
-          const results = uriLengths.map((length, index) =>
+          const results = EffectArray.map(uriLengths, (length, index) =>
             hit(index, {
+              // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
               uri: `threadnote://user/test/memories/durable/projects/threadnote/${index}-${'x'.repeat(length)}.md`,
             }),
           );
@@ -852,8 +873,14 @@ describe('recall MCP response projection', () => {
       level: 'high',
     });
     const nextUri = projected.structuredContent.nextAction.uris[0];
-    const receipt = projected.structuredContent.memoryConnections?.connections.find(
-      connection => connection.neighborUri === nextUri,
+    const receipt = EffectOption.getOrUndefined(
+      EffectOption.map(
+        EffectOption.fromNullishOr(projected.structuredContent.memoryConnections?.connections),
+        __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(__effectArrayReceiver, connection => connection.neighborUri === nextUri),
+          ),
+      ),
     );
     if (receipt === undefined) throw new Error('Expected an actionable connection receipt.');
     expect(receipt).toMatchObject({currentness: 'current', requestedOrdinal: 1, resolution: 'resolved'});
@@ -936,10 +963,10 @@ describe('recall MCP response projection', () => {
         fc.integer({min: RECALL_MCP_RESPONSE_MINIMUM_ESTIMATED_TOKENS, max: 1_500}),
         fc.boolean(),
         (segments, budgetTokens, explain) => {
-          const results = segments.map((segment, index) =>
+          const results = EffectArray.map(segments, (segment, index) =>
             hit(index, {uri: `threadnote://user/test/memories/durable/projects/threadnote/${segment}.md`}),
           );
-          const connections = results.map((result, relationOrdinal) => ({
+          const connections = EffectArray.map(results, (result, relationOrdinal) => ({
             currentness: relationOrdinal % 2 === 0 ? ('current' as const) : ('historical' as const),
             direction: 'outgoing' as const,
             distance: 1 as const,
@@ -989,7 +1016,7 @@ describe('recall MCP response projection', () => {
           };
           const projected = projectRecallMcpResponse(response, {budgetTokens, explain});
           const repeated = projectRecallMcpResponse(response, {budgetTokens, explain});
-          const returnedUris = new Set(projected.structuredContent.results.map(result => result.uri));
+          const returnedUris = new Set(EffectArray.map(projected.structuredContent.results, result => result.uri));
 
           expect(projected).toEqual(repeated);
           expect(projected.measurement.totalBytes).toBeLessThanOrEqual(budgetTokens * 3);
@@ -999,9 +1026,20 @@ describe('recall MCP response projection', () => {
             level: 'high',
           });
           expect(projected.structuredContent.nextAction.uris.length).toBeGreaterThan(0);
-          expect(projected.structuredContent.nextAction.uris.every(uri => returnedUris.has(uri))).toBe(true);
-          const actionableReceipt = projected.structuredContent.memoryConnections?.connections.find(
-            connection => connection.neighborUri === projected.structuredContent.nextAction.uris[0],
+          expect(EffectArray.every(projected.structuredContent.nextAction.uris, uri => returnedUris.has(uri))).toBe(
+            true,
+          );
+          const actionableReceipt = EffectOption.getOrUndefined(
+            EffectOption.map(
+              EffectOption.fromNullishOr(projected.structuredContent.memoryConnections?.connections),
+              __effectArrayReceiver =>
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    __effectArrayReceiver,
+                    connection => connection.neighborUri === projected.structuredContent.nextAction.uris[0],
+                  ),
+                ),
+            ),
           );
           if (actionableReceipt === undefined) throw new Error('Expected an actionable connection receipt.');
           expect(actionableReceipt).toMatchObject({resolution: 'resolved'});
@@ -1073,7 +1111,7 @@ describe('recall MCP response projection', () => {
         fc.uniqueArray(fc.stringMatching(/^[a-z0-9-]{1,32}$/), {maxLength: 30, selector: value => value}),
         fc.integer({min: RECALL_MCP_RESPONSE_MINIMUM_ESTIMATED_TOKENS, max: 1_500}),
         (segments, budgetTokens) => {
-          const results = segments.map((segment, index) =>
+          const results = EffectArray.map(segments, (segment, index) =>
             hit(index, {
               uri: `threadnote://user/test/memories/durable/projects/threadnote/${segment}.md`,
             }),
@@ -1083,12 +1121,14 @@ describe('recall MCP response projection', () => {
 
           expect(first).toEqual(second);
           expect(first.measurement.totalBytes).toBeLessThanOrEqual(budgetTokens * 3);
-          expect(first.structuredContent.results.map(result => result.uri)).toEqual(
-            results.slice(0, first.structuredContent.output.returnedResults).map(result => result.uri),
+          expect(EffectArray.map(first.structuredContent.results, result => result.uri)).toEqual(
+            EffectArray.map(results.slice(0, first.structuredContent.output.returnedResults), result => result.uri),
           );
-          expect(first.structuredContent.results.every(result => result.readState === 'unread')).toBe(true);
+          expect(EffectArray.every(first.structuredContent.results, result => result.readState === 'unread')).toBe(
+            true,
+          );
           expect(first.structuredContent.nextAction.uris).toEqual(
-            first.structuredContent.results.slice(0, 3).map(result => result.uri),
+            EffectArray.map(first.structuredContent.results.slice(0, 3), result => result.uri),
           );
         },
       ),
@@ -1105,7 +1145,7 @@ describe('recall MCP response projection', () => {
           selector: value => value,
         }),
         segments => {
-          const results = segments.map((segment, index) =>
+          const results = EffectArray.map(segments, (segment, index) =>
             hit(index, {
               rankReasons: [{code: 'exact_term_match', contribution: 0.18, detail: `Match ${segment}\t🚀\n${index}`}],
               uri: `threadnote://user/test/memories/durable/projects/threadnote/${segment}.md`,
@@ -1123,15 +1163,21 @@ describe('recall MCP response projection', () => {
           expect(narrow.measurement.totalBytes).toBeLessThanOrEqual(700 * 3);
           expect(expanded.measurement.totalBytes).toBeLessThanOrEqual(1_500 * 3);
 
-          const narrowUris = narrow.structuredContent.results.map(result => result.uri);
-          const expandedUris = expanded.structuredContent.results.map(result => result.uri);
-          expect(narrowUris).toEqual(results.slice(0, narrowUris.length).map(result => result.uri));
-          expect(expandedUris).toEqual(results.slice(0, expandedUris.length).map(result => result.uri));
+          const narrowUris = EffectArray.map(narrow.structuredContent.results, result => result.uri);
+          const expandedUris = EffectArray.map(expanded.structuredContent.results, result => result.uri);
+          expect(narrowUris).toEqual(EffectArray.map(results.slice(0, narrowUris.length), result => result.uri));
+          expect(expandedUris).toEqual(EffectArray.map(results.slice(0, expandedUris.length), result => result.uri));
           expect(expandedUris.slice(0, narrowUris.length)).toEqual(narrowUris);
           expect(expandedUris.length).toBeGreaterThanOrEqual(narrowUris.length);
 
           for (const [index, result] of expanded.structuredContent.results.entries()) {
-            const row = expanded.text.split('\n').find(line => line.startsWith(`${index + 1}. `));
+            const row = EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                Effect.pipe(expanded.text, EffectString.split('\n')),
+                __effectArrayValue =>
+                  !!(line => Effect.pipe(line, EffectString.startsWith(`${index + 1}. `)))(__effectArrayValue),
+              ),
+            );
             expect(row).toContain(result.uri);
             expect(row).not.toMatch(/[\t\n]/u);
           }
@@ -1145,7 +1191,7 @@ describe('recall MCP response projection', () => {
     const projected = projectRecallMcpResponse(
       seededNavigation([
         hit(1, {
-          uri: `threadnote://user/test/memories/durable/projects/threadnote/${'long-uri-segment-'.repeat(250)}.md`,
+          uri: `threadnote://user/test/memories/durable/projects/threadnote/${Effect.pipe('long-uri-segment-', EffectString.repeat(250))}.md`,
         }),
       ]),
       {budgetTokens: 700},

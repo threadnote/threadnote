@@ -6,11 +6,13 @@ import {join} from '@threadnote/testing/node-path';
 import {fileURLToPath} from '@threadnote/testing/node-url';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Effect, FileSystem, Path} from 'effect';
+import {Array as EffectArray, Clock, Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import {parseCodeGraphBenchmarkRunCheckpoint, startExternalSampler} from '../../../../scripts/benchmark-code-graph.js';
 import {parseCodeGraphBenchmarkSamplerCheckpoint} from '../../../../scripts/code-graph-benchmark-sampler.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('production-large benchmark failure telemetry', () => {
   it('accepts only structured run lifecycle checkpoints', () => {
@@ -72,7 +74,9 @@ describe('production-large benchmark failure telemetry', () => {
 
         expect(terminal).toMatchObject({state: 'parent-exited'});
         expect(
-          (await readdir(artifactRoot)).filter(name => name.startsWith('code-graph-production-large-n1-')),
+          EffectArray.filter(await readdir(artifactRoot), name =>
+            Effect2.pipe(name, EffectString.startsWith('code-graph-production-large-n1-')),
+          ),
         ).toEqual(['code-graph-production-large-n1-test.json.bootstrap.sampler.json']);
       } finally {
         if (parent.exitCode === null) parent.kill(9);
@@ -97,7 +101,7 @@ describe('production-large benchmark failure telemetry', () => {
         const failingFileSystem = FileSystem.FileSystem.of({
           ...fileSystem,
           writeFileString: (file, data, options) =>
-            file.endsWith('.stop')
+            Effect2.pipe(file, EffectString.endsWith('.stop'))
               ? Effect.die(TestError.make({message: 'injected stop-write failure'}))
               : fileSystem.writeFileString(file, data, options),
         });

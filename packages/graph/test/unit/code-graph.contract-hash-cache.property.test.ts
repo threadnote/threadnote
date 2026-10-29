@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {createCachedCodeGraphContractHash} from '@threadnote/graph/cached_contract_hash';
@@ -8,18 +9,22 @@ import {
   packDerivationIdentity,
 } from '@threadnote/graph/languages/registry';
 import type {CodeGraphLanguagePack} from '@threadnote/graph/languages/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const nativeHash = (input: string) => new Bun.CryptoHasher('sha256').update(input).digest('hex');
 const fixturePack = BUILTIN_LANGUAGE_PACK_REGISTRY.packs[0];
-const mutableFixturePack = BUILTIN_LANGUAGE_PACK_REGISTRY.packs.find(pack => pack.assets.length > 0)!;
+const mutableFixturePack = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_LANGUAGE_PACK_REGISTRY.packs, pack => pack.assets.length > 0),
+)!;
 
 function clonePack(pack: CodeGraphLanguagePack) {
   return {
     ...pack,
-    assets: pack.assets.map(asset => ({...asset})),
+    assets: EffectArray.map(pack.assets, asset => ({...asset})),
     capabilities: new Set(pack.capabilities),
     extractor: {...pack.extractor},
-    files: pack.files.map(file => ({...file})),
+    files: EffectArray.map(pack.files, file => ({...file})),
     resolutionStrategy: {...pack.resolutionStrategy},
   };
 }
@@ -69,8 +74,8 @@ describe('code graph pure contract digest caches', () => {
     for (const input of [
       'before',
       '\u0000\ud800\udfff\ud83d\ude80',
-      'x'.repeat(65_536),
-      'y'.repeat(65_537),
+      Effect.pipe('x', EffectString.repeat(65_536)),
+      Effect.pipe('y', EffectString.repeat(65_537)),
       'before',
     ]) {
       expect(hash(owner, input)).toBe(nativeHash(input));
@@ -94,7 +99,9 @@ describe('code graph pure contract digest caches', () => {
           const registry = {...BUILTIN_LANGUAGE_PACK_REGISTRY, packs: [pack]};
           const original = packState(pack);
           const originalHashes = [packCacheIdentity(pack), packDerivationIdentity(pack)];
-          const originalContracts = [false, true].map(opaque => codeGraphInventoryReuseContract(registry, opaque));
+          const originalContracts = EffectArray.map([false, true], opaque =>
+            codeGraphInventoryReuseContract(registry, opaque),
+          );
           for (const {field, suffix, opaque} of mutations) {
             if (field === 'matcher') pack.files[0].value = `.changed-${suffix}`;
             else if (field === 'role') pack.files[0].role = suffix % 2 === 0 ? 'manifest' : 'source';
@@ -118,7 +125,7 @@ describe('code graph pure contract digest caches', () => {
           Object.assign(pack, clonePack(mutableFixturePack));
           expect(packState(pack)).toBe(original);
           expect([packCacheIdentity(pack), packDerivationIdentity(pack)]).toEqual(originalHashes);
-          expect([false, true].map(opaque => codeGraphInventoryReuseContract(registry, opaque))).toEqual(
+          expect(EffectArray.map([false, true], opaque => codeGraphInventoryReuseContract(registry, opaque))).toEqual(
             originalContracts,
           );
         },

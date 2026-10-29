@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {boundNativeCycleOutput, nativeCycleTextPage} from '../src/cycle_output.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const caught = (run: () => unknown): unknown => {
   try {
@@ -19,7 +22,7 @@ describe('native cycle text paging', () => {
         fc.array(fc.constantFrom('🌊', 'é', '漢'), {minLength: 700, maxLength: 2200}),
         fc.integer({min: 1024, max: 4096}),
         (characters, maxBytes) => {
-          const input = characters.join('');
+          const input = EffectArray.join(characters, '');
           const expected = new TextDecoder().decode(new TextEncoder().encode(input));
           const pages: string[] = [];
           let offsetBytes = 0;
@@ -43,7 +46,7 @@ describe('native cycle text paging', () => {
             sourceDigest = page.sourceDigest;
             expect(pageCount).toBeLessThanOrEqual(20);
           }
-          expect(pages.join('')).toBe(expected);
+          expect(EffectArray.join(pages, '')).toBe(expected);
         },
       ),
       {numRuns: 40},
@@ -51,12 +54,16 @@ describe('native cycle text paging', () => {
   });
 
   it('requires the exact digest for continuations and rejects stale or split offsets', () => {
-    const source = `${'x'.repeat(1023)}🌟tail`;
+    const source = `${Effect.pipe('x', EffectString.repeat(1023))}🌟tail`;
     const first = nativeCycleTextPage(source, {maxBytes: 1024});
-    expect(first.text).toBe('x'.repeat(1023));
+    expect(first.text).toBe(Effect.pipe('x', EffectString.repeat(1023)));
     expect(first.nextOffsetBytes).toBe(1023);
     expect(caught(() => nativeCycleTextPage(source, {offsetBytes: 1023}))).toMatchObject({code: 'invalid-cycle-page'});
-    expect(caught(() => nativeCycleTextPage(source, {offsetBytes: 1023, sourceDigest: '0'.repeat(64)}))).toMatchObject({
+    expect(
+      caught(() =>
+        nativeCycleTextPage(source, {offsetBytes: 1023, sourceDigest: Effect.pipe('0', EffectString.repeat(64))}),
+      ),
+    ).toMatchObject({
       code: 'invalid-cycle-page',
     });
     expect(
@@ -90,7 +97,7 @@ describe('native cycle text paging', () => {
 describe('native cycle output budgeting', () => {
   it('retains failure semantics and exact detail identity when a failed report is oversized', () => {
     const result = boundNativeCycleOutput(
-      {status: 'error', code: 'invalid-cycle-review', report: 'x'.repeat(8000)},
+      {status: 'error', code: 'invalid-cycle-review', report: Effect.pipe('x', EffectString.repeat(8000))},
       1024,
       {snapshotId: 'snapshot-1', detailKind: 'attempt', attemptId: 'failed-1'},
     );
@@ -112,7 +119,7 @@ describe('native cycle output budgeting', () => {
       revision: 'revision-7',
       snapshot: {snapshotId: 'snapshot-1'},
       next: {cursor: 'cursor-2'},
-      body: '🌊'.repeat(1500),
+      body: Effect.pipe('🌊', EffectString.repeat(1500)),
     };
     const result = boundNativeCycleOutput(payload, 1024);
     const bytes = new TextEncoder().encode(JSON.stringify(result)).byteLength;
@@ -132,7 +139,11 @@ describe('native cycle output budgeting', () => {
   it('refuses a fallback that cannot retain the next-page payload within budget', () => {
     const result = caught(() =>
       boundNativeCycleOutput(
-        {available: true, snapshot: {snapshotId: 'snapshot-1'}, next: {cursor: 'x'.repeat(1400)}},
+        {
+          available: true,
+          snapshot: {snapshotId: 'snapshot-1'},
+          next: {cursor: Effect.pipe('x', EffectString.repeat(1400))},
+        },
         1024,
       ),
     );

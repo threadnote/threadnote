@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {basename, join} from '@threadnote/testing/node-path';
@@ -8,6 +9,8 @@ import {
   runCommand as runCommandEffect,
 } from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const enrichRecallQueryWithWorkspaceContext = (
   ...args: Parameters<typeof enrichRecallQueryWithWorkspaceContextEffect>
@@ -22,7 +25,7 @@ describe('workspace recall enrichment', () => {
     const repoRoot = await mkdtemp(join(tmpdir(), 'threadnote-recall-repo-'));
     const previousCallerCwd = process.env.THREADNOTE_CALLER_CWD;
     const gitEnvKeys = ['GIT_COMMON_DIR', 'GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE'] as const;
-    const previousGitEnv = new Map(gitEnvKeys.map(key => [key, process.env[key]]));
+    const previousGitEnv = new Map(EffectArray.map(gitEnvKeys, key => [key, process.env[key]]));
     delete process.env.THREADNOTE_CALLER_CWD;
     for (const key of gitEnvKeys) {
       delete process.env[key];
@@ -42,7 +45,7 @@ describe('workspace recall enrichment', () => {
         cwd: repoRoot,
         includeProcessCwd: false,
       });
-      const projectTerms = projectScoped.split(/\s+/);
+      const projectTerms = Effect.pipe(projectScoped, EffectString.split(/\s+/));
       expect(projectTerms).toContain('threadnote');
       expect(projectTerms).not.toContain(basename(repoRoot));
       expect(projectScoped).not.toContain('mobile-feedback-results-fix');

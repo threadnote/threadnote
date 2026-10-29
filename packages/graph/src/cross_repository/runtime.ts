@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {requireWorkset} from '@threadnote/workspace/manifest';
@@ -37,14 +38,16 @@ import {
   type CodeGraphCrossRepositoryTraversalBudgetsV1,
   type CodeGraphCrossRepositoryTraversalEndpointV1,
 } from './traversal.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class CodeGraphCrossRepositoryRuntimeError extends Schema.TaggedError<CodeGraphCrossRepositoryRuntimeError>()(
-  'CodeGraphCrossRepositoryRuntimeError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphCrossRepositoryRuntimeError extends Schema.TaggedError<
+  CodeGraphCrossRepositoryRuntimeError,
+  {readonly brand: unique symbol}
+>()('CodeGraphCrossRepositoryRuntimeError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const SNAPSHOT_LEASE_MILLISECONDS = 2 * 60_000;
 const LOCAL_ADJACENCY_SCAN_MAXIMUM = 5_000;
@@ -246,7 +249,7 @@ const inspectCodeGraphWorksetTopologyScoped = Effect.fn('codeGraphCrossRepositor
         ...(options.maxEvidencePerEdge === undefined ? {} : {maxEvidencePerEdge: options.maxEvidencePerEdge}),
         ...(options.maxNodes === undefined ? {} : {maxNodes: options.maxNodes}),
       },
-      repositories: runtime.published.members.map(member => ({
+      repositories: EffectArray.map(runtime.published.members, member => ({
         repositoryId: member.repositoryId,
         repositoryKey: member.repositoryKey,
         snapshotId: member.snapshotId,
@@ -280,7 +283,9 @@ function prepareRuntime(config: RuntimeConfig, worksetName: string) {
         message: `The published workset catalog for ${workset.name} is stale; run \`threadnote workset prepare\`.`,
       });
     }
-    const projectsByKey = new Map(workset.projects.map(project => [safeLabel(project.name), project] as const));
+    const projectsByKey = new Map(
+      EffectArray.map(workset.projects, project => [safeLabel(project.name), project] as const),
+    );
     const candidates = yield* Effect.forEach(
       published.members,
       member => {
@@ -305,7 +310,7 @@ function prepareRuntime(config: RuntimeConfig, worksetName: string) {
       {concurrency: 4},
     );
     const availableByRepositorySnapshot = new Map(
-      candidates.flatMap(member =>
+      EffectArray.flatMap(candidates, member =>
         member === undefined ? [] : [[repositorySnapshotKey(member.published), member] as const],
       ),
     );
@@ -315,7 +320,8 @@ function prepareRuntime(config: RuntimeConfig, worksetName: string) {
 
 function requireCompleteBridgeSet(config: RuntimeConfig, runtime: PreparedRuntime) {
   if (
-    [...runtime.availableByRepositorySnapshot.values()].some(
+    EffectArray.some(
+      [...runtime.availableByRepositorySnapshot.values()],
       member => member.status.projectCoverage?.completeness === 'partial',
     )
   ) {
@@ -475,7 +481,7 @@ function readLocalAdjacencyPage(
         }
         const nextOffset = lastRawIndex === undefined ? undefined : lastRawIndex + 1;
         return {
-          edges: selected.map(value => value.edge),
+          edges: EffectArray.map(selected, value => value.edge),
           ...(nextOffset !== undefined && (hasUnseenRows || sourceMayHaveMore) ? {next: String(nextOffset)} : {}),
         } satisfies CodeGraphCrossRepositoryLocalPageV1;
       }
@@ -489,7 +495,9 @@ function registerTraversalQualifiedRefs(
   qualifiedRefs: ReadonlyMap<string, {readonly nodeId: string; readonly repositoryId: string}>,
 ) {
   return Effect.forEach(
-    [...qualifiedRefs].map(([ref, value]) => ({...value, ref})).sort((left, right) => compareText(left.ref, right.ref)),
+    EffectArray.map([...qualifiedRefs], ([ref, value]) => ({...value, ref})).sort((left, right) =>
+      compareText(left.ref, right.ref),
+    ),
     candidate => registerCodeGraphQualifiedRef(threadnoteHome, candidate),
     {concurrency: 1, discard: true},
   );
@@ -543,10 +551,12 @@ function edgeNodeId(ref: string, repositoryId: string, rows: readonly CodeGraphE
 
 function resolveTraversalEndpoint(config: RuntimeConfig, runtime: PreparedRuntime, selector: string) {
   return Effect.gen(function* () {
-    const normalized = selector.trim();
+    const normalized = Effect2.pipe(selector, EffectString.trim);
     if (QUALIFIED_REF.test(normalized)) {
       const record = yield* resolveCodeGraphQualifiedRef(config.agentContextHome, {ref: normalized});
-      const member = runtime.published.members.find(candidate => candidate.repositoryId === record.repositoryId);
+      const member = EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.published.members, candidate => candidate.repositoryId === record.repositoryId),
+      );
       if (member === undefined)
         throw CodeGraphCrossRepositoryRuntimeError.make({
           message: 'The qualified reference repository is not in this workset generation.',
@@ -569,13 +579,19 @@ function resolveTraversalEndpoint(config: RuntimeConfig, runtime: PreparedRuntim
       }
       return traversalEndpoint(runtime.published.members[0], {componentId: normalized, kind: 'component'});
     }
-    const marker = normalized.lastIndexOf(':cgp_');
+    const marker = Effect2.pipe(
+      normalized,
+      EffectString.lastIndexOf(':cgp_'),
+      Effect2.Option.getOrElse(() => -1),
+    );
     if (marker > 0) {
-      const repositoryKey = normalized.slice(0, marker);
-      const componentId = normalized.slice(marker + 1);
+      const repositoryKey = Effect2.pipe(normalized, EffectString.slice(0, marker));
+      const componentId = Effect2.pipe(normalized, EffectString.slice(marker + 1));
       if (!COMPONENT_ID.test(componentId))
         throw CodeGraphCrossRepositoryRuntimeError.make({message: 'Workset component selector is invalid.'});
-      const member = runtime.published.members.find(candidate => candidate.repositoryKey === repositoryKey);
+      const member = EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.published.members, candidate => candidate.repositoryKey === repositoryKey),
+      );
       if (member === undefined)
         throw CodeGraphCrossRepositoryRuntimeError.make({
           message: 'Workset component selector names an unknown generation member.',
@@ -623,8 +639,8 @@ function localOffset(cursor: string | undefined): number {
 }
 
 function safeLabel(value: string): string {
-  const normalized = value.replace(/[\r\n\t\0]/gu, ' ').trim();
-  return normalized.slice(0, 256) || 'unknown';
+  const normalized = Effect2.pipe(value, EffectString.replace(/[\r\n\t\0]/gu, ' '), EffectString.trim);
+  return Effect2.pipe(normalized, EffectString.slice(0, 256)) || 'unknown';
 }
 
 function boundedInteger(value: number, label: string, minimum: number, maximum: number): number {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect} from 'effect';
 import {
@@ -50,7 +51,7 @@ const passingEvidence: MixedNxBazelGateEvidence = {
 describe('mixed Nx/Bazel release gate', () => {
   it.effect('pins the reviewed public repositories and accepts an explicit output only', () =>
     Effect.sync(() => {
-      expect(MIXED_NX_BAZEL_FIXTURE_SOURCES.map(source => `${source.id}@${source.commit}`)).toEqual([
+      expect(EffectArray.map(MIXED_NX_BAZEL_FIXTURE_SOURCES, source => `${source.id}@${source.commit}`)).toEqual([
         'nx@2d15c7faa570629657112857a079803897e8e43d',
         'rules-js@0960bdd0f542a73a4a6fa3183d68ef5766cce285',
         'angular@8925a4ee491aebaf6a1a74880c73dfb20e0a4ba1',

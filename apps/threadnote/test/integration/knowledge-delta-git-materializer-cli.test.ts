@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import assert from 'node:assert/strict';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -8,12 +10,15 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {buildKnowledgeDeltaGitProposalV1} from '@threadnote/threadnote/git_proposal/knowledge_delta';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import type {KnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execFilePromise = promisify(execFile);
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
 });
 
 describe('Knowledge Delta Git proposal materializer CLI', () => {
@@ -32,7 +37,7 @@ describe('Knowledge Delta Git proposal materializer CLI', () => {
     );
     expect(preview).toMatchObject({
       branch: proposal.proposal.branch.name,
-      files: proposal.proposal.files.map(file => file.path),
+      files: EffectArray.map(proposal.proposal.files, file => file.path),
       outcome: 'preview',
       proposalHash: proposal.proposal.proposalHash,
     });
@@ -65,14 +70,14 @@ describe('Knowledge Delta Git proposal materializer CLI', () => {
     const wrongTeam = await runCli(
       ['share', 'materialize', '--proposal', proposalPath, '--team', 'alias', '--apply'],
       fixture.home,
-    ).catch(error => error as CliFailure);
+    ).catch(cliFailure);
     expect(wrongTeam).toMatchObject({code: 1});
     expect(wrongTeam.stderr).toContain('targets shared team "default"');
 
     await configureTeams(fixture.home, fixture.worktree, {default: {access: 'read-only'}});
     await expect(runCli(['share', 'materialize', '--proposal', proposalPath], fixture.home)).resolves.toBeDefined();
     const readOnly = await runCli(['share', 'materialize', '--proposal', proposalPath, '--apply'], fixture.home).catch(
-      error => error as CliFailure,
+      cliFailure,
     );
     expect(readOnly).toMatchObject({code: 1});
     expect(readOnly.stderr).toContain('is read-only');
@@ -81,15 +86,13 @@ describe('Knowledge Delta Git proposal materializer CLI', () => {
     const staleTarget = proposalFor(fixture.baseCommit, proposal.proposal.files[0].content);
     const staleTargetPath = join(fixture.root, 'stale-target-proposal.json');
     await writeFile(staleTargetPath, staleTarget.artifact, 'utf8');
-    const stale = await runCli(['share', 'materialize', '--proposal', staleTargetPath], fixture.home).catch(
-      error => error as CliFailure,
-    );
+    const stale = await runCli(['share', 'materialize', '--proposal', staleTargetPath], fixture.home).catch(cliFailure);
     expect(stale).toMatchObject({code: 1});
     expect(stale.stderr).toContain('Proposal target changed');
 
     await git(fixture.worktree, ['update-ref', `refs/heads/${proposal.proposal.branch.name}`, fixture.baseCommit]);
     const conflict = await runCli(['share', 'materialize', '--proposal', proposalPath, '--apply'], fixture.home).catch(
-      error => error as CliFailure,
+      cliFailure,
     );
     expect(conflict).toMatchObject({code: 1});
     expect(conflict.stderr).toContain('Existing materialization branch conflicts');
@@ -105,14 +108,14 @@ describe('Knowledge Delta Git proposal materializer CLI', () => {
     await symlink(outside, join(fixture.worktree, 'durable'));
     await git(fixture.worktree, ['add', 'durable']);
     await git(fixture.worktree, ['commit', '-m', 'seed symlink']);
-    fixture.baseCommit = (await git(fixture.worktree, ['rev-parse', 'HEAD'])).trim();
+    fixture.baseCommit = Effect.pipe(await git(fixture.worktree, ['rev-parse', 'HEAD']), EffectString.trim);
     const proposal = proposalFor(fixture.baseCommit);
     const proposalPath = join(fixture.root, 'proposal.json');
     await writeFile(proposalPath, proposal.artifact, 'utf8');
     const before = await observeRepository(fixture.worktree);
 
     const result = await runCli(['share', 'materialize', '--proposal', proposalPath, '--apply'], fixture.home).catch(
-      error => error as CliFailure,
+      cliFailure,
     );
     expect(result).toMatchObject({code: 1});
     await expect(stat(join(outside, 'projects', 'threadnote', 'architecture.md'))).rejects.toThrow();
@@ -144,6 +147,20 @@ interface CliFailure extends Error {
   readonly stderr: string;
 }
 
+function isCliFailure(error: unknown): error is CliFailure {
+  return (
+    error instanceof Error &&
+    'stderr' in error &&
+    typeof error.stderr === 'string' &&
+    (!('code' in error) || typeof error.code === 'number')
+  );
+}
+
+function cliFailure(error: unknown): CliFailure {
+  assert(isCliFailure(error), 'Expected a failed CLI result.');
+  return error;
+}
+
 interface Fixture {
   baseCommit: string;
   readonly home: string;
@@ -166,7 +183,7 @@ async function makeFixture(
   await writeFile(join(worktree, 'README.md'), '# Shared knowledge\n', 'utf8');
   await git(worktree, ['add', 'README.md']);
   await git(worktree, ['commit', '-m', options.empty === true ? 'seed repository' : 'seed shared repository']);
-  const baseCommit = (await git(worktree, ['rev-parse', 'HEAD'])).trim();
+  const baseCommit = Effect.pipe(await git(worktree, ['rev-parse', 'HEAD']), EffectString.trim);
   await configureTeams(home, worktree, {default: {access: 'read-write'}});
   return {baseCommit, home, root, worktree};
 }
@@ -249,8 +266,8 @@ async function configureTeams(
     `${JSON.stringify(
       {
         defaultTeam: 'default',
-        teams: Object.fromEntries(
-          Object.entries(teams).map(([name, team]) => [
+        teams: EffectRecord.fromEntries(
+          EffectArray.map(EffectRecord.toEntries(teams), ([name, team]) => [
             name,
             {
               access: team.access,

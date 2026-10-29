@@ -1,4 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const RECALL_CHUNKER_VERSION = 3 as const;
 export const DEFAULT_CHUNK_MAX_CHARACTERS = 2400;
@@ -36,11 +39,11 @@ export function chunkRecallDocument(
     if (available < 128) continue;
     const windows = splitWithOverlap(section.body, available, overlapCharacters);
     for (const window of windows) {
-      const content = `${prefix}${window}`.trim();
+      const content = Effect.pipe(`${prefix}${window}`, EffectString.trim);
       if (content) rawChunks.push({content, heading: section.heading});
     }
   }
-  return rawChunks.map((chunk, index) => {
+  return EffectArray.map(rawChunks, (chunk, index) => {
     const fingerprint = digest(chunk.content);
     return {
       ...chunk,
@@ -53,13 +56,16 @@ export function chunkRecallDocument(
 }
 
 function normalizeChunkSource(value: string): string {
-  return value
-    .replace(/\r\n?/g, '\n')
-    .split('\n')
-    .map(line => line.replace(/[ \t]+$/g, ''))
-    .join('\n')
-    .replace(/\n{4,}/g, '\n\n\n')
-    .trim();
+  return Effect.pipe(
+    EffectArray.join(
+      EffectArray.map(Effect.pipe(value, EffectString.replace(/\r\n?/g, '\n'), EffectString.split('\n')), line =>
+        Effect.pipe(line, EffectString.replace(/[ \t]+$/g, '')),
+      ),
+      '\n',
+    ),
+    EffectString.replace(/\n{4,}/g, '\n\n\n'),
+    EffectString.trim,
+  );
 }
 
 function markdownSections(source: string): readonly {readonly body: string; readonly heading: string}[] {
@@ -67,11 +73,11 @@ function markdownSections(source: string): readonly {readonly body: string; read
   const headingStack: string[] = [];
   let body: string[] = [];
   const flush = () => {
-    const content = body.join('\n').trim();
-    if (content) sections.push({body: content, heading: headingStack.join(' > ')});
+    const content = Effect.pipe(EffectArray.join(body, '\n'), EffectString.trim);
+    if (content) sections.push({body: content, heading: EffectArray.join(headingStack, ' > ')});
     body = [];
   };
-  for (const line of source.split('\n')) {
+  for (const line of Effect.pipe(source, EffectString.split('\n'))) {
     const match = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
     if (!match) {
       body.push(line);
@@ -80,7 +86,7 @@ function markdownSections(source: string): readonly {readonly body: string; read
     flush();
     const level = match[1].length;
     headingStack.splice(level - 1);
-    headingStack[level - 1] = match[2].trim();
+    headingStack[level - 1] = Effect.pipe(match[2], EffectString.trim);
   }
   flush();
   return sections.length > 0 ? sections : [{body: source, heading: ''}];
@@ -93,15 +99,19 @@ function splitWithOverlap(source: string, maximum: number, overlap: number): rea
   while (start < source.length) {
     let end = Math.min(source.length, start + maximum);
     if (end < source.length) {
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
       const paragraph = source.lastIndexOf('\n\n', end);
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
       const line = source.lastIndexOf('\n', end);
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
       const space = source.lastIndexOf(' ', end);
-      const boundary = [paragraph >= 0 ? paragraph + 2 : -1, line >= 0 ? line + 1 : -1, space + 1]
-        .filter(candidate => candidate > start + Math.floor(maximum * 0.6))
-        .sort((left, right) => right - left)[0];
+      const boundary = EffectArray.filter(
+        [paragraph >= 0 ? paragraph + 2 : -1, line >= 0 ? line + 1 : -1, space + 1],
+        candidate => candidate > start + Math.floor(maximum * 0.6),
+      ).sort((left, right) => right - left)[0];
       if (boundary !== undefined) end = boundary;
     }
-    const chunk = source.slice(start, end).trim();
+    const chunk = Effect.pipe(source, EffectString.slice(start, end), EffectString.trim);
     if (chunk) chunks.push(chunk);
     if (end >= source.length) break;
     const next = Math.max(start + 1, end - overlap);

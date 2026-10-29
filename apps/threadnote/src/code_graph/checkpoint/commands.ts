@@ -1,9 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect} from 'effect';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import * as operations from '@threadnote/graph/checkpoint/operations';
 import {checkpointTerminalText} from '@threadnote/graph/checkpoint/terminal_text';
 import type {CodeGraphCheckpointHeaderV1} from '@threadnote/graph/checkpoint/schema';
+
 export * from '@threadnote/graph/checkpoint/operations';
 
 export const runCodeGraphCheckpointInspect = Effect.fn('codeGraph.checkpoint.inspectCommand')(function* (
@@ -57,7 +59,7 @@ export const runCodeGraphCheckpointImport = Effect.fn('codeGraph.checkpoint.impo
   return result;
 });
 function checkpointRecordTotal(header: CodeGraphCheckpointHeaderV1): number {
-  return header.chunks.reduce((total, chunk) => total + chunk.recordCount, 0);
+  return EffectArray.reduce(header.chunks, 0, (total, chunk) => total + chunk.recordCount);
 }
 
 function publicationMessage(state: operations.CodeGraphCheckpointImportResultV1['publication']): string {

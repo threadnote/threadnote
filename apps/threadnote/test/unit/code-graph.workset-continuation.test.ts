@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -34,15 +35,18 @@ import {
   type CodeGraphWorksetResultSetPageV1,
   type CodeGraphWorksetRoutingProjectionV1,
 } from '@threadnote/graph/workset_catalog/types';
-import {join, mkdtemp, rm, stat} from '../helpers/effect-filesystem.js';
+import {pathService, mkdtemp, rm, stat} from '../helpers/effect-filesystem.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph workset qualified refs and continuation', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   effectIt.effect('creates v4 before removing obsolete disposable v2 and v3 catalogs', () =>
@@ -53,8 +57,10 @@ describe('code graph workset qualified refs and continuation', () => {
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-workset-catalog-upgrade-'});
         const root = path.join(home, 'indexes', 'code-graph', 'worksets');
         yield* fs.makeDirectory(root, {recursive: true});
-        const obsoleteDatabases = [2, 3].map(version => path.join(root, `catalog-v${String(version)}.sqlite`));
-        const obsoleteFiles = obsoleteDatabases.flatMap(databasePath => [
+        const obsoleteDatabases = EffectArray.map([2, 3], version =>
+          path.join(root, `catalog-v${String(version)}.sqlite`),
+        );
+        const obsoleteFiles = EffectArray.flatMap(obsoleteDatabases, databasePath => [
           databasePath,
           `${databasePath}-journal`,
           `${databasePath}-shm`,
@@ -93,7 +99,7 @@ describe('code graph workset qualified refs and continuation', () => {
         async seeds => {
           for (const seed of seeds) {
             const nodeHexLength = [32, 40, 64][seed % 3];
-            const nodeId = `cgs_${digest(`node:${seed}`).slice(0, nodeHexLength)}`;
+            const nodeId = `cgs_${Effect2.pipe(digest(`node:${seed}`), EffectString.slice(0, nodeHexLength))}`;
             const leftRepositoryId = digest(`left:${seed}`);
             const rightRepositoryId = digest(`right:${seed}`);
             const left = await runEffect(registerCodeGraphQualifiedRef(home, {nodeId, repositoryId: leftRepositoryId}));
@@ -119,7 +125,7 @@ describe('code graph workset qualified refs and continuation', () => {
       {numRuns: 12},
     );
 
-    const productionWidthNode = `cgs_${digest('production-width-node').slice(0, 32)}`;
+    const productionWidthNode = `cgs_${Effect2.pipe(digest('production-width-node'), EffectString.slice(0, 32))}`;
     await publish(
       home,
       generationInput('node-width', 'node-width-manifest', [
@@ -165,7 +171,7 @@ describe('code graph workset qualified refs and continuation', () => {
   it('pages one pinned ranked sequence across a newer publication and reports exact cursor failures', async () => {
     const home = await temporaryHome(homes);
     const repositoryId = digest('shared-repository');
-    const nodeId = `cgs_${digest('shared-node').slice(0, 40)}`;
+    const nodeId = `cgs_${Effect2.pipe(digest('shared-node'), EffectString.slice(0, 40))}`;
     const left = member({nodeId, repositoryId, repositoryKey: 'left', seed: 1});
     const right = member({nodeId, repositoryId, repositoryKey: 'right', seed: 2});
     const generation = await publish(home, generationInput('engineering', 'manifest-a', [left, right]));
@@ -187,7 +193,7 @@ describe('code graph workset qualified refs and continuation', () => {
       coverage: {requestedRepositories: 2},
       warnings: ['fixture envelope receipt'],
     });
-    expect(Object.keys(first.result.repositories).sort()).toEqual(['left', 'right']);
+    expect(EffectRecord.keys(first.result.repositories).sort()).toEqual(['left', 'right']);
     expect(first.next).toBe(registered.continuationForOffset(1));
     expect(first.continuationForOffset(2)).toBe(registered.continuationForOffset(2));
     const second = await runEffect(readCodeGraphWorksetResultSetPage(home, {cursor: first.next!, limit: 1}));
@@ -200,9 +206,14 @@ describe('code graph workset qualified refs and continuation', () => {
         .query<{readonly card_json: string}, []>('SELECT card_json FROM result_cards ORDER BY ordinal')
         .all();
       expect(stored).toHaveLength(2);
-      expect(stored.every(row => !row.card_json.includes('source') && !row.card_json.includes('documentation'))).toBe(
-        true,
-      );
+      expect(
+        EffectArray.every(
+          stored,
+          row =>
+            !Effect2.pipe(row.card_json, EffectString.includes('source')) &&
+            !Effect2.pipe(row.card_json, EffectString.includes('documentation')),
+        ),
+      ).toBe(true);
     } finally {
       raw.close(false);
     }
@@ -210,7 +221,8 @@ describe('code graph workset qualified refs and continuation', () => {
       runEffect(
         registerCodeGraphWorksetResultSet(home, {
           projectorVersion: CODE_GRAPH_WORKSET_EVIDENCE_PROJECTOR_VERSION,
-          result: worksetResult([{...cards[0], source: 'must never persist'} as never], generation, [left, right]),
+          // @ts-expect-error This rejection fixture deliberately gives a valid card the invalid source field to test input validation.
+          result: worksetResult([{...cards[0], source: 'must never persist'}], generation, [left, right]),
         }),
       ),
     ).rejects.toMatchObject({reason: 'invalid-input'} satisfies Partial<CodeGraphWorksetCatalogError>);
@@ -287,7 +299,9 @@ describe('code graph workset qualified refs and continuation', () => {
       ),
     ).rejects.toMatchObject({reason: 'incompatible'} satisfies Partial<CodeGraphWorksetCatalogError>);
     await expect(
-      runEffect(readCodeGraphWorksetResultSetPage(home, {cursor: `cgwc_${'f'.repeat(40)}`})),
+      runEffect(
+        readCodeGraphWorksetResultSetPage(home, {cursor: `cgwc_${Effect2.pipe('f', EffectString.repeat(40))}`}),
+      ),
     ).rejects.toMatchObject({reason: 'missing'} satisfies Partial<CodeGraphWorksetCatalogError>);
 
     const database = new Database(catalogPath(home), {strict: true});
@@ -295,7 +309,9 @@ describe('code graph workset qualified refs and continuation', () => {
       const sequenceDigest = database
         .query<{readonly sequence_digest: string}, [string]>('SELECT sequence_digest FROM result_sets WHERE id = ?')
         .get(registered.id)!.sequence_digest;
-      database.query('UPDATE result_sets SET sequence_digest = ? WHERE id = ?').run('0'.repeat(64), registered.id);
+      database
+        .query('UPDATE result_sets SET sequence_digest = ? WHERE id = ?')
+        .run(Effect2.pipe('0', EffectString.repeat(64)), registered.id);
       await expect(
         runEffect(readCodeGraphWorksetResultSetPage(home, {cursor: registered.initialCursor})),
       ).rejects.toMatchObject({reason: 'corrupt'} satisfies Partial<CodeGraphWorksetCatalogError>);
@@ -445,20 +461,20 @@ function projection(options: {
   const {seed} = options;
   return createCodeGraphWorksetRoutingProjection({
     checkoutId: digest(`checkout-${seed}`),
-    commitId: digest(`commit-${seed}`).slice(0, 40),
+    commitId: Effect2.pipe(digest(`commit-${seed}`), EffectString.slice(0, 40)),
     componentCount: 1,
     extractorGeneration: 12,
     projectorVersion: CODE_GRAPH_WORKSET_CATALOG_PROJECTOR_VERSION,
     repositoryId: options.repositoryId ?? digest(`repository-${seed}`),
     snapshotDigest: digest(`snapshot-digest-${seed}`),
-    snapshotId: `cgsn_${digest(`snapshot-${seed}`).slice(0, 40)}`,
+    snapshotId: `cgsn_${Effect2.pipe(digest(`snapshot-${seed}`), EffectString.slice(0, 40))}`,
     symbols: Array.from({length: options.symbolCount ?? 1}, (_, index) => ({
       exported: true,
       kind: 'function',
       language: 'typescript',
       lookupKeys: [`fixture.symbol.${seed}.${index}`],
       name: `symbol${seed}_${index}`,
-      nodeId: options.nodeId ?? `cgs_${digest(`node-${seed}-${index}`).slice(0, 40)}`,
+      nodeId: options.nodeId ?? `cgs_${Effect2.pipe(digest(`node-${seed}-${index}`), EffectString.slice(0, 40))}`,
       packageName: '@fixture/package',
       path: `src/symbol-${seed}-${index}.ts`,
       qualifiedName: `fixture.symbol${seed}_${index}`,
@@ -509,8 +525,8 @@ function worksetResult(
       states: {current: members.length, deferred: 0, excluded: 0, failed: 0, missing: 0, stale: 0},
       stopReason: 'sufficient-evidence',
     },
-    repositories: Object.fromEntries(
-      members.map(inputMember => [
+    repositories: EffectRecord.fromEntries(
+      EffectArray.map(members, inputMember => [
         inputMember.repositoryKey,
         {
           considered: true,
@@ -540,7 +556,7 @@ function worksetResult(
 }
 
 function catalogPath(home: string): string {
-  return codeGraphWorksetCatalogDatabasePath({join} as never, home);
+  return codeGraphWorksetCatalogDatabasePath(pathService, home);
 }
 
 function digest(value: string): string {

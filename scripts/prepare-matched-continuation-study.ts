@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This local sealer owns reviewed evidence-file boundaries. */
 
@@ -30,6 +31,9 @@ import {
 } from './run-matched-evaluation.js';
 import {assertMatchedContinuationRuntimeFilesV1} from './matched-continuation-runtime-integrity.js';
 import {assertMatchedEvaluationRepositoryV1} from './matched-evaluation-runtime-integrity.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const MATCHED_CONTINUATION_PREPARATION_VERSION = 1 as const;
 
@@ -131,11 +135,11 @@ export async function prepareMatchedContinuationStudyFromFilesV1(options: Prepar
     throw new Error('Continuation candidate differs from the matched preparation receipt.');
   }
   const compactArm = required(
-    manifest.arms.find(arm => arm.arm === 'threadnote-compact'),
+    EffectOption.getOrUndefined(EffectArray.findFirst(manifest.arms, arm => arm.arm === 'threadnote-compact')),
     'threadnote-compact arm',
   );
   const graphArm = required(
-    manifest.arms.find(arm => arm.arm === 'threadnote-graph'),
+    EffectOption.getOrUndefined(EffectArray.findFirst(manifest.arms, arm => arm.arm === 'threadnote-graph')),
     'threadnote-graph arm',
   );
   if (
@@ -156,7 +160,7 @@ export async function prepareMatchedContinuationStudyFromFilesV1(options: Prepar
   }
 
   const taskInputs = await Promise.all(
-    preparation.tasks.map(async (entry, taskIndex) => {
+    EffectArray.map(preparation.tasks, async (entry, taskIndex) => {
       const [planBytes, taskRuntimeBytes] = await Promise.all([
         readBoundedRegularFile(entry.planPath, 8 * 1_024 * 1_024, `continuation plan ${taskIndex}`),
         readBoundedRegularFile(entry.runtimePath, 8 * 1_024 * 1_024, `continuation runtime ${taskIndex}`),
@@ -184,15 +188,19 @@ export async function prepareMatchedContinuationStudyFromFilesV1(options: Prepar
         throw new Error(`Continuation plan ${taskIndex} uses a different candidate.`);
       }
       const corpusTask = required(
-        corpus.tasks.find(task => task.taskId === plan.taskId),
+        EffectOption.getOrUndefined(EffectArray.findFirst(corpus.tasks, task => task.taskId === plan.taskId)),
         `corpus task ${plan.taskId}`,
       );
       const taskContext = required(
-        matchedStudy.taskContexts.find(context => context.taskId === plan.taskId),
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(matchedStudy.taskContexts, context => context.taskId === plan.taskId),
+        ),
         `matched task context ${plan.taskId}`,
       );
       const cluster = required(
-        matchedStudy.clusters.find(candidate => candidate.clusterId === entry.clusterId),
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(matchedStudy.clusters, candidate => candidate.clusterId === entry.clusterId),
+        ),
         `matched cluster ${entry.clusterId}`,
       );
       if (
@@ -206,7 +214,9 @@ export async function prepareMatchedContinuationStudyFromFilesV1(options: Prepar
       }
       continuationCheckpointStudyV2(matchedStudy, plan.sourceTask, plan.checkpoint);
       const runtimeRepository = required(
-        taskRuntime.repositories.find(repository => repository.clusterId === entry.clusterId),
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(taskRuntime.repositories, repository => repository.clusterId === entry.clusterId),
+        ),
         `runtime repository ${entry.clusterId}`,
       );
       if (runtimeRepository.repositoryIdentityHash !== cluster.repositoryIdentityHash) {
@@ -224,10 +234,19 @@ export async function prepareMatchedContinuationStudyFromFilesV1(options: Prepar
   assertMatchedContinuationExposureAudit(
     parseJson(exposureAuditBytes, 'continuation exposure audit'),
     preparation.sourceCommit,
-    taskInputs.map(({plan}) => plan.taskId),
+    EffectArray.map(taskInputs, ({plan}) => plan.taskId),
   );
-  const variants = MATCHED_CONTINUATION_VARIANTS.filter(variant =>
-    taskInputs[0]?.plan.attempts.some(attempt => attempt.variant === variant),
+  const variants = EffectArray.filter(
+    MATCHED_CONTINUATION_VARIANTS,
+    (variant, __effectArrayIndex) =>
+      __effectArrayIndex in MATCHED_CONTINUATION_VARIANTS &&
+      Boolean(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(taskInputs[0]?.plan.attempts), __effectOptionalArrayReceiver =>
+            EffectArray.some(__effectOptionalArrayReceiver, attempt => attempt.variant === variant),
+          ),
+        ),
+      ),
   );
 
   let globalRunOrder = 0;
@@ -240,16 +259,17 @@ export async function prepareMatchedContinuationStudyFromFilesV1(options: Prepar
       toolVersion: compactArm.tool.version,
     },
     gates: preparation.gates,
-    schedule: taskInputs.flatMap(({plan}) =>
-      [...plan.attempts]
-        .sort((left, right) => left.runOrder - right.runOrder)
-        .map(attempt => ({
+    schedule: EffectArray.flatMap(taskInputs, ({plan}) =>
+      EffectArray.map(
+        [...plan.attempts].sort((left, right) => left.runOrder - right.runOrder),
+        attempt => ({
           globalRunOrder: (globalRunOrder += 1),
           runNonce: attempt.runNonce,
           taskId: plan.taskId,
           variant: attempt.variant,
           withinTaskRunOrder: attempt.runOrder,
-        })),
+        }),
+      ),
     ),
     sourceEvidence: {
       corpusHash,
@@ -260,7 +280,7 @@ export async function prepareMatchedContinuationStudyFromFilesV1(options: Prepar
       verificationPlanHash: matchedStudy.verificationPlanHash,
     },
     studyId: preparation.studyId,
-    tasks: taskInputs.map(({cluster, plan, planSha256}) => ({
+    tasks: EffectArray.map(taskInputs, ({cluster, plan, planSha256}) => ({
       checkpointRepositoryFixtureHash: plan.checkpoint.repositoryFixtureHash,
       checkpointRevision: plan.checkpoint.repositoryRevision,
       clusterId: cluster.clusterId,
@@ -285,7 +305,7 @@ export async function prepareMatchedContinuationStudyFromFilesV1(options: Prepar
     matchedRuntimePath: await canonicalRegularFile(options.matchedRuntimePath, 'matched runtime'),
     matchedStudyPath: await canonicalRegularFile(options.matchedStudyPath, 'matched study'),
     studyHash: study.studyHash,
-    tasks: taskInputs.map(({entry, plan, planSha256}) => ({
+    tasks: EffectArray.map(taskInputs, ({entry, plan, planSha256}) => ({
       pilotDirectory: entry.pilotDirectory,
       planPath: entry.planPath,
       planSha256,
@@ -301,7 +321,9 @@ export async function prepareMatchedContinuationStudyFromFilesV1(options: Prepar
     runtimeSha256: sha256(jsonBytes(runtime)),
     studyHash: study.studyHash,
     studySha256: sha256(jsonBytes(study)),
-    taskPlanSha256: Object.fromEntries(taskInputs.map(({plan, planSha256}) => [plan.taskId, planSha256])),
+    taskPlanSha256: EffectRecord.fromEntries(
+      EffectArray.map(taskInputs, ({plan, planSha256}) => [plan.taskId, planSha256]),
+    ),
     version: MATCHED_CONTINUATION_PREPARATION_VERSION,
   };
   await assertMatchedContinuationRuntimeFilesV1(study, runtime);
@@ -332,7 +354,7 @@ export function assertMatchedContinuationExposureAudit(
   unique(tasks, 'continuation exposure audit task ids');
   const expected = [...taskIds].sort();
   const actual = [...tasks].sort();
-  if (expected.length !== actual.length || expected.some((taskId, index) => taskId !== actual[index])) {
+  if (expected.length !== actual.length || EffectArray.some(expected, (taskId, index) => taskId !== actual[index])) {
     invalid('exposure audit tasks do not exactly cover the continuation study');
   }
 }
@@ -342,7 +364,7 @@ function strictHeldOutTaskIds(audit: Record<string, unknown>): readonly string[]
   if (audit.reviewedBeforeProviderOutcomes !== true) {
     invalid('exposure audit must be reviewed before provider outcomes');
   }
-  return array(audit.tasks, 'continuation exposure audit tasks').map((entry, index) => {
+  return EffectArray.map(array(audit.tasks, 'continuation exposure audit tasks'), (entry, index) => {
     const task = object(entry, `continuation exposure audit task ${index}`);
     exactKeys(task, ['priorProductImplementationExposure', 'priorProviderOutcomeExposure', 'taskId']);
     if (task.priorProductImplementationExposure !== false || task.priorProviderOutcomeExposure !== false) {
@@ -380,7 +402,7 @@ function disclosedBenchmarkReuseTaskIds(audit: Record<string, unknown>): readonl
     invalid('benchmark reuse requires fresh isolation, no pooled outcomes, and no task-specific product tuning');
   }
   boundedText(reuse.limitation, 1, 2_048, 'benchmark reuse limitation');
-  return array(audit.tasks, 'continuation exposure audit tasks').map((entry, index) => {
+  return EffectArray.map(array(audit.tasks, 'continuation exposure audit tasks'), (entry, index) => {
     const task = object(entry, `continuation exposure audit task ${index}`);
     exactKeys(task, ['priorProviderOutcomeExposure', 'taskId']);
     if (typeof task.priorProviderOutcomeExposure !== 'boolean') {
@@ -506,7 +528,7 @@ function parseQualificationReceiptV1(value: unknown): {readonly receiptHash: str
   const receipt = object(value, 'qualification receipt');
   exactKeys(receipt, ['receiptHash', 'tasks', 'version']);
   if (receipt.version !== 1) invalid('qualification receipt version must be 1');
-  const tasks = array(receipt.tasks, 'qualification receipt tasks').map((value, taskIndex) => {
+  const tasks = EffectArray.map(array(receipt.tasks, 'qualification receipt tasks'), (value, taskIndex) => {
     const task = object(value, `qualification receipt task ${taskIndex}`);
     exactKeys(task, [
       'appliedPaths',
@@ -520,16 +542,19 @@ function parseQualificationReceiptV1(value: unknown): {readonly receiptHash: str
     ]);
     const appliedPaths = qualificationPaths(task.appliedPaths, `qualification task ${taskIndex} applied paths`);
     const protectedPaths = qualificationPaths(task.protectedPaths, `qualification task ${taskIndex} protected paths`);
-    const commands = array(task.commands, `qualification task ${taskIndex} commands`).map((value, commandIndex) => {
-      const command = object(value, `qualification task ${taskIndex} command ${commandIndex}`);
-      exactKeys(command, ['commandHash', 'diagnosticHash', 'exitCode']);
-      if (command.exitCode !== 0) invalid(`qualification task ${taskIndex} command ${commandIndex} did not pass`);
-      return {
-        commandHash: matching(command.commandHash, /^[0-9a-f]{64}$/u, 'qualification command hash'),
-        diagnosticHash: matching(command.diagnosticHash, /^[0-9a-f]{64}$/u, 'qualification diagnostic hash'),
-        exitCode: 0 as const,
-      };
-    });
+    const commands = EffectArray.map(
+      array(task.commands, `qualification task ${taskIndex} commands`),
+      (value, commandIndex) => {
+        const command = object(value, `qualification task ${taskIndex} command ${commandIndex}`);
+        exactKeys(command, ['commandHash', 'diagnosticHash', 'exitCode']);
+        if (command.exitCode !== 0) invalid(`qualification task ${taskIndex} command ${commandIndex} did not pass`);
+        return {
+          commandHash: matching(command.commandHash, /^[0-9a-f]{64}$/u, 'qualification command hash'),
+          diagnosticHash: matching(command.diagnosticHash, /^[0-9a-f]{64}$/u, 'qualification diagnostic hash'),
+          exitCode: 0 as const,
+        };
+      },
+    );
     if (appliedPaths.length === 0 || commands.length === 0 || commands.length > 16) {
       invalid(`qualification task ${taskIndex} has invalid evidence bounds`);
     }
@@ -546,7 +571,7 @@ function parseQualificationReceiptV1(value: unknown): {readonly receiptHash: str
   });
   if (tasks.length === 0 || tasks.length > 64) invalid('qualification receipt tasks have invalid bounds');
   unique(
-    tasks.map(task => task.taskId),
+    EffectArray.map(tasks, task => task.taskId),
     'qualification receipt task ids',
   );
   const receiptWithoutHash = {tasks, version: 1 as const};
@@ -558,7 +583,7 @@ function parseQualificationReceiptV1(value: unknown): {readonly receiptHash: str
 }
 
 function qualificationPaths(value: unknown, label: string): readonly string[] {
-  const paths = array(value, label).map((path, index) => safeRelativePath(path, `${label} ${index}`));
+  const paths = EffectArray.map(array(value, label), (path, index) => safeRelativePath(path, `${label} ${index}`));
   if (paths.length === 0 || paths.length > 256) invalid(`${label} has invalid bounds`);
   unique(paths, label);
   return paths;
@@ -567,9 +592,12 @@ function qualificationPaths(value: unknown, label: string): readonly string[] {
 function safeRelativePath(value: unknown, label: string): string {
   const path = boundedText(value, 1, 4_096, label);
   if (
-    path.includes('\\') ||
+    Effect2.pipe(path, EffectString.includes('\\')) ||
     isAbsolute(path) ||
-    path.split('/').some(segment => segment.length === 0 || segment === '.' || segment === '..')
+    EffectArray.some(
+      Effect2.pipe(path, EffectString.split('/')),
+      segment => segment.length === 0 || segment === '.' || segment === '..',
+    )
   ) {
     invalid(`${label} must be one normalized relative path`);
   }
@@ -593,7 +621,7 @@ export function parseMatchedContinuationPreparationPlanV1(value: unknown): Match
     'minimumCorrectnessScoreMilli',
     'minimumTokenReductionBasisPoints',
   ]);
-  const tasks = array(plan.tasks, 'continuation preparation tasks').map((entry, index) => {
+  const tasks = EffectArray.map(array(plan.tasks, 'continuation preparation tasks'), (entry, index) => {
     const task = object(entry, `continuation preparation task ${index}`);
     exactKeys(task, ['clusterId', 'pilotDirectory', 'planPath', 'runtimePath']);
     return {
@@ -604,19 +632,19 @@ export function parseMatchedContinuationPreparationPlanV1(value: unknown): Match
     };
   });
   unique(
-    tasks.map(task => task.clusterId),
+    EffectArray.map(tasks, task => task.clusterId),
     'continuation preparation clusters',
   );
   unique(
-    tasks.map(task => task.planPath),
+    EffectArray.map(tasks, task => task.planPath),
     'continuation preparation plan paths',
   );
   unique(
-    tasks.map(task => task.pilotDirectory),
+    EffectArray.map(tasks, task => task.pilotDirectory),
     'continuation preparation pilot directories',
   );
   unique(
-    tasks.map(task => task.runtimePath),
+    EffectArray.map(tasks, task => task.runtimePath),
     'continuation preparation runtime paths',
   );
   return {
@@ -688,6 +716,7 @@ function parseArguments(args: readonly string[]): PreparationOptions {
 }
 
 async function ensureOutputDirectory(path: string): Promise<void> {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   if (!path.split(sep).includes('.context'))
     throw new Error('Continuation output must be inside a .context directory.');
   await mkdir(path, {recursive: true, mode: 0o700});
@@ -743,19 +772,19 @@ function digest(namespace: string, value: unknown): string {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
   const expected = [...keys].sort();
-  const actual = Object.keys(value).sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  const actual = EffectRecord.keys(value).sort();
+  if (actual.length !== expected.length || EffectArray.some(actual, (key, index) => key !== expected[index])) {
     invalid('object contains unsupported or missing fields');
   }
 }
@@ -767,7 +796,12 @@ function matching(value: unknown, pattern: RegExp, label: string): string {
 }
 
 function boundedText(value: unknown, minimum: number, maximum: number, label: string): string {
-  if (typeof value !== 'string' || value.length < minimum || value.length > maximum || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.length < minimum ||
+    value.length > maximum ||
+    Effect2.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} is invalid`);
   }
   return value;

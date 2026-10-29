@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Context, Effect, FileSystem, Layer, Option, Path} from 'effect';
@@ -19,6 +20,8 @@ import {
 } from '@threadnote/graph/workset_catalog/store';
 import {queryCodeGraphWorksetV2, resolveCodeGraphQualifiedRefTarget} from '@threadnote/graph/workset/query_v2';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('scoped graph retrieval', () => {
   effectIt.effect(
@@ -41,14 +44,17 @@ describe('scoped graph retrieval', () => {
         yield* write('package.json', JSON.stringify({private: true, workspaces: ['apps/*']}));
         for (const name of ['a', 'b']) {
           yield* write(`apps/${name}/package.json`, JSON.stringify({name: `@fixture/${name}`}));
-          yield* write(`apps/${name}/index.ts`, `export const value${name.toUpperCase()} = '${name}';\n`);
+          yield* write(
+            `apps/${name}/index.ts`,
+            `export const value${Effect2.pipe(name, EffectString.toUpperCase)} = '${name}';\n`,
+          );
         }
         yield* write('apps/partial/package.json', JSON.stringify({name: '@fixture/partial'}));
         yield* write('apps/partial/tsconfig.json', JSON.stringify({references: [{path: '../missing'}]}));
         yield* write('apps/partial/index.ts', "export const partialValue = 'partial';\n");
         yield* git('add', '.');
         yield* git('commit', '-qm', 'fixture');
-        const projects = ['a', 'b', 'partial'].map(name => ({
+        const projects = EffectArray.map(['a', 'b', 'partial'], name => ({
           name,
           path: root,
           seed: [],
@@ -88,7 +94,7 @@ describe('scoped graph retrieval', () => {
         const config = {account: 'test', agentId: 'test', user: 'test', agentContextHome: home, manifestPath};
         const workset = yield* prepareCodeGraphWorkset(config, 'both');
         expect(workset.state).toBe('ready');
-        expect(workset.members.filter(member => member.state === 'ready')).toHaveLength(2);
+        expect(EffectArray.filter(workset.members, member => member.state === 'ready')).toHaveLength(2);
         const published = yield* readPublishedCodeGraphWorksetCatalogGeneration(home, 'both');
         expect(published?.members).toMatchObject([
           {
@@ -129,9 +135,11 @@ describe('scoped graph retrieval', () => {
         });
         const result = yield* query.inspect({...options, operation: 'query', query: 'valueA'});
         expect(result.freshness).toBe('current');
-        expect(result.nodes.some(node => node.path === 'apps/a/index.ts')).toBe(true);
-        expect(result.nodes.some(node => node.path === 'apps/b/index.ts')).toBe(false);
-        const node = result.nodes.find(node => node.path === 'apps/a/index.ts')!;
+        expect(EffectArray.some(result.nodes, node => node.path === 'apps/a/index.ts')).toBe(true);
+        expect(EffectArray.some(result.nodes, node => node.path === 'apps/b/index.ts')).toBe(false);
+        const node = Option.getOrUndefined(
+          EffectArray.findFirst(result.nodes, node => node.path === 'apps/a/index.ts'),
+        )!;
         const ref = yield* registerCodeGraphQualifiedRef(home, {
           repositoryId: result.repository.repositoryId,
           nodeId: node.id,
@@ -156,7 +164,7 @@ describe('scoped graph retrieval', () => {
         expect(staleStatus.readySnapshot?.id).toBe(a.snapshot.id);
         const staleQuery = yield* query.inspect({...options, operation: 'query', query: 'valueA'});
         expect(staleQuery.freshness).toBe('stale');
-        expect(staleQuery.nodes.some(candidate => candidate.path === 'apps/a/index.ts')).toBe(true);
+        expect(EffectArray.some(staleQuery.nodes, candidate => candidate.path === 'apps/a/index.ts')).toBe(true);
         const repeatedStaleQuery = yield* query.inspect({...options, operation: 'query', query: 'valueA'});
         expect(repeatedStaleQuery.freshness).toBe('stale');
         expect(repeatedStaleQuery.snapshot.id).toBe(a.snapshot.id);
@@ -215,8 +223,26 @@ describe('scoped graph retrieval', () => {
                 }).pipe(Effect.provideService(CodeGraphQueryService, trackedQuery));
                 expect(discovered.result?.freshness).toBe('stale');
                 expect(discovered.result?.snapshot.id).toBe(a.snapshot.id);
-                expect(discovered.result?.nodes.some(candidate => candidate.name === 'valueA')).toBe(true);
-                expect(discovered.result?.nodes.some(candidate => candidate.path.startsWith('apps/b/'))).toBe(false);
+                expect(
+                  Option.getOrUndefined(
+                    Option.map(Option.fromNullishOr(discovered.result?.nodes), __effectArrayReceiver =>
+                      EffectArray.some(__effectArrayReceiver, candidate => candidate.name === 'valueA'),
+                    ),
+                  ),
+                ).toBe(true);
+                expect(
+                  Option.getOrUndefined(
+                    Option.map(Option.fromNullishOr(discovered.result?.nodes), __effectArrayReceiver =>
+                      EffectArray.some(
+                        __effectArrayReceiver,
+                        __effectArrayValue =>
+                          !!(candidate => Effect2.pipe(candidate.path, EffectString.startsWith('apps/b/')))(
+                            __effectArrayValue,
+                          ),
+                      ),
+                    ),
+                  ),
+                ).toBe(false);
                 expect(sessions).toHaveLength(1);
                 expect([...readSessions]).toEqual(sessions);
               }
@@ -236,7 +262,7 @@ describe('scoped graph retrieval', () => {
           manifestPath,
           JSON.stringify({
             version: 1,
-            projects: projects.map(project =>
+            projects: EffectArray.map(projects, project =>
               project.name === 'a' ? {...project, graph: {...project.graph, roots: ['apps/b']}} : project,
             ),
             worksets: [

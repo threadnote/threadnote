@@ -1,15 +1,20 @@
 import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const GRAPH_SHARING_ERROR_KINDS = ['unavailable', 'verification-failed'] as const;
 export type GraphSharingErrorKind = (typeof GRAPH_SHARING_ERROR_KINDS)[number];
 
-export class GraphSharingError extends Schema.TaggedError<GraphSharingError>()('GraphSharingError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  kind: Schema.Literals(['unavailable', 'verification-failed']),
-  message: Schema.String,
-  httpStatus: Schema.optionalKey(Schema.Int),
-  retryAfterMilliseconds: Schema.optionalKey(Schema.Finite),
-}) {}
+export class GraphSharingError extends Schema.TaggedError<GraphSharingError, {readonly brand: unique symbol}>()(
+  'GraphSharingError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    kind: Schema.Literals(['unavailable', 'verification-failed']),
+    message: Schema.String,
+    httpStatus: Schema.optionalKey(Schema.Int),
+    retryAfterMilliseconds: Schema.optionalKey(Schema.Finite),
+  },
+) {}
 
 export function graphSharingFailure(
   message: string,
@@ -37,8 +42,11 @@ export function graphShareRetryAfterMilliseconds(
   nowMilliseconds: number,
 ): number | undefined {
   if (value === undefined) return undefined;
-  const seconds = /^\d+$/u.test(value.trim()) ? Number(value.trim()) : undefined;
-  if (seconds === undefined && !/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)/iu.test(value.trim())) return undefined;
+  const seconds = /^\d+$/u.test(Effect.pipe(value, EffectString.trim))
+    ? Number(Effect.pipe(value, EffectString.trim))
+    : undefined;
+  if (seconds === undefined && !/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)/iu.test(Effect.pipe(value, EffectString.trim)))
+    return undefined;
   const delay = seconds === undefined ? Date.parse(value) - nowMilliseconds : seconds * 1_000;
   return Number.isFinite(delay) && delay >= 0
     ? Math.min(delay, Number.MAX_SAFE_INTEGER - Math.max(0, nowMilliseconds))

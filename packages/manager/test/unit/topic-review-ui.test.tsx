@@ -4,13 +4,98 @@ import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {ReviewsPanel} from '@threadnote/manager/attention-view';
-import type {ManagerContextMaintenancePacketV2} from '@threadnote/manager/attention/contracts';
+import type {
+  ManagerContextMaintenancePacketV2,
+  ManagerContextMaintenanceStatusV2,
+} from '@threadnote/manager/attention/contracts';
 import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
 import {TopicReviewDialog} from '../../src/attention/topic_review.js';
 import {MaintenanceCaseDialog} from '../../src/attention/maintenance_dialogs.js';
+import {
+  Array as EffectArray,
+  Predicate,
+  String as EffectString,
+  pipe as EffectPipe,
+  Option as EffectOption,
+} from 'effect';
 
-const hash = 'a'.repeat(64);
-const citationId = `tncc_${'1'.repeat(40)}`;
+function parseTopicReviewAction(value: unknown): Record<string, unknown> {
+  if (!Predicate.isObject(value) || typeof value.action !== 'string')
+    throw new Error('Expected a topic review action with a string action name.');
+  return value;
+}
+
+function parseEditedTopicDraft(value: unknown, baseline: ManagerTopicReviewV1['draft']): ManagerTopicReviewV1['draft'] {
+  if (!Predicate.isObject(value) || !EffectArray.isArray(value.operations))
+    throw new Error('Expected the edited topic draft to retain an operation list.');
+  const seenOrdinals = new Set<number>();
+  const operations = EffectArray.map(value.operations, operation => {
+    if (
+      !Predicate.isObject(operation) ||
+      typeof operation.ordinal !== 'number' ||
+      !Number.isSafeInteger(operation.ordinal) ||
+      typeof operation.beforeHash !== 'string' ||
+      typeof operation.text !== 'string' ||
+      !EffectArray.isArray(operation.supportHandles) ||
+      !EffectArray.every(operation.supportHandles, handle => typeof handle === 'string') ||
+      typeof operation.rationale !== 'string'
+    )
+      throw new Error('Expected edited topic operations to retain their typed fields.');
+    if (seenOrdinals.has(operation.ordinal)) throw new Error('Expected edited topic operation ordinals to be unique.');
+    seenOrdinals.add(operation.ordinal);
+    const disposition = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        baseline.paragraphDispositions?.entries ?? [],
+        candidate => candidate.ordinal === operation.ordinal,
+      ),
+    );
+    const original = EffectOption.getOrUndefined(
+      EffectArray.findFirst(baseline.operations, candidate => candidate.ordinal === operation.ordinal),
+    );
+    if (disposition === undefined && original === undefined)
+      throw new Error('Edited topic operation is outside the source draft.');
+    const expected = original ?? {
+      ordinal: operation.ordinal,
+      beforeHash: disposition!.beforeHash,
+      supportHandles: disposition!.supportHandles,
+      rationale: disposition!.rationale,
+      text: operation.text,
+    };
+    if (operation.beforeHash !== expected.beforeHash)
+      throw new Error('Edited topic operation changed its source identity.');
+    return {
+      ...expected,
+      rationale: operation.rationale,
+      supportHandles: operation.supportHandles,
+      text: operation.text,
+    };
+  });
+  if (seenOrdinals.size !== operations.length)
+    throw new Error('Expected edited topic operation ordinals to be unique.');
+  return {...baseline, operations};
+}
+
+function parseEditedTopicOperationTexts(value: unknown): string[] {
+  if (!Predicate.isObject(value) || !EffectArray.isArray(value.operations))
+    throw new Error('Expected a topic draft with an operation list.');
+  return EffectArray.map(value.operations, operation => {
+    if (!Predicate.isObject(operation) || typeof operation.text !== 'string')
+      throw new Error('Expected a topic draft operation with text.');
+    return operation.text;
+  });
+}
+
+const maintenanceStatus = (cases: ManagerContextMaintenanceStatusV2['cases']): ManagerContextMaintenanceStatusV2 => ({
+  version: 2,
+  state: 'idle',
+  generation: 'fixture-generation',
+  paused: false,
+  projects: [],
+  cases,
+  receipts: [],
+});
+const hash = EffectPipe('a', EffectString.repeat(64));
+const citationId = `tncc_${EffectPipe('1', EffectString.repeat(40))}`;
 const acceptedBody = 'Observed behavior.\n\nPolicy requirement.';
 const packet: ManagerContextMaintenancePacketV2 = {
   version: 2,
@@ -140,7 +225,7 @@ beforeEach(() => {
   inboxRefreshFailure = false;
   inboxReads = 0;
   posted.length = 0;
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(function (this: HTMLDialogElement) {
     this.open = true;
   });
@@ -181,11 +266,12 @@ beforeEach(() => {
                   },
             ),
           );
-        if (url.searchParams.get('view') === 'status')
+        if (url.searchParams.get('view') === 'status') {
+          if (packet.family === undefined || packet.slot === undefined)
+            throw new Error('The topic maintenance packet fixture must retain its case family and slot.');
           return new Response(
-            JSON.stringify({
-              version: 2,
-              cases: [
+            JSON.stringify(
+              maintenanceStatus([
                 {
                   caseId: packet.caseId,
                   project: packet.project,
@@ -201,10 +287,11 @@ beforeEach(() => {
                   attemptCount: 1,
                   events: [],
                 },
-              ],
-            }),
+              ]),
+            ),
             {status: 200, headers: {'content-type': 'application/json'}},
           );
+        }
         if (packetFailure)
           return new Response(
             JSON.stringify({
@@ -219,7 +306,7 @@ beforeEach(() => {
           });
         result = evidencePacket;
       } else if (url.pathname === '/api/attention/topic-review' && init?.method === 'POST') {
-        const action = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const action = parseTopicReviewAction(JSON.parse(String(init.body)));
         posted.push(action);
         if (action.action === 'generate' || action.action === 'regenerate') await generationGate;
         if ((action.action === 'generate' || action.action === 'regenerate') && generationRecovery)
@@ -243,10 +330,10 @@ beforeEach(() => {
           });
         if (action.action === 'preview') {
           await previewGate;
-          const draft = JSON.parse(String(action.editedDraftJson)) as ManagerTopicReviewV1['draft'];
-          const paragraphs = current.acceptedBody.split(/\n\n/u);
+          const draft = parseEditedTopicDraft(JSON.parse(String(action.editedDraftJson)), current.draft);
+          const paragraphs = EffectPipe(current.acceptedBody, EffectString.split(/\n\n/u));
           for (const operation of draft.operations) paragraphs[operation.ordinal] = operation.text;
-          const body = paragraphs.join('\n\n');
+          const body = EffectArray.join(paragraphs, '\n\n');
           const revision = current.revision + 1;
           current = review({
             ...current,
@@ -256,7 +343,7 @@ beforeEach(() => {
             proposal: {
               body,
               finalBodyHash: hash,
-              changedOrdinals: draft.operations.map(operation => operation.ordinal),
+              changedOrdinals: EffectArray.map(draft.operations, operation => operation.ordinal),
             },
             approval: {
               stage: 'preview',
@@ -276,7 +363,7 @@ beforeEach(() => {
             approval: {
               ...current.approval!,
               stage: 'written',
-              ...(mismatchedApplyDigest ? {approvalDigest: 'b'.repeat(64)} : {}),
+              ...(mismatchedApplyDigest ? {approvalDigest: EffectPipe('b', EffectString.repeat(64))} : {}),
             },
             warnings: preparedAfterWrite ? ['The approved document was already written.'] : [],
           });
@@ -318,6 +405,8 @@ beforeEach(() => {
               candidates: [
                 {
                   candidateId: 'candidate-1',
+                  categories: ['decision'],
+                  comparison: 'new',
                   state: 'pending',
                   recommendation: 'replace',
                   confidence: 0.7,
@@ -349,7 +438,16 @@ async function render(element: React.ReactElement) {
   await act(async () => root?.render(element));
 }
 const button = (label: string) =>
-  [...document.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent?.includes(label))!;
+  EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      __effectArrayValue =>
+        !!(item =>
+          EffectPipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : EffectPipe(effectOptionalString, EffectString.includes(label)),
+          ) ?? false)(__effectArrayValue),
+    ),
+  )!;
 
 it('keeps blockers prominent and technical review notes behind closed disclosures', async () => {
   current = review({
@@ -366,14 +464,33 @@ it('keeps blockers prominent and technical review notes behind closed disclosure
     />,
   );
   const disclosure = (label: string) =>
-    [...document.querySelectorAll<HTMLDetailsElement>('details')].find(item =>
-      item.querySelector('summary')?.textContent?.includes(label),
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLDetailsElement>('details')],
+        __effectArrayValue =>
+          !!(item =>
+            EffectPipe(item.querySelector('summary')?.textContent, effectOptionalString =>
+              effectOptionalString == null ? undefined : EffectPipe(effectOptionalString, EffectString.includes(label)),
+            ))(__effectArrayValue),
+      ),
     );
   expect(disclosure('Generation details')?.open).toBe(false);
   expect(disclosure('Review notes')?.open).toBe(false);
   expect(disclosure('Review notes')?.textContent).toContain('unsupported-extraction');
-  const blocker = [...document.querySelectorAll('[role="status"]')].find(item =>
-    item.textContent?.includes('Refresh the source evidence before accepting.'),
+  const blocker = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('[role="status"]')],
+      __effectArrayValue =>
+        !!(item =>
+          EffectPipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : EffectPipe(
+                  effectOptionalString,
+                  EffectString.includes('Refresh the source evidence before accepting.'),
+                ),
+          ))(__effectArrayValue),
+    ),
   );
   expect(blocker).toBeTruthy();
   expect(blocker?.closest('details')).toBeNull();
@@ -388,8 +505,14 @@ async function click(label: string) {
   await act(async () => button(label).click());
 }
 async function clickExact(label: string) {
-  const target = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-    item => item.textContent?.trim() === label,
+  const target = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      item =>
+        EffectPipe(item.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : EffectPipe(effectOptionalString, EffectString.trim),
+        ) === label,
+    ),
   )!;
   await act(async () => target.click());
 }
@@ -437,7 +560,7 @@ it('retains a dirty topic draft through unchanged evidence revalidation and free
     document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed descriptive paragraph 1"]')?.value,
   ).toBe('Dirty current behavior.');
   expect(button('Save draft')?.disabled ?? true).toBe(true);
-  expect(posted.map(action => action.action)).toEqual(['preview']);
+  expect(EffectArray.map(posted, action => action.action)).toEqual(['preview']);
   packetFailure = true;
   await act(async () => root?.render(dialog(true)));
   expect(document.body.textContent).not.toContain('Dirty current behavior.');
@@ -511,7 +634,7 @@ it('shows primary generation progress for the pending request without starting a
   await act(async () => gate.resolve());
   expect(document.querySelector('.topic-review-progress')).toBeNull();
   expect(document.body.textContent).toContain('Exact final document prepared for review.');
-  expect(posted.map(action => action.action)).toEqual(['generate', 'preview']);
+  expect(EffectArray.map(posted, action => action.action)).toEqual(['generate', 'preview']);
 });
 
 it('keeps a failed apply open and never acknowledges a resolved case', async () => {
@@ -556,12 +679,12 @@ it('recovers a failed post-generation evidence read explicitly without another m
   expect(document.querySelector('[role="alert"]')?.textContent).toContain('selected source evidence changed');
   expect(document.querySelector('dialog[open]')).not.toBeNull();
   expect(button('Apply update').disabled).toBe(true);
-  expect(posted.map(item => item.action)).toEqual(['generate']);
+  expect(EffectArray.map(posted, item => item.action)).toEqual(['generate']);
   packetFailure = false;
   await click('Refresh evidence');
   expect(document.querySelector('[role="alert"]')).toBeNull();
   expect(button('Apply update').disabled).toBe(false);
-  expect(posted.map(item => item.action)).toEqual(['generate', 'preview']);
+  expect(EffectArray.map(posted, item => item.action)).toEqual(['generate', 'preview']);
   expect(onClose).not.toHaveBeenCalled();
 });
 
@@ -617,9 +740,9 @@ it('freezes paragraph decisions, text and support while an exact preview is pend
     decision.value = 'unresolved';
     decision.dispatchEvent(new Event('change', {bubbles: true}));
   });
-  expect(button('Apply update').disabled).toBe(true);
   expect(button('Save draft')?.disabled ?? true).toBe(true);
-  expect(posted.map(action => action.action)).toEqual(['preview']);
+  expect(button('Apply update').disabled).toBe(true);
+  expect(EffectArray.map(posted, action => action.action)).toEqual(['preview']);
 });
 
 it.each(['model', 'manual'] as const)(
@@ -663,9 +786,11 @@ it.each(['threadnote', ''])('routes topic inbox items to their project from scop
   await click('Review and decide');
   expect(document.body.textContent).toContain('Review topic update');
   expect(document.body.textContent).not.toContain('Check the memory being replaced');
-  expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes('/api/reviews/preview'))).toBe(
-    false,
-  );
+  expect(
+    EffectArray.some(vi.mocked(globalThis.fetch).mock.calls, ([input]) =>
+      EffectPipe(String(input), EffectString.includes('/api/reviews/preview')),
+    ),
+  ).toBe(false);
 });
 
 it('keeps an inbox review open through preview and shows its exact final document', async () => {
@@ -734,7 +859,7 @@ it('retains a learned review identity after acceptance instead of reloading its 
 });
 
 it('opens the exact blocked review for explicit recovery without generating or closing it automatically', async () => {
-  const reviewId = `review-${'b'.repeat(24)}`;
+  const reviewId = `review-${EffectPipe('b', EffectString.repeat(24))}`;
   current = review({reviewId, state: 'conflict'});
   evidencePacket = {...packet, reviewId: undefined};
   generationRecovery = {action: 'open-review', reviewId, state: 'conflict'};
@@ -748,11 +873,11 @@ it('opens the exact blocked review for explicit recovery without generating or c
     />,
   );
   await click('Generate draft');
-  expect(posted.map(action => action.action)).toEqual(['generate']);
+  expect(EffectArray.map(posted, action => action.action)).toEqual(['generate']);
   expect(document.body.textContent).toContain('recoverable review conflict');
   await click('Open existing review');
   expect(button('Close conflicted review')).toBeTruthy();
-  expect(posted.map(action => action.action)).toEqual(['generate']);
+  expect(EffectArray.map(posted, action => action.action)).toEqual(['generate']);
   await click('Close conflicted review');
   expect(posted[1]).toMatchObject({action: 'reject', reviewId, revision: 3, caseId: 'case-1'});
 });
@@ -772,7 +897,15 @@ it('ignores a malformed review recovery selector', async () => {
   await click('Generate draft');
   expect(document.body.textContent).toContain('recoverable review conflict');
   expect(
-    [...document.querySelectorAll('button')].some(item => item.textContent?.includes('Open existing review')),
+    EffectArray.some(
+      [...document.querySelectorAll('button')],
+      item =>
+        EffectPipe(item.textContent, effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : EffectPipe(effectOptionalString, EffectString.includes('Open existing review')),
+        ) ?? false,
+    ),
   ).toBe(false);
 });
 
@@ -896,9 +1029,16 @@ it('keeps an unresolved paragraph blocked until its unchanged decision has expli
     decision.dispatchEvent(new Event('change', {bubbles: true}));
   });
   expect(button('Save draft')?.disabled ?? true).toBe(true);
-  const support = [...document.querySelectorAll('fieldset')]
-    .find(item => item.querySelector('legend')?.textContent?.includes('paragraph 1'))!
-    .querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  let supportField: HTMLFieldSetElement | undefined;
+  for (const fieldset of document.querySelectorAll<HTMLFieldSetElement>('fieldset')) {
+    const label = fieldset.querySelector('legend')?.textContent ?? '';
+    if (EffectString.includes('paragraph 1')(label)) {
+      supportField = fieldset;
+      break;
+    }
+  }
+  const support = supportField?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  if (!support) throw new Error('Expected the paragraph support checkbox.');
   expect(support.checked).toBe(false);
   await act(async () => support.click());
   expect(button('Save draft').disabled).toBe(false);
@@ -965,11 +1105,10 @@ it('retains the first edited paragraph while previewing a second edit', async ()
   await edit(1, 'Second edited.');
   expect(button('Apply update').disabled).toBe(true);
   await click('Save draft');
-  expect(
-    (JSON.parse(String(posted[2].editedDraftJson)) as ManagerTopicReviewV1['draft']).operations.map(
-      operation => operation.text,
-    ),
-  ).toEqual(['First edited.', 'Second edited.']);
+  expect(parseEditedTopicOperationTexts(JSON.parse(String(posted[2].editedDraftJson)))).toEqual([
+    'First edited.',
+    'Second edited.',
+  ]);
   expect(document.body.textContent).toContain('First edited.');
   expect(document.body.textContent).toContain('Second edited.');
   expect(button('Apply update').disabled).toBe(false);
@@ -984,7 +1123,7 @@ it.each([false, true])(
       topicEvidence: {
         ...packet.topicEvidence!,
         outcome: 'unavailable',
-        targetHash: 'b'.repeat(64),
+        targetHash: EffectPipe('b', EffectString.repeat(64)),
         reason: 'source changed',
       },
     };
@@ -1081,7 +1220,7 @@ it('holds resume while the deferred revision reloads, then submits that revision
   expect(document.body.textContent).toContain('Loading topic and review…');
   expect(button('Resume review').disabled).toBe(true);
   await click('Resume review');
-  expect(posted.map(action => action.action)).toEqual(['preview', 'defer']);
+  expect(EffectArray.map(posted, action => action.action)).toEqual(['preview', 'defer']);
   await act(async () => gate.resolve());
   expect(button('Resume review').disabled).toBe(false);
   await click('Resume review');
@@ -1109,9 +1248,9 @@ it('keeps the edited draft through defer and resume, then requires a new exact p
     document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed descriptive paragraph 1"]')?.value,
   ).toBe('Reviewed current behavior.');
   expect(button('Apply update').disabled).toBe(false);
-  expect(
-    (JSON.parse(String(posted.at(-1)?.editedDraftJson)) as ManagerTopicReviewV1['draft']).operations[0]?.text,
-  ).toBe('Reviewed current behavior.');
+  expect(parseEditedTopicOperationTexts(JSON.parse(String(posted.at(-1)?.editedDraftJson)))[0]).toBe(
+    'Reviewed current behavior.',
+  );
   expect(button('Apply update').disabled).toBe(false);
 });
 
@@ -1202,9 +1341,9 @@ it('adopts an unavailable imported observation without a generated review and di
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: string) =>
-      input.startsWith('/api/consolidation-models')
+      EffectString.startsWith('/api/consolidation-models')(input)
         ? new Response(JSON.stringify({models: []}))
-        : input.startsWith('/api/attention/topic-review')
+        : EffectString.startsWith('/api/attention/topic-review')(input)
           ? new Response(JSON.stringify({error: 'No saved review.'}), {status: 404})
           : new Response(JSON.stringify(selected)),
     ),
@@ -1226,9 +1365,15 @@ it('adopts an unavailable imported observation without a generated review and di
   expect(document.body.textContent).not.toContain('Private imported excerpt.');
   expect(document.body.textContent).not.toContain('Private accepted prose.');
   expect(document.body.textContent).toContain('Source access was revoked.');
-  expect([...document.querySelectorAll('button')].some(value => value.textContent?.includes('Apply update'))).toBe(
-    false,
-  );
+  expect(
+    EffectArray.some([...document.querySelectorAll('button')], value =>
+      Boolean(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(value.textContent), EffectString.includes('Apply update')),
+        ),
+      ),
+    ),
+  ).toBe(false);
 });
 
 it.each(['unavailable', 'not-ready', '403'] as const)(
@@ -1252,8 +1397,9 @@ it.each(['unavailable', 'not-ready', '403'] as const)(
       events: [],
     };
     const fetch = vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.startsWith('/api/consolidation-models')) return new Response(JSON.stringify({models: []}));
-      if (input.startsWith('/api/attention/topic-review'))
+      if (EffectString.startsWith('/api/consolidation-models')(input))
+        return new Response(JSON.stringify({models: []}));
+      if (EffectString.startsWith('/api/attention/topic-review')(input))
         return new Response(JSON.stringify({error: 'No saved review.'}), {status: 404});
       if (init?.method === 'POST')
         return failure === '403'
@@ -1269,7 +1415,9 @@ it.each(['unavailable', 'not-ready', '403'] as const)(
                     },
               ),
             );
-      return new Response(JSON.stringify(input.includes('view=status') ? {version: 2, cases: [item]} : selected));
+      return new Response(
+        JSON.stringify(EffectString.includes('view=status')(input) ? maintenanceStatus([item]) : selected),
+      );
     });
     vi.stubGlobal('fetch', fetch);
     const element = (stale: boolean) => (
@@ -1290,9 +1438,10 @@ it.each(['unavailable', 'not-ready', '403'] as const)(
     expect(document.body.textContent).not.toContain('Private imported excerpt.');
     expect(document.body.textContent).not.toContain('Private accepted prose.');
     expect(
-      fetch.mock.calls
-        .filter(([, init]) => init?.method === 'POST')
-        .every(([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case'),
+      EffectArray.every(
+        EffectArray.filter(fetch.mock.calls, ([, init]) => init?.method === 'POST'),
+        ([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case',
+      ),
     ).toBe(true);
   },
 );
@@ -1300,11 +1449,11 @@ it.each(['unavailable', 'not-ready', '403'] as const)(
 it('adopts the exact refreshed code-topic observation without a generated review', async () => {
   const citation = createMemoryCodeCitation({
     version: 1,
-    repositoryId: 'b'.repeat(64),
+    repositoryId: EffectString.repeat(64)('b'),
     repositoryIdentityKind: 'local',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: EffectString.repeat(40)('c'),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${EffectString.repeat(40)('d')}`,
     extractorSet: 'test',
     path: 'source.ts',
     fileContentHash: {algorithm: 'sha256', value: hash},
@@ -1323,10 +1472,10 @@ it('adopts the exact refreshed code-topic observation without a generated review
       extractorSet: 'test',
       fileContentHash: hash,
       path: 'source.ts',
-      repositoryId: 'b'.repeat(64),
-      sourceCommit: 'c'.repeat(40),
+      repositoryId: EffectString.repeat(64)('b'),
+      sourceCommit: EffectString.repeat(40)('c'),
       sourceDirty: false,
-      sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+      sourceSnapshotId: `cgsn_${EffectString.repeat(40)('d')}`,
     },
   });
   const initial: ManagerContextMaintenancePacketV2 = {
@@ -1350,9 +1499,9 @@ it('adopts the exact refreshed code-topic observation without a generated review
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: string) =>
-      input.startsWith('/api/consolidation-models')
+      EffectString.startsWith('/api/consolidation-models')(input)
         ? new Response(JSON.stringify({models: []}))
-        : input.startsWith('/api/attention/topic-review')
+        : EffectString.startsWith('/api/attention/topic-review')(input)
           ? new Response(JSON.stringify({error: 'No saved review.'}), {status: 404})
           : new Response(JSON.stringify(initial)),
     ),
@@ -1424,8 +1573,8 @@ it('refreshes the selected topic observation from the visible control without a 
     },
   };
   const fetch = vi.fn(async (input: string, init?: RequestInit) => {
-    if (input.startsWith('/api/consolidation-models')) return new Response(JSON.stringify({models: []}));
-    if (input.startsWith('/api/attention/topic-review'))
+    if (EffectString.startsWith('/api/consolidation-models')(input)) return new Response(JSON.stringify({models: []}));
+    if (EffectString.startsWith('/api/attention/topic-review')(input))
       return new Response(JSON.stringify({error: 'No saved review.'}), {status: 404});
     if (init?.method === 'POST') {
       refreshed = true;
@@ -1438,7 +1587,7 @@ it('refreshes the selected topic observation from the visible control without a 
         JSON.stringify({outcome: 'ready', item: {...item, evidenceRevision: 'fresh'}, packet: fresh}),
       );
     }
-    if (input.includes('view=status')) return new Response(JSON.stringify({version: 2, cases: [item]}));
+    if (EffectString.includes('view=status')(input)) return new Response(JSON.stringify(maintenanceStatus([item])));
     return changed && !refreshed
       ? new Response(JSON.stringify({error: 'Saved source observation is stale.'}), {status: 409})
       : new Response(JSON.stringify(refreshed ? fresh : {...packet, reviewId: undefined}));
@@ -1462,7 +1611,7 @@ it('refreshes the selected topic observation from the visible control without a 
   expect(refreshed).toBe(true);
   expect(document.body.textContent).toContain('Fresh selected source could not be verified.');
   expect(document.body.textContent).not.toContain('Saved source observation is stale.');
-  expect(fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  expect(EffectArray.filter(fetch.mock.calls, ([, init]) => init?.method === 'POST')).toHaveLength(1);
 });
 
 it.each(['reviews', 'case'] as const)(
@@ -1493,11 +1642,11 @@ it.each(['reviews', 'case'] as const)(
     current = review({...current, caseObservationMatches: false});
     const citation = createMemoryCodeCitation({
       version: 1,
-      repositoryId: 'b'.repeat(64),
+      repositoryId: EffectString.repeat(64)('b'),
       repositoryIdentityKind: 'local',
-      sourceCommit: 'c'.repeat(40),
+      sourceCommit: EffectString.repeat(40)('c'),
       sourceDirty: false,
-      sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+      sourceSnapshotId: `cgsn_${EffectString.repeat(40)('d')}`,
       extractorSet: 'test',
       path: 'source.ts',
       fileContentHash: {algorithm: 'sha256', value: hash},
@@ -1513,13 +1662,13 @@ it.each(['reviews', 'case'] as const)(
       supportsCitation: false,
       truncated: false,
       source: {
-        repositoryId: 'b'.repeat(64),
+        repositoryId: EffectString.repeat(64)('b'),
         extractorSet: 'test',
         fileContentHash: hash,
         path: 'source.ts',
-        sourceCommit: 'c'.repeat(40),
+        sourceCommit: EffectString.repeat(40)('c'),
         sourceDirty: false,
-        sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+        sourceSnapshotId: `cgsn_${EffectString.repeat(40)('d')}`,
       },
     });
     evidencePacket = {
@@ -1549,11 +1698,11 @@ it.each(['reviews', 'case'] as const)(
     expect(button('Apply update').disabled).toBe(true);
     expect(document.body.textContent).toContain('This draft needs fresh evidence');
     expect(
-      vi
-        .mocked(globalThis.fetch)
-        .mock.calls.filter(
-          ([input, init]) => String(input).startsWith('/api/attention/context-maintenance') && init?.method === 'POST',
-        ),
+      EffectArray.filter(
+        vi.mocked(globalThis.fetch).mock.calls,
+        ([input, init]) =>
+          EffectString.startsWith('/api/attention/context-maintenance')(String(input)) && init?.method === 'POST',
+      ),
     ).toHaveLength(1);
   },
 );
@@ -1589,7 +1738,7 @@ it.each(['reviews', 'case'] as const)(
     expect(button('Preview exact final document')).toBeUndefined();
     expect(button('Save draft')).toBeUndefined();
     expect(button('Apply update').disabled).toBe(false);
-    expect(posted.map(action => action.action)).toEqual(['preview']);
+    expect(EffectArray.map(posted, action => action.action)).toEqual(['preview']);
     const gate = Promise.withResolvers<void>();
     const base = globalThis.fetch;
     vi.stubGlobal(
@@ -1605,9 +1754,9 @@ it.each(['reviews', 'case'] as const)(
       apply.click();
     });
     expect(button('Saving update…').disabled).toBe(true);
-    expect(posted.map(action => action.action)).toEqual(['preview']);
+    expect(EffectArray.map(posted, action => action.action)).toEqual(['preview']);
     await act(async () => gate.resolve());
-    expect(posted.map(action => action.action)).toEqual(['preview', 'apply']);
+    expect(EffectArray.map(posted, action => action.action)).toEqual(['preview', 'apply']);
     expect(posted[1]).toMatchObject({revision: 4, approvalDigest: hash, approved: true});
   },
 );
@@ -1634,13 +1783,15 @@ it.each([false, true])('reconciles an unknown automatic preparation with GETs on
       onOpenLibrary={() => undefined}
     />,
   );
-  expect(posted.map(action => action.action)).toEqual(['preview']);
+  expect(EffectArray.map(posted, action => action.action)).toEqual(['preview']);
   expect(button('Apply update').disabled).toBe(true);
   expect(!!document.querySelector('[aria-label="Exact final document"]')).toBe(saved);
-  expect(vi.mocked(globalThis.fetch).mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  expect(
+    EffectArray.filter(vi.mocked(globalThis.fetch).mock.calls, ([, init]) => init?.method === 'POST'),
+  ).toHaveLength(1);
   await click('Refresh evidence');
   // Only the human's explicit selected-observation refresh adds a POST; preparation is not replayed.
-  expect(posted.map(action => action.action)).toEqual(['preview']);
+  expect(EffectArray.map(posted, action => action.action)).toEqual(['preview']);
   expect(button('Apply update').disabled).toBe(!saved);
 });
 
@@ -1694,7 +1845,7 @@ it('bounds automatic preparation at 30 seconds and performs no mutation replay a
   await act(async () => vi.advanceTimersByTimeAsync(1));
   expect(preparationSignal?.aborted).toBe(true);
   expect(document.body.textContent).toContain('timed out after 30000 ms');
-  expect(posted.map(action => action.action)).toEqual(['preview']);
+  expect(EffectArray.map(posted, action => action.action)).toEqual(['preview']);
   expect(button('Apply update').disabled).toBe(true);
 });
 
@@ -1710,7 +1861,9 @@ it('aborts a pending automatic preparation on selection change and ignores its l
       onOpenLibrary={() => undefined}
     />,
   );
-  const request = vi.mocked(globalThis.fetch).mock.calls.find(([, init]) => init?.method === 'POST');
+  const request = EffectOption.getOrUndefined(
+    EffectArray.findFirst(vi.mocked(globalThis.fetch).mock.calls, ([, init]) => init?.method === 'POST'),
+  );
   const signal = request?.[1]?.signal;
   await act(async () =>
     root?.render(
@@ -1727,5 +1880,5 @@ it('aborts a pending automatic preparation on selection change and ignores its l
   await act(async () => gate.resolve());
   expect(document.querySelector('[aria-label="Exact final document"]')).toBeNull();
   expect(document.body.textContent).not.toContain('Updated behavior.');
-  expect(posted.map(action => action.action)).toEqual(['preview']);
+  expect(EffectArray.map(posted, action => action.action)).toEqual(['preview']);
 });

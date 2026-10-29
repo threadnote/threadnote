@@ -5,16 +5,18 @@ import {
   assertGraphSharePublicationProgress,
   graphSharePublicationAuthority,
 } from '@threadnote/graph/sharing/registry/publication_state';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const candidate = (generation: number, publisherFence = 1) => ({
   descriptorDigest: sha256Digest(`descriptor-${generation}`),
   envelopeDigest: sha256Digest(`envelope-${generation}`),
   generation,
-  historyFloor: {generation: 1, sourceCommit: 'a'.repeat(40)},
+  historyFloor: {generation: 1, sourceCommit: Effect.pipe('a', EffectString.repeat(40))},
   manifestDigest: sha256Digest(`manifest-${generation}`),
   publisherFence,
   retentionDigest: sha256Digest(`retention-${generation}`),
-  sourceCommit: 'b'.repeat(40),
+  sourceCommit: Effect.pipe('b', EffectString.repeat(40)),
 });
 
 it('publication progress is monotonic and rejects conflicting identities without mutating receipts', () => {
@@ -37,7 +39,7 @@ it('publication progress is monotonic and rejects conflicting identities without
 
 it('isolates receipt authority by every trust and registry dimension, normalizing the default TLS port', () => {
   const scope = {
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect.pipe('a', EffectString.repeat(64)),
     branch: 'refs/heads/main',
     profileDigest: sha256Digest('profile'),
     publisherKeyFingerprint: sha256Digest('key'),
@@ -47,7 +49,7 @@ it('isolates receipt authority by every trust and registry dimension, normalizin
   expect(graphSharePublicationAuthority(scope, 'oci://registry.example.test:443/org/canonical')).toBe(authority);
   for (const modified of [
     {...scope, branch: 'refs/heads/other'},
-    {...scope, repositoryId: 'b'.repeat(64)},
+    {...scope, repositoryId: Effect.pipe('b', EffectString.repeat(64))},
     {...scope, profileDigest: sha256Digest('other')},
     {...scope, publisherKeyFingerprint: sha256Digest('other')},
   ]) {

@@ -1,19 +1,28 @@
+import {Array as EffectArray} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {hasUndeclaredPythonRuntimeReference} from '../../../../scripts/effect/self-contained-source.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
-const workflowSources = [
-  'apps/threadnote/src/dev_skills/contract.ts',
-  'apps/threadnote/src/dev_skills/manifest.ts',
-  'apps/threadnote/src/dev_skills/readiness.ts',
-  'packages/manager/src/dev_skills/contracts.ts',
-].map(path => ({path, content: readFileSync(path, 'utf8')}));
+const workflowSources = EffectArray.map(
+  [
+    'apps/threadnote/src/dev_skills/contract.ts',
+    'apps/threadnote/src/dev_skills/manifest.ts',
+    'apps/threadnote/src/dev_skills/readiness.ts',
+    'packages/manager/src/dev_skills/contracts.ts',
+  ],
+  path => ({path, content: readFileSync(path, 'utf8')}),
+);
 
 describe('self-contained source Python boundary', () => {
   it.each(workflowSources)('accepts only retained workflow ownership metadata in $path', ({path, content}) => {
     expect(hasUndeclaredPythonRuntimeReference(path, content)).toBe(false);
-    expect(hasUndeclaredPythonRuntimeReference(path, content.replaceAll('\n', '\r\n'))).toBe(false);
+    expect(hasUndeclaredPythonRuntimeReference(path, Effect.pipe(content, EffectString.replaceAll('\n', '\r\n')))).toBe(
+      false,
+    );
   });
 
   it('rejects Python execution added to every workflow metadata source or another runtime file', () => {
@@ -41,26 +50,41 @@ describe('self-contained source Python boundary', () => {
   });
 
   it('rejects interpreter probes and prerequisites even in workflow metadata files', () => {
-    const readiness = workflowSources.find(source => source.path.endsWith('/readiness.ts'))!;
+    const readiness = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        workflowSources,
+        __effectArrayValue =>
+          !!(source => Effect.pipe(source.path, EffectString.endsWith('/readiness.ts')))(__effectArrayValue),
+      ),
+    )!;
     expect(
       hasUndeclaredPythonRuntimeReference(
         readiness.path,
         `${readiness.content}\nconst python = findWorkingExecutable(['python3']).pipe(Effect.orElseSucceed(() => undefined));`,
       ),
     ).toBe(true);
-    for (const contract of workflowSources.filter(source => /\/contracts?\.ts$/u.test(source.path)))
+    for (const contract of EffectArray.filter(workflowSources, source => /\/contracts?\.ts$/u.test(source.path)))
       for (const field of ['readonly python?: string;', 'readonly python: string;'])
         expect(
           hasUndeclaredPythonRuntimeReference(
             contract.path,
-            contract.content.replace('readonly prerequisites: {', `readonly prerequisites: {\n    ${field}`),
+            Effect.pipe(
+              contract.content,
+              EffectString.replace('readonly prerequisites: {', `readonly prerequisites: {\n    ${field}`),
+            ),
           ),
         ).toBe(true);
-    const manifest = workflowSources.find(source => source.path.endsWith('/manifest.ts'))!;
+    const manifest = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        workflowSources,
+        __effectArrayValue =>
+          !!(source => Effect.pipe(source.path, EffectString.endsWith('/manifest.ts')))(__effectArrayValue),
+      ),
+    )!;
     expect(
       hasUndeclaredPythonRuntimeReference(
         manifest.path,
-        manifest.content.replace("python: '>=3.10'", "python: '>=3.11'"),
+        Effect.pipe(manifest.content, EffectString.replace("python: '>=3.10'", "python: '>=3.11'")),
       ),
     ).toBe(true);
   });

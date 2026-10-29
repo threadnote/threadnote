@@ -1,5 +1,7 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, it, expect} from 'vitest';
 import {nativeWatchInvocation} from '../../src/workflow_automation/watch_process.js';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 describe('native watch invocation', () => {
   const token = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
   it('uses the same binary with trusted source entrypoint only for Bun', () => {
@@ -115,7 +117,7 @@ async function realCollectorScenario(terminal: boolean) {
   const counter = join(root, 'gh-requests');
   await writeFile(counter, '');
   const fake = join(root, 'fake-gh.ts');
-  const head = 'a'.repeat(40);
+  const head = Effect2.pipe('a', EffectString.repeat(40));
   await writeFile(
     fake,
     `import {appendFileSync} from 'node:fs';
@@ -218,7 +220,7 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
       await dead(pid);
       owned.delete(pid);
       const delivery = required((await cli('relay', consumer)).result.delivery);
-      expect(delivery.events.map(event => event.kind).sort()).toEqual([
+      expect(EffectArray.map(delivery.events, event => event.kind).sort()).toEqual([
         'ci_error',
         'comment',
         'merged',
@@ -226,7 +228,7 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
       ]);
       expect((await cli('relay', consumer)).result.delivery).toEqual(delivery);
       const requests = await readFile(counter, 'utf8');
-      const dispositions = delivery.events.map(event => ({
+      const dispositions = EffectArray.map(delivery.events, event => ({
         eventId: event.id,
         status: 'resolved',
         reason: 'terminal fixture reviewed',
@@ -234,7 +236,9 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
       }));
       await cli('disposition', {...consumer, deliveryId: delivery.id, dispositions});
       expect((await cli('ack', {...consumer, deliveryId: delivery.id})).result.pending).toBe(0);
-      expect(required((await cli('work')).result.work.items).every(item => item.status === 'resolved')).toBe(true);
+      expect(
+        EffectArray.every(required((await cli('work')).result.work.items), item => item.status === 'resolved'),
+      ).toBe(true);
       expect((await cli('inspect')).result.collector.alive).toBe(false);
       expect(await readFile(counter, 'utf8')).toBe(requests);
       return;
@@ -250,7 +254,11 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
     } while (!candidate && Date.now() < deadline);
     const delivery = required(candidate);
     expect(delivery).toBeTruthy();
-    expect(delivery.events.map(event => event.kind).sort()).toEqual(['ci_error', 'comment', 'review_thread']);
+    expect(EffectArray.map(delivery.events, event => event.kind).sort()).toEqual([
+      'ci_error',
+      'comment',
+      'review_thread',
+    ]);
     const requests = await readFile(counter, 'utf8');
     const duplicate = await cli('start', start, false);
     expect(duplicate.exitCode).not.toBe(0);
@@ -277,10 +285,12 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
     expect(sweep.metrics.sweeps).toBe(2);
     const restartRequests = await readFile(counter, 'utf8');
     expect((await cli('relay', consumer)).result.delivery).toEqual(delivery);
-    const largeEvent = required(delivery.events.find(event => event.kind === 'ci_error'));
-    const largeReason = '界'.repeat(1024);
-    const largeEvidence = '語'.repeat(2048);
-    const dispositions = delivery.events.map(event => ({
+    const largeEvent = required(
+      EffectOption.getOrUndefined(EffectArray.findFirst(delivery.events, event => event.kind === 'ci_error')),
+    );
+    const largeReason = Effect2.pipe('界', EffectString.repeat(1024));
+    const largeEvidence = Effect2.pipe('語', EffectString.repeat(2048));
+    const dispositions = EffectArray.map(delivery.events, event => ({
       eventId: event.id,
       status: 'open',
       reason: event.id === largeEvent.id ? largeReason : 'fixture needs follow-up',
@@ -292,10 +302,18 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
     expect(acknowledged.work.open).toBe(3);
     expect((await cli('ack', {...consumer, deliveryId: delivery.id})).result.pending).toBe(0);
     const work = required((await cli('work')).result.work.items);
-    expect(work.map(item => item.eventId).sort()).toEqual(dispositions.map(item => item.eventId).sort());
-    const locator = required(required(work.find(item => item.eventId === largeEvent.id)).detail);
+    expect(EffectArray.map(work, item => item.eventId).sort()).toEqual(
+      EffectArray.map(dispositions, item => item.eventId).sort(),
+    );
+    const locator = required(
+      required(EffectOption.getOrUndefined(EffectArray.findFirst(work, item => item.eventId === largeEvent.id))).detail,
+    );
     const beforeDetail = (await cli('inspect')).result.revision;
-    const wrong = await cli('work-detail', {eventId: locator.eventId, sourceDigest: 'f'.repeat(64)}, false);
+    const wrong = await cli(
+      'work-detail',
+      {eventId: locator.eventId, sourceDigest: Effect2.pipe('f', EffectString.repeat(64))},
+      false,
+    );
     expect(wrong.exitCode).not.toBe(0);
     expect((await cli('inspect')).result.revision).toBe(beforeDetail);
     let offsetBytes = 0;
@@ -320,16 +338,19 @@ process.stdout.write('HTTP/2.0 200 OK\\r\\nETag: "fixture"\\r\\nX-Poll-Interval:
     expect(retained.event.url).toBe('https://github.com/fixture/repo/pull/1/checks?check_run_id=2');
     expect(retained.event.head).toBe(head);
     expect(
-      work
-        .filter(item => item.eventId !== largeEvent.id)
-        .every(item => item.reason === 'fixture needs follow-up' && item.evidence === 'fixture lifecycle acceptance'),
+      EffectArray.every(
+        EffectArray.filter(work, item => item.eventId !== largeEvent.id),
+        item => item.reason === 'fixture needs follow-up' && item.evidence === 'fixture lifecycle acceptance',
+      ),
     ).toBe(true);
     expect((await cli('inspect')).result.revision).toBe(beforeDetail);
     await cli('work-disposition', {
       ...consumer,
-      dispositions: dispositions.map(item => ({...item, status: 'resolved', reason: 'fixture addressed'})),
+      dispositions: EffectArray.map(dispositions, item => ({...item, status: 'resolved', reason: 'fixture addressed'})),
     });
-    expect(required((await cli('work')).result.work.items).every(item => item.status === 'resolved')).toBe(true);
+    expect(EffectArray.every(required((await cli('work')).result.work.items), item => item.status === 'resolved')).toBe(
+      true,
+    );
     expect(await readFile(counter, 'utf8')).toBe(restartRequests);
     await cli('stop');
     await dead(nextPid);
@@ -378,8 +399,8 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestClock} from 'effect/testing';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {CommandExecutor} from '@threadnote/platform/command';
-import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {SystemInfo} from '@threadnote/platform/system';
+
 import {initializeNativeWatch} from '@threadnote/workflow-automations/watch';
 import {
   decodeNativeWatchEnvelope,
@@ -387,11 +408,14 @@ import {
   writeNativeWatch,
 } from '../../src/workflow_automation/watch_store.js';
 import {launchNativeWatchProcess} from '../../src/workflow_automation/watch_process.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 effectIt.effect('startup failure sets stop only for its current nonce and preserves queued state', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const home = yield* fs.makeTempDirectoryScoped({prefix: 'native-watch-startup-'});
-    const config = {agentContextHome: home} as RuntimeConfig;
+    const config = runtimeConfigForTest({agentContextHome: home});
     const token = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
     const envelope = decodeNativeWatchEnvelope({
       format: 'threadnote-native-watch-runtime',
@@ -425,7 +449,7 @@ effectIt.effect('startup failure sets stop only for its current nonce and preser
   }).pipe(
     Effect.provideService(CommandExecutor, {
       spawnDetached: () => Effect.succeed(false),
-    } as unknown as CommandExecutor['Service']),
+    } as unknown),
     Effect.provideService(SystemInfo, {
       executablePath: process.execPath,
       developmentEntrypoint: 'trusted.ts',
@@ -434,7 +458,7 @@ effectIt.effect('startup failure sets stop only for its current nonce and preser
       isProcessRunning: (pid: number) => pid === process.pid,
       canonicalProcessStartIdentity: () => Effect.void,
       processStartIdentity: () => Effect.void,
-    } as unknown as SystemInfoShape),
+    } as unknown),
     provideTestLayer(BunServices.layer),
     TestClock.withLive,
   ),
@@ -444,7 +468,7 @@ effectIt.effect('accepts only the current nonce terminal receipt after its proce
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const home = yield* fs.makeTempDirectoryScoped({prefix: 'native-watch-terminal-launch-'});
-    const config = {agentContextHome: home} as RuntimeConfig;
+    const config = runtimeConfigForTest({agentContextHome: home});
     const token = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
     const state = initializeNativeWatch('fixture-watch', 'https://github.com/fixture/repo/pull/1', 0);
     const envelope = decodeNativeWatchEnvelope({
@@ -485,7 +509,7 @@ effectIt.effect('accepts only the current nonce terminal receipt after its proce
   }).pipe(
     Effect.provideService(CommandExecutor, {
       spawnDetached: () => Effect.succeed(true),
-    } as unknown as CommandExecutor['Service']),
+    } as unknown),
     Effect.provideService(SystemInfo, {
       executablePath: process.execPath,
       developmentEntrypoint: 'trusted.ts',
@@ -494,7 +518,7 @@ effectIt.effect('accepts only the current nonce terminal receipt after its proce
       isProcessRunning: () => false,
       canonicalProcessStartIdentity: () => Effect.void,
       processStartIdentity: () => Effect.void,
-    } as unknown as SystemInfoShape),
+    } as unknown),
     provideTestLayer(BunServices.layer),
     TestClock.withLive,
   ),

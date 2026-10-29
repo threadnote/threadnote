@@ -17,14 +17,14 @@ import type {CodeGraphStoreShape} from '../store.js';
 import {CODE_GRAPH_DEFERRED_VECTORS, type CodeGraphIndexSummary, type CodeGraphSnapshot} from '../types.js';
 export {CODE_GRAPH_DEFERRED_VECTORS};
 
-class CodeGraphVectorPublicationSuperseded extends Schema.TaggedError<CodeGraphVectorPublicationSuperseded>()(
-  'CodeGraphVectorPublicationSuperseded',
-  {message: Schema.String},
-) {}
+class CodeGraphVectorPublicationSuperseded extends Schema.TaggedError<
+  CodeGraphVectorPublicationSuperseded,
+  {readonly brand: unique symbol}
+>()('CodeGraphVectorPublicationSuperseded', {message: Schema.String}) {}
 
 /** Capture only while the structural publisher still owns its target gates. */
 export const captureCodeGraphVectorPublication = Effect.fn('codeGraph.captureVectorPublication')(function* (input: {
-  readonly store: CodeGraphStoreShape;
+  readonly store: Pick<CodeGraphStoreShape, 'readySnapshot' | 'withSession'>;
   readonly layout: CodeGraphLayout;
   readonly threadnoteHome: string;
   readonly snapshot: CodeGraphSnapshot;

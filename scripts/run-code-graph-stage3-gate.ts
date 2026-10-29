@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 import {
   assertStage3,
   parseStage3Arguments,
@@ -11,6 +12,8 @@ import {runStage3Scenarios} from './support/code-graph-stage3-scenarios.js';
 import {Schema} from 'effect';
 import {ScriptError} from './effect/errors.js';
 import {withStage3Cleanup} from './support/code-graph-stage3-lifecycle.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export async function runStage3Gate(arguments_: readonly string[]) {
   const options = parseStage3Arguments(arguments_);
@@ -39,7 +42,10 @@ export async function runStage3Gate(arguments_: readonly string[]) {
       const encoded = `${JSON.stringify(result, undefined, 2)}\n`;
       assertStage3(
         encoded.length < 64 * 1024 &&
-          ![...driver.forbidden].filter(value => value.startsWith('/')).some(value => encoded.includes(value)),
+          !EffectArray.some(
+            EffectArray.filter([...driver.forbidden], value => Effect.pipe(value, EffectString.startsWith('/'))),
+            value => Effect.pipe(encoded, EffectString.includes(value)),
+          ),
         'artifact-privacy',
       );
       return result;

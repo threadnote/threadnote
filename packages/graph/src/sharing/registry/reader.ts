@@ -33,7 +33,8 @@ export const makeGraphShareRegistryReader = Effect.fn('codeGraph.sharing.registr
       );
       const digest = sha256Digest(response.bytes);
       if (
-        response.headers['content-type']?.split(';')[0]?.trim() !== GRAPH_SHARE_OCI_IMAGE_MANIFEST_MEDIA_TYPE ||
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native split indexing preserves the optional content-type boundary.
+        response.headers['content-type']?.split(';')[0].trim() !== GRAPH_SHARE_OCI_IMAGE_MANIFEST_MEDIA_TYPE ||
         (response.headers['docker-content-digest'] !== undefined &&
           response.headers['docker-content-digest'] !== digest)
       )

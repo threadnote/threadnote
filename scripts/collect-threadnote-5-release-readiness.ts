@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Console, Effect} from 'effect';
 import {readPrivateCollectionJson} from './threadnote-5-collection-process.js';
@@ -7,6 +8,9 @@ import {
   sealThreadnote5Collection,
 } from './threadnote-5-collection-runner.js';
 import {ScriptError} from './effect/errors.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export async function runThreadnote5CollectionCli(args: readonly string[]): Promise<unknown> {
   const [mode, ...rest] = args;
@@ -35,11 +39,16 @@ export async function runThreadnote5CollectionCli(args: readonly string[]): Prom
   for (let index = 0; index < rest.length; index += 2) {
     const name = rest[index];
     const value = rest[index + 1];
-    if (!allowed.includes(name) || Object.hasOwn(options, name) || !value || value.startsWith('--'))
+    if (
+      !allowed.includes(name) ||
+      EffectRecord.has(options, name) ||
+      !value ||
+      Effect2.pipe(value, EffectString.startsWith('--'))
+    )
       throw new Error('Invalid or duplicate collection option.');
     options[name] = value;
   }
-  if (allowed.some(name => !Object.hasOwn(options, name)))
+  if (EffectArray.some(allowed, name => !EffectRecord.has(options, name)))
     throw new Error('Collection requires every documented input; there are no fixture/default adapters.');
   if (mode === 'preview') return previewThreadnote5Collection(await readPrivateCollectionJson(options['--plan']));
   if (mode === 'collect') {

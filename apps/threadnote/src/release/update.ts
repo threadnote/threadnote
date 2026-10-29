@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {
   heading,
@@ -59,11 +61,17 @@ import {
 import {errorMessage} from '@threadnote/platform/errors';
 import {toolRoot} from '@threadnote/workspace/installation';
 import {prepareReleaseDevSkills, refreshReleaseDevSkills} from './dev_skills_update.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class UpdateOperationError extends Schema.TaggedError<UpdateOperationError>()('UpdateOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class UpdateOperationError extends Schema.TaggedError<UpdateOperationError, {readonly brand: unique symbol}>()(
+  'UpdateOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const THREADNOTE_COMMAND = 'threadnote';
 const DEFAULT_RELEASE_SOURCE = GITHUB_RELEASES_URL;
@@ -400,12 +408,18 @@ const installStandaloneRelease = Effect.fn('update.installStandaloneRelease')(fu
   const releaseRoot = path.join(installationRoot(path, system), 'versions', options.version);
   const artifactName = releaseArtifactName(system);
   const releases = yield* fetchAvailableReleases(options.source, {allowCredentialCommand: !options.dryRun});
-  const release = releases.find(candidate => compareVersions(candidate.version, options.version) === 0);
+  const release = EffectOption.getOrUndefined(
+    EffectArray.findFirst(releases, candidate => compareVersions(candidate.version, options.version) === 0),
+  );
   if (!release) {
     return yield* UpdateOperationError.make({message: `GitHub release ${options.version} is no longer available.`});
   }
-  const archiveAsset = release.assets.find(asset => asset.name === artifactName);
-  const checksumAsset = release.assets.find(asset => asset.name === `${artifactName}.sha256`);
+  const archiveAsset = EffectOption.getOrUndefined(
+    EffectArray.findFirst(release.assets, asset => asset.name === artifactName),
+  );
+  const checksumAsset = EffectOption.getOrUndefined(
+    EffectArray.findFirst(release.assets, asset => asset.name === `${artifactName}.sha256`),
+  );
   if (!archiveAsset || !checksumAsset) {
     return yield* UpdateOperationError.make({
       message: `Release ${options.version} does not publish ${artifactName} and ${artifactName}.sha256 for this platform.`,
@@ -469,7 +483,7 @@ export const verifyOfficialPlatformSignature = Effect.fn('update.verifyOfficialP
   if (system.platform === 'darwin') {
     for (const file of yield* findFilesRecursively(fs, path, path.join(releaseRoot, 'runtime'))) {
       const type = yield* runCommandEffect('file', ['--brief', file]);
-      if (!type.stdout.includes('Mach-O')) continue;
+      if (!Effect2.pipe(type.stdout, EffectString.includes('Mach-O'))) continue;
       yield* runCommandEffect('codesign', ['--verify', '--strict', '--verbose=2', file]).pipe(
         Effect.mapError(cause =>
           UpdateOperationError.make({cause, message: `Release signature validation failed for ${file}.`}),
@@ -540,27 +554,37 @@ function releaseRequestHeaders(): Readonly<Record<string, string>> {
 }
 
 export function parseReleaseChecksum(content: string, artifactName: string): string {
-  const line = content
-    .split(/\r?\n/)
-    .map(value => value.trim())
-    .find(value => value.length > 0);
+  const line = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      EffectArray.map(Effect2.pipe(content, EffectString.split(/\r?\n/)), value =>
+        Effect2.pipe(value, EffectString.trim),
+      ),
+      value => value.length > 0,
+    ),
+  );
   const parsed = line ? parseReleaseChecksumLine(line) : undefined;
   if (!parsed || (parsed.artifact !== undefined && parsed.artifact !== artifactName)) {
     throw UpdateOperationError.make({message: `Invalid checksum document for ${artifactName}.`});
   }
-  return parsed.digest.toLowerCase();
+  return Effect2.pipe(parsed.digest, EffectString.toLowerCase);
 }
 
 function parseReleaseChecksumLine(line: string): {readonly artifact?: string; readonly digest: string} | undefined {
-  const digest = line.slice(0, 64);
-  if (digest.length !== 64 || [...digest].some(character => !'0123456789abcdefABCDEF'.includes(character))) {
+  const digest = Effect2.pipe(line, EffectString.slice(0, 64));
+  if (
+    digest.length !== 64 ||
+    EffectArray.some(
+      [...digest],
+      character => !Effect2.pipe('0123456789abcdefABCDEF', EffectString.includes(character)),
+    )
+  ) {
     return undefined;
   }
   if (line.length === 64) return {digest};
   const separator = line[64];
   if (separator !== ' ' && separator !== '\t') return undefined;
-  let artifact = line.slice(64).trimStart();
-  if (artifact.startsWith('*')) artifact = artifact.slice(1);
+  let artifact = Effect2.pipe(line, EffectString.slice(64), EffectString.trimStart);
+  if (Effect2.pipe(artifact, EffectString.startsWith('*'))) artifact = Effect2.pipe(artifact, EffectString.slice(1));
   return artifact ? {artifact, digest} : undefined;
 }
 
@@ -617,9 +641,10 @@ const validateCodeGraphAssets = Effect.fn('update.validateCodeGraphAssets')(func
       path: 'runtime/web-tree-sitter.wasm',
       runtime: true,
     },
-    ...Object.entries(grammars)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([id, metadata]) => ({id, metadata, runtime: false})),
+    ...EffectArray.map(
+      EffectRecord.toEntries(grammars).sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right))),
+      ([id, metadata]) => ({id, metadata, runtime: false}),
+    ),
   ];
   for (const asset of expected) {
     if (
@@ -627,7 +652,7 @@ const validateCodeGraphAssets = Effect.fn('update.validateCodeGraphAssets')(func
       typeof asset.metadata.path !== 'string' ||
       typeof asset.metadata.version !== 'string' ||
       typeof asset.metadata.source !== 'string' ||
-      !asset.metadata.source.startsWith('https://github.com/') ||
+      !Effect2.pipe(asset.metadata.source, EffectString.startsWith('https://github.com/')) ||
       typeof asset.metadata.sha256 !== 'string' ||
       !/^[0-9a-f]{64}$/.test(asset.metadata.sha256) ||
       (asset.runtime
@@ -636,7 +661,12 @@ const validateCodeGraphAssets = Effect.fn('update.validateCodeGraphAssets')(func
     ) {
       return yield* UpdateOperationError.make({message: `Code graph asset metadata is invalid for ${asset.id}.`});
     }
-    const assetPath = path.join(releaseRoot, 'assets', 'code-graph', ...asset.metadata.path.split('/'));
+    const assetPath = path.join(
+      releaseRoot,
+      'assets',
+      'code-graph',
+      ...Effect2.pipe(asset.metadata.path, EffectString.split('/')),
+    );
     if (!(yield* fs.exists(assetPath)) || (yield* sha256FileHex(assetPath)) !== asset.metadata.sha256) {
       return yield* UpdateOperationError.make({
         message: `Code graph asset checksum validation failed for ${asset.metadata.path}.`,
@@ -648,7 +678,12 @@ const validateCodeGraphAssets = Effect.fn('update.validateCodeGraphAssets')(func
           message: `Code graph asset license metadata is missing for ${asset.id}.`,
         });
       }
-      const licensePath = path.join(releaseRoot, 'assets', 'code-graph', ...asset.metadata.license.split('/'));
+      const licensePath = path.join(
+        releaseRoot,
+        'assets',
+        'code-graph',
+        ...Effect2.pipe(asset.metadata.license, EffectString.split('/')),
+      );
       if (!(yield* fs.exists(licensePath)) || (yield* fs.stat(licensePath)).size <= 0) {
         return yield* UpdateOperationError.make({
           message: `Code graph asset license is missing for ${asset.metadata.license}.`,
@@ -659,7 +694,7 @@ const validateCodeGraphAssets = Effect.fn('update.validateCodeGraphAssets')(func
           releaseRoot,
           'assets',
           'code-graph',
-          ...asset.metadata.builderLicense.split('/'),
+          ...Effect2.pipe(asset.metadata.builderLicense, EffectString.split('/')),
         );
         if (!(yield* fs.exists(builderLicensePath)) || (yield* fs.stat(builderLicensePath)).size <= 0) {
           return yield* UpdateOperationError.make({
@@ -789,13 +824,15 @@ export function streamingSubcommandFailureMessage(
   result: {readonly exitCode: number; readonly stderr: string; readonly stdout: string},
 ): string {
   const command = formatShellCommand(executable, args);
-  const preferred = redactSensitiveText(result.stderr.trim() || result.stdout.trim());
+  const preferred = redactSensitiveText(
+    Effect2.pipe(result.stderr, EffectString.trim) || Effect2.pipe(result.stdout, EffectString.trim),
+  );
   if (preferred.length === 0) {
     return `${command} exited with ${result.exitCode}.`;
   }
   const truncated =
     preferred.length > STREAMING_SUBCOMMAND_FAILURE_DETAIL_LIMIT
-      ? `…${preferred.slice(-STREAMING_SUBCOMMAND_FAILURE_DETAIL_LIMIT)}`
+      ? `…${Effect2.pipe(preferred, EffectString.slice(-STREAMING_SUBCOMMAND_FAILURE_DETAIL_LIMIT))}`
       : preferred;
   return `${command} exited with ${result.exitCode}. ${truncated}`;
 }
@@ -907,6 +944,7 @@ export function latestUpdateVersionLabel(channel: UpdateChannel): string {
 }
 
 export function requiresFreshStandaloneInstall(version: string): boolean {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const major = Number.parseInt(stableVersionCore(version).split('.', 1)[0] ?? '', 10);
   return Number.isSafeInteger(major) && major < 4;
 }
@@ -919,7 +957,7 @@ export const fetchLatestVersion = Effect.fn('fetchLatestVersion')(function* (
   options: ReleaseAuthenticationOptions = {},
 ) {
   const releases = yield* fetchAvailableReleases(source, options);
-  const candidates = channel === 'beta' ? releases : releases.filter(release => !release.prerelease);
+  const candidates = channel === 'beta' ? releases : EffectArray.filter(releases, release => !release.prerelease);
   return candidates.sort((left, right) => compareVersions(right.version, left.version))[0]?.version;
 });
 
@@ -939,24 +977,28 @@ const fetchAvailableReleases = Effect.fn('update.fetchAvailableReleases')(functi
       ),
     ),
   );
-  if (!Array.isArray(response.body)) {
+  if (!EffectArray.isArray(response.body)) {
     return yield* applicationError(
       'check GitHub for updates',
       UpdateOperationError.make({message: 'GitHub releases response was not an array.'}),
     );
   }
-  return response.body.flatMap(parseAvailableRelease);
+  return EffectArrayPipe(response.body, __effectFlatMapValues =>
+    EffectArray.flatMap(__effectFlatMapValues, (value, __effectFlatMapIndex) =>
+      __effectFlatMapIndex in __effectFlatMapValues ? parseAvailableRelease(value) : [],
+    ),
+  );
 });
 
 function parseAvailableRelease(value: unknown): readonly AvailableRelease[] {
   if (!isJsonObject(value) || value.draft === true || value.immutable !== true || typeof value.tag_name !== 'string') {
     return [];
   }
-  const version = value.tag_name.trim().replace(/^v/, '');
-  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) || !Array.isArray(value.assets)) {
+  const version = Effect2.pipe(value.tag_name, EffectString.trim, EffectString.replace(/^v/, ''));
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) || !EffectArray.isArray(value.assets)) {
     return [];
   }
-  const assets = value.assets.flatMap(asset => {
+  const assets = EffectArray.flatMap(value.assets, asset => {
     if (!isJsonObject(asset) || typeof asset.name !== 'string' || typeof asset.browser_download_url !== 'string') {
       return [];
     }
@@ -1226,10 +1268,10 @@ const readPostUpdateMigrations = Effect.fn('update.readPostUpdateMigrations')(fu
     try: (): unknown => JSON.parse(raw),
     catch: cause => UpdateOperationError.make({cause, message: `Could not parse ${POST_UPDATE_MIGRATIONS_FILE}.`}),
   });
-  if (!isJsonObject(parsed) || !Array.isArray(parsed.migrations)) {
+  if (!isJsonObject(parsed) || !EffectArray.isArray(parsed.migrations)) {
     throw UpdateOperationError.make({message: `${POST_UPDATE_MIGRATIONS_FILE} must contain a migrations array.`});
   }
-  return parsed.migrations.map(parsePostUpdateMigration);
+  return EffectArray.map(parsed.migrations, parsePostUpdateMigration);
 });
 
 function parsePostUpdateMigration(value: unknown): PostUpdateMigration {
@@ -1238,9 +1280,9 @@ function parsePostUpdateMigration(value: unknown): PostUpdateMigration {
     typeof value.id !== 'string' ||
     typeof value.introducedIn !== 'string' ||
     typeof value.title !== 'string' ||
-    !Array.isArray(value.description) ||
-    !Array.isArray(value.commandArgs) ||
-    !Array.isArray(value.instructions)
+    !EffectArray.isArray(value.description) ||
+    !EffectArray.isArray(value.commandArgs) ||
+    !EffectArray.isArray(value.instructions)
   ) {
     throw UpdateOperationError.make({message: `Invalid entry in ${POST_UPDATE_MIGRATIONS_FILE}.`});
   }
@@ -1282,17 +1324,18 @@ function postUpdateMigrationReached(migration: PostUpdateMigration, fromVersion:
     migration.appliesToPrereleases === true &&
     compareVersions(fromVersion, toVersion) < 0 &&
     stableVersionCore(migration.introducedIn) === stableVersionCore(toVersion) &&
-    toVersion.includes('-')
+    Effect2.pipe(toVersion, EffectString.includes('-'))
   );
 }
 
 function stableVersionCore(version: string): string {
-  return version.trim().replace(/^v/, '').split(/[+-]/, 1)[0] ?? '';
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+  return Effect2.pipe(version, EffectString.trim, EffectString.replace(/^v/, '')).split(/[+-]/, 1)[0] ?? '';
 }
 
 function stringArray(value: JsonObject, key: string): readonly string[] {
   const raw = value[key];
-  if (!Array.isArray(raw) || !raw.every(item => typeof item === 'string')) {
+  if (!EffectArray.isArray(raw) || !EffectArray.every(raw, item => typeof item === 'string')) {
     throw UpdateOperationError.make({message: `Invalid ${key} in ${POST_UPDATE_MIGRATIONS_FILE}.`});
   }
   return raw;
@@ -1309,11 +1352,14 @@ const printPostUpdateMigration = Effect.fn('update.printPostUpdateMigration')(fu
 });
 
 function formatMigrationCommand(executable: string, args: readonly string[]): string {
-  return [executable, ...args].map(part => (/\s/.test(part) ? JSON.stringify(part) : part)).join(' ');
+  return EffectArray.join(
+    EffectArray.map([executable, ...args], part => (/\s/.test(part) ? JSON.stringify(part) : part)),
+    ' ',
+  );
 }
 
 function currentThreadnoteCommand(system: SystemInfoShape): string | undefined {
-  const executable = system.executablePath.trim();
+  const executable = Effect2.pipe(system.executablePath, EffectString.trim);
   return executable || undefined;
 }
 
@@ -1329,10 +1375,10 @@ const readPostUpdateState = Effect.fn('update.readPostUpdateState')(function* (c
     return yield* UpdateOperationError.make({message: `Post-update state is invalid and was preserved: ${statePath}`});
   }
   const parsed = parsedResult.success;
-  if (!isJsonObject(parsed) || !Array.isArray(parsed.handledMigrationIds)) {
+  if (!isJsonObject(parsed) || !EffectArray.isArray(parsed.handledMigrationIds)) {
     return yield* UpdateOperationError.make({message: `Post-update state is invalid and was preserved: ${statePath}`});
   }
-  if (!parsed.handledMigrationIds.every((id): id is string => typeof id === 'string')) {
+  if (!EffectArray.every(parsed.handledMigrationIds, (id): id is string => typeof id === 'string')) {
     return yield* UpdateOperationError.make({message: `Post-update state is invalid and was preserved: ${statePath}`});
   }
   return {handledMigrationIds: [...new Set(parsed.handledMigrationIds)].sort()};
@@ -1412,7 +1458,13 @@ function allowsUntrustedSource(option: boolean | undefined, environment: NodeJS.
   if (option === true) {
     return true;
   }
-  const envValue = environment[ALLOW_UNTRUSTED_SOURCE_ENV]?.trim().toLowerCase();
+  const envValue = Effect2.pipe(
+    environment[ALLOW_UNTRUSTED_SOURCE_ENV],
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   return envValue === '1' || envValue === 'true' || envValue === 'yes';
 }
 

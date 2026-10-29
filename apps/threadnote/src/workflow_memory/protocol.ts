@@ -1,8 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import type {MemoryRelation} from '@threadnote/memory/document';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import type {DeferredCodeAnchorWriteRequest} from '../memory/deferred/code_anchor.js';
 import type {WorkflowNameFamily} from '@threadnote/workflow-automations/naming';
+import * as EffectRecord from 'effect/Record';
 
 export const WorkflowNameFamilySchema = Schema.Struct({
   policyVersion: Schema.Literal(1),
@@ -12,10 +14,13 @@ export const WorkflowNameFamilySchema = Schema.Struct({
 
 export const WORKFLOW_PROTOCOL_VERSION = 1 as const;
 export type WorkflowProfile = 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal';
-export class WorkflowMemoryError extends Schema.TaggedError<WorkflowMemoryError>()('WorkflowMemoryError', {
-  code: Schema.String,
-  message: Schema.String,
-}) {}
+export class WorkflowMemoryError extends Schema.TaggedError<WorkflowMemoryError, {readonly brand: unique symbol}>()(
+  'WorkflowMemoryError',
+  {
+    code: Schema.String,
+    message: Schema.String,
+  },
+) {}
 export const workflowError = (code: string, message: string) => WorkflowMemoryError.make({code, message});
 export const validateWorkflowInput = <A>(validate: () => A) =>
   Effect.try({
@@ -170,19 +175,22 @@ export function stableJson(value: unknown): string {
   return JSON.stringify(sortJson(value));
 }
 function sortJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJson);
+  if (EffectArray.isArray(value)) return EffectArray.map(value, sortJson);
   if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([, item]) => item !== undefined)
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([key, item]) => [key, sortJson(item)]),
+    return EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectArray.filter(EffectRecord.toEntries(value), ([, item]) => item !== undefined).sort(([a], [b]) =>
+          a < b ? -1 : a > b ? 1 : 0,
+        ),
+        ([key, item]) => [key, sortJson(item)],
+      ),
     );
   }
   return value;
 }
 export function requiredText(value: string | undefined, label: string): string {
-  if (!value?.trim() || value.length > 4096 || [...value].some(character => character.charCodeAt(0) < 32))
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining narrows `value` across the validation condition.
+  if (!value?.trim() || value.length > 4096 || EffectArray.some([...value], character => character.charCodeAt(0) < 32))
     throw workflowError('invalid-request', `${label} must be nonempty text without control characters.`);
   return value;
 }

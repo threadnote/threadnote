@@ -52,10 +52,13 @@ export const readContributionRetryState = Effect.fn('codeGraph.sharing.readContr
   if (!(yield* fs.exists(target))) return undefined;
   if (Number((yield* fs.stat(target)).size) > 4_096)
     return yield* graphSharingFailure('Contribution retry state exceeds the read limit.');
-  const value = (yield* readJsonFile(target)) as Partial<ContributionRetryState> | null;
+  const value: unknown = yield* readJsonFile(target);
   if (
-    value === null ||
     typeof value !== 'object' ||
+    value === null ||
+    !('identity' in value) ||
+    !('failures' in value) ||
+    !('nextAttempt' in value) ||
     typeof value.identity !== 'string' ||
     !SHA256_DIGEST.test(value.identity) ||
     typeof value.failures !== 'number' ||
@@ -68,7 +71,7 @@ export const readContributionRetryState = Effect.fn('codeGraph.sharing.readContr
   ) {
     return yield* graphSharingFailure('Contribution retry state is invalid.');
   }
-  return value as ContributionRetryState;
+  return {failures: value.failures, identity: value.identity, nextAttempt: value.nextAttempt};
 });
 
 // The repository delivery lease serializes this state across foreground and background runtimes.

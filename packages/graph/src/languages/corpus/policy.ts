@@ -1,3 +1,5 @@
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 export const CORPUS_EXTRACTION_SOURCE_BYTES_LIMIT = 64 * 1_048_576;
 export const CORPUS_ARCHIVE_ENTRY_BYTES_LIMIT = 16 * 1_048_576;
 export const CORPUS_ARCHIVE_EXPANDED_BYTES_LIMIT = 64 * 1_048_576;
@@ -40,7 +42,14 @@ const OPAQUE_CORPUS_MEDIA_EXTENSION_SET = new Set<string>(OPAQUE_CORPUS_MEDIA_EX
 
 /** Binary media contributes metadata-only asset nodes and can be deferred by structural-only indexing. */
 export function isOpaqueCorpusMediaPath(path: string): boolean {
-  const basename = path.split('/').at(-1)?.toLowerCase() ?? '';
-  const separator = basename.lastIndexOf('.');
-  return separator > 0 && OPAQUE_CORPUS_MEDIA_EXTENSION_SET.has(basename.slice(separator));
+  const basename =
+    Effect.pipe(Effect.pipe(path, EffectString.split('/')).at(-1), effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+    ) ?? '';
+  const separator = Effect.pipe(
+    basename,
+    EffectString.lastIndexOf('.'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  return separator > 0 && OPAQUE_CORPUS_MEDIA_EXTENSION_SET.has(Effect.pipe(basename, EffectString.slice(separator)));
 }

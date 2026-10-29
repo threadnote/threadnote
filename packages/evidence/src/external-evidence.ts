@@ -1,7 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {credentialScrubberBlocker} from '@threadnote/platform/scrubber';
 import type {BenchmarkArtifactV1, BenchmarkMeasurementV1} from './benchmark.js';
 import {privacySafeExternalControlPath, privacySafeExternalControlQuery} from './public-controls.js';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const EXTERNAL_RELEASE_MINIMUM_SAMPLES = 25;
 export const EXTERNAL_RELEASE_MINIMUM_WARMUPS = 5;
@@ -40,9 +44,12 @@ const INCREMENTAL_STAGED_ACTIVATION_STAGES = [
   'checkpointing-snapshot',
 ] as const;
 
-const ACTIVATION_COPY_STAGES = EXTERNAL_ACTIVATION_STAGES.filter(stage => stage.startsWith('copying-'));
+const ACTIVATION_COPY_STAGES = EffectArray.filter(EXTERNAL_ACTIVATION_STAGES, stage =>
+  Effect.pipe(stage, EffectString.startsWith('copying-')),
+);
 
-const SAMPLER_REQUIRED_MEASUREMENTS = (['cold', 'one-file-reindex', 'same-overlay-reference'] as const).flatMap(
+const SAMPLER_REQUIRED_MEASUREMENTS = EffectArray.flatMap(
+  ['cold', 'one-file-reindex', 'same-overlay-reference'] as const,
   prefix => [
     {name: `${prefix}-external-sampler-version-n1`, unit: 'count'} as const,
     {name: `${prefix}-external-storage-samples-n1`, unit: 'count'} as const,
@@ -62,25 +69,26 @@ const SAMPLER_REQUIRED_MEASUREMENTS = (['cold', 'one-file-reindex', 'same-overla
   ],
 );
 
-const ACTIVATION_REQUIRED_MEASUREMENTS = (['cold', 'one-file-reindex'] as const).flatMap(prefix => [
+const ACTIVATION_REQUIRED_MEASUREMENTS = EffectArray.flatMap(['cold', 'one-file-reindex'] as const, prefix => [
   {name: `${prefix}-activation-observed-stages-n1`, unit: 'count'} as const,
   {name: `${prefix}-activation-longest-transaction-n1`, unit: 'milliseconds'} as const,
   {name: `${prefix}-maximum-progress-heartbeat-gap-n1`, unit: 'milliseconds'} as const,
-  ...EXTERNAL_ACTIVATION_STAGES.flatMap(stage => [
+  ...EffectArray.flatMap(EXTERNAL_ACTIVATION_STAGES, stage => [
     {name: `${prefix}-activation-${stage}-observed-n1`, unit: 'count'} as const,
     {name: `${prefix}-activation-${stage}-duration-n1`, unit: 'milliseconds'} as const,
     {name: `${prefix}-activation-${stage}-rows-n1`, unit: 'count'} as const,
   ]),
 ]);
 
-export const INVENTORY_TIMING_REQUIRED_MEASUREMENTS = (
-  ['cold', 'one-file-reindex', 'same-overlay-reference'] as const
-).flatMap(prefix => [
-  {name: `${prefix}-inventory-source-reading-n1`, unit: 'milliseconds'} as const,
-  {name: `${prefix}-inventory-parser-extraction-summed-n1`, unit: 'milliseconds'} as const,
-  {name: `${prefix}-inventory-cache-persistence-n1`, unit: 'milliseconds'} as const,
-  {name: `${prefix}-inventory-parser-fact-serialization-n1`, unit: 'milliseconds'} as const,
-]);
+export const INVENTORY_TIMING_REQUIRED_MEASUREMENTS = EffectArray.flatMap(
+  ['cold', 'one-file-reindex', 'same-overlay-reference'] as const,
+  prefix => [
+    {name: `${prefix}-inventory-source-reading-n1`, unit: 'milliseconds'} as const,
+    {name: `${prefix}-inventory-parser-extraction-summed-n1`, unit: 'milliseconds'} as const,
+    {name: `${prefix}-inventory-cache-persistence-n1`, unit: 'milliseconds'} as const,
+    {name: `${prefix}-inventory-parser-fact-serialization-n1`, unit: 'milliseconds'} as const,
+  ],
+);
 
 const MATERIALIZATION_SUBPHASE_MEASUREMENT_NAMES = [
   'attribution-compute',
@@ -90,9 +98,11 @@ const MATERIALIZATION_SUBPHASE_MEASUREMENT_NAMES = [
   'shard-serialization',
 ] as const;
 
-export const MATERIALIZATION_SUBPHASE_REQUIRED_MEASUREMENTS = (['cold', 'same-overlay-reference'] as const).flatMap(
+export const MATERIALIZATION_SUBPHASE_REQUIRED_MEASUREMENTS = EffectArray.flatMap(
+  ['cold', 'same-overlay-reference'] as const,
   prefix =>
-    MATERIALIZATION_SUBPHASE_MEASUREMENT_NAMES.map(
+    EffectArray.map(
+      MATERIALIZATION_SUBPHASE_MEASUREMENT_NAMES,
       subphase => ({name: `${prefix}-materialization-subphase-${subphase}-n1`, unit: 'milliseconds'}) as const,
     ),
 );
@@ -277,11 +287,11 @@ const INLINE_CREDENTIAL_PATTERN =
 export function releaseEvidenceVersionForRef(ref: string): string | undefined {
   const match = RELEASE_REF_PATTERN.exec(ref);
   if (!match) return undefined;
-  const components = match
-    .slice(2)
-    .filter((component): component is string => component !== undefined)
-    .map(Number);
-  if (!components.every(Number.isSafeInteger) || Number(match[2]) < 4) return undefined;
+  const components = EffectArray.map(
+    EffectArray.filter(match.slice(2), (component): component is string => component !== undefined),
+    Number,
+  );
+  if (!EffectArray.every(components, Number.isSafeInteger) || Number(match[2]) < 4) return undefined;
   return match[1];
 }
 
@@ -306,17 +316,22 @@ export function publicGitHubRepositoryEvidence(origin: string): PublicGitHubRepo
   } catch {
     throw new Error('External benchmark repository origin must be a public GitHub HTTPS URL.');
   }
-  if (parsed.protocol !== 'https:' || parsed.hostname.toLowerCase() !== 'github.com' || parsed.search || parsed.hash) {
+  if (
+    parsed.protocol !== 'https:' ||
+    Effect.pipe(parsed.hostname, EffectString.toLowerCase) !== 'github.com' ||
+    parsed.search ||
+    parsed.hash
+  ) {
     throw new Error('External benchmark repository origin must be a public GitHub HTTPS URL.');
   }
-  const components = parsed.pathname
-    .replace(/\.git\/?$/, '')
-    .split('/')
-    .filter(Boolean);
+  const components = EffectArray.filter(
+    Effect.pipe(parsed.pathname, EffectString.replace(/\.git\/?$/, ''), EffectString.split('/')),
+    Boolean,
+  );
   if (
     components.length !== 2 ||
-    components.some(component => !/^[A-Za-z0-9_.-]+$/.test(component)) ||
-    components.some(component => component === '.' || component === '..')
+    EffectArray.some(components, component => !/^[A-Za-z0-9_.-]+$/.test(component)) ||
+    EffectArray.some(components, component => component === '.' || component === '..')
   ) {
     throw new Error('External benchmark repository origin must identify one public GitHub owner/repository.');
   }
@@ -450,7 +465,7 @@ export function validateExternalRepositoryEvidence(
   if (controlLanguages.length === 0) missing.push('external query control languages');
   if (metadata.externalControlCount !== controlLanguages.length) missing.push('external query control count');
   if (options.expectedControlLanguages && !sameSet(controlLanguages, options.expectedControlLanguages)) {
-    missing.push(`exact ${options.expectedControlLanguages.join(', ')} control set`);
+    missing.push(`exact ${EffectArray.join(options.expectedControlLanguages, ', ')} control set`);
   }
   validateControlEvidence(metadata, controlLanguages, missing);
   validateDeterministicParity(measurements, metadata, missing);
@@ -463,7 +478,7 @@ export function validateExternalRepositoryEvidence(
   if (options.releaseBound) validateReleaseSampling(artifact, measurements, missing);
 
   if (missing.length > 0) {
-    throw new Error(`External repository evidence is incomplete: ${[...new Set(missing)].join(', ')}.`);
+    throw new Error(`External repository evidence is incomplete: ${EffectArray.join([...new Set(missing)], ', ')}.`);
   }
 }
 
@@ -493,15 +508,18 @@ function assertExactArtifactShape(artifact: BenchmarkArtifactV1): void {
 }
 
 function assertExactKeys(value: object, expected: readonly string[], path: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const sortedExpected = [...expected].sort();
-  if (actual.length !== sortedExpected.length || actual.some((key, index) => key !== sortedExpected[index])) {
+  if (
+    actual.length !== sortedExpected.length ||
+    EffectArray.some(actual, (key, index) => key !== sortedExpected[index])
+  ) {
     throw new Error(`External benchmark ${path} has unknown or missing fields.`);
   }
 }
 
 function assertPublicMetadataShape(metadata: Readonly<Record<string, boolean | number | string>>): void {
-  for (const [key, value] of Object.entries(metadata)) {
+  for (const [key, value] of EffectRecord.toEntries(metadata)) {
     if (!EXTERNAL_PUBLIC_METADATA_KEY_SET.has(key)) {
       throw new Error(`External benchmark metadata.${key} is not in the public allowlist.`);
     }
@@ -516,8 +534,9 @@ function assertPublicMetadataShape(metadata: Readonly<Record<string, boolean | n
 
 function assertPrivacySafeArtifact(artifact: BenchmarkArtifactV1): void {
   for (const [path, value] of [
-    ...Object.entries(artifact.environment).filter(([, value]) => typeof value === 'string'),
-    ...Object.entries(artifact.metadata).filter(([, value]) => typeof value === 'string'),
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    ...EffectArray.filter(Object.entries(artifact.environment), ([, value]) => typeof value === 'string'),
+    ...EffectArray.filter(EffectRecord.toEntries(artifact.metadata), ([, value]) => typeof value === 'string'),
   ] as readonly [string, string][]) {
     if (credentialScrubberBlocker(value) !== undefined || INLINE_CREDENTIAL_PATTERN.test(value)) {
       throw new Error(`External benchmark ${path} contains credential-like content.`);
@@ -615,8 +634,9 @@ function validateRepositoryIdentity(
 function externalControlLanguages(metadata: BenchmarkArtifactV1['metadata']): readonly string[] {
   const value = metadata.externalControlLanguages;
   if (typeof value !== 'string' || value.length === 0) return [];
-  const languages = value.split(',');
-  return languages.some(language => !/^[a-z][a-z0-9-]*$/.test(language)) || new Set(languages).size !== languages.length
+  const languages = Effect.pipe(value, EffectString.split(','));
+  return Boolean(EffectArray.some(languages, language => !/^[a-z][a-z0-9-]*$/.test(language))) ||
+    new Set(languages).size !== languages.length
     ? []
     : languages;
 }
@@ -630,8 +650,10 @@ function validateControlEvidence(
     const parsed: unknown = JSON.parse(String(metadata.externalControlEvidence ?? ''));
     if (!Predicate.isObject(parsed)) throw new Error('invalid controls');
     const evidence = parsed;
-    const expectedKeys = languages.map(language => (language === 'bazel-build' ? 'bazel' : language)).sort();
-    if (!sameSet(Object.keys(evidence), expectedKeys)) throw new Error('control count mismatch');
+    const expectedKeys = EffectArray.map(languages, language =>
+      language === 'bazel-build' ? 'bazel' : language,
+    ).sort();
+    if (!sameSet(EffectRecord.keys(evidence), expectedKeys)) throw new Error('control count mismatch');
     for (const key of expectedKeys) {
       const value = evidence[key];
       if (!Predicate.isObject(value)) throw new Error('invalid control');
@@ -671,7 +693,7 @@ function validateDeterministicParity(
     metadata.structuralGraphDigestIncremental,
     metadata.structuralGraphDigestSameOverlayReference,
   ];
-  if (!digests.every(value => typeof value === 'string' && SHA256_PATTERN.test(value))) {
+  if (!EffectArray.every(digests, value => typeof value === 'string' && SHA256_PATTERN.test(value))) {
     missing.push('three structural graph SHA-256 digests');
   }
   if (digests[1] !== digests[2]) missing.push('incremental and independent overlay digest parity');
@@ -799,8 +821,8 @@ function validateProvenance(artifact: BenchmarkArtifactV1, releaseBound: boolean
   const managedVersion = metadata.benchmarkValidatedManagedVersion;
   const managedVersionMatchesCommit =
     typeof managedVersion === 'string' &&
-    (managedVersion.endsWith(`-local.g${artifact.environment.commit}`) ||
-      managedVersion.endsWith(`.local.g${artifact.environment.commit}`));
+    (Effect.pipe(managedVersion, EffectString.endsWith(`-local.g${artifact.environment.commit}`)) ||
+      Effect.pipe(managedVersion, EffectString.endsWith(`.local.g${artifact.environment.commit}`)));
   if (
     metadata.benchmarkMeasuredExecutionMode !== 'local-source-application-layer' ||
     metadata.benchmarkMeasuredSourceCommit !== artifact.environment.commit ||
@@ -856,14 +878,15 @@ function validateProvenance(artifact: BenchmarkArtifactV1, releaseBound: boolean
     let parsedHarnessDeltaPaths: readonly string[] = [];
     try {
       const parsed = JSON.parse(String(harnessDeltaPaths ?? '[]'));
-      if (Array.isArray(parsed) && parsed.every(path => typeof path === 'string')) parsedHarnessDeltaPaths = parsed;
+      if (EffectArray.isArray(parsed) && EffectArray.every(parsed, path => typeof path === 'string'))
+        parsedHarnessDeltaPaths = parsed;
     } catch {
       // Report invalid release provenance through the shared missing-evidence path below.
     }
     const canonicalHarnessDelta =
       parsedHarnessDeltaPaths.length > 0 &&
       new Set(parsedHarnessDeltaPaths).size === parsedHarnessDeltaPaths.length &&
-      parsedHarnessDeltaPaths.every(path => RELEASE_EVIDENCE_HARNESS_DELTA_PATH_SET.has(path)) &&
+      EffectArray.every(parsedHarnessDeltaPaths, path => RELEASE_EVIDENCE_HARNESS_DELTA_PATH_SET.has(path)) &&
       JSON.stringify([...parsedHarnessDeltaPaths].sort()) === JSON.stringify(parsedHarnessDeltaPaths);
     const sourceModeValid =
       (sourceMode === 'exact-release' &&
@@ -927,5 +950,8 @@ function validateReleaseSampling(
 }
 
 function sameSet(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && [...left].sort().every((value, index) => value === [...right].sort()[index]);
+  return (
+    left.length === right.length &&
+    EffectArray.every([...left].sort(), (value, index) => value === [...right].sort()[index])
+  );
 }

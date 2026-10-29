@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {codeGraphLiveObservationPaths} from '@threadnote/graph/live_catalog_observation';
@@ -49,8 +50,11 @@ export const makeManagerGraphLiveObservation = Effect.fn('manager.graphLive.obse
               ? unavailable
               : [
                   ...unavailable,
-                  ...resources.filter(
-                    item => item.topic === 'graph-status' && !unavailable.some(missing => missing.topic === item.topic),
+                  ...EffectArray.filter(
+                    resources,
+                    item =>
+                      item.topic === 'graph-status' &&
+                      !EffectArray.some(unavailable, missing => missing.topic === item.topic),
                   ),
                 ],
           ),

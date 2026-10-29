@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {mcpConfigurationChecks} from '../mcp/install.js';
 import {withSetupMutationLock} from '../setup/lock.js';
@@ -12,6 +13,7 @@ import {
   type AgentIntegrationRegistry,
   type AgentSetupCompletion,
 } from './registry.js';
+import * as EffectRecord from 'effect/Record';
 
 const makeStatusContext = Effect.fn('agentAdapters.statusContext')(function* (
   config: RuntimeConfig,
@@ -68,7 +70,7 @@ export const repairRegisteredAgentAdapters = Effect.fn('agentAdapters.repairRegi
 ) {
   const operation = Effect.gen(function* () {
     const registry = yield* readAgentIntegrationRegistry(config);
-    for (const id of Object.keys(registry?.surfaces ?? {})) {
+    for (const id of EffectRecord.keys(registry?.surfaces ?? {})) {
       const adapter = getAgentAdapter(id);
       if (adapter)
         yield* adapter.actions.repair(config, adapter, {
@@ -88,8 +90,11 @@ export const removeRegisteredAgentAdaptersInTransaction = Effect.fn('agentAdapte
 ) {
   let registry = yield* readAgentIntegrationRegistry(config);
   if (!registry) return;
-  const excludedConsumers = new Set(removeLegacyConsumers ? Object.keys(registry.hosts).map(id => `legacy:${id}`) : []);
-  for (const id of Object.keys(registry.surfaces ?? {})) {
+  const excludedConsumers = new Set(
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    removeLegacyConsumers ? EffectArray.map(Object.keys(registry.hosts), id => `legacy:${id}`) : [],
+  );
+  for (const id of EffectRecord.keys(registry.surfaces ?? {})) {
     const adapter = getAgentAdapter(id);
     if (!adapter) continue;
     const next: AgentIntegrationRegistry | AgentSetupCompletion | void = yield* adapter.actions.remove(
@@ -114,7 +119,7 @@ export const agentAdapterDoctorChecks = Effect.fn('agentAdapters.doctor')(functi
 ) {
   const context = yield* makeStatusContext(config, inferredClients, false);
   const checks: DoctorCheck[] = [...context.legacyChecks];
-  for (const id of Object.keys(context.registry?.surfaces ?? {})) {
+  for (const id of EffectRecord.keys(context.registry?.surfaces ?? {})) {
     const adapter = getAgentAdapter(id);
     if (!adapter && options.includeRetainedUnsupported === false) continue;
     const result = adapter

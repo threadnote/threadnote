@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {mkdtempSync, rmSync} from '@threadnote/testing/node-fs';
@@ -18,6 +19,8 @@ import type {
   RepositoryIdentity,
 } from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('project-closure persisted store', () => {
   it.effect('accepts a scoped project surface replacement while changed closure remains strict', () =>
@@ -167,7 +170,7 @@ describe('project-closure persisted store', () => {
         const ready = {...snapshot(identity, 'local-surface', 2), baseSnapshotId: base.id};
         yield* store.activateStaged(databasePath, identity, ready);
         const graph = yield* store.loadGraph(databasePath, ready.id);
-        expect(graph.symbols.map(value => value.id).sort()).toEqual([newLocal.id, published.id].sort());
+        expect(EffectArray.map(graph.symbols, value => value.id).sort()).toEqual([newLocal.id, published.id].sort());
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -254,11 +257,23 @@ describe('project-closure persisted store', () => {
           yield* store.prepareActivation(databasePath, [file]);
           yield* store.stageActivationFacts(databasePath, [published], []);
           yield* sql`INSERT INTO activation_incremental_paths (path) VALUES (${file.path})`;
-          yield* insertSnapshotSurfaceReexports(sql, base.id, baseValues.map(surfaceReexport));
-          yield* insertActivationSurfaceReexports(sql, currentValues.map(surfaceReexport));
+          yield* insertSnapshotSurfaceReexports(sql, base.id, EffectArray.map(baseValues, surfaceReexport));
+          yield* insertActivationSurfaceReexports(sql, EffectArray.map(currentValues, surfaceReexport));
 
-          const expected = [...baseValues].sort((left, right) => left - right).join(',');
-          const actual = [...currentValues].sort((left, right) => left - right).join(',');
+          const expected = EffectArray.join(
+            EffectArray.map(
+              [...baseValues].sort((left, right) => left - right),
+              item => (item === null || item === undefined ? '' : String(item)),
+            ),
+            ',',
+          );
+          const actual = EffectArray.join(
+            EffectArray.map(
+              [...currentValues].sort((left, right) => left - right),
+              item => (item === null || item === undefined ? '' : String(item)),
+            ),
+            ',',
+          );
           expect(yield* persistedIncrementalSurfaceMatches(sql, base.id)).toBe(expected === actual);
         }),
       ).pipe(provideTestLayer(ApplicationLayer)),
@@ -375,7 +390,8 @@ describe('project-closure persisted store', () => {
         const facts = fileFacts(file.path, symbol(2));
         expect(
           yield* store.preparePersistedIncrementalActivation(databasePath, base.id, [file], [facts], {
-            resolutionClosure: 'unknown' as 'project',
+            // @ts-expect-error -- Exercise rejection of a corrupt persisted closure tag outside the typed union.
+            resolutionClosure: 'unknown',
           }),
         ).toBe(false);
         expect(
@@ -413,7 +429,7 @@ describe('project-closure persisted store', () => {
         const decoded = yield* store.loadCachedFacts(databasePath, [file], 'extractor');
         expect(decoded.facts.size).toBe(0);
 
-        const oversized = ' '.repeat(8 * 1_048_576 + 1);
+        const oversized = Effect2.pipe(' ', EffectString.repeat(8 * 1_048_576 + 1));
         yield* Effect.sync(() => insertCachedFact(databasePath, file, 'extractor', oversized));
         const metadata = yield* store.loadCachedFacts(databasePath, [file], 'extractor', {decode: false});
         expect(metadata.bytes).toBe(oversized.length);
@@ -455,14 +471,14 @@ function withStoreFixture<A, E>(
 function repositoryIdentity(root: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'project-closure-store',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'r'.repeat(64),
-    worktreeId: 'w'.repeat(64),
+    repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
   };
 }
 
@@ -609,7 +625,7 @@ function insertReexports(databasePath: string, snapshotId: string, count: number
           snapshotId,
           'packages/barrel/index.ts',
           'foo',
-          `packages/target-${String(index).padStart(5, '0')}.ts`,
+          `packages/target-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}.ts`,
           `target${index}`,
         );
       }

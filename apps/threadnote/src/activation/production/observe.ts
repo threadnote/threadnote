@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Path, Schema} from 'effect';
 import {getAgentAdapter, type AgentAdapter} from '../../agent_integration/adapters.js';
 import {AGENT_CATALOG} from '@threadnote/integrations/catalog';
@@ -12,11 +13,13 @@ import {collectActivationImportPreview, type ActivationImportPreviewV1} from '..
 import {createActivationPlanV1} from '../planner.js';
 import type {ActivationPlanV1} from '../contract.js';
 import type {ActivationProductionRequestV1} from './contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class ActivationProductionError extends Schema.TaggedError<ActivationProductionError>()(
-  'ActivationProductionError',
-  {message: Schema.String},
-) {}
+export class ActivationProductionError extends Schema.TaggedError<
+  ActivationProductionError,
+  {readonly brand: unique symbol}
+>()('ActivationProductionError', {message: Schema.String}) {}
 
 export interface ActivationProductionObservationV1 {
   readonly imports: ActivationImportPreviewV1;
@@ -56,9 +59,10 @@ export const observeActivationProductionV1 = Effect.fn('activation.production.ob
   const decisionIntent = activationDecisionPlanIdentityV1(normalizedRequest);
   const catalogSnapshotHash = sha256HexSync(
     canonicalJson(
-      [primaryAdapter.catalog, secondaryAdapter.catalog]
-        .sort((left, right) => compareText(left.id, right.id))
-        .map(entry => ({adapterVersion: 1, entry})),
+      EffectArray.map(
+        [primaryAdapter.catalog, secondaryAdapter.catalog].sort((left, right) => compareText(left.id, right.id)),
+        entry => ({adapterVersion: 1, entry}),
+      ),
     ),
   );
   const plan = createActivationPlanV1({
@@ -165,15 +169,15 @@ const validateTeamTarget = Effect.fn('activation.production.validateTeamTarget')
     );
   }
   return yield* resolveRepositoryIdentity(request.team.remotePath).pipe(
-    Effect.map(identity => identity.repositoryId),
-    Effect.mapError(() =>
-      activationProductionError('Activation team remotePath must be a readable local Git repository.'),
-    ),
+    Effect.mapBoth({
+      onSuccess: identity => identity.repositoryId,
+      onFailure: () => activationProductionError('Activation team remotePath must be a readable local Git repository.'),
+    }),
   );
 });
 
 export function activationCatalogRevisionV1(): string {
-  return `agent-catalog-v1-${sha256HexSync(canonicalJson(AGENT_CATALOG)).slice(0, 16)}`;
+  return `agent-catalog-v1-${Effect2.pipe(sha256HexSync(canonicalJson(AGENT_CATALOG)), EffectString.slice(0, 16))}`;
 }
 
 export function activationReplacementTargetIdentityHashV1(uri: string): string {

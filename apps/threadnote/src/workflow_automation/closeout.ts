@@ -1,13 +1,17 @@
+import {isOneOf} from '@threadnote/platform/validation';
 import {
   Array as EffectArray,
+  Option as EffectOption,
   Record as EffectRecord,
   String as EffectString,
   Effect,
   FileSystem,
   Path,
+  Predicate,
   Schema,
   pipe,
 } from 'effect';
+import * as Effect2 from 'effect';
 import {checkNativeCycleScope} from '@threadnote/workflow-automations/cycle';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workflow-automations/contracts';
@@ -52,16 +56,26 @@ const ref = (artifact: WorkflowArtifact) => ({
   memoryId: artifact.memoryId,
   revision: artifact.revision,
 });
+const closeoutArtifactSchema = Schema.Struct({
+  uri: Schema.String,
+  memoryId: Schema.String,
+  revision: Schema.String,
+  body: Schema.String,
+  storageKind: Schema.Literals(['durable', 'handoff']),
+  state: Schema.Literals(['active', 'archived']),
+});
 const artifact = (input: unknown): WorkflowArtifact => {
-  if (!input || typeof input !== 'object') throw fail('invalid-readback', 'Expected verified native memory readback.');
-  const value = input as Record<string, unknown>;
+  if (!input || typeof input !== 'object' || !Predicate.isObject(input))
+    throw fail('invalid-readback', 'Expected verified native memory readback.');
+  const value = input;
   if (
     value.verifiedReadback !== true ||
     typeof value.canonicalUri !== 'string' ||
     typeof value.memoryId !== 'string' ||
     typeof value.revision !== 'string' ||
     typeof value.body !== 'string' ||
-    !['active', 'archived'].includes(String(value.state))
+    !isOneOf(['durable', 'handoff'], value.storageKind) ||
+    !isOneOf(['active', 'archived'], value.state)
   )
     throw fail('invalid-readback', 'Expected verified native memory readback.');
   return {
@@ -69,8 +83,8 @@ const artifact = (input: unknown): WorkflowArtifact => {
     memoryId: value.memoryId,
     revision: value.revision,
     body: value.body,
-    storageKind: value.storageKind as 'durable' | 'handoff',
-    state: value.state as 'active' | 'archived',
+    storageKind: value.storageKind,
+    state: value.state,
   };
 };
 const summary = (journal: Journal, revision: string) => ({
@@ -85,10 +99,13 @@ const summary = (journal: Journal, revision: string) => ({
     ...(journal.admissionEpoch ? {admissionEpoch: journal.admissionEpoch} : {}),
     retainedAdmissions: journal.history?.length ?? 0,
     owned: journal.owned.length,
-    archived: Object.keys(journal.archives).length,
-    outputs: Object.entries(journal.outputs)
-      .filter(([key]) => ['architecture', 'behavior', 'handoff', 'decisions-0', 'history-0'].includes(key))
-      .map(([key, reference]) => ({key, ...reference})),
+    archived: EffectRecord.keys(journal.archives).length,
+    outputs: EffectArray.map(
+      EffectArray.filter(EffectRecord.toEntries(journal.outputs), ([key]) =>
+        ['architecture', 'behavior', 'handoff', 'decisions-0', 'history-0'].includes(key),
+      ),
+      ([key, reference]) => ({key, ...reference}),
+    ),
     ...(journal.approvalDigest
       ? {approvalDigest: journal.approvalDigest, decision: journal.decision ?? 'pending'}
       : {}),
@@ -280,14 +297,15 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             executorVersion: 1,
             status: 'ok',
             source: inputs.source,
-            phases: inputs.cycle.plan.phases.map(phase => ({
+            phases: EffectArray.map(inputs.cycle.plan.phases, phase => ({
               id: phase.id,
               acceptanceCriteria: phase.acceptanceCriteria,
             })),
-            scenarios: inputs.spec?.kind === 'spec' ? inputs.spec.scenarios.map(item => ({id: item.id})) : [],
+            scenarios:
+              inputs.spec?.kind === 'spec' ? EffectArray.map(inputs.spec.scenarios, item => ({id: item.id})) : [],
             decisions:
               inputs.plan.kind === 'plan'
-                ? inputs.plan.decisions.map(item => ({id: item.id, selected: item.selected}))
+                ? EffectArray.map(inputs.plan.decisions, item => ({id: item.id, selected: item.selected}))
                 : [],
           };
         }
@@ -353,12 +371,15 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
           );
           // Admit every final document before any knowledge write or retirement.
           yield* attempt(() =>
-            [
-              admission.documents.architecture,
-              ...admission.documents.decisions,
-              admission.documents.handoff,
-              ...(admission.documents.behavior ? [admission.documents.behavior] : []),
-            ].forEach(encodeAuthoringDocument),
+            EffectArray.forEach(
+              [
+                admission.documents.architecture,
+                ...admission.documents.decisions,
+                admission.documents.handoff,
+                ...(admission.documents.behavior ? [admission.documents.behavior] : []),
+              ],
+              encodeAuthoringDocument,
+            ),
           );
           const admissionEpoch =
             saved?.state.status === 'superseded' ? hash({supersededRevision: saved.revision}) : undefined;
@@ -375,7 +396,10 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
           for (const item of inputs.owned) {
             const operationId =
               'closeout-' +
-              hash({transactionId, bindingId: item.bindingId, uri: item.uri, revision: item.revision}).slice(0, 48);
+              Effect2.pipe(
+                hash({transactionId, bindingId: item.bindingId, uri: item.uri, revision: item.revision}),
+                EffectString.slice(0, 48),
+              );
             const preview = yield* runWorkflowMemory(config, {
               protocolVersion: 1,
               action: 'preflight',
@@ -395,8 +419,8 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
           const documents = yield* planNativeCloseoutDocuments(admission, owned, (key, body) =>
             call({
               ...base('preflight'),
-              operationId: 'closeout-' + transactionId.slice(0, 24) + '-' + key,
-              artifactKey: 'closeout-' + transactionId.slice(0, 24) + '-' + key,
+              operationId: 'closeout-' + Effect2.pipe(transactionId, EffectString.slice(0, 24)) + '-' + key,
+              artifactKey: 'closeout-' + Effect2.pipe(transactionId, EffectString.slice(0, 24)) + '-' + key,
               role: 'closeout-' + key,
               nameHint: key,
               body,
@@ -703,7 +727,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             ],
             {timeoutMs: 30_000},
           );
-          if (head.stdout.trim() !== journal.source.head || dirty.stdout.length !== 0)
+          if (Effect2.pipe(head.stdout, EffectString.trim) !== journal.source.head || dirty.stdout.length !== 0)
             return yield* fail('closeout-source-drift', 'Source changed during closeout; keep remaining drafts.');
         });
         for (const item of journal.owned) {
@@ -732,11 +756,11 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             {
               key: 'architecture',
               role: 'architecture' as const,
-              topic: binding.featureId.slice(0, 80) + '-implemented',
+              topic: Effect2.pipe(binding.featureId, EffectString.slice(0, 80)) + '-implemented',
               body:
                 renderNativeDocument(admission.documents.architecture) +
                 '\n' +
-                admission.documents.decisions.map(renderNativeDocument).join('\n'),
+                EffectArray.join(EffectArray.map(admission.documents.decisions, renderNativeDocument), '\n'),
               codeRefs: [...admission.architecture.codeRefs],
               relations: admission.documents.behavior ? [{type: 'references', nodeKey: 'spec'}] : [],
             },
@@ -745,7 +769,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
                   {
                     key: 'spec',
                     role: 'spec' as const,
-                    topic: binding.featureId.slice(0, 80) + '-verified',
+                    topic: Effect2.pipe(binding.featureId, EffectString.slice(0, 80)) + '-verified',
                     body: renderNativeDocument(admission.documents.behavior),
                     codeRefs: [...admission.architecture.codeRefs],
                     relations: [{type: 'references', nodeKey: 'architecture'}],
@@ -815,7 +839,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             publication !== null &&
             'status' in publication &&
             publication.status === 'pending'
-              ? (publication as Record<string, unknown>)
+              ? publication
               : undefined;
           if (pendingPublication) {
             const rawStage = pendingPublication.stage;
@@ -903,9 +927,14 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             }
             yield* fresh;
             const operationId =
-              'closeout-' + journal.transactionId.slice(0, 24) + '-' + key + (replacing ? '-final' : '');
-            const existing = (yield* readNativeWorkflowState(config, request.runId))?.state.operations.find(
-              item => item.intent.operationId === operationId,
+              'closeout-' +
+              Effect2.pipe(journal.transactionId, EffectString.slice(0, 24)) +
+              '-' +
+              key +
+              (replacing ? '-final' : '');
+            const knownOperations = (yield* readNativeWorkflowState(config, request.runId))?.state.operations ?? [];
+            const existing = EffectOption.getOrUndefined(
+              EffectArray.findFirst(knownOperations, item => item.intent.operationId === operationId),
             );
             if (
               existing &&
@@ -921,7 +950,8 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
                 : {
                     ...base('write'),
                     operationId,
-                    artifactKey: 'closeout-' + journal.transactionId.slice(0, 24) + '-' + key,
+                    artifactKey:
+                      'closeout-' + Effect2.pipe(journal.transactionId, EffectString.slice(0, 24)) + '-' + key,
                     role: 'closeout-' + key,
                     nameHint: key,
                     body,
@@ -934,7 +964,9 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             );
             if (!result || typeof result !== 'object' || !('artifact' in result))
               return yield* fail('invalid-readback', 'Closeout write did not return its artifact.');
-            const value = result.artifact as WorkflowArtifact;
+            const value = result.artifact;
+            if (!Schema.is(closeoutArtifactSchema)(value))
+              return yield* fail('invalid-readback', 'Closeout write returned an invalid artifact.');
             const observed = yield* read(journal.bindingId, value.uri);
             if (
               observed.memoryId !== value.memoryId ||
@@ -949,7 +981,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             yield* save({...journal, outputs: {...journal.outputs, [key]: reference}});
             return reference;
           });
-        const finalDocuments = new Map(journal.documents.map(document => [document.key, document]));
+        const finalDocuments = new Map(EffectArray.map(journal.documents, document => [document.key, document]));
         const seen = new Set<string>();
         for (const document of journal.documents) {
           const boundary = yield* CurrentNativeJobBoundary;
@@ -957,9 +989,15 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
           if (!seen.has(document.key)) {
             const final = finalDocuments.get(document.key);
             if (final && final !== document) {
-              const operationId = 'closeout-' + journal.transactionId.slice(0, 24) + '-' + document.key + '-final';
-              const existing = (yield* readNativeWorkflowState(config, request.runId))?.state.operations.find(
-                item => item.intent.operationId === operationId,
+              const operationId =
+                'closeout-' +
+                Effect2.pipe(journal.transactionId, EffectString.slice(0, 24)) +
+                '-' +
+                document.key +
+                '-final';
+              const knownOperations = (yield* readNativeWorkflowState(config, request.runId))?.state.operations ?? [];
+              const existing = EffectOption.getOrUndefined(
+                EffectArray.findFirst(knownOperations, item => item.intent.operationId === operationId),
               );
               if (existing) {
                 if (

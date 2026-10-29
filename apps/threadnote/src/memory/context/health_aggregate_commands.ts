@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 
 import {readBoundedContainedStableRegularFile} from '@threadnote/graph/inventory/contained_file';
@@ -26,6 +27,9 @@ import {
 import {memoryHeaderValue, parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {readPersonalProjectMemoryRecords} from '../maintenance/records.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAXIMUM_TEAM_FILES = 1_000;
 const MAXIMUM_TEAM_FILE_BYTES = 256 * 1_024;
@@ -34,10 +38,10 @@ const MAXIMUM_GIT_OUTPUT_BYTES = 1_048_576;
 const GIT_TIMEOUT_MILLISECONDS = 10_000;
 const GIT_COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
-class ContextHealthAggregateReadError extends Schema.TaggedError<ContextHealthAggregateReadError>()(
-  'ContextHealthAggregateReadError',
-  {cause: Schema.optionalKey(Schema.Defect()), message: Schema.String},
-) {}
+class ContextHealthAggregateReadError extends Schema.TaggedError<
+  ContextHealthAggregateReadError,
+  {readonly brand: unique symbol}
+>()('ContextHealthAggregateReadError', {cause: Schema.optionalKey(Schema.Defect()), message: Schema.String}) {}
 
 export interface ContextHealthAggregateOptionsV1 {
   readonly callerCwd: string;
@@ -80,7 +84,7 @@ export const collectContextHealthAggregateSources = Effect.fn('memory.contextHea
   const teams: ContextHealthAggregateSourceV1[] = [];
   if (Result.isFailure(teamsFile)) {
     if (requestedTeams && requestedTeams.length > 0) {
-      teams.push(...requestedTeams.map(team => unknownTeam(team, 'snapshot-unreadable')));
+      teams.push(...EffectArray.map(requestedTeams, team => unknownTeam(team, 'snapshot-unreadable')));
     } else {
       teams.push(unknownTeamSelection('snapshot-unreadable'));
     }
@@ -88,7 +92,7 @@ export const collectContextHealthAggregateSources = Effect.fn('memory.contextHea
     const selected =
       requestedTeams === undefined
         ? yield* Effect.try({
-            try: () => canonicalContextHealthTeamsV1(Object.keys(teamsFile.success.teams)),
+            try: () => canonicalContextHealthTeamsV1(EffectRecord.keys(teamsFile.success.teams)),
             catch: cause => aggregateReadError('Configured context health team selection is invalid.', cause),
           }).pipe(Effect.result)
         : Result.succeed(requestedTeams);
@@ -144,7 +148,7 @@ const collectPersonalSource = Effect.fn('memory.contextHealth.aggregatePersonal'
   const recordsResult = yield* readPersonalProjectMemoryRecords(config, project).pipe(Effect.result);
   if (Result.isFailure(recordsResult)) return unknownPersonal('snapshot-unreadable');
   const corpus = recordsResult.success;
-  const records = corpus.filter(record => record.metadata.status === 'active');
+  const records = EffectArray.filter(corpus, record => record.metadata.status === 'active');
   const evidenceRevision = memoryRecordsRevision('personal', corpus);
   const report = yield* collectContextHealth(config, project, records, callerCwd, {relationCorpus: corpus}).pipe(
     Effect.result,
@@ -204,7 +208,8 @@ const collectTeamSource = Effect.fn('memory.contextHealth.aggregateTeam')(functi
     records: active,
     relationEvidence: relationEvidenceWithinSnapshot(active, all),
   });
-  return active.some(
+  return EffectArray.some(
+    active,
     record => (record.metadata.codeCitations?.length ?? 0) > 0 || (record.metadata.citationErrors?.length ?? 0) > 0,
   )
     ? {...unknownTeam(team, 'citation-evidence-unavailable', evidenceRevision), report}
@@ -224,11 +229,13 @@ const readTeamRecords = Effect.fn('memory.contextHealth.readTeamRecords')(functi
   const prefix = `durable/projects/${projectSegment}`;
   const listing = yield* runGit(worktree, ['ls-tree', '-r', '-z', head, '--', prefix]);
   if (listing.exitCode !== 0) return yield* aggregateReadError('Could not list the selected team snapshot.');
-  const entries = (yield* Effect.forEach(listing.stdout.split('\0').filter(Boolean), raw =>
-    Effect.try({
-      try: () => parseTreeEntry(raw),
-      catch: cause => aggregateReadError('Team snapshot Git tree is malformed.', cause),
-    }),
+  const entries = (yield* Effect.forEach(
+    EffectArray.filter(Effect2.pipe(listing.stdout, EffectString.split('\0')), Boolean),
+    raw =>
+      Effect.try({
+        try: () => parseTreeEntry(raw),
+        catch: cause => aggregateReadError('Team snapshot Git tree is malformed.', cause),
+      }),
   )).sort(compareTreeEntry);
   if (entries.length > MAXIMUM_TEAM_FILES) return yield* aggregateReadError('Team snapshot file limit exceeded.');
   const records: MemoryRecord[] = [];
@@ -246,7 +253,7 @@ const readTeamRecords = Effect.fn('memory.contextHealth.readTeamRecords')(functi
       return yield* aggregateReadError('Team snapshot byte limit exceeded.');
     }
     const observedObject = yield* runGit(worktree, ['hash-object', '--stdin'], bytes);
-    if (observedObject.exitCode !== 0 || observedObject.stdout.trim() !== entry.objectId) {
+    if (observedObject.exitCode !== 0 || Effect2.pipe(observedObject.stdout, EffectString.trim) !== entry.objectId) {
       return yield* aggregateReadError('Team snapshot content does not match the selected Git revision.');
     }
     const content = yield* Effect.try({
@@ -271,14 +278,15 @@ const readTeamRecords = Effect.fn('memory.contextHealth.readTeamRecords')(functi
   }
   const all = records.sort(compareRecord);
   return {
-    active: all.filter(record => record.metadata.status === 'active'),
+    active: EffectArray.filter(all, record => record.metadata.status === 'active'),
     all,
     evidenceRevision: snapshotEvidenceRevision(head, evidence),
   };
 });
 
 function isCompatibleTeamVisibility(record: MemoryRecord): boolean {
-  const normalizedContent = record.content.replace(/\r\n?/gu, '\n');
+  const normalizedContent = Effect2.pipe(record.content, EffectString.replace(/\r\n?/gu, '\n'));
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const header = normalizedContent.split('\n\n', 1)[0] ?? '';
   const visibility = memoryHeaderValue(header, 'visibility');
   return visibility === undefined || visibility === 'personal' || visibility === 'shared';
@@ -289,7 +297,7 @@ const observeTeamSnapshot = Effect.fn('memory.contextHealth.observeTeamSnapshot'
   project: string,
 ) {
   const head = yield* runGit(worktree, ['rev-parse', '--verify', 'HEAD']);
-  if (head.exitCode !== 0 || !GIT_COMMIT.test(head.stdout.trim())) {
+  if (head.exitCode !== 0 || !GIT_COMMIT.test(Effect2.pipe(head.stdout, EffectString.trim))) {
     return yield* aggregateReadError('Team snapshot HEAD is unavailable.');
   }
   const status = yield* runGit(worktree, [
@@ -301,7 +309,7 @@ const observeTeamSnapshot = Effect.fn('memory.contextHealth.observeTeamSnapshot'
     `durable/projects/${project}`,
   ]);
   if (status.exitCode !== 0) return yield* aggregateReadError('Team snapshot status is unavailable.');
-  return {dirty: status.stdout.length > 0, head: head.stdout.trim()};
+  return {dirty: status.stdout.length > 0, head: Effect2.pipe(head.stdout, EffectString.trim)};
 });
 
 const runGit = Effect.fn('memory.contextHealth.git')(function* (
@@ -339,13 +347,14 @@ function relationEvidenceWithinSnapshot(
     matches.push(record);
     byMemoryId.set(record.metadata.memoryId, matches);
   }
-  return active.flatMap(record =>
-    (record.metadata.relations ?? []).map(relation => {
+  return EffectArray.flatMap(active, record =>
+    EffectArray.map(record.metadata.relations ?? [], relation => {
       const memoryId = memoryIdFromIdentityAlias(relation.uri);
       const matches = memoryId === undefined ? undefined : byMemoryId.get(memoryId);
       const directMatches =
         memoryId === undefined
-          ? corpus.filter(
+          ? EffectArray.filter(
+              corpus,
               candidate =>
                 candidate.uri === relation.uri ||
                 (candidate.metadata.status !== 'active' && candidate.metadata.archivedFrom === relation.uri),
@@ -376,10 +385,10 @@ function relationEvidenceWithinSnapshot(
 }
 
 function memoryRecordsRevision(scope: string, records: readonly MemoryRecord[]): string {
-  const evidence = records
-    .map(record => `${record.uri}\0${sha256HexSync(record.content)}`)
-    .sort(compareText)
-    .join('\n');
+  const evidence = EffectArray.join(
+    EffectArray.map(records, record => `${record.uri}\0${sha256HexSync(record.content)}`).sort(compareText),
+    '\n',
+  );
   return sha256HexSync(`context-health-${scope}-v1\n${evidence}`);
 }
 
@@ -388,7 +397,10 @@ function snapshotEvidenceRevision(
   evidence: readonly {readonly contentHash: string; readonly path: string}[],
 ): string {
   return sha256HexSync(
-    `context-health-team-v1\n${head}\n${evidence.map(item => `${item.path}\0${item.contentHash}`).join('\n')}`,
+    `context-health-team-v1\n${head}\n${EffectArray.join(
+      EffectArray.map(evidence, item => `${item.path}\0${item.contentHash}`),
+      '\n',
+    )}`,
   );
 }
 
@@ -421,9 +433,13 @@ interface TeamTreeEntry {
 }
 
 function parseTreeEntry(raw: string): TeamTreeEntry {
-  const separator = raw.indexOf('\t');
-  const metadata = separator < 0 ? [] : raw.slice(0, separator).split(' ');
-  const path = separator < 0 ? '' : raw.slice(separator + 1);
+  const separator = Effect2.pipe(
+    raw,
+    EffectString.indexOf('\t'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const metadata = separator < 0 ? [] : Effect2.pipe(raw, EffectString.slice(0, separator), EffectString.split(' '));
+  const path = separator < 0 ? '' : Effect2.pipe(raw, EffectString.slice(separator + 1));
   if (metadata.length !== 3 || metadata[1] !== 'blob' || !GIT_COMMIT.test(metadata[2] ?? '') || !path) {
     throw new Error('Invalid Git tree entry.');
   }

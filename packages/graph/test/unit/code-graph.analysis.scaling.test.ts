@@ -10,6 +10,8 @@ import {
   pagedAnalysisStore,
   type AnalysisPagingObservation,
 } from '../helpers/code-graph-analysis.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph analysis scaling', () => {
   effectIt.effect(
@@ -19,20 +21,27 @@ describe('code graph analysis scaling', () => {
         const nodeCount = 20_000;
         const packageSize = 100;
         const symbols: CodeGraphSymbol[] = Array.from({length: nodeCount}, (_, index) => {
-          const padded = index.toString().padStart(5, '0');
-          const packageIndex = Math.floor(index / packageSize)
-            .toString()
-            .padStart(3, '0');
+          const padded = Effect2.pipe(index.toString(), EffectString.padStart(5, '0'));
+          const packageIndex = Effect2.pipe(Math.floor(index / packageSize).toString(), EffectString.padStart(3, '0'));
           return analysisSymbol(`node-${padded}`, `package-${packageIndex}`, `packages/p${packageIndex}/src/index.ts`);
         });
         const edges: CodeGraphEdge[] = [];
         for (let index = 0; index < symbols.length; index += 1) {
           const source = symbols[index];
           const next = symbols[(index + 1) % symbols.length];
-          edges.push(analysisEdge(`next-${index.toString().padStart(5, '0')}`, source, next));
+          edges.push(
+            analysisEdge(`next-${Effect2.pipe(index.toString(), EffectString.padStart(5, '0'))}`, source, next),
+          );
           if (index % 2 === 0) {
             const secondary = symbols[(index + 17) % symbols.length];
-            edges.push(analysisEdge(`secondary-${index.toString().padStart(5, '0')}`, source, secondary, 'references'));
+            edges.push(
+              analysisEdge(
+                `secondary-${Effect2.pipe(index.toString(), EffectString.padStart(5, '0'))}`,
+                source,
+                secondary,
+                'references',
+              ),
+            );
           }
         }
         const observation: AnalysisPagingObservation = {edgePageLimits: [], symbolPageLimits: []};

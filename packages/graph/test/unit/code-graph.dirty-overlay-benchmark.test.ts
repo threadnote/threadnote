@@ -1,5 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {describe, expect, it} from 'vitest';
+import {Predicate, Schema} from 'effect';
 import {
   dirtyOverlayAmplificationEvidence,
   dirtyOverlayChangedSource,
@@ -12,47 +14,85 @@ import {
   validateCodeGraphBenchmarkRatchet,
 } from '../../../../scripts/benchmark-code-graph.js';
 import {generatedStaticReexportControlStatement} from '../../../../scripts/code-graph-fixture.js';
+import * as EffectRecord from 'effect/Record';
+
+const extraValues = [Schema.Record(Schema.String, Schema.Unknown)] as const;
+const replaySchema = Schema.StructWithRest(
+  Schema.Struct({
+    attributedFiles: Schema.Finite,
+    cachedFactReplayBytes: Schema.Finite,
+    changedFactBytes: Schema.Finite,
+    crossGenerationShardFiles: Schema.Finite,
+    exactGenerationShardFiles: Schema.Finite,
+    materializedShardReplayBytes: Schema.Finite,
+    rawFactReplayBytes: Schema.Finite,
+  }),
+  extraValues,
+);
+const dirtyOverlayEvidenceSchema = Schema.StructWithRest(
+  Schema.Struct({
+    environment: Schema.StructWithRest(
+      Schema.Struct({
+        availableBytes: Schema.Finite,
+        commit: Schema.String,
+        minimumFreeBytes: Schema.Finite,
+        provenance: Schema.StructWithRest(Schema.Struct({sourceCommit: Schema.String}), extraValues),
+        storage: Schema.StructWithRest(Schema.Struct({location: Schema.String, medium: Schema.String}), extraValues),
+      }),
+      extraValues,
+    ),
+    measurements: Schema.StructWithRest(
+      Schema.Struct({
+        full: Schema.StructWithRest(
+          Schema.Struct({durationMilliseconds: Schema.Finite, stagedFiles: Schema.Finite}),
+          extraValues,
+        ),
+        incremental: Schema.StructWithRest(
+          Schema.Struct({durationMilliseconds: Schema.Finite, stagedFiles: Schema.Finite}),
+          extraValues,
+        ),
+      }),
+      extraValues,
+    ),
+    observations: Schema.StructWithRest(
+      Schema.Struct({
+        full: Schema.StructWithRest(
+          Schema.Struct({edges: Schema.Finite, symbols: Schema.Finite, totalFiles: Schema.Finite}),
+          extraValues,
+        ),
+        incremental: Schema.StructWithRest(
+          Schema.Struct({
+            attributionContextFiles: Schema.Finite,
+            baseFactsLoaded: Schema.Finite,
+            changedFiles: Schema.Finite,
+            closureProjects: Schema.Finite,
+            edges: Schema.Finite,
+            inventoryFilesInspected: Schema.Finite,
+            probedDependencyPaths: Schema.Finite,
+            replay: replaySchema,
+            resolutionClosure: Schema.String,
+            symbols: Schema.Finite,
+            totalFiles: Schema.Finite,
+          }),
+          extraValues,
+        ),
+      }),
+      extraValues,
+    ),
+  }),
+  extraValues,
+);
 
 describe('code graph dirty-overlay benchmark evidence', () => {
   it('retains governed 300k dependency-closure evidence with proportional work', () => {
-    const evidence = JSON.parse(
-      readFileSync(
-        'apps/threadnote/test/evaluation/baselines/code-graph-v1/dirty-overlay-dependency-surface-development.json',
-        'utf8',
-      ),
-    ) as {
-      readonly environment: {
-        readonly availableBytes: number;
-        readonly commit: string;
-        readonly minimumFreeBytes: number;
-        readonly provenance: {readonly sourceCommit: string};
-        readonly storage: {readonly location: string; readonly medium: string};
-      };
-      readonly measurements: {
-        readonly full: {readonly durationMilliseconds: number; readonly stagedFiles: number};
-        readonly incremental: {readonly durationMilliseconds: number; readonly stagedFiles: number};
-      };
-      readonly observations: {
-        readonly full: {readonly edges: number; readonly symbols: number; readonly totalFiles: number};
-        readonly incremental: {
-          readonly attributionContextFiles: number;
-          readonly baseFactsLoaded: number;
-          readonly changedFiles: number;
-          readonly closureProjects: number;
-          readonly edges: number;
-          readonly inventoryFilesInspected: number;
-          readonly probedDependencyPaths: number;
-          readonly replay: {
-            readonly cachedFactReplayBytes: number;
-            readonly materializedShardReplayBytes: number;
-            readonly rawFactReplayBytes: number;
-          };
-          readonly resolutionClosure: string;
-          readonly symbols: number;
-          readonly totalFiles: number;
-        };
-      };
-    };
+    const evidence = Schema.decodeUnknownSync(dirtyOverlayEvidenceSchema)(
+      JSON.parse(
+        readFileSync(
+          'apps/threadnote/test/evaluation/baselines/code-graph-v1/dirty-overlay-dependency-surface-development.json',
+          'utf8',
+        ),
+      ) as unknown,
+    );
     expect(evidence.environment.commit).toMatch(/^[0-9a-f]{40}$/);
     expect(evidence.environment.provenance.sourceCommit).toBe(evidence.environment.commit);
     expect(evidence.environment.availableBytes).toBeGreaterThanOrEqual(evidence.environment.minimumFreeBytes);
@@ -279,15 +319,19 @@ describe('code graph dirty-overlay benchmark evidence', () => {
       'incremental-base-facts-loaded maximum 5 exceeds 4',
     );
 
-    const checkedRatchet = JSON.parse(
+    const parsedRatchet: unknown = JSON.parse(
       readFileSync(
         'apps/threadnote/test/evaluation/baselines/code-graph-v1/dirty-overlay-dependency-surface-ratchet.json',
         'utf8',
       ),
-    ) as {readonly measurements: Readonly<Record<string, unknown>>};
-    expect(() => validateCodeGraphBenchmarkRatchet(checkedRatchet)).not.toThrow();
-    expect(Object.keys(checkedRatchet.measurements).sort()).toEqual(
-      artifact.measurements.map(measurement => measurement.name).sort(),
+    );
+    expect(() => validateCodeGraphBenchmarkRatchet(parsedRatchet)).not.toThrow();
+    if (!Predicate.isObject(parsedRatchet)) throw new Error('Validated ratchet must be an object');
+    const measurements = parsedRatchet.measurements;
+    if (!Predicate.isObject(measurements)) throw new Error('Validated ratchet must expose its measurements record');
+    const checkedRatchet = {measurements};
+    expect(EffectRecord.keys(checkedRatchet.measurements).sort()).toEqual(
+      EffectArray.map(artifact.measurements, measurement => measurement.name).sort(),
     );
   });
 

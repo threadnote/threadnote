@@ -9,10 +9,13 @@ import {errorMessage} from '@threadnote/platform/errors';
 import {whatsNewLinesForVersion, whatsNewLinesForVersionRange} from '../notes.js';
 import {SystemInfo} from '@threadnote/platform/system';
 
-class VersionCommandError extends Schema.TaggedError<VersionCommandError>()('VersionCommandError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class VersionCommandError extends Schema.TaggedError<VersionCommandError, {readonly brand: unique symbol}>()(
+  'VersionCommandError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export const runVersion = Effect.fn('runVersion')(function* (config: RuntimeConfig, options: VersionOptions) {
   const currentVersion = yield* currentPackageVersion();

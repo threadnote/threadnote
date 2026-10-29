@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Exit, FileSystem, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -161,7 +162,7 @@ describe('source provider dispatch', () => {
       yield* runSourceRemove(config, {id: 'canvas-notes'}).pipe(captureConsole);
       expect((yield* readSourceConfiguration(config)).sources).toHaveLength(3);
       yield* runSourceRemove(config, {id: 'canvas-notes', apply: true}).pipe(captureConsole);
-      expect((yield* readSourceConfiguration(config)).sources.map(source => source.id)).toEqual([
+      expect(EffectArray.map((yield* readSourceConfiguration(config)).sources, source => source.id)).toEqual([
         'local-notes',
         'repo-source',
       ]);

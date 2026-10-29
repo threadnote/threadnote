@@ -1,3 +1,5 @@
+import {Predicate} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {mkdtemp, mkdir, writeFile, readFile, rm} from '@threadnote/testing/node-fs-promises';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -6,14 +8,111 @@ import {testHttpFetch} from '@threadnote/testing/http-fetch';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {startManagerTestServer, type ManagerTestServer} from '../helpers/manager-test-server.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import type {SharingConflict, SharingConflictDetail} from '@threadnote/manager/sharing-contracts';
+import type {SharingConflict} from '@threadnote/manager/sharing-contracts';
 import type {ObsidianIntegration} from '@threadnote/integration-obsidian/manager-contracts';
 import type {IntegrationResult} from '@threadnote/integration-core/manager-contracts';
 import {parseSourceConfiguration} from '@threadnote/threadnote/integrations/config';
-type TestResponse = SharingConflictDetail &
-  ObsidianIntegration &
-  IntegrationResult & {readonly conflicts: readonly SharingConflict[]; readonly error: string};
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
+type TestResponse = Record<PropertyKey, unknown>;
+function isArrayOf<T>(value: unknown, item: (candidate: unknown) => candidate is T): value is readonly T[] {
+  return EffectArray.isArray(value) && EffectArray.every(value, item);
+}
+function isStringArray(value: unknown): value is readonly string[] {
+  return isArrayOf(value, (item): item is string => typeof item === 'string');
+}
+function isMemoryKind(value: unknown): value is ObsidianIntegration['projections'][number]['kinds'][number] {
+  return EffectArray.some(['durable', 'handoff', 'incident', 'preference', 'smoke'] as const, kind => kind === value);
+}
+function isMemoryStatus(value: unknown): value is ObsidianIntegration['projections'][number]['statuses'][number] {
+  return EffectArray.some(['active', 'archived', 'expired', 'superseded'] as const, status => status === value);
+}
+function isObsidianSource(value: unknown): value is ObsidianIntegration['sources'][number] {
+  return (
+    Predicate.isObject(value) &&
+    typeof value.id === 'string' &&
+    typeof value.vault === 'string' &&
+    typeof value.enabled === 'boolean' &&
+    isStringArray(value.include) &&
+    isStringArray(value.exclude) &&
+    typeof value.watch === 'boolean' &&
+    (value.inbox === undefined || typeof value.inbox === 'string')
+  );
+}
+function isObsidianProjection(value: unknown): value is ObsidianIntegration['projections'][number] {
+  return (
+    Predicate.isObject(value) &&
+    typeof value.id === 'string' &&
+    typeof value.vault === 'string' &&
+    typeof value.enabled === 'boolean' &&
+    typeof value.folder === 'string' &&
+    isArrayOf(value.kinds, isMemoryKind) &&
+    isArrayOf(value.statuses, isMemoryStatus) &&
+    typeof value.includeShared === 'boolean' &&
+    (value.selectedUris === undefined || isStringArray(value.selectedUris))
+  );
+}
+function isIntegrationEntry(value: unknown): value is IntegrationResult['entries'][number] {
+  return (
+    Predicate.isObject(value) &&
+    typeof value.action === 'string' &&
+    typeof value.relativePath === 'string' &&
+    (value.detail === undefined || typeof value.detail === 'string')
+  );
+}
+function isSharingConflict(value: unknown): value is SharingConflict {
+  return (
+    Predicate.isObject(value) &&
+    typeof value.id === 'string' &&
+    typeof value.team === 'string' &&
+    typeof value.uri === 'string' &&
+    typeof value.relativePath === 'string' &&
+    typeof value.reason === 'string' &&
+    typeof value.status === 'string' &&
+    typeof value.hasLocalContent === 'boolean' &&
+    typeof value.hasSharedContent === 'boolean' &&
+    (value.identityConflict === undefined ||
+      value.identityConflict === 'missing' ||
+      value.identityConflict === 'changed')
+  );
+}
+function responseField<T>(body: TestResponse, key: string, isValue: (value: unknown) => value is T): T {
+  const value = body[key];
+  if (!isValue(value)) throw new Error(`Manager HTTP response field ${key} is invalid.`);
+  return value;
+}
+function responseArray<T>(body: TestResponse, key: string, isItem: (value: unknown) => value is T): readonly T[] {
+  return responseField(body, key, value => isArrayOf(value, isItem));
+}
+function sourceList(body: TestResponse): ObsidianIntegration['sources'] {
+  return responseArray(body, 'sources', isObsidianSource);
+}
+function projectionList(body: TestResponse): ObsidianIntegration['projections'] {
+  return responseArray(body, 'projections', isObsidianProjection);
+}
+function integrationEntries(body: TestResponse): IntegrationResult['entries'] {
+  return responseArray(body, 'entries', isIntegrationEntry);
+}
+function sharingConflicts(body: TestResponse): readonly SharingConflict[] {
+  return responseArray(body, 'conflicts', isSharingConflict);
+}
+function stringField(body: TestResponse, key: string): string {
+  return responseField(body, key, (value): value is string => typeof value === 'string');
+}
+function numberField(body: TestResponse, key: string): number {
+  return responseField(body, key, (value): value is number => typeof value === 'number');
+}
+function optionalStringField(body: TestResponse, key: string): string | undefined {
+  const value = body[key];
+  if (value !== undefined && typeof value !== 'string')
+    throw new Error(`Manager HTTP response field ${key} is invalid.`);
+  return value;
+}
+function decodeTestResponse(input: unknown): TestResponse {
+  if (!Predicate.isObject(input)) throw new Error('Manager HTTP response body is not an object.');
+  return input;
+}
 // These tests exercise the real fetch/HTTP boundary and Git child processes.
 let home: string;
 let server: ManagerTestServer;
@@ -39,23 +138,27 @@ async function request(path: string, body?: Record<string, unknown>) {
     headers: {authorization: 'Bearer ' + token, 'content-type': 'application/json'},
     ...(body ? {body: JSON.stringify(body)} : {}),
   });
-  return {status: response.status, body: (await response.json()) as TestResponse};
+  const responseBody: unknown = await response.json();
+  return {status: response.status, body: decodeTestResponse(responseBody)};
 }
 async function write(path: string, content: string) {
   await mkdir(dirname(path), {recursive: true});
   await writeFile(path, content);
 }
 function git(cwd: string, ...args: string[]) {
-  return execFileSync('git', ['-C', cwd, ...args], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'Manager test',
-      GIT_AUTHOR_EMAIL: 'manager@example.test',
-      GIT_COMMITTER_NAME: 'Manager test',
-      GIT_COMMITTER_EMAIL: 'manager@example.test',
-    },
-  }).trim();
+  return Effect.pipe(
+    execFileSync('git', ['-C', cwd, ...args], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'Manager test',
+        GIT_AUTHOR_EMAIL: 'manager@example.test',
+        GIT_COMMITTER_NAME: 'Manager test',
+        GIT_COMMITTER_EMAIL: 'manager@example.test',
+      },
+    }),
+    EffectString.trim,
+  );
 }
 
 describe('Manager Obsidian HTTP workflow', () => {
@@ -81,7 +184,9 @@ describe('Manager Obsidian HTTP workflow', () => {
       }),
     );
     const before = parseSourceConfiguration(await readFile(configPath, 'utf8'));
-    expect((await request('/api/integrations/obsidian')).body.sources.map(source => source.id)).toEqual(['notes']);
+    expect(
+      EffectArray.map(sourceList((await request('/api/integrations/obsidian')).body), source => source.id),
+    ).toEqual(['notes']);
     expect(
       (
         await request('/api/integrations/obsidian', {
@@ -96,8 +201,12 @@ describe('Manager Obsidian HTTP workflow', () => {
       ).status,
     ).toBe(200);
     const edited = parseSourceConfiguration(await readFile(configPath, 'utf8'));
-    expect(edited.sources.find(source => source.id === 'notes')).toMatchObject({enabled: false, watch: true});
-    expect(edited.sources.find(source => source.id === 'remote-notes')).toEqual(before.sources[1]);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(edited.sources, source => source.id === 'notes')),
+    ).toMatchObject({enabled: false, watch: true});
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(edited.sources, source => source.id === 'remote-notes')),
+    ).toEqual(before.sources[1]);
     expect(
       (
         await request('/api/integrations/obsidian', {
@@ -119,7 +228,7 @@ describe('Manager Obsidian HTTP workflow', () => {
     expect(
       (await request('/api/integrations/obsidian', {action: 'save-source', id: 'notes', apply: true})).status,
     ).toBe(400);
-    expect((await request('/api/integrations/obsidian')).body.sources).toEqual([]);
+    expect(sourceList((await request('/api/integrations/obsidian')).body)).toEqual([]);
   });
   it('previews imports without writing, applies them, and disconnects without deleting vault notes', async () => {
     const vault = join(home, 'vault');
@@ -131,7 +240,7 @@ describe('Manager Obsidian HTTP workflow', () => {
     ).toBe(200);
     const preview = await request('/api/integrations/obsidian', {action: 'sync-source', id: 'notes'});
     expect(preview.status).toBe(200);
-    expect(preview.body.entries).toEqual([
+    expect(integrationEntries(preview.body)).toEqual([
       expect.objectContaining({action: 'add', relativePath: 'Engineering/Boundaries.md'}),
     ]);
     const imported = join(home, 'data/local/resources/external/obsidian/notes/Engineering/Boundaries.md');
@@ -144,7 +253,7 @@ describe('Manager Obsidian HTTP workflow', () => {
       .poll(
         () =>
           readFile(imported, 'utf8').catch(cause => {
-            if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return '';
+            if ((Predicate.hasProperty(cause, 'code') ? cause.code : undefined) === 'ENOENT') return '';
             throw cause;
           }),
         {interval: 25, timeout: 10_000},
@@ -165,13 +274,13 @@ describe('Manager Obsidian HTTP workflow', () => {
       apply: true,
       confirm: true,
     });
-    expect((await request('/api/integrations/obsidian')).body.sources[0].enabled).toBe(false);
+    expect(sourceList((await request('/api/integrations/obsidian')).body)[0].enabled).toBe(false);
     expect(
       (await request('/api/integrations/obsidian', {action: 'remove-source', id: 'notes', apply: true, confirm: true}))
         .status,
     ).toBe(200);
     expect(await readFile(join(vault, 'Engineering', 'Boundaries.md'), 'utf8')).toContain('Keep services focused.');
-    expect((await request('/api/integrations/obsidian')).body.sources).toEqual([]);
+    expect(sourceList((await request('/api/integrations/obsidian')).body)).toEqual([]);
   });
   it('previews Inbox proposals without creating reviews and applies each unchanged note only once', async () => {
     const vault = join(home, 'vault');
@@ -194,18 +303,21 @@ describe('Manager Obsidian HTTP workflow', () => {
       ).status,
     ).toBe(200);
     const preview = await request('/api/integrations/obsidian', {action: 'scan-inbox', id: 'notes'});
-    expect(preview.body.reviewCount).toBe(1);
+    expect(numberField(preview.body, 'reviewCount')).toBe(1);
     const reviews = async () => {
       const response = await testHttpFetch(server.url + '/api/reviews?project=demo', {
         headers: {authorization: 'Bearer ' + token},
       });
-      return (await response.json()) as {pendingCount: number};
+      const value: unknown = await response.json();
+      if (!Predicate.isObject(value) || typeof value.pendingCount !== 'number')
+        throw new Error('Manager reviews response has an invalid pending count.');
+      return {pendingCount: value.pendingCount};
     };
     expect((await reviews()).pendingCount).toBe(0);
     const apply = {action: 'scan-inbox', id: 'notes', apply: true, confirm: true};
-    expect((await request('/api/integrations/obsidian', apply)).body.reviewCount).toBe(1);
+    expect(numberField((await request('/api/integrations/obsidian', apply)).body, 'reviewCount')).toBe(1);
     expect((await reviews()).pendingCount).toBe(1);
-    expect((await request('/api/integrations/obsidian', apply)).body.reviewCount).toBe(0);
+    expect(numberField((await request('/api/integrations/obsidian', apply)).body, 'reviewCount')).toBe(0);
     expect((await reviews()).pendingCount).toBe(1);
     expect(await readFile(join(vault, 'Inbox', 'Retry policy.md'), 'utf8')).toBe(note);
   });
@@ -232,12 +344,12 @@ describe('Manager Obsidian HTTP workflow', () => {
         })
       ).status,
     ).toBe(409);
-    expect((await request('/api/integrations/obsidian')).body.projections).toEqual([]);
+    expect(projectionList((await request('/api/integrations/obsidian')).body)).toEqual([]);
     expect((await request('/api/integrations/obsidian', {...base, selection: 'all'})).status).toBe(200);
     const memory = 'MEMORY\nkind: durable\nstatus: active\nproject: demo\ntopic: note\n\n# A memory\n\nOriginal body.';
     await write(join(home, 'data/local/user/tester/memories/durable/projects/demo/note.md'), memory);
     const preview = await request('/api/integrations/obsidian', {action: 'sync-projection', id: 'library'});
-    expect(preview.body.entries).toEqual(
+    expect(integrationEntries(preview.body)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({action: 'add', relativePath: expect.stringContaining('Memories/demo/')}),
       ]),
@@ -252,7 +364,7 @@ describe('Manager Obsidian HTTP workflow', () => {
         })
       ).status,
     ).toBe(200);
-    const exported = join(vault, 'Threadnote', preview.body.entries[0].relativePath);
+    const exported = join(vault, 'Threadnote', integrationEntries(preview.body)[0].relativePath);
     await writeFile(exported, '# Edited in Obsidian');
     const again = await request('/api/integrations/obsidian', {
       action: 'sync-projection',
@@ -260,7 +372,9 @@ describe('Manager Obsidian HTTP workflow', () => {
       apply: true,
       confirm: true,
     });
-    expect(again.body.entries).toEqual(expect.arrayContaining([expect.objectContaining({action: 'drift'})]));
+    expect(integrationEntries(again.body)).toEqual(
+      expect.arrayContaining([expect.objectContaining({action: 'drift'})]),
+    );
     expect(await readFile(exported, 'utf8')).toBe('# Edited in Obsidian');
     expect(
       (
@@ -272,7 +386,7 @@ describe('Manager Obsidian HTTP workflow', () => {
         })
       ).status,
     ).toBe(409);
-    expect((await request('/api/integrations/obsidian')).body.projections).toHaveLength(1);
+    expect(projectionList((await request('/api/integrations/obsidian')).body)).toHaveLength(1);
   });
 });
 
@@ -298,7 +412,7 @@ describe('Manager shared conflict HTTP workflow', () => {
     git(worktree, 'config', 'user.name', 'Manager test');
     git(worktree, 'config', 'user.email', 'manager@example.test');
     const localPath = join(home, 'data/local/user/tester/memories/shared/engineering', relativePath);
-    await write(localPath, shared.replace('Shared body.', 'Local body.'));
+    await write(localPath, Effect.pipe(shared, EffectString.replace('Shared body.', 'Local body.')));
     await write(
       join(home, 'share/auto-sync-pending-reindexes.json'),
       JSON.stringify({
@@ -311,36 +425,42 @@ describe('Manager shared conflict HTTP workflow', () => {
   it.each(['local', 'shared', 'manual'])('resolves a reviewed conflict with the %s choice', async resolution => {
     const fixture = await conflictFixture();
     const listed = await request('/api/shares/conflicts');
-    expect(listed.body.conflicts).toHaveLength(1);
+    expect(sharingConflicts(listed.body)).toHaveLength(1);
     const detail = await request('/api/shares/conflicts/detail?id=' + encodeURIComponent(fixture.id));
     expect(detail.body).toMatchObject({canKeepLocal: true, canUseShared: true, canMerge: true});
     const resolved = await request('/api/shares/conflicts/resolve', {
       id: fixture.id,
-      revision: detail.body.revision,
+      revision: stringField(detail.body, 'revision'),
       resolution,
-      content: (detail.body.localContent ?? '').replace('Local body.', 'Merged body.'),
+      content: Effect.pipe(
+        optionalStringField(detail.body, 'localContent') ?? '',
+        EffectString.replace('Local body.', 'Merged body.'),
+      ),
       confirm: true,
     });
     expect(resolved.status).toBe(200);
     expect(await readFile(fixture.localPath, 'utf8')).toContain(
       resolution === 'manual' ? 'Merged body.' : resolution === 'local' ? 'Local body.' : 'Shared body.',
     );
-    expect((await request('/api/shares/conflicts')).body.conflicts).toEqual([]);
+    expect(sharingConflicts((await request('/api/shares/conflicts')).body)).toEqual([]);
   });
   it('rejects stale reviewed content without replacing it or clearing the conflict', async () => {
     const fixture = await conflictFixture();
     const detail = await request('/api/shares/conflicts/detail?id=' + encodeURIComponent(fixture.id));
-    const newer = (detail.body.localContent ?? '').replace('Local body.', 'Newer local edit.');
+    const newer = Effect.pipe(
+      optionalStringField(detail.body, 'localContent') ?? '',
+      EffectString.replace('Local body.', 'Newer local edit.'),
+    );
     await writeFile(fixture.localPath, newer);
     const result = await request('/api/shares/conflicts/resolve', {
       id: fixture.id,
-      revision: detail.body.revision,
+      revision: stringField(detail.body, 'revision'),
       resolution: 'shared',
       confirm: true,
     });
     expect(result.status).toBe(409);
-    expect(result.body.error).toContain('changed after you opened it');
+    expect(stringField(result.body, 'error')).toContain('changed after you opened it');
     expect(await readFile(fixture.localPath, 'utf8')).toBe(newer);
-    expect((await request('/api/shares/conflicts')).body.conflicts).toHaveLength(1);
+    expect(sharingConflicts((await request('/api/shares/conflicts')).body)).toHaveLength(1);
   });
 });

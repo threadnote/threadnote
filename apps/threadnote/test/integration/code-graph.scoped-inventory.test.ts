@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -25,6 +26,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Path} from 'effect';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = Layer.mergeAll(
   BunServices.layer,
@@ -36,7 +39,8 @@ const write = (root: string, path: string, content: string) => {
   mkdirSync(dirname(join(root, path)), {recursive: true});
   writeFileSync(join(root, path), content);
 };
-const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], {encoding: 'utf8'}).trim();
+const git = (root: string, ...args: string[]) =>
+  Effect2.pipe(execFileSync('git', ['-C', root, ...args], {encoding: 'utf8'}), EffectString.trim);
 const fixture = Effect.acquireRelease(
   Effect.sync(() => {
     const root = mkdtempSync(join(tmpdir(), 'threadnote-scoped-inventory-'));
@@ -51,7 +55,11 @@ const fixture = Effect.acquireRelease(
       ['shared/a-only', {}],
       ['shared/b-only', {}],
     ] as const) {
-      write(root, `${path}/package.json`, JSON.stringify({name: `@fixture/${path.split('/')[1]}`, dependencies}));
+      write(
+        root,
+        `${path}/package.json`,
+        JSON.stringify({name: `@fixture/${Effect2.pipe(path, EffectString.split('/'))[1]}`, dependencies}),
+      );
       write(root, `${path}/index.ts`, `export const value = '${path}';\n`);
     }
     git(root, 'add', '.');
@@ -146,7 +154,11 @@ describe('scoped inventory', () => {
         const dirty = yield* indexer.index(request);
         expect(dirty.snapshot.scopeId).toBe(clean.snapshot.scopeId);
         expect(dirty.materialization).toMatchObject({mode: 'incremental-overlay', stagedFiles: 1, totalFiles: 7});
-        expect(dirty.diagnostics.some(value => value.includes('without hydrating the complete inventory'))).toBe(true);
+        expect(
+          EffectArray.some(dirty.diagnostics, value =>
+            Effect2.pipe(value, EffectString.includes('without hydrating the complete inventory')),
+          ),
+        ).toBe(true);
         git(root, 'add', '.');
         git(root, 'commit', '-qm', 'scoped edit');
         const committed = yield* indexer.index(request);
@@ -353,10 +365,10 @@ describe('scoped inventory', () => {
         project,
         onContentBatch: files =>
           Effect.sync(() => {
-            hydrated.push(...files.map(file => file.path));
+            hydrated.push(...EffectArray.map(files, file => file.path));
           }),
       });
-      expect(clean.files.map(file => file.path)).toEqual([
+      expect(EffectArray.map(clean.files, file => file.path)).toEqual([
         'apps/a/index.ts',
         'apps/a/package.json',
         'package.json',
@@ -381,12 +393,14 @@ describe('scoped inventory', () => {
         }),
       );
       expect(request.state).toEqual({dirty: false, fingerprint: undefined});
-      expect(opened.some(path => path.endsWith('/apps/b/index.ts'))).toBe(false);
+      expect(EffectArray.some(opened, path => Effect2.pipe(path, EffectString.endsWith('/apps/b/index.ts')))).toBe(
+        false,
+      );
       const dirty = yield* inventoryRepository(identity, {project});
       expect(dirty.dirty).toBe(false);
       expect(dirty.scopeInventoryFingerprint).toBe(clean.scopeInventoryFingerprint);
       const full = yield* inventoryRepository(identity);
-      expect(full.files.some(file => file.path === 'apps/b/index.ts')).toBe(true);
+      expect(EffectArray.some(full.files, file => file.path === 'apps/b/index.ts')).toBe(true);
       expect(full.dirty).toBe(true);
     }).pipe(provideTestLayer(layer), TestClock.withLive),
   );
@@ -403,8 +417,8 @@ describe('scoped inventory', () => {
       );
       const after = yield* inventoryRepository(identity, {project});
       expect(after.scope?.closureDigest).not.toBe(before.scope?.closureDigest);
-      expect(after.files.some(file => file.path === 'shared/b-only/index.ts')).toBe(true);
-      expect(after.files.some(file => file.path === 'apps/b/index.ts')).toBe(false);
+      expect(EffectArray.some(after.files, file => file.path === 'shared/b-only/index.ts')).toBe(true);
+      expect(EffectArray.some(after.files, file => file.path === 'apps/b/index.ts')).toBe(false);
     }).pipe(provideTestLayer(layer), TestClock.withLive),
   );
 });

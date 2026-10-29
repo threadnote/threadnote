@@ -1,8 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {describe, expect, it} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Effect, Predicate} from 'effect';
 import * as FC from 'fast-check';
 import {
   codeGraphAnalysisMcpResponse,
@@ -28,10 +29,10 @@ import {
   codeGraphQueryExecutionBudget,
   completeCodeGraphReadyReadRefresh,
   codeGraphRefreshBlocksCompletedInspection,
-} from '@threadnote/threadnote/mcp/server/code_graph/ready_read';
-import {analyzeCodeGraph} from '@threadnote/graph/analysis';
+} from '../../src/mcp/server/code_graph/ready_read.js';
+import {analyzeCodeGraph, type CodeGraphStructuralRelationshipGroup} from '@threadnote/graph/analysis';
 import type {CodeGraphProgress, CodeGraphQueryResult} from '@threadnote/graph/types';
-import type {CodeGraphRefreshStatus, CodeGraphWatcherShape} from '@threadnote/graph/watcher';
+import type {CodeGraphRefreshStatus} from '@threadnote/graph/watcher';
 import {
   codeGraphInspectionNeedsReadyAttachment,
   type CodeGraphStatusObservation,
@@ -48,6 +49,17 @@ import {
   readAnonymousTelemetryDiagnostic,
   readAnonymousTelemetryReportedOutcome,
 } from '@threadnote/threadnote/telemetry/diagnostic';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
+
+function textContent(value: unknown): string {
+  if (!Predicate.isObject(value) || value.type !== 'text' || typeof value.text !== 'string') {
+    throw new Error('Expected a text MCP content block.');
+  }
+  return value.text;
+}
 
 describe('MCP code graph indexing progress', () => {
   fcProp(
@@ -105,8 +117,8 @@ describe('MCP code graph indexing progress', () => {
 
   it('allows stale ready evidence for non-strict operations only', () => {
     expect(
-      Object.fromEntries(
-        (['query', 'node', 'neighbors', 'explain', 'path', 'impact'] as const).map(operation => [
+      EffectRecord.fromEntries(
+        EffectArray.map(['query', 'node', 'neighbors', 'explain', 'path', 'impact'] as const, operation => [
           operation,
           codeGraphInspectionAllowsStaleReady(operation),
         ]),
@@ -158,7 +170,7 @@ describe('MCP code graph indexing progress', () => {
           Effect.sync(() => {
             scheduledResumes += 1;
           }),
-      } as unknown as CodeGraphWatcherShape;
+      };
 
       const continuity = yield* completeCodeGraphReadyReadRefresh({
         backgroundRefreshRequested: true,
@@ -170,7 +182,7 @@ describe('MCP code graph indexing progress', () => {
 
       expect(continuity).toEqual({state: 'deferred', type: 'code-graph-refresh-continuity', version: 1});
       const active = {
-        currentTargetToken: `cgdq_${'1'.repeat(32)}`,
+        currentTargetToken: `cgdq_${Effect2.pipe('1', EffectString.repeat(32))}`,
         state: 'active' as const,
         type: 'code-graph-refresh-continuity' as const,
         version: 1 as const,
@@ -374,7 +386,7 @@ describe('MCP code graph indexing progress', () => {
     const deferred = {
       ...deferredStatus('no-space'),
       privateNativeDetail: '/Users/private/graph.sqlite',
-    } as unknown as CodeGraphRefreshStatus;
+    };
     const continued = codeGraphResultWithRefreshContinuity(result, deferred);
 
     expect(continued.freshness).toBe('stale');
@@ -418,7 +430,7 @@ describe('MCP code graph indexing progress', () => {
         type: 'code-graph-refresh-continuity' as const,
         version: 1 as const,
         state,
-        ...(state === 'idle' ? {} : {queueToken: `cgdq_${'a'.repeat(32)}`}),
+        ...(state === 'idle' ? {} : {queueToken: `cgdq_${Effect2.pipe('a', EffectString.repeat(32))}`}),
         ...(state === 'deferred' ? {retryAfterMilliseconds: 1_000} : {}),
       };
       const result = verboseCodeGraphResult();
@@ -512,7 +524,7 @@ describe('MCP code graph indexing progress', () => {
 
   it('reserves three seconds for query cleanup and response finalization', () => {
     expect(
-      [4_000, 4_001, 25_000, 55_000].map(requestBudget => [
+      EffectArray.map([4_000, 4_001, 25_000, 55_000], requestBudget => [
         requestBudget,
         codeGraphQueryExecutionBudget(requestBudget),
       ]),
@@ -547,7 +559,7 @@ describe('MCP code graph indexing progress', () => {
       version: 2,
     });
     expect(readAnonymousTelemetryReportedOutcome(timedOut)).toBe('timed-out');
-    expect((timedOut.content[0] as {readonly text: string}).text).toContain("this request's 55-second MCP budget");
+    expect(textContent(timedOut.content[0])).toContain("this request's 55-second MCP budget");
     const readyReadTimedOut = codeGraphQueryTimeoutResult('query', indexingStatus(60_000), true);
     expect(readyReadTimedOut.structuredContent).toMatchObject({
       readySnapshotAvailable: true,
@@ -555,7 +567,7 @@ describe('MCP code graph indexing progress', () => {
       type: 'code-graph-query-state',
     });
     expect(JSON.stringify(readyReadTimedOut.structuredContent)).not.toContain('retryAfterMilliseconds');
-    const readyReadTimeoutText = (readyReadTimedOut.content[0] as {readonly text: string}).text;
+    const readyReadTimeoutText = textContent(readyReadTimedOut.content[0]);
     expect(readyReadTimeoutText).toContain("this request's 55-second MCP budget");
     expect(readyReadTimeoutText).toContain('--freshness ready --read-timeout-ms 120000');
     expect(readAnonymousTelemetryReportedOutcome(readyReadTimedOut)).toBe('timed-out');
@@ -580,7 +592,7 @@ describe('MCP code graph indexing progress', () => {
       state: 'indexing',
     });
     expect(JSON.stringify(writerWaiting.structuredContent)).not.toContain('retryAfterMilliseconds');
-    expect((writerWaiting.content[0] as {readonly text: string}).text).toContain('retry after it releases');
+    expect(textContent(writerWaiting.content[0])).toContain('retry after it releases');
 
     const deferred = codeGraphQueryTimeoutResult('query', deferredStatus('transient-io'));
     expect(deferred.isError).not.toBe(true);
@@ -747,7 +759,7 @@ describe('MCP code graph indexing progress', () => {
     const result = {
       ...verbose,
       edges: [],
-      nodes: [{...verbose.nodes[0], signature: 'x'.repeat(2_000_000)}],
+      nodes: [{...verbose.nodes[0], signature: Effect2.pipe('x', EffectString.repeat(2_000_000))}],
       operation: 'node' as const,
       warnings: [],
     };
@@ -800,7 +812,7 @@ describe('MCP code graph indexing progress', () => {
 
     expect(first).toEqual(second);
     expect(first).not.toHaveProperty('structuredContent');
-    expect(text.startsWith('TN-GRAPH/1\n')).toBe(true);
+    expect(Effect2.pipe(text, EffectString.startsWith('TN-GRAPH/1\n'))).toBe(true);
     expect(text).toContain('Coverage:');
     expect(text).toContain('n1. ');
     expect(text).toContain(' → ');
@@ -814,7 +826,7 @@ describe('MCP code graph indexing progress', () => {
 
   it('stops impact projection after a connected behavioral core instead of filling the budget', () => {
     const verbose = verboseCodeGraphResult();
-    const nodes = verbose.nodes.slice(0, 6).map((node, index) => ({
+    const nodes = EffectArray.map(verbose.nodes.slice(0, 6), (node, index) => ({
       ...node,
       name: `node-${index}`,
       path: `src/node-${index}.ts`,
@@ -854,12 +866,15 @@ describe('MCP code graph indexing progress', () => {
 
     expect(defaultResponse).toEqual(explicitCore);
     expect(largerCeiling).toEqual(explicitCore);
-    expect(defaultResponse.structuredContent.nodes.map(node => node.id)).toEqual([
+    expect(EffectArray.map(defaultResponse.structuredContent.nodes, node => node.id)).toEqual([
       nodes[1].id,
       nodes[0].id,
       nodes[2].id,
     ]);
-    expect(defaultResponse.structuredContent.edges.map(item => item.id)).toEqual(['cge_core_1', 'cge_core_2']);
+    expect(EffectArray.map(defaultResponse.structuredContent.edges, item => item.id)).toEqual([
+      'cge_core_1',
+      'cge_core_2',
+    ]);
     expect(defaultResponse.structuredContent.output).toMatchObject({
       returnedEdges: 2,
       returnedNodes: 3,
@@ -867,7 +882,7 @@ describe('MCP code graph indexing progress', () => {
       totalNodes: 6,
       truncated: true,
     });
-    const visibleNodeIds = new Set(defaultResponse.structuredContent.nodes.map(node => node.id));
+    const visibleNodeIds = new Set(EffectArray.map(defaultResponse.structuredContent.nodes, node => node.id));
     for (const item of defaultResponse.structuredContent.edges) {
       expect(visibleNodeIds.has(item.sourceId!)).toBe(true);
       expect(visibleNodeIds.has(item.targetId!)).toBe(true);
@@ -877,8 +892,12 @@ describe('MCP code graph indexing progress', () => {
     expect(JSON.stringify(result)).toBe(before);
 
     const dual = codeGraphMcpResponse(result, undefined, undefined, 'dual');
-    expect(dual.structuredContent.nodes.map(node => node.id)).toEqual(nodes.map(node => node.id));
-    expect(dual.structuredContent.edges.map(item => item.id)).toEqual(result.edges.map(item => item.id));
+    expect(EffectArray.map(dual.structuredContent.nodes, node => node.id)).toEqual(
+      EffectArray.map(nodes, node => node.id),
+    );
+    expect(EffectArray.map(dual.structuredContent.edges, item => item.id)).toEqual(
+      EffectArray.map(result.edges, item => item.id),
+    );
 
     const danglingCall = {...edge(0, 1, 0, 'calls'), targetId: 'cgs_missing'};
     const connectedImport = edge(1, 3, 0, 'imports');
@@ -888,13 +907,16 @@ describe('MCP code graph indexing progress', () => {
       undefined,
       'agent',
     );
-    expect(connectedFallback.structuredContent.edges.map(item => item.id)).toEqual([connectedImport.id]);
-    expect(connectedFallback.structuredContent.nodes.map(node => node.id)).toEqual([nodes[3].id, nodes[0].id]);
+    expect(EffectArray.map(connectedFallback.structuredContent.edges, item => item.id)).toEqual([connectedImport.id]);
+    expect(EffectArray.map(connectedFallback.structuredContent.nodes, node => node.id)).toEqual([
+      nodes[3].id,
+      nodes[0].id,
+    ]);
   });
 
   it('stops default query projection after three ranked nodes while preserving explicit expansion', () => {
     const verbose = verboseCodeGraphResult();
-    const nodes = verbose.nodes.slice(0, 6).map((node, index) => ({
+    const nodes = EffectArray.map(verbose.nodes.slice(0, 6), (node, index) => ({
       ...node,
       name: `node-${index}`,
       path: `src/node-${index}.ts`,
@@ -923,10 +945,10 @@ describe('MCP code graph indexing progress', () => {
     const largerCeiling = codeGraphMcpResponse(result, 1_500, undefined, 'agent');
 
     expect(largerCeiling).toEqual(defaultResponse);
-    expect(defaultResponse.structuredContent.nodes.map(node => node.id)).toEqual(
-      nodes.slice(0, 3).map(node => node.id),
+    expect(EffectArray.map(defaultResponse.structuredContent.nodes, node => node.id)).toEqual(
+      EffectArray.map(nodes.slice(0, 3), node => node.id),
     );
-    expect(defaultResponse.structuredContent.edges.map(item => item.id)).toEqual(['cge_query_core_0']);
+    expect(EffectArray.map(defaultResponse.structuredContent.edges, item => item.id)).toEqual(['cge_query_core_0']);
     expect(defaultResponse.structuredContent.output).toMatchObject({
       returnedEdges: 1,
       returnedNodes: 3,
@@ -937,14 +959,23 @@ describe('MCP code graph indexing progress', () => {
     expect(defaultResponse.structuredContent.warnings.at(-1)).toContain('bounded to 3/6 nodes');
 
     const expanded = codeGraphMcpResponse(result, 1_500, undefined, 'agent', {queryNodeLimit: 5});
-    expect(expanded.structuredContent.nodes.map(node => node.id)).toEqual(nodes.slice(0, 5).map(node => node.id));
-    expect(expanded.structuredContent.edges.map(item => item.id)).toEqual(['cge_query_core_0', 'cge_query_core_2']);
+    expect(EffectArray.map(expanded.structuredContent.nodes, node => node.id)).toEqual(
+      EffectArray.map(nodes.slice(0, 5), node => node.id),
+    );
+    expect(EffectArray.map(expanded.structuredContent.edges, item => item.id)).toEqual([
+      'cge_query_core_0',
+      'cge_query_core_2',
+    ]);
     const expandedAgent = formatCodeGraphMcpResponse(expanded, 'agent');
     expect(measureAgentToolResponse({text: expandedAgent.content[0].text}).totalBytes).toBeLessThanOrEqual(1_500 * 3);
 
     const dual = codeGraphMcpResponse(result, undefined, undefined, 'dual', {queryNodeLimit: 3});
-    expect(dual.structuredContent.nodes.map(node => node.id)).toEqual(nodes.map(node => node.id));
-    expect(dual.structuredContent.edges.map(item => item.id)).toEqual(result.edges.map(item => item.id));
+    expect(EffectArray.map(dual.structuredContent.nodes, node => node.id)).toEqual(
+      EffectArray.map(nodes, node => node.id),
+    );
+    expect(EffectArray.map(dual.structuredContent.edges, item => item.id)).toEqual(
+      EffectArray.map(result.edges, item => item.id),
+    );
     expect(JSON.stringify(result)).toBe(before);
   });
 
@@ -962,12 +993,12 @@ describe('MCP code graph indexing progress', () => {
           dependencyComponents: 2,
           kind: 'project',
           negativeProof: 'selected-graph-only',
-          observedWorktreeCommit: 'b'.repeat(40),
+          observedWorktreeCommit: Effect2.pipe('b', EffectString.repeat(40)),
           project: 'threadnote-app',
           reusedEquivalentSnapshot: false,
           rootComponents: 1,
         },
-        snapshot: {...source.snapshot, commit: 'b'.repeat(40), dirty: true},
+        snapshot: {...source.snapshot, commit: Effect2.pipe('b', EffectString.repeat(40)), dirty: true},
         warnings: [],
       },
       1_500,
@@ -1045,21 +1076,30 @@ describe('MCP code graph indexing progress', () => {
     const result = {
       ...verboseCodeGraphResult(),
       outsideProjectGraph: {
-        paths: Array.from({length: 40}, (_, index) => `outside/${'深/'.repeat(200)}${index}.ts`),
+        paths: Array.from(
+          {length: 40},
+          (_, index) => `outside/${Effect2.pipe('深/', EffectString.repeat(200))}${index}.ts`,
+        ),
         state: 'outside-project-graph' as const,
-        suggestedActions: Array.from({length: 20}, (_, index) => `Select ${'根/'.repeat(200)} ${index}.`),
+        suggestedActions: Array.from(
+          {length: 20},
+          (_, index) => `Select ${Effect2.pipe('根/', EffectString.repeat(200))} ${index}.`,
+        ),
       },
       projectCoverage: {
         completeness: 'partial' as const,
-        configuredRoots: Array.from({length: 40}, (_, index) => `apps/${'root/'.repeat(200)}${index}`),
+        configuredRoots: Array.from(
+          {length: 40},
+          (_, index) => `apps/${Effect2.pipe('root/', EffectString.repeat(200))}${index}`,
+        ),
         dependencyComponents: 2,
         kind: 'project' as const,
         negativeProof: 'selected-graph-only' as const,
-        observedWorktreeCommit: 'w'.repeat(2_000),
-        project: 'project'.repeat(200),
+        observedWorktreeCommit: Effect2.pipe('w', EffectString.repeat(2_000)),
+        project: Effect2.pipe('project', EffectString.repeat(200)),
         reusedEquivalentSnapshot: false,
         rootComponents: 3,
-        snapshotSourceCommit: 's'.repeat(2_000),
+        snapshotSourceCommit: Effect2.pipe('s', EffectString.repeat(2_000)),
       },
     };
     for (const responseFormat of ['dual', 'text', 'agent'] as const) {
@@ -1075,9 +1115,9 @@ describe('MCP code graph indexing progress', () => {
   });
 
   it('admits an emoji-heavy zero-evidence mandatory receipt at the local minimum', () => {
-    const result = mandatoryEmojiGraphResult('😀'.repeat(5_000));
+    const result = mandatoryEmojiGraphResult(Effect2.pipe('😀', EffectString.repeat(5_000)));
     const refresh = {
-      queueToken: '😀'.repeat(5_000),
+      queueToken: Effect2.pipe('😀', EffectString.repeat(5_000)),
       state: 'queued' as const,
       type: 'code-graph-refresh-continuity' as const,
       version: 1 as const,
@@ -1086,10 +1126,14 @@ describe('MCP code graph indexing progress', () => {
       const response = codeGraphMcpResponse(result, 800, refresh, responseFormat);
       const formatted = formatCodeGraphMcpResponse(response, responseFormat);
       if (responseFormat === 'agent') {
-        const structured = response.structuredContent as {
-          readonly outsideProjectGraph?: unknown;
-          readonly projectCoverage?: unknown;
-        };
+        const structured = response.structuredContent;
+        if (
+          !Predicate.isObject(structured) ||
+          !('projectCoverage' in structured) ||
+          !('outsideProjectGraph' in structured)
+        ) {
+          throw new Error('Expected structured agent metadata.');
+        }
         expect(response.structuredContent.output).toMatchObject({truncated: false});
         expect(structured.projectCoverage).toMatchObject({configuredRootsOmitted: 48});
         expect(structured.outsideProjectGraph).toMatchObject({
@@ -1135,8 +1179,8 @@ describe('MCP code graph indexing progress', () => {
           dependencyComponents: 2,
           kind: 'project' as const,
           negativeProof: 'selected-graph-only' as const,
-          observedWorktreeCommit: 'w'.repeat(2_000),
-          project: 'project'.repeat(200),
+          observedWorktreeCommit: Effect2.pipe('w', EffectString.repeat(2_000)),
+          project: Effect2.pipe('project', EffectString.repeat(200)),
           reusedEquivalentSnapshot: false,
           rootComponents: 3,
         },
@@ -1160,6 +1204,7 @@ describe('MCP code graph indexing progress', () => {
     'keeps multibyte mandatory receipts within every accepted local format budget',
     {emojiCount: FC.integer({min: 1, max: 1_000})},
     ({emojiCount}) => {
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       const result = mandatoryEmojiGraphResult('😀'.repeat(emojiCount));
       for (const responseFormat of ['dual', 'text', 'agent'] as const) {
         const response = codeGraphMcpResponse(result, 800, undefined, responseFormat);
@@ -1198,7 +1243,12 @@ describe('MCP code graph indexing progress', () => {
       'agent',
     );
     const text = formatCodeGraphMcpResponse(response, 'agent').content[0].text;
-    const edge = text.split('\n').find(line => line.includes(' → '));
+    const edge = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        Effect2.pipe(text, EffectString.split('\n')),
+        __effectArrayValue => !!(line => Effect2.pipe(line, EffectString.includes(' → ')))(__effectArrayValue),
+      ),
+    );
     expect(edge).toContain('source 界 → target 界:');
     expect(edge).toContain('src/界 newline file .ts');
     expect(edge).not.toContain('\t');
@@ -1266,7 +1316,7 @@ describe('MCP code graph indexing progress', () => {
       expect(JSON.stringify(result)).toBe(before);
       if (operation === 'impact' || operation === 'query') {
         const projected = codeGraphMcpResponse(result, budgetTokens, undefined, 'agent').structuredContent;
-        const visibleNodeIds = new Set(projected.nodes.map(node => node.id));
+        const visibleNodeIds = new Set(EffectArray.map(projected.nodes, node => node.id));
         for (const edge of projected.edges) {
           expect(edge.sourceId === undefined || visibleNodeIds.has(edge.sourceId)).toBe(true);
           expect(edge.targetId === undefined || visibleNodeIds.has(edge.targetId)).toBe(true);
@@ -1300,10 +1350,10 @@ describe('MCP code graph indexing progress', () => {
   it('keeps shared graph source fields after compact and a tight token budget', () => {
     const source = {
       deltaCount: 0,
-      frontierCommit: 'a'.repeat(40),
+      frontierCommit: Effect2.pipe('a', EffectString.repeat(40)),
       kind: 'shared-base-plus-local-overlay' as const,
-      localCommit: 'b'.repeat(40),
-      profileDigest: `sha256:${'c'.repeat(64)}`,
+      localCommit: Effect2.pipe('b', EffectString.repeat(40)),
+      profileDigest: `sha256:${Effect2.pipe('c', EffectString.repeat(64))}`,
     };
     const result = {...verboseCodeGraphResult(), source};
     const compact = compactCodeGraphMcpResult(result);
@@ -1381,6 +1431,47 @@ describe('MCP code graph indexing progress', () => {
       maxNodes: 100_000,
     });
   });
+
+  effectIt.effect('preserves incomplete source group samples when all members fit', () =>
+    Effect.gen(function* () {
+      const source = analysisSymbol('group-base', '@acme/group', 'src/group.ts');
+      const analysis = yield* analyzeCodeGraph(pagedAnalysisStore([source], []), {
+        databasePath: ':memory:',
+        snapshot: analysisSnapshot([source], []),
+      });
+      const member = {
+        id: 'group-member',
+        kind: 'function',
+        label: 'member',
+        path: 'src/member.ts',
+        qualifiedName: 'Fixture.member',
+      };
+      const group = {
+        center: {
+          id: 'group-center',
+          kind: 'function',
+          label: 'center',
+          path: 'src/center.ts',
+          qualifiedName: 'Fixture.center',
+        },
+        direction: 'fan-out',
+        id: 'mcp-incomplete-group',
+        kind: 'structural-hyperedge',
+        members: [member],
+        memberSampleComplete: false,
+        relationshipCount: 1,
+      } satisfies CodeGraphStructuralRelationshipGroup;
+      const incompleteAnalysis = {...analysis, relationshipGroups: [group]};
+      const response = codeGraphAnalysisMcpResponse(incompleteAnalysis, 'groups', {
+        displayName: 'Fixture/group',
+        repositoryId: 'repository-id',
+      });
+      const projected = response.structuredContent.result.relationshipGroups[0];
+
+      expect(projected?.members).toEqual([member]);
+      expect(projected?.memberSampleComplete).toBe(false);
+    }),
+  );
 
   effectIt.effect('marks a small stats projection complete when all stats evidence fits', () =>
     Effect.gen(function* () {
@@ -1481,7 +1572,7 @@ describe('MCP code graph indexing progress', () => {
       expect(component).toBeDefined();
       expect(membership).toBeDefined();
       if (!community || !component || !membership) throw TestError.make({message: 'Expected topology fixtures.'});
-      const longRepositoryText = '界'.repeat(800);
+      const longRepositoryText = Effect2.pipe('界', EffectString.repeat(800));
       const noisyStats = {
         ...stats,
         communities: Array.from({length: 200}, (_, index) => ({
@@ -1520,14 +1611,16 @@ describe('MCP code graph indexing progress', () => {
 
   effectIt.effect('independently bounds deterministic MCP analysis text and structured projections', () =>
     Effect.gen(function* () {
-      const path = `src/${'深'.repeat(600)}.ts`;
+      const path = `src/${Effect2.pipe('深', EffectString.repeat(600))}.ts`;
       const symbols = Array.from({length: 180}, (_, index) =>
-        analysisSymbol(`node-${index.toString().padStart(4, '0')}`, '@acme/large', path, {
-          name: `node-${index}-${'🙂'.repeat(300)}`,
-          qualifiedName: `Fixture.${'Namespace.'.repeat(100)}node${index}`,
+        analysisSymbol(`node-${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}`, '@acme/large', path, {
+          name: `node-${index}-${Effect2.pipe('🙂', EffectString.repeat(300))}`,
+          qualifiedName: `Fixture.${Effect2.pipe('Namespace.', EffectString.repeat(100))}node${index}`,
         }),
       );
-      const edges = symbols.slice(1).map((symbol, index) => analysisEdge(`edge-${index}`, symbols[index], symbol));
+      const edges = EffectArray.map(symbols.slice(1), (symbol, index) =>
+        analysisEdge(`edge-${index}`, symbols[index], symbol),
+      );
       const store = pagedAnalysisStore(symbols, edges);
       const snapshot = analysisSnapshot(symbols, edges);
       const communities = yield* analyzeCodeGraph(store, {
@@ -1557,7 +1650,7 @@ describe('MCP code graph indexing progress', () => {
         verbose,
         'community',
         {
-          displayName: `Fixture/${'界'.repeat(2_000)}`,
+          displayName: `Fixture/${Effect2.pipe('界', EffectString.repeat(2_000))}`,
           repositoryId: 'repository-id',
         },
         metadata,
@@ -1566,12 +1659,12 @@ describe('MCP code graph indexing progress', () => {
         verbose,
         'community',
         {
-          displayName: `Fixture/${'界'.repeat(2_000)}`,
+          displayName: `Fixture/${Effect2.pipe('界', EffectString.repeat(2_000))}`,
           repositoryId: 'repository-id',
         },
         metadata,
       );
-      expect(first.text.startsWith('Graph analysis:')).toBe(true);
+      expect(Effect2.pipe(first.text, EffectString.startsWith('Graph analysis:'))).toBe(true);
       expect(first.text).not.toContain('Read:');
       expect(first.text).not.toContain(JSON.stringify(metadata));
       const structuredBytes = new TextEncoder().encode(JSON.stringify(first.structuredContent)).byteLength;
@@ -1644,6 +1737,7 @@ describe('MCP code graph indexing progress', () => {
         ...verbose,
         edges: verbose.edges.slice(0, edgeCount),
         nodes: verbose.nodes.slice(0, nodeCount),
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         repository: {...verbose.repository, displayName: 'r'.repeat(displayNameLength)},
       };
       const response = codeGraphMcpResponse(result);
@@ -1703,43 +1797,48 @@ function verboseCodeGraphResult(): CodeGraphQueryResult {
   return {
     edges: Array.from({length: 200}, (_, index) => ({
       confidence: 1,
-      evidencePath: `src/${'deep/'.repeat(100)}edge-${index}.ts`,
+      evidencePath: `src/${Effect2.pipe('deep/', EffectString.repeat(100))}edge-${index}.ts`,
       evidenceSpan: span,
-      id: `cge_${String(index).padStart(4, '0')}`,
+      id: `cge_${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`,
       provenance: 'resolved' as const,
       relation: 'calls' as const,
-      sourceId: `cgs_${String(index).padStart(4, '0')}`,
-      sourceName: `source-${index}-${'x'.repeat(300)}`,
-      targetId: `cgs_${String(index + 1).padStart(4, '0')}`,
-      targetName: `target-${index}-${'y'.repeat(300)}`,
+      sourceId: `cgs_${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`,
+      sourceName: `source-${index}-${Effect2.pipe('x', EffectString.repeat(300))}`,
+      targetId: `cgs_${Effect2.pipe(String(index + 1), EffectString.padStart(4, '0'))}`,
+      targetName: `target-${index}-${Effect2.pipe('y', EffectString.repeat(300))}`,
     })),
     freshness: 'current',
     nodes: Array.from({length: 100}, (_, index) => ({
-      contentHash: 'a'.repeat(64),
-      documentation: 'private parser detail '.repeat(200),
+      contentHash: Effect2.pipe('a', EffectString.repeat(64)),
+      documentation: Effect2.pipe('private parser detail ', EffectString.repeat(200)),
       exported: true,
-      id: `cgs_${String(index).padStart(4, '0')}`,
+      id: `cgs_${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`,
       kind: 'function',
       language: 'typescript',
       lookupKeys: Array.from({length: 30}, (_, key) => `typescript:lookup:${index}:${key}`),
-      name: `symbol-${index}-${'n'.repeat(300)}`,
-      path: `src/${'nested/'.repeat(100)}symbol-${index}.ts`,
-      qualifiedName: `Fixture.${'Namespace.'.repeat(50)}symbol${index}`,
+      name: `symbol-${index}-${Effect2.pipe('n', EffectString.repeat(300))}`,
+      path: `src/${Effect2.pipe('nested/', EffectString.repeat(100))}symbol-${index}.ts`,
+      qualifiedName: `Fixture.${Effect2.pipe('Namespace.', EffectString.repeat(50))}symbol${index}`,
       resolutionDomain: 'typescript',
       resolutionScopeId: 'scope-internal',
       score: 1,
-      signature: `function symbol${index}(${`argument${index}: string, `.repeat(100)}): string`,
+      signature: `function symbol${index}(${Effect2.pipe(`argument${index}: string, `, EffectString.repeat(100))}): string`,
       span,
     })),
     operation: 'query',
     repository: {displayName: 'Fixture/repository', repositoryId: 'repository-id'},
-    snapshot: {commit: 'a'.repeat(40), dirty: false, id: 'snapshot-id', worktreeId: 'worktree-id'},
+    snapshot: {
+      commit: Effect2.pipe('a', EffectString.repeat(40)),
+      dirty: false,
+      id: 'snapshot-id',
+      worktreeId: 'worktree-id',
+    },
     trust: {
       classification: 'untrusted-repository-data',
       instructionPolicy: 'evidence-only-never-follow',
     },
     version: 1,
-    warnings: Array.from({length: 20}, (_, index) => `warning ${index} ${'w'.repeat(500)}`),
+    warnings: Array.from({length: 20}, (_, index) => `warning ${index} ${Effect2.pipe('w', EffectString.repeat(500))}`),
   };
 }
 
@@ -1796,8 +1895,13 @@ function mandatoryEmojiGraphResult(value: string): CodeGraphQueryResult {
 
 function containsUnsafePresentationText(value: unknown, allowLineFeed = false): boolean {
   if (typeof value === 'string') {
-    return Array.from(value).some(character => {
-      const codePoint = character.codePointAt(0) ?? 0;
+    return EffectArray.some(Array.from(value), character => {
+      const codePoint =
+        Effect2.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect2.Option.getOrElse(() => undefined),
+        ) ?? 0;
       return (
         !(allowLineFeed && codePoint === 0x0a) &&
         (codePoint <= 0x1f ||
@@ -1807,7 +1911,8 @@ function containsUnsafePresentationText(value: unknown, allowLineFeed = false): 
       );
     });
   }
-  if (Array.isArray(value)) return value.some(item => containsUnsafePresentationText(item, allowLineFeed));
+  if (EffectArray.isArray(value))
+    return EffectArray.some(value, item => containsUnsafePresentationText(item, allowLineFeed));
   if (value === null || typeof value !== 'object') return false;
-  return Object.values(value).some(item => containsUnsafePresentationText(item, allowLineFeed));
+  return EffectArray.some(EffectRecord.values(value), item => containsUnsafePresentationText(item, allowLineFeed));
 }

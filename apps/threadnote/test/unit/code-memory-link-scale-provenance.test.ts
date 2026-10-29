@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer} from 'effect';
@@ -29,8 +30,11 @@ import {
   evaluateCodeMemoryLinkScaleCapture,
 } from '@threadnote/threadnote/evaluation/code-memory-link-scale-contract';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const commit = '1'.repeat(40);
+const commit = Effect2.pipe('1', EffectString.repeat(40));
 const repoUrl = `https://github.com/${CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORY}`;
 const ref = 'refs/heads/main';
 const workflowUrl = `${repoUrl}/${CODE_MEMORY_LINK_SCALE_GITHUB_WORKFLOW_PATH}@${ref}`;
@@ -47,7 +51,7 @@ describe('authenticated inverse scale provenance', () => {
     Effect.gen(function* () {
       const capture = fixture();
       expect(capture.evidenceClass).toBe('development-smoke');
-      const calls: readonly string[][] = [];
+      const calls: string[][] = [];
       const verified = yield* verifyCodeMemoryLinkScaleProvenance(capture, candidate).pipe(
         provideTestLayer(testLayer({calls})),
       );
@@ -56,7 +60,7 @@ describe('authenticated inverse scale provenance', () => {
       expect(codeMemoryLinkScaleAttestationSubjectV1(verified.artifact)).toBe(
         codeMemoryLinkScaleAttestationSubjectV1(capture),
       );
-      const verify = calls.find(args => args[0] === 'attestation')!;
+      const verify = EffectOption.getOrUndefined(EffectArray.findFirst(calls, args => args[0] === 'attestation'))!;
       expect(verify).toEqual(
         expect.arrayContaining([
           '--hostname',
@@ -70,7 +74,7 @@ describe('authenticated inverse scale provenance', () => {
       );
       expect(verify).not.toContain('--bundle');
       expect(
-        calls.some(args =>
+        EffectArray.some(calls, args =>
           args.includes(
             `repos/${CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORY}/actions/runs/123/attempts/2/jobs?per_page=100`,
           ),
@@ -107,7 +111,7 @@ describe('authenticated inverse scale provenance', () => {
 
   effectIt.effect('rejects mismatched signed identity fields and untrusted job metadata', () =>
     Effect.gen(function* () {
-      for (const key of Object.keys(certificate())) {
+      for (const key of EffectRecord.keys(certificate())) {
         const failure = yield* verifyCodeMemoryLinkScaleProvenance(fixture(), candidate).pipe(
           provideTestLayer(testLayer({certificateOverride: {[key]: 'forged'}})),
           Effect.flip,
@@ -128,7 +132,7 @@ describe('authenticated inverse scale provenance', () => {
         expect(String(failure)).toContain('does not establish the governed scale runner');
       }
       const failedRun = yield* verifyCodeMemoryLinkScaleProvenance(fixture(), candidate).pipe(
-        provideTestLayer(testLayer({runOverride: {head_sha: '2'.repeat(40)}})),
+        provideTestLayer(testLayer({runOverride: {head_sha: Effect2.pipe('2', EffectString.repeat(40))}})),
         Effect.flip,
       );
       expect(String(failedRun)).toContain('does not establish the governed scale runner');
@@ -144,11 +148,11 @@ describe('authenticated inverse scale provenance', () => {
           ...capture,
           capture: {
             ...capture.capture,
-            scenarios: capture.capture.scenarios.map((scenario, index) =>
+            scenarios: EffectArray.map(capture.capture.scenarios, (scenario, index) =>
               index === 0
                 ? {
                     ...scenario,
-                    samples: scenario.samples.map((sample, sampleIndex) =>
+                    samples: EffectArray.map(scenario.samples, (sample, sampleIndex) =>
                       sampleIndex === 0 ? {...sample, milliseconds: value} : sample,
                     ),
                   }
@@ -164,7 +168,7 @@ describe('authenticated inverse scale provenance', () => {
 });
 
 function testLayer(options: {
-  readonly calls?: readonly string[][];
+  readonly calls?: string[][];
   readonly unsigned?: boolean;
   readonly subjectHash?: string;
   readonly certificateOverride?: Record<string, unknown>;
@@ -179,7 +183,7 @@ function testLayer(options: {
         execute: (executable, args) =>
           Effect.gen(function* () {
             expect(executable).toBe('gh');
-            (options.calls as string[][] | undefined)?.push([...args]);
+            options.calls?.push([...args]);
             let body: unknown;
             if (args[0] === 'attestation') {
               if (options.unsigned)
@@ -200,7 +204,7 @@ function testLayer(options: {
                   },
                 },
               ];
-            } else if (args[3].includes('/jobs?')) {
+            } else if (Effect2.pipe(args[3], EffectString.includes('/jobs?'))) {
               body = {
                 total_count: 1,
                 jobs: [
@@ -212,11 +216,14 @@ function testLayer(options: {
                     labels: ['macos-15'],
                     status: 'in_progress',
                     conclusion: null,
-                    steps: [CODE_MEMORY_LINK_SCALE_CAPTURE_STEP, CODE_MEMORY_LINK_SCALE_ATTEST_STEP].map(name => ({
-                      name,
-                      status: 'completed',
-                      conclusion: 'success',
-                    })),
+                    steps: EffectArray.map(
+                      [CODE_MEMORY_LINK_SCALE_CAPTURE_STEP, CODE_MEMORY_LINK_SCALE_ATTEST_STEP],
+                      name => ({
+                        name,
+                        status: 'completed',
+                        conclusion: 'success',
+                      }),
+                    ),
                     ...options.jobOverride,
                   },
                 ],
@@ -271,7 +278,7 @@ function fixture() {
       observedCommit: commit,
       dirty: false,
       gitStatusObserved: true,
-      builtArtifactSha256: '2'.repeat(64),
+      builtArtifactSha256: Effect2.pipe('2', EffectString.repeat(64)),
       invocationMode: 'release-scale',
       architecture: 'arm64',
       cpu: 'Apple M1',
@@ -292,7 +299,7 @@ function fixture() {
         runAttempt: 2,
         sha: commit,
         workflowSha: commit,
-        workflowRef: workflowUrl.slice('https://github.com/'.length),
+        workflowRef: Effect2.pipe(workflowUrl, EffectString.slice('https://github.com/'.length)),
       },
     },
     capture: {
@@ -315,7 +322,7 @@ function fixture() {
         recallDatabaseBytes: 100,
         recallStorageBytes: 200,
       },
-      scenarios: CODE_MEMORY_LINK_SCALE_SCENARIOS.map(id => {
+      scenarios: EffectArray.map(CODE_MEMORY_LINK_SCALE_SCENARIOS, id => {
         const expectedUris = codeMemoryLinkScaleExpectedUris(id);
         const expectedTruncatedSelectorCount = codeMemoryLinkScaleExpectedTruncatedSelectorCount(id);
         const observation = {

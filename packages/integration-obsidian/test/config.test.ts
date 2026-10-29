@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -12,6 +13,7 @@ import {
   ObsidianConfigurationError,
 } from '../src/config.js';
 import {SourceConfigurationError} from '@threadnote/integration-core/config';
+
 const registry = makeSourceConfigurationRegistry({
   sources: [obsidianSourceCodec],
   projections: [obsidianProjectionCodec],
@@ -71,38 +73,25 @@ describe('Obsidian configuration', () => {
   it('requires an explicit source allowlist', () => {
     expect(() =>
       parseObsidianConfiguration(
-        [
-          'version: 1',
-          'sources:',
-          '  - id: engineering',
-          '    type: obsidian',
-          '    vault: /vault',
-          '    include: []',
-          'projections: []',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'sources:',
+            '  - id: engineering',
+            '    type: obsidian',
+            '    vault: /vault',
+            '    include: []',
+            'projections: []',
+          ],
+          '\n',
+        ),
       ),
     ).toThrow(/include must contain at least one allowlist pattern/i);
   });
 
   it('preserves configurations without selected_uris as legacy all-matching projections', () => {
     const configuration = parseObsidianConfiguration(
-      [
-        'version: 1',
-        'sources: []',
-        'projections:',
-        '  - id: memory',
-        '    type: obsidian',
-        '    vault: /vault',
-        '    folder: Threadnote',
-      ].join('\n'),
-    );
-
-    expect(configuration.projections[0]?.selectedUris).toBeUndefined();
-  });
-
-  it('accepts only canonical memory resources in projection selections', () => {
-    expect(() =>
-      parseObsidianConfiguration(
+      EffectArray.join(
         [
           'version: 1',
           'sources: []',
@@ -111,9 +100,31 @@ describe('Obsidian configuration', () => {
           '    type: obsidian',
           '    vault: /vault',
           '    folder: Threadnote',
-          '    selected_uris:',
-          '      - threadnote://resources/external/obsidian/vault/Note.md',
-        ].join('\n'),
+        ],
+        '\n',
+      ),
+    );
+
+    expect(configuration.projections[0]?.selectedUris).toBeUndefined();
+  });
+
+  it('accepts only canonical memory resources in projection selections', () => {
+    expect(() =>
+      parseObsidianConfiguration(
+        EffectArray.join(
+          [
+            'version: 1',
+            'sources: []',
+            'projections:',
+            '  - id: memory',
+            '    type: obsidian',
+            '    vault: /vault',
+            '    folder: Threadnote',
+            '    selected_uris:',
+            '      - threadnote://resources/external/obsidian/vault/Note.md',
+          ],
+          '\n',
+        ),
       ),
     ).toThrow(/only canonical Threadnote memory URIs/i);
   });
@@ -121,33 +132,39 @@ describe('Obsidian configuration', () => {
   it('rejects unsafe projection folders and duplicate identifiers', () => {
     expect(() =>
       parseObsidianConfiguration(
-        [
-          'version: 1',
-          'sources: []',
-          'projections:',
-          '  - id: memory',
-          '    type: obsidian',
-          '    vault: /vault',
-          '    folder: ../outside',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'sources: []',
+            'projections:',
+            '  - id: memory',
+            '    type: obsidian',
+            '    vault: /vault',
+            '    folder: ../outside',
+          ],
+          '\n',
+        ),
       ),
     ).toThrow(/safe vault-relative folder/i);
 
     expect(() =>
       parseObsidianConfiguration(
-        [
-          'version: 1',
-          'sources:',
-          '  - id: engineering',
-          '    type: obsidian',
-          '    vault: /vault',
-          '    include: ["Engineering/**"]',
-          '  - id: engineering',
-          '    type: obsidian',
-          '    vault: /other',
-          '    include: ["Docs/**"]',
-          'projections: []',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'sources:',
+            '  - id: engineering',
+            '    type: obsidian',
+            '    vault: /vault',
+            '    include: ["Engineering/**"]',
+            '  - id: engineering',
+            '    type: obsidian',
+            '    vault: /other',
+            '    include: ["Docs/**"]',
+            'projections: []',
+          ],
+          '\n',
+        ),
       ),
     ).toThrow(/duplicate source id/i);
   });
@@ -155,30 +172,36 @@ describe('Obsidian configuration', () => {
   it('rejects source traversal patterns and unsafe Inbox folders', () => {
     expect(() =>
       parseObsidianConfiguration(
-        [
-          'version: 1',
-          'sources:',
-          '  - id: engineering',
-          '    type: obsidian',
-          '    vault: /vault',
-          '    include: ["../Private/**"]',
-          'projections: []',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'sources:',
+            '  - id: engineering',
+            '    type: obsidian',
+            '    vault: /vault',
+            '    include: ["../Private/**"]',
+            'projections: []',
+          ],
+          '\n',
+        ),
       ),
     ).toThrow(/vault-relative patterns without parent traversal/i);
 
     expect(() =>
       parseObsidianConfiguration(
-        [
-          'version: 1',
-          'sources:',
-          '  - id: engineering',
-          '    type: obsidian',
-          '    vault: /vault',
-          '    include: ["Engineering/**"]',
-          '    inbox: ../Inbox',
-          'projections: []',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'sources:',
+            '  - id: engineering',
+            '    type: obsidian',
+            '    vault: /vault',
+            '    include: ["Engineering/**"]',
+            '    inbox: ../Inbox',
+            'projections: []',
+          ],
+          '\n',
+        ),
       ),
     ).toThrow(/safe vault-relative folder/i);
   });
@@ -186,28 +209,34 @@ describe('Obsidian configuration', () => {
   it('requires absolute vault paths and accepts native Windows paths', () => {
     expect(() =>
       parseObsidianConfiguration(
+        EffectArray.join(
+          [
+            'version: 1',
+            'sources:',
+            '  - id: engineering',
+            '    type: obsidian',
+            '    vault: relative/vault',
+            '    include: ["Engineering/**"]',
+            'projections: []',
+          ],
+          '\n',
+        ),
+      ),
+    ).toThrow(/vault must be an absolute path/i);
+
+    const configuration = parseObsidianConfiguration(
+      EffectArray.join(
         [
           'version: 1',
           'sources:',
           '  - id: engineering',
           '    type: obsidian',
-          '    vault: relative/vault',
+          '    vault: "C:\\\\Users\\\\example\\\\Vault"',
           '    include: ["Engineering/**"]',
           'projections: []',
-        ].join('\n'),
+        ],
+        '\n',
       ),
-    ).toThrow(/vault must be an absolute path/i);
-
-    const configuration = parseObsidianConfiguration(
-      [
-        'version: 1',
-        'sources:',
-        '  - id: engineering',
-        '    type: obsidian',
-        '    vault: "C:\\\\Users\\\\example\\\\Vault"',
-        '    include: ["Engineering/**"]',
-        'projections: []',
-      ].join('\n'),
     );
     expect(requireObsidianSource(configuration, 'engineering').vault).toBe('C:\\Users\\example\\Vault');
   });

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {summarizeRecallFeedback, type RecallFeedbackEvent} from '@threadnote/recall/feedback';
 
@@ -342,7 +343,7 @@ function medianOf(values: readonly number[]): number {
 function sumCounts(...values: readonly number[]): number {
   return Math.min(
     VALUE_REPORT_MAX_COUNT,
-    values.reduce((total, value) => total + value, 0),
+    EffectArray.reduce(values, 0, (total, value) => total + value),
   );
 }
 

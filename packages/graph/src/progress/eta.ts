@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import type {CodeGraphProgress} from '../types.js';
 
@@ -295,14 +296,14 @@ function appendEtaSample(samples: readonly number[], sample: number): readonly n
 function coefficientOfVariation(values: readonly number[]): number {
   const average = mean(values);
   if (average <= 0 || !Number.isFinite(average)) return Number.POSITIVE_INFINITY;
-  const variance = values.reduce((total, value) => total + (value - average) ** 2, 0) / values.length;
+  const variance = EffectArray.reduce(values, 0, (total, value) => total + (value - average) ** 2) / values.length;
   return Math.sqrt(variance) / average;
 }
 
 function mean(values: readonly number[]): number {
   return values.length === 0
     ? Number.POSITIVE_INFINITY
-    : values.reduce((total, value) => total + value, 0) / values.length;
+    : EffectArray.reduce(values, 0, (total, value) => total + value) / values.length;
 }
 
 function median(values: readonly number[]): number | undefined {

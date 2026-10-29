@@ -2,7 +2,7 @@ import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import * as FC from 'fast-check';
@@ -18,11 +18,19 @@ import {
   type CodeGraphRemovedViewVectorUnitResult,
   withPreparedCodeGraphRemovedViewVectorUnit,
 } from '@threadnote/graph/vector/maintenance';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const RemovedViewVectorTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
-const CHECKOUT_ID = 'a'.repeat(64);
-const WORKTREE_ID = 'b'.repeat(64);
-const SNAPSHOT_ID = `cgsn_${'1'.repeat(40)}`;
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
+const WORKTREE_ID = Effect2.pipe('b', EffectString.repeat(64));
+const SNAPSHOT_ID = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
 const PREPARATION = {
   deadlineMonotonicMilliseconds: Number.MAX_SAFE_INTEGER,
   reservationMode: 'nonblocking-one-attempt',
@@ -43,7 +51,7 @@ describe('code graph removed-view vector cleanup', () => {
         const input = yield* makeVectorHome(fs, path, home);
         yield* makeModelDirectories(fs, path, input, 1, ['model-scoped']);
         const databasePath = modelDatabasePath(path, input, 'model-scoped');
-        const scopeId = `code-graph-scope:${'c'.repeat(64)}`;
+        const scopeId = `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`;
         const scopeView = codeGraphVectorViewId(WORKTREE_ID, scopeId);
         yield* Effect.sync(() => {
           seedVectorDatabase(databasePath, {vectorCount: 3});
@@ -165,7 +173,7 @@ describe('code graph removed-view vector cleanup', () => {
           const databasePath = modelDatabasePath(path, input, 'model-000');
           yield* Effect.sync(() => seedVectorDatabase(databasePath, {vectorCount: 2}));
           const before = readVectorState(databasePath);
-          const digest = 'f'.repeat(64);
+          const digest = Effect2.pipe('f', EffectString.repeat(64));
           const invalid = [
             '',
             `vp1:r:${digest}:model-000`,
@@ -183,7 +191,7 @@ describe('code graph removed-view vector cleanup', () => {
             cursorToken =>
               Effect.gen(function* () {
                 let uses = 0;
-                const result = yield* withPreparedCodeGraphRemovedViewVectorUnit(
+                const result = yield* withPreparedCodeGraphRemovedViewVectorUnit<void, unknown, never>(
                   input,
                   cleanupEntry({cursorToken}),
                   PREPARATION,
@@ -247,7 +255,7 @@ describe('code graph removed-view vector cleanup', () => {
             const input = yield* makeVectorHome(fs, path, home);
             let uses = 0;
 
-            const result = yield* withPreparedCodeGraphRemovedViewVectorUnit(
+            const result = yield* withPreparedCodeGraphRemovedViewVectorUnit<void, unknown, never>(
               input,
               cleanupEntry({cursorToken: `outside-vp1/${suffix}`}),
               PREPARATION,
@@ -339,12 +347,13 @@ describe('code graph removed-view vector cleanup', () => {
             let uses = 0;
             const invalidPreparation = {
               ...PREPARATION,
-              reservationMode: 'wait',
-            } as unknown as CodeGraphRemovedViewVectorUnitPreparation;
+              reservationMode: 'wait' as const,
+            };
 
-            const result = yield* withPreparedCodeGraphRemovedViewVectorUnit(
+            const result = yield* withPreparedCodeGraphRemovedViewVectorUnit<void, unknown, never>(
               input,
               cleanupEntry(),
+              // @ts-expect-error -- exercise runtime rejection of an unsupported reservation mode.
               invalidPreparation,
               commit =>
                 Effect.sync(() => {
@@ -387,7 +396,7 @@ describe('code graph removed-view vector cleanup', () => {
             withPreparedCodeGraphRemovedViewVectorUnit(busyInput, cleanupEntry(), PREPARATION, commit =>
               Effect.gen(function* () {
                 busyEvents.push(
-                  `use:${(yield* activeReceiptOperations(fs, path, busyInput.threadnoteHome)).join(',')}`,
+                  `use:${EffectArray.join(yield* activeReceiptOperations(fs, path, busyInput.threadnoteHome), ',')}`,
                 );
                 busyEvents.push('target-enter');
                 const result = yield* commit;
@@ -567,7 +576,9 @@ function makeModelDirectories(
   count: number,
   exactNames?: readonly string[],
 ) {
-  const names = exactNames ?? Array.from({length: count}, (_, index) => `model-${index.toString().padStart(3, '0')}`);
+  const names =
+    exactNames ??
+    Array.from({length: count}, (_, index) => `model-${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}`);
   expect(names).toHaveLength(count);
   return Effect.forEach(names, name => fs.makeDirectory(modelRoot(path, input, name), {recursive: true, mode: 0o700}), {
     concurrency: 8,
@@ -629,7 +640,14 @@ function seedVectorDatabase(databasePath: string, input: {readonly vectorCount: 
            template_version, count, state, created_at
          ) VALUES (?, ?, ?, ?, 384, 1, ?, 'ready', ?)`,
       )
-      .run('generation-live', SNAPSHOT_ID, 'model-test', 'f'.repeat(64), input.vectorCount, new Date(0).toISOString());
+      .run(
+        'generation-live',
+        SNAPSHOT_ID,
+        'model-test',
+        Effect2.pipe('f', EffectString.repeat(64)),
+        input.vectorCount,
+        new Date(0).toISOString(),
+      );
     database
       .query('INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, ?)')
       .run(WORKTREE_ID, 'generation-live');
@@ -638,7 +656,7 @@ function seedVectorDatabase(databasePath: string, input: {readonly vectorCount: 
     );
     database.transaction(() => {
       for (let index = 0; index < input.vectorCount; index += 1) {
-        const symbolId = `symbol-${index.toString().padStart(6, '0')}`;
+        const symbolId = `symbol-${Effect2.pipe(index.toString(), EffectString.padStart(6, '0'))}`;
         insertVector.run('generation-live', symbolId, `fingerprint-${symbolId}`, new Uint8Array(16));
       }
     })();
@@ -668,7 +686,13 @@ function insertReappearedPointer(databasePath: string): void {
            template_version, count, state, created_at
          ) VALUES (?, ?, ?, ?, 384, 1, 0, 'ready', ?)`,
       )
-      .run('generation-reappeared', SNAPSHOT_ID, 'model-test', 'f'.repeat(64), new Date(1).toISOString());
+      .run(
+        'generation-reappeared',
+        SNAPSHOT_ID,
+        'model-test',
+        Effect2.pipe('f', EffectString.repeat(64)),
+        new Date(1).toISOString(),
+      );
     database
       .query('INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, ?)')
       .run(WORKTREE_ID, 'generation-reappeared');
@@ -682,14 +706,23 @@ function readVectorState(databasePath: string) {
   try {
     const hasTable = (name: string) =>
       Number(
-        (
-          database.query("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as {
-            readonly count: number;
-          }
+        requiredRow(
+          database
+            .query<
+              {
+                readonly count: number;
+              },
+              SQLQueryBindings[]
+            >("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .get(name),
         ).count,
       ) === 1;
     const count = (table: string) =>
-      Number((database.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as {readonly count: number}).count);
+      Number(
+        requiredRow(
+          database.query<{readonly count: number}, SQLQueryBindings[]>(`SELECT COUNT(*) AS count FROM ${table}`).get(),
+        ).count,
+      );
     const retirementPrepared = hasTable('vector_generation_retirements');
     return {
       generations: count('vector_generations'),
@@ -708,10 +741,15 @@ function readVectorExactState(databasePath: string) {
   try {
     const hasTable = (name: string) =>
       Number(
-        (
-          database.query("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as {
-            readonly count: number;
-          }
+        requiredRow(
+          database
+            .query<
+              {
+                readonly count: number;
+              },
+              SQLQueryBindings[]
+            >("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .get(name),
         ).count,
       ) === 1;
     const hasRetirementState = hasTable('vector_retirement_state');
@@ -758,13 +796,17 @@ function activeReceiptOperations(fs: FileSystem.FileSystem, path: Path.Path, thr
   return Effect.gen(function* () {
     const root = codeGraphDiskReservationRoot(path, threadnoteHome);
     if (!(yield* fs.exists(root))) return [] as string[];
-    const names = (yield* fs.readDirectory(root)).filter(name => /^v1-[0-9a-f]{64}\.json$/.test(name)).sort();
+    const names = EffectArray.filter(
+      yield* fs.readDirectory(root),
+      __effectArrayValue => !!(name => /^v1-[0-9a-f]{64}\.json$/.test(name))(__effectArrayValue),
+    ).sort();
     return yield* Effect.forEach(names, name =>
-      fs
-        .readFileString(path.join(root, name))
-        .pipe(
-          Effect.map(content => String((JSON.parse(content) as {readonly operation?: unknown}).operation ?? 'invalid')),
-        ),
+      fs.readFileString(path.join(root, name)).pipe(
+        Effect.map(content => {
+          const value: unknown = JSON.parse(content);
+          return Effect2.Predicate.isObject(value) && typeof value.operation === 'string' ? value.operation : 'invalid';
+        }),
+      ),
     );
   });
 }
@@ -846,9 +888,13 @@ function parseCursor(result: CodeGraphRemovedViewVectorUnitResult): ParsedCursor
   );
   expect(match).not.toBeNull();
   if (match === null) throw TestError.make({message: 'Vector-unit cursor is not canonical.'});
+  const mode = match[1];
+  if (mode !== 'r' && mode !== 'n' && mode !== 'a') {
+    throw TestError.make({message: 'Vector-unit cursor mode is not recognized.'});
+  }
   return {
     digest: match[2],
-    mode: match[1] as ParsedCursor['mode'],
+    mode,
     ...(match[3] === undefined ? {} : {modelName: match[3]}),
     ...(match[4] === undefined ? {} : {step: Number(match[4])}),
     token: progress.cursorToken,

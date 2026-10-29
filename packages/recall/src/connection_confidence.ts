@@ -1,5 +1,6 @@
 import type {RecallConfidence} from './rank.js';
 import type {RecallMemoryConnectionsResult} from './memory/connections.js';
+import {Array as EffectArray} from 'effect';
 
 export const EXPLICIT_MEMORY_CONNECTION_CONFIDENCE_BASIS = 'explicit-memory-connection' as const;
 
@@ -18,7 +19,7 @@ export function actionableMemoryConnectionUris(
 ): readonly string[] {
   if (memoryConnections === undefined) return [];
   const actionablePremiseOrdinals = new Set(
-    memoryConnections.premises.flatMap(premise =>
+    EffectArray.flatMap(memoryConnections.premises, premise =>
       premise.state === 'current' || premise.state === 'historical' ? [premise.requestedOrdinal] : [],
     ),
   );

@@ -1,4 +1,5 @@
-import type {TransactionSql} from 'postgres';
+import {Array as EffectArray} from 'effect';
+import type {ISql} from 'postgres';
 import type {AuthorizedRemotePrincipal} from '../authorization.js';
 import {remoteMemoryError} from '../errors.js';
 import {requireJsonValue} from '../json.js';
@@ -17,7 +18,7 @@ export type RememberPublicationPlanRecordResult =
   | {readonly kind: 'prepared'; readonly plan: StoredRememberPublicationPlanV1};
 
 export async function recordRememberPublicationPlan(
-  transaction: TransactionSql,
+  transaction: ISql,
   principal: AuthorizedRemotePrincipal,
   operationId: string,
   fingerprint: string,
@@ -63,23 +64,38 @@ export async function recordRememberPublicationPlan(
 }
 
 export function storedRememberPublicationPlan(value: unknown): StoredRememberPublicationPlanV1 | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-  const plan = value as Partial<StoredRememberPublicationPlanV1>;
   if (
-    plan.kind !== 'remember_publication_plan' ||
-    plan.version !== 1 ||
-    typeof plan.contentHash !== 'string' ||
-    !/^[0-9a-f]{64}$/u.test(plan.contentHash) ||
-    typeof plan.memoryId !== 'string' ||
-    !/^tn_[0-9a-f]{32}$/u.test(plan.memoryId) ||
-    typeof plan.proposedRevision !== 'string' ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(plan.proposedRevision) ||
-    typeof plan.renderedAt !== 'string' ||
-    !Number.isFinite(Date.parse(plan.renderedAt))
+    typeof value !== 'object' ||
+    value === null ||
+    EffectArray.isArray(value) ||
+    !isStoredRememberPublicationPlan(value)
   ) {
     return undefined;
   }
-  return plan as StoredRememberPublicationPlanV1;
+  return value;
+}
+
+function isStoredRememberPublicationPlan(value: object): value is StoredRememberPublicationPlanV1 {
+  if (!('kind' in value) || !('version' in value)) return false;
+  if (
+    value.kind !== 'remember_publication_plan' ||
+    value.version !== 1 ||
+    !('contentHash' in value) ||
+    typeof value.contentHash !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(value.contentHash) ||
+    !('memoryId' in value) ||
+    typeof value.memoryId !== 'string' ||
+    !/^tn_[0-9a-f]{32}$/u.test(value.memoryId) ||
+    !('proposedRevision' in value) ||
+    typeof value.proposedRevision !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value.proposedRevision) ||
+    !('renderedAt' in value) ||
+    typeof value.renderedAt !== 'string' ||
+    !Number.isFinite(Date.parse(value.renderedAt))
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export function storedRememberPublicationPlanDate(plan: StoredRememberPublicationPlanV1): Date {

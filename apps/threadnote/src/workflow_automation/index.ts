@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {nativeRequestSchema} from './request_schema.js';
 import {nativeWorkflowFeatureVersions} from './features.js';
 import {Effect} from 'effect';
@@ -38,6 +39,7 @@ import {
   immutableWorkflowImage,
   withWorkflowReadCache,
 } from '../workflow_memory/read_cache.js';
+import * as EffectRecord from 'effect/Record';
 
 const version = {protocolVersion: 1 as const, executorVersion: 1 as const};
 const issue = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -58,7 +60,7 @@ const summary = (state: NativeWorkflowState) => ({
   ...(state.naming ? {naming: state.naming, title: state.title} : {}),
   profile: state.profile,
   ...(state.team ? {team: state.team} : {}),
-  operations: state.operations.map(operation => ({
+  operations: EffectArray.map(state.operations, operation => ({
     operationId: operation.intent.operationId,
     status: operation.status,
     intentDigest: operation.intentDigest,
@@ -112,16 +114,18 @@ const inspectNative = Effect.fn('workflowAutomation.inspectNative')(function* (
 ) {
   const native =
     admitted ?? (yield* withWorkflowLock(config, binding.bindingId, inspectWorkflowJournal(config, binding.bindingId)));
-  const ids = new Set(state.operations.map(operation => operation.intent.operationId));
+  const ids = new Set(EffectArray.map(state.operations, operation => operation.intent.operationId));
   const cache = yield* CurrentWorkflowReadCache;
   if (
-    Object.entries(native.state.operations).some(
+    EffectArray.some(
+      EffectRecord.toEntries(native.state.operations),
       ([id, operation]) =>
         !ids.has(id) &&
         !(
           operation.request.action === 'archive' &&
           operation.request.sourceRunId === state.runId &&
-          state.operations.some(
+          EffectArray.some(
+            state.operations,
             local =>
               local.status === 'verified' &&
               local.artifact?.uri === operation.sourceUri &&
@@ -161,7 +165,7 @@ const inspectNative = Effect.fn('workflowAutomation.inspectNative')(function* (
     ...summary(state),
     needsRecovery: native.needsRecovery,
     artifactReadback: 'not-performed' as const,
-    operations: summary(state).operations.map(operation => ({
+    operations: EffectArray.map(summary(state).operations, operation => ({
       ...operation,
       nativeOperationState: native.state.operations[operation.operationId]?.status ?? 'absent',
     })),
@@ -280,7 +284,9 @@ const save = Effect.fn('workflowAutomation.save')(function* (
     return yield* issue('pending-operation', 'Finish this run’s admitted closeout before starting another write.');
   const intent = intentFrom(stored.state, request);
   const digest = nativeWorkflowIntentDigest(intent, sha256HexSync);
-  const existing = stored.state.operations.find(operation => operation.intent.operationId === request.operationId);
+  const existing = EffectOption.getOrUndefined(
+    EffectArray.findFirst(stored.state.operations, operation => operation.intent.operationId === request.operationId),
+  );
   if (existing && existing.intentDigest !== digest)
     return yield* issue('operation-intent-conflict', 'This operationId already belongs to different native intent.');
   if (request.action === 'preflight' && existing) {
@@ -322,7 +328,7 @@ const save = Effect.fn('workflowAutomation.save')(function* (
     yield* CurrentNativeOperationLimit,
     reservation?.operationLimit ?? closeout?.operationLimit ?? nativeWorkflowOperationLimit,
   );
-  if (!existing && stored.state.operations.some(operation => operation.status === 'prepared'))
+  if (!existing && EffectArray.some(stored.state.operations, operation => operation.status === 'prepared'))
     return yield* issue(
       'pending-operation',
       'Recover this run’s existing pending operation before preparing another write.',
@@ -351,7 +357,7 @@ const save = Effect.fn('workflowAutomation.save')(function* (
       config,
       {
         ...pending.state,
-        operations: pending.state.operations.map(operation =>
+        operations: EffectArray.map(pending.state.operations, operation =>
           operation.intent.operationId === request.operationId
             ? {...operation, status: 'verified' as const, artifact}
             : operation,
@@ -376,7 +382,9 @@ const recover = Effect.fn('workflowAutomation.recover')(function* (
       !stored.state.closeoutSave.operationIds.includes(operationId))
   )
     return yield* issue('pending-operation', 'Resume the original closeout before recovering its child writes.');
-  const operation = stored.state.operations.find(item => item.intent.operationId === operationId);
+  const operation = EffectOption.getOrUndefined(
+    EffectArray.findFirst(stored.state.operations, item => item.intent.operationId === operationId),
+  );
   if (!operation)
     return yield* issue(
       'operation-not-found',
@@ -388,7 +396,7 @@ const recover = Effect.fn('workflowAutomation.recover')(function* (
       config,
       {
         ...stored.state,
-        operations: stored.state.operations.map(item =>
+        operations: EffectArray.map(stored.state.operations, item =>
           item.intent.operationId === operationId ? {...item, status: 'verified' as const, artifact} : item,
         ),
       },

@@ -1,3 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export interface LinuxCgroupMemoryFile {
   readonly path: string;
   readonly version: 1 | 2;
@@ -37,12 +41,12 @@ export function linuxCgroupMemoryFiles(
       files.push({path: joinLinuxPath(mount.mountPoint, ancestor, filename), version: membership.version});
     }
   }
-  return [...new Map(files.map(file => [`${file.version}:${file.path}`, file])).values()];
+  return [...new Map(EffectArray.map(files, file => [`${file.version}:${file.path}`, file])).values()];
 }
 
 /** Parses a positive finite cgroup byte limit exactly. Unlimited and malformed values are absent. */
 export function parseLinuxCgroupMemoryLimitBytes(value: string): bigint | undefined {
-  const normalized = value.trim();
+  const normalized = Effect.pipe(value, EffectString.trim);
   if (!/^\d+$/.test(normalized)) return undefined;
   try {
     const bytes = BigInt(normalized);
@@ -70,11 +74,11 @@ export function effectiveLinuxMemoryBytes(
 
 function parseLinuxCgroupMemberships(input: string): readonly LinuxCgroupMembership[] {
   const memberships: LinuxCgroupMembership[] = [];
-  for (const line of input.split(/\r?\n/)) {
+  for (const line of Effect.pipe(input, EffectString.split(/\r?\n/))) {
     // The path may itself contain colons, so only the first two separators are structural.
-    const match = /^(\d+):([^:]*):(.*)$/.exec(line.trim());
+    const match = /^(\d+):([^:]*):(.*)$/.exec(Effect.pipe(line, EffectString.trim));
     if (!match) continue;
-    const controllers = new Set((match[2] ?? '').split(',').filter(Boolean));
+    const controllers = new Set(EffectArray.filter(Effect.pipe(match[2] ?? '', EffectString.split(',')), Boolean));
     const path = normalizeLinuxPath(match[3] ?? '/');
     if (path === undefined) continue;
     if (match[1] === '0' && controllers.size === 0) memberships.push({path, version: 2});
@@ -85,13 +89,13 @@ function parseLinuxCgroupMemberships(input: string): readonly LinuxCgroupMembers
 
 function parseLinuxCgroupMounts(input: string): readonly LinuxCgroupMount[] {
   const mounts: LinuxCgroupMount[] = [];
-  for (const line of input.split(/\r?\n/)) {
-    const fields = line.trim().split(/\s+/);
+  for (const line of Effect.pipe(input, EffectString.split(/\r?\n/))) {
+    const fields = Effect.pipe(line, EffectString.trim, EffectString.split(/\s+/));
     const separator = fields.indexOf('-');
     if (separator < 6 || separator + 3 >= fields.length) continue;
     const filesystem = fields[separator + 1];
     const source = fields[separator + 2] ?? '';
-    const superOptions = fields.slice(separator + 3).join(',');
+    const superOptions = EffectArray.join(fields.slice(separator + 3), ',');
     const version =
       filesystem === 'cgroup2'
         ? 2
@@ -111,57 +115,71 @@ function matchingLinuxCgroupMount(
   membership: LinuxCgroupMembership,
   mounts: readonly LinuxCgroupMount[],
 ): LinuxCgroupMount | undefined {
-  return mounts
-    .filter(
-      candidate =>
+  return EffectArray.filter(
+    mounts,
+    __effectArrayValue =>
+      !!(candidate =>
         candidate.version === membership.version &&
-        (membership.path === '/' || pathWithinRoot(membership.path, candidate.root)),
-    )
-    .sort((left, right) => right.root.length - left.root.length)[0];
+        (membership.path === '/' || pathWithinRoot(membership.path, candidate.root)))(__effectArrayValue),
+  ).sort((left, right) => right.root.length - left.root.length)[0];
 }
 
 function hasMemoryController(source: string, superOptions: string): boolean {
-  return `${source},${superOptions}`.split(',').includes('memory');
+  return Effect.pipe(`${source},${superOptions}`, EffectString.split(',')).includes('memory');
 }
 
 function decodeMountInfoPath(value: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
   return value.replace(/\\([0-7]{3})/g, (_match, octal: string) => String.fromCharCode(Number.parseInt(octal, 8)));
 }
 
 function normalizeLinuxPath(value: string): string | undefined {
-  if (!value.startsWith('/') || [...value].some(character => isControlCharacter(character))) return undefined;
+  if (
+    !Effect.pipe(value, EffectString.startsWith('/')) ||
+    EffectArray.some([...value], character => isControlCharacter(character))
+  )
+    return undefined;
   const segments: string[] = [];
-  for (const segment of value.split('/')) {
+  for (const segment of Effect.pipe(value, EffectString.split('/'))) {
     if (!segment) continue;
     if (segment === '.' || segment === '..') return undefined;
     segments.push(segment);
   }
-  return `/${segments.join('/')}`;
+  return `/${EffectArray.join(segments, '/')}`;
 }
 
 function isControlCharacter(value: string): boolean {
-  const code = value.charCodeAt(0);
+  const code = Effect.pipe(
+    value,
+    EffectString.charCodeAt(0),
+    Effect.Option.getOrElse(() => NaN),
+  );
   return code <= 31 || code === 127;
 }
 
 function pathWithinRoot(path: string, root: string): boolean {
-  return root === '/' || path === root || path.startsWith(`${root}/`);
+  return root === '/' || path === root || Effect.pipe(path, EffectString.startsWith(`${root}/`));
 }
 
 function relativeToRoot(path: string, root: string): string {
-  if (root === '/') return path.slice(1);
-  return path === root ? '' : path.slice(root.length + 1);
+  if (root === '/') return Effect.pipe(path, EffectString.slice(1));
+  return path === root ? '' : Effect.pipe(path, EffectString.slice(root.length + 1));
 }
 
 function visibleAncestorPaths(relative: string): readonly string[] {
   if (!relative) return [''];
-  const segments = relative.split('/');
-  return Array.from({length: segments.length + 1}, (_, index) => segments.slice(0, segments.length - index).join('/'));
+  const segments = Effect.pipe(relative, EffectString.split('/'));
+  return Array.from({length: segments.length + 1}, (_, index) =>
+    EffectArray.join(segments.slice(0, segments.length - index), '/'),
+  );
 }
 
 function joinLinuxPath(...parts: readonly string[]): string {
-  return `/${parts
-    .flatMap(part => part.split('/'))
-    .filter(Boolean)
-    .join('/')}`;
+  return `/${EffectArray.join(
+    EffectArray.filter(
+      EffectArray.flatMap(parts, part => Effect.pipe(part, EffectString.split('/'))),
+      Boolean,
+    ),
+    '/',
+  )}`;
 }

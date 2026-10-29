@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {Database} from 'bun:sqlite';
 import {describe, expect, it} from '@effect/vitest';
@@ -25,6 +26,9 @@ import {
 import {appendCodeGraphMaterializationSpoolFactBatch} from '@threadnote/graph/materialization/spool/writer';
 import {codeGraphSqliteAll, codeGraphSqliteGet, codeGraphSqliteRun} from '@threadnote/graph/sqlite_statement';
 import type {CodeGraphLayout} from '@threadnote/graph/layout';
+import type {Path as EffectPath} from 'effect/Path';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph materialization spool', () => {
   fcProp(
@@ -42,11 +46,15 @@ describe('code graph materialization spool', () => {
     },
     ({loads}) => {
       const boundary = codeGraphSpoolSortCapacityBoundary(loads);
-      expect(boundary.finalFactBytes).toBe(loads.reduce((maximum, load) => Math.max(maximum, load.bytes), 0));
-      expect(boundary.mainSortPayloadBytes).toBe(
-        loads.reduce((maximum, load) => Math.max(maximum, load.bytes + load.lexicalTermBytesUpperBound), 0),
+      expect(boundary.finalFactBytes).toBe(
+        EffectArray.reduce(loads, 0, (maximum, load) => Math.max(maximum, load.bytes)),
       );
-      expect(boundary.rowCount).toBe(loads.reduce((maximum, load) => Math.max(maximum, load.rows), 0));
+      expect(boundary.mainSortPayloadBytes).toBe(
+        EffectArray.reduce(loads, 0, (maximum, load) =>
+          Math.max(maximum, load.bytes + load.lexicalTermBytesUpperBound),
+        ),
+      );
+      expect(boundary.rowCount).toBe(EffectArray.reduce(loads, 0, (maximum, load) => Math.max(maximum, load.rows)));
       expect(codeGraphSpoolSortCapacityBoundary([...loads].reverse())).toEqual(boundary);
       for (const load of loads) {
         expect(boundary.finalFactBytes).toBeGreaterThanOrEqual(load.bytes);
@@ -59,11 +67,11 @@ describe('code graph materialization spool', () => {
   it('persists exact pending surface capacity across append replay and spool resume', () => {
     const database = new Database(':memory:', {strict: true});
     const header = {
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect.pipe('a', EffectString.repeat(64)),
       extractorSet: 'extractor-v1',
-      graphContentId: `cgc_${'b'.repeat(40)}`,
-      repositoryId: 'c'.repeat(64),
-      snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+      graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+      repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+      snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
     };
     try {
       configureCodeGraphMaterializationSpoolDatabase(database);
@@ -102,7 +110,12 @@ describe('code graph materialization spool', () => {
         transientFilesystem: 'temporary',
       });
       expect(initializeCodeGraphMaterializationSpoolDatabase(database, header)).toBe('resumed');
-      const secondReceipt = spoolReceipt({batchId: 'f'.repeat(64), batchIndex: 1, reexportCount: 1, rowCount: 1});
+      const secondReceipt = spoolReceipt({
+        batchId: Effect.pipe('f', EffectString.repeat(64)),
+        batchIndex: 1,
+        reexportCount: 1,
+        rowCount: 1,
+      });
       expect(
         commitCodeGraphMaterializationSpoolBatch(database, secondReceipt, () =>
           appendCodeGraphMaterializationSpoolFactBatch(database, {
@@ -169,7 +182,7 @@ describe('code graph materialization spool', () => {
         temporaryAvailableBytes: 50 * gib,
       });
     expect(capacity(codeGraphSpoolSortCapacityBoundary(loads).finalFactBytes).state).toBe('healthy');
-    expect(capacity(loads.reduce((sum, load) => sum + load.bytes, 0)).state).toBe('pressure');
+    expect(capacity(EffectArray.reduce(loads, 0, (sum, load) => sum + load.bytes)).state).toBe('pressure');
   });
 
   fcProp(
@@ -192,7 +205,7 @@ describe('code graph materialization spool', () => {
             database,
             'SELECT id, value FROM statement_ownership WHERE id >= 0 ORDER BY id',
           ),
-        ).toEqual(values.map((value, id) => ({id, value})));
+        ).toEqual(EffectArray.map(values, (value, id) => ({id, value})));
         expect(
           codeGraphSqliteGet<{readonly count: number}>(database, 'SELECT COUNT(*) AS count FROM statement_ownership'),
         ).toEqual({count: values.length + 1});
@@ -212,12 +225,12 @@ describe('code graph materialization spool', () => {
     },
     ({pageRows, rowCount}) => {
       const pages = codeGraphMaterializationApplyPages(rowCount, pageRows);
-      expect(pages.reduce((total, page) => total + page.rowCount, 0)).toBe(rowCount);
-      expect(pages.every(page => page.rowCount > 0 && page.rowCount <= pageRows)).toBe(true);
-      expect(pages.map(page => page.afterRowid).sort((left, right) => left - right)).toEqual(
+      expect(EffectArray.reduce(pages, 0, (total, page) => total + page.rowCount)).toBe(rowCount);
+      expect(EffectArray.every(pages, page => page.rowCount > 0 && page.rowCount <= pageRows)).toBe(true);
+      expect(EffectArray.map(pages, page => page.afterRowid).sort((left, right) => left - right)).toEqual(
         Array.from({length: pages.length}, (_, index) => index * pageRows),
       );
-      expect(new Set(pages.map(page => page.afterRowid)).size).toBe(pages.length);
+      expect(new Set(EffectArray.map(pages, page => page.afterRowid)).size).toBe(pages.length);
       if (pages.length > 0) {
         expect(pages[0].afterRowid).toBe(Math.floor(pages.length / 2) * pageRows);
       }
@@ -226,18 +239,31 @@ describe('code graph materialization spool', () => {
   );
 
   it('uses the breadth-first median schedule retained by the storage screen', () => {
-    expect(codeGraphMaterializationApplyPages(50, 10).map(page => page.afterRowid)).toEqual([20, 10, 40, 0, 30]);
+    expect(EffectArray.map(codeGraphMaterializationApplyPages(50, 10), page => page.afterRowid)).toEqual([
+      20, 10, 40, 0, 30,
+    ]);
   });
 
   it('uses a closed snapshot grammar for a repository-contained sibling path', () => {
-    const layout = {repositoryRoot: '/threadnote/code-graph/repository'} as CodeGraphLayout;
-    const path = {join: (...parts: readonly string[]) => parts.join('/')} as unknown as Parameters<
-      typeof codeGraphMaterializationSpoolPath
-    >[0];
-    expect(codeGraphMaterializationSpoolPath(path, layout, `cgsn_${'a'.repeat(40)}-direct`)).toBe(
-      `/threadnote/code-graph/repository/materialization-spool-v2-cgsn_${'a'.repeat(40)}-direct.sqlite`,
+    const layout = {repositoryRoot: '/threadnote/code-graph/repository'} satisfies Pick<
+      CodeGraphLayout,
+      'repositoryRoot'
+    >;
+    const path = {join: (...parts: readonly string[]) => EffectArray.join(parts, '/')} satisfies Pick<
+      EffectPath,
+      'join'
+    >;
+    expect(
+      codeGraphMaterializationSpoolPath(path, layout, `cgsn_${Effect.pipe('a', EffectString.repeat(40))}-direct`),
+    ).toBe(
+      `/threadnote/code-graph/repository/materialization-spool-v2-cgsn_${Effect.pipe('a', EffectString.repeat(40))}-direct.sqlite`,
     );
-    for (const invalid of ['', '../escape', `cgsn_${'a'.repeat(39)}`, `cgsn_${'a'.repeat(40)}-full-xyz`]) {
+    for (const invalid of [
+      '',
+      '../escape',
+      `cgsn_${Effect.pipe('a', EffectString.repeat(39))}`,
+      `cgsn_${Effect.pipe('a', EffectString.repeat(40))}-full-xyz`,
+    ]) {
       expect(() => codeGraphMaterializationSpoolPath(path, layout, invalid)).toThrow(
         'Code graph materialization spool snapshot identity is invalid.',
       );
@@ -260,22 +286,22 @@ describe('code graph materialization spool', () => {
   it('resumes only the exact immutable sidecar identity', () => {
     const database = new Database(':memory:', {strict: true});
     const header = {
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect.pipe('a', EffectString.repeat(64)),
       extractorSet: 'extractor-v1',
-      graphContentId: `cgc_${'b'.repeat(40)}`,
-      repositoryId: 'c'.repeat(64),
-      snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+      graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+      repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+      snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
     };
     try {
       configureCodeGraphMaterializationSpoolDatabase(database);
       expect(initializeCodeGraphMaterializationSpoolDatabase(database, header)).toBe('created');
       expect(initializeCodeGraphMaterializationSpoolDatabase(database, header)).toBe('resumed');
       for (const [field, replacement] of [
-        ['checkoutId', 'e'.repeat(64)],
+        ['checkoutId', Effect.pipe('e', EffectString.repeat(64))],
         ['extractorSet', 'extractor-v2'],
-        ['graphContentId', `cgc_${'e'.repeat(40)}`],
-        ['repositoryId', 'e'.repeat(64)],
-        ['snapshotId', `cgsn_${'e'.repeat(40)}-direct`],
+        ['graphContentId', `cgc_${Effect.pipe('e', EffectString.repeat(40))}`],
+        ['repositoryId', Effect.pipe('e', EffectString.repeat(64))],
+        ['snapshotId', `cgsn_${Effect.pipe('e', EffectString.repeat(40))}-direct`],
       ] as const) {
         expect(() =>
           initializeCodeGraphMaterializationSpoolDatabase(database, {...header, [field]: replacement}),
@@ -293,11 +319,11 @@ describe('code graph materialization spool', () => {
   it('atomically sorts every raw fact surface and resumes the ready state', () => {
     const database = new Database(':memory:', {strict: true});
     const header = {
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect.pipe('a', EffectString.repeat(64)),
       extractorSet: 'extractor-v1',
-      graphContentId: `cgc_${'b'.repeat(40)}`,
-      repositoryId: 'c'.repeat(64),
-      snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+      graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+      repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+      snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
     };
     try {
       configureCodeGraphMaterializationSpoolDatabase(database);
@@ -348,15 +374,15 @@ describe('code graph materialization spool', () => {
         initializeCodeGraphMaterializationSpoolDatabase(database, {
           checkoutId: '../escape',
           extractorSet: 'extractor-v1',
-          graphContentId: `cgc_${'b'.repeat(40)}`,
-          repositoryId: 'c'.repeat(64),
-          snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+          graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+          repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+          snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
         }),
       ).toThrow('Code graph materialization spool header is invalid.');
       expect(
-        database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'").get() as {
-          readonly count: number;
-        },
+        database
+          .query<{readonly count: number}, []>("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'")
+          .get(),
       ).toEqual({count: 0});
     } finally {
       database.close();
@@ -372,11 +398,11 @@ describe('code graph materialization spool', () => {
       try {
         configureCodeGraphMaterializationSpoolDatabase(database);
         initializeCodeGraphMaterializationSpoolDatabase(database, {
-          checkoutId: 'a'.repeat(64),
+          checkoutId: Effect.pipe('a', EffectString.repeat(64)),
           extractorSet: 'extractor-v1',
-          graphContentId: `cgc_${'b'.repeat(40)}`,
-          repositoryId: 'c'.repeat(64),
-          snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+          graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+          repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+          snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
         });
         for (const [batchIndex, batchId] of batchIds.entries()) {
           const receipt = spoolReceipt({
@@ -418,11 +444,11 @@ describe('code graph materialization spool', () => {
     try {
       configureCodeGraphMaterializationSpoolDatabase(database);
       initializeCodeGraphMaterializationSpoolDatabase(database, {
-        checkoutId: 'a'.repeat(64),
+        checkoutId: Effect.pipe('a', EffectString.repeat(64)),
         extractorSet: 'extractor-v1',
-        graphContentId: `cgc_${'b'.repeat(40)}`,
-        repositoryId: 'c'.repeat(64),
-        snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+        graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+        repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+        snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
       });
       const receipt = spoolReceipt({rowCount: 5});
       expect(() =>
@@ -443,7 +469,7 @@ describe('code graph materialization spool', () => {
         commitCodeGraphMaterializationSpoolBatch(
           database,
           {
-            batchId: 'f'.repeat(64),
+            batchId: Effect.pipe('f', EffectString.repeat(64)),
             batchIndex: 1,
             candidateCount: 0,
             edgeCount: 0,
@@ -467,11 +493,11 @@ describe('code graph materialization spool', () => {
   it('rejects a corrupt durable receipt ledger during exact-identity resume', () => {
     const database = new Database(':memory:', {strict: true});
     const header = {
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect.pipe('a', EffectString.repeat(64)),
       extractorSet: 'extractor-v1',
-      graphContentId: `cgc_${'b'.repeat(40)}`,
-      repositoryId: 'c'.repeat(64),
-      snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+      graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+      repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+      snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
     };
     try {
       configureCodeGraphMaterializationSpoolDatabase(database);
@@ -479,7 +505,7 @@ describe('code graph materialization spool', () => {
       commitCodeGraphMaterializationSpoolBatch(database, spoolReceipt({rowCount: 5}), () => undefined);
       database
         .prepare('UPDATE materialization_spool_batches SET batch_id = ? WHERE batch_index = 0')
-        .run('z'.repeat(64));
+        .run(Effect.pipe('z', EffectString.repeat(64)));
       expect(() => initializeCodeGraphMaterializationSpoolDatabase(database, header)).toThrow(
         'Code graph materialization spool batch ledger is corrupt.',
       );
@@ -493,11 +519,11 @@ describe('code graph materialization spool', () => {
     try {
       configureCodeGraphMaterializationSpoolDatabase(database);
       initializeCodeGraphMaterializationSpoolDatabase(database, {
-        checkoutId: 'a'.repeat(64),
+        checkoutId: Effect.pipe('a', EffectString.repeat(64)),
         extractorSet: 'extractor-v1',
-        graphContentId: `cgc_${'b'.repeat(40)}`,
-        repositoryId: 'c'.repeat(64),
-        snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+        graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+        repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+        snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
       });
       database.exec('CREATE TABLE raw_test (value TEXT NOT NULL)');
       const receipt = spoolReceipt({rowCount: 1});
@@ -535,11 +561,11 @@ describe('code graph materialization spool', () => {
       try {
         configureCodeGraphMaterializationSpoolDatabase(database);
         initializeCodeGraphMaterializationSpoolDatabase(database, {
-          checkoutId: 'a'.repeat(64),
+          checkoutId: Effect.pipe('a', EffectString.repeat(64)),
           extractorSet: 'extractor-v1',
-          graphContentId: `cgc_${'b'.repeat(40)}`,
-          repositoryId: 'c'.repeat(64),
-          snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+          graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+          repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+          snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
         });
         sealCodeGraphMaterializationSpool(database, 0);
         expect(beginCodeGraphMaterializationSpoolSort(database, surfaceCount)).toBe('sorting');
@@ -573,11 +599,11 @@ describe('code graph materialization spool', () => {
     try {
       configureCodeGraphMaterializationSpoolDatabase(database);
       initializeCodeGraphMaterializationSpoolDatabase(database, {
-        checkoutId: 'a'.repeat(64),
+        checkoutId: Effect.pipe('a', EffectString.repeat(64)),
         extractorSet: 'extractor-v1',
-        graphContentId: `cgc_${'b'.repeat(40)}`,
-        repositoryId: 'c'.repeat(64),
-        snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+        graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+        repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+        snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
       });
       sealCodeGraphMaterializationSpool(database, 0);
       beginCodeGraphMaterializationSpoolSort(database, 2);
@@ -603,7 +629,7 @@ describe('code graph materialization spool', () => {
 
 function spoolReceipt(overrides: Partial<Parameters<typeof commitCodeGraphMaterializationSpoolBatch>[1]> = {}) {
   return {
-    batchId: 'e'.repeat(64),
+    batchId: Effect.pipe('e', EffectString.repeat(64)),
     batchIndex: 0,
     candidateCount: 0,
     edgeCount: 0,
@@ -621,15 +647,21 @@ function spoolReceipt(overrides: Partial<Parameters<typeof commitCodeGraphMateri
 
 function directCodeGraphSpoolSortCapacity(database: Database) {
   const pending = new Set(
-    codeGraphSqliteAll<{readonly name: string}>(
-      database,
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'materialization_raw_%'",
-    ).map(row => row.name),
+    EffectArray.map(
+      codeGraphSqliteAll<{readonly name: string}>(
+        database,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'materialization_raw_%'",
+      ),
+      row => row.name,
+    ),
   );
   return codeGraphSpoolSortCapacityBoundary(
-    CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES.flatMap(surface => {
+    EffectArray.flatMap(CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES, surface => {
       if (!pending.has(`materialization_raw_${surface.name}`)) return [];
-      const payload = surface.columns.map(column => `COALESCE(LENGTH(CAST(${column} AS BLOB)), 0)`).join(' + ');
+      const payload = EffectArray.join(
+        EffectArray.map(surface.columns, column => `COALESCE(LENGTH(CAST(${column} AS BLOB)), 0)`),
+        ' + ',
+      );
       const lexicalTermBytes = surface.name === 'symbol_terms' ? 'COALESCE(SUM(LENGTH(CAST(term AS BLOB))), 0)' : '0';
       const row = codeGraphSqliteGet<{
         readonly bytes: bigint | number;

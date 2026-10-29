@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {
   AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
   encodedJsonBytes,
@@ -12,6 +14,9 @@ import {
   graphAgentString,
   renderCodeGraphAgentProvenance,
 } from './code_graph_agent_provenance.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_BYTES = 24 * 1_024;
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_RESERVE_BYTES = 768;
@@ -28,7 +33,7 @@ function compactMcpText(value: string, maximumBytes: number): string {
   const suffix = '…';
   const suffixBytes = 3;
   if (maximumBytes < suffixBytes) return '';
-  return `${value.slice(0, utf8PrefixEnd(value, maximumBytes - suffixBytes))}${suffix}`;
+  return `${Effect.pipe(value, EffectString.slice(0, utf8PrefixEnd(value, maximumBytes - suffixBytes)))}${suffix}`;
 }
 
 /** Return a code-point boundary whose UTF-8 prefix fits the byte limit.
@@ -38,7 +43,11 @@ function utf8PrefixEnd(value: string, maximumBytes: number): number {
   let bytes = 0;
   let index = 0;
   while (index < value.length) {
-    const codePoint = value.codePointAt(index);
+    const codePoint = Effect.pipe(
+      value,
+      EffectString.codePointAt(index),
+      Effect.Option.getOrElse(() => undefined),
+    );
     if (codePoint === undefined) break;
     const codeUnits = codePoint > 0xffff ? 2 : 1;
     const encodedBytes = codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
@@ -86,7 +95,9 @@ function compactCodeGraphEdge(edge: CodeGraphQueryResult['edges'][number]) {
 function compactProjectCoverage(coverage: CodeGraphProjectCoverage, profile: MandatoryMetadataProfile) {
   const rootLimit = profile === 'minimum' ? 1 : 2;
   const textLimit = profile === 'minimum' ? 32 : 64;
-  const configuredRoots = coverage.configuredRoots.slice(0, rootLimit).map(root => compactMcpText(root, textLimit));
+  const configuredRoots = EffectArray.map(coverage.configuredRoots.slice(0, rootLimit), root =>
+    compactMcpText(root, textLimit),
+  );
   return {
     ...coverage,
     ...(coverage.snapshotSourceCommit === undefined
@@ -107,8 +118,12 @@ function compactOutsideProjectGraph(
 ) {
   const pathLimit = profile === 'minimum' ? 1 : 2;
   const actionLimit = profile === 'minimum' ? 0 : 1;
-  const paths = outside.paths.slice(0, pathLimit).map(path => compactMcpText(path, profile === 'minimum' ? 48 : 96));
-  const suggestedActions = outside.suggestedActions.slice(0, actionLimit).map(action => compactMcpText(action, 96));
+  const paths = EffectArray.map(outside.paths.slice(0, pathLimit), path =>
+    compactMcpText(path, profile === 'minimum' ? 48 : 96),
+  );
+  const suggestedActions = EffectArray.map(outside.suggestedActions.slice(0, actionLimit), action =>
+    compactMcpText(action, 96),
+  );
   return {
     ...outside,
     paths,
@@ -172,9 +187,11 @@ function projectCodeGraphMcpResult(
   metadataProfile: MandatoryMetadataProfile = 'normal',
 ) {
   const metadata = compactMandatoryMetadata(result, metadataProfile);
-  const warningsPrefix = result.warnings.slice(0, warningCount).map(warning => compactMcpText(warning, 320));
-  const nodes = result.nodes.slice(0, nodeCount).map(compactCodeGraphNode);
-  const edges = result.edges.slice(0, edgeCount).map(compactCodeGraphEdge);
+  const warningsPrefix = EffectArray.map(result.warnings.slice(0, warningCount), warning =>
+    compactMcpText(warning, 320),
+  );
+  const nodes = EffectArray.map(result.nodes.slice(0, nodeCount), compactCodeGraphNode);
+  const edges = EffectArray.map(result.edges.slice(0, edgeCount), compactCodeGraphEdge);
   const truncated =
     nodes.length < result.nodes.length ||
     edges.length < result.edges.length ||
@@ -238,12 +255,14 @@ function responseForPrefix(
   );
   const rendered: CodeGraphQueryResult = {
     ...result,
-    edges: result.edges
-      .slice(0, structuredContent.edges.length)
-      .map((edge, index) => ({...edge, ...structuredContent.edges[index]})),
-    nodes: result.nodes
-      .slice(0, structuredContent.nodes.length)
-      .map((node, index) => ({...node, ...structuredContent.nodes[index]})),
+    edges: EffectArray.map(result.edges.slice(0, structuredContent.edges.length), (edge, index) => ({
+      ...edge,
+      ...structuredContent.edges[index],
+    })),
+    nodes: EffectArray.map(result.nodes.slice(0, structuredContent.nodes.length), (node, index) => ({
+      ...node,
+      ...structuredContent.nodes[index],
+    })),
     repository: structuredContent.repository,
     snapshot: structuredContent.snapshot,
     ...(structuredContent.projectCoverage === undefined ? {} : {projectCoverage: structuredContent.projectCoverage}),
@@ -348,17 +367,17 @@ function defaultCodeGraphMcpResponse(result: CodeGraphQueryResult, refresh?: Cod
 
 function impactAgentProjectionOrder(result: CodeGraphQueryResult): CodeGraphQueryResult {
   if (result.operation !== 'impact') return result;
-  const nodeIds = new Set(result.nodes.map(node => node.id));
-  const edges = result.edges
-    .map((edge, index) => ({edge, index}))
-    .sort(
+  const nodeIds = new Set(EffectArray.map(result.nodes, node => node.id));
+  const edges = EffectArray.map(
+    EffectArray.map(result.edges, (edge, index) => ({edge, index})).sort(
       (left, right) =>
         Number(edgeIsConnected(right.edge, nodeIds)) - Number(edgeIsConnected(left.edge, nodeIds)) ||
         impactRelationPriority(left.edge.relation) - impactRelationPriority(right.edge.relation) ||
         left.index - right.index,
-    )
-    .map(({edge}) => edge);
-  const nodesById = new Map(result.nodes.map(node => [node.id, node]));
+    ),
+    ({edge}) => edge,
+  );
+  const nodesById = new Map(EffectArray.map(result.nodes, node => [node.id, node]));
   const seen = new Set<string>();
   const nodes: CodeGraphQueryResult['nodes'][number][] = [];
   const append = (id: string | undefined) => {
@@ -400,13 +419,17 @@ function impactAgentCoreResponse(
   refresh?: CodeGraphRefreshContinuity,
 ) {
   const ordered = impactAgentProjectionOrder(result);
-  const nodeIds = new Set(ordered.nodes.map(node => node.id));
+  const nodeIds = new Set(EffectArray.map(ordered.nodes, node => node.id));
   const firstPriority = ordered.edges[0] === undefined ? undefined : impactRelationPriority(ordered.edges[0].relation);
   const primaryEdgeCount =
     firstPriority === undefined
       ? 0
-      : ordered.edges.findIndex(
-          edge => !edgeIsConnected(edge, nodeIds) || impactRelationPriority(edge.relation) !== firstPriority,
+      : EffectOption.getOrElse(
+          EffectArray.findFirstIndex(
+            ordered.edges,
+            edge => !edgeIsConnected(edge, nodeIds) || impactRelationPriority(edge.relation) !== firstPriority,
+          ),
+          () => -1,
         );
   const maximumPrimaryEdges = primaryEdgeCount === -1 ? ordered.edges.length : primaryEdgeCount;
   for (let edgeCount = maximumPrimaryEdges; edgeCount >= 0; edgeCount -= 1) {
@@ -437,12 +460,18 @@ function queryAgentCoreResponse(
 ) {
   const maximumCoreNodes = Math.min(requestedNodeLimit ?? 3, result.nodes.length);
   for (let nodeCount = maximumCoreNodes; nodeCount >= 0; nodeCount -= 1) {
-    const selectedNodeIds = new Set(result.nodes.slice(0, nodeCount).map(node => node.id));
-    const connectedEdges = result.edges.filter(edge => edgeIsConnected(edge, selectedNodeIds));
+    const selectedNodeIds = new Set(EffectArray.map(result.nodes.slice(0, nodeCount), node => node.id));
+    const connectedEdges = EffectArrayPipe(result.edges, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (edge, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && edgeIsConnected(edge, selectedNodeIds),
+      ),
+    );
     const connectedEdgeSet = new Set(connectedEdges);
     const ordered = {
       ...result,
-      edges: [...connectedEdges, ...result.edges.filter(edge => !connectedEdgeSet.has(edge))],
+      edges: [...connectedEdges, ...EffectArray.filter(result.edges, edge => !connectedEdgeSet.has(edge))],
     };
     const candidate = responseForPrefix(
       ordered,
@@ -617,32 +646,44 @@ function measureFormattedCodeGraphMcpResponse<T>(
 /** A deterministic, text-only receipt for direct agent reading. The structured
  * dual channel remains available to machine consumers. */
 export function renderCodeGraphAgentResponse(value: unknown): string {
-  const result = value as {
-    readonly edges?: readonly Record<string, unknown>[];
-    readonly nodes?: readonly Record<string, unknown>[];
-    readonly output?: Record<string, unknown>;
-    readonly warnings?: readonly unknown[];
-    readonly [key: string]: unknown;
-  };
-  const nodes = result.nodes ?? [];
-  const aliases = new Map(nodes.map((node, index) => [String(node.id), `n${index + 1}`]));
+  const result = graphAgentRecord(value) ?? {};
+  const records = (candidate: unknown): readonly Record<string, unknown>[] =>
+    EffectArray.isArray(candidate)
+      ? EffectArray.flatMap(candidate, item => {
+          const record = graphAgentRecord(item);
+          return record === undefined ? [] : [record];
+        })
+      : [];
+  const nodes = records(result.nodes);
+  const edges = records(result.edges);
+  const warnings = EffectArray.isArray(result.warnings) ? result.warnings : [];
+  const aliases = new Map(EffectArray.map(nodes, (node, index) => [String(node.id), `n${index + 1}`]));
   const scalar = (item: unknown) =>
-    (JSON.stringify(item) ?? 'null').replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
+    Effect.pipe(
+      JSON.stringify(item) ?? 'null',
+      EffectString.replaceAll('\u2028', '\\u2028'),
+      EffectString.replaceAll('\u2029', '\\u2029'),
+    );
   const oneLine = (item: unknown) => {
     let output = '';
     let replacingControl = false;
     for (const character of String(item ?? '')) {
-      const codePoint = character.codePointAt(0) ?? 0;
+      const codePoint =
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        ) ?? 0;
       const control =
         codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) || codePoint === 0x2028 || codePoint === 0x2029;
       if (!control) output += character;
       else if (!replacingControl) output += ' ';
       replacingControl = control;
     }
-    return output.trim();
+    return Effect.pipe(output, EffectString.trim);
   };
-  const provenance = renderCodeGraphAgentProvenance(result).trimEnd();
-  const lines = ['TN-GRAPH/1', ...(provenance.length === 0 ? [] : provenance.split('\n'))];
+  const provenance = Effect.pipe(renderCodeGraphAgentProvenance(result), EffectString.trimEnd);
+  const lines = ['TN-GRAPH/1', ...(provenance.length === 0 ? [] : Effect.pipe(provenance, EffectString.split('\n')))];
   if (result.outsideProjectGraph !== undefined)
     lines.push(`Outside project graph: ${scalar(result.outsideProjectGraph)}`);
   if (result.outsideScopeChangedPaths !== undefined)
@@ -659,7 +700,7 @@ export function renderCodeGraphAgentResponse(value: unknown): string {
   const output = graphAgentRecord(result.output);
   const returnedNodes = graphAgentNumber(output?.returnedNodes) ?? nodes.length;
   const totalNodes = graphAgentNumber(output?.totalNodes) ?? returnedNodes;
-  const returnedEdges = graphAgentNumber(output?.returnedEdges) ?? result.edges?.length ?? 0;
+  const returnedEdges = graphAgentNumber(output?.returnedEdges) ?? edges.length;
   const totalEdges = graphAgentNumber(output?.totalEdges) ?? returnedEdges;
   lines.push(
     `Coverage: ${returnedNodes}/${totalNodes} symbols, ${returnedEdges}/${totalEdges} relationships${output?.truncated === true ? '; truncated' : ''}${output?.metadataTruncated === true ? '; metadata truncated' : ''}.`,
@@ -679,7 +720,7 @@ export function renderCodeGraphAgentResponse(value: unknown): string {
     const qualifiedName = graphAgentString(node.qualifiedName);
     if (qualifiedName !== undefined && qualifiedName !== name) lines.push(`   Qualified: ${oneLine(qualifiedName)}`);
   }
-  for (const edge of result.edges ?? []) {
+  for (const edge of edges) {
     const {id: _id, sourceId, targetId, ...rest} = edge;
     const source =
       sourceId === undefined
@@ -698,14 +739,21 @@ export function renderCodeGraphAgentResponse(value: unknown): string {
         ? ''
         : ` — ${oneLine(evidencePath)}${evidenceLine === undefined ? '' : `:${evidenceLine}`}`;
     const confidence = graphAgentNumber(rest.confidence);
-    const relationshipEvidence = [graphAgentString(rest.provenance), confidence === undefined ? undefined : confidence]
-      .filter(item => item !== undefined)
-      .join(' ');
+    const relationshipEvidence = EffectArray.join(
+      EffectArray.map(
+        EffectArray.filter(
+          [graphAgentString(rest.provenance), confidence === undefined ? undefined : confidence],
+          item => item !== undefined,
+        ),
+        item => (item === null || item === undefined ? '' : String(item)),
+      ),
+      ' ',
+    );
     lines.push(
       `${oneLine(source)} → ${oneLine(target)}: ${oneLine(relation)}${relationshipEvidence ? ` (${relationshipEvidence})` : ''}${evidence}`,
     );
   }
-  for (const warning of result.warnings ?? []) lines.push(`Warning: ${oneLine(warning)}`);
-  if (result.output?.truncated === true) lines.push('Recovery: refine the query or follow a stable cgs_ handle.');
-  return `${lines.join('\n')}\n`;
+  for (const warning of warnings) lines.push(`Warning: ${oneLine(warning)}`);
+  if (output?.truncated === true) lines.push('Recovery: refine the query or follow a stable cgs_ handle.');
+  return `${EffectArray.join(lines, '\n')}\n`;
 }

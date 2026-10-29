@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Console, Effect, FileSystem, Option, Path, PlatformError, Result, Schema} from 'effect';
 import * as yaml from 'js-yaml';
 import {
@@ -34,6 +35,9 @@ import {
 import {globToRegExp} from '@threadnote/platform/glob';
 import {expandPath, getInvocationCwd} from '@threadnote/platform/paths';
 import {toolRoot} from '@threadnote/workspace/installation';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface SeedStateEntry {
   readonly mtimeMs: number;
@@ -47,10 +51,13 @@ interface SeedStateFile {
   readonly version: 1;
 }
 
-class SeedingOperationError extends Schema.TaggedError<SeedingOperationError>()('SeedingOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class SeedingOperationError extends Schema.TaggedError<SeedingOperationError, {readonly brand: unique symbol}>()(
+  'SeedingOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const log = Console.log;
 const MAX_SEED_CANDIDATES_PER_PROJECT = 20_000;
@@ -166,7 +173,7 @@ export function runSeed(config: RuntimeConfig, options: SeedOptions) {
       return yield* applicationError(
         'seed projects',
         SeedingOperationError.make({
-          message: `${failedProjectNames.length} project(s) failed after the remaining projects were processed: ${failedProjectNames.join(', ')}`,
+          message: `${failedProjectNames.length} project(s) failed after the remaining projects were processed: ${EffectArray.join(failedProjectNames, ', ')}`,
         }),
       );
     }
@@ -206,7 +213,7 @@ const seedProject = Effect.fn('seeding.seedProject')(function* ({
     const batch = pending.splice(0);
     yield* store.mutate(
       location,
-      batch.map(entry => entry.mutation),
+      EffectArray.map(batch, entry => entry.mutation),
     );
     for (const entry of batch) {
       if (entry.stateEntry === undefined) {
@@ -298,7 +305,8 @@ const seedProject = Effect.fn('seeding.seedProject')(function* ({
   );
   yield* flush();
 
-  for (const uri of Object.keys(state.files).filter(
+  for (const uri of EffectArray.filter(
+    EffectRecord.keys(state.files),
     uri => seedStateEntryOwnedByProject(uri, state.files[uri], project, manifest.projects) && !currentUris.has(uri),
   )) {
     if (options.dryRun === true) {
@@ -339,7 +347,7 @@ export function seedDependencyGraphs(
     const projectByPublishedName = new Map<string, string>();
     for (const [name, facts] of factsByProject) {
       if (facts.publishedName) {
-        projectByPublishedName.set(facts.publishedName.toLowerCase(), name);
+        projectByPublishedName.set(Effect2.pipe(facts.publishedName, EffectString.toLowerCase), name);
       }
     }
 
@@ -389,16 +397,16 @@ function filterProjects(
   if (!only || only.length === 0) {
     return projects;
   }
-  const known = new Set(projects.map(project => project.name));
-  const missing = only.filter(name => !known.has(name));
+  const known = new Set(EffectArray.map(projects, project => project.name));
+  const missing = EffectArray.filter(only, name => !known.has(name));
   if (missing.length > 0) {
-    const all = [...known].join(', ');
+    const all = EffectArray.join([...known], ', ');
     throw SeedingOperationError.make({
-      message: `Unknown project(s) in --only: ${missing.join(', ')}. Manifest projects: ${all}`,
+      message: `Unknown project(s) in --only: ${EffectArray.join(missing, ', ')}. Manifest projects: ${all}`,
     });
   }
   const want = new Set(only);
-  return projects.filter(project => want.has(project.name));
+  return EffectArray.filter(projects, __effectArrayValue => !!(project => want.has(project.name))(__effectArrayValue));
 }
 
 const readSeedFile = Effect.fn('seeding.readSeedFile')(function* (projectRoot: string, relativePath: string) {
@@ -408,7 +416,7 @@ const readSeedFile = Effect.fn('seeding.readSeedFile')(function* (projectRoot: s
   if (inspected.size > MAX_SEED_FILE_BYTES) {
     return {size: inspected.size, type: 'too-large' as const};
   }
-  const target = path.join(projectRoot, ...relativePath.split('/'));
+  const target = path.join(projectRoot, ...Effect2.pipe(relativePath, EffectString.split('/')));
   const info = yield* fs.stat(target);
   if (info.type !== 'File' || Number(info.size) !== inspected.size) {
     return yield* SeedingOperationError.make({message: `Seed file changed before it was read: ${relativePath}`});
@@ -483,7 +491,7 @@ function readSeedState(path: string) {
       return {files: {}, version: 1} as const;
     }
     const files: Record<string, SeedStateEntry> = {};
-    for (const [uri, entry] of Object.entries(parsed.files)) {
+    for (const [uri, entry] of EffectRecord.toEntries(parsed.files)) {
       if (isJsonObject(entry) && typeof entry.mtimeMs === 'number' && typeof entry.size === 'number') {
         files[uri] = {
           mtimeMs: entry.mtimeMs,
@@ -517,18 +525,21 @@ function seedStateEntryOwnedByProject(
   project: ProjectManifest,
   projects: readonly ProjectManifest[],
 ): boolean {
-  if (entry.project !== undefined && projects.some(candidate => candidate.name === entry.project)) {
+  if (entry.project !== undefined && EffectArray.some(projects, candidate => candidate.name === entry.project)) {
     return entry.project === project.name;
   }
-  const matchingOwners = projects
-    .filter(candidate => {
-      const root = trimTrailingSlash(candidate.uri);
-      return uri === root || uri.startsWith(`${root}/`);
-    })
-    .sort(
-      (left, right) =>
-        trimTrailingSlash(right.uri).length - trimTrailingSlash(left.uri).length || left.name.localeCompare(right.name),
-    );
+  const matchingOwners = EffectArray.filter(
+    projects,
+    __effectArrayValue =>
+      !!(candidate => {
+        const root = trimTrailingSlash(candidate.uri);
+        return uri === root || Effect2.pipe(uri, EffectString.startsWith(`${root}/`));
+      })(__effectArrayValue),
+  ).sort(
+    (left, right) =>
+      trimTrailingSlash(right.uri).length - trimTrailingSlash(left.uri).length ||
+      Effect2.pipe(left.name, EffectString.localeCompare(right.name)),
+  );
   return matchingOwners[0]?.name === project.name;
 }
 
@@ -575,7 +586,7 @@ export function runInitManifest(config: RuntimeConfig, options: InitManifestOpti
 
     const outputManifest: Record<string, unknown> = {
       version: 1,
-      projects: projects.map(project => ({
+      projects: EffectArray.map(projects, project => ({
         ...(project.graph === undefined
           ? {}
           : {
@@ -600,7 +611,7 @@ export function runInitManifest(config: RuntimeConfig, options: InitManifestOpti
       };
     }
     if (existingManifest?.worksets) {
-      outputManifest.worksets = existingManifest.worksets.map(workset => ({
+      outputManifest.worksets = EffectArray.map(existingManifest.worksets, workset => ({
         name: workset.name,
         ...(workset.description !== undefined ? {description: workset.description} : {}),
         projects: [...workset.projects],
@@ -610,7 +621,7 @@ export function runInitManifest(config: RuntimeConfig, options: InitManifestOpti
 
     if (options.dryRun === true) {
       yield* log(`# Would write ${manifestPath}`);
-      yield* log(output.trimEnd());
+      yield* log(Effect2.pipe(output, EffectString.trimEnd));
       return;
     }
 
@@ -648,7 +659,17 @@ export function runWorksetList(config: RuntimeConfig) {
 export function runWorksetShow(config: RuntimeConfig, name: string) {
   return Effect.gen(function* () {
     const manifest = yield* readSeedManifest(config.manifestPath);
-    const workset = manifest.worksets?.find(entry => entry.name.toLowerCase() === name.toLowerCase());
+    const workset = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(manifest.worksets), __effectArrayReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            entry =>
+              Effect2.pipe(entry.name, EffectString.toLowerCase) === Effect2.pipe(name, EffectString.toLowerCase),
+          ),
+        ),
+      ),
+    );
     if (!workset) {
       return yield* applicationError(
         'show workset',
@@ -661,7 +682,13 @@ export function runWorksetShow(config: RuntimeConfig, name: string) {
     }
     yield* log('Projects:');
     for (const memberName of workset.projects) {
-      const project = manifest.projects.find(entry => entry.name.toLowerCase() === memberName.toLowerCase());
+      const project = Option.getOrUndefined(
+        EffectArray.findFirst(
+          manifest.projects,
+          entry =>
+            Effect2.pipe(entry.name, EffectString.toLowerCase) === Effect2.pipe(memberName, EffectString.toLowerCase),
+        ),
+      );
       yield* log(project ? `- ${project.name} (${project.uri})` : `- ${memberName} [not found in manifest projects]`);
     }
   });
@@ -718,12 +745,12 @@ export const projectManifestForRepo = Effect.fn('seeding.projectManifestForRepo'
 ) {
   const path = yield* Path.Path;
   const baseName = uriSegment((yield* resolveRepoName(repoRoot)) ?? path.basename(repoRoot));
-  const usedNames = new Set(existingProjects.map(project => project.name));
-  const usedUris = new Set(existingProjects.map(project => project.uri));
+  const usedNames = new Set(EffectArray.map(existingProjects, project => project.name));
+  const usedUris = new Set(EffectArray.map(existingProjects, project => project.uri));
   let name = baseName;
   let uri = `threadnote://resources/repos/${name}`;
   if (usedNames.has(name) || usedUris.has(uri)) {
-    name = `${baseName}-${(yield* sha256(repoRoot)).slice(0, 8)}`;
+    name = `${baseName}-${Effect2.pipe(yield* sha256(repoRoot), EffectString.slice(0, 8))}`;
     uri = `threadnote://resources/repos/${name}`;
   }
   return {
@@ -815,12 +842,21 @@ const visitProjectPattern = Effect.fn('seeding.visitProjectPattern')(function* (
   }
 
   const regex = globToRegExp(normalizedPattern);
-  const patternDepth = normalizedPattern.split('/').filter(segment => segment !== '' && segment !== '.').length;
-  const recursiveGlob = normalizedPattern.includes('**');
+  const patternDepth = EffectArray.filter(
+    Effect2.pipe(normalizedPattern, EffectString.split('/')),
+    segment => segment !== '' && segment !== '.',
+  ).length;
+  const recursiveGlob = Effect2.pipe(normalizedPattern, EffectString.includes('**'));
   const explicitlyIncludedHiddenDirectories = new Set(
-    normalizedPattern
-      .split('/')
-      .filter(segment => segment.startsWith('.') && segment !== '.' && segment !== '..' && !hasGlob(segment)),
+    EffectArray.filter(
+      Effect2.pipe(normalizedPattern, EffectString.split('/')),
+      __effectArrayValue2 =>
+        !!(segment =>
+          Effect2.pipe(segment, EffectString.startsWith('.')) &&
+          segment !== '.' &&
+          segment !== '..' &&
+          !hasGlob(segment))(__effectArrayValue2),
+    ),
   );
   const visitPath: (
     currentPath: string,
@@ -844,16 +880,21 @@ const visitProjectPattern = Effect.fn('seeding.visitProjectPattern')(function* (
     if (inspection.type !== 'Directory') {
       return;
     }
-    const directoryName = relativePath.split('/').at(-1) ?? '';
+    const directoryName = Effect2.pipe(relativePath, EffectString.split('/')).at(-1) ?? '';
     if (
-      directoryName.startsWith('.') &&
+      Effect2.pipe(directoryName, EffectString.startsWith('.')) &&
       relativePath !== '' &&
       !explicitlyIncludedHiddenDirectories.has(directoryName)
     ) {
       return;
     }
     const directoryDepth =
-      relativePath === '' ? 0 : relativePath.split('/').filter(segment => segment !== '' && segment !== '.').length;
+      relativePath === ''
+        ? 0
+        : EffectArray.filter(
+            Effect2.pipe(relativePath, EffectString.split('/')),
+            segment => segment !== '' && segment !== '.',
+          ).length;
     if (!recursiveGlob && directoryDepth >= patternDepth) {
       return;
     }
@@ -897,7 +938,10 @@ function inspectSeedPathWithinBoundary(
     }
 
     let currentPath = boundary.logicalRoot;
-    const segments = relativePath.split(path.sep).filter(segment => segment !== '' && segment !== '.');
+    const segments = EffectArray.filter(
+      Effect2.pipe(relativePath, EffectString.split(path.sep)),
+      segment => segment !== '' && segment !== '.',
+    );
     for (let index = 0; index < segments.length; index += 1) {
       currentPath = path.join(currentPath, segments[index]);
       let inspection = boundary.inspections.get(currentPath);
@@ -928,7 +972,11 @@ function inspectSeedPathWithinBoundary(
 }
 
 function pathEscapesSeedBoundary(relativePath: string, path: Path.Path): boolean {
-  return relativePath === '..' || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath);
+  return (
+    relativePath === '..' ||
+    Effect2.pipe(relativePath, EffectString.startsWith(`..${path.sep}`)) ||
+    path.isAbsolute(relativePath)
+  );
 }
 
 const prepareSeedContent = Effect.fn('seeding.prepareSeedContent')(function* (
@@ -1018,27 +1066,34 @@ const resolveAbsolutePattern = Effect.fn('seeding.resolveAbsolutePattern')(funct
     return (yield* isFile(normalizedPattern)) ? [normalizedPattern] : [];
   }
   const globBase = getGlobBase(normalizedPattern);
-  const basePath = globBase.startsWith('/') ? globBase : `/${globBase}`;
+  const basePath = Effect2.pipe(globBase, EffectString.startsWith('/')) ? globBase : `/${globBase}`;
   if (!(yield* exists(basePath))) {
     return [];
   }
   const regex = globToRegExp(normalizedPattern);
   const files = yield* walkFiles(basePath);
-  return files.filter(filePath => regex.test(toPosixPath(filePath)));
+  return EffectArray.filter(
+    files,
+    (filePath, __effectArrayIndex) => __effectArrayIndex in files && regex.test(toPosixPath(filePath)),
+  );
 });
 
 function skillResourceUri(skill: SkillCandidate): string {
-  return `threadnote://resources/agent-skills/${uriSegment(skill.source)}/${skillResourceName(skill)}-${skill.hash.slice(0, 12)}.md`;
+  return `threadnote://resources/agent-skills/${uriSegment(skill.source)}/${skillResourceName(skill)}-${Effect2.pipe(skill.hash, EffectString.slice(0, 12))}.md`;
 }
 
 function skillResourceName(skill: SkillCandidate): string {
-  const parts = toPosixPath(skill.filePath).split('/');
+  const parts = Effect2.pipe(toPosixPath(skill.filePath), EffectString.split('/'));
   const fileName = parts.at(-1) ?? skill.filePath;
-  if (fileName.toLowerCase() === 'skill.md') {
+  if (Effect2.pipe(fileName, EffectString.toLowerCase) === 'skill.md') {
     return uriSegment(parts.at(-2) ?? 'skill');
   }
-  const extensionIndex = fileName.lastIndexOf('.');
-  const stem = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
+  const extensionIndex = Effect2.pipe(
+    fileName,
+    EffectString.lastIndexOf('.'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const stem = extensionIndex > 0 ? Effect2.pipe(fileName, EffectString.slice(0, extensionIndex)) : fileName;
   return uriSegment(stem);
 }
 
@@ -1046,19 +1101,23 @@ const loadIgnorePatterns = Effect.fn('seeding.loadIgnorePatterns')(function* () 
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const raw = yield* fs.readFileString(path.join(yield* toolRoot(), '.threadnoteignore'));
-  return raw
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => line.length > 0 && !line.startsWith('#'));
+  return EffectArray.filter(
+    EffectArray.map(Effect2.pipe(raw, EffectString.split('\n')), line => Effect2.pipe(line, EffectString.trim)),
+    line => line.length > 0 && !Effect2.pipe(line, EffectString.startsWith('#')),
+  );
 });
 
 function matchesIgnore(relativePath: string, patterns: readonly string[]): boolean {
   const path = toPosixPath(relativePath);
   for (const pattern of patterns) {
     const normalizedPattern = toPosixPath(pattern);
-    if (normalizedPattern.endsWith('/')) {
-      const directory = normalizedPattern.slice(0, -1);
-      if (path === directory || path.includes(`/${directory}/`) || path.startsWith(`${directory}/`)) {
+    if (Effect2.pipe(normalizedPattern, EffectString.endsWith('/'))) {
+      const directory = Effect2.pipe(normalizedPattern, EffectString.slice(0, -1));
+      if (
+        path === directory ||
+        Effect2.pipe(path, EffectString.includes(`/${directory}/`)) ||
+        Effect2.pipe(path, EffectString.startsWith(`${directory}/`))
+      ) {
         return true;
       }
       continue;
@@ -1073,15 +1132,15 @@ function matchesIgnore(relativePath: string, patterns: readonly string[]): boole
 function shouldRedactPath(relativePath: string): boolean {
   const path = toPosixPath(relativePath);
   return (
-    path.endsWith('.mcp.json') ||
-    path.endsWith('config.toml') ||
-    path.includes('/settings') ||
-    path.includes('/settings.local')
+    Effect2.pipe(path, EffectString.endsWith('.mcp.json')) ||
+    Effect2.pipe(path, EffectString.endsWith('config.toml')) ||
+    Effect2.pipe(path, EffectString.includes('/settings')) ||
+    Effect2.pipe(path, EffectString.includes('/settings.local'))
   );
 }
 
 function redactContent(relativePath: string, content: string): string {
-  if (relativePath.endsWith('.json')) {
+  if (Effect2.pipe(relativePath, EffectString.endsWith('.json'))) {
     const parsed = Result.try((): unknown => JSON.parse(content));
     return Result.isSuccess(parsed)
       ? `${JSON.stringify(redactJsonValue(parsed.success), null, 2)}\n`
@@ -1091,14 +1150,14 @@ function redactContent(relativePath: string, content: string): string {
 }
 
 function redactJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(item => redactJsonValue(item));
+  if (EffectArray.isArray(value)) {
+    return EffectArray.map(value, item => redactJsonValue(item));
   }
   if (!isJsonObject(value)) {
     return value;
   }
   const output: Record<string, unknown> = {};
-  for (const [key, nestedValue] of Object.entries(value)) {
+  for (const [key, nestedValue] of EffectRecord.toEntries(value)) {
     output[key] = isSensitiveKey(key) ? '[REDACTED]' : redactJsonValue(nestedValue);
   }
   return output;

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {composeWorkflowSetup, maintainPersonalWorkflows} from '../setup/workflows.js';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -31,6 +32,8 @@ import {
   readCodexCloudProfile,
   sameCloudIdentity,
 } from './profile.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export function codexCloudRuntimeConfig(
   config: RuntimeConfig,
@@ -68,7 +71,7 @@ export const codexCloudMemoryScope = Effect.fn('codexCloud.memoryScope')(functio
 ) {
   const profile = yield* requireCodexCloudProfile(config);
   const selected = team === undefined ? profile.teams : normalizeCodexCloudShares([team]);
-  if (selected.some(value => !profile.teams.includes(value)))
+  if (EffectArray.some(selected, value => !profile.teams.includes(value)))
     return yield* CodexCloudError.make({
       message: `Share "${team}" is outside the configured Codex Cloud share set. Bootstrap it explicitly first.`,
     });
@@ -90,7 +93,7 @@ export const codexCloudMemoryScope = Effect.fn('codexCloud.memoryScope')(functio
   return {
     mode: 'shared-read-write',
     label: 'Codex Cloud',
-    shares: selected.map(team => ({root: cursorCloudMemoryRoot(config.user, team), team})),
+    shares: EffectArray.map(selected, team => ({root: cursorCloudMemoryRoot(config.user, team), team})),
     ...(localReads ? {localReadRoots: [`threadnote://user/${uriSegment(config.user)}/memories/handoffs`]} : {}),
   } satisfies CursorCloudMemoryScope;
 });
@@ -144,7 +147,9 @@ export const runCodexCloudBootstrap = Effect.fn('codexCloud.bootstrap')(function
   const plan = planCursorCloudBootstrap(yield* readTeamsFile(config), options.remote, team, 'Codex Cloud');
   const preview = yield* captureConsoleWithoutProgress(installCodexCloudAgentIntegration(config, true));
   if (options.dryRun) {
-    yield* Console.log(`Would ${plan.action} Codex Cloud share "${team}"; selected shares: ${selected.join(', ')}.`);
+    yield* Console.log(
+      `Would ${plan.action} Codex Cloud share "${team}"; selected shares: ${EffectArray.join(selected, ', ')}.`,
+    );
     if (preview.output) yield* Console.log(preview.output);
     if (cwd !== undefined) yield* Console.log('Would prepare the checkout code graph without vector materialization.');
     yield* composeWorkflowSetup(
@@ -214,7 +219,8 @@ export const runCodexCloudVerify = Effect.fn('codexCloud.verify')(function* (
     },
   ];
   for (const check of yield* agentIntegrationDoctorChecks(config)) {
-    if (check.name.startsWith('codex ')) checks.push({...check, status: check.status === 'ok' ? 'ok' : 'fail'});
+    if (Effect2.pipe(check.name, EffectString.startsWith('codex ')))
+      checks.push({...check, status: check.status === 'ok' ? 'ok' : 'fail'});
   }
   const teamsFile = yield* readTeamsFile(config);
   for (const team of profile?.teams ?? []) {
@@ -224,7 +230,10 @@ export const runCodexCloudVerify = Effect.fn('codexCloud.verify')(function* (
       checks.push(
         ...(yield* configuredTeamChecks(fs, configured, team).pipe(
           Effect.map(values =>
-            values.map(check => ({...check, status: check.status === 'ok' ? ('ok' as const) : ('fail' as const)})),
+            EffectArray.map(values, check => ({
+              ...check,
+              status: check.status === 'ok' ? ('ok' as const) : ('fail' as const),
+            })),
           ),
         )),
       );
@@ -270,12 +279,14 @@ export const runCodexCloudVerify = Effect.fn('codexCloud.verify')(function* (
     provider: 'codex-cloud',
     runtime: {platform: (yield* SystemInfo).platform, version: yield* getThreadnoteVersion()},
     shares: profile?.teams ?? [],
-    status: checks.every(check => check.status === 'ok') ? 'ok' : 'fail',
+    status: EffectArray.every(checks, check => check.status === 'ok') ? 'ok' : 'fail',
     transport: 'cli',
     version: 1,
   };
   if (json) yield* Console.log(JSON.stringify(receipt));
-  else for (const check of checks) yield* Console.log(`${check.status.toUpperCase()} ${check.name}: ${check.detail}`);
+  else
+    for (const check of checks)
+      yield* Console.log(`${Effect2.pipe(check.status, EffectString.toUpperCase)} ${check.name}: ${check.detail}`);
   if (receipt.status === 'fail')
     return yield* CodexCloudError.make({
       message:
@@ -294,7 +305,10 @@ export const runCodexCloudStart = Effect.fn('codexCloud.start')(function* (
   const workflows = yield* maintainPersonalWorkflows(config, {agent: 'codex-cloud', profile: 'codex-cloud-personal'});
   if (workflows.state === 'pending' || workflows.state === 'setup-needed')
     yield* Console.error(
-      `Development workflows: ${workflows.state}. ${workflows.issues.map(issue => issue.message).join(' ')}`,
+      `Development workflows: ${workflows.state}. ${EffectArray.join(
+        EffectArray.map(workflows.issues, issue => issue.message),
+        ' ',
+      )}`,
     );
   const restored = yield* captureConsoleWithoutProgress(installCodexCloudAgentIntegration(config, false));
   if (restored.output) yield* Console.error(restored.output);

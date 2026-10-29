@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {AgentTrace} from '../components/AgentTrace';
 import {Icon} from '../components/Icons';
@@ -19,15 +20,21 @@ export default function ProTipsPage() {
   const activeHeadingRef = useRef<HTMLHeadingElement>(null);
   const shouldFocusActiveRef = useRef(false);
   const visibleTips = useMemo(
-    () => (category === 'all' ? proTips : proTips.filter(tip => tip.category === category)),
+    () => (category === 'all' ? proTips : EffectArray.filter(proTips, tip => tip.category === category)),
     [category],
   );
-  const active = proTips.find(tip => tip.id === activeId) ?? visibleTips[0] ?? proTips[0];
+  const active =
+    EffectOption.getOrUndefined(EffectArray.findFirst(proTips, tip => tip.id === activeId)) ??
+    visibleTips[0] ??
+    proTips[0];
 
   const chooseCategory = (next: typeof category) => {
     shouldFocusActiveRef.current = true;
     setCategory(next);
-    const first = next === 'all' ? proTips[0] : proTips.find(tip => tip.category === next);
+    const first =
+      next === 'all'
+        ? proTips[0]
+        : EffectOption.getOrUndefined(EffectArray.findFirst(proTips, tip => tip.category === next));
     if (first) {
       setActiveId(first.id);
       if (first.id === active.id) {
@@ -80,7 +87,7 @@ export default function ProTipsPage() {
 
       <section className="tips-explorer content-section">
         <div className="tips-filter" role="group" aria-label="Filter pro tips">
-          {categories.map(item => (
+          {EffectArray.map(categories, item => (
             <button
               key={item.id}
               type="button"
@@ -93,7 +100,7 @@ export default function ProTipsPage() {
         </div>
         <div className="tips-layout">
           <nav className="tips-index" aria-label="Pro tip scenarios">
-            {visibleTips.map(tip => (
+            {EffectArray.map(visibleTips, tip => (
               <button
                 type="button"
                 key={tip.id}
@@ -128,7 +135,7 @@ export default function ProTipsPage() {
             <div className="tip-checklist">
               <h3>Put it into practice</h3>
               <ul>
-                {active.practice.map(item => (
+                {EffectArray.map(active.practice, item => (
                   <li key={item}>
                     <Icon name="check" aria-hidden="true" />
                     {item}

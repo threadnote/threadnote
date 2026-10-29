@@ -9,6 +9,8 @@ import {
   type RepositoryIdentityMetadata,
 } from '@threadnote/graph/repository';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -125,7 +127,9 @@ describe('repository identity branch frame', () => {
         yield* f.git(['update-ref', 'refs/remotes/main', 'HEAD']);
         for (const warn of ['true', 'false']) {
           yield* f.git(['config', 'core.warnAmbiguousRefs', warn]);
-          expect((yield* f.git(['rev-parse', '--abbrev-ref=strict', 'HEAD'])).stdout.trim()).toBe('heads/main');
+          expect(
+            Effect2.pipe((yield* f.git(['rev-parse', '--abbrev-ref=strict', 'HEAD'])).stdout, EffectString.trim),
+          ).toBe('heads/main');
           const fast = yield* observe(f.root);
           expect(fast.detail.identity.branch).toBe('main');
           expect(fast.detail).toEqual((yield* observe(f.root, 'unsupported')).detail);
@@ -164,8 +168,8 @@ describe('repository identity branch frame', () => {
 
   it('rejects malformed branch frames without mutating input and preserves detached and bounded Unicode names', () => {
     const utf8 = new TextEncoder();
-    const prefix = `/repo\n/common\n/git\nsha1\n${'a'.repeat(40)}\n`;
-    for (const branch of ['main', 'feature/東🦉', 'a'.repeat(1024), 'HEAD']) {
+    const prefix = `/repo\n/common\n/git\nsha1\n${Effect2.pipe('a', EffectString.repeat(40))}\n`;
+    for (const branch of ['main', 'feature/東🦉', Effect2.pipe('a', EffectString.repeat(1024)), 'HEAD']) {
       const bytes = utf8.encode(`${prefix}${branch}\n`);
       const before = bytes.slice();
       expect(parseRepositoryIdentityMetadata(bytes)?.branch).toEqual(
@@ -175,8 +179,8 @@ describe('repository identity branch frame', () => {
     }
     for (const branch of [
       '',
-      'a'.repeat(1025),
-      '東'.repeat(342),
+      Effect2.pipe('a', EffectString.repeat(1025)),
+      Effect2.pipe('東', EffectString.repeat(342)),
       ' main',
       'main ',
       'a\tb',

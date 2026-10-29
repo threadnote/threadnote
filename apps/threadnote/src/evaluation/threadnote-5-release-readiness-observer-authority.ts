@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -18,6 +19,9 @@ import {
   type Threadnote5LocalSourceKindV1,
   type Threadnote5LocalSubsystemReceiptRecordV1,
 } from './threadnote-5-release-readiness-receipts.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const THREADNOTE_5_OBSERVER_AUTHORITY_REVIEW_VERSION = 1 as const;
 const EXPECTED_OBSERVER_ARTIFACTS = 15;
@@ -158,7 +162,9 @@ export function previewThreadnote5ReviewedAuthorityManifestV1(input: {
   assertReviewArtifactCount(input.reviews);
   const records = parseRetainedRecords(input.retainedRecords, candidate);
   const reviews = parseReviews(input.reviews, candidate, records);
-  const expected = new Map(THREADNOTE_5_OBSERVER_AUTHORITY_COVERAGE.map(item => [coverageKey(item), item] as const));
+  const expected = new Map(
+    EffectArray.map(THREADNOTE_5_OBSERVER_AUTHORITY_COVERAGE, item => [coverageKey(item), item] as const),
+  );
   const entries: Threadnote5LocalAuthorityEntryV1[] = [];
   const reviewed = new Set<string>();
   for (const review of reviews.artifacts) {
@@ -228,16 +234,42 @@ export function reviewedAuthorityBindingHash(manifestHash: string, reviewArtifac
   );
 }
 
+const OBSERVER_SOURCE_KINDS = [
+  'activation',
+  'closeout',
+  'context-brief',
+  'context-check',
+  'context-health',
+  'git-proposal',
+  'guidance',
+  'migration',
+  'procedure',
+  'recall',
+  'sharing',
+  'value-report',
+] as const satisfies readonly Threadnote5LocalSourceKindV1[];
+
+function isLocalSourceKind(value: unknown): value is Threadnote5LocalSourceKindV1 {
+  return typeof value === 'string' && EffectArray.some(OBSERVER_SOURCE_KINDS, kind => kind === value);
+}
+
+function isReleaseScenario(value: unknown): value is Threadnote5ReleaseScenario {
+  return (
+    typeof value === 'string' && EffectArray.some(APPROVED_THREADNOTE_5_SCENARIOS, scenario => scenario.id === value)
+  );
+}
+
 function parseRetainedRecords(
   value: unknown,
   candidate: Threadnote5SourceV1,
 ): ReadonlyMap<string, Threadnote5LocalSubsystemReceiptRecordV1> {
-  if (!Array.isArray(value) || value.length > 64) throw new Error('Observer authority retained records are invalid.');
+  if (!EffectArray.isArray(value) || value.length > 64)
+    throw new Error('Observer authority retained records are invalid.');
   if (encodedBytes(value) > MAX_RETAINED_RECORD_SET_BYTES)
     throw new Error('Observer authority retained record set exceeds its encoded byte budget.');
   const allowed = new Set(
-    APPROVED_THREADNOTE_5_SCENARIOS.flatMap(scenario =>
-      scenario.subsystems.map(kind => coverageKey({kind, scenario: scenario.id})),
+    EffectArray.flatMap(APPROVED_THREADNOTE_5_SCENARIOS, scenario =>
+      EffectArray.map(scenario.subsystems, kind => coverageKey({kind, scenario: scenario.id})),
     ),
   );
   const records = new Map<string, Threadnote5LocalSubsystemReceiptRecordV1>();
@@ -247,19 +279,24 @@ function parseRetainedRecords(
       ['artifact', 'candidate', 'digest', 'kind', 'scenario', 'version'],
       'retained record',
     );
+    if (!isLocalSourceKind(source.kind) || !isReleaseScenario(source.scenario))
+      throw new Error('Observer authority retained source is unsupported or candidate-drifting.');
     const record: Threadnote5LocalSubsystemReceiptRecordV1 = {
       artifact: source.artifact,
       candidate: parseThreadnote5TrustedSourceV1(source.candidate, 'candidate'),
       digest: hash(source.digest),
-      kind: source.kind as Threadnote5LocalSourceKindV1,
-      scenario: source.scenario as Threadnote5ReleaseScenario,
+      kind: source.kind,
+      scenario: source.scenario,
       version: 1,
     };
     if (source.version !== 1 || !sameSource(record.candidate, candidate) || !allowed.has(coverageKey(record)))
       throw new Error('Observer authority retained source is unsupported or candidate-drifting.');
     if (record.digest !== threadnote5LocalSubsystemReceiptDigest(withoutDigest(record)))
       throw new Error('Observer authority retained source digest does not match its native artifact.');
-    if (records.has(record.digest) || [...records.values()].some(item => coverageKey(item) === coverageKey(record)))
+    if (
+      records.has(record.digest) ||
+      EffectArray.some([...records.values()], item => coverageKey(item) === coverageKey(record))
+    )
       throw new Error('Observer authority retained source is duplicated.');
     records.set(record.digest, record);
   }
@@ -276,9 +313,9 @@ function parseReviews(
   const source = exactObject(value, ['artifacts', 'candidate', 'version'], 'observer authority proof envelope');
   if (source.version !== 1 || !sameSource(parseThreadnote5TrustedSourceV1(source.candidate, 'candidate'), candidate))
     throw new Error('Observer authority proof envelope candidate or version is invalid.');
-  if (!Array.isArray(source.artifacts) || source.artifacts.length !== EXPECTED_OBSERVER_ARTIFACTS)
+  if (!EffectArray.isArray(source.artifacts) || source.artifacts.length !== EXPECTED_OBSERVER_ARTIFACTS)
     throw new Error('Observer authority proof set must contain exactly 15 artifacts.');
-  const artifacts = source.artifacts.map(value => {
+  const artifacts = EffectArray.map(source.artifacts, value => {
     const row = exactObject(
       value,
       ['artifact', 'artifactDigest', 'observerKind', 'recordDigest'],
@@ -293,18 +330,20 @@ function parseReviews(
       throw new Error('Observer artifact digest does not match its private proof.');
     return {artifact, artifactDigest, observerKind: boundedText(row.observerKind, 'observer kind'), recordDigest};
   });
-  if (new Set(artifacts.map(item => item.recordDigest)).size !== artifacts.length)
+  if (new Set(EffectArray.map(artifacts, item => item.recordDigest)).size !== artifacts.length)
     throw new Error('Observer artifact source digests must be unique.');
   return {
     candidate,
-    artifacts: [...artifacts].sort((left, right) => left.recordDigest.localeCompare(right.recordDigest)),
+    artifacts: [...artifacts].sort((left, right) =>
+      Effect.pipe(left.recordDigest, EffectString.localeCompare(right.recordDigest)),
+    ),
     version: 1,
   };
 }
 
 function assertReviewArtifactCount(value: unknown): void {
   const source = exactObject(value, ['artifacts', 'candidate', 'version'], 'observer authority proof envelope');
-  if (!Array.isArray(source.artifacts) || source.artifacts.length !== EXPECTED_OBSERVER_ARTIFACTS)
+  if (!EffectArray.isArray(source.artifacts) || source.artifacts.length !== EXPECTED_OBSERVER_ARTIFACTS)
     throw new Error('Observer authority proof set must contain exactly 15 artifacts.');
 }
 
@@ -420,11 +459,11 @@ export function threadnote5PrivateObserverArtifactDigest(value: unknown): string
   return sha256HexSync(`threadnote-5-private-observer-artifact-v1\0${canonicalJson(value)}`);
 }
 function assertStrictObserverClaims(coverage: Coverage, entry: Threadnote5LocalAuthorityEntryV1): void {
-  if (entry.type === 'git-proposal-review' && entry.trials.some(trial => trial.providerApiCallCount !== 0))
+  if (entry.type === 'git-proposal-review' && EffectArray.some(entry.trials, trial => trial.providerApiCallCount !== 0))
     throw new Error('Provider-neutral proposal observer evidence records provider API activity.');
   if (
     entry.type === 'procedure-verification' &&
-    (entry.automaticExecutionCount !== 0 || entry.commandResults.some(result => result.exitCode !== 0))
+    (entry.automaticExecutionCount !== 0 || EffectArray.some(entry.commandResults, result => result.exitCode !== 0))
   )
     throw new Error('Procedure observer evidence requires zero auto-execution and successful commands.');
   if (
@@ -433,7 +472,8 @@ function assertStrictObserverClaims(coverage: Coverage, entry: Threadnote5LocalA
       entry.schedule.writeActivityCount !== 0 ||
       entry.aggregate.networkActivityCount !== 0 ||
       entry.aggregate.writeActivityCount !== 0 ||
-      entry.aggregate.teamSnapshots.some(
+      EffectArray.some(
+        entry.aggregate.teamSnapshots,
         snapshot =>
           snapshot.preHead !== snapshot.postHead ||
           snapshot.preIndexDigest !== snapshot.postIndexDigest ||
@@ -444,19 +484,19 @@ function assertStrictObserverClaims(coverage: Coverage, entry: Threadnote5LocalA
   if (
     coverage.scenario === 'two-agent' &&
     entry.type === 'activation-verification' &&
-    entry.trials.some(trial => trial.attestationDigest === null)
+    EffectArray.some(entry.trials, trial => trial.attestationDigest === null)
   )
     throw new Error('Two-agent activation observer evidence requires an attestation.');
   if (
     coverage.scenario === 'offline' &&
     entry.type === 'activation-verification' &&
-    entry.trials.some(trial => trial.offlineObservationDigest === null)
+    EffectArray.some(entry.trials, trial => trial.offlineObservationDigest === null)
   )
     throw new Error('Offline activation observer evidence requires a network observation.');
   if (
     coverage.scenario === 'interrupted-resumed' &&
     entry.type === 'activation-verification' &&
-    entry.trials.some(trial => trial.resumeBoundaryRevision === null)
+    EffectArray.some(entry.trials, trial => trial.resumeBoundaryRevision === null)
   )
     throw new Error('Interrupted activation observer evidence requires a resume boundary.');
 }
@@ -470,15 +510,19 @@ function withoutDigest(
   return rest;
 }
 function exactObject(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object.`);
-  const source = value as Record<string, unknown>;
-  if (canonicalJson(Object.keys(source).sort()) !== canonicalJson([...keys].sort()))
+  if (!Predicate.isObject(value)) throw new Error(`${label} must be an object.`);
+  const source = value;
+  if (canonicalJson(EffectRecord.keys(source).sort()) !== canonicalJson([...keys].sort()))
     throw new Error(`${label} has unsupported or missing fields.`);
   return source;
 }
 function boundedText(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim() !== value || value.length < 1 || value.length > 96)
+  if (
+    typeof value !== 'string' ||
+    Effect.pipe(value, EffectString.trim) !== value ||
+    value.length < 1 ||
+    value.length > 96
+  )
     throw new Error(`${label} is invalid.`);
   return value;
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Exit, Fiber, Stream, Sink, FileSystem} from 'effect';
@@ -27,7 +28,7 @@ it('unions intervals against an independent bounded occupancy model; order and d
         expect(intervalUnion(events)).toBe(occupied.size);
         expect(intervalUnion(events)).toBeGreaterThanOrEqual(0);
         expect(intervalUnion(events)).toBeLessThanOrEqual(
-          events.reduce((total, event) => total + event.milliseconds, 0),
+          EffectArray.reduce(events, 0, (total, event) => total + event.milliseconds),
         );
         expect(intervalUnion([...events].reverse())).toBe(occupied.size);
         expect(intervalUnion([...events, ...events])).toBe(occupied.size);
@@ -73,17 +74,20 @@ effectIt.effect('forwards both command boundaries without changing arguments, op
         expect(yield* wrapped.executeBytes!('git', args, options)).toBe(binary);
       }),
     );
-    expect(received.every(row => row[1] === args && row[2] === options)).toBe(true);
-    expect(collector.events.filter(e => e.kind === 'command')).toHaveLength(2);
-    expect(collector.events.filter(e => e.kind === 'command').map(e => e.operation)).toEqual([
-      'private-untracked-status',
-      'private-untracked-status',
-    ]);
+    expect(EffectArray.every(received, row => row[1] === args && row[2] === options)).toBe(true);
+    expect(EffectArray.filter(collector.events, e => e.kind === 'command')).toHaveLength(2);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(collector.events, e => e.kind === 'command'),
+        e => e.operation,
+      ),
+    ).toEqual(['private-untracked-status', 'private-untracked-status']);
     expect(JSON.stringify(collector.events)).not.toContain('/synthetic');
     const failing = collector.command({...executor, execute: () => Effect.fail(failure)});
     const exit = yield* collector.sample(1, failing.execute('git', args)).pipe(Effect.exit);
     expect(
-      Exit.isFailure(exit) && exit.cause.reasons.some(reason => reason._tag === 'Fail' && reason.error === failure),
+      Exit.isFailure(exit) &&
+        EffectArray.some(exit.cause.reasons, reason => reason._tag === 'Fail' && reason.error === failure),
     ).toBe(true);
   }),
 );
@@ -147,7 +151,7 @@ effectIt.effect('retains interruption and finalizers and never consumes child st
     yield* Deferred.await(entered);
     yield* Fiber.interrupt(fiber);
     expect(finalized).toBe(1);
-    expect(collector.events.some(e => e.sample === 4 && e.outcome === 'interrupted')).toBe(true);
+    expect(EffectArray.some(collector.events, e => e.sample === 4 && e.outcome === 'interrupted')).toBe(true);
   }),
 );
 
@@ -161,7 +165,12 @@ effectIt.effect('keeps concurrent phase and command IDs fiber-local and reports 
       );
     expect(yield* Effect.all([run(1), run(2)], {concurrency: 2})).toEqual([1, 2]);
     expect(collector.dropped).toBeGreaterThan(0);
-    expect(collector.events.filter(e => e.kind === 'file').every(e => e.phase === 'closing')).toBe(true);
+    expect(
+      EffectArray.every(
+        EffectArray.filter(collector.events, e => e.kind === 'file'),
+        e => e.phase === 'closing',
+      ),
+    ).toBe(true);
   }),
 );
 
@@ -170,8 +179,14 @@ effectIt.effect('distinguishes typed errors, defects and interruptions and inval
     const collector = new Collector();
     yield* collector.sample(0, collector.measure('store', 'typed', Effect.fail('typed'))).pipe(Effect.exit);
     yield* collector.sample(1, collector.measure('store', 'defect', Effect.die('defect'))).pipe(Effect.exit);
-    expect(collector.events.find(event => event.operation === 'typed')?.outcome).toBe('typed-error');
-    expect(collector.events.find(event => event.operation === 'defect')?.outcome).toBe('defect');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(collector.events, event => event.operation === 'typed'))
+        ?.outcome,
+    ).toBe('typed-error');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(collector.events, event => event.operation === 'defect'))
+        ?.outcome,
+    ).toBe('defect');
   }),
 );
 
@@ -188,12 +203,16 @@ effectIt.effect(
         ],
         {concurrency: 2},
       );
-      expect(collector.events.find(event => event.kind === 'file' && event.sample === 1)?.operation).toBe(
-        'readFile:cited-source',
-      );
-      expect(collector.events.find(event => event.kind === 'file' && event.sample === 2)?.operation).toBe(
-        'readFile:other',
-      );
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(collector.events, event => event.kind === 'file' && event.sample === 1),
+        )?.operation,
+      ).toBe('readFile:cited-source');
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(collector.events, event => event.kind === 'file' && event.sample === 2),
+        )?.operation,
+      ).toBe('readFile:other');
       const proceed = yield* Deferred.make<void>();
       const child = yield* collector.sample(
         3,

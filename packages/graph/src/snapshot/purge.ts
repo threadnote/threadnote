@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Path, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -22,14 +23,16 @@ import {
   withCodeGraphSnapshotVectorEvidenceLocks,
 } from '../vector/maintenance.js';
 import {inspectCodeGraphViewDatabaseTarget} from '../view_removal.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class CodeGraphSnapshotPurgeError extends Schema.TaggedError<CodeGraphSnapshotPurgeError>()(
-  'CodeGraphSnapshotPurgeError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphSnapshotPurgeError extends Schema.TaggedError<
+  CodeGraphSnapshotPurgeError,
+  {readonly brand: unique symbol}
+>()('CodeGraphSnapshotPurgeError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const HASH_ID = /^[0-9a-f]{64}$/u;
 const SNAPSHOT_ID = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u;
@@ -257,7 +260,7 @@ export function serializeCodeGraphSnapshotPurgeResult(result: CodeGraphSnapshotP
 }
 
 export function renderCodeGraphSnapshotPurgeResult(result: CodeGraphSnapshotPurgeActionResult): string {
-  const target = `checkout ${result.checkoutId.slice(0, 12)}, snapshot ${result.snapshotId}`;
+  const target = `checkout ${Effect2.pipe(result.checkoutId, EffectString.slice(0, 12))}, snapshot ${result.snapshotId}`;
   if (result.state === 'not-found') return `Selected code graph snapshot was not found for ${target}.`;
   if (result.state === 'approval-required') {
     return `Snapshot purge for ${target} requires the approval digest from a fresh preview.`;
@@ -266,18 +269,21 @@ export function renderCodeGraphSnapshotPurgeResult(result: CodeGraphSnapshotPurg
     return `Refusing to purge ${target}: safety evidence changed after preview.`;
   }
   if (result.state === 'blocked') {
-    return [
-      `Refusing to purge ${target}: the snapshot is not isolated.`,
-      ...result.blockers.map(blocker => `Blocker [${blocker.code}]: ${blocker.message}`),
-    ].join('\n');
+    return EffectArray.join(
+      [
+        `Refusing to purge ${target}: the snapshot is not isolated.`,
+        ...EffectArray.map(result.blockers, blocker => `Blocker [${blocker.code}]: ${blocker.message}`),
+      ],
+      '\n',
+    );
   }
   if (result.applied) {
     return `Purged selected code graph snapshot for ${target}; physical cleanup ${result.cleanupState ?? 'deferred'}.`;
   }
-  return [
-    `Would purge selected code graph snapshot for ${target}.`,
-    `Approval: ${result.approvalDigest ?? 'unavailable'}`,
-  ].join('\n');
+  return EffectArray.join(
+    [`Would purge selected code graph snapshot for ${target}.`, `Approval: ${result.approvalDigest ?? 'unavailable'}`],
+    '\n',
+  );
 }
 
 export function codeGraphSnapshotPurgeTargetFailure(result: CodeGraphSnapshotPurgeActionResult): Error | undefined {
@@ -289,7 +295,10 @@ export function codeGraphSnapshotPurgeTargetFailure(result: CodeGraphSnapshotPur
     return CodeGraphSnapshotPurgeError.make({message: 'The selected snapshot changed; preview it again.'});
   if (result.state === 'blocked') {
     return CodeGraphSnapshotPurgeError.make({
-      message: `The selected snapshot is protected: ${result.blockers.map(blocker => blocker.code).join(', ')}.`,
+      message: `The selected snapshot is protected: ${EffectArray.join(
+        EffectArray.map(result.blockers, blocker => blocker.code),
+        ', ',
+      )}.`,
     });
   }
   return undefined;
@@ -301,7 +310,7 @@ function observedResult(
   graph: CodeGraphSnapshotPurgeGraphEvidence,
   vectors: CodeGraphSnapshotVectorEvidence,
 ): CodeGraphSnapshotPurgeActionResult {
-  const blockers = [...graph.blockers, ...vectors.blockers].sort(compareCodeUnits).map(blockerDetail);
+  const blockers = EffectArray.map([...graph.blockers, ...vectors.blockers].sort(compareCodeUnits), blockerDetail);
   const eligible = blockers.length === 0;
   const approvalDigest = eligible
     ? codeGraphSnapshotPurgeApprovalDigest(approvalProjection(graph, vectors))

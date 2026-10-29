@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {boundedRecallPhysicalCandidateLimit} from './query.js';
@@ -18,6 +19,9 @@ import {
   type RecallWorkspaceScopeMode,
 } from './scope.js';
 import type {RecallCorpusStatistics} from '../rank.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface RecallDocumentSampleRow {
   readonly candidate_json: string;
@@ -80,7 +84,10 @@ export function selectRecallDocumentRowsByMemoryIds(
     );
     for (let index = 0; index < memoryIds.length; index += 400) {
       const batch = memoryIds.slice(index, index + 400);
-      const parameters = batch.map(() => '?').join(', ');
+      const parameters = EffectArray.join(
+        EffectArray.map(batch, () => '?'),
+        ', ',
+      );
       rows.push(
         ...(yield* sql.unsafe<RecallDocumentSampleRow>(
           `SELECT d.id, d.uri, d.candidate_json
@@ -117,8 +124,14 @@ export function selectTopRecallPostingsByTerms(
     recallProjectPredicate('d', project),
     workspace,
   );
-  const queryTermValues = terms.map(() => '(?, ?)').join(', ');
-  const queryTermParameters = terms.flatMap(term => [term, postingInverseDocumentFrequency(term, corpusStatistics)]);
+  const queryTermValues = EffectArray.join(
+    EffectArray.map(terms, () => '(?, ?)'),
+    ', ',
+  );
+  const queryTermParameters = EffectArray.flatMap(terms, term => [
+    term,
+    postingInverseDocumentFrequency(term, corpusStatistics),
+  ]);
   // A logical frequency can hide physical aliases. Bound their worst-case
   // contribution before preferring term lookups to an authorized URI scan.
   // Missing evidence preserves the existing narrow-scope access plan.
@@ -274,7 +287,7 @@ export function selectRecallRecentTopicalDocuments(
           [term, ...scope.params, limit, page * limit],
         );
         termRows.push(...rows);
-        rows.forEach(row => logicalKeys.add(row.logical_key));
+        EffectArray.forEach(rows, row => logicalKeys.add(row.logical_key));
         if (rows.length < limit || logicalKeys.size >= minimumLogicalCandidates) break;
       }
       // Keep physical aliases in the bounded pool so the ordinary logical
@@ -286,12 +299,33 @@ export function selectRecallRecentTopicalDocuments(
 }
 
 export function recallProjectMatches(project: string | undefined, candidateProject: string | undefined): boolean {
-  const normalizedProject = project?.trim().toLowerCase();
-  return !normalizedProject || candidateProject?.trim().toLowerCase() === normalizedProject;
+  const normalizedProject = Effect2.pipe(
+    project,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
+  return (
+    !normalizedProject ||
+    Effect2.pipe(
+      candidateProject,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+    ) === normalizedProject
+  );
 }
 
 export function recallProjectPredicate(alias: string, project: string | undefined): RecallSqlPredicate {
-  const normalizedProject = project?.trim().toLowerCase();
+  const normalizedProject = Effect2.pipe(
+    project,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   return normalizedProject
     ? {params: [normalizedProject], restricted: true, sql: `${alias}.project = ?`}
     : {params: [], restricted: false, sql: '1 = 1'};
@@ -413,7 +447,10 @@ export function selectRecallQueryTermStatistics(
           `SELECT p.term, COUNT(DISTINCT d.logical_key) AS document_frequency
            FROM documents AS d${frequencyIndexHint}
            INNER JOIN postings AS p ON p.document_id = d.id
-           WHERE p.term IN (${batch.map(() => '?').join(', ')})
+           WHERE p.term IN (${EffectArray.join(
+             EffectArray.map(batch, () => '?'),
+             ', ',
+           )})
              AND ${scope.sql}
            GROUP BY p.term`,
           [...batch, ...scope.params],
@@ -425,7 +462,9 @@ export function selectRecallQueryTermStatistics(
     return {
       averageDocumentLength: documentCount === 0 ? 1 : totalDocumentLength / documentCount,
       documentCount,
-      documentFrequency: Object.fromEntries(frequencies.map(row => [row.term, row.document_frequency])),
+      documentFrequency: EffectRecord.fromEntries(
+        EffectArray.map(frequencies, row => [row.term, row.document_frequency]),
+      ),
       totalDocumentLength,
     } satisfies RecallCorpusStatistics;
   });
@@ -445,10 +484,13 @@ export function recallQuerySelectionIsExhaustive(input: {
 }): boolean {
   const postingCountByTerm = new Map<string, number>();
   for (const term of input.postingTerms) postingCountByTerm.set(term, (postingCountByTerm.get(term) ?? 0) + 1);
-  const indexedTermsWithPostings = input.indexedQueryTerms.filter(term => (input.documentFrequency[term] ?? 0) > 0);
+  const indexedTermsWithPostings = EffectArray.filter(
+    input.indexedQueryTerms,
+    term => (input.documentFrequency[term] ?? 0) > 0,
+  );
   return (
     input.queryTerms.length === indexedTermsWithPostings.length &&
-    input.queryTerms.every(term => (postingCountByTerm.get(term) ?? 0) < input.postingPoolLimit) &&
+    EffectArray.every(input.queryTerms, term => (postingCountByTerm.get(term) ?? 0) < input.postingPoolLimit) &&
     input.rankedDocumentCount <= input.candidateDecodeLimit &&
     input.deduplicatedCandidateCount <= input.resultLimit
   );

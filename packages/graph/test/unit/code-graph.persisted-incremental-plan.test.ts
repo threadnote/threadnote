@@ -1,4 +1,5 @@
-import {Database} from 'bun:sqlite';
+import {Array as EffectArray} from 'effect';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it} from 'vitest';
 import {
   persistedIncrementalBaseSymbolsStatement,
@@ -18,31 +19,40 @@ describe('persisted incremental SQLite plans', () => {
       expect(changedFiles).toContain('SCAN changed');
       expect(changedFiles).toContain('SEARCH current USING PRIMARY KEY (path=?)');
       expect(changedFiles).toContain('SEARCH base USING PRIMARY KEY (snapshot_id=? AND path=?)');
-      expect(changedFiles.join('\n')).not.toMatch(/SEARCH base USING PRIMARY KEY \(snapshot_id=\?\)(?! AND path)/u);
+      expect(EffectArray.join(changedFiles, '\n')).not.toMatch(
+        /SEARCH base USING PRIMARY KEY \(snapshot_id=\?\)(?! AND path)/u,
+      );
 
       const baseSymbols = planDetails(database, persistedIncrementalBaseSymbolsStatement('snapshot-base', 100));
       expect(baseSymbols).toContain('SCAN changed');
       expect(baseSymbols).toContain('SEARCH base USING INDEX symbols_path (snapshot_id=? AND path=?)');
-      expect(baseSymbols.join('\n')).not.toMatch(/SEARCH base USING PRIMARY KEY \(snapshot_id=\?\)/u);
+      expect(EffectArray.join(baseSymbols, '\n')).not.toMatch(/SEARCH base USING PRIMARY KEY \(snapshot_id=\?\)/u);
 
       const reexports = planDetails(database, persistedIncrementalReexportMismatchStatement('snapshot-base'));
-      expect(reexports.filter(detail => detail === 'SCAN changed')).toHaveLength(2);
+      expect(EffectArray.filter(reexports, detail => detail === 'SCAN changed')).toHaveLength(2);
       expect(
-        reexports.filter(detail => detail === 'SEARCH base USING PRIMARY KEY (snapshot_id=? AND source_path=?)'),
+        EffectArray.filter(
+          reexports,
+          detail => detail === 'SEARCH base USING PRIMARY KEY (snapshot_id=? AND source_path=?)',
+        ),
       ).toHaveLength(2);
-      expect(reexports.join('\n')).not.toMatch(/SEARCH base USING PRIMARY KEY \(snapshot_id=\?\)(?! AND source_path)/u);
+      expect(EffectArray.join(reexports, '\n')).not.toMatch(
+        /SEARCH base USING PRIMARY KEY \(snapshot_id=\?\)(?! AND source_path)/u,
+      );
     }));
 
   it('point-probes persisted fact counts for every changed path', () =>
     withPlanDatabase(database => {
       const details = planDetails(database, persistedIncrementalFactCountsStatement('snapshot-base'));
-      expect(details.filter(detail => detail === 'SCAN changed')).toHaveLength(3);
+      expect(EffectArray.filter(details, detail => detail === 'SCAN changed')).toHaveLength(3);
       expect(details).toContain('SEARCH file USING PRIMARY KEY (snapshot_id=? AND path=?)');
       expect(details).toContain('SEARCH symbol USING COVERING INDEX symbols_path (snapshot_id=? AND path=?)');
       expect(details).toContain(
         'SEARCH edge USING COVERING INDEX edges_evidence_path (snapshot_id=? AND evidence_path=?)',
       );
-      expect(details.join('\n')).not.toMatch(/SEARCH (?:file|symbol|edge) USING PRIMARY KEY \(snapshot_id=\?\)/u);
+      expect(EffectArray.join(details, '\n')).not.toMatch(
+        /SEARCH (?:file|symbol|edge) USING PRIMARY KEY \(snapshot_id=\?\)/u,
+      );
     }));
 
   it('point-probes persisted deletion candidates for every changed path', () =>
@@ -67,17 +77,22 @@ describe('persisted incremental SQLite plans', () => {
       );
       expect(edges).toContain('SEARCH current USING PRIMARY KEY (id=?)');
 
-      expect([...files, ...symbols, ...edges].join('\n')).not.toMatch(
+      expect(EffectArray.join([...files, ...symbols, ...edges], '\n')).not.toMatch(
         /SEARCH base USING PRIMARY KEY \(snapshot_id=\?\)(?! AND (?:path|evidence_path))/u,
       );
     }));
 });
 
 function planDetails(database: Database, statement: CodeGraphSqlQueryStatement): readonly string[] {
-  const rows = database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-    readonly detail: string;
-  }[];
-  return rows.map(row => row.detail);
+  const rows = database
+    .query<
+      {
+        readonly detail: string;
+      },
+      SQLQueryBindings[]
+    >(`EXPLAIN QUERY PLAN ${statement.text}`)
+    .all(...statement.parameters);
+  return EffectArray.map(rows, row => row.detail);
 }
 
 function withPlanDatabase(run: (database: Database) => void): void {

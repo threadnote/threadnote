@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Effect, Layer} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -66,7 +67,7 @@ export const diagnoseCodeGraphDatabaseReadOnly = Effect.fn('codeGraph.diagnoseDa
     const activeRows = yield* sql<{readonly count: number}>`SELECT COUNT(*) AS count FROM active_snapshots`;
     const cacheRows = deep ? yield* sql<{readonly count: number}>`SELECT COUNT(*) AS count FROM file_blobs` : [];
     const foreignKeyRows = deep ? yield* sql.unsafe('PRAGMA foreign_key_check') : [];
-    const counts = new Map(stateRows.map(row => [row.state, Number(row.count)]));
+    const counts = new Map(EffectArray.map(stateRows, row => [row.state, Number(row.count)]));
     const integrityOk =
       integrityRows.length === 1 && integrityRows[0]?.integrity_check === 'ok' && foreignKeyRows.length === 0;
     return {

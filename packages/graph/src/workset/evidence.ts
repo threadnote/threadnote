@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -13,6 +14,9 @@ import {
   type CodeGraphRelation,
   type CodeGraphSpan,
 } from '../types.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_WORKSET_EVIDENCE_RESULT_VERSION = 2 as const;
 export const CODE_GRAPH_WORKSET_EVIDENCE_PROJECTOR_VERSION = 1 as const;
@@ -71,7 +75,7 @@ const QUALIFIED_REF = /^cgr_[0-9a-f]{40}$/u;
 const CONTINUATION_HANDLE = /^cgwc_[0-9a-f]{40}$/u;
 const GENERATION_ID = /^cgwg_[0-9a-f]{40}$/u;
 const CARD_ID = /^cgec_[0-9a-f]{40}$/u;
-const CONTINUATION_PLACEHOLDER = `cgwc_${'0'.repeat(HANDLE_HEX_LENGTH)}`;
+const CONTINUATION_PLACEHOLDER = `cgwc_${Effect.pipe('0', EffectString.repeat(HANDLE_HEX_LENGTH))}`;
 
 const LIMITS = {
   cards: 512,
@@ -359,20 +363,14 @@ const STRICT_PARSE_OPTIONS = {errors: 'all', onExcessProperty: 'error'} as const
 export function codeGraphQualifiedRefHandle(input: QualifiedCodeGraphRefV1): string {
   if (!SHA256_HEX.test(input.repositoryId)) throw invalid('Qualified code graph repository identity is invalid.');
   if (!LOCAL_NODE_ID.test(input.nodeId)) throw invalid('Qualified code graph node identity is invalid.');
-  return `cgr_${sha256HexSync(`threadnote-qualified-code-graph-ref-v1\0${input.repositoryId}\0${input.nodeId}`).slice(
-    0,
-    HANDLE_HEX_LENGTH,
-  )}`;
+  return `cgr_${Effect.pipe(sha256HexSync(`threadnote-qualified-code-graph-ref-v1\0${input.repositoryId}\0${input.nodeId}`), EffectString.slice(0, HANDLE_HEX_LENGTH))}`;
 }
 
 export function codeGraphEvidenceCardId(ref: string, snapshotId: string, worktreeId: string): string {
   assertQualifiedRef(ref);
   boundedText(snapshotId, 'snapshot identity', 256);
   if (!SHA256_HEX.test(worktreeId)) throw invalid('Evidence card worktree identity is invalid.');
-  return `cgec_${sha256HexSync(`threadnote-code-graph-evidence-card-v1\0${ref}\0${snapshotId}\0${worktreeId}`).slice(
-    0,
-    HANDLE_HEX_LENGTH,
-  )}`;
+  return `cgec_${Effect.pipe(sha256HexSync(`threadnote-code-graph-evidence-card-v1\0${ref}\0${snapshotId}\0${worktreeId}`), EffectString.slice(0, HANDLE_HEX_LENGTH))}`;
 }
 
 export function codeGraphWorksetContinuationHandle(input: CodeGraphWorksetContinuationIdentityV1): string {
@@ -384,9 +382,12 @@ export function codeGraphWorksetContinuationHandle(input: CodeGraphWorksetContin
   if (!Number.isSafeInteger(input.offset) || input.offset < 0) {
     throw invalid('Workset continuation offset is invalid.');
   }
-  return `cgwc_${sha256HexSync(
-    `threadnote-code-graph-workset-continuation-v1\0${input.resultSetToken}\0${input.generationDigest}\0${input.projectorVersion}\0${input.offset}`,
-  ).slice(0, HANDLE_HEX_LENGTH)}`;
+  return `cgwc_${Effect.pipe(
+    sha256HexSync(
+      `threadnote-code-graph-workset-continuation-v1\0${input.resultSetToken}\0${input.generationDigest}\0${input.projectorVersion}\0${input.offset}`,
+    ),
+    EffectString.slice(0, HANDLE_HEX_LENGTH),
+  )}`;
 }
 
 export function isCodeGraphQualifiedRefHandle(value: string): boolean {
@@ -469,7 +470,7 @@ export function renderCodeGraphWorksetEvidenceText(result: CodeGraphWorksetEvide
   if (result.continuation !== undefined) {
     lines.push(`Continuation: ${result.continuation.cursor} (${result.continuation.remainingEstimate} remaining).`);
   }
-  return `${lines.join('\n')}\n`;
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 function evidenceProjection(
@@ -482,10 +483,10 @@ function evidenceProjection(
   const cards = result.cards.slice(0, count);
   const omittedCards = totalCards - cards.length;
   const repositoryKeys = referencedRepositoryKeys(cards);
-  const repositories = Object.fromEntries(
-    Object.entries(result.repositories)
-      .filter(([repositoryKey]) => repositoryKeys.has(repositoryKey))
-      .sort(([left], [right]) => compareText(left, right)),
+  const repositories = EffectRecord.fromEntries(
+    EffectArray.filter(EffectRecord.toEntries(result.repositories), ([repositoryKey]) =>
+      repositoryKeys.has(repositoryKey),
+    ).sort(([left], [right]) => compareText(left, right)),
   );
   const truncated = omittedCards > 0;
   const continuation =
@@ -530,15 +531,18 @@ function validateCommonResult(
   requireFullReceipts: boolean,
 ): void {
   boundedText(result.workset.name, 'workset name', 256);
-  if (result.workset.generation.id !== `cgwg_${result.workset.generation.digest.slice(0, HANDLE_HEX_LENGTH)}`) {
+  if (
+    result.workset.generation.id !==
+    `cgwg_${Effect.pipe(result.workset.generation.digest, EffectString.slice(0, HANDLE_HEX_LENGTH))}`
+  ) {
     throw invalid('Workset generation identity does not match its digest.');
   }
-  if (Object.keys(result.repositories).length > LIMITS.repositories) {
+  if (EffectRecord.keys(result.repositories).length > LIMITS.repositories) {
     throw invalid('Workset evidence contains too many repository receipts.');
   }
   const cardIds = new Set<string>();
   const refOwners = new Map<string, string>();
-  for (const [repositoryKey, receipt] of Object.entries(result.repositories)) {
+  for (const [repositoryKey, receipt] of EffectRecord.toEntries(result.repositories)) {
     boundedText(repositoryKey, 'repository key', 256);
     if (repositoryKey === '__proto__' || repositoryKey === 'constructor' || repositoryKey === 'prototype') {
       throw invalid(`Workset repository key ${repositoryKey} is reserved.`);
@@ -556,7 +560,7 @@ function validateCommonResult(
 
   if (!requireFullReceipts) {
     const referenced = referencedRepositoryKeys(result.cards);
-    const receiptKeys = Object.keys(result.repositories).sort(compareText);
+    const receiptKeys = EffectRecord.keys(result.repositories).sort(compareText);
     if (JSON.stringify(receiptKeys) !== JSON.stringify([...referenced].sort(compareText))) {
       throw invalid('Projected repository receipts must exactly match repositories referenced by retained cards.');
     }
@@ -564,13 +568,19 @@ function validateCommonResult(
 }
 
 function validateFullCoverage(result: CodeGraphWorksetQueryResultV2): void {
-  const receipts = Object.values(result.repositories);
+  const receipts = EffectRecord.values(result.repositories);
   if (receipts.length !== result.coverage.requestedRepositories) {
     throw invalid('Workset requested repository count must equal its complete receipt dictionary.');
   }
-  const catalogued = receipts.filter(receipt => receipt.snapshot !== undefined).length;
-  const considered = receipts.filter(receipt => receipt.considered).length;
-  const deepQueried = receipts.filter(receipt => receipt.deepQueried).length;
+  const catalogued = EffectArray.filter(receipts, receipt => receipt.snapshot !== undefined).length;
+  const considered = EffectArray.filter(
+    receipts,
+    __effectArrayValue => !!(receipt => receipt.considered)(__effectArrayValue),
+  ).length;
+  const deepQueried = EffectArray.filter(
+    receipts,
+    __effectArrayValue => !!(receipt => receipt.deepQueried)(__effectArrayValue),
+  ).length;
   if (catalogued !== result.coverage.cataloguedRepositories) {
     throw invalid('Workset catalogued repository count does not match snapshot receipts.');
   }
@@ -581,14 +591,15 @@ function validateFullCoverage(result: CodeGraphWorksetQueryResultV2): void {
     throw invalid('Workset deep-query count does not match member receipts.');
   }
   for (const state of CODE_GRAPH_WORKSET_EVIDENCE_REPOSITORY_STATES) {
-    const actual = receipts.filter(receipt => receipt.state === state).length;
+    const actual = EffectArray.filter(receipts, receipt => receipt.state === state).length;
     if (actual !== result.coverage.states[state]) {
       throw invalid(`Workset ${state} repository count does not match member receipts.`);
     }
   }
   if (
     result.coverage.complete !==
-    (considered === catalogued && receipts.every(receipt => receipt.projectCoverage?.completeness !== 'partial'))
+    (considered === catalogued &&
+      EffectArray.every(receipts, receipt => receipt.projectCoverage?.completeness !== 'partial'))
   ) {
     throw invalid('Workset completeness must report full consideration without partial project coverage.');
   }
@@ -730,9 +741,10 @@ function validateCoverageBounds(coverage: WorksetCoverageV2): void {
   if (coverage.deepQueriedRepositories > coverage.consideredRepositories) {
     throw invalid('Deep-queried repositories cannot exceed considered repositories.');
   }
-  const stateTotal = CODE_GRAPH_WORKSET_EVIDENCE_REPOSITORY_STATES.reduce(
-    (total, state) => total + coverage.states[state],
+  const stateTotal = EffectArray.reduce(
+    CODE_GRAPH_WORKSET_EVIDENCE_REPOSITORY_STATES,
     0,
+    (total, state) => total + coverage.states[state],
   );
   if (stateTotal !== coverage.requestedRepositories) {
     throw invalid('Workset member-state counts must sum to requested repositories.');
@@ -757,7 +769,7 @@ function evidenceRepository(
   repositoryKey: string,
   context: string,
 ): RepositoryEvidenceReceiptV1 {
-  if (!Object.hasOwn(repositories, repositoryKey)) {
+  if (!EffectRecord.has(repositories, repositoryKey)) {
     throw invalid(`Unknown repository key ${repositoryKey} referenced by ${context}.`);
   }
   const receipt = repositories[repositoryKey];
@@ -774,18 +786,24 @@ function ownRef(owners: Map<string, string>, ref: string, repositoryId: string):
 }
 
 function relationshipKey(relationship: CompactEvidenceRelationshipV1): string {
-  return [
-    relationship.source.repositoryKey,
-    relationship.source.ref,
-    relationship.relation,
-    relationship.target.repositoryKey,
-    relationship.target.ref,
-    relationship.provenance,
-    relationship.evidence.repositoryKey,
-    relationship.evidence.path,
-    relationship.evidence.span.line,
-    relationship.evidence.span.column,
-  ].join('\0');
+  return EffectArray.join(
+    EffectArray.map(
+      [
+        relationship.source.repositoryKey,
+        relationship.source.ref,
+        relationship.relation,
+        relationship.target.repositoryKey,
+        relationship.target.ref,
+        relationship.provenance,
+        relationship.evidence.repositoryKey,
+        relationship.evidence.path,
+        relationship.evidence.span.line,
+        relationship.evidence.span.column,
+      ],
+      item => (item === null || item === undefined ? '' : String(item)),
+    ),
+    '\0',
+  );
 }
 
 function projectionMaximumBytes(options: CodeGraphWorksetEvidenceProjectionOptionsV1): number {
@@ -832,10 +850,13 @@ function validateSpan(span: CodeGraphSpan, context: string): void {
 function repositoryRelativePath(value: string, label: string): string {
   const path = boundedText(value, label, 4_096);
   if (
-    path.startsWith('/') ||
-    path.includes('\\') ||
+    Effect.pipe(path, EffectString.startsWith('/')) ||
+    Effect.pipe(path, EffectString.includes('\\')) ||
     /^[A-Za-z]:/u.test(path) ||
-    path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    EffectArray.some(
+      Effect.pipe(path, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     throw invalid(`Workset ${label} must be repository-relative and slash-normalized.`);
   }
@@ -844,8 +865,13 @@ function repositoryRelativePath(value: string, label: string): string {
 
 function boundedText(value: string, label: string, maximumBytes: number): string {
   if (
-    [...value].some(character => {
-      const codePoint = character.codePointAt(0) ?? 0;
+    EffectArray.some([...value], character => {
+      const codePoint =
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        ) ?? 0;
       return codePoint <= 0x1f || codePoint === 0x7f;
     }) ||
     new TextEncoder().encode(value).byteLength > maximumBytes

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {fromPromise} from '@threadnote/platform/errors';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -24,6 +25,8 @@ import {
   type CodeGraphRefreshDemandState,
 } from './demand_scheduler.js';
 import type {CodeGraphRefreshContinuity} from '../watcher.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAXIMUM_BYTES = 8 * 1024;
 const LOCK_STALE_MILLISECONDS = 15_000;
@@ -31,10 +34,10 @@ const PRE_STATUS_OWNER_GRACE_MILLISECONDS = 30_000;
 /** Private isolated-builder control result; never part of the CLI contract. */
 export const CODE_GRAPH_REFRESH_DEMAND_SUPERSEDED_EXIT_CODE = 75;
 
-export class CodeGraphRefreshDemandSuperseded extends Schema.TaggedError<CodeGraphRefreshDemandSuperseded>()(
-  'CodeGraphRefreshDemandSuperseded',
-  {message: Schema.String},
-) {}
+export class CodeGraphRefreshDemandSuperseded extends Schema.TaggedError<
+  CodeGraphRefreshDemandSuperseded,
+  {readonly brand: unique symbol}
+>()('CodeGraphRefreshDemandSuperseded', {message: Schema.String}) {}
 
 export interface CodeGraphRefreshDemandIdentity {
   readonly checkoutId: string;
@@ -146,7 +149,7 @@ export const registerCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDem
   const crypto = yield* Crypto.Crypto;
   const system = yield* SystemInfo;
   const now = yield* Clock.currentTimeMillis;
-  const token = `cgdq_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
+  const token = `cgdq_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
   const processStartIdentity = yield* system.canonicalProcessStartIdentity?.(system.processId) ??
     system.processStartIdentity(system.processId);
   return yield* mutate(identity, state =>
@@ -172,7 +175,7 @@ export const resumeCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDeman
   const crypto = yield* Crypto.Crypto;
   const system = yield* SystemInfo;
   const now = yield* Clock.currentTimeMillis;
-  const token = `cgdq_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
+  const token = `cgdq_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
   const processStartIdentity = yield* system.canonicalProcessStartIdentity?.(system.processId) ??
     system.processStartIdentity(system.processId);
   return yield* mutate(identity, state =>
@@ -197,7 +200,7 @@ export const enqueueCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDema
 ) {
   const crypto = yield* Crypto.Crypto;
   const now = yield* Clock.currentTimeMillis;
-  const token = `cgdq_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
+  const token = `cgdq_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
   return yield* mutate(identity, state =>
     Effect.sync(() => {
       const registration = enqueueCodeGraphRefreshDemand(state, {
@@ -391,10 +394,10 @@ function readState(
   }).pipe(Effect.orDie);
 }
 
-function parseDemand(content: string): CodeGraphRefreshDemandState | undefined {
+function parseDemand(content: string): unknown {
   try {
     const parsed: unknown = JSON.parse(content);
-    return typeof parsed === 'object' && parsed !== null ? (parsed as CodeGraphRefreshDemandState) : undefined;
+    return parsed;
   } catch {
     return undefined;
   }
@@ -542,7 +545,7 @@ function refreshDemandDirectoryIsTrusted(
 function sameDirectories(left: readonly DirectoryAuthority[], right: readonly DirectoryAuthority[]): boolean {
   return (
     left.length === right.length &&
-    left.every((entry, index) => {
+    EffectArray.every(left, (entry, index) => {
       const candidate = right[index];
       return (
         candidate !== undefined &&

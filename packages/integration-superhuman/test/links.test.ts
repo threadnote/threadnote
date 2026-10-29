@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {Redacted} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {describeSuperhumanSelection, resolveSuperhumanBrowserLinks} from '../src/links.js';
 import {mergeResolvedSuperhumanSelections} from '../src/selection.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const credential = Redacted.make('synthetic-manager-token');
 const icon = {name: 'Banknotes', type: 'image/png', browserLink: 'https://cdn.coda.io/icons/png/color/money.png'};
@@ -25,7 +28,7 @@ describe('Saved Superhuman selection metadata', () => {
       fetch: async (url, init) => {
         calls.push({url, method: init.method});
         return json(
-          url.pathname.endsWith('/page_a')
+          Effect.pipe(url.pathname, EffectString.endsWith('/page_a'))
             ? {
                 type: 'page',
                 id: 'page_a',
@@ -48,7 +51,7 @@ describe('Saved Superhuman selection metadata', () => {
       },
       {documentId: 'doc_two', name: 'Handbook', browserLink: 'https://docs.superhuman.com/d/_ddoc_two'},
     ]);
-    expect(calls.map(item => [item.url.pathname, item.method])).toEqual([
+    expect(EffectArray.map(calls, item => [item.url.pathname, item.method])).toEqual([
       ['/apis/v1/docs/doc_one/pages/page_a', 'GET'],
       ['/apis/v1/docs/doc_two', 'GET'],
     ]);
@@ -112,7 +115,11 @@ describe('Saved Superhuman selection metadata', () => {
     const result = await describeSuperhumanSelection([{id: 'doc_one', pages}], credential, {
       fetch: async url => {
         requests++;
-        return json({type: 'page', id: url.pathname.split('/').at(-1), name: 'Selected title'});
+        return json({
+          type: 'page',
+          id: Effect.pipe(url.pathname, EffectString.split('/')).at(-1),
+          name: 'Selected title',
+        });
       },
     });
     expect(requests).toBe(64);
@@ -153,7 +160,7 @@ describe('Superhuman Docs link resolution', () => {
         iconUrl: icon.browserLink,
       },
     ]);
-    expect(calls.map(url => url.pathname)).toEqual([
+    expect(EffectArray.map(calls, url => url.pathname)).toEqual([
       '/apis/v1/resolveBrowserLink',
       '/apis/v1/resolveBrowserLink',
       '/apis/v1/docs/doc_01',
@@ -168,21 +175,35 @@ describe('Superhuman Docs link resolution', () => {
       fetch: async (url, init) => {
         calls.push({url, method: init.method});
         if (url.pathname === '/apis/v1/resolveBrowserLink') {
-          const pageId = url.searchParams.get('url')!.split('_s').at(-1)!;
+          const pageId = Effect.pipe(url.searchParams.get('url')!, EffectString.split('_s')).at(-1)!;
           return json(resolved('page', 'doc_one', pageId, 'Page title'));
         }
-        return json({type: 'page', id: url.pathname.split('/').at(-1), name: 'Page title', icon});
+        return json({
+          type: 'page',
+          id: Effect.pipe(url.pathname, EffectString.split('/')).at(-1),
+          name: 'Page title',
+          icon,
+        });
       },
     });
     expect(result.selections).toHaveLength(64);
-    expect(result.selections.every(item => item.iconUrl === icon.browserLink && !!item.browserLink)).toBe(true);
+    expect(EffectArray.every(result.selections, item => item.iconUrl === icon.browserLink && !!item.browserLink)).toBe(
+      true,
+    );
     expect(result.documents[0].pages).toHaveLength(64);
     expect(calls).toHaveLength(128);
-    expect(calls.every(item => item.url.origin === 'https://docs.superhuman.com' && item.method === 'GET')).toBe(true);
     expect(
-      calls
-        .filter(item => item.url.pathname.startsWith('/apis/v1/docs/'))
-        .every(item => /^\/apis\/v1\/docs\/doc_one\/pages\/page_\d+$/.test(item.url.pathname)),
+      EffectArray.every(calls, item => item.url.origin === 'https://docs.superhuman.com' && item.method === 'GET'),
+    ).toBe(true);
+    expect(
+      EffectArray.every(
+        EffectArray.filter(
+          calls,
+          __effectArrayValue =>
+            !!(item => Effect.pipe(item.url.pathname, EffectString.startsWith('/apis/v1/docs/')))(__effectArrayValue),
+        ),
+        item => /^\/apis\/v1\/docs\/doc_one\/pages\/page_\d+$/.test(item.url.pathname),
+      ),
     ).toBe(true);
   });
 
@@ -242,7 +263,7 @@ describe('Superhuman Docs link resolution', () => {
         const right = mergeResolvedSuperhumanSelections([...selections].reverse());
         expect(left).toEqual(right);
         expect(mergeResolvedSuperhumanSelections(left.selections)).toEqual(left);
-        expect(new Set(left.documents.map(document => document.id)).size).toBe(left.documents.length);
+        expect(new Set(EffectArray.map(left.documents, document => document.id)).size).toBe(left.documents.length);
       }),
       {numRuns: 100},
     );

@@ -1,97 +1,11 @@
-import {readFile} from '@threadnote/testing/node-fs-promises';
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
-
-const FIXTURE_URL = new URL('../evaluation/fixtures/token-efficiency-calibration-v1/fixture.json', import.meta.url);
-const CORPUS_URL = new URL('../evaluation/corpora/token-efficiency-historical-v1/corpus.json', import.meta.url);
-
-type Fixture = {
-  readonly id: string;
-  readonly version: number;
-  readonly schema: {
-    readonly closedEnums: Readonly<Record<string, readonly string[]>>;
-    readonly followUpBounds: {
-      readonly maximumEdgeLimit: number;
-      readonly maximumNodeLimit: number;
-      readonly maximumTokenBudget: number;
-      readonly minimumEdgeLimit: number;
-      readonly minimumNodeLimit: number;
-      readonly minimumTokenBudget: number;
-    };
-  };
-  readonly publicCorpus: {readonly corpusId: string; readonly corpusPath: string; readonly provenancePath: string};
-  readonly contextUtilityLabels: readonly {
-    readonly id: string;
-    readonly kind: string;
-    readonly taskId: string;
-    readonly required: {readonly path: string; readonly symbol: string};
-    readonly optionalSupport: readonly {readonly path: string; readonly symbol: string}[];
-    readonly requiredInvariantClass: string;
-    readonly distractors: readonly {readonly path: string; readonly symbol: string}[];
-    readonly observedOutput: string;
-  }[];
-  readonly negativeControls: readonly {readonly controlId: string; readonly purpose: string; readonly taskId: string}[];
-  readonly evidenceScenarios: readonly {
-    readonly id: string;
-    readonly state: string;
-    readonly requiredLabelId: string;
-    readonly expectedDisposition: string;
-    readonly observedOutput: string;
-  }[];
-  readonly memoryNonInterferenceScenarios: readonly {
-    readonly id: string;
-    readonly memoryState: string;
-    readonly requiredLabelId: string;
-    readonly expectedRequiredEvidenceAuthority: string;
-  }[];
-  readonly resumeScenarios: readonly {
-    readonly id: string;
-    readonly resumeKind: string;
-    readonly expectedDisposition: string;
-  }[];
-  readonly followUp: {
-    readonly arguments: {readonly budgetTokens: number; readonly edgeLimit: number; readonly nodeLimit: number};
-  };
-  readonly retainedPilots: readonly {
-    readonly availability: string;
-    readonly comparativeClaimsEligible: boolean;
-    readonly name: string;
-    readonly pilotId: string;
-    readonly provenance: string;
-    readonly rows: readonly {
-      readonly arm: string;
-      readonly completed: boolean;
-      readonly derivedUsage: {
-        readonly cacheWriteTokens: null;
-        readonly newTokens: null;
-        readonly processedTokens: null;
-        readonly unavailableReason: string;
-        readonly uncachedInputTokens: number;
-      };
-      readonly providerTokens: {
-        readonly cachedInputTokens: number;
-        readonly inputTokens: number;
-        readonly outputTokens: number;
-        readonly reasoningOutputTokens: number;
-        readonly totalTokens: number;
-      };
-      readonly verifierStatus: string;
-    }[];
-    readonly taskId: string;
-    readonly unavailableReason: string | null;
-  }[];
-};
-
-type Corpus = {
-  readonly corpusId: string;
-  readonly tasks: readonly {
-    readonly taskId: string;
-    readonly negativeControls: readonly {readonly controlId: string}[];
-    readonly sourceGold: readonly {readonly path: string}[];
-  }[];
-};
-
-const fixture = JSON.parse(await readFile(FIXTURE_URL, 'utf8')) as Fixture;
-const corpus = JSON.parse(await readFile(CORPUS_URL, 'utf8')) as Corpus;
+import fixture from '../evaluation/fixtures/token-efficiency-calibration-v1/fixture.json' with {type: 'json'};
+import corpus from '../evaluation/corpora/token-efficiency-historical-v1/corpus.json' with {type: 'json'};
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 describe('token-efficiency calibration fixture v1', () => {
   it('is a closed, public-corpus-linked, provider-free calibration contract', () => {
@@ -103,21 +17,25 @@ describe('token-efficiency calibration fixture v1', () => {
     });
 
     const ids = [
-      ...fixture.contextUtilityLabels.map(label => label.id),
-      ...fixture.negativeControls.map(control => control.controlId),
-      ...fixture.evidenceScenarios.map(scenario => scenario.id),
-      ...fixture.memoryNonInterferenceScenarios.map(scenario => scenario.id),
-      ...fixture.resumeScenarios.map(scenario => scenario.id),
+      ...EffectArray.map(fixture.contextUtilityLabels, label => label.id),
+      ...EffectArray.map(fixture.negativeControls, control => control.controlId),
+      ...EffectArray.map(fixture.evidenceScenarios, scenario => scenario.id),
+      ...EffectArray.map(fixture.memoryNonInterferenceScenarios, scenario => scenario.id),
+      ...EffectArray.map(fixture.resumeScenarios, scenario => scenario.id),
     ];
     expect(new Set(ids)).toHaveLength(ids.length);
 
-    const corpusTasks = new Map(corpus.tasks.map(task => [task.taskId, task]));
+    const corpusTasks = new Map(EffectArray.map(corpus.tasks, task => [task.taskId, task]));
     for (const label of fixture.contextUtilityLabels) {
       const task = corpusTasks.get(label.taskId);
       expect(task, label.id).toBeDefined();
       expect(fixture.schema.closedEnums.contextUtilityKind).toContain(label.kind);
       expect(
-        task?.sourceGold.some(source => source.path === label.required.path),
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(task?.sourceGold), __effectArrayReceiver =>
+            EffectArray.some(__effectArrayReceiver, source => source.path === label.required.path),
+          ),
+        ),
         label.id,
       ).toBe(true);
       expect(label.optionalSupport.length).toBeGreaterThan(0);
@@ -125,7 +43,7 @@ describe('token-efficiency calibration fixture v1', () => {
       expect(label.distractors.length).toBeGreaterThan(0);
       expect(label.observedOutput).toBe('not-captured');
     }
-    expect(fixture.contextUtilityLabels.map(label => label.taskId)).toEqual([
+    expect(EffectArray.map(fixture.contextUtilityLabels, label => label.taskId)).toEqual([
       'tsk_1c391a7896906b29202da55b',
       'tsk_40aa8260ce35eb0588e0d85f',
     ]);
@@ -133,15 +51,19 @@ describe('token-efficiency calibration fixture v1', () => {
     for (const control of fixture.negativeControls) {
       const task = corpusTasks.get(control.taskId);
       expect(
-        task?.negativeControls.some(candidate => candidate.controlId === control.controlId),
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(task?.negativeControls), __effectArrayReceiver =>
+            EffectArray.some(__effectArrayReceiver, candidate => candidate.controlId === control.controlId),
+          ),
+        ),
         control.controlId,
       ).toBe(true);
       expect(fixture.schema.closedEnums.negativeControlPurpose).toContain(control.purpose);
     }
-    expect(new Set(fixture.negativeControls.map(control => control.taskId))).toHaveLength(2);
+    expect(new Set(EffectArray.map(fixture.negativeControls, control => control.taskId))).toHaveLength(2);
 
-    const labels = new Set(fixture.contextUtilityLabels.map(label => label.id));
-    expect(fixture.evidenceScenarios.map(scenario => scenario.state).sort()).toEqual([
+    const labels = new Set(EffectArray.map(fixture.contextUtilityLabels, label => label.id));
+    expect(EffectArray.map(fixture.evidenceScenarios, scenario => scenario.state).sort()).toEqual([
       'degraded',
       'no-match',
       'partial',
@@ -154,7 +76,7 @@ describe('token-efficiency calibration fixture v1', () => {
       expect(fixture.schema.closedEnums.observedOutput).toContain(scenario.observedOutput);
     }
 
-    expect(fixture.memoryNonInterferenceScenarios.map(scenario => scenario.memoryState).sort()).toEqual([
+    expect(EffectArray.map(fixture.memoryNonInterferenceScenarios, scenario => scenario.memoryState).sort()).toEqual([
       'graph-only',
       'incomplete',
       'irrelevant',
@@ -169,7 +91,7 @@ describe('token-efficiency calibration fixture v1', () => {
       );
     }
 
-    expect(fixture.resumeScenarios.map(scenario => scenario.resumeKind).sort()).toEqual([
+    expect(EffectArray.map(fixture.resumeScenarios, scenario => scenario.resumeKind).sort()).toEqual([
       'legacy',
       'no-handoff',
       'structured',
@@ -191,11 +113,11 @@ describe('token-efficiency calibration fixture v1', () => {
   });
 
   it('seals both privacy-safe retained pilots without a provider or ignored local evidence', () => {
-    expect(fixture.retainedPilots.map(pilot => pilot.pilotId)).toEqual([
+    expect(EffectArray.map(fixture.retainedPilots, pilot => pilot.pilotId)).toEqual([
       'production-5.0.7-attrs-three-arm-v1',
       'production-5.0.7-werkzeug-three-arm-v1',
     ]);
-    expect(fixture.retainedPilots.map(pilot => pilot.name)).toEqual([
+    expect(EffectArray.map(fixture.retainedPilots, pilot => pilot.name)).toEqual([
       'attrs-1606-production-5.0.7-three-arm',
       'werkzeug-3295-production-5.0.7-three-arm',
     ]);
@@ -209,10 +131,10 @@ describe('token-efficiency calibration fixture v1', () => {
         unavailableReason: null,
       });
       expect(
-        corpus.tasks.some(task => task.taskId === pilot.taskId),
+        EffectArray.some(corpus.tasks, task => task.taskId === pilot.taskId),
         pilot.pilotId,
       ).toBe(true);
-      expect(pilot.rows.map(row => row.arm).sort(), pilot.pilotId).toEqual([
+      expect(EffectArray.map(pilot.rows, row => row.arm).sort(), pilot.pilotId).toEqual([
         'files',
         'threadnote-compact',
         'threadnote-graph',
@@ -270,10 +192,10 @@ describe('token-efficiency calibration fixture v1', () => {
 
   it('contains no absolute paths, managed-memory pointers, or likely secret material', () => {
     const strings = flattenStrings(fixture);
-    expect(strings.some(value => value.startsWith('/'))).toBe(false);
-    expect(strings.some(value => value.includes('threadnote://'))).toBe(false);
+    expect(EffectArray.some(strings, value => Effect.pipe(value, EffectString.startsWith('/')))).toBe(false);
+    expect(EffectArray.some(strings, value => Effect.pipe(value, EffectString.includes('threadnote://')))).toBe(false);
     expect(
-      strings.some(value =>
+      EffectArray.some(strings, value =>
         /(?:^|[^a-z0-9])(?:sk-|ghp_|github_pat_|AKIA|-----BEGIN(?: [A-Z]+)? PRIVATE KEY|bearer\s+[A-Za-z0-9._-]+)/iu.test(
           value,
         ),
@@ -284,7 +206,11 @@ describe('token-efficiency calibration fixture v1', () => {
 
 function flattenStrings(value: unknown): string[] {
   if (typeof value === 'string') return [value];
-  if (Array.isArray(value)) return value.flatMap(flattenStrings);
-  if (value !== null && typeof value === 'object') return Object.values(value).flatMap(flattenStrings);
+  if (EffectArray.isArray(value))
+    return EffectArray.flatMap(value, (__effectFlatMapValue, __effectFlatMapIndex) =>
+      __effectFlatMapIndex in value ? flattenStrings(__effectFlatMapValue) : [],
+    );
+  if (value !== null && typeof value === 'object')
+    return EffectArray.flatMap(EffectRecord.values(value), flattenStrings);
   return [];
 }

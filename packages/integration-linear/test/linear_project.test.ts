@@ -2,7 +2,7 @@ import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Redacted} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import {readExternalDocumentManifest} from '@threadnote/store/external-resource';
 import {createLinearClient} from '../src/client.js';
 import {runLinearSourceAdd, runLinearSourceInventory, runLinearSourceSync} from '../src/source.js';
@@ -20,6 +20,10 @@ import {
   source,
   update,
 } from './fixtures.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
+
 describe('Linear selected project evidence', () => {
   it('paginates >50 native documents and authored updates independently and double-checks revisions', async () => {
     const docs = Array.from({length: 51}, (_, i) => document(100 + i));
@@ -29,14 +33,14 @@ describe('Linear selected project evidence', () => {
       fetch: async (url, init) => {
         const r = request(init);
         calls++;
-        if (r.query.includes('LinearDocuments'))
+        if (Effect2.pipe(r.query, EffectString.includes('LinearDocuments')))
           return response({
             project: {
               id: project.id,
               documents: r.variables.after ? connection(docs.slice(50)) : connection(docs.slice(0, 50), true, 'docs-2'),
             },
           });
-        if (r.query.includes('LinearUpdates'))
+        if (Effect2.pipe(r.query, EffectString.includes('LinearUpdates')))
           return response({
             project: {
               id: project.id,
@@ -64,7 +68,7 @@ describe('Linear selected project evidence', () => {
       let reads = 0;
       const client = createLinearClient(Redacted.make('synthetic-linear-private-key'), {
         fetch: async (url, init) => {
-          if (request(init).query.includes('LinearDocuments')) {
+          if (Effect2.pipe(request(init).query, EffectString.includes('LinearDocuments'))) {
             reads++;
             return response({
               project: {
@@ -90,7 +94,7 @@ describe('Linear selected project evidence', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'linear-project-'}));
-        const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+        const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
         const location = {home, account: 'local', user: 'tester'};
         yield* runLinearSourceAdd(config, {
           ...projectSource,
@@ -107,7 +111,9 @@ describe('Linear selected project evidence', () => {
           apply: true,
           clientOptions: {
             fetch: async (url, init) =>
-              request(init).query.includes('LinearProjectIssues') ? response({}, 503) : projectFetch(url, init),
+              Effect2.pipe(request(init).query, EffectString.includes('LinearProjectIssues'))
+                ? response({}, 503)
+                : projectFetch(url, init),
           },
         });
         expect((yield* readExternalDocumentManifest(location, source.id, doc, 'linear'))?.chunks).toEqual(old?.chunks);
@@ -116,7 +122,7 @@ describe('Linear selected project evidence', () => {
           apply: true,
           clientOptions: {
             fetch: async (url, init) =>
-              request(init).query.includes('LinearProjectIssues')
+              Effect2.pipe(request(init).query, EffectString.includes('LinearProjectIssues'))
                 ? response({project: {id: project.id, issues: connection([])}})
                 : projectFetch(url, init),
           },

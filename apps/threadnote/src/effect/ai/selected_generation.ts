@@ -30,6 +30,8 @@ import {
   DraftProviderUnavailableBeforeDispatch,
 } from './consolidator.js';
 import {topicDraftModelSchema} from '../../manager/topic_draft_schema.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v24';
 export const AUTOMATIC_DRAFT_PROMPT_VERSION = 'automatic-memory-v9';
@@ -47,10 +49,13 @@ export interface SelectedDraftResult {
   readonly settings: DraftGenerationSettings;
 }
 
-export class SelectedDraftError extends Schema.TaggedError<SelectedDraftError>()('SelectedDraftError', {
-  message: Schema.String,
-  reason: Schema.optionalKey(Schema.Literal('deadline')),
-}) {}
+export class SelectedDraftError extends Schema.TaggedError<SelectedDraftError, {readonly brand: unique symbol}>()(
+  'SelectedDraftError',
+  {
+    message: Schema.String,
+    reason: Schema.optionalKey(Schema.Literal('deadline')),
+  },
+) {}
 const fail = (message: string) => SelectedDraftError.make({message});
 export const isTransientDraftProviderFailure = (error: unknown) =>
   AiError.isAiError(error) &&
@@ -60,7 +65,7 @@ function remoteModelVersion(apiUrl: string | undefined): string {
   let host = 'default';
   if (apiUrl) {
     try {
-      host = new URL(apiUrl).host.slice(0, 64) || 'custom';
+      host = Effect2.pipe(new URL(apiUrl).host, EffectString.slice(0, 64)) || 'custom';
     } catch {
       host = 'custom';
     }

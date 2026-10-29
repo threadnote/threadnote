@@ -10,6 +10,8 @@ import {runShareSetAccess} from '@threadnote/threadnote/effect/share';
 import {runSharePublishTool} from '@threadnote/threadnote/mcp/server/share';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('MCP share-publish team access', () => {
   for (const preview of [true, false]) {
@@ -155,7 +157,8 @@ const publicationFixture = Effect.fn('test.mcpSharePublishAccessFixture')(functi
     manifestPath: path.join(home, 'seed-manifest.yaml'),
     user: 'tester',
   };
-  const git = (...args: string[]) => runCommandEffect('git', args).pipe(Effect.map(result => result.stdout.trim()));
+  const git = (...args: string[]) =>
+    runCommandEffect('git', args).pipe(Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)));
   yield* fs.makeDirectory(path.dirname(sourcePath), {recursive: true});
   yield* fs.makeDirectory(path.dirname(teamsPath), {recursive: true});
   yield* fs.writeFileString(sourcePath, content);

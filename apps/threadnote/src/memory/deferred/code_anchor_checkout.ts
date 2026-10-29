@@ -2,6 +2,8 @@ import {Effect, FileSystem, Result, Schema} from 'effect';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {CodeGraphRepositoryError} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export type DeferredCodeAnchorCallerCheckoutObservation =
   | {readonly state: 'missing'}
@@ -16,7 +18,10 @@ export type DeferredCodeAnchorCallerCheckoutAdmission =
     };
 
 function isUnusableDeferredCodeAnchorCallerCheckout(error: unknown): boolean {
-  return Schema.is(CodeGraphRepositoryError)(error) && error.message.startsWith('Not a Git repository');
+  return (
+    Schema.is(CodeGraphRepositoryError)(error) &&
+    Effect2.pipe(error.message, EffectString.startsWith('Not a Git repository'))
+  );
 }
 
 export const observeDeferredCodeAnchorCallerCheckout = Effect.fn('memoryCodeAnchor.observeCallerCheckout')(function* (

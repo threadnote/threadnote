@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Clock, DateTime, Effect} from 'effect';
@@ -19,6 +20,8 @@ import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {rankRecallCandidates, RECALL_RANKER_VERSION} from '@threadnote/recall/rank';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {atomicWrite, fixtureHash, printJson, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 const CLEAN_GIT_STATUS_ARGUMENTS = [
@@ -90,7 +93,7 @@ const benchmarkRecall = Effect.gen(function* () {
     yield* Effect.yieldNow;
   }
   const latency = benchmarkMeasurement('hybrid-rank-one-query', 'milliseconds', durations);
-  const throughput = durations.map(duration => 1_000 / duration);
+  const throughput = EffectArray.map(durations, duration => 1_000 / duration);
   const [commit, status, hardware] = yield* Effect.all(
     [git(['rev-parse', 'HEAD']), git(CLEAN_GIT_STATUS_ARGUMENTS), system.hardwareInfo],
     {
@@ -175,7 +178,9 @@ function parseArguments(args: readonly string[]): BenchmarkOptions {
 }
 
 const git = Effect.fn('benchmark.git')((arguments_: readonly string[]) =>
-  runCommandEffect('git', arguments_, {timeoutMs: 30_000}).pipe(Effect.map(result => result.stdout.trim())),
+  runCommandEffect('git', arguments_, {timeoutMs: 30_000}).pipe(
+    Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+  ),
 );
 
 function positiveInteger(value: string | undefined, option: string): number {
@@ -193,7 +198,12 @@ function nonNegativeInteger(value: string | undefined, option: string): number {
 }
 
 function requiredValue(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }
 

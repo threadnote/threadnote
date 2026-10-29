@@ -1,8 +1,9 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {Effect, FileSystem, Layer} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
@@ -24,8 +25,17 @@ import {
   vectorIndexDatabaseFilename,
   vectorIndexStatus,
 } from '@threadnote/recall/vector-index';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
+
+const manifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
 const TARGET_URI = 'threadnote://user/me/memories/durable/projects/target-app/target.md';
 const TARGET_ALIAS = 'threadnote://user/me/memories/shared/team/durable/projects/target-app/target.md';
 const PROJECTLESS_URI = 'threadnote://resources/global/approved-guidance.md';
@@ -36,7 +46,9 @@ describe('vector recall eligibility', () => {
     'filters project and authority before semantic top-k and does not expand aliases from rejected representatives',
     () =>
       withVectorHome(
-        semanticRuntime(input => (input.includes('eligible-weaker-vector') ? blendedVector() : unitVector(0))),
+        semanticRuntime(input =>
+          Effect2.pipe(input, EffectString.includes('eligible-weaker-vector')) ? blendedVector() : unitVector(0),
+        ),
         home =>
           Effect.gen(function* () {
             const candidates: RecallCandidate[] = [
@@ -193,7 +205,7 @@ describe('vector recall eligibility', () => {
             const permuted = yield* ensureVectorIndex(
               {agentContextHome: home},
               manifest,
-              order.map(index => candidates[index]),
+              EffectArray.map(order, index => candidates[index]),
             );
 
             expect(permuted.generation).toBe(first.generation);
@@ -257,13 +269,19 @@ function readOnlyVectorRow(home: string) {
   return Effect.acquireUseRelease(
     Effect.sync(() => new Database(vectorDatabasePath(home), {readonly: true})),
     database =>
-      Effect.sync(
-        () =>
-          database.query('SELECT project, approved_authoritative, vector_id FROM vector_chunks LIMIT 1').get() as {
-            readonly approved_authoritative: number;
-            readonly project: string | null;
-            readonly vector_id: number;
-          },
+      Effect.sync(() =>
+        requiredRow(
+          database
+            .query<
+              {
+                readonly approved_authoritative: number;
+                readonly project: string | null;
+                readonly vector_id: number;
+              },
+              SQLQueryBindings[]
+            >('SELECT project, approved_authoritative, vector_id FROM vector_chunks LIMIT 1')
+            .get(),
+        ),
       ),
     database => Effect.sync(() => database.close()),
   );
@@ -291,7 +309,7 @@ function semanticRuntime(
       embedMany: ({inputs}) =>
         Effect.sync(() => {
           onInputs(inputs);
-          return inputs.map(vector);
+          return EffectArray.map(inputs, vector);
         }),
       generate: () => Effect.die(TestError.make({message: 'Unexpected generation'})),
       rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking'})),

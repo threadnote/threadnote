@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path, Schema, Tracer} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -33,8 +34,12 @@ import type {CodeGraphStatus, CodeGraphSymbol} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
 const platform = Layer.merge(
   citationPlatformLayer,
@@ -80,7 +85,7 @@ const fixture = (dirty = false, capturedSource?: string) =>
         edgeCount: 0,
         extractorSet: 'test',
         fileCount: 1,
-        id: `cgsn_${'c'.repeat(40)}`,
+        id: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
         repositoryId: identity.repositoryId,
         state: 'ready',
         symbolCount: 0,
@@ -99,7 +104,10 @@ const fixture = (dirty = false, capturedSource?: string) =>
       Effect.suspend(() => {
         reads.status++;
         if (reads.status === changeSnapshotAt)
-          status = {...status, readySnapshot: {...status.readySnapshot!, id: `cgsn_${'d'.repeat(40)}`}};
+          status = {
+            ...status,
+            readySnapshot: {...status.readySnapshot!, id: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`},
+          };
         return available ? Effect.succeed(status) : Effect.fail('unavailable');
       });
     const tracer = Tracer.make({
@@ -109,52 +117,63 @@ const fixture = (dirty = false, capturedSource?: string) =>
         return new Tracer.NativeSpan(options);
       },
     });
-    const query = CodeGraphQueryService.of({
+    const queryMock = Layer.mock(CodeGraphQueryService, {
       status: readStatus,
       statusForPublishedIdentity: readStatus,
-    } as unknown as CodeGraphQueryService['Service']);
-    const store = CodeGraphStore.of({
-      acquireSnapshotLease: () => Effect.sync(() => `lease-${++leases}`),
-      releaseSnapshotLease: () =>
-        Effect.sync(() => {
-          releases++;
-        }),
-      readySnapshotById: () =>
-        Effect.sync(() => {
-          reads.historicalSnapshot++;
-          return historicalSnapshotAvailable ? status.readySnapshot : undefined;
-        }),
-      readySnapshotForCommit: () => Effect.void,
-      effectiveSnapshotCitationEvidence: () =>
-        Effect.sync(() => {
-          if (historicalSnapshotAvailable) expect(leases).toBeGreaterThan(releases);
-          return {
-            fileInventoryCoverage: 'complete',
-            filesByContentHashes: [],
-            filesByPaths: [
-              {
-                path: 'source.ts',
-                file: {
-                  blobId: '',
-                  contentHash: historicalFileHash ?? sha256HexSync(bytes),
-                  language: 'typescript',
-                  mode: '100644',
+    });
+    const queryLayer = Layer.effect(
+      CodeGraphQueryService,
+      Effect.gen(function* () {
+        const mockService = yield* CodeGraphQueryService;
+        const {withStatusSession: _unusedSessionHook, ...fallbackService} = mockService;
+        return fallbackService;
+      }),
+    ).pipe(Layer.provide(queryMock));
+    const mockServices = Layer.merge(
+      queryLayer,
+      Layer.mock(CodeGraphStore, {
+        acquireSnapshotLease: () => Effect.sync(() => `lease-${++leases}`),
+        releaseSnapshotLease: () =>
+          Effect.sync(() => {
+            releases++;
+          }),
+        readySnapshotById: () =>
+          Effect.sync(() => {
+            reads.historicalSnapshot++;
+            return historicalSnapshotAvailable ? status.readySnapshot : undefined;
+          }),
+        readySnapshotForCommit: () => Effect.as(Effect.void, undefined),
+        effectiveSnapshotCitationEvidence: () =>
+          Effect.sync(() => {
+            if (historicalSnapshotAvailable) expect(leases).toBeGreaterThan(releases);
+            return {
+              fileInventoryCoverage: 'complete',
+              filesByContentHashes: [],
+              filesByPaths: [
+                {
                   path: 'source.ts',
-                  size: bytes.byteLength,
-                  source: 'worktree',
+                  file: {
+                    blobId: '',
+                    contentHash: historicalFileHash ?? sha256HexSync(bytes),
+                    language: 'typescript',
+                    mode: '100644',
+                    path: 'source.ts',
+                    size: bytes.byteLength,
+                    source: 'worktree',
+                  },
                 },
-              },
-            ],
-            symbolsByIds: historicalSymbols,
-            symbolsBySemanticLocators: [],
-          };
-        }),
-    } as unknown as CodeGraphStore['Service']);
-    const config = {
+              ],
+              symbolsByIds: historicalSymbols,
+              symbolsBySemanticLocators: [],
+            };
+          }),
+      }),
+    );
+    const config = runtimeConfigForTest({
       agentContextHome: home,
       manifestPath: path.join(home, 'threadnote.toml'),
       manifestSource: 'bundled-example',
-    } as RuntimeConfig;
+    });
     const citationInput = {
       extractorSet: 'test',
       fileContentHash: {algorithm: 'sha256' as const, value: sha256HexSync(bytes)},
@@ -168,12 +187,9 @@ const fixture = (dirty = false, capturedSource?: string) =>
       version: 1 as const,
     };
     const citation = createMemoryCodeCitation(citationInput);
+    const mockContext = yield* Layer.build(mockServices);
     const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-      effect.pipe(
-        Effect.provideService(CodeGraphQueryService, query),
-        Effect.provideService(CodeGraphStore, store),
-        Effect.withTracer(tracer),
-      );
+      Effect.provideContext(effect, mockContext).pipe(Effect.withTracer(tracer));
     const check = (anchor: MemoryCodeCitationV1) =>
       provide(
         validateContextHealthMemoryCitations(config, {callerCwd: cwd, kind: 'repository'}, [
@@ -218,7 +234,7 @@ const fixture = (dirty = false, capturedSource?: string) =>
       leaseCounts: () => ({leases, releases}),
       readCounts: () => ({...reads}),
       resetReadCounts: () => {
-        for (const key of Object.keys(reads) as (keyof typeof reads)[]) reads[key] = 0;
+        for (const key of EffectRecord.keys(reads)) reads[key] = 0;
       },
       changeSnapshotOnRead: (ordinal: number) => {
         changeSnapshotAt = ordinal;
@@ -248,7 +264,7 @@ describe('citation proof before source retirement', () => {
           for (const purpose of ['historical', 'current'] as const) {
             data.resetReadCounts();
             const selected = yield* read(purpose);
-            const expected = both.excerpts.filter(item => item.provenance === `${purpose}-verified`);
+            const expected = EffectArray.filter(both.excerpts, item => item.provenance === `${purpose}-verified`);
             expect(selected.excerpts).toEqual(expected);
             expect(selected.excerpts.length).toBeGreaterThan(0);
             expect(selected).toMatchObject({
@@ -276,7 +292,7 @@ describe('citation proof before source retirement', () => {
         const scope = {callerCwd: data.cwd, kind: 'repository' as const};
         const forged = createMemoryCodeCitation({
           ...data.citationInput,
-          fileContentHash: {algorithm: 'sha256', value: 'f'.repeat(64)},
+          fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('f', EffectString.repeat(64))},
         });
         const missing = yield* data.provide(
           readContextHealthCitationEvidence(data.config, scope, forged, {purpose: 'historical'}),
@@ -302,14 +318,18 @@ describe('citation proof before source retirement', () => {
           const data = yield* fixture();
           const scope = {callerCwd: data.cwd, kind: 'repository' as const};
           const current = yield* data.provide(readContextHealthCitationEvidence(data.config, scope, data.citation));
-          expect(current.excerpts.find(value => value.provenance === 'current-verified')).toMatchObject({
+          expect(
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(current.excerpts, value => value.provenance === 'current-verified'),
+            ),
+          ).toMatchObject({
             content: source,
             fileBytesHash: sha256HexSync(data.bytes),
             supportsCitation: true,
           });
           yield* data.fs.writeFileString(data.path.join(data.repository, 'source.ts'), 'changed during read\n');
           const raced = yield* data.provide(readContextHealthCitationEvidence(data.config, scope, data.citation));
-          expect(raced.excerpts.every(value => value.provenance === 'historical-verified')).toBe(true);
+          expect(EffectArray.every(raced.excerpts, value => value.provenance === 'historical-verified')).toBe(true);
           expect(data.leaseCounts().leases).toBe(data.leaseCounts().releases);
         }),
       ),
@@ -375,7 +395,7 @@ describe('citation proof before source retirement', () => {
           const data = yield* fixture(true);
           data.unavailable();
           data.retainSnapshot();
-          const content = new TextDecoder().decode(data.bytes).trimEnd();
+          const content = Effect2.pipe(new TextDecoder().decode(data.bytes), EffectString.trimEnd);
           const imported = createMemoryCodeCitation({
             ...data.citationInput,
             target: {
@@ -384,7 +404,7 @@ describe('citation proof before source retirement', () => {
               kind: 'symbol',
               language: 'typescript',
               name: 'supported',
-              nodeId: `cgs_${'a'.repeat(32)}`,
+              nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
               qualifiedName: 'supported',
               span: {line: 1, column: 1, endLine: 1, endColumn: content.length + 1},
               symbolKind: 'variable',
@@ -470,7 +490,7 @@ describe('citation proof before source retirement', () => {
             );
             expect(read.excerpts[0]?.content).toBe(new TextDecoder().decode(data.bytes));
             expect(read.excerpts[0]?.source.sourceDirty).toBe(true);
-            expect(read.excerpts.every(value => value.provenance === 'historical-verified')).toBe(true);
+            expect(EffectArray.every(read.excerpts, value => value.provenance === 'historical-verified')).toBe(true);
             yield* data.fs.remove(
               data.path.join(
                 data.layout.repositoryRoot,
@@ -507,24 +527,33 @@ describe('citation proof before source retirement', () => {
             version: 1 as const,
             target: {
               fragmentCanonicalization: 'utf8-source-span-v1' as const,
-              fragmentHash: {algorithm: 'sha256' as const, value: sha256HexSync(source.trimEnd())},
+              fragmentHash: {
+                algorithm: 'sha256' as const,
+                value: sha256HexSync(Effect2.pipe(source, EffectString.trimEnd)),
+              },
               kind: 'symbol' as const,
               language: 'typescript',
               name: 'supported',
-              nodeId: `cgs_${'a'.repeat(32)}`,
+              nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
               qualifiedName: 'supported',
-              span: {line: 1, column: 1, endLine: 1, endColumn: source.trimEnd().length + 1},
+              span: {line: 1, column: 1, endLine: 1, endColumn: Effect2.pipe(source, EffectString.trimEnd).length + 1},
               symbolKind: 'variable',
             },
           };
           const valid = createMemoryCodeCitation(input);
           expect((yield* data.check(valid))[0]?.receipts[0]?.provenance).toBe('historical-verified');
           const invalid = [
-            createMemoryCodeCitation({...input, fileContentHash: {algorithm: 'sha256', value: 'f'.repeat(64)}}),
+            createMemoryCodeCitation({
+              ...input,
+              fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('f', EffectString.repeat(64))},
+            }),
             createMemoryCodeCitation({...input, target: {...input.target, span: {...input.target.span, endLine: 2}}}),
             createMemoryCodeCitation({
               ...input,
-              target: {...input.target, signatureHash: {algorithm: 'sha256', value: 'f'.repeat(64)}},
+              target: {
+                ...input.target,
+                signatureHash: {algorithm: 'sha256', value: Effect2.pipe('f', EffectString.repeat(64))},
+              },
             }),
           ];
           for (const anchor of invalid)
@@ -536,7 +565,7 @@ describe('citation proof before source retirement', () => {
     it.effect('keeps capture usable when capsule caps are exceeded and exposes lost dirty evidence', () =>
       TestClock.withLive(
         Effect.gen(function* () {
-          const oversized = source + '// padding\n'.repeat(30_000);
+          const oversized = source + Effect2.pipe('// padding\n', EffectString.repeat(30_000));
           for (const dirty of [false, true]) {
             const data = yield* fixture(dirty, oversized);
             const [captured] = yield* data.provide(
@@ -586,7 +615,9 @@ describe('citation proof before source retirement', () => {
             size: data.bytes.byteLength,
             source: 'commit',
           }).pipe(Effect.provideService(TreeSitterRuntime, treeRuntime));
-          const symbol = facts.symbols.find(value => value.name === 'supported');
+          const symbol = EffectOption.getOrUndefined(
+            EffectArray.findFirst(facts.symbols, value => value.name === 'supported'),
+          );
           if (symbol === undefined) return yield* Effect.die('Expected exact TypeScript declaration.');
           const fragment = createCodeGraphSourceSpanCanonicalizer(source).fragment(symbol.span);
           if (!fragment.ok || symbol.signature === undefined)
@@ -632,16 +663,16 @@ describe('citation proof before source retirement', () => {
           fc.integer({min: 1, max: 128}),
           fc.integer({min: 1, max: 100}),
           (lines, maximumBytes, maximumLines) => {
-            const content = lines.join('\n');
+            const content = EffectArray.join(lines, '\n');
             const bytes = new TextEncoder().encode(content);
             const evidenceSource = {
               extractorSet: 'test',
               fileContentHash: sha256HexSync(bytes),
               path: 'source.ts',
-              repositoryId: 'a'.repeat(64),
-              sourceCommit: 'b'.repeat(40),
+              repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+              sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
               sourceDirty: true,
-              sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+              sourceSnapshotId: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
             };
             const excerpt = citationSourceExcerpt(bytes, evidenceSource, 'historical-verified', true, {
               maximumBytes,
@@ -654,7 +685,16 @@ describe('citation proof before source retirement', () => {
             expect(excerpt.fileBytesHash).toBe(sha256HexSync(bytes));
             expect(excerpt.provenance).toBe('historical-verified');
             expect(excerpt.source).toEqual(evidenceSource);
-            expect(content.replace(/\r\n|\r|\u2028|\u2029/gu, '\n').startsWith(excerpt.content)).toBe(true);
+            expect(
+              Effect2.pipe(content, __effectPipeInput => {
+                const __effectPipeStage0 = Effect2.pipe(
+                  __effectPipeInput,
+                  EffectString.replace(/\r\n|\r|\u2028|\u2029/gu, '\n'),
+                );
+                const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.startsWith(excerpt.content));
+                return __effectPipeStage1;
+              }),
+            ).toBe(true);
           },
         ),
         {numRuns: 100},
@@ -674,7 +714,7 @@ describe('citation proof before source retirement', () => {
             const symbol: CodeGraphSymbol = {
               contentHash: fileHash,
               exported: true,
-              id: `cgs_${sha256HexSync(name).slice(0, 40)}`,
+              id: `cgs_${Effect2.pipe(sha256HexSync(name), EffectString.slice(0, 40))}`,
               kind: 'variable',
               language: 'typescript',
               name,
@@ -683,16 +723,18 @@ describe('citation proof before source retirement', () => {
               signature: `const ${name}: boolean`,
               span: {line, column, endLine: line, endColumn: column + 1},
             };
+            const signature = symbol.signature;
+            if (signature === undefined) throw new Error('Symbol fixture is missing its signature.');
             const anchor = createMemoryCodeCitation({
               version: 1,
               extractorSet: 'test',
               fileContentHash: {algorithm: 'sha256', value: legacyRawHash ? rawHash : fileHash},
               path: symbol.path,
-              repositoryId: 'a'.repeat(64),
+              repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
               repositoryIdentityKind: 'local',
-              sourceCommit: 'b'.repeat(40),
+              sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
               sourceDirty: true,
-              sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+              sourceSnapshotId: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
               target: {
                 fragmentCanonicalization: 'utf8-source-span-v1',
                 fragmentHash: {algorithm: 'sha256', value: sha256HexSync(name)},
@@ -701,7 +743,7 @@ describe('citation proof before source retirement', () => {
                 name,
                 nodeId: symbol.id,
                 qualifiedName: symbol.qualifiedName,
-                signatureHash: {algorithm: 'sha256', value: sha256HexSync(symbol.signature!)},
+                signatureHash: {algorithm: 'sha256', value: sha256HexSync(signature)},
                 span: symbol.span,
                 symbolKind: symbol.kind,
               },
@@ -734,8 +776,8 @@ describe('citation proof before source retirement', () => {
               false,
             );
             const mutations: readonly Partial<CodeGraphSymbol>[] = [
-              {id: `cgs_${'f'.repeat(32)}`},
-              {contentHash: 'f'.repeat(64)},
+              {id: `cgs_${Effect2.pipe('f', EffectString.repeat(32))}`},
+              {contentHash: Effect2.pipe('f', EffectString.repeat(64))},
               {path: 'other.ts'},
               {kind: 'function'},
               {language: 'javascript'},

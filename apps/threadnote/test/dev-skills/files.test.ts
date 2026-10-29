@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import {it as effectIt} from '@effect/vitest';
 import {ByteSize, Effect, FileSystem, Layer, Option, Path, PlatformError, Schema} from 'effect';
@@ -32,7 +33,7 @@ const tree = Effect.fn(function* (root = '/', parts: readonly string[] = ['owned
   const directories = [root];
   for (const part of parts) directories.push(path.join(directories.at(-1), part));
   const leaf = path.join(directories.at(-1), '.threadnote.setup-mutation.lock');
-  const entries = new Map<string, Entry>(directories.map(directory => [directory, 'Directory']));
+  const entries = new Map<string, Entry>(EffectArray.map(directories, directory => [directory, 'Directory']));
   entries.set(leaf, 'File');
   const reads: string[] = [];
   const fs = FileSystem.makeNoop({
@@ -87,7 +88,7 @@ describe('development skills destination safety', () => {
         success: undefined,
       });
       expect(disappeared).toBe(true);
-      expect(f.reads.filter(read => read === 'readLink:/')).toHaveLength(2);
+      expect(EffectArray.filter(f.reads, read => read === 'readLink:/')).toHaveLength(2);
       expect(f.entries.has(f.leaf)).toBe(false);
     }).pipe(providePath(BunPath.layerPosix)),
   );
@@ -230,7 +231,10 @@ describe('development skills destination safety', () => {
           ).toMatchObject({_tag: 'Failure', failure: {code: 'unsafe-path'}});
           expect(disappeared).toBe(true);
           expect([...f.entries]).toEqual(
-            f.directories.map(directory => [directory, directory === ancestor ? replacement : 'Directory']),
+            EffectArray.map(f.directories, directory => [
+              directory,
+              directory === ancestor ? replacement : 'Directory',
+            ]),
           );
         }).pipe(providePath(variant.layer)),
       {arbitrary: {runs: 40}},

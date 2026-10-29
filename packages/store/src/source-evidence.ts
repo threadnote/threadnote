@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runtimePlatform} from '@threadnote/platform/system';
@@ -22,6 +23,9 @@ import {
   validSourceEvidenceVersion,
   type SourceEvidenceCitationV1,
 } from './source-evidence-citation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 export {
   serializeSourceEvidenceCitation,
   validSourceEvidenceCitation,
@@ -74,9 +78,12 @@ export interface SourceEvidenceRead {
   readonly fragment?: string;
 }
 
-export class SourceEvidenceError extends Schema.TaggedError<SourceEvidenceError>()('SourceEvidenceError', {
-  message: Schema.String,
-}) {}
+export class SourceEvidenceError extends Schema.TaggedError<SourceEvidenceError, {readonly brand: unique symbol}>()(
+  'SourceEvidenceError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 function invalid(message: string): SourceEvidenceError {
   return SourceEvidenceError.make({message});
@@ -96,6 +103,7 @@ function githubRepositoryId(documentId: string): string | undefined {
 
 const access = Effect.fn('sourceEvidence.access')(function* (location: ResourceStoreLocation, resourceUri: string) {
   const identity = parseExternalResourceIdentity(resourceUri);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   if (!identity || identity.provider === undefined || resourceUri !== resourceUri.split('#', 1)[0]) return undefined;
   const service = yield* Effect.serviceOption(ExternalSourcePolicy);
   if (Option.isNone(service)) return undefined;
@@ -182,7 +190,10 @@ const ensurePrivateDirectory = Effect.fn('sourceEvidence.privateDirectory')(func
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   let current = home;
-  const segments = path.relative(home, directory).split(path.sep).filter(Boolean);
+  const segments = EffectArray.filter(
+    Effect2.pipe(path.relative(home, directory), EffectString.split(path.sep)),
+    Boolean,
+  );
   if (segments[0] !== 'threadnote' || segments[1] !== 'source-evidence' || segments.length !== 5)
     return yield* invalid('Private evidence directory is outside its account boundary.');
   for (const [index, segment] of segments.entries()) {
@@ -261,14 +272,15 @@ const safeFile = Effect.fn('sourceEvidence.safeFile')(function* (filename: strin
 
 function parsePin(raw: string): {citation: SourceEvidenceCitationV1; sanitizedContent: string} | undefined {
   try {
-    if (!raw.startsWith(PIN_HEADER)) return undefined;
+    if (!Effect2.pipe(raw, EffectString.startsWith(PIN_HEADER))) return undefined;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const headerEnd = raw.indexOf('\n', PIN_HEADER.length);
     if (headerEnd < 0 || headerEnd - PIN_HEADER.length > MAX_CITATION) return undefined;
-    const header = raw.slice(PIN_HEADER.length, headerEnd);
+    const header = Effect2.pipe(raw, EffectString.slice(PIN_HEADER.length, headerEnd));
     const citation: unknown = JSON.parse(header);
     if (!validSourceEvidenceCitation(citation) || serializeSourceEvidenceCitation(citation) !== header)
       return undefined;
-    const sanitizedContent = raw.slice(headerEnd + 1);
+    const sanitizedContent = Effect2.pipe(raw, EffectString.slice(headerEnd + 1));
     if (bytes(sanitizedContent) > MAX_ENVELOPE || sha256HexSync(sanitizedContent) !== citation.revisionHash)
       return undefined;
     return {citation, sanitizedContent};
@@ -315,7 +327,11 @@ export const captureSourceEvidence = Effect.fn('sourceEvidence.capture')(functio
         inspected.sanitizerVersion !== input.expectedSanitizerVersion
       )
         return yield* invalid('Reviewed source identity or sanitized revision changed; inspect again.');
-      const fragmentStart = inspected.sanitizedContent.indexOf(input.fragment);
+      const fragmentStart = Effect2.pipe(
+        inspected.sanitizedContent,
+        EffectString.indexOf(input.fragment),
+        Effect2.Option.getOrElse(() => -1),
+      );
       if (fragmentStart < 0) return yield* invalid('Fragment is absent from the exact sanitized imported revision.');
       const crypto = yield* Crypto.Crypto;
       const now = yield* Clock.currentTimeMillis;
@@ -345,7 +361,11 @@ export const captureSourceEvidence = Effect.fn('sourceEvidence.capture')(functio
       const names = yield* fs.readDirectory(directory);
       if (names.length > 700) return yield* invalid('Source evidence directory exceeds its file budget.');
       for (const name of names) {
-        if (!UUID.test(name.slice(0, -5)) || !name.endsWith('.json')) continue;
+        if (
+          !UUID.test(Effect2.pipe(name, EffectString.slice(0, -5))) ||
+          !Effect2.pipe(name, EffectString.endsWith('.json'))
+        )
+          continue;
         const filename = path.join(directory, name);
         const raw = yield* safeFile(filename, MAX_PIN_FILE_BYTES);
         if (raw === undefined) return yield* invalid('Source evidence pin is unreadable or unsafe.');
@@ -401,8 +421,12 @@ const manifestEntry = Effect.fn('sourceEvidence.manifestEntry')(function* (home:
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const relative = path.relative(home, filename);
-  const segments = relative.split(path.sep).filter(Boolean);
-  if (segments.length < 1 || segments.length > 16 || segments.some(segment => segment === '..' || segment === '.'))
+  const segments = EffectArray.filter(Effect2.pipe(relative, EffectString.split(path.sep)), Boolean);
+  if (
+    segments.length < 1 ||
+    segments.length > 16 ||
+    EffectArray.some(segments, segment => segment === '..' || segment === '.')
+  )
     return 'unsafe' as const;
   let parent = home;
   for (const [index, segment] of segments.entries()) {
@@ -494,7 +518,10 @@ export const readSourceEvidence = Effect.fn('sourceEvidence.read')(function* (
         citation.fragmentEnd > pin.sanitizedContent.length
       )
         return denied(citation, 'corrupt');
-      const fragment = pin.sanitizedContent.slice(citation.fragmentStart, citation.fragmentEnd);
+      const fragment = Effect2.pipe(
+        pin.sanitizedContent,
+        EffectString.slice(citation.fragmentStart, citation.fragmentEnd),
+      );
       if (bytes(fragment) < 1 || bytes(fragment) > MAX_FRAGMENT || sha256HexSync(fragment) !== citation.fragmentHash)
         return denied(citation, 'corrupt');
       const beforeInspection = yield* access(location, citation.resourceUri);
@@ -601,7 +628,10 @@ export const removeSourceEvidencePins = Effect.fn('sourceEvidence.removePins')(f
       const names = yield* fs.readDirectory(directory);
       if (names.length > 700) return yield* invalid('Source evidence directory exceeds its file budget.');
       for (const name of names) {
-        if (name.endsWith('.json') && UUID.test(name.slice(0, -5))) {
+        if (
+          Effect2.pipe(name, EffectString.endsWith('.json')) &&
+          UUID.test(Effect2.pipe(name, EffectString.slice(0, -5)))
+        ) {
           const filename = path.join(directory, name);
           const raw = yield* safeFile(filename, MAX_PIN_FILE_BYTES);
           const pin = raw === undefined ? undefined : parsePin(raw);

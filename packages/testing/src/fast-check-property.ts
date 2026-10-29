@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {TestContext, Vitest} from '@effect/vitest';
 import {Schema, type Effect, type Scope} from 'effect';
 import * as Arbitrary from 'effect/Arbitrary';
@@ -19,11 +20,11 @@ type EffectPropertyOptions = {
   readonly timeout?: number;
 };
 
-function inputArbitrary<const A extends Inputs>(inputs: A): FC.Arbitrary<Values<A>> {
-  if (Array.isArray(inputs)) {
-    return FC.tuple(...inputs) as FC.Arbitrary<Values<A>>;
-  }
-  return FC.record(inputs as Readonly<Record<string, FC.Arbitrary<unknown>>>) as FC.Arbitrary<Values<A>>;
+const isArrayInput = (inputs: Inputs): inputs is ReadonlyArray<FC.Arbitrary<unknown>> => EffectArray.isArray(inputs);
+
+function inputArbitrary<const A extends Inputs>(inputs: A): FC.Arbitrary<Values<A>>;
+function inputArbitrary(inputs: Inputs): FC.Arbitrary<unknown> {
+  return isArrayInput(inputs) ? FC.tuple(...inputs) : FC.record(inputs);
 }
 
 /** Run a Fast-check property independently of Effect's native Arbitrary API. */
@@ -55,6 +56,7 @@ export function fcEffectProp<const A extends Inputs, R, E, Result>(
 ): void {
   const check = options?.fastCheck;
   if (check) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     for (const key of Object.keys(check)) {
       if (!['interruptAfterTimeLimit', 'markInterruptAsFailure', 'numRuns', 'seed'].includes(key)) {
         throw new Error(`Unsupported Fast-check option in Effect property: ${key}`);

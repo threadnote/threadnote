@@ -2,6 +2,7 @@ import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem} from 'effect';
 import {describe, expect} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
+import {isJsonObject} from '@threadnote/platform/json';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {runTelemetryDisable, runTelemetryEnable, runTelemetryStatus} from '@threadnote/threadnote/telemetry/commands';
@@ -113,7 +114,9 @@ describe('telemetry commands', () => {
         const config = runtimeConfig(home);
         yield* runTelemetryEnable(config, {apply: true});
         const file = yield* telemetryConfigurationPath(config);
-        const previous = JSON.parse(yield* fs.readFileString(file)) as Record<string, unknown>;
+        const parsedPrevious: unknown = JSON.parse(yield* fs.readFileString(file));
+        if (!isJsonObject(parsedPrevious)) throw new Error('Expected a telemetry configuration object.');
+        const previous = parsedPrevious;
         const previousEndpoint = 'https://collector.example/v1/traces';
         yield* fs.writeFileString(
           file,

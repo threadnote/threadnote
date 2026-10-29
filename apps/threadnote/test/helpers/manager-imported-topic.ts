@@ -1,4 +1,5 @@
-import {Effect, FileSystem, Path} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {expect} from 'vitest';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
@@ -91,7 +92,9 @@ export const managerImportedTopicFixture = Effect.fn('test.managerImportedTopicF
     input,
   });
   expect(preview?.status).toBe(200);
-  const approval = preview?.body as {readonly expectedContentHash: string; readonly revision: string};
+  const approval = yield* Schema.decodeUnknownEffect(
+    Schema.Struct({expectedContentHash: Schema.String, revision: Schema.String}),
+  )(preview?.body);
   const applied = yield* request('POST', '/api/attention/topic-enrollment', {
     action: 'apply',
     uri,
@@ -114,7 +117,7 @@ export const managerImportedTopicFixture = Effect.fn('test.managerImportedTopicF
   const caseId = topicMaintenanceCaseId(record);
   for (let tick = 0; tick < 12; tick += 1) {
     const status = yield* runContextMaintenance(config, {cwd: home, project: 'notes', maxRecords: 4});
-    if (status.cases.some(item => item.caseId === caseId)) break;
+    if (EffectArray.some(status.cases, item => item.caseId === caseId)) break;
   }
   const packet = yield* readContextMaintenancePacket(config, caseId);
   if (

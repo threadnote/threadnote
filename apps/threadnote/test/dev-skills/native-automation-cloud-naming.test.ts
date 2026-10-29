@@ -8,13 +8,20 @@ import {persistCodexCloudProfile} from '../../src/codex/profile.js';
 import {persistCursorCloudIdentityProfile} from '../../src/cursor/profile.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const) {
   effectIt.effect(`${profile} names private and shared artifacts without reusing destination approval`, () =>
     Effect.gen(function* () {
       const system = yield* SystemInfo;
-      const environment = Object.fromEntries(
-        Object.entries(system.environment()).filter(([key]) => !key.startsWith('THREADNOTE_')),
+      const environment = EffectRecord.fromEntries(
+        EffectArray.filter(
+          EffectRecord.toEntries(system.environment()),
+          ([key]) => !Effect2.pipe(key, EffectString.startsWith('THREADNOTE_')),
+        ),
       );
       if (profile === 'cursor-cloud-personal') environment.THREADNOTE_CURSOR_CLOUD_TEAM = 'default';
       const f = yield* nativeFixture(environment);
@@ -24,7 +31,7 @@ for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const
       yield* git(f.repo, ['config', 'user.name', 'Native Naming Test']);
       yield* git(f.repo, ['add', 'source.ts']);
       yield* git(f.repo, ['commit', '-m', 'source']);
-      const sourceCommit = (yield* git(f.repo, ['rev-parse', 'HEAD'])).stdout.trim();
+      const sourceCommit = Effect2.pipe((yield* git(f.repo, ['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       const remote = f.path.join(f.root, 'remote.git');
       const worktree = f.path.join(f.root, 'shared');
       yield* git(f.root, ['init', '--bare', '--initial-branch=main', remote]);
@@ -119,7 +126,7 @@ for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const
         ),
       ).toMatchObject({_tag: 'Failure', failure: {code: 'publication-approval-required'}});
       expect(yield* f.store.read(f.location, draft.uri)).toBe(draftBytes);
-      expect((yield* git(remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
+      expect(Effect2.pipe((yield* git(remote, ['rev-list', '--count', 'main'])).stdout, EffectString.trim)).toBe('1');
       yield* call({
         ...envelope,
         action: 'publication-approve',
@@ -130,9 +137,12 @@ for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const
       expect(
         yield* call({...envelope, action: 'publication-publish', approvalDigest: changed.approvalDigest}),
       ).toMatchObject({status: 'ok', verifiedReadback: true});
-      expect((yield* git(remote, ['ls-tree', '-r', '--name-only', 'main'])).stdout.split('\n').filter(Boolean)).toEqual(
-        ['README.md', 'durable/projects/fixture/workflow-cloud-runtime-arch-revised.md'],
-      );
+      expect(
+        EffectArray.filter(
+          Effect2.pipe((yield* git(remote, ['ls-tree', '-r', '--name-only', 'main'])).stdout, EffectString.split('\n')),
+          Boolean,
+        ),
+      ).toEqual(['README.md', 'durable/projects/fixture/workflow-cloud-runtime-arch-revised.md']);
       expect(yield* f.store.read(f.location, draft.uri)).toBe(draftBytes);
     }).pipe(TestClock.withLive, provideNative),
   );

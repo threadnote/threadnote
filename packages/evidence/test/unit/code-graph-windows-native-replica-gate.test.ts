@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
@@ -6,6 +8,8 @@ import {
   type CodeGraphWindowsReplicaInput,
 } from '../../../../scripts/adjudicate-code-graph-windows-replicas.js';
 import type {BenchmarkArtifactV1, BenchmarkMeasurementV1} from '@threadnote/evidence/benchmark';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const GitCommit = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/u));
 const Sha256 = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u));
@@ -141,15 +145,17 @@ const calibration = Schema.decodeSync(
 const budget: unknown = JSON.parse(
   await Bun.file('apps/threadnote/test/evaluation/baselines/code-graph-v1/budgets.json').text(),
 );
-const expectedCommit = 'a'.repeat(40);
+const expectedCommit = Effect.pipe('a', EffectString.repeat(40));
 
 describe('hosted Windows native replica adjudication', () => {
   it('rederives the safety fuse and wall-only runner variance from retained exact-tree evidence', () => {
     expect(calibration.observations).toHaveLength(2);
-    expect(new Set(calibration.observations.map(observation => observation.workflowRun)).size).toBe(2);
-    expect(new Set(calibration.observations.map(observation => observation.artifactId)).size).toBe(2);
-    expect(new Set(calibration.observations.map(observation => observation.rawJsonSha256)).size).toBe(2);
-    expect(calibration.observations.every(observation => observation.sourceTree === calibration.sourceTree)).toBe(true);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.workflowRun)).size).toBe(2);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.artifactId)).size).toBe(2);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.rawJsonSha256)).size).toBe(2);
+    expect(
+      EffectArray.every(calibration.observations, observation => observation.sourceTree === calibration.sourceTree),
+    ).toBe(true);
     const [ordinary, tail] = calibration.observations;
     if (ordinary === undefined || tail === undefined) throw new Error('Replica calibration observations are missing.');
 
@@ -177,19 +183,21 @@ describe('hosted Windows native replica adjudication', () => {
 
   it('rederives the cross-phase wall safety and analysis CPU companion from the prospective replica set', () => {
     const prospective = calibration.prospectiveReplicaSet;
-    expect(prospective.replicas.map(replica => replica.replica)).toEqual([1, 2, 3]);
-    expect(new Set(prospective.replicas.map(replica => replica.runnerIdentity)).size).toBe(3);
-    expect(new Set(prospective.replicas.map(replica => replica.rawJsonSha256)).size).toBe(3);
-    expect(prospective.replicas.filter(replica => replica.classification === 'ordinary-pass')).toHaveLength(
-      prospective.expected.ordinaryPasses,
+    expect(EffectArray.map(prospective.replicas, replica => replica.replica)).toEqual([1, 2, 3]);
+    expect(new Set(EffectArray.map(prospective.replicas, replica => replica.runnerIdentity)).size).toBe(3);
+    expect(new Set(EffectArray.map(prospective.replicas, replica => replica.rawJsonSha256)).size).toBe(3);
+    expect(
+      EffectArray.filter(prospective.replicas, replica => replica.classification === 'ordinary-pass'),
+    ).toHaveLength(prospective.expected.ordinaryPasses);
+    const schedulerTail = EffectOption.getOrUndefined(
+      EffectArray.findFirst(prospective.replicas, replica => replica.classification === 'scheduler-wall-tail'),
     );
-    const schedulerTail = prospective.replicas.find(replica => replica.classification === 'scheduler-wall-tail');
     if (schedulerTail === undefined) throw new Error('Prospective scheduler-tail observation is missing.');
     expect(
       schedulerTail.wallMilliseconds.wholeGraphAnalysisP95 / schedulerTail.processCpuMilliseconds.wholeGraphAnalysisP95,
     ).toBeCloseTo(prospective.expected.schedulerTailWholeGraphWallToCpuP95Ratio, 8);
     const observedAnalysisCpuMaximum = Math.max(
-      ...prospective.replicas.map(replica => replica.processCpuMilliseconds.wholeGraphAnalysisP95),
+      ...EffectArray.map(prospective.replicas, replica => replica.processCpuMilliseconds.wholeGraphAnalysisP95),
     );
     expect(observedAnalysisCpuMaximum).toBe(prospective.expected.wholeGraphAnalysisProcessCpuObservedP95Maximum);
     expect(Math.ceil((observedAnalysisCpuMaximum * 1.5) / 100) * 100).toBe(
@@ -202,51 +210,63 @@ describe('hosted Windows native replica adjudication', () => {
     const oneTail = replicas([500, 1673.8084, 600]);
     const result = adjudicate(oneTail);
     expect(result.gate).toEqual({failures: [], passed: true});
-    expect(result.replicas.map(replica => replica.ordinaryPassed)).toEqual([true, false, true]);
-    expect(result.replicas.every(replica => replica.safetyPassed)).toBe(true);
+    expect(EffectArray.map(result.replicas, replica => replica.ordinaryPassed)).toEqual([true, false, true]);
+    expect(EffectArray.every(result.replicas, replica => replica.safetyPassed)).toBe(true);
   });
 
   it('accepts the prospective cross-phase scheduler tail with two complete ordinary passes', () => {
     const prospective = calibration.prospectiveReplicaSet;
     const result = adjudicateCodeGraphWindowsReplicas(prospectiveReplicaInputs(), budget, prospective.commit);
     expect(result.gate).toEqual({failures: [], passed: true});
-    expect(result.replicas.filter(replica => replica.ordinaryPassed)).toHaveLength(prospective.expected.ordinaryPasses);
-    expect(result.replicas.filter(replica => replica.safetyPassed)).toHaveLength(
-      prospective.expected.safetyPassesAfterCorrection,
+    expect(
+      EffectArrayPipe(result.replicas, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (replica, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && replica.ordinaryPassed,
+        ),
+      ),
+    ).toHaveLength(prospective.expected.ordinaryPasses);
+    expect(
+      EffectArrayPipe(result.replicas, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (replica, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && replica.safetyPassed,
+        ),
+      ),
+    ).toHaveLength(prospective.expected.safetyPassesAfterCorrection);
+    expect(EffectArray.map(result.replicas, replica => replica.ordinaryPassed)).toEqual(
+      EffectArray.map(prospective.replicas, replica => replica.classification === 'ordinary-pass'),
     );
-    expect(result.replicas.map(replica => replica.ordinaryPassed)).toEqual(
-      prospective.replicas.map(replica => replica.classification === 'ordinary-pass'),
+    expect(EffectArray.map(result.replicas, replica => replica.hotQuery.p50)).toEqual(
+      EffectArray.map(prospective.replicas, replica => replica.wallMilliseconds.hotQueryP50),
     );
-    expect(result.replicas.map(replica => replica.hotQuery.p50)).toEqual(
-      prospective.replicas.map(replica => replica.wallMilliseconds.hotQueryP50),
+    expect(EffectArray.map(result.replicas, replica => replica.hotQuery.p95)).toEqual(
+      EffectArray.map(prospective.replicas, replica => replica.wallMilliseconds.hotQueryP95),
     );
-    expect(result.replicas.map(replica => replica.hotQuery.p95)).toEqual(
-      prospective.replicas.map(replica => replica.wallMilliseconds.hotQueryP95),
+    expect(EffectArray.map(result.replicas, replica => replica.processCpu.p95)).toEqual(
+      EffectArray.map(prospective.replicas, replica => replica.processCpuMilliseconds.hotQueryP95),
     );
-    expect(result.replicas.map(replica => replica.processCpu.p95)).toEqual(
-      prospective.replicas.map(replica => replica.processCpuMilliseconds.hotQueryP95),
+    expect(EffectArray.map(result.replicas, replica => replica.wholeGraphAnalysis.p95)).toEqual(
+      EffectArray.map(prospective.replicas, replica => replica.wallMilliseconds.wholeGraphAnalysisP95),
     );
-    expect(result.replicas.map(replica => replica.wholeGraphAnalysis.p95)).toEqual(
-      prospective.replicas.map(replica => replica.wallMilliseconds.wholeGraphAnalysisP95),
-    );
-    expect(result.replicas.map(replica => replica.wholeGraphAnalysisProcessCpu.p95)).toEqual(
-      prospective.replicas.map(replica => replica.processCpuMilliseconds.wholeGraphAnalysisP95),
+    expect(EffectArray.map(result.replicas, replica => replica.wholeGraphAnalysisProcessCpu.p95)).toEqual(
+      EffectArray.map(prospective.replicas, replica => replica.processCpuMilliseconds.wholeGraphAnalysisP95),
     );
   });
 
   it('replays the candidate-C nested materialization tail under the enclosing phase safety contract', () => {
     const candidate = calibration.nestedMaterializationOutlier;
-    expect(candidate.replicas.map(replica => replica.replica)).toEqual([1, 2, 3]);
-    expect(new Set(candidate.replicas.map(replica => replica.artifactId)).size).toBe(3);
-    expect(new Set(candidate.replicas.map(replica => replica.rawJsonSha256)).size).toBe(3);
-    expect(candidate.replicas.filter(replica => replica.wallMilliseconds.coldMaterialization <= 16_000)).toHaveLength(
-      candidate.expected.safetyPassesBeforeCorrection,
-    );
+    expect(EffectArray.map(candidate.replicas, replica => replica.replica)).toEqual([1, 2, 3]);
+    expect(new Set(EffectArray.map(candidate.replicas, replica => replica.artifactId)).size).toBe(3);
+    expect(new Set(EffectArray.map(candidate.replicas, replica => replica.rawJsonSha256)).size).toBe(3);
+    expect(
+      EffectArray.filter(candidate.replicas, replica => replica.wallMilliseconds.coldMaterialization <= 16_000),
+    ).toHaveLength(candidate.expected.safetyPassesBeforeCorrection);
     const observedColdMaterializationCpuMaximum = Math.max(
-      ...candidate.replicas.map(replica => replica.processCpuMilliseconds.coldMaterialization),
+      ...EffectArray.map(candidate.replicas, replica => replica.processCpuMilliseconds.coldMaterialization),
     );
     const observedOneFileMaterializationCpuMaximum = Math.max(
-      ...candidate.replicas.map(replica => replica.processCpuMilliseconds.oneFileMaterialization),
+      ...EffectArray.map(candidate.replicas, replica => replica.processCpuMilliseconds.oneFileMaterialization),
     );
     expect(observedColdMaterializationCpuMaximum).toBe(candidate.expected.coldMaterializationProcessCpuObservedMaximum);
     expect(observedOneFileMaterializationCpuMaximum).toBe(
@@ -259,7 +279,9 @@ describe('hosted Windows native replica adjudication', () => {
       calibration.policy.oneFileMaterializationProcessCpuMillisecondsMaximum,
     );
 
-    const outlier = candidate.replicas.find(replica => replica.classification === 'scheduler-storage-tail');
+    const outlier = EffectOption.getOrUndefined(
+      EffectArray.findFirst(candidate.replicas, replica => replica.classification === 'scheduler-storage-tail'),
+    );
     if (outlier === undefined) throw new Error('Nested materialization outlier is missing.');
     expect(outlier.wallMilliseconds.coldMaterialization).toBeLessThan(outlier.wallMilliseconds.coldIndex);
     expect(
@@ -277,16 +299,28 @@ describe('hosted Windows native replica adjudication', () => {
     const result = adjudicateCodeGraphWindowsReplicas(calibratedReplicaInputs(candidate), budget, candidate.commit);
     expect(result.gate).toEqual({failures: [], passed: true});
     expect(result.policy.nestedMaterializationUsesEnclosingSafetyCeiling).toBe(true);
-    expect(result.replicas.filter(replica => replica.ordinaryPassed)).toHaveLength(candidate.expected.ordinaryPasses);
-    expect(result.replicas.filter(replica => replica.safetyPassed)).toHaveLength(
-      candidate.expected.safetyPassesAfterCorrection,
+    expect(
+      EffectArrayPipe(result.replicas, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (replica, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && replica.ordinaryPassed,
+        ),
+      ),
+    ).toHaveLength(candidate.expected.ordinaryPasses);
+    expect(
+      EffectArrayPipe(result.replicas, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (replica, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && replica.safetyPassed,
+        ),
+      ),
+    ).toHaveLength(candidate.expected.safetyPassesAfterCorrection);
+    expect(EffectArray.map(result.replicas, replica => replica.ordinaryPassed)).toEqual([false, true, true]);
+    expect(EffectArray.map(result.replicas, replica => replica.coldMaterializationProcessCpu.maximum)).toEqual(
+      EffectArray.map(candidate.replicas, replica => replica.processCpuMilliseconds.coldMaterialization),
     );
-    expect(result.replicas.map(replica => replica.ordinaryPassed)).toEqual([false, true, true]);
-    expect(result.replicas.map(replica => replica.coldMaterializationProcessCpu.maximum)).toEqual(
-      candidate.replicas.map(replica => replica.processCpuMilliseconds.coldMaterialization),
-    );
-    expect(result.replicas.map(replica => replica.oneFileMaterializationProcessCpu.maximum)).toEqual(
-      candidate.replicas.map(replica => replica.processCpuMilliseconds.oneFileMaterialization),
+    expect(EffectArray.map(result.replicas, replica => replica.oneFileMaterializationProcessCpu.maximum)).toEqual(
+      EffectArray.map(candidate.replicas, replica => replica.processCpuMilliseconds.oneFileMaterialization),
     );
   });
 
@@ -307,8 +341,8 @@ describe('hosted Windows native replica adjudication', () => {
       ...inputs.slice(0, 2),
       {...third, artifact: replaceAllStatistics(third.artifact, 'whole-graph-structural-analysis', 2000.000_001)},
     ]);
-    expect(result.replicas.map(replica => replica.ordinaryPassed)).toEqual([true, false, false]);
-    expect(result.replicas.map(replica => replica.safetyPassed)).toEqual([true, true, true]);
+    expect(EffectArray.map(result.replicas, replica => replica.ordinaryPassed)).toEqual([true, false, false]);
+    expect(EffectArray.map(result.replicas, replica => replica.safetyPassed)).toEqual([true, true, true]);
     expect(result.gate.failures).toContain('ordinary performance budget passed 1/3; required 2');
   });
 
@@ -478,7 +512,7 @@ describe('hosted Windows native replica adjudication', () => {
     const result = adjudicate([aboveBoundary, ...inputs.slice(1)]);
     expect(result.gate.passed).toBe(false);
     expect(result.replicas[0]?.safetyPassed).toBe(false);
-    expect(result.gate.failures.join('\n')).toMatch(/whole-graph-structural-analysis-process-cpu p95/u);
+    expect(EffectArray.join(result.gate.failures, '\n')).toMatch(/whole-graph-structural-analysis-process-cpu p95/u);
   });
 
   it('fails closed on whole-graph wall and CPU unit or sample-shape drift', () => {
@@ -542,8 +576,11 @@ describe('hosted Windows native replica adjudication', () => {
     const inputs = replicas();
     const first = inputs[0];
     if (first === undefined) throw new Error('Replica fixture is missing.');
-    const processCpu = first.artifact.measurements.find(
-      measurement => measurement.name === 'whole-graph-structural-analysis-process-cpu',
+    const processCpu = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        first.artifact.measurements,
+        measurement => measurement.name === 'whole-graph-structural-analysis-process-cpu',
+      ),
     );
     if (processCpu === undefined) throw new Error('Whole-graph process CPU fixture is missing.');
     const contradictory = {
@@ -605,7 +642,7 @@ describe('hosted Windows native replica adjudication', () => {
       if (first === undefined) throw new Error('Replica fixture is missing.');
       const result = adjudicate([{...first, artifact: mutate(first.artifact)}, ...inputs.slice(1)]);
       expect(result.gate.passed).toBe(false);
-      expect(result.gate.failures.join('\n')).toMatch(expected);
+      expect(EffectArray.join(result.gate.failures, '\n')).toMatch(expected);
     }
   });
 
@@ -619,7 +656,7 @@ describe('hosted Windows native replica adjudication', () => {
         'runner identities must be distinct across all replicas',
       ]),
     );
-    const mismatched = valid.map((input, index) =>
+    const mismatched = EffectArray.map(valid, (input, index) =>
       index === 2
         ? {
             ...input,
@@ -648,7 +685,9 @@ describe('hosted Windows native replica adjudication', () => {
           fc.double({max: 2_100, min: 500, noDefaultInfinity: true, noNaN: true}),
         ),
         walls => {
-          const expected = walls.every(value => value <= 1900) && walls.filter(value => value <= 1050).length >= 2;
+          const expected =
+            EffectArray.every(walls, value => value <= 1900) &&
+            EffectArray.filter(walls, value => value <= 1050).length >= 2;
           expect(adjudicate(replicas(walls)).gate.passed).toBe(expected);
         },
       ),
@@ -779,9 +818,9 @@ function adjudicate(inputs: readonly CodeGraphWindowsReplicaInput[]) {
 }
 
 function replicas(walls: Triple = [500, 600, 700]): readonly CodeGraphWindowsReplicaInput[] {
-  return walls.map((wallP95, index) => ({
+  return EffectArray.map(walls, (wallP95, index) => ({
     artifact: artifact(index + 1, wallP95),
-    artifactSha256: String(index + 1).repeat(64),
+    artifactSha256: Effect.pipe(String(index + 1), EffectString.repeat(64)),
     replica: index + 1,
   }));
 }
@@ -796,7 +835,7 @@ type CalibratedReplicaSet = {
 };
 
 function calibratedReplicaInputs(replicaSet: CalibratedReplicaSet): readonly CodeGraphWindowsReplicaInput[] {
-  return replicaSet.replicas.map(replica => {
+  return EffectArray.map(replicaSet.replicas, replica => {
     let replay = artifact(replica.replica, replica.wallMilliseconds.hotQueryP95);
     replay = {
       ...replay,
@@ -909,13 +948,13 @@ function artifact(replica: number, wallP95: number): BenchmarkArtifactV1 {
       incrementalReusedFiles: 12,
       oneFileReindexStagedFiles: 1,
       oneFileReindexTotalFiles: 13,
-      primaryQueryStructuralDigestIncremental: '1'.repeat(64),
-      primaryQueryStructuralDigestSameOverlayReference: '1'.repeat(64),
+      primaryQueryStructuralDigestIncremental: Effect.pipe('1', EffectString.repeat(64)),
+      primaryQueryStructuralDigestSameOverlayReference: Effect.pipe('1', EffectString.repeat(64)),
       runnerClass: 'github-hosted-windows-x64',
-      runnerIdentity: `runner-${replica.toString(16).padStart(16, '0')}`,
+      runnerIdentity: `runner-${Effect.pipe(replica.toString(16), EffectString.padStart(16, '0'))}`,
       runtimePlatform: 'win32',
-      structuralGraphDigestIncremental: '2'.repeat(64),
-      structuralGraphDigestSameOverlayReference: '2'.repeat(64),
+      structuralGraphDigestIncremental: Effect.pipe('2', EffectString.repeat(64)),
+      structuralGraphDigestSameOverlayReference: Effect.pipe('2', EffectString.repeat(64)),
       vectorEnabled: false,
     },
     suite: 'code-graph-v1',
@@ -936,7 +975,7 @@ function measurement(
 function replaceHotSampleCounts(artifact: BenchmarkArtifactV1, samples: number): BenchmarkArtifactV1 {
   return {
     ...artifact,
-    measurements: artifact.measurements.map(measurement =>
+    measurements: EffectArray.map(artifact.measurements, measurement =>
       measurement.name === 'hot-exact-lexical-query' || measurement.name === 'hot-query-process-cpu'
         ? {...measurement, samples}
         : measurement,
@@ -961,10 +1000,14 @@ function replaceMeasurement(
   name: string,
   update: (measurement: BenchmarkMeasurementV1) => BenchmarkMeasurementV1,
 ): BenchmarkArtifactV1 {
-  const current = artifact.measurements.find(measurement => measurement.name === name);
+  const current = EffectOption.getOrUndefined(
+    EffectArray.findFirst(artifact.measurements, measurement => measurement.name === name),
+  );
   if (current === undefined) throw new Error(`Missing measurement ${name}.`);
   return {
     ...artifact,
-    measurements: artifact.measurements.map(measurement => (measurement.name === name ? update(current) : measurement)),
+    measurements: EffectArray.map(artifact.measurements, measurement =>
+      measurement.name === name ? update(current) : measurement,
+    ),
   };
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Console, Crypto, DateTime, Effect, Fiber, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
 import {writeFinalCliOutput} from '../effect/cli/output.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -8,6 +9,8 @@ import {orderThreadnoteProcessesByAttention} from './attention.js';
 import {observeProcessInstanceIdentity, processInstanceIdentityMatches} from './process_identity.js';
 import {withoutTelemetrySessionEnvironment} from '../telemetry/session.js';
 import {createMissingProcessFile, linkMissingProcessFile} from './owned_file.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const PROCESS_DIAGNOSTICS_SCHEMA_VERSION = 1;
 const PROCESS_DIAGNOSTICS_LIMIT = 100;
@@ -25,7 +28,14 @@ export const readBoundedProcessRegistrationNames = Effect.fn('processDiagnostics
   const fs = yield* FileSystem.FileSystem;
   if (!(yield* fs.exists(directory))) return {names: [] as string[], truncated: false};
   const page = yield* runtimeTextDirectoryNamePage(directory, PROCESS_DIAGNOSTICS_SCAN_LIMIT).pipe(Effect.orDie);
-  return {names: page.names.filter(name => /^[1-9]\d*\.json$/.test(name)).sort(), truncated: page.overflow};
+  const names = page.names;
+  return {
+    names: EffectArray.filter(
+      names,
+      (name, __effectArrayIndex) => __effectArrayIndex in names && /^[1-9]\d*\.json$/.test(name),
+    ).sort(),
+    truncated: page.overflow,
+  };
 });
 
 export type ThreadnoteProcessRole =
@@ -97,13 +107,13 @@ export type ThreadnoteProcessTerminationErrorCode =
   | 'process-signal-failed'
   | 'process-stale';
 
-export class ThreadnoteProcessTerminationError extends Schema.TaggedError<ThreadnoteProcessTerminationError>()(
-  'ThreadnoteProcessTerminationError',
-  {
-    code: Schema.String,
-    message: Schema.String,
-  },
-) {
+export class ThreadnoteProcessTerminationError extends Schema.TaggedError<
+  ThreadnoteProcessTerminationError,
+  {readonly brand: unique symbol}
+>()('ThreadnoteProcessTerminationError', {
+  code: Schema.String,
+  message: Schema.String,
+}) {
   static of(code: ThreadnoteProcessTerminationErrorCode, message: string): ThreadnoteProcessTerminationError {
     return ThreadnoteProcessTerminationError.make({code, message});
   }
@@ -166,13 +176,31 @@ export const threadnoteHomeForProcess = Effect.fn('processDiagnostics.home')(fun
 ) {
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const inline = arguments_.find(argument => argument.startsWith('--home='))?.slice('--home='.length);
-  const flagIndex = arguments_.findIndex(argument => argument === '--home');
+  const inline = Effect2.pipe(
+    Option.getOrUndefined(
+      EffectArray.findFirst(
+        arguments_,
+        __effectArrayValue =>
+          !!(argument => Effect2.pipe(argument, EffectString.startsWith('--home=')))(__effectArrayValue),
+      ),
+    ),
+    effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.slice('--home='.length)),
+  );
+  const flagIndex = Option.getOrElse(
+    EffectArray.findFirstIndex(arguments_, argument => argument === '--home'),
+    () => -1,
+  );
   const configured = inline || (flagIndex >= 0 ? arguments_[flagIndex + 1] : undefined) || environment.THREADNOTE_HOME;
   const candidate = configured || path.join(system.homeDirectory, '.threadnote');
   if (candidate === '~') return system.homeDirectory;
-  if (candidate.startsWith('~/') || candidate.startsWith('~\\')) {
-    return path.join(system.homeDirectory, candidate.slice(2));
+  if (
+    Effect2.pipe(candidate, EffectString.startsWith('~/')) ||
+    Effect2.pipe(candidate, EffectString.startsWith('~\\'))
+  ) {
+    return path.join(system.homeDirectory, Effect2.pipe(candidate, EffectString.slice(2)));
   }
   return path.isAbsolute(candidate)
     ? candidate
@@ -312,12 +340,12 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
   // PID/start-identity-bound lease so updates do not delete their executable.
   // Merge only that bounded installation evidence; never inspect or expose
   // arbitrary process command lines, which may contain memory text or paths.
-  const releaseLeaseByProcess = new Map(releaseLeases.map(lease => [lease.processId, lease] as const));
-  const registeredProcessIds = new Set(live.map(value => value.processId));
+  const releaseLeaseByProcess = new Map(EffectArray.map(releaseLeases, lease => [lease.processId, lease] as const));
+  const registeredProcessIds = new Set(EffectArray.map(live, value => value.processId));
   const now = yield* Clock.currentTimeMillis;
-  const legacy = releaseLeases
-    .filter(lease => !registeredProcessIds.has(lease.processId))
-    .map(lease => {
+  const legacy = EffectArray.map(
+    EffectArray.filter(releaseLeases, lease => !registeredProcessIds.has(lease.processId)),
+    lease => {
       const startedAt = Option.getOrElse(lease.startedAt, () => new Date(now).toISOString());
       return {
         ageMilliseconds: Math.max(0, now - Date.parse(startedAt)),
@@ -327,15 +355,19 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
         role: 'legacy' as const,
         startedAt,
       };
-    });
+    },
+  );
 
   // ROLE stays the registered identity of the process. A nested activity is
   // reported separately so a dedicated graph build is still obvious without an
   // MCP or CLI process appearing to be a graph daemon it never was.
-  const roleByProcess = new Map(live.map(value => [value.processId, value.baseRole] as const));
-  const current = live
-    .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.processId - right.processId)
-    .map(value => ({
+  const roleByProcess = new Map(EffectArray.map(live, value => [value.processId, value.baseRole] as const));
+  const current = EffectArray.map(
+    live.sort(
+      (left, right) =>
+        Effect2.pipe(left.startedAt, EffectString.localeCompare(right.startedAt)) || left.processId - right.processId,
+    ),
+    value => ({
       ...(value.role === value.baseRole ? {} : {activityRole: value.role}),
       ageMilliseconds: Math.max(0, now - Date.parse(value.startedAt)),
       ...(value.currentOperation === undefined ? {} : {currentOperation: value.currentOperation}),
@@ -349,9 +381,11 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
         : {releaseVersion: releaseLeaseByProcess.get(value.processId)!.version}),
       role: value.baseRole,
       startedAt: value.startedAt,
-    }));
+    }),
+  );
   const candidates = [...current, ...legacy].sort(
-    (left, right) => left.startedAt.localeCompare(right.startedAt) || left.processId - right.processId,
+    (left, right) =>
+      Effect2.pipe(left.startedAt, EffectString.localeCompare(right.startedAt)) || left.processId - right.processId,
   );
   // Bound the OS memory query to the same privacy-safe rows the command can
   // return. A damaged private lease tree must not turn diagnostics into an
@@ -362,16 +396,19 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
   );
   const memoryByProcess = new Map(
     processMemoryBytes(
-      selected.map(value => value.processId),
+      EffectArray.map(selected, value => value.processId),
       system.platform,
       system.environment(),
     ),
   );
-  if (selected.some(value => value.processId === system.processId) && !memoryByProcess.has(system.processId)) {
+  if (
+    EffectArray.some(selected, value => value.processId === system.processId) &&
+    !memoryByProcess.has(system.processId)
+  ) {
     const rssBytes = system.memoryUsage().rss;
     if (Number.isSafeInteger(rssBytes) && rssBytes >= 0) memoryByProcess.set(system.processId, rssBytes);
   }
-  const sorted = selected.map(value => ({
+  const sorted = EffectArray.map(selected, value => ({
     ...value,
     ...(memoryByProcess.get(value.processId) === undefined ? {} : {rssBytes: memoryByProcess.get(value.processId)}),
   }));
@@ -381,7 +418,7 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
     truncated:
       releaseLeaseDiagnostics.truncated || live.length + legacy.length > PROCESS_DIAGNOSTICS_LIMIT || scan.truncated,
   } satisfies ThreadnoteProcessDiagnostics;
-  return {diagnostics, registrations: new Map(live.map(value => [value.processId, value] as const))};
+  return {diagnostics, registrations: new Map(EffectArray.map(live, value => [value.processId, value] as const))};
 });
 
 export const readThreadnoteProcessDiagnostics = Effect.fn('processDiagnostics.read')(function* (
@@ -483,7 +520,7 @@ export const runProcessDiagnostics = Effect.fn('processDiagnostics.run')(functio
   const observed = yield* readThreadnoteProcessDiagnostics(config);
   const diagnostics: ThreadnoteProcessDiagnostics = {
     ...observed,
-    processes: observed.processes.filter(process => process.processId !== system.processId),
+    processes: EffectArray.filter(observed.processes, process => process.processId !== system.processId),
   };
   if (options.json) {
     yield* writeFinalCliOutput(JSON.stringify(diagnostics));
@@ -494,7 +531,7 @@ export const runProcessDiagnostics = Effect.fn('processDiagnostics.run')(functio
     return;
   }
   yield* Console.log(renderProcessDiagnosticsTable(diagnostics.processes));
-  if (diagnostics.processes.some(process => process.role === 'legacy')) {
+  if (EffectArray.some(diagnostics.processes, process => process.role === 'legacy')) {
     yield* Console.log(
       'Legacy entries predate runtime registration; restart their owning agent sessions to retire old releases safely.',
     );
@@ -505,7 +542,7 @@ export const runProcessDiagnostics = Effect.fn('processDiagnostics.run')(functio
 export function renderProcessDiagnosticsTable(processes: readonly ThreadnoteProcessDiagnostic[]): string {
   const rows = [
     ['PID', 'PPID', 'ROLE', 'VERSION', 'AGE', 'RSS', 'OPERATION'],
-    ...processes.map(process => [
+    ...EffectArray.map(processes, process => [
       String(process.processId),
       process.parentProcessId === 0 ? '-' : String(process.parentProcessId),
       process.activityRole === undefined ? process.role : `${process.role} (${process.activityRole})`,
@@ -515,19 +552,25 @@ export function renderProcessDiagnosticsTable(processes: readonly ThreadnoteProc
       process.currentOperation ?? '-',
     ]),
   ];
-  const widths = rows[0].map((_, column) => Math.max(...rows.map(row => row[column].length)));
-  return rows
-    .map(row =>
-      row.map((value, column) => (column === row.length - 1 ? value : value.padEnd(widths[column] + 2))).join(''),
-    )
-    .join('\n');
+  const widths = EffectArray.map(rows[0], (_, column) => Math.max(...EffectArray.map(rows, row => row[column].length)));
+  return EffectArray.join(
+    EffectArray.map(rows, row =>
+      EffectArray.join(
+        EffectArray.map(row, (value, column) =>
+          column === row.length - 1 ? value : Effect2.pipe(value, EffectString.padEnd(widths[column] + 2)),
+        ),
+        '',
+      ),
+    ),
+    '\n',
+  );
 }
 
 export const legacyProcessDoctorCheck = Effect.fn('processDiagnostics.doctorCheck')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
 ) {
   const diagnostics = yield* readThreadnoteProcessDiagnostics(config);
-  const legacy = diagnostics.processes.filter(process => process.role === 'legacy');
+  const legacy = EffectArray.filter(diagnostics.processes, process => process.role === 'legacy');
   if (legacy.length === 0) {
     return {
       detail: 'no unregistered standalone processes detected',
@@ -535,9 +578,12 @@ export const legacyProcessDoctorCheck = Effect.fn('processDiagnostics.doctorChec
       status: 'ok' as const,
     };
   }
-  const versions = [...new Set(legacy.flatMap(process => (process.releaseVersion ? [process.releaseVersion] : [])))]
-    .sort()
-    .join(', ');
+  const versions = EffectArray.join(
+    [
+      ...new Set(EffectArray.flatMap(legacy, process => (process.releaseVersion ? [process.releaseVersion] : []))),
+    ].sort(),
+    ', ',
+  );
   return {
     detail:
       `${legacy.length} live pre-registry process(es)${versions ? ` from ${versions}` : ''}; ` +
@@ -809,7 +855,7 @@ function parseRegistrationFile(source: string): Option.Option<ProcessRegistratio
 }
 
 function isProcessRegistrationFile(value: unknown): value is ProcessRegistrationFile {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
   const candidate = value as Partial<ProcessRegistrationFile>;
   return (
     candidate.schemaVersion === PROCESS_DIAGNOSTICS_SCHEMA_VERSION &&
@@ -989,7 +1035,16 @@ function processMemoryBytes(
   try {
     if (platform === 'win32') return windowsProcessMemoryBytes(processIds, environment);
     const result = Bun.spawnSync({
-      cmd: ['ps', '-o', 'pid=,rss=', '-p', processIds.join(',')],
+      cmd: [
+        'ps',
+        '-o',
+        'pid=,rss=',
+        '-p',
+        EffectArray.join(
+          EffectArray.map(processIds, item => (item === null || item === undefined ? '' : String(item))),
+          ',',
+        ),
+      ],
       env: withoutTelemetrySessionEnvironment(environment),
       stderr: 'pipe',
       stdout: 'pipe',
@@ -997,7 +1052,7 @@ function processMemoryBytes(
     });
     if (result.exitCode !== 0) return new Map();
     const memory = new Map<number, number>();
-    for (const line of result.stdout.toString().split(/\r?\n/)) {
+    for (const line of Effect2.pipe(result.stdout.toString(), EffectString.split(/\r?\n/))) {
       const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
       if (!match) continue;
       memory.set(Number(match[1]), Number(match[2]) * 1024);
@@ -1021,14 +1076,20 @@ function windowsProcessMemoryBytes(
       '$ids=$env:THREADNOTE_PROCESS_IDS -split ","; ' +
         'Get-Process -Id $ids -ErrorAction SilentlyContinue | Select-Object Id,WorkingSet64 | ConvertTo-Json -Compress',
     ],
-    env: {...withoutTelemetrySessionEnvironment(environment), THREADNOTE_PROCESS_IDS: processIds.join(',')},
+    env: {
+      ...withoutTelemetrySessionEnvironment(environment),
+      THREADNOTE_PROCESS_IDS: EffectArray.join(
+        EffectArray.map(processIds, item => (item === null || item === undefined ? '' : String(item))),
+        ',',
+      ),
+    },
     stderr: 'pipe',
     stdout: 'pipe',
     timeout: PROCESS_MEMORY_QUERY_TIMEOUT_MS,
   });
   if (result.exitCode !== 0 || !result.stdout.length) return new Map();
   const parsed = JSON.parse(result.stdout.toString()) as unknown;
-  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  const rows = EffectArray.isArray(parsed) ? parsed : [parsed];
   const memory = new Map<number, number>();
   for (const row of rows) {
     if (

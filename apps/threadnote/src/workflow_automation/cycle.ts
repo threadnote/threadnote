@@ -1,12 +1,7 @@
-import {
-  Array as EffectArray,
-  Option as EffectOption,
-  String as EffectString,
-  Effect,
-  FileSystem,
-  Path,
-  Schema,
-} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+import {isJsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
@@ -20,7 +15,6 @@ import {
   invalidateNativeCycle,
   reconcileNativeCyclePlan,
   type NativeCycleState,
-  type NativeCycleValidation,
 } from '@threadnote/workflow-automations/cycle';
 import {
   NativeCyclePacketOptionsSchema,
@@ -44,6 +38,9 @@ import {
 } from './cycle_git.js';
 import {nativeWorkflowError} from './memory.js';
 import type {NativeAuthoringCall} from './authoring_artifacts.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
@@ -151,13 +148,16 @@ const readOnlyIncoming = Effect.fn('workflowAutomation.cycle.incoming')(function
   captured: Effect.Success<ReturnType<typeof captureNativeCycleSource>>,
   baseline: NativeCycleRuntime['baselines'][string],
 ) {
-  const base = (yield* git(repo, ['rev-parse', '--verify', '--end-of-options', phase.baseBranch + '^{commit}'])).trim();
-  const common = (yield* git(repo, ['merge-base', base, captured.head])).trim();
+  const base = Effect2.pipe(
+    yield* git(repo, ['rev-parse', '--verify', '--end-of-options', phase.baseBranch + '^{commit}']),
+    EffectString.trim,
+  );
+  const common = Effect2.pipe(yield* git(repo, ['merge-base', base, captured.head]), EffectString.trim);
   const scope = yield* captureNativeCycleSource(repo, common);
   if (scope.head !== captured.head || scope.tree !== captured.tree)
     return yield* fail('source-drift', 'Source changed during declared-base scope verification.');
-  const files = [...new Set([...Object.keys(captured.files), ...Object.keys(scope.files)])].sort();
-  const paths = files.filter(file => !checkNativeCycleScope(phase, [file]));
+  const files = [...new Set([...EffectRecord.keys(captured.files), ...EffectRecord.keys(scope.files)])].sort();
+  const paths = EffectArray.filter(files, file => !checkNativeCycleScope(phase, [file]));
   const incoming = [];
   for (const file of paths) {
     const actual = captured.entries[file] ?? scope.entries[file];
@@ -182,7 +182,7 @@ const readOnlyIncoming = Effect.fn('workflowAutomation.cycle.incoming')(function
     incoming,
     scopeBase: scope.baseTree,
     declaredBaseHead: base,
-    scopeFiles: Object.keys(scope.files).sort(),
+    scopeFiles: EffectRecord.keys(scope.files).sort(),
   };
 });
 
@@ -195,7 +195,8 @@ const currentSnapshot = Effect.fn('workflowAutomation.cycle.checkSnapshot')(func
   if (
     current.tree !== snapshot.tree ||
     (current.head !== snapshot.head &&
-      (acceptedHead !== current.head || (yield* git(repo, ['rev-parse', 'HEAD^{tree}'])).trim() !== snapshot.tree))
+      (acceptedHead !== current.head ||
+        Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== snapshot.tree))
   )
     return yield* fail('source-drift', 'Current HEAD/tree differs from the immutable review snapshot.');
   return current;
@@ -246,11 +247,12 @@ export const runNativeCycle = <R>(
         generation: plan.source.binding.generation,
         uri: plan.source.root.uri,
         delivery: plan.delivery,
-        bindings: Object.fromEntries(
-          plan.phases.map(phase => [phase.id, {branch: phase.branch, baseBranch: phase.baseBranch}]),
+        bindings: EffectRecord.fromEntries(
+          EffectArray.map(plan.phases, phase => [phase.id, {branch: phase.branch, baseBranch: phase.baseBranch}]),
         ),
       });
-      if (stableJson((observed as {authoring: unknown}).authoring) !== stableJson(plan))
+      const observedAuthoring = isJsonObject(observed) ? observed.authoring : undefined;
+      if (stableJson(observedAuthoring) !== stableJson(plan))
         return yield* fail('plan-drift', 'The plan differs from its verified ready native authoring export.');
       if (request.command === 'validate-plan')
         return {status: 'ok', valid: true, source: plan.source, phaseCount: plan.phases.length};
@@ -281,8 +283,13 @@ export const runNativeCycle = <R>(
           generation: plan.source.binding.generation,
           uri: plan.source.root.uri,
         });
-        const artifact = (read as {artifact?: {memoryId: string; revision: string}}).artifact;
-        if (artifact?.memoryId !== plan.source.root.memoryId || artifact.revision !== plan.source.root.revision)
+        const artifactValue = isJsonObject(read) ? read.artifact : undefined;
+        const artifact = isJsonObject(artifactValue) ? artifactValue : undefined;
+        if (
+          !artifact ||
+          artifact.memoryId !== plan.source.root.memoryId ||
+          artifact.revision !== plan.source.root.revision
+        )
           return yield* fail(
             'plan-drift',
             'The approved plan root changed. Reconcile its current verified export before further delivery.',
@@ -325,7 +332,8 @@ export const runNativeCycle = <R>(
         const mutation = nativeCycleRequiresRevision(request.command);
         if (
           mutation &&
-          (stored.state.authoringSave || stored.state.operations.some(operation => operation.status === 'prepared'))
+          (stored.state.authoringSave ||
+            EffectArray.some(stored.state.operations, operation => operation.status === 'prepared'))
         )
           return yield* fail(
             'pending-operation',
@@ -345,15 +353,17 @@ export const runNativeCycle = <R>(
           });
         const pinBaseline = (phaseId: string) =>
           Effect.gen(function* () {
-            const selected = (runtime?.state.plan ?? verifiedPlan!).phases.find(phase => phase.id === phaseId)!;
-            if ((yield* git(repo, ['branch', '--show-current'])).trim() !== selected.branch)
+            const selected = EffectOption.getOrUndefined(
+              EffectArray.findFirst((runtime?.state.plan ?? verifiedPlan!).phases, phase => phase.id === phaseId),
+            )!;
+            if (Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch)
               return yield* fail('branch-drift', 'Begin from the declared phase branch before changing source.');
             const captured = yield* captureNativeCycleSource(repo, 'HEAD');
             return {
               repo,
               head: captured.head,
               tree: captured.tree,
-              preservedFiles: Object.keys(captured.files),
+              preservedFiles: EffectRecord.keys(captured.files),
               pinnedRef: yield* pinNativeCycleTree(repo, stored.state.bindingId, phaseId, captured.tree, 'baseline'),
             };
           });
@@ -382,11 +392,15 @@ export const runNativeCycle = <R>(
         if (!runtime) return yield* fail('cycle-not-found', 'Initialize this run from a verified native plan export.');
         const state = runtime.state;
         const phaseId = request.phaseId;
-        const phase = state.plan.phases.find(item => item.id === phaseId);
+        const phase = EffectOption.getOrUndefined(
+          EffectArray.findFirst(state.plan.phases, item => item.id === phaseId),
+        );
         const getPhase = () => required(phase, 'a phaseId from this native plan');
         const getSnapshot = () =>
           required(
-            runtime.snapshots.find(item => item.snapshot.snapshotId === request.snapshotId),
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === request.snapshotId),
+            ),
             'an existing snapshotId',
           );
         const compact = () => ({
@@ -394,7 +408,7 @@ export const runNativeCycle = <R>(
           revision: stored.revision,
           next: nextNativeCycle(state),
           featureId: state.plan.featureId,
-          phases: state.plan.phases.map(item => ({
+          phases: EffectArray.map(state.plan.phases, item => ({
             id: item.id,
             status: state.phases[item.id].status,
             phaseHash: state.phases[item.id].phaseHash,
@@ -497,7 +511,9 @@ export const runNativeCycle = <R>(
           if (state.phases[selected.id].status === 'merged')
             return yield* fail('phase-complete', 'Merged phase history is immutable.');
           const snapshotId = yield* from(() => required(request.snapshotId, 'a fresh immutable snapshotId'));
-          const existing = runtime.snapshots.find(item => item.snapshot.snapshotId === snapshotId);
+          const existing = EffectOption.getOrUndefined(
+            EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === snapshotId),
+          );
           if (existing) {
             if (
               existing.snapshot.phaseId !== selected.id ||
@@ -508,7 +524,9 @@ export const runNativeCycle = <R>(
             return {status: 'ok', revision: stored.revision, snapshot: existing};
           }
           const prior = request.previous
-            ? runtime.snapshots.find(item => item.snapshot.snapshotId === request.previous)?.snapshot
+            ? EffectOption.getOrUndefined(
+                EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === request.previous),
+              )?.snapshot
             : undefined;
           const phaseSnapshots = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === selected.id);
           const last = phaseSnapshots.at(-1)?.snapshot;
@@ -539,11 +557,19 @@ export const runNativeCycle = <R>(
           const baseline = runtime.baselines[selected.id];
           if (!baseline) return yield* fail('baseline-required', 'Run begin-phase before implementation.');
           const captured = yield* captureNativeCycleSource(repo, baseline.tree);
-          if (request.base && (yield* git(repo, ['rev-parse', request.base + '^{tree}'])).trim() !== baseline.tree)
+          if (
+            request.base &&
+            Effect2.pipe(yield* git(repo, ['rev-parse', request.base + '^{tree}']), EffectString.trim) !== baseline.tree
+          )
             return yield* fail('review-history', 'Keep the phase’s original review baseline.');
           const priorHead = prior?.head ?? baseline.head;
           if (captured.head !== priorHead) {
-            if (request.acceptedHead !== captured.head || !request.reason?.trim())
+            if (
+              request.acceptedHead !== captured.head ||
+              !Effect2.pipe(request.reason, effectOptionalString =>
+                effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+              )
+            )
               return yield* fail('head-drift', 'Record the exact changed HEAD and its reconciliation evidence.');
             yield* git(repo, ['merge-base', '--is-ancestor', priorHead, captured.head]);
           }
@@ -599,22 +625,32 @@ export const runNativeCycle = <R>(
           else if (kind === 'plan') body = stableJson(state.plan);
           else if (kind === 'phase') {
             const selected = yield* from(getPhase);
-            const ids = runtime.snapshots
-              .filter(item => item.snapshot.phaseId === selected.id)
-              .map(item => item.snapshot.snapshotId);
+            const ids = EffectArray.map(
+              EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === selected.id),
+              item => item.snapshot.snapshotId,
+            );
             body = stableJson({
               phase: selected,
               proof: state.phases[selected.id],
               snapshots: ids,
-              attempts: runtime.attempts
-                .filter(item => ids.includes(item.snapshotId))
-                .map(item => ({id: item.id, snapshotId: item.snapshotId, status: item.status})),
+              attempts: EffectArray.map(
+                EffectArrayPipe(runtime.attempts, __effectArrayValues =>
+                  EffectArray.filter(
+                    __effectArrayValues,
+                    (item, __effectArrayIndex) =>
+                      __effectArrayIndex in __effectArrayValues && ids.includes(item.snapshotId),
+                  ),
+                ),
+                item => ({id: item.id, snapshotId: item.snapshotId, status: item.status}),
+              ),
             });
           } else if (kind === 'attempt')
             body = yield* from(
               () =>
                 required(
-                  runtime.attempts.find(item => item.id === request.attemptId),
+                  EffectOption.getOrUndefined(
+                    EffectArray.findFirst(runtime.attempts, item => item.id === request.attemptId),
+                  ),
                   'an existing attemptId',
                 ).report,
             );
@@ -627,7 +663,9 @@ export const runNativeCycle = <R>(
                 yield* from(
                   () =>
                     required(
-                      runtime.reviews.find(item => item.snapshotId === snapshot!.snapshotId),
+                      EffectOption.getOrUndefined(
+                        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === snapshot!.snapshotId),
+                      ),
                       'the completed review',
                     ).report,
                 ),
@@ -647,7 +685,9 @@ export const runNativeCycle = <R>(
                 4_000_000,
               );
             const previousScope = snapshot.previous
-              ? runtime.snapshots.find(item => item.snapshot.snapshotId === snapshot!.previous)?.snapshot.scopeBase
+              ? EffectOption.getOrUndefined(
+                  EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === snapshot!.previous),
+                )?.snapshot.scopeBase
               : snapshot.baseTree;
             if (kind === 'patch' && snapshot.scopeBase !== previousScope)
               body +=
@@ -682,7 +722,9 @@ export const runNativeCycle = <R>(
               'Split review evidence into a bounded complete report before admission.',
             );
           const hash = sha256HexSync(raw);
-          const repeated = runtime.attempts.find(item => item.id === attemptId);
+          const repeated = EffectOption.getOrUndefined(
+            EffectArray.findFirst(runtime.attempts, item => item.id === attemptId),
+          );
           if (repeated) {
             if (repeated.digest !== hash || repeated.snapshotId !== snapshot.snapshotId)
               return yield* fail('review-conflict', 'Review attempt identity already belongs to other evidence.');
@@ -694,10 +736,12 @@ export const runNativeCycle = <R>(
             };
           }
           if (
-            runtime.reviews.filter(
+            EffectArray.filter(
+              runtime.reviews,
               item =>
-                runtime.snapshots.find(entry => entry.snapshot.snapshotId === item.snapshotId)?.snapshot.phaseId ===
-                snapshot.phaseId,
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === item.snapshotId),
+                )?.snapshot.phaseId === snapshot.phaseId,
             ).length >= (runtime.reviewLimits[snapshot.phaseId] ?? 5)
           )
             return yield* fail(
@@ -705,9 +749,13 @@ export const runNativeCycle = <R>(
               'The continuous phase review limit is reached. Record explicit human expansion before another review.',
             );
           if (
-            runtime.attempts.filter(item => item.snapshotId === snapshot.snapshotId && item.status === 'invalid')
-              .length >= 2 &&
-            !request.userAuthority?.trim()
+            EffectArray.filter(
+              runtime.attempts,
+              item => item.snapshotId === snapshot.snapshotId && item.status === 'invalid',
+            ).length >= 2 &&
+            !Effect2.pipe(request.userAuthority, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            )
           )
             return yield* fail(
               'review-failed',
@@ -715,10 +763,14 @@ export const runNativeCycle = <R>(
             );
           const predecessor = snapshot.previous ?? snapshot.supersedes;
           const previous = predecessor
-            ? runtime.snapshots.find(item => item.snapshot.snapshotId === predecessor)?.snapshot
+            ? EffectOption.getOrUndefined(
+                EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === predecessor),
+              )?.snapshot
             : undefined;
           const priorReview = previous
-            ? runtime.reviews.find(item => item.snapshotId === previous.snapshotId)?.report
+            ? EffectOption.getOrUndefined(
+                EffectArray.findFirst(runtime.reviews, item => item.snapshotId === previous.snapshotId),
+              )?.report
             : undefined;
           const verdict = yield* from(() => {
             try {
@@ -743,7 +795,7 @@ export const runNativeCycle = <R>(
             report: raw,
             ...(request.userAuthority ? {authority: request.userAuthority} : {}),
           };
-          if (verdict.accepted && runtime.reviews.some(item => item.snapshotId === snapshot.snapshotId))
+          if (verdict.accepted && EffectArray.some(runtime.reviews, item => item.snapshotId === snapshot.snapshotId))
             return yield* fail(
               'review-conflict',
               'A completed review is immutable; create a new source iteration for changed findings.',
@@ -774,7 +826,7 @@ export const runNativeCycle = <R>(
               fail('invalid-cycle-packet', 'Provide bounded source anchors, ownership, checks and capacity evidence.'),
             ),
           );
-          const observedGraph = graph as {graph: typeof options.graphProof};
+          const observedGraphValue = isJsonObject(graph) ? graph.graph : undefined;
           const captured = yield* captureNativeCycleSource(repo, 'HEAD');
           if (
             !sourceBeforeGraph ||
@@ -785,22 +837,29 @@ export const runNativeCycle = <R>(
               'source-drift',
               'Source changed around ready-graph preparation. Retry with current evidence.',
             );
-          const proof = {...observedGraph.graph, tree: captured.tree};
+          if (!isJsonObject(observedGraphValue))
+            return yield* fail('source-drift', 'Packet graph evidence does not match exact current checkout bytes.');
+          const proof: Record<string, unknown> = {...observedGraphValue, tree: captured.tree};
           if (
             stableJson(proof) !== stableJson(options.graphProof) ||
-            proof.head !== captured.head ||
-            proof.repositoryRoot !== repo
+            proof['head'] !== captured.head ||
+            proof['repositoryRoot'] !== repo
           )
             return yield* fail('source-drift', 'Packet graph evidence does not match exact current checkout bytes.');
           const adapter = yield* makeWorkflowGitAdapter();
-          const source = yield* adapter.inspect(repo, [...new Set(options.anchors.map(anchor => anchor.path))]);
+          const source = yield* adapter.inspect(repo, [
+            ...new Set(EffectArray.map(options.anchors, anchor => anchor.path)),
+          ]);
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           for (const anchor of options.anchors) {
             if (
               !nativeCycleRelativePath(anchor.path) ||
               source.files[anchor.path] !== anchor.sha256 ||
-              !(yield* fs.readFileString(path.join(repo, anchor.path))).includes(anchor.pattern)
+              !Effect2.pipe(
+                yield* fs.readFileString(path.join(repo, anchor.path)),
+                EffectString.includes(anchor.pattern),
+              )
             )
               return yield* fail('anchor-drift', 'Packet anchor bytes or literal symbol changed.');
           }
@@ -822,15 +881,21 @@ export const runNativeCycle = <R>(
           )
             return yield* fail('review-stale', 'Snapshot belongs to another material phase contract.');
           const current = yield* currentSnapshot(repo, entry.snapshot, request.acceptedHead);
-          const report = runtime.reviews.find(item => item.snapshotId === entry.snapshot.snapshotId)?.report;
+          const report = EffectOption.getOrUndefined(
+            EffectArray.findFirst(runtime.reviews, item => item.snapshotId === entry.snapshot.snapshotId),
+          )?.report;
           if (!report)
             return yield* fail('review-pending', 'A complete immutable source review is required before acceptance.');
           const predecessor = entry.snapshot.previous ?? entry.snapshot.supersedes;
           const previous = predecessor
-            ? runtime.snapshots.find(item => item.snapshot.snapshotId === predecessor)?.snapshot
+            ? EffectOption.getOrUndefined(
+                EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === predecessor),
+              )?.snapshot
             : undefined;
           const priorReport = previous
-            ? runtime.reviews.find(item => item.snapshotId === previous.snapshotId)?.report
+            ? EffectOption.getOrUndefined(
+                EffectArray.findFirst(runtime.reviews, item => item.snapshotId === previous.snapshotId),
+              )?.report
             : undefined;
           const reviewed = yield* from(() =>
             validateNativeCycleReview(
@@ -841,18 +906,18 @@ export const runNativeCycle = <R>(
           );
           if (reviewed.summary.blockingIssueCount)
             return yield* fail('review-blocked', 'Resolve the recorded blockers before accepting this phase.');
-          if (state.plan.delivery !== 'local' && entry.incoming.some(item => item.source === 'preserved'))
+          if (state.plan.delivery !== 'local' && EffectArray.some(entry.incoming, item => item.source === 'preserved'))
             return yield* fail(
               'preserved-work-publication',
               'Preserve unowned existing work outside the phase commit. Use a clean isolated phase checkout.',
             );
-          const incoming = new Set(entry.incoming.map(item => item.path));
+          const incoming = new Set(EffectArray.map(entry.incoming, item => item.path));
           const updated = yield* from(() =>
             validateNativeCyclePhase(
               state,
               selected.id,
-              {...current, files: entry.snapshot.files.filter(file => !incoming.has(file))},
-              request.validation as NativeCycleValidation,
+              {...current, files: EffectArray.filter(entry.snapshot.files, file => !incoming.has(file))},
+              request.validation,
             ),
           );
           return {status: 'ok', revision: yield* save({...runtime, state: updated}), next: nextNativeCycle(updated)};
@@ -872,9 +937,12 @@ export const runNativeCycle = <R>(
           if (!proof.validation || !proof.tree)
             return yield* fail('not-ready', 'Current phase validation is required.');
           const current = yield* captureNativeCycleSource(repo, 'HEAD');
-          if (current.tree !== proof.tree || (yield* git(repo, ['rev-parse', 'HEAD^{tree}'])).trim() !== proof.tree)
+          if (
+            current.tree !== proof.tree ||
+            Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== proof.tree
+          )
             return yield* fail('source-drift', 'Publish the clean exact validated tree.');
-          if ((yield* git(repo, ['branch', '--show-current'])).trim() !== selected.branch)
+          if (Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch)
             return yield* fail('branch-drift', 'Publish from the declared phase branch.');
           if (state.plan.delivery === 'pr')
             yield* from(() =>
@@ -904,13 +972,16 @@ export const runNativeCycle = <R>(
             phaseHash: proof.phaseHash,
             status: proof.status,
             acceptance: proof.validation?.acceptance,
-            attempts: runtime.attempts
-              .filter(
+            attempts: EffectArray.map(
+              EffectArray.filter(
+                runtime.attempts,
                 item =>
-                  runtime.snapshots.find(entry => entry.snapshot.snapshotId === item.snapshotId)?.snapshot.phaseId ===
-                  selected.id,
-              )
-              .map(({id, status, message}) => ({id, status, message})),
+                  EffectOption.getOrUndefined(
+                    EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === item.snapshotId),
+                  )?.snapshot.phaseId === selected.id,
+              ),
+              ({id, status, message}) => ({id, status, message}),
+            ),
             next: nextNativeCycle(state),
           };
         }
@@ -923,7 +994,7 @@ export const runNativeCycle = <R>(
             source: state.plan.source,
             completion: state.plan.completion,
             spec: state.plan.spec,
-            phases: state.plan.phases.map(phase => ({
+            phases: EffectArray.map(state.plan.phases, phase => ({
               id: phase.id,
               phaseHash: state.phases[phase.id].phaseHash,
               validation: state.phases[phase.id].validation,

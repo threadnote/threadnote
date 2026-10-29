@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import {GRAPH_SHARE_ACTION_KEY, type GraphShareActionKey} from './action.js';
 import {readJsonFile} from './atomic.js';
@@ -31,10 +32,10 @@ export function planGraphWorkerActions(
 export const GRAPH_SHARE_WORKER_ADVERTISEMENT_LIMIT = 4_096;
 
 export function parseGraphShareWorkerAdvertisements(value: unknown): readonly GraphShareWorkerAdvertisement[] {
-  if (!Array.isArray(value) || value.length > GRAPH_SHARE_WORKER_ADVERTISEMENT_LIMIT) {
+  if (!EffectArray.isArray(value) || value.length > GRAPH_SHARE_WORKER_ADVERTISEMENT_LIMIT) {
     throw graphSharingFailure('Worker advertisement list is invalid.');
   }
-  return value.map(parseAdvertisement);
+  return EffectArray.map(value, parseAdvertisement);
 }
 
 export const readAdvertisedGraphWorkerActions = Effect.fn('codeGraph.sharing.readAdvertisedWorkerActions')(function* (
@@ -64,5 +65,5 @@ function parseAdvertisement(value: unknown): GraphShareWorkerAdvertisement {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }

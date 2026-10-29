@@ -13,7 +13,8 @@ import {
 } from '@threadnote/threadnote/cursor/hooks';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {SystemInfo} from '@threadnote/platform/system';
-import type {JsonObject} from '@threadnote/platform/json';
+import {isJsonObject, type JsonObject} from '@threadnote/platform/json';
+import * as EffectRecord from 'effect/Record';
 
 const TestLayer = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer);
 const managed = {_threadnote: 'managed', command: 'old threadnote command'};
@@ -69,8 +70,9 @@ describe('Cursor hook config', () => {
           expect(withCursorHooks(cloud, 'cloud')).toEqual(cloud);
           const removed = withCursorHooks(cloud, 'cloud', true);
           expect(withCursorHooks(removed, 'cloud', true)).toEqual(removed);
-          const remaining = removed.hooks as Record<string, unknown>;
-          for (const [event, entries] of Object.entries(hooks)) expect(remaining[event]).toEqual(entries);
+          const remaining = removed.hooks;
+          if (!isJsonObject(remaining)) throw new Error('Expected remaining cursor hooks.');
+          for (const [event, entries] of EffectRecord.toEntries(hooks)) expect(remaining[event]).toEqual(entries);
           expect(removed.metadata).toEqual(metadata);
           expect(original).toEqual(before);
         },
@@ -122,7 +124,7 @@ describe('Cursor hook config', () => {
       expect(installed.output).toContain('sessionStart, sessionEnd, and workspaceOpen are unavailable');
       expect(yield* fs.exists(configPath)).toBe(false);
       const saved = JSON.parse(yield* fs.readFileString(`${project}/.cursor/hooks.json`));
-      expect(Object.keys(saved.hooks)).toEqual(['preCompact']);
+      expect(EffectRecord.keys(saved.hooks)).toEqual(['preCompact']);
       yield* runCursorHooksInstall({target: 'cloud', project, apply: true, remove: true});
       expect(JSON.parse(yield* fs.readFileString(`${project}/.cursor/hooks.json`)).hooks).toEqual({preCompact: []});
     }).pipe(provideTestLayer(TestLayer)),

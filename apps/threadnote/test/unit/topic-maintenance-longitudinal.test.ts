@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {readFile} from '@threadnote/testing/node-fs-promises';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import fc from 'fast-check';
@@ -18,6 +20,9 @@ import {
   topicStudyLedgerRowV1,
   topicStudyUnavailableObservationV1,
 } from '@threadnote/threadnote/evaluation/topic-maintenance-longitudinal';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function summarizeFixture(...args: Parameters<typeof summarizeTopicStudyV1>) {
   return summarizeTopicStudyV1(args[0], args[1], args[2], 1);
@@ -34,46 +39,53 @@ describe('topic maintenance longitudinal evaluation', () => {
   it('seals an independently authored sequential corpus with recurring probes', async () => {
     const source = await readFile(fixturePath, 'utf8');
     const parsed = parseTopicStudyCorpusJsonV1(source);
-    const seal = (await readFile(sealPath, 'utf8')).trim();
+    const seal = Effect.pipe(await readFile(sealPath, 'utf8'), EffectString.trim);
     expect(sha256HexSync(topicStudyCanonicalJson(parsed))).toBe(seal);
     expect(parsed.events).toHaveLength(50);
-    expect(new Set(parsed.events.map(event => event.operation)).size).toBeGreaterThan(20);
-    expect(parsed.events.every(event => event.probes.length >= 7)).toBe(true);
+    expect(new Set(EffectArray.map(parsed.events, event => event.operation)).size).toBeGreaterThan(20);
+    expect(EffectArray.every(parsed.events, event => event.probes.length >= 7)).toBe(true);
     expect(parsed.events[10].probes[0].answer).toBeNull();
-    expect(parsed.events.map(event => event.probes[6].answer)).toEqual(
+    expect(EffectArray.map(parsed.events, event => event.probes[6].answer)).toEqual(
       Array.from({length: 50}, (_, offset) =>
         offset < 19 || [28, 31, 32].includes(offset) ? null : offset < 40 ? '45 seconds' : '50 seconds',
       ),
     );
     expect(() =>
       parseTopicStudyCorpusJsonV1(
-        JSON.stringify({...parsed, events: parsed.events.map(event => ({...event, probes: event.probes.slice(0, 6)}))}),
+        JSON.stringify({
+          ...parsed,
+          events: EffectArray.map(parsed.events, event => ({...event, probes: event.probes.slice(0, 6)})),
+        }),
       ),
     ).toThrow('seven');
   });
 
   it('separates stale preview refusal from fresh post-race answers and preserves legacy replay', async () => {
     const input = await corpus();
-    const race = input.events.find(event => event.id === 'source-preview-race')!;
+    const race = EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.events, event => event.id === 'source-preview-race'),
+    )!;
     expect(race.expectedClass).toBe('stale-conflict');
     expect(race.postReviewChanges[0].content).toContain('timeoutSeconds = 90;');
     expect(race.postReviewChanges[0].content).toContain('stagingTimeoutSeconds = 45;');
-    expect(race.probes.find(probe => probe.id === 'race')?.answer).toBe('No');
+    expect(EffectOption.getOrUndefined(EffectArray.findFirst(race.probes, probe => probe.id === 'race'))?.answer).toBe(
+      'No',
+    );
     for (const [id, answer] of [
       ['current', '90 seconds'],
       ['staging', '45 seconds'],
     ]) {
-      const probe = race.probes.find(item => item.id === id)!;
+      const probe = EffectOption.getOrUndefined(EffectArray.findFirst(race.probes, item => item.id === id))!;
       expect(probe.answer).toBe(answer);
       expect(gradeTopicStudyAnswerV1(probe, answer)).toBe('correct');
     }
     const legacy = {
       ...input,
-      events: input.events.map(event =>
+      events: EffectArray.map(input.events, event =>
         event.id === race.id
           ? {
               ...event,
-              probes: event.probes.map(probe =>
+              probes: EffectArray.map(event.probes, probe =>
                 ['current', 'staging'].includes(probe.id) ? {...probe, answer: null} : probe,
               ),
             }
@@ -165,12 +177,12 @@ describe('topic maintenance longitudinal evaluation', () => {
 
   it('replays exact authored source bytes in order and keeps numeric gold independent', async () => {
     const input = await corpus();
-    const baseline = JSON.parse(
-      await readFile('apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/baseline.json', 'utf8'),
-    ) as {
-      sourceFiles: readonly {path: string; content: string}[];
-    };
-    const files = new Map(baseline.sourceFiles.map(item => [item.path, item.content]));
+    const baseline = Schema.decodeUnknownSync(
+      Schema.Struct({sourceFiles: Schema.Array(Schema.Struct({path: Schema.String, content: Schema.String}))}),
+    )(
+      JSON.parse(await readFile('apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/baseline.json', 'utf8')),
+    );
+    const files = new Map(EffectArray.map(baseline.sourceFiles, item => [item.path, item.content]));
     for (const event of input.events) {
       for (const change of event.changes) {
         if (change.content === null) files.delete(change.path);
@@ -195,8 +207,15 @@ describe('topic maintenance longitudinal evaluation', () => {
 
   it('roundtrips optional state receipts without changing legacy rows and separates authored labels from actual debt', async () => {
     const input = await corpus();
-    const event = input.events.find(event => event.expectedClass === 'unchanged')!;
-    const state = {beforeHash: 'b'.repeat(64), sourceHash: 'c'.repeat(64), eligible: true, repairOrdinals: [3, 4]};
+    const event = EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.events, event => event.expectedClass === 'unchanged'),
+    )!;
+    const state = {
+      beforeHash: Effect.pipe('b', EffectString.repeat(64)),
+      sourceHash: Effect.pipe('c', EffectString.repeat(64)),
+      eligible: true,
+      repairOrdinals: [3, 4],
+    };
     const reviewerExpectation = {
       version: TOPIC_STUDY_REVIEWER_VERSION,
       before: state,
@@ -241,6 +260,7 @@ describe('topic maintenance longitudinal evaluation', () => {
     const {reviewerExpectation: _receipt, ...legacy} = observation;
     const legacyRow = makeRow(legacy);
     expect(assertTopicStudyLedgerV1(JSON.stringify(legacyRow), input)).toEqual([legacyRow]);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     expect(Object.hasOwn(legacyRow.observation, 'reviewerExpectation')).toBe(false);
     expect(
       summarizeFixture([legacyRow], input, {
@@ -252,7 +272,9 @@ describe('topic maintenance longitudinal evaluation', () => {
         downstreamNoRegression: null,
       }).outcomeDisagreementCount,
     ).toBe(1);
-    const intrinsic = input.events.find(item => item.expectedClass === 'stale-conflict')!;
+    const intrinsic = EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.events, item => item.expectedClass === 'stale-conflict'),
+    )!;
     const intrinsicRow = {...row, eventIndex: intrinsic.index, eventId: intrinsic.id};
     const gate = {
       realTopicPilotObserved: false,
@@ -289,8 +311,8 @@ describe('topic maintenance longitudinal evaluation', () => {
   it('canonical hashing is independent of object key insertion order', () => {
     fc.assert(
       fc.property(fc.dictionary(fc.string({minLength: 1, maxLength: 8}), fc.integer()), entries => {
-        const first = Object.fromEntries(Object.entries(entries));
-        const reverse = Object.fromEntries(Object.entries(entries).reverse());
+        const first = EffectRecord.fromEntries(EffectRecord.toEntries(entries));
+        const reverse = EffectRecord.fromEntries(EffectRecord.toEntries(entries).reverse());
         expect(topicStudyCanonicalJson(first)).toBe(topicStudyCanonicalJson(reverse));
       }),
       {numRuns: 100},
@@ -327,8 +349,8 @@ describe('independent longitudinal answer and preservation contracts', () => {
     id: 'original',
     repositoryId: 'repo',
     path: 'config.ts',
-    sourceCommit: 'a'.repeat(40),
-    fileContentHash: {algorithm: 'sha256', value: 'b'.repeat(64)},
+    sourceCommit: Effect.pipe('a', EffectString.repeat(40)),
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe('b', EffectString.repeat(64))},
   };
   function document(version = 1, paragraphs = ['intro', 'history', 'current', 'later exception']) {
     const manifest = {
@@ -336,8 +358,8 @@ describe('independent longitudinal answer and preservation contracts', () => {
       memoryId: 'tn_fixture',
       repositoryId: 'repo',
       coverage: 'declared-only',
-      bodyHash: sha256HexSync(paragraphs.join('\n\n')),
-      paragraphs: paragraphs.map((text, ordinal) => ({
+      bodyHash: sha256HexSync(EffectArray.join(paragraphs, '\n\n')),
+      paragraphs: EffectArray.map(paragraphs, (text, ordinal) => ({
         ordinal,
         hash: sha256HexSync(text),
         role: ordinal === 1 ? 'historical' : 'descriptive',
@@ -351,7 +373,7 @@ describe('independent longitudinal answer and preservation contracts', () => {
     };
     return (
       `MEMORY\nkind: durable\nmemory_id: tn_fixture\nproject: fixture\nowner: original\n` +
-      `code_citation: ${JSON.stringify(citation)}\ntopic_maintenance: ${JSON.stringify(manifest)}\n\n${paragraphs.join('\n\n')}`
+      `code_citation: ${JSON.stringify(citation)}\ntopic_maintenance: ${JSON.stringify(manifest)}\n\n${EffectArray.join(paragraphs, '\n\n')}`
     );
   }
   const directParagraphs = (seconds = 60, heading = 'Context Health', staging?: number) => [
@@ -363,6 +385,7 @@ describe('independent longitudinal answer and preservation contracts', () => {
     ...(staging === undefined ? [] : [`The staging fixture timeout is ${staging} seconds.`]),
   ];
   const literalDocument = (paragraphs: readonly string[]) =>
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
     document(2, [...paragraphs]).replace(/^topic_maintenance: (.+)$/mu, (_line, json: string) => {
       const manifest = JSON.parse(json);
       manifest.paragraphs = manifest.paragraphs.map((paragraph: {ordinal: number}) => ({
@@ -385,7 +408,7 @@ describe('independent longitudinal answer and preservation contracts', () => {
     const before = literalDocument(directParagraphs());
     const expectation = topicStudyReviewExpectationV1(before, literalSources());
     expect(expectation.repairOrdinals).toEqual([3, 4]);
-    expect(expectation.expectedBody).toBe(directParagraphs(90, 'Context Health v2').join('\n\n'));
+    expect(expectation.expectedBody).toBe(EffectArray.join(directParagraphs(90, 'Context Health v2'), '\n\n'));
     expect(
       checkTopicStudyReviewV1(before, literalDocument(directParagraphs(90, 'Context Health v2')), expectation)
         .acceptable,
@@ -415,7 +438,10 @@ describe('independent longitudinal answer and preservation contracts', () => {
     expect(
       checkTopicStudyReviewV1(
         before,
-        before.replace('The display heading is Context Health v2.', 'Display: Context Health v2.'),
+        Effect.pipe(
+          before,
+          EffectString.replace('The display heading is Context Health v2.', 'Display: Context Health v2.'),
+        ),
         expectation,
       ).acceptable,
     ).toBe(false);
@@ -434,15 +460,15 @@ describe('independent longitudinal answer and preservation contracts', () => {
     const expectation = topicStudyReviewExpectationV1(before, literalSources());
     const correct = literalDocument(directParagraphs(90, 'Context Health v2'));
     const mutations = [
-      correct.replace('memory_id: tn_fixture', 'memory_id: tn_other'),
-      correct.replace('owner: original', 'owner: other'),
-      correct.replace('"scope":"production"', '"scope":"staging"'),
-      correct.replace('"role":"normative"', '"role":"descriptive"'),
-      correct.replace('"originCitationIds":["original"]', '"originCitationIds":[]'),
-      correct.replace('"scope":"production"', '"validity":"new","scope":"production"'),
-      ...[0, 1, 2].map(ordinal =>
+      Effect.pipe(correct, EffectString.replace('memory_id: tn_fixture', 'memory_id: tn_other')),
+      Effect.pipe(correct, EffectString.replace('owner: original', 'owner: other')),
+      Effect.pipe(correct, EffectString.replace('"scope":"production"', '"scope":"staging"')),
+      Effect.pipe(correct, EffectString.replace('"role":"normative"', '"role":"descriptive"')),
+      Effect.pipe(correct, EffectString.replace('"originCitationIds":["original"]', '"originCitationIds":[]')),
+      Effect.pipe(correct, EffectString.replace('"scope":"production"', '"validity":"new","scope":"production"')),
+      ...EffectArray.map([0, 1, 2], ordinal =>
         literalDocument(
-          directParagraphs(90, 'Context Health v2').map((text, index) =>
+          EffectArray.map(directParagraphs(90, 'Context Health v2'), (text, index) =>
             index === ordinal ? `${text} Rewritten.` : text,
           ),
         ),
@@ -467,7 +493,9 @@ describe('independent longitudinal answer and preservation contracts', () => {
           let actual = before;
           for (const choice of failures) {
             const candidate = literalDocument(
-              directParagraphs(oldSeconds).map((text, ordinal) => (ordinal === choice % 3 ? `${text} Corrupt.` : text)),
+              EffectArray.map(directParagraphs(oldSeconds), (text, ordinal) =>
+                ordinal === choice % 3 ? `${text} Corrupt.` : text,
+              ),
             );
             const assessment = checkTopicStudyReviewV1(
               actual,
@@ -481,9 +509,12 @@ describe('independent longitudinal answer and preservation contracts', () => {
           expect(expectation).toEqual(topicStudyReviewExpectationV1(before, source));
           expect(expectation.repairOrdinals).toEqual([...(oldSeconds === currentSeconds ? [] : [3]), 4]);
           expect(checkTopicStudyReviewV1(actual, correct, expectation).acceptable).toBe(true);
-          const reworded = correct.replace(
-            `The production fixture timeout is ${currentSeconds} seconds.`,
-            `Production timeout: ${currentSeconds} seconds.`,
+          const reworded = Effect.pipe(
+            correct,
+            EffectString.replace(
+              `The production fixture timeout is ${currentSeconds} seconds.`,
+              `Production timeout: ${currentSeconds} seconds.`,
+            ),
           );
           expect(checkTopicStudyReviewV1(actual, reworded, expectation).acceptable).toBe(false);
         },
@@ -499,7 +530,7 @@ describe('independent longitudinal answer and preservation contracts', () => {
         fc.nat(),
         (paragraphs, choice) => {
           const ordinal = choice % paragraphs.length;
-          const changed = paragraphs.map((text, index) => (index === ordinal ? `${text} changed` : text));
+          const changed = EffectArray.map(paragraphs, (text, index) => (index === ordinal ? `${text} changed` : text));
           expect(
             measureTopicStudyPreservationV1(document(2, paragraphs), document(2, changed), []).unrelatedBodyPreserved,
           ).toBe(false);
@@ -515,31 +546,54 @@ describe('independent longitudinal answer and preservation contracts', () => {
 
   it('permits repeated V2 reviewed-current pin replacement while retaining immutable origins and untouched citations', () => {
     const before = document(2);
-    const boundary = before.indexOf('\n\n');
-    const header = before.slice(0, boundary);
-    const old = JSON.parse(header.split('topic_maintenance: ')[1]) as {
-      acceptedSources: {citationId: string; acceptedCitationId: string}[];
-    };
-    const firstCitation = {...citation, id: 'current-one', sourceCommit: '1'.repeat(40)};
-    const secondCitation = {...citation, id: 'current-two', sourceCommit: '2'.repeat(40)};
+    const boundary = Effect.pipe(
+      before,
+      EffectString.indexOf('\n\n'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    const header = Effect.pipe(before, EffectString.slice(0, boundary));
+    const old = Schema.decodeUnknownSync(
+      Schema.StructWithRest(
+        Schema.Struct({
+          acceptedSources: Schema.Array(Schema.Struct({citationId: Schema.String, acceptedCitationId: Schema.String})),
+        }),
+        [Schema.Record(Schema.String, Schema.Unknown)],
+      ),
+    )(JSON.parse(Effect.pipe(header, EffectString.split('topic_maintenance: '))[1]));
+    const firstCitation = {...citation, id: 'current-one', sourceCommit: Effect.pipe('1', EffectString.repeat(40))};
+    const secondCitation = {...citation, id: 'current-two', sourceCommit: Effect.pipe('2', EffectString.repeat(40))};
     const priorManifest = {...old, acceptedSources: [{citationId: 'original', acceptedCitationId: 'current-one'}]};
     const nextManifest = {...old, acceptedSources: [{citationId: 'original', acceptedCitationId: 'current-two'}]};
-    const base = header.slice(0, header.indexOf('topic_maintenance: '));
+    const base = Effect.pipe(
+      header,
+      EffectString.slice(
+        0,
+        Effect.pipe(
+          header,
+          EffectString.indexOf('topic_maintenance: '),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      ),
+    );
     const prior =
       base +
       `code_citation: ${JSON.stringify(firstCitation)}\ntopic_maintenance: ${JSON.stringify(priorManifest)}` +
-      before.slice(boundary);
+      Effect.pipe(before, EffectString.slice(boundary));
     const next =
       base +
       `code_citation: ${JSON.stringify(secondCitation)}\ntopic_maintenance: ${JSON.stringify(nextManifest)}` +
-      before.slice(boundary);
+      Effect.pipe(before, EffectString.slice(boundary));
     expect(measureTopicStudyPreservationV1(prior, next, [])).toEqual({
       identityPreserved: true,
       provenancePreserved: true,
       unrelatedBodyPreserved: true,
     });
     expect(
-      measureTopicStudyPreservationV1(prior, next.replace('owner: original', 'owner: missing'), []).provenancePreserved,
+      measureTopicStudyPreservationV1(
+        prior,
+        Effect.pipe(next, EffectString.replace('owner: original', 'owner: missing')),
+        [],
+      ).provenancePreserved,
     ).toBe(false);
   });
 
@@ -552,12 +606,18 @@ describe('independent longitudinal answer and preservation contracts', () => {
         unrelatedBodyPreserved: true,
       });
       expect(
-        measureTopicStudyPreservationV1(before, before.replace('owner: original', 'owner: changed'), [])
-          .provenancePreserved,
+        measureTopicStudyPreservationV1(
+          before,
+          Effect.pipe(before, EffectString.replace('owner: original', 'owner: changed')),
+          [],
+        ).provenancePreserved,
       ).toBe(false);
       expect(
-        measureTopicStudyPreservationV1(before, before.replace(`code_citation: ${JSON.stringify(citation)}\n`, ''), [])
-          .provenancePreserved,
+        measureTopicStudyPreservationV1(
+          before,
+          Effect.pipe(before, EffectString.replace(`code_citation: ${JSON.stringify(citation)}\n`, '')),
+          [],
+        ).provenancePreserved,
       ).toBe(false);
       expect(
         measureTopicStudyPreservationV1(before, document(version, ['intro', 'history', 'current']), [2])
@@ -567,7 +627,7 @@ describe('independent longitudinal answer and preservation contracts', () => {
     expect(
       measureTopicStudyPreservationV1(
         document(2),
-        document(2).replace('"originCitationIds":["original"]', '"originCitationIds":[]'),
+        Effect.pipe(document(2), EffectString.replace('"originCitationIds":["original"]', '"originCitationIds":[]')),
         [],
       ).provenancePreserved,
     ).toBe(false);
@@ -580,8 +640,8 @@ it('separates a failing naive comparator from complete maintained/manual candida
   const pin = {
     backend: 'local-ai',
     id: 'local',
-    digest: '1'.repeat(64),
-    settingsHash: '2'.repeat(64),
+    digest: Effect.pipe('1', EffectString.repeat(64)),
+    settingsHash: Effect.pipe('2', EffectString.repeat(64)),
     modelVersion: 'verified-bytes;settings=recorded',
     promptVersion: 'request-v1',
     attempts: 1,
@@ -594,21 +654,21 @@ it('separates a failing naive comparator from complete maintained/manual candida
         status: 'observed' as const,
         reason: null,
         actualClass: event.expectedClass,
-        sourceCommit: 'a'.repeat(40),
-        sourceTreeHash: 'b'.repeat(64),
-        targetBeforeHash: 'c'.repeat(64),
-        targetAfterHash: 'd'.repeat(64),
+        sourceCommit: Effect.pipe('a', EffectString.repeat(40)),
+        sourceTreeHash: Effect.pipe('b', EffectString.repeat(64)),
+        targetBeforeHash: Effect.pipe('c', EffectString.repeat(64)),
+        targetAfterHash: Effect.pipe('d', EffectString.repeat(64)),
         detected: event.declaredPositive,
         identityPreserved: true,
         provenancePreserved: true,
         unrelatedBodyPreserved: arm !== 'naive-local',
         downstreamModel: pin,
-        downstreamPromptHash: 'e'.repeat(64),
-        retrievalHash: 'f'.repeat(64),
-        draftAttempted: arm.startsWith('maintained'),
-        draftCompleted: arm.startsWith('maintained'),
+        downstreamPromptHash: Effect.pipe('e', EffectString.repeat(64)),
+        retrievalHash: Effect.pipe('f', EffectString.repeat(64)),
+        draftAttempted: Effect.pipe(arm, EffectString.startsWith('maintained')),
+        draftCompleted: Effect.pipe(arm, EffectString.startsWith('maintained')),
         model: arm === 'maintained-alternate' ? {...pin, backend: 'effect-ai', id: 'alternate', digest: null} : pin,
-        promptHash: '0'.repeat(64),
+        promptHash: Effect.pipe('0', EffectString.repeat(64)),
         providerInputTokens: 100,
         providerOutputTokens: 10,
         providerChargeMicros: 0,
@@ -621,8 +681,8 @@ it('separates a failing naive comparator from complete maintained/manual candida
         evidenceMilliseconds: 10,
         downstreamMilliseconds: 10,
         retainedBytes: 1000,
-        commandReceiptHashes: ['1'.repeat(64)],
-        probes: event.probes.map(probe => ({
+        commandReceiptHashes: [Effect.pipe('1', EffectString.repeat(64))],
+        probes: EffectArray.map(event.probes, probe => ({
           id: probe.id,
           answer: arm === 'naive-local' ? `not ${probe.answer ?? 'unknown'}` : (probe.answer ?? 'unknown'),
           evidence: 'evidence',
@@ -653,14 +713,14 @@ it('separates a failing naive comparator from complete maintained/manual candida
     evidence: {
       realTopicPilot: {
         topicId: 'real-reviewed-topic',
-        corpusHash: '3'.repeat(64),
-        receiptHash: '4'.repeat(64),
+        corpusHash: Effect.pipe('3', EffectString.repeat(64)),
+        receiptHash: Effect.pipe('4', EffectString.repeat(64)),
         observations: [
           {
-            hash: '5'.repeat(64),
-            sourceCommit: 'a'.repeat(40),
-            targetBeforeHash: 'c'.repeat(64),
-            targetAfterHash: 'd'.repeat(64),
+            hash: Effect.pipe('5', EffectString.repeat(64)),
+            sourceCommit: Effect.pipe('a', EffectString.repeat(40)),
+            targetBeforeHash: Effect.pipe('c', EffectString.repeat(64)),
+            targetAfterHash: Effect.pipe('d', EffectString.repeat(64)),
             identityPreserved: true,
             provenancePreserved: true,
             unrelatedBodyPreserved: true,
@@ -672,17 +732,20 @@ it('separates a failing naive comparator from complete maintained/manual candida
       },
       alternatePermission: {
         modelId: 'alternate',
-        receiptHash: '4'.repeat(64),
-        rowHashes: rows.filter(row => row.arm === 'maintained-alternate').map(row => row.hash),
+        receiptHash: Effect.pipe('4', EffectString.repeat(64)),
+        rowHashes: EffectArray.map(
+          EffectArray.filter(rows, row => row.arm === 'maintained-alternate'),
+          row => row.hash,
+        ),
       },
-      humanPairs: ['maintained-local', 'maintained-alternate'].map(arm => ({
+      humanPairs: EffectArray.map(['maintained-local', 'maintained-alternate'], arm => ({
         manualRowHash: rows[0].hash,
-        candidateRowHash: rows.find(row => row.arm === arm)!.hash,
-        receiptHash: '4'.repeat(64),
+        candidateRowHash: EffectOption.getOrUndefined(EffectArray.findFirst(rows, row => row.arm === arm))!.hash,
+        receiptHash: Effect.pipe('4', EffectString.repeat(64)),
       })),
       costProfile: {
-        rowHashes: rows.map(row => row.hash),
-        receiptHash: '4'.repeat(64),
+        rowHashes: EffectArray.map(rows, row => row.hash),
+        receiptHash: Effect.pipe('4', EffectString.repeat(64)),
         reuseCounts: [1, 10],
         computeMicrosPerSecond: 1,
         reviewerMicrosPerMinute: 1,
@@ -697,7 +760,7 @@ it('separates a failing naive comparator from complete maintained/manual candida
   expect(result.comparatorHardFailureCount).toBe(input.events.length);
   expect(
     summarizeFixture(
-      rows.map(row =>
+      EffectArray.map(rows, row =>
         row.arm === 'naive-local'
           ? {...row, observation: {...row.observation, status: 'failed', reason: 'Measured baseline failure'}}
           : row,
@@ -706,25 +769,28 @@ it('separates a failing naive comparator from complete maintained/manual candida
       gate,
     ).decision,
   ).toBe('GO');
-  const equivalentAnswers = rows.map(row =>
-    row.arm.startsWith('maintained')
+  const equivalentAnswers = EffectArray.map(rows, row =>
+    Effect.pipe(row.arm, EffectString.startsWith('maintained'))
       ? {
           ...row,
           observation: {
             ...row.observation,
-            probes: row.observation.probes.map(probe => ({...probe, answer: `${probe.answer!.toUpperCase()}.`})),
+            probes: EffectArray.map(row.observation.probes, probe => ({
+              ...probe,
+              answer: `${Effect.pipe(probe.answer!, EffectString.toUpperCase)}.`,
+            })),
           },
         }
       : row,
   );
   expect(summarizeFixture(equivalentAnswers, input, gate).decision).toBe('GO');
-  const forged = rows.map(row =>
+  const forged = EffectArray.map(rows, row =>
     row.arm === 'maintained-local'
       ? {
           ...row,
           observation: {
             ...row.observation,
-            probes: row.observation.probes.map(probe =>
+            probes: EffectArray.map(row.observation.probes, probe =>
               probe.id === 'current' ? {...probe, answer: 'not 160 seconds', judged: 'correct' as const} : probe,
             ),
           },
@@ -761,34 +827,36 @@ it('separates a failing naive comparator from complete maintained/manual candida
           ...evidence,
           alternatePermission: {
             ...evidence.alternatePermission!,
-            rowHashes: evidence.alternatePermission!.rowHashes.map(hash => remap.get(hash)!),
+            rowHashes: EffectArray.map(evidence.alternatePermission!.rowHashes, hash => remap.get(hash)!),
           },
-          humanPairs: evidence.humanPairs.map(pair => ({
+          humanPairs: EffectArray.map(evidence.humanPairs, pair => ({
             ...pair,
             manualRowHash: remap.get(pair.manualRowHash)!,
             candidateRowHash: remap.get(pair.candidateRowHash)!,
           })),
           costProfile: {
             ...evidence.costProfile!,
-            rowHashes: evidence.costProfile!.rowHashes.map(hash => remap.get(hash)!),
+            rowHashes: EffectArray.map(evidence.costProfile!.rowHashes, hash => remap.get(hash)!),
           },
-          adjudications: adjudicatedRows.map(row => ({
+          adjudications: EffectArray.map(adjudicatedRows, row => ({
             rowHash: remap.get(row.hash)!,
             probeId: 'current',
-            receiptHash: '9'.repeat(64),
+            receiptHash: Effect.pipe('9', EffectString.repeat(64)),
             judged: 'correct' as const,
           })),
         },
       },
     };
   };
-  const firstCandidate = rows.find(row => row.arm === 'maintained-local')!;
+  const firstCandidate = EffectOption.getOrUndefined(
+    EffectArray.findFirst(rows, row => row.arm === 'maintained-local'),
+  )!;
   const wrongNumeric = remappedStudy(
     row =>
       row === firstCandidate
         ? {
             ...row.observation,
-            probes: row.observation.probes.map(probe =>
+            probes: EffectArray.map(row.observation.probes, probe =>
               probe.id === 'current'
                 ? {...probe, answer: '160 seconds', judged: 'adjudication-required' as const}
                 : probe,
@@ -804,7 +872,7 @@ it('separates a failing naive comparator from complete maintained/manual candida
     row.eventIndex === firstCandidate.eventIndex && row.arm !== 'naive-local'
       ? {
           ...row.observation,
-          probes: row.observation.probes.map(probe =>
+          probes: EffectArray.map(row.observation.probes, probe =>
             probe.id === 'current' ? {...probe, answer: null, judged: 'adjudication-required' as const} : probe,
           ),
         }
@@ -814,7 +882,7 @@ it('separates a failing naive comparator from complete maintained/manual candida
   expect(missing.decision).toBe('HOLD');
   expect(missing.hardFailureCount).toBe(0);
   expect(missing.reasons).toContain('downstream probe observations unavailable');
-  const nullRows = rows.map(row => ({
+  const nullRows = EffectArray.map(rows, row => ({
     ...row,
     observation: {
       ...topicStudyUnavailableObservationV1(input.events[row.eventIndex - 1], 'null'),
@@ -825,8 +893,11 @@ it('separates a failing naive comparator from complete maintained/manual candida
   }));
   expect(summarizeFixture(nullRows, input, gate).decision).toBe('HOLD');
   expect(summarizeFixture(rows, input, {...gate, evidence: undefined}).decision).toBe('HOLD');
-  const declared = rows.filter(row => input.events[row.eventIndex - 1].declaredPositive);
-  const unknown = rows.map(row =>
+  const declared = EffectArray.filter(
+    rows,
+    (row, __effectArrayIndex) => __effectArrayIndex in rows && input.events[row.eventIndex - 1].declaredPositive,
+  );
+  const unknown = EffectArray.map(rows, row =>
     declared.includes(row) ? {...row, observation: {...row.observation, detected: null}} : row,
   );
   expect(summarizeFixture(unknown, input, gate).detection.recall).toBe(0);
@@ -847,7 +918,7 @@ describe('executed-path probe eligibility', () => {
     const event = input.events[32];
     const observation = {
       ...topicStudyUnavailableObservationV1(event, `Fault ${event.fault} requires a dedicated execution adapter.`),
-      probes: event.probes.map(probe => {
+      probes: EffectArray.map(event.probes, probe => {
         const answer = probe.answer === null ? '125 seconds' : probe.answer;
         return {id: probe.id, answer, evidence: null, judged: gradeTopicStudyAnswerV1(probe, answer)};
       }),
@@ -923,7 +994,7 @@ describe('executed-path probe eligibility', () => {
     const input = await corpus();
     fc.assert(
       fc.property(fc.array(fc.boolean(), {minLength: 50, maxLength: 50}), flags => {
-        const rows = input.events.map((event, index) =>
+        const rows = EffectArray.map(input.events, (event, index) =>
           topicStudyLedgerRowV1({
             corpusHash: topicStudyCorpusHashV1(input),
             runNonce: 'partition-check',
@@ -950,7 +1021,9 @@ describe('executed-path probe eligibility', () => {
           counts.probePlanned + counts.unsupportedFaultProbes + counts.unrecordedSlotProbePlanned!,
         );
         expect(counts.recordedSlotProbePlanned).toBe(counts.probePlanned + counts.unsupportedFaultProbes);
-        expect(result.byArm.reduce((sum, arm) => sum + arm.measuredProbes.planned, 0)).toBe(counts.probePlanned);
+        expect(EffectArray.reduce(result.byArm, 0, (sum, arm) => sum + arm.measuredProbes.planned)).toBe(
+          counts.probePlanned,
+        );
         for (const arm of result.byArm)
           expect(arm.measuredProbes.planned).toBe(
             arm.measuredProbes.correct +
@@ -959,7 +1032,12 @@ describe('executed-path probe eligibility', () => {
               arm.measuredProbes.unavailable,
           );
         expect(counts.unsupportedFaultEvents).toBe(
-          input.events.filter((event, index) => flags[index] && event.fault !== 'none').length,
+          EffectArrayPipe(input.events, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (event, index) => index in __effectArrayValues && Boolean(flags[index] && event.fault !== 'none'),
+            ),
+          ).length,
         );
         expect(JSON.stringify(rows)).toBe(before);
         expect(result.decision).toBe('HOLD');
@@ -994,7 +1072,7 @@ it('counts unstarted planned repetitions and labels a legacy schedule unknown', 
   expect(known.denominators.plannedEvents).toBe(400);
   expect(known.denominators.minimumEventsFromObservedRepetitions).toBe(200);
   expect(known.denominators.allSlotProbePlanned).toBe(
-    input.events.reduce((total, item) => total + item.probes.length, 0) * 8,
+    EffectArray.reduce(input.events, 0, (total, item) => total + item.probes.length) * 8,
   );
   expect(known.denominators.unrecordedSlotProbePlanned).toBe(
     known.denominators.allSlotProbePlanned! - event.probes.length,

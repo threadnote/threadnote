@@ -1,9 +1,11 @@
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {captureReviewedSupportLegacyOrigin, createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
 import {captureConsolidationSource, consolidationRevision, reviewConsolidation} from '@threadnote/memory/consolidation';
 import {topicMaintenanceReplacementError} from '@threadnote/memory/topic-maintenance';
 import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import type {ManagerAutomaticReview} from '@threadnote/manager/attention/topic-contracts';
 import * as maintenanceRecords from '../../src/memory/maintenance/records.js';
 import * as maintenanceInventory from '../../src/memory/context/maintenance_inventory.js';
 import * as preparationState from '../../src/memory/context/maintenance_preparation_state.js';
@@ -35,41 +37,100 @@ import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-
 import {tmpdir} from '@threadnote/testing/node-os';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {join} from '@threadnote/testing/node-path';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const ReviewSupportProjectionSchema = withRest(
+  Schema.Struct({
+    active: withRest(Schema.Struct({paragraphs: Schema.Array(Schema.Unknown), sources: Schema.Array(Schema.Unknown)})),
+    initialApproval: Schema.Unknown,
+  }),
+);
+const AutomaticReviewApprovalProjectionSchema = withRest(
+  Schema.Struct({
+    approvalDigest: Schema.String,
+    content: Schema.String,
+    contentHash: Schema.String,
+    metadataDiff: Schema.Array(
+      withRest(Schema.Struct({afterHash: Schema.String, beforeHash: Schema.String, field: Schema.String})),
+    ),
+    reviewRevision: Schema.Finite,
+    reviewedSupport: ReviewSupportProjectionSchema,
+    stage: Schema.String,
+  }),
+);
+const AutomaticReviewProjectionSchema = withRest(
+  Schema.Struct({
+    approval: Schema.optionalKey(AutomaticReviewApprovalProjectionSchema),
+    canApply: Schema.Boolean,
+    canFinishVerification: Schema.Boolean,
+    kind: Schema.Literal('automatic-memory-review'),
+    project: Schema.String,
+    purpose: Schema.String,
+    revision: Schema.Finite,
+    reviewId: Schema.String,
+    state: Schema.String,
+    verified: Schema.Boolean,
+    version: Schema.Literal(1),
+  }),
+);
+const AutomaticMemoryListSchema = withRest(
+  Schema.Struct({
+    incomplete: Schema.Boolean,
+    items: Schema.Array(withRest(Schema.Struct({uri: Schema.String}))),
+    nextCursor: Schema.optionalKey(Schema.String),
+  }),
+);
 
 const personalUri = 'threadnote://user/test/memories/durable/projects/threadnote/source.md';
 const sharedUri = 'threadnote://user/test/memories/shared/default/durable/projects/threadnote/source.md';
-const base = [
-  'MEMORY',
-  'kind: durable',
-  'status: active',
-  'project: threadnote',
-  'topic: source',
-  'memory_id: tn_manager_source',
-  'relation: depends_on threadnote://memory/tn_manager_target',
-  '',
-  'Original body.',
-].join('\n');
+const base = EffectArray.join(
+  [
+    'MEMORY',
+    'kind: durable',
+    'status: active',
+    'project: threadnote',
+    'topic: source',
+    'memory_id: tn_manager_source',
+    'relation: depends_on threadnote://memory/tn_manager_target',
+    '',
+    'Original body.',
+  ],
+  '\n',
+);
 
 describe('Manager raw memory relation boundary', () => {
   it('allows body edits while preserving exact relation headers', () => {
-    const updated = base.replace('Original body.', 'Updated body.');
+    const updated = Effect2.pipe(base, EffectString.replace('Original body.', 'Updated body.'));
 
     expect(() => assertManagerRawPersonalMemorySave(personalUri, base, base, updated)).not.toThrow();
     expect(() => assertManagerRawSharedMemorySave(config(), sharedUri, base, base, updated)).not.toThrow();
   });
 
   it('allows a browser-normalized LF body edit of an existing CRLF memory', () => {
-    const existing = base.replaceAll('\n', '\r\n');
-    const updated = base.replace('Original body.', 'Updated body.');
+    const existing = Effect2.pipe(base, EffectString.replaceAll('\n', '\r\n'));
+    const updated = Effect2.pipe(base, EffectString.replace('Original body.', 'Updated body.'));
 
     expect(() => assertManagerRawPersonalMemorySave(personalUri, existing, existing, updated)).not.toThrow();
     expect(() => assertManagerRawSharedMemorySave(config(), sharedUri, existing, existing, updated)).not.toThrow();
   });
 
   it.each([
-    ['add', base.replace('\n\nOriginal', '\nrelation: related_to threadnote://memory/tn_other\n\nOriginal')],
-    ['change', base.replace('depends_on', 'related_to')],
-    ['remove', base.replace('relation: depends_on threadnote://memory/tn_manager_target\n', '')],
+    [
+      'add',
+      Effect2.pipe(
+        base,
+        EffectString.replace('\n\nOriginal', '\nrelation: related_to threadnote://memory/tn_other\n\nOriginal'),
+      ),
+    ],
+    ['change', Effect2.pipe(base, EffectString.replace('depends_on', 'related_to'))],
+    [
+      'remove',
+      Effect2.pipe(base, EffectString.replace('relation: depends_on threadnote://memory/tn_manager_target\n', '')),
+    ],
   ])('rejects a raw %s relation edit until structured Manager authoring exists', (_operation, updated) => {
     expect(() => assertManagerRawPersonalMemorySave(personalUri, base, base, updated)).toThrow(
       'Raw Manager saves cannot change typed memory relations',
@@ -80,7 +141,10 @@ describe('Manager raw memory relation boundary', () => {
   });
 
   it('rejects changing the source identity into a preserved self relation', () => {
-    const updated = base.replace('memory_id: tn_manager_source', 'memory_id: tn_manager_target');
+    const updated = Effect2.pipe(
+      base,
+      EffectString.replace('memory_id: tn_manager_source', 'memory_id: tn_manager_target'),
+    );
 
     expect(() => assertManagerRawPersonalMemorySave(personalUri, base, base, updated)).toThrow(
       'Raw Manager saves cannot change stable memory_id',
@@ -471,9 +535,9 @@ describe('Manager raw approved-support boundary', () => {
       acceptance: {
         reviewId: 'review-manager-support',
         approvedAt: '2026-10-21T00:00:00.000Z',
-        targetBeforeHash: '1'.repeat(64),
-        preparationDigest: '2'.repeat(64),
-        sourceVectorDigest: '3'.repeat(64),
+        targetBeforeHash: Effect2.pipe('1', EffectString.repeat(64)),
+        preparationDigest: Effect2.pipe('2', EffectString.repeat(64)),
+        sourceVectorDigest: Effect2.pipe('3', EffectString.repeat(64)),
       },
     });
     const content = formatMemoryDocument(
@@ -492,7 +556,10 @@ describe('Manager raw approved-support boundary', () => {
       body,
     );
     expect(() => assertManagerRawPersonalMemorySave(personalUri, content, content, content)).not.toThrow();
-    for (const next of [content.replace(body, 'Edited prose.'), content.replace(/^reviewed_support: .*\n/mu, '')]) {
+    for (const next of [
+      Effect2.pipe(content, EffectString.replace(body, 'Edited prose.')),
+      Effect2.pipe(content, EffectString.replace(/^reviewed_support: .*\n/mu, '')),
+    ]) {
       expect(() => assertManagerRawPersonalMemorySave(personalUri, content, content, next)).toThrow(
         /context_maintenance_review/u,
       );
@@ -507,14 +574,14 @@ function reviewedCodeMemory() {
   const citation = (revision: 'a' | 'b') =>
     createMemoryCodeCitation({
       version: 1,
-      repositoryId: 'c'.repeat(64),
+      repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
       repositoryIdentityKind: 'remote',
-      sourceSnapshotId: `cgsn_${revision.repeat(40)}`,
-      sourceCommit: revision.repeat(40),
+      sourceSnapshotId: `cgsn_${Effect2.pipe(revision, EffectString.repeat(40))}`,
+      sourceCommit: Effect2.pipe(revision, EffectString.repeat(40)),
       sourceDirty: false,
       path: 'src/limit.ts',
       target: {kind: 'file'},
-      fileContentHash: {algorithm: 'sha256', value: revision.repeat(64)},
+      fileContentHash: {algorithm: 'sha256', value: Effect2.pipe(revision, EffectString.repeat(64))},
       extractorSet: 'test',
     });
   const root = citation('a');
@@ -531,9 +598,9 @@ function reviewedCodeMemory() {
     acceptance: {
       reviewId: 'review-manager-current-code',
       approvedAt: '2026-10-21T00:00:00.000Z',
-      targetBeforeHash: '1'.repeat(64),
-      preparationDigest: '2'.repeat(64),
-      sourceVectorDigest: '3'.repeat(64),
+      targetBeforeHash: Effect2.pipe('1', EffectString.repeat(64)),
+      preparationDigest: Effect2.pipe('2', EffectString.repeat(64)),
+      sourceVectorDigest: Effect2.pipe('3', EffectString.repeat(64)),
     },
   });
   const content = memoryContent('tn_manager_source', 'source', body, {
@@ -609,18 +676,21 @@ describe('Manager retained reviewed provenance', () => {
       yield* fs.makeDirectory(path.join(root, 'threadnote'), {recursive: true});
       yield* fs.makeDirectory(path.join(root, 'unrelated'), {recursive: true});
       const uris = Array.from({length: 140}, (_, index) =>
-        personalUri.replace('source.md', `page-${String(index).padStart(3, '0')}.md`),
+        Effect2.pipe(
+          personalUri,
+          EffectString.replace('source.md', `page-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`),
+        ),
       );
       for (const [index, uri] of uris.entries())
         yield* fs.writeFileString(
-          path.join(root, 'threadnote', uri.split('/').at(-1)!),
+          path.join(root, 'threadnote', Effect2.pipe(uri, EffectString.split('/')).at(-1)!),
           memoryContent(`tn_manager_page_${index}`, `page-${index}`, `Memory ${index}.`),
         );
       yield* fs.writeFileString(
         path.join(root, 'unrelated', 'private.md'),
-        memoryContent('tn_other_project', 'private', 'Unrelated private prose.').replace(
-          'project: threadnote',
-          'project: unrelated',
+        Effect2.pipe(
+          memoryContent('tn_other_project', 'private', 'Unrelated private prose.'),
+          EffectString.replace('project: threadnote', 'project: unrelated'),
         ),
       );
       // The actual ordinary-use worker may have built only the all-project inventory.
@@ -652,12 +722,14 @@ describe('Manager retained reviewed provenance', () => {
             body: Effect.succeed({}),
           }).pipe(Effect.provideService(FileSystem.FileSystem, tracked));
           expect(response?.status).toBe(200);
-          const body = response!.body as {items: {uri: string}[]; nextCursor?: string; incomplete: boolean};
+          const body = yield* Schema.decodeUnknownEffect(AutomaticMemoryListSchema)(response!.body);
           expect(body.incomplete).toBe(false);
           expect(body.items.length).toBeLessThanOrEqual(32);
-          expect(opens.filter(file => file.startsWith(root))).toHaveLength(body.items.length);
-          expect(opens.some(file => file.includes('/unrelated/'))).toBe(false);
-          observed.push(...body.items.map(item => item.uri));
+          expect(EffectArray.filter(opens, file => Effect2.pipe(file, EffectString.startsWith(root)))).toHaveLength(
+            body.items.length,
+          );
+          expect(EffectArray.some(opens, file => Effect2.pipe(file, EffectString.includes('/unrelated/')))).toBe(false);
+          observed.push(...EffectArray.map(body.items, item => item.uri));
           afterUri = body.nextCursor;
         } while (afterUri);
         expect(observed).toEqual(uris);
@@ -672,8 +744,10 @@ describe('Manager retained reviewed provenance', () => {
           body: Effect.succeed({}),
         }).pipe(Effect.provideService(FileSystem.FileSystem, tracked));
         expect(detail).toMatchObject({status: 200, body: {items: [{uri: uris.at(-1)}]}});
-        expect(opens.filter(file => file.startsWith(root))).toEqual([path.join(root, 'threadnote', 'page-139.md')]);
-        expect(opens.some(file => file.includes('/inventory/'))).toBe(false);
+        expect(EffectArray.filter(opens, file => Effect2.pipe(file, EffectString.startsWith(root)))).toEqual([
+          path.join(root, 'threadnote', 'page-139.md'),
+        ]);
+        expect(EffectArray.some(opens, file => Effect2.pipe(file, EffectString.includes('/inventory/')))).toBe(false);
         expect(allReviews).not.toHaveBeenCalled();
         expect(corpus).not.toHaveBeenCalled();
         expect(sources).not.toHaveBeenCalled();
@@ -776,11 +850,17 @@ describe('Manager retained reviewed provenance', () => {
         );
         yield* fs.makeDirectory(root, {recursive: true});
         const uris = Array.from({length: count}, (_, index) =>
-          personalUri.replace('source.md', `property-${String(index).padStart(3, '0')}.md`),
+          Effect2.pipe(
+            personalUri,
+            EffectString.replace(
+              'source.md',
+              `property-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`,
+            ),
+          ),
         );
         for (const uri of reverse ? [...uris].reverse() : uris)
           yield* fs.writeFileString(
-            path.join(root, uri.split('/').at(-1)!),
+            path.join(root, Effect2.pipe(uri, EffectString.split('/')).at(-1)!),
             memoryContent('tn_property', 'property', 'Property memory.'),
           );
         yield* maintenanceInventory.prepareContextMaintenanceInventory(fixture.config, undefined, 10_000);
@@ -822,8 +902,8 @@ describe('Manager retained reviewed provenance', () => {
           personalUri,
           memoryContent('tn_manager_source', 'source', 'Unenrolled body.'),
         )!;
-        const prepared = prepareAutomaticMemory(record, {scopeRevision: 'a'.repeat(64)});
-        const hash = 'b'.repeat(64);
+        const prepared = prepareAutomaticMemory(record, {scopeRevision: Effect2.pipe('a', EffectString.repeat(64))});
+        const hash = Effect2.pipe('b', EffectString.repeat(64));
         const background: Effect.Success<ReturnType<typeof draftController.readAutomaticDraftBackgroundStatus>> = {
           version: 1,
           allMaintenancePaused: false,
@@ -953,7 +1033,9 @@ describe('Manager retained reviewed provenance', () => {
           expect(yield* handleManagerAutomaticMemory(request)).toMatchObject({
             body: {items: [{state: 'preparing', coverage: {outcome: 'unknown'}, paragraphs: []}]},
           });
-          const uris = Array.from({length: 6}, (_, index) => personalUri.replace('source.md', `bounded-${index}.md`));
+          const uris = Array.from({length: 6}, (_, index) =>
+            Effect2.pipe(personalUri, EffectString.replace('source.md', `bounded-${index}.md`)),
+          );
           const page = vi
             .spyOn(maintenanceInventory, 'readContextMaintenanceInventoryPage')
             .mockReturnValue(Effect.succeed({uris, total: 6, omitted: 0, incomplete: false}));
@@ -967,9 +1049,14 @@ describe('Manager retained reviewed provenance', () => {
               url: new URL('http://localhost/api/attention/automatic-memory?project=threadnote'),
             });
             expect(reads).toHaveBeenCalledTimes(4);
-            expect(reads.mock.calls.map(call => call[2]?.maxBytes)).toEqual(Array(4).fill(8 * 1024 * 1024));
+            expect(EffectArray.map(reads.mock.calls, call => call[2]?.maxBytes)).toEqual(
+              Array(4).fill(8 * 1024 * 1024),
+            );
             expect(bounded).toMatchObject({status: 200, body: {omitted: 2, incomplete: true, nextCursor: uris[3]}});
-            expect((bounded!.body as {items: unknown[]}).items).toHaveLength(4);
+            expect(
+              (yield* Schema.decodeUnknownEffect(Schema.Struct({items: Schema.Array(Schema.Unknown)}))(bounded!.body))
+                .items,
+            ).toHaveLength(4);
           }).pipe(Effect.ensuring(Effect.sync(() => page.mockRestore())));
           expect(generate).not.toHaveBeenCalled();
           expect(corpus).not.toHaveBeenCalled();
@@ -998,7 +1085,7 @@ describe('Manager retained reviewed provenance', () => {
       await writeFile(runtime.manifestPath, 'version: 1\nprojects: []\n');
       const directory = join(home, 'data', 'local', 'user', 'test', 'memories', 'durable', 'projects', 'threadnote');
       await mkdir(directory, {recursive: true});
-      const sourceUri = personalUri.replace('source.md', 'support.md');
+      const sourceUri = Effect2.pipe(personalUri, EffectString.replace('source.md', 'support.md'));
       const sourceContent = memoryContent('tn_manager_support', 'support', 'Old info.\n\nKeep info.');
       await writeFile(join(directory, 'support.md'), sourceContent);
       const source = {
@@ -1045,9 +1132,9 @@ describe('Manager retained reviewed provenance', () => {
         acceptance: {
           reviewId: 'review-manager-initial',
           approvedAt: '2026-10-21T00:00:00.000Z',
-          targetBeforeHash: '1'.repeat(64),
-          preparationDigest: '2'.repeat(64),
-          sourceVectorDigest: '3'.repeat(64),
+          targetBeforeHash: Effect2.pipe('1', EffectString.repeat(64)),
+          preparationDigest: Effect2.pipe('2', EffectString.repeat(64)),
+          sourceVectorDigest: Effect2.pipe('3', EffectString.repeat(64)),
         },
       });
       const content = memoryContent('tn_manager_source', 'source', body, {
@@ -1056,7 +1143,7 @@ describe('Manager retained reviewed provenance', () => {
       });
       const storedContent = `${content}\n`;
       await writeFile(join(directory, 'source.md'), storedContent);
-      const desired = storedContent.replace('Old info.', 'Edited info.');
+      const desired = Effect2.pipe(storedContent, EffectString.replace('Old info.', 'Edited info.'));
       const server = await startManagerTestServer(runtime, 'manual-secret');
       const headers = {authorization: 'Bearer manual-secret', 'content-type': 'application/json'};
       const post = (path: string, value: unknown) =>
@@ -1075,7 +1162,7 @@ describe('Manager retained reviewed provenance', () => {
           action: 'manual-preview',
           project: 'threadnote',
           uri: personalUri,
-          expectedContentHash: '0'.repeat(64),
+          expectedContentHash: Effect2.pipe('0', EffectString.repeat(64)),
           desiredContent: desired,
         });
         expect(stale.status).toBe(409);
@@ -1087,7 +1174,7 @@ describe('Manager retained reviewed provenance', () => {
           desiredContent: desired,
         });
         expect(preview.status, await preview.clone().text()).toBe(200);
-        let prepared = (await preview.json()) as ManagerAutomaticReview;
+        let prepared = Schema.decodeUnknownSync(AutomaticReviewProjectionSchema)(await preview.json());
         expect(prepared).toMatchObject({
           kind: 'automatic-memory-review',
           purpose: 'manual-edit',
@@ -1105,7 +1192,10 @@ describe('Manager retained reviewed provenance', () => {
         ]);
         expect(prepared.approval?.metadataDiff.length).toBeGreaterThan(0);
         expect(await readFile(join(directory, 'source.md'), 'utf8')).toBe(storedContent);
-        await writeFile(join(directory, 'support.md'), sourceContent.replace('Keep info.', 'Changed private source.'));
+        await writeFile(
+          join(directory, 'support.md'),
+          Effect2.pipe(sourceContent, EffectString.replace('Keep info.', 'Changed private source.')),
+        );
         const withheld = await fetch(
           `${server.url}/api/attention/automatic-review?project=threadnote&reviewId=${prepared.reviewId}`,
           {headers},
@@ -1172,7 +1262,7 @@ describe('Manager retained reviewed provenance', () => {
           revision: prepared.revision,
         });
         expect(refreshed.status, await refreshed.clone().text()).toBe(200);
-        prepared = (await refreshed.json()) as ManagerAutomaticReview;
+        prepared = Schema.decodeUnknownSync(AutomaticReviewProjectionSchema)(await refreshed.json());
         expect(prepared).toMatchObject({
           kind: 'automatic-memory-review',
           state: 'pending',
@@ -1230,7 +1320,7 @@ describe('Manager retained reviewed provenance', () => {
             `${server.url}/api/attention/automatic-review?project=threadnote&reviewId=${prepared.reviewId}`,
             {headers},
           );
-          const current = (await resume.json()) as ManagerAutomaticReview;
+          const current = Schema.decodeUnknownSync(AutomaticReviewProjectionSchema)(await resume.json());
           expect(current).toMatchObject({
             state: 'applying',
             canFinishVerification: mode === 'finish-verification',
@@ -1251,10 +1341,22 @@ describe('Manager retained reviewed provenance', () => {
           expect(await readFile(join(home, 'locks', 'resources', 'local', 'canonical-generation-v1'), 'utf8')).toBe(
             writtenGeneration,
           );
-        const journal = JSON.parse(
-          await readFile(join(home, 'threadnote', 'candidates', 'v1', 'reviews', `${prepared.reviewId}.json`), 'utf8'),
-        ) as candidateStore.CandidateReview;
-        expect(journal.auditEvents.filter(event => event.action === 'apply')).toHaveLength(1);
+        const journal = candidateStore.parseCandidateReview(
+          JSON.parse(
+            await readFile(
+              join(home, 'threadnote', 'candidates', 'v1', 'reviews', `${prepared.reviewId}.json`),
+              'utf8',
+            ),
+          ),
+        );
+        expect(
+          EffectArrayPipe(journal.auditEvents, __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (event, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && event.action === 'apply',
+            ),
+          ),
+        ).toHaveLength(1);
         const reloaded = await fetch(
           `${server.url}/api/attention/automatic-review?project=threadnote&reviewId=${prepared.reviewId}`,
           {headers},
@@ -1262,7 +1364,10 @@ describe('Manager retained reviewed provenance', () => {
         expect(await reloaded.json()).toMatchObject({verified: true, state: 'applied'});
         const list = await fetch(`${server.url}/api/attention/automatic-memory?project=threadnote`, {headers});
         expect(
-          ((await list.json()) as {items: {reviewId?: string}[]}).items.every(
+          EffectArray.every(
+            Schema.decodeUnknownSync(
+              Schema.Struct({items: Schema.Array(Schema.Struct({reviewId: Schema.optionalKey(Schema.String)}))}),
+            )(await list.json()).items,
             item => item.reviewId !== prepared.reviewId,
           ),
         ).toBe(true);
@@ -1286,7 +1391,7 @@ describe('Manager retained reviewed provenance', () => {
       const {root, current} = reviewedCodeMemory();
       const rootLine = `code_citation: ${JSON.stringify(root)}`;
       for (const replacement of ['', `code_citation: ${JSON.stringify(current)}\n`, `${rootLine} \n`]) {
-        const changed = f.content.replace(`${rootLine}\n`, replacement);
+        const changed = Effect2.pipe(f.content, EffectString.replace(`${rootLine}\n`, replacement));
         expect(parseMemoryDocument(f.uri, changed)?.metadata.reviewedSupport).toEqual(
           parseMemoryDocument(f.uri, f.content)?.metadata.reviewedSupport,
         );
@@ -1297,7 +1402,10 @@ describe('Manager retained reviewed provenance', () => {
         expect(await readFile(f.canonicalPath, 'utf8')).toBe(f.content);
         if (f.worktreePath) expect(await readFile(f.worktreePath, 'utf8')).toBe(f.content);
       }
-      const edited = f.content.replace('status: active', 'status: active\nkeywords: retained-provenance');
+      const edited = Effect2.pipe(
+        f.content,
+        EffectString.replace('status: active', 'status: active\nkeywords: retained-provenance'),
+      );
       const response = await save(edited, f.content);
       expect(response.status, await response.text()).toBe(200);
       const stored = await readFile(f.canonicalPath, 'utf8');
@@ -1353,7 +1461,10 @@ describe('Manager retained reviewed provenance', () => {
     });
     const record = parseMemoryDocument(personalUri, withLegacy)!;
     expect(record.metadata.reviewedSupportError).toBeUndefined();
-    const metadataEdit = withLegacy.replace('status: active', 'status: active\nkeywords: keep-history');
+    const metadataEdit = Effect2.pipe(
+      withLegacy,
+      EffectString.replace('status: active', 'status: active\nkeywords: keep-history'),
+    );
     expect(() => assertManagerRawPersonalMemorySave(personalUri, withLegacy, withLegacy, metadataEdit)).not.toThrow();
     expect(topicMaintenanceReplacementError(record, parseMemoryDocument(personalUri, metadataEdit)!)).toBeUndefined();
     expect(() => assertManagerRawSharedMemorySave(config(), sharedUri, withLegacy, withLegacy, metadataEdit)).toThrow(
@@ -1366,9 +1477,9 @@ describe('Manager retained reviewed provenance', () => {
         metadata: {...record.metadata, codeCitations: [current]},
       }),
     ).toContain('root code citations');
-    const ordinaryEdit = legacy.replace(
-      `code_citation: ${JSON.stringify(root)}`,
-      `code_citation: ${JSON.stringify(current)}`,
+    const ordinaryEdit = Effect2.pipe(
+      legacy,
+      EffectString.replace(`code_citation: ${JSON.stringify(root)}`, `code_citation: ${JSON.stringify(current)}`),
     );
     expect(() => assertManagerRawPersonalMemorySave(personalUri, legacy, legacy, ordinaryEdit)).not.toThrow();
     expect(() => assertManagerRawSharedMemorySave(config(), sharedUri, legacy, legacy, ordinaryEdit)).not.toThrow();
@@ -1381,8 +1492,11 @@ describe('Manager retained reviewed provenance', () => {
         fc.constantFrom('\n', '\r\n', '\r'),
         (keywords, ending) => {
           const {content} = reviewedCodeMemory();
-          const previous = content.replaceAll('\n', ending);
-          const next = content.replace('status: active', `status: active\nkeywords: ${keywords.join(' ')}`);
+          const previous = Effect2.pipe(content, EffectString.replaceAll('\n', ending));
+          const next = Effect2.pipe(
+            content,
+            EffectString.replace('status: active', `status: active\nkeywords: ${EffectArray.join(keywords, ' ')}`),
+          );
           expect(() => assertManagerRawPersonalMemorySave(personalUri, previous, previous, next)).not.toThrow();
           expect(() => assertManagerRawSharedMemorySave(config(), sharedUri, previous, previous, next)).not.toThrow();
         },
@@ -1415,11 +1529,18 @@ describe('Manager retained reviewed provenance', () => {
           kind: 'durable',
           project: 'threadnote',
           topic: 'consolidated',
-          uris: [f.uri, personalUri.replace('/source.md', '/other.md')],
+          uris: [f.uri, Effect2.pipe(personalUri, EffectString.replace('/source.md', '/other.md'))],
         }),
       });
       expect(response.status).toBe(200);
-      const {job} = (await response.json()) as {job: {id: string; status: string; error?: string}};
+      const {job} = Schema.decodeUnknownSync(
+        Schema.Struct({
+          job: Schema.StructWithRest(
+            Schema.Struct({id: Schema.String, status: Schema.String, error: Schema.optionalKey(Schema.String)}),
+            [Schema.Record(Schema.String, Schema.Unknown)],
+          ),
+        }),
+      )(await response.json());
       expect(job).toMatchObject({
         status: 'failed',
         error: expect.stringMatching(/reviewed support.*cannot preserve/iu),
@@ -1434,9 +1555,11 @@ describe('Manager retained reviewed provenance', () => {
       expect(await apply.text()).toContain('not completed');
       expect(await readFile(f.canonicalPath, 'utf8')).toBe(f.content);
       expect(await readFile(otherPath, 'utf8')).toBe(other);
-      const legacy = f.content
-        .replace(/^reviewed_support: .*\n/mu, '')
-        .replace('schema_version: 11', 'schema_version: 10');
+      const legacy = Effect2.pipe(
+        f.content,
+        EffectString.replace(/^reviewed_support: .*\n/mu, ''),
+        EffectString.replace('schema_version: 11', 'schema_version: 10'),
+      );
       await writeFile(f.canonicalPath, legacy);
       const control = await fetch(`${server.url}/api/consolidations`, {
         method: 'POST',
@@ -1446,7 +1569,7 @@ describe('Manager retained reviewed provenance', () => {
           kind: 'durable',
           project: 'threadnote',
           topic: 'consolidated',
-          uris: [f.uri, personalUri.replace('/source.md', '/other.md')],
+          uris: [f.uri, Effect2.pipe(personalUri, EffectString.replace('/source.md', '/other.md'))],
         }),
       });
       expect(control.status).toBe(200);

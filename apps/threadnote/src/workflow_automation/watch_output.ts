@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
 import type {NativeWatchWork} from '@threadnote/workflow-automations/watch';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
@@ -49,7 +50,7 @@ export function nativeWatchWorkDetail(
   offsetBytes = 0,
   sourceDigest?: string,
 ) {
-  const item = work.find(value => value.eventId === eventId);
+  const item = EffectOption.getOrUndefined(EffectArray.findFirst(work, value => value.eventId === eventId));
   if (!item) return fail('Watch work record is unavailable.');
   try {
     return {eventId, ...nativeCycleTextPage(stableJson(item), {maxBytes: 3000, offsetBytes, sourceDigest})};

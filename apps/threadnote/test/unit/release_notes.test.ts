@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Effect} from 'effect';
@@ -69,8 +70,8 @@ describe('fetchThreadnoteReleaseNotes', () => {
         provideTestLayer(ApplicationLayer),
       );
 
-      expect(stable.map(release => release.version)).toEqual(['2.0.4']);
-      expect(beta.map(release => release.version)).toEqual(['3.0.0-beta.1', '2.0.4']);
+      expect(EffectArray.map(stable, release => release.version)).toEqual(['2.0.4']);
+      expect(EffectArray.map(beta, release => release.version)).toEqual(['3.0.0-beta.1', '2.0.4']);
     }),
   );
 });
@@ -83,17 +84,19 @@ describe('releasesBetween', () => {
         fc.integer({min: 0, max: 30}),
         fc.integer({min: 0, max: 10}),
         (patches, current, distance) => {
-          const notes = patches.map(patch => ({version: '5.1.' + patch, title: 'Release', body: ''}));
+          const notes = EffectArray.map(patches, patch => ({version: '5.1.' + patch, title: 'Release', body: ''}));
           const before = structuredClone(notes);
           const upper = current + distance;
           const installed = releaseForVersion(notes, '5.1.' + current);
           const available = releasesBetween(notes, '5.1.' + current, '5.1.' + upper);
-          expect(installed.map(note => note.version)).toEqual(patches.includes(current) ? ['5.1.' + current] : []);
-          expect(available.map(note => note.version)).toEqual(
-            patches
-              .filter(patch => patch > current && patch <= upper)
-              .sort((a, b) => a - b)
-              .map(patch => '5.1.' + patch),
+          expect(EffectArray.map(installed, note => note.version)).toEqual(
+            patches.includes(current) ? ['5.1.' + current] : [],
+          );
+          expect(EffectArray.map(available, note => note.version)).toEqual(
+            EffectArray.map(
+              EffectArray.filter(patches, patch => patch > current && patch <= upper).sort((a, b) => a - b),
+              patch => '5.1.' + patch,
+            ),
           );
           expect(notes).toEqual(before);
         },
@@ -102,13 +105,16 @@ describe('releasesBetween', () => {
     );
   });
   it('returns newer releases up to latest in ascending order', () => {
-    expect(releasesBetween(releases, '0.7.7', '0.7.9').map(release => release.version)).toEqual(['0.7.8', '0.7.9']);
+    expect(EffectArray.map(releasesBetween(releases, '0.7.7', '0.7.9'), release => release.version)).toEqual([
+      '0.7.8',
+      '0.7.9',
+    ]);
   });
 });
 
 describe('releaseForVersion', () => {
   it('returns only the requested release', () => {
-    expect(releaseForVersion(releases, '0.7.7').map(release => release.version)).toEqual(['0.7.7']);
+    expect(EffectArray.map(releaseForVersion(releases, '0.7.7'), release => release.version)).toEqual(['0.7.7']);
   });
 });
 

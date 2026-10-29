@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -38,7 +39,10 @@ export function activationValueEventsV1(receipt: ActivationReceiptV1): readonly 
             version: 1 as const,
           },
         ]),
-    ...(receipt.operations.some(operation => operation.kind === 'secondary.prove' && operation.status === 'verified')
+    ...(EffectArray.some(
+      receipt.operations,
+      operation => operation.kind === 'secondary.prove' && operation.status === 'verified',
+    )
       ? [
           {
             durationMilliseconds: elapsed(receipt.startedAt, receipt.updatedAt),

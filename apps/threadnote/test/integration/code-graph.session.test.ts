@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Database} from 'bun:sqlite';
@@ -16,6 +17,8 @@ import {CodeGraphStore} from '@threadnote/graph/store';
 import {CODE_GRAPH_SCHEMA_VERSION} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const sqliteSessions = vi.hoisted(() => ({
   active: 0,
@@ -63,7 +66,7 @@ beforeAll(() => {
   mkdirSync(join(repositoryRoot, 'src'), {recursive: true});
   writeFileSync(join(repositoryRoot, 'package.json'), '{"name":"session-fixture"}\n');
   for (let index = 0; index < 260; index += 1) {
-    const suffix = String(index).padStart(3, '0');
+    const suffix = Effect2.pipe(String(index), EffectString.padStart(3, '0'));
     writeFileSync(
       join(repositoryRoot, 'src', `symbol-${suffix}.ts`),
       `export function sessionSymbol${suffix}(): number { return ${index}; }\n`,
@@ -75,7 +78,7 @@ beforeAll(() => {
   writeFileSync(join(repositoryRoot, '.gitignore'), '/.threadnote-*/\n');
   git(['add', '.']);
   git(['commit', '-qm', 'large base']);
-  baseCommit = git(['rev-parse', 'HEAD']).trim();
+  baseCommit = Effect2.pipe(git(['rev-parse', 'HEAD']), EffectString.trim);
   writeFileSync(
     join(repositoryRoot, 'src', 'current-only.ts'),
     'export function currentOnlySymbol(): string { return "current"; }\n',
@@ -166,8 +169,8 @@ describe('code graph SQLite session lifetime', () => {
 
         expect(indexed.snapshot.fileCount).toBeGreaterThan(128);
         expect(clientsByActivity.length).toBeGreaterThan(1);
-        expect(clientsByActivity.every(({active}) => active === 1)).toBe(true);
-        expect(new Set(clientsByActivity.map(({opened}) => opened)).size).toBe(1);
+        expect(EffectArray.every(clientsByActivity, ({active}) => active === 1)).toBe(true);
+        expect(new Set(EffectArray.map(clientsByActivity, ({opened}) => opened)).size).toBe(1);
         expectClosedSessions(2);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     60_000,
@@ -193,8 +196,8 @@ describe('code graph SQLite session lifetime', () => {
         expect(lease.snapshot.commit).toBe(baseCommit);
         expect(lease.snapshot.fileCount).toBeGreaterThan(128);
         expect(clientsByActivity.length).toBeGreaterThan(1);
-        expect(clientsByActivity.every(({active}) => active === 1)).toBe(true);
-        expect(new Set(clientsByActivity.map(({opened}) => opened)).size).toBe(1);
+        expect(EffectArray.every(clientsByActivity, ({active}) => active === 1)).toBe(true);
+        expect(new Set(EffectArray.map(clientsByActivity, ({opened}) => opened)).size).toBe(1);
         expectClosedSessions(2);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     60_000,
@@ -296,7 +299,7 @@ function expectClosedSessions(expected: number): void {
   expect(sqliteSessions.closed).toEqual(sqliteSessions.opened);
   expect(sqliteSessions.maximumActive).toBeLessThanOrEqual(1);
   expect(sqliteSessions.active).toBe(0);
-  expect(sqliteSessions.opened.every(filename => /graph-v\d+\.sqlite$/.test(filename))).toBe(true);
+  expect(EffectArray.every(sqliteSessions.opened, filename => /graph-v\d+\.sqlite$/.test(filename))).toBe(true);
 }
 
 function git(args: readonly string[]): string {

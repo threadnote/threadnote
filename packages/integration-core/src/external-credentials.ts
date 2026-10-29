@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {Crypto, Effect, FileSystem, Option, Path, Redacted, Schema} from 'effect';
 import {
@@ -8,8 +9,13 @@ import {
 } from '@threadnote/platform/system';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class ExternalCredentialError extends Schema.TaggedError<ExternalCredentialError>()('ExternalCredentialError', {
+export class ExternalCredentialError extends Schema.TaggedError<
+  ExternalCredentialError,
+  {readonly brand: unique symbol}
+>()('ExternalCredentialError', {
   message: Schema.String,
 }) {}
 
@@ -139,7 +145,7 @@ const revalidate = Effect.fn('external.revalidateCredentialDirectories')(functio
   before: readonly RuntimeBigIntStats[],
 ) {
   const after = yield* inspectDirectories(directories, false);
-  if (after === undefined || !before.every((entry, index) => samePath(entry, after[index])))
+  if (after === undefined || !EffectArray.every(before, (entry, index) => samePath(entry, after[index])))
     return yield* unavailable();
 });
 
@@ -194,12 +200,11 @@ export const reusableExternalCredential = Effect.fn('external.reusableCredential
   targetId: string,
   valid: Validator = validExternalApiToken,
 ) {
-  const candidates = sources
-    .filter(
-      (source): source is CredentialSource & {readonly type: string} =>
-        source.type === provider && source.id !== targetId && typeof source.credentialEnv === 'string',
-    )
-    .sort((left, right) => left.id.localeCompare(right.id));
+  const candidates = EffectArray.filter(
+    sources,
+    (source): source is CredentialSource & {readonly type: string} =>
+      source.type === provider && source.id !== targetId && typeof source.credentialEnv === 'string',
+  ).sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id)));
   for (const source of candidates) {
     const token = yield* resolveExternalCredential(config, source, provider, valid).pipe(
       Effect.orElseSucceed(() => undefined),

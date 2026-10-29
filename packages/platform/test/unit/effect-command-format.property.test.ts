@@ -1,14 +1,17 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {formatShellCommand} from '@threadnote/platform/command';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const windowsPathSegment = fc
   .array(fc.constantFrom('a', 'B', '3', ' ', '_', '-'), {maxLength: 20, minLength: 1})
-  .map(characters => characters.join('').trim() || 'repo');
+  .map(characters => Effect.pipe(EffectArray.join(characters, ''), EffectString.trim) || 'repo');
 
 const windowsPath = fc
   .tuple(fc.constantFrom('C', 'D', 'E'), fc.array(windowsPathSegment, {maxLength: 5, minLength: 2}))
-  .map(([drive, segments]) => `${drive}:\\${segments.join('\\')}`);
+  .map(([drive, segments]) => `${drive}:\\${EffectArray.join(segments, '\\')}`);
 
 describe('git command formatting', () => {
   it('uses role-specific placeholders for Windows share paths, including paths with spaces', () => {
@@ -46,7 +49,9 @@ describe('git command formatting', () => {
       {option: '--separate-git-dir', role: 'gitdir'},
       {option: '--work-tree', role: 'worktree'},
     ] as const;
-    const attachedOptions = separatedOptions.filter(({option}) => option.startsWith('--'));
+    const attachedOptions = EffectArray.filter(separatedOptions, ({option}) =>
+      Effect.pipe(option, EffectString.startsWith('--')),
+    );
 
     fc.assert(
       fc.property(windowsPath, windowsPath, (gitRoot, path) => {

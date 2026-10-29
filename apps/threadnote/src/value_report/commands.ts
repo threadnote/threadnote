@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, Path, Schema} from 'effect';
 import {writeFinalCliOutput} from '../effect/cli/output.js';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -10,13 +11,18 @@ import {readLocalValueEvents, summarizeCandidateReviewValue, summarizeLocalValue
 import {deleteValueReportData, pruneValueReportData, VALUE_REPORT_EXPORT_DIRECTORY} from './storage.js';
 import {ValueArtifactError, writeValueArtifact} from './artifact.js';
 import {ManagerConsumerClockHints, nextManagerWindowChange} from '../manager/live_consumer_sources.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const DEFAULT_VALUE_REPORT_PERIOD_DAYS = 30 as const;
 export const DEFAULT_VALUE_REPORT_RETENTION_DAYS = 365 as const;
 export const MAXIMUM_VALUE_REPORT_RETENTION_DAYS = 3_650 as const;
 export {VALUE_REPORT_EXPORT_DIRECTORY} from './storage.js';
 
-export class ValueReportCommandError extends Schema.TaggedError<ValueReportCommandError>()('ValueReportCommandError', {
+export class ValueReportCommandError extends Schema.TaggedError<
+  ValueReportCommandError,
+  {readonly brand: unique symbol}
+>()('ValueReportCommandError', {
   message: Schema.String,
 }) {}
 
@@ -123,8 +129,8 @@ export const valueReportExportPath = Effect.fn('valueReport.export.path')(functi
   const digest = yield* sha256Hex(serialized);
   return path.join(
     agentContextHome,
-    ...VALUE_REPORT_EXPORT_DIRECTORY.split('/'),
-    `threadnote-value-report-export-v1-${digest.slice(0, 24)}.json`,
+    ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')),
+    `threadnote-value-report-export-v1-${Effect2.pipe(digest, EffectString.slice(0, 24))}.json`,
   );
 });
 
@@ -163,15 +169,17 @@ export const buildLocalValueReport = Effect.fn('valueReport.buildLocal')(functio
     ],
     {concurrency: 3},
   );
-  const project = options.project?.trim();
+  const project = Effect2.pipe(options.project, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (!absolute && periodDays === 30 && project) {
     // Reuse the inputs already loaded by the authoritative projection. Observers never rebuild this report.
     const timestamps = [
-      ...feedbackEvents.map(event => Date.parse(event.timestamp)),
-      ...valueEvents.map(event => Date.parse(event.timestamp)),
-      ...candidateReviews.flatMap(review => [
+      ...EffectArray.map(feedbackEvents, event => Date.parse(event.timestamp)),
+      ...EffectArray.map(valueEvents, event => Date.parse(event.timestamp)),
+      ...EffectArray.flatMap(candidateReviews, review => [
         Date.parse(review.createdAt),
-        ...review.auditEvents.map(event => Date.parse(event.at)),
+        ...EffectArray.map(review.auditEvents, event => Date.parse(event.at)),
       ]),
     ];
     yield* (yield* ManagerConsumerClockHints).register(
@@ -194,7 +202,9 @@ export const buildLocalValueReport = Effect.fn('valueReport.buildLocal')(functio
       ...eventCounts,
       knowledgeDelta: summarizeCandidateReviewValue(candidateReviews, range),
     },
-    feedbackEvents: absolute ? feedbackEvents.filter(event => Date.parse(event.timestamp) < to) : feedbackEvents,
+    feedbackEvents: absolute
+      ? EffectArray.filter(feedbackEvents, event => Date.parse(event.timestamp) < to)
+      : feedbackEvents,
     period,
     ...(project ? {project} : {}),
   });
@@ -202,14 +212,17 @@ export const buildLocalValueReport = Effect.fn('valueReport.buildLocal')(functio
 });
 
 function renderValueReport(report: ValueReportV1): string {
-  return [
-    `Local value report (${report.period.from} to ${report.period.to})`,
-    `Feedback: ${report.feedback.total} total; ${report.feedback.applied} applied, ${report.feedback.useful} useful, ${report.feedback.pin} pinned, ${report.feedback.wrong} wrong, ${report.feedback.dismiss} dismissed.`,
-    `Context briefs: ${report.contextBrief.successful}/${report.contextBrief.attempts} successful; ${report.contextBrief.coverageGaps} coverage gap(s).`,
-    `Activation: ${report.setup.availability}; ${report.setup.completed} completed, ${report.setup.supportedAgentReuse} second-agent reuse${report.setup.timeToFirstEvidenceMilliseconds === undefined ? '' : `, ${report.setup.timeToFirstEvidenceMilliseconds} ms to first evidence`}.`,
-    `Knowledge Delta: ${report.knowledgeDelta.proposed} proposed, ${report.knowledgeDelta.approved} approved, ${report.knowledgeDelta.edited} edited, ${report.knowledgeDelta.rejected} rejected, ${report.knowledgeDelta.deferred} deferred.`,
-    `Health: ${report.health.opened} opened, ${report.health.resolved} resolved.`,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `Local value report (${report.period.from} to ${report.period.to})`,
+      `Feedback: ${report.feedback.total} total; ${report.feedback.applied} applied, ${report.feedback.useful} useful, ${report.feedback.pin} pinned, ${report.feedback.wrong} wrong, ${report.feedback.dismiss} dismissed.`,
+      `Context briefs: ${report.contextBrief.successful}/${report.contextBrief.attempts} successful; ${report.contextBrief.coverageGaps} coverage gap(s).`,
+      `Activation: ${report.setup.availability}; ${report.setup.completed} completed, ${report.setup.supportedAgentReuse} second-agent reuse${report.setup.timeToFirstEvidenceMilliseconds === undefined ? '' : `, ${report.setup.timeToFirstEvidenceMilliseconds} ms to first evidence`}.`,
+      `Knowledge Delta: ${report.knowledgeDelta.proposed} proposed, ${report.knowledgeDelta.approved} approved, ${report.knowledgeDelta.edited} edited, ${report.knowledgeDelta.rejected} rejected, ${report.knowledgeDelta.deferred} deferred.`,
+      `Health: ${report.health.opened} opened, ${report.health.resolved} resolved.`,
+    ],
+    '\n',
+  );
 }
 
 function absoluteWindow(options: Pick<RunValueReportExportOptionsV1, 'from' | 'to' | 'period'>) {
@@ -218,7 +231,11 @@ function absoluteWindow(options: Pick<RunValueReportExportOptionsV1, 'from' | 't
       const date = (value: string | undefined) => {
         if (value === undefined || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) throw new Error();
         const parsed = Date.parse(`${value}T00:00:00.000Z`);
-        if (!Number.isFinite(parsed) || new Date(parsed).toISOString().slice(0, 10) !== value) throw new Error();
+        if (
+          !Number.isFinite(parsed) ||
+          Effect2.pipe(new Date(parsed).toISOString(), EffectString.slice(0, 10)) !== value
+        )
+          throw new Error();
         return parsed;
       };
       const from = date(options.from);

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -39,9 +40,25 @@ import {
 import {mcpToolCapabilities, parseMcpToolset} from '@threadnote/threadnote/mcp/toolset';
 import {runRemember} from '@threadnote/threadnote/memory/index';
 import {runSharePublishTool} from '@threadnote/threadnote/mcp/server/share';
+import {isJsonObject, parseJsonConfigObject} from '@threadnote/platform/json';
 import type {JsonObject} from '@threadnote/platform/json';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function cursorMcpServers(content: string): {readonly mcpServers: JsonObject} {
+  const config = parseJsonConfigObject(content);
+  if (config === undefined || !isJsonObject(config.mcpServers)) {
+    throw new Error('Cursor MCP configuration has no server map.');
+  }
+  return {...config, mcpServers: config.mcpServers};
+}
+
+function cursorServerEnvironment(server: unknown): JsonObject {
+  if (!isJsonObject(server) || !isJsonObject(server.env)) return {};
+  return server.env;
+}
 
 const runtimeConfig = (home: string): RuntimeConfig => ({
   account: 'local',
@@ -89,17 +106,25 @@ describe('organization composer attach', () => {
       }),
   );
 
-  it.each(['', ' offline_access', 'openid profile', 'a"b', 'a\\b', 'é', '\n', 'a'.repeat(257)])(
-    'rejects invalid provider scopes %#',
-    scope => {
-      expect(() => composerOAuthScopes([scope])).toThrow('RFC 6749');
-    },
-  );
+  it.each([
+    '',
+    ' offline_access',
+    'openid profile',
+    'a"b',
+    'a\\b',
+    'é',
+    '\n',
+    Effect2.pipe('a', EffectString.repeat(257)),
+  ])('rejects invalid provider scopes %#', scope => {
+    expect(() => composerOAuthScopes([scope])).toThrow('RFC 6749');
+  });
 
   it('bounds provider scope count and serialized size', () => {
     expect(() => composerOAuthScopes(Array.from({length: 33}, () => 'offline_access'))).toThrow('32');
     expect(() => composerOAuthScopes(Array.from({length: 30}, (_, i) => `scope${i}`))).toThrow('32');
-    expect(() => composerOAuthScopes(Array.from({length: 10}, (_, i) => `${i}${'a'.repeat(255)}`))).toThrow('2048');
+    expect(() =>
+      composerOAuthScopes(Array.from({length: 10}, (_, i) => `${i}${Effect2.pipe('a', EffectString.repeat(255))}`)),
+    ).toThrow('2048');
   });
 
   it('compares explicit scopes while keeping customized demo entries outside removal ownership', () => {
@@ -147,7 +172,9 @@ describe('organization composer attach', () => {
         ).toBe(true);
         expect(servers[THREADNOTE_ORG_MCP_NAME]).toMatchObject({auth: {CLIENT_ID: clientId}});
         expect(JSON.stringify(servers[THREADNOTE_ORG_MCP_NAME])).not.toMatch(/"(?:authorization|CLIENT_SECRET)"\s*:/i);
-        expect(new URL((servers[THREADNOTE_ORG_MCP_NAME] as {url: string}).url).search).toBe('');
+        const composerEntry = servers[THREADNOTE_ORG_MCP_NAME];
+        if (!composerEntry || typeof composerEntry.url !== 'string') throw new Error('Expected a composer URL.');
+        expect(new URL(composerEntry.url).search).toBe('');
         expect(ORG_COMPOSER_POLICY).toEqual({
           canonicalStore: 'git',
           cursorOidc: 'optional-attribution',
@@ -168,7 +195,7 @@ describe('organization composer attach', () => {
   );
 
   it('rejects invalid share IDs without reflecting them', () => {
-    for (const shareId of ['share:other', '-leading-hyphen', `${'a'.repeat(128)}b`]) {
+    for (const shareId of ['share:other', '-leading-hyphen', `${Effect2.pipe('a', EffectString.repeat(128))}b`]) {
       let message = '';
       try {
         composerShareId(shareId);
@@ -228,11 +255,14 @@ describe('organization composer attach', () => {
     );
   });
 
-  it.each(['', ' ', 'client\nother', 'x'.repeat(513)])('rejects an invalid registered OAuth client ID %#', clientId => {
-    expect(() => buildComposerHttpMcpEntry('https://composer.example.test/mcp', 'engineering', clientId)).toThrow(
-      'OAuth client ID',
-    );
-  });
+  it.each(['', ' ', 'client\nother', Effect2.pipe('x', EffectString.repeat(513))])(
+    'rejects an invalid registered OAuth client ID %#',
+    clientId => {
+      expect(() => buildComposerHttpMcpEntry('https://composer.example.test/mcp', 'engineering', clientId)).toThrow(
+        'OAuth client ID',
+      );
+    },
+  );
 
   it('rejects credential-bearing composer URLs without reflecting them', () => {
     const endpoint = 'https://owner:credential@composer.example.test/mcp';
@@ -256,7 +286,7 @@ describe('organization composer attach', () => {
   });
 
   it('treats only ~/.threadnote as the personal home', () => {
-    const resolve = (...parts: string[]) => parts.join('/');
+    const resolve = (...parts: string[]) => EffectArray.join(parts, '/');
     expect(isPersonalThreadnoteHome('/Users/denys/.threadnote', '/Users/denys', resolve)).toBe(true);
     expect(isPersonalThreadnoteHome('/homes/contributor-a', '/Users/denys', resolve)).toBe(false);
   });
@@ -320,7 +350,7 @@ describe('Team MCP install composer attach', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-stdio-only-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-stdio-only-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const cursorPath = path.join(user, '.cursor', 'mcp.json');
@@ -336,11 +366,11 @@ describe('Team MCP install composer attach', () => {
         yield* captureConsole(runMcpInstall(testRuntime, 'cursor', {apply: true})).pipe(
           Effect.provideService(SystemInfo, testSystem),
         );
-        const installed = JSON.parse(yield* fs.readFileString(cursorPath)) as {
-          mcpServers: Record<string, {env?: Record<string, string>; url?: string}>;
-        };
-        expect(installed.mcpServers[THREADNOTE_MCP_NAME]?.env?.THREADNOTE_MCP_TOOLSET).toBe('core');
-        expect(stdioEnvironmentCallsComposer(installed.mcpServers[THREADNOTE_MCP_NAME]?.env ?? {})).toBe(false);
+        const installed = cursorMcpServers(yield* fs.readFileString(cursorPath));
+        expect(cursorServerEnvironment(installed.mcpServers[THREADNOTE_MCP_NAME]).THREADNOTE_MCP_TOOLSET).toBe('core');
+        expect(stdioEnvironmentCallsComposer(cursorServerEnvironment(installed.mcpServers[THREADNOTE_MCP_NAME]))).toBe(
+          false,
+        );
         expect(installed.mcpServers[THREADNOTE_ORG_MCP_NAME]).toBeUndefined();
         expect(JSON.stringify(installed)).not.toContain(CURSOR_CLOUD_MEMORY_ENDPOINT_ENV);
         expect(JSON.stringify(installed)).not.toContain('composer.example.test');
@@ -354,7 +384,7 @@ describe('Team MCP install composer attach', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-copilot-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-copilot-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const project = path.join(root, 'repo');
@@ -408,7 +438,7 @@ describe('Team MCP install composer attach', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-attach-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-attach-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const project = path.join(root, 'fixture-repo');
@@ -437,14 +467,12 @@ describe('Team MCP install composer attach', () => {
           }),
         ).pipe(Effect.provideService(SystemInfo, testSystem));
         expect(yield* fs.exists(personalCursorPath)).toBe(false);
-        const installed = JSON.parse(yield* fs.readFileString(cursorPath)) as {
-          mcpServers: Record<string, {env?: Record<string, string>; headers?: Record<string, string>; url?: string}>;
-        };
+        const installed = cursorMcpServers(yield* fs.readFileString(cursorPath));
         const stdio = installed.mcpServers[THREADNOTE_MCP_NAME];
         const composer = installed.mcpServers[THREADNOTE_ORG_MCP_NAME];
-        expect(stdio?.env?.THREADNOTE_MCP_TOOLSET).toBe('core');
-        expect(stdioEnvironmentCallsComposer(stdio?.env ?? {})).toBe(false);
-        expect(JSON.stringify(stdio?.env ?? {})).not.toMatch(/attest|oidc|CURSOR_AGENT_SOCKET/i);
+        expect(cursorServerEnvironment(stdio).THREADNOTE_MCP_TOOLSET).toBe('core');
+        expect(stdioEnvironmentCallsComposer(cursorServerEnvironment(stdio))).toBe(false);
+        expect(JSON.stringify(cursorServerEnvironment(stdio))).not.toMatch(/attest|oidc|CURSOR_AGENT_SOCKET/i);
         expect(composer).toEqual(
           buildComposerHttpMcpEntry('https://composer.example.test/mcp', 'share-engineering', 'registered-client'),
         );
@@ -550,7 +578,7 @@ describe('Team MCP install composer attach', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-preserve-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-preserve-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const cursorPath = path.join(user, '.cursor', 'mcp.json');
@@ -582,9 +610,7 @@ describe('Team MCP install composer attach', () => {
         yield* captureConsole(runMcpInstall(testRuntime, 'cursor', {apply: true})).pipe(
           Effect.provideService(SystemInfo, testSystem),
         );
-        const installed = JSON.parse(yield* fs.readFileString(cursorPath)) as {
-          mcpServers: Record<string, unknown>;
-        };
+        const installed = cursorMcpServers(yield* fs.readFileString(cursorPath));
         expect(installed.mcpServers[THREADNOTE_MCP_NAME]).toMatchObject({
           env: {THREADNOTE_MCP_TOOLSET: 'core'},
         });
@@ -602,7 +628,7 @@ describe('Team MCP install composer attach', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-name-collision-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-name-collision-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const testRuntime = runtimeConfig(path.join(user, '.threadnote'));
@@ -632,7 +658,7 @@ describe('Team MCP install composer attach', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-no-global-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-no-global-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const personalCursorPath = path.join(user, '.cursor', 'mcp.json');
@@ -662,7 +688,7 @@ describe('Team MCP install composer attach', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-enterprise-home-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-enterprise-home-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const enterpriseHome = path.join(root, 'homes', 'contributor-a');
@@ -692,7 +718,7 @@ describe('Team MCP install composer attach', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-uninstall-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-uninstall-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const project = path.join(root, 'fixture-repo');
@@ -721,15 +747,11 @@ describe('Team MCP install composer attach', () => {
           }),
         ).pipe(Effect.provideService(SystemInfo, testSystem));
         yield* captureConsole(removeMcpConfigs('cursor', false)).pipe(Effect.provideService(SystemInfo, testSystem));
-        const remaining = JSON.parse(yield* fs.readFileString(cursorPath)) as {
-          mcpServers: Record<string, unknown>;
-        };
+        const remaining = cursorMcpServers(yield* fs.readFileString(cursorPath));
         expect(remaining.mcpServers[THREADNOTE_ORG_MCP_NAME]).toEqual(
           buildComposerHttpMcpEntry('https://composer.example.test/mcp', 'share-engineering'),
         );
-        const personal = JSON.parse(yield* fs.readFileString(personalCursorPath)) as {
-          mcpServers: Record<string, unknown>;
-        };
+        const personal = cursorMcpServers(yield* fs.readFileString(personalCursorPath));
         expect(personal.mcpServers[THREADNOTE_ORG_MCP_NAME]).toBeUndefined();
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -741,7 +763,7 @@ describe('Team MCP install composer attach', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-keep-custom-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-keep-custom-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const cursorPath = path.join(user, '.cursor', 'mcp.json');
@@ -776,9 +798,7 @@ describe('Team MCP install composer attach', () => {
           Effect.provideService(SystemInfo, testSystem),
         );
         yield* captureConsole(removeMcpConfigs('cursor', false)).pipe(Effect.provideService(SystemInfo, testSystem));
-        const remaining = JSON.parse(yield* fs.readFileString(cursorPath)) as {
-          mcpServers: Record<string, unknown>;
-        };
+        const remaining = cursorMcpServers(yield* fs.readFileString(cursorPath));
         expect(remaining.mcpServers[THREADNOTE_MCP_NAME]).toBeUndefined();
         expect(remaining.mcpServers[THREADNOTE_ORG_MCP_NAME]).toEqual(
           buildComposerHttpMcpEntry('https://composer.example.test/mcp', 'engineering', 'operator-registered'),
@@ -795,7 +815,7 @@ vitestDescribe('organization cloud hybrid verify', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-verify-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-verify-'}));
         const home = path.join(root, 'home');
         const cwd = path.join(root, 'checkout');
         yield* fs.makeDirectory(home, {recursive: true});
@@ -822,7 +842,9 @@ vitestDescribe('organization cloud hybrid verify', () => {
         }
         expect(receipt.cursorOidc).toBe('required-for-writes');
         expect(receipt.oauth).toBe('org-idp');
-        expect(receipt.checks.find(check => check.name === 'composer OAuth')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(receipt.checks, check => check.name === 'composer OAuth')),
+        ).toMatchObject({
           status: 'warn',
         });
       }),
@@ -835,7 +857,7 @@ vitestDescribe('organization cloud hybrid verify', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-status-loopback-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-org-status-loopback-'}));
         const home = path.join(root, 'home');
         const cwd = path.join(root, 'checkout');
         yield* fs.makeDirectory(home, {recursive: true});

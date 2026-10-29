@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {SHA256_HEX} from './digest.js';
 import {graphSharingFailure} from './errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const GRAPH_SHARE_HTTP_CAS_MAX_BYTES = 32 * 1_048_576;
 export const GRAPH_SHARE_REGISTRY_MANIFEST_MAX_BYTES = 4 * 1_048_576;
@@ -30,5 +33,5 @@ export function assertGraphShareDiscoveryTag(name: string): string {
 export function graphSharePayloadLooksLikeGitObject(bytes: Uint8Array): boolean {
   if (bytes.byteLength < 5) return false;
   const prefix = new TextDecoder().decode(bytes.subarray(0, 7));
-  return GIT_OBJECT_PREFIXES.some(candidate => prefix.startsWith(candidate));
+  return EffectArray.some(GIT_OBJECT_PREFIXES, candidate => Effect.pipe(prefix, EffectString.startsWith(candidate)));
 }

@@ -1,8 +1,11 @@
+import * as MigrationSchema from 'effect/Schema';
+import {Array as EffectArray} from 'effect';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {parsePersonalMemoryUri} from '../hygiene.js';
 import {MemoryPointerNotFound} from '../relocation.js';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
 
 export interface MemoryReadRecoveryV1 {
   readonly code: 'memory-resource-not-found';
@@ -25,7 +28,7 @@ export function memoryReadRecoveryForError(
   config: Pick<RuntimeConfig, 'user'>,
   error: unknown,
 ): MemoryReadRecoveryV1 | undefined {
-  if (!(error instanceof MemoryPointerNotFound)) return undefined;
+  if (!MigrationSchema.is(MemoryPointerNotFound)(error)) return undefined;
   const identity = parsePersonalMemoryUri(error.uri, config.user);
   if (identity === undefined) return undefined;
   return memoryReadRecoveryForRequestedUri(error.uri);
@@ -110,7 +113,9 @@ export function memoryReadRecoveryText(recovery: MemoryReadRecoveryV1): string {
 }
 
 function hasExactObjectKeys(value: Readonly<Record<string, unknown>>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const sortedExpected = [...expected].sort();
-  return actual.length === sortedExpected.length && actual.every((key, index) => key === sortedExpected[index]);
+  return (
+    actual.length === sortedExpected.length && EffectArray.every(actual, (key, index) => key === sortedExpected[index])
+  );
 }

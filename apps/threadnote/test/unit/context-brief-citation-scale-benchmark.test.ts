@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as yaml from 'js-yaml';
 import fc from 'fast-check';
@@ -37,6 +38,8 @@ import {
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale-contract';
 import {parseContextBriefCitationScaleBenchmarkArguments} from '../../../../scripts/benchmark-context-brief-citations-target.js';
 import {CONTEXT_BRIEF_CITATION_RSS_MAXIMUM_OBSERVATIONS} from '../../../../scripts/context-brief-citation-rss-observer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NonNegativeInteger = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const PositiveInteger = Schema.Int.check(Schema.isGreaterThan(0));
@@ -233,22 +236,25 @@ describe('Context Brief citation scale benchmark', () => {
         },
       ],
     });
-    expect(parseContextBriefCitationScaleBenchmarkArguments(['--built-artifact-sha256', 'a'.repeat(64)])).toMatchObject(
-      {
-        memoryCandidates: 100_000,
-        profileIds: CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS,
-        samples: CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES,
-        warmups: CONTEXT_BRIEF_CITATION_SCALE_RELEASE_WARMUPS,
-      },
-    );
     expect(
       parseContextBriefCitationScaleBenchmarkArguments([
         '--built-artifact-sha256',
-        'a'.repeat(64),
-        '--candidate-commit',
-        'b'.repeat(40),
+        Effect2.pipe('a', EffectString.repeat(64)),
       ]),
-    ).toMatchObject({candidateCommit: 'b'.repeat(40)});
+    ).toMatchObject({
+      memoryCandidates: 100_000,
+      profileIds: CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS,
+      samples: CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES,
+      warmups: CONTEXT_BRIEF_CITATION_SCALE_RELEASE_WARMUPS,
+    });
+    expect(
+      parseContextBriefCitationScaleBenchmarkArguments([
+        '--built-artifact-sha256',
+        Effect2.pipe('a', EffectString.repeat(64)),
+        '--candidate-commit',
+        Effect2.pipe('b', EffectString.repeat(40)),
+      ]),
+    ).toMatchObject({candidateCommit: Effect2.pipe('b', EffectString.repeat(40))});
     expect(() => parseContextBriefCitationScaleBenchmarkArguments(['--samples', '101'])).toThrow(
       /supports at most 300 total profile\/sample observations; received 303/u,
     );
@@ -283,7 +289,7 @@ describe('Context Brief citation scale benchmark', () => {
     const shapePreservingPlan = contextBriefCitationScaleFixturePlan(
       {
         ...budget,
-        profiles: budget.profiles.map(profile =>
+        profiles: EffectArray.map(budget.profiles, profile =>
           profile.id === 'workset-50' ? {...profile, citedRepositories: 17} : profile,
         ),
       },
@@ -301,7 +307,7 @@ describe('Context Brief citation scale benchmark', () => {
       contextBriefCitationScaleReviewedFixtureIdentity(
         {
           ...budget,
-          profiles: budget.profiles.map(profile =>
+          profiles: EffectArray.map(budget.profiles, profile =>
             profile.id === 'workset-50' ? {...profile, selectedMemories: 15} : profile,
           ),
         },
@@ -310,7 +316,7 @@ describe('Context Brief citation scale benchmark', () => {
       ),
     ).toThrow(/selectedMemories/u);
 
-    const candidate = contextBriefCitationScaleCandidateBinding('a'.repeat(40), {
+    const candidate = contextBriefCitationScaleCandidateBinding(Effect2.pipe('a', EffectString.repeat(40)), {
       packageManager: 'bun@1.4.2',
       version: '4.6.8',
     });
@@ -329,7 +335,7 @@ describe('Context Brief citation scale benchmark', () => {
     const parseSchedule = (profileIds: readonly string[], samples: number) =>
       parseContextBriefCitationScaleBenchmarkArguments([
         '--profiles',
-        profileIds.join(','),
+        EffectArray.join(profileIds, ','),
         '--samples',
         String(samples),
       ]);
@@ -367,8 +373,8 @@ describe('Context Brief citation scale benchmark', () => {
   it('fails closed when any release-runner identity field is relabeled', () => {
     const identity: ContextBriefCitationScaleReleaseIdentityV1 = {
       architecture: 'arm64',
-      candidateCommit: 'a'.repeat(40),
-      commit: 'a'.repeat(40),
+      candidateCommit: Effect2.pipe('a', EffectString.repeat(40)),
+      commit: Effect2.pipe('a', EffectString.repeat(40)),
       cpu: 'Apple M1',
       dirty: false,
       gitStatusObserved: true,
@@ -409,7 +415,7 @@ describe('Context Brief citation scale benchmark', () => {
                 : key === 'gitStatusObserved' || key === 'githubActions'
                   ? false
                   : key === 'commit'
-                    ? 'b'.repeat(40)
+                    ? Effect2.pipe('b', EffectString.repeat(40))
                     : 'invalid',
           } as ContextBriefCitationScaleReleaseIdentityV1;
           expect(contextBriefCitationScaleReleaseIdentityFailures(invalid).length).toBeGreaterThan(0);
@@ -420,7 +426,9 @@ describe('Context Brief citation scale benchmark', () => {
   });
 
   it('gates externally observed process-tree RSS while retaining boundary RSS as diagnostics', () => {
-    const profile = budget.profiles.find(candidate => candidate.id === 'local-100k')!;
+    const profile = Option.getOrUndefined(
+      EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'local-100k'),
+    )!;
     const boundaryOutlier = scaleObservation(
       profile,
       {},
@@ -445,9 +453,13 @@ describe('Context Brief citation scale benchmark', () => {
 
   it('rederives the v3 sample-gap ceiling from retained hosted-runner calibration evidence', () => {
     expect(sampleGapCalibration.runs).toHaveLength(5);
-    expect(new Set(sampleGapCalibration.runs.map(run => run.rawArtifactSha256)).size).toBe(5);
-    expect(new Set(sampleGapCalibration.runs.map(run => run.artifactId)).size).toBe(5);
-    expect(sampleGapCalibration.runs.find(run => run.workflowRun === 36_251_218_009)).toMatchObject({
+    expect(new Set(EffectArray.map(sampleGapCalibration.runs, run => run.rawArtifactSha256)).size).toBe(5);
+    expect(new Set(EffectArray.map(sampleGapCalibration.runs, run => run.artifactId)).size).toBe(5);
+    expect(
+      Option.getOrUndefined(
+        EffectArray.findFirst(sampleGapCalibration.runs, run => run.workflowRun === 36_251_218_009),
+      ),
+    ).toMatchObject({
       artifactZipSha256: 'a56543c43df9eef8072dfdadcab1e022d77d9b4e47f0d66e153c3529c4610d3f',
       artifactId: 10_909_666_470,
       candidateCommit: '366f1924df3b7d3aa18df99b27b2edcff0b695f4',
@@ -455,7 +467,7 @@ describe('Context Brief citation scale benchmark', () => {
       rawArtifactSha256: 'abd46bf098aa9c82ab1efd3a8f513427c43f2937d9f2c6b16c9fa46045bb20e7',
       workflowAttempt: 1,
     });
-    const gaps = sampleGapCalibration.runs.flatMap(run => {
+    const gaps = EffectArray.flatMap(sampleGapCalibration.runs, run => {
       expect(run.maximumSampleGapsMilliseconds).toHaveLength(run.observationCount);
       expect(Number.isFinite(Date.parse(run.createdAt))).toBe(true);
       return run.maximumSampleGapsMilliseconds;
@@ -467,7 +479,7 @@ describe('Context Brief citation scale benchmark', () => {
       return value;
     };
     const maximumConsecutiveBreachesWithinRun = Math.max(
-      ...sampleGapCalibration.runs.map(run => {
+      ...EffectArray.map(sampleGapCalibration.runs, run => {
         let current = 0;
         let maximum = 0;
         for (const gap of run.maximumSampleGapsMilliseconds) {
@@ -486,7 +498,7 @@ describe('Context Brief citation scale benchmark', () => {
       ) * sampleGapCalibration.roundUpIncrementMilliseconds;
 
     expect({
-      breachCount: gaps.filter(gap => gap > sampleGapCalibration.breachThresholdMilliseconds).length,
+      breachCount: EffectArray.filter(gaps, gap => gap > sampleGapCalibration.breachThresholdMilliseconds).length,
       derivedHardMaximumMilliseconds,
       maximumConsecutiveBreachesWithinRun,
       maximumMilliseconds,
@@ -511,29 +523,31 @@ describe('Context Brief citation scale benchmark', () => {
 
   it('rederives the 100-sample validation quantile from retained same-bundle hosted evidence', () => {
     expect(validationQuantileCalibration.runs).toHaveLength(5);
-    expect(new Set(validationQuantileCalibration.runs.map(run => run.workflowRun)).size).toBe(5);
-    expect(new Set(validationQuantileCalibration.runs.map(run => run.artifactId)).size).toBe(5);
-    expect(new Set(validationQuantileCalibration.runs.map(run => run.rawJsonSha256)).size).toBe(5);
-    expect(new Set(validationQuantileCalibration.runs.map(run => run.archiveSha256)).size).toBe(5);
+    expect(new Set(EffectArray.map(validationQuantileCalibration.runs, run => run.workflowRun)).size).toBe(5);
+    expect(new Set(EffectArray.map(validationQuantileCalibration.runs, run => run.artifactId)).size).toBe(5);
+    expect(new Set(EffectArray.map(validationQuantileCalibration.runs, run => run.rawJsonSha256)).size).toBe(5);
+    expect(new Set(EffectArray.map(validationQuantileCalibration.runs, run => run.archiveSha256)).size).toBe(5);
     expect(
-      validationQuantileCalibration.runs.every(
+      EffectArray.every(
+        validationQuantileCalibration.runs,
         run =>
           run.benchmarkBundleSha256 === validationQuantileCalibration.benchmarkBundleSha256 &&
           run.fixtureSha256 === validationQuantileCalibration.fixtureSha256,
       ),
     ).toBe(true);
     expect(
-      validationQuantileCalibration.runs.every(
+      EffectArray.every(
+        validationQuantileCalibration.runs,
         run => run.validationMilliseconds.length === validationQuantileCalibration.historicalSamplesPerRun,
       ),
     ).toBe(true);
 
-    const all = validationQuantileCalibration.runs.flatMap(run => run.validationMilliseconds);
+    const all = EffectArray.flatMap(validationQuantileCalibration.runs, run => run.validationMilliseconds);
     const pooled = benchmarkMeasurement('validation-pooled', 'milliseconds', all);
     const latestFour = benchmarkMeasurement(
       'validation-latest-four',
       'milliseconds',
-      validationQuantileCalibration.runs.slice(1).flatMap(run => run.validationMilliseconds),
+      EffectArray.flatMap(validationQuantileCalibration.runs.slice(1), run => run.validationMilliseconds),
     );
     expect({
       latestFourObservationCount: latestFour.samples,
@@ -542,8 +556,10 @@ describe('Context Brief citation scale benchmark', () => {
       observationCount: pooled.samples,
       p50Milliseconds: pooled.p50,
       p95Milliseconds: pooled.p95,
-      thresholdBreaches: all.filter(value => value > validationQuantileCalibration.validationP95MaximumMilliseconds)
-        .length,
+      thresholdBreaches: EffectArray.filter(
+        all,
+        value => value > validationQuantileCalibration.validationP95MaximumMilliseconds,
+      ).length,
     }).toEqual({
       latestFourObservationCount: validationQuantileCalibration.expected.latestFourObservationCount,
       latestFourP95Milliseconds: validationQuantileCalibration.expected.latestFourP95Milliseconds,
@@ -564,10 +580,11 @@ describe('Context Brief citation scale benchmark', () => {
     ({gaps}) =>
       Effect.sync(() => {
         const summary = contextBriefCitationRssSampleGapSummary(gaps);
-        const breaches = gaps.map(
+        const breaches = EffectArray.map(
+          gaps,
           gap => gap > CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.breachThresholdMilliseconds,
         );
-        const breachCount = breaches.filter(Boolean).length;
+        const breachCount = EffectArray.filter(breaches, Boolean).length;
         let run = 0;
         let maximumRun = 0;
         for (const breach of breaches) {
@@ -674,7 +691,9 @@ describe('Context Brief citation scale benchmark', () => {
   });
 
   it('fails closed when a claimed OS peak growth is not derivable from its fixed baseline', () => {
-    const profile = budget.profiles.find(candidate => candidate.id === 'local-100k')!;
+    const profile = Option.getOrUndefined(
+      EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'local-100k'),
+    )!;
     fc.assert(
       fc.property(
         fc.integer({min: 1, max: 2_000_000_000}),
@@ -711,7 +730,9 @@ describe('Context Brief citation scale benchmark', () => {
   });
 
   it('requires a local descendant capture and 80% coverage for sustained workset fan-out', () => {
-    const localProfile = budget.profiles.find(candidate => candidate.id === 'local-100k')!;
+    const localProfile = Option.getOrUndefined(
+      EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'local-100k'),
+    )!;
     const observations = Array.from({length: 5}, (_, ordinal) =>
       scaleObservation(
         localProfile,
@@ -736,7 +757,7 @@ describe('Context Brief citation scale benchmark', () => {
       descendantObservationRate: 0.8,
     });
 
-    const noLocalDescendants = observations.map(observation => ({
+    const noLocalDescendants = EffectArray.map(observations, observation => ({
       ...observation,
       memory: {...observation.memory, peakProcessCount: 1},
     }));
@@ -751,8 +772,10 @@ describe('Context Brief citation scale benchmark', () => {
       'local-100k observed workload descendants in 0/5 memory observations; required at least one sampled descendant',
     );
 
-    const worksetProfile = budget.profiles.find(candidate => candidate.id === 'workset-50')!;
-    const worksetObservations = observations.map((_, ordinal) =>
+    const worksetProfile = Option.getOrUndefined(
+      EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'workset-50'),
+    )!;
+    const worksetObservations = EffectArray.map(observations, (_, ordinal) =>
       scaleObservation(
         worksetProfile,
         {},
@@ -772,7 +795,7 @@ describe('Context Brief citation scale benchmark', () => {
         worksetObservations,
       ).failures,
     ).toEqual([]);
-    const underObservedWorkset = worksetObservations.map((observation, ordinal) =>
+    const underObservedWorkset = EffectArray.map(worksetObservations, (observation, ordinal) =>
       ordinal === 1 ? {...observation, memory: {...observation.memory, peakProcessCount: 1}} : observation,
     );
     expect(
@@ -793,9 +816,9 @@ describe('Context Brief citation scale benchmark', () => {
         (baselines, offset) => {
           const expected = Math.max(0, Math.max(...baselines) - baselines[0]);
           expect(contextBriefCitationScaleRetainedRootRssGrowthBytes(baselines)).toBe(expected);
-          expect(contextBriefCitationScaleRetainedRootRssGrowthBytes(baselines.map(value => value + offset))).toBe(
-            expected,
-          );
+          expect(
+            contextBriefCitationScaleRetainedRootRssGrowthBytes(EffectArray.map(baselines, value => value + offset)),
+          ).toBe(expected);
         },
       ),
       {numRuns: 100},
@@ -803,7 +826,9 @@ describe('Context Brief citation scale benchmark', () => {
   });
 
   it('fails when real production store-session fan-out exceeds distinct cited repositories', () => {
-    const profile = budget.profiles.find(candidate => candidate.id === 'workset-128')!;
+    const profile = Option.getOrUndefined(
+      EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'workset-128'),
+    )!;
     const observation = scaleObservation(profile, {
       productionStoreSessionCalls: profile.citedRepositories * 3,
     });
@@ -814,7 +839,9 @@ describe('Context Brief citation scale benchmark', () => {
   });
 
   it('fails when a published Workset omits either active-view fence observation', () => {
-    const profile = budget.profiles.find(candidate => candidate.id === 'workset-50')!;
+    const profile = Option.getOrUndefined(
+      EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'workset-50'),
+    )!;
     const observation = scaleObservation(profile, {
       activeViewFenceObservations: profile.citedRepositories,
     });
@@ -823,10 +850,12 @@ describe('Context Brief citation scale benchmark', () => {
   });
 
   it('keeps aggregation invariant under sample order while enforcing fan-out counters', () => {
-    const profile = budget.profiles.find(candidate => candidate.id === 'workset-50')!;
+    const profile = Option.getOrUndefined(
+      EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'workset-50'),
+    )!;
     fc.assert(
       fc.property(fc.shuffledSubarray([1, 2, 3, 4, 5], {maxLength: 5, minLength: 5}), order => {
-        const observations = order.map((value, index) =>
+        const observations = EffectArray.map(order, (value, index) =>
           scaleObservation(
             profile,
             {},
@@ -857,7 +886,9 @@ describe('Context Brief citation scale benchmark', () => {
   });
 
   it('uses the 100-sample production quantile at the four-versus-five validation-tail boundary', () => {
-    const profile = budget.profiles.find(candidate => candidate.id === 'workset-128')!;
+    const profile = Option.getOrUndefined(
+      EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'workset-128'),
+    )!;
     const order = Array.from({length: CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES}, (_, index) => index);
 
     fc.assert(
@@ -868,7 +899,7 @@ describe('Context Brief citation scale benchmark', () => {
           minLength: CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES,
         }),
         (tailValues, permutation) => {
-          const observations = permutation.map((value, ordinal) => {
+          const observations = EffectArray.map(permutation, (value, ordinal) => {
             const validationMilliseconds =
               value < tailValues
                 ? profile.maximumValidationP95Milliseconds + 1
@@ -886,7 +917,11 @@ describe('Context Brief citation scale benchmark', () => {
             scaleObservation(profile),
             observations,
           );
-          const validationFailures = evaluated.failures.filter(failure => failure.includes('validation p95'));
+          const validationFailures = EffectArray.filter(
+            evaluated.failures,
+            (failure, index) =>
+              index in evaluated.failures && Effect2.pipe(failure, EffectString.includes('validation p95')),
+          );
 
           expect(validationFailures.length === 0).toBe(tailValues <= 4);
         },
@@ -927,7 +962,7 @@ describe('Context Brief citation scale benchmark', () => {
   });
 
   it('rederives retained release evidence against the independently reviewed commit and package version', () => {
-    const candidate = contextBriefCitationScaleCandidateBinding('a'.repeat(40), {
+    const candidate = contextBriefCitationScaleCandidateBinding(Effect2.pipe('a', EffectString.repeat(40)), {
       version: '4.6.8',
       packageManager: 'bun@1.4.2',
     });
@@ -935,7 +970,7 @@ describe('Context Brief citation scale benchmark', () => {
     expect(parseContextBriefCitationScaleArtifactV2(artifact, budget, candidate)).toEqual(artifact);
     expect(() => parseContextBriefCitationScaleArtifactV2(artifact, budget)).toThrow();
     for (const mismatch of [
-      {...candidate, commit: 'b'.repeat(40)},
+      {...candidate, commit: Effect2.pipe('b', EffectString.repeat(40))},
       {...candidate, sourceVersion: 'threadnote-4.6.9'},
       {...candidate, sourceVersion: 'threadnote-4.6.8-..'},
       {...candidate, runtime: 'bun/1.4.3'},
@@ -948,7 +983,7 @@ describe('Context Brief citation scale benchmark', () => {
   });
 
   it('keeps development smoke evidence non-release even with a valid candidate binding', () => {
-    const candidate = contextBriefCitationScaleCandidateBinding('a'.repeat(40), {
+    const candidate = contextBriefCitationScaleCandidateBinding(Effect2.pipe('a', EffectString.repeat(40)), {
       version: '4.6.8',
       packageManager: 'bun@1.4.2',
     });
@@ -964,24 +999,88 @@ describe('Context Brief citation scale benchmark', () => {
   });
 
   it('runs first-use memory evidence before observer-free timing', () => {
-    const memoryPhase = scaleEvaluationSource.indexOf('const rssEvidence = yield* Effect.acquireUseRelease');
-    const timingPhase = scaleEvaluationSource.indexOf('const timingProfiles = new Map');
+    const memoryPhase = Effect2.pipe(
+      scaleEvaluationSource,
+      EffectString.indexOf('const rssEvidence = yield* Effect.acquireUseRelease'),
+      Effect2.Option.getOrElse(() => -1),
+    );
+    const timingPhase = Effect2.pipe(
+      scaleEvaluationSource,
+      EffectString.indexOf('const timingProfiles = new Map'),
+      Effect2.Option.getOrElse(() => -1),
+    );
     expect(memoryPhase).toBeGreaterThan(-1);
     expect(timingPhase).toBeGreaterThan(memoryPhase);
   });
 
   it('runs only by schedule or explicit opt-in and retains the built scale artifact', () => {
-    const workflow = yaml.load(benchmarkWorkflow) as {
-      readonly jobs: Readonly<
-        Record<string, {readonly if?: string; readonly 'runs-on'?: string; readonly steps?: readonly WorkflowStep[]}>
-      >;
-      readonly on: {readonly workflow_dispatch?: {readonly inputs?: Readonly<Record<string, unknown>>}};
-    };
+    const workflow = Schema.decodeUnknownSync(
+      Schema.Struct({
+        jobs: Schema.Record(
+          Schema.String,
+          Schema.Struct({
+            if: Schema.optional(Schema.String),
+            'runs-on': Schema.optional(Schema.String),
+            steps: Schema.optional(
+              Schema.Array(
+                Schema.Struct({
+                  env: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+                  run: Schema.optional(Schema.String),
+                  uses: Schema.optional(Schema.String),
+                  with: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+                }),
+              ),
+            ),
+          }),
+        ),
+        on: Schema.Struct({
+          workflow_dispatch: Schema.optional(
+            Schema.Struct({inputs: Schema.optional(Schema.Record(Schema.String, Schema.Unknown))}),
+          ),
+        }),
+      }),
+    )(yaml.load(benchmarkWorkflow));
     const job = workflow.jobs['context-brief-citations-scale'];
-    const benchmarkStep = job.steps?.find(step => step.run?.includes('bench:context-brief-citations'));
-    const checkout = job.steps?.find(step => step.uses === 'actions/checkout@v7');
+    const benchmarkStep = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), __effectArrayReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(step =>
+                Effect2.pipe(step.run, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect2.pipe(effectOptionalString, EffectString.includes('bench:context-brief-citations')),
+                ))(__effectArrayValue),
+          ),
+        ),
+      ),
+    );
+    const checkout = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), __effectArrayReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver, step => step.uses === 'actions/checkout@v7'),
+        ),
+      ),
+    );
     const command = benchmarkStep?.run ?? '';
-    const upload = job.steps?.find(step => step.uses?.startsWith('actions/upload-artifact'));
+    const upload = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), __effectArrayReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(step =>
+                Effect2.pipe(step.uses, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect2.pipe(effectOptionalString, EffectString.startsWith('actions/upload-artifact')),
+                ))(__effectArrayValue),
+          ),
+        ),
+      ),
+    );
     expect(workflow.on.workflow_dispatch?.inputs).toHaveProperty('include_context_brief_citations_scale');
     expect(job.if).toContain("github.event_name == 'schedule'");
     expect(job.if).toContain('inputs.include_context_brief_citations_scale');
@@ -1005,13 +1104,6 @@ describe('Context Brief citation scale benchmark', () => {
   });
 });
 
-interface WorkflowStep {
-  readonly env?: Readonly<Record<string, string>>;
-  readonly run?: string;
-  readonly uses?: string;
-  readonly with?: Readonly<Record<string, unknown>>;
-}
-
 type ArtifactTamperTarget =
   | 'claimed-profile-aggregate'
   | 'execution-contract'
@@ -1023,7 +1115,7 @@ type ArtifactTamperTarget =
   | 'workset-generation-digest';
 
 function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
-  const profiles = budget.profiles.map(profile => {
+  const profiles = EffectArray.map(budget.profiles, profile => {
     const observation = scaleObservation(profile, {}, {}, {observationId: `context-rss-${profile.id}-0`});
     return evaluateContextBriefCitationScaleProfile(budget, profile.id, observation.memoryWorkload, [observation])
       .result;
@@ -1033,7 +1125,7 @@ function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
     environment: {
       architecture: 'arm64',
       candidateCommit: 'unclaimed',
-      commit: 'a'.repeat(40),
+      commit: Effect2.pipe('a', EffectString.repeat(40)),
       cpu: 'Apple M1 Max',
       dirty: true,
       gitStatusObserved: true,
@@ -1048,15 +1140,21 @@ function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
       sourceVersion: 'threadnote-4.6.0',
     },
     evidenceClass: 'development-smoke',
-    execution: {builtArtifactSha256: 'b'.repeat(64), ...CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2},
+    execution: {
+      builtArtifactSha256: Effect2.pipe('b', EffectString.repeat(64)),
+      ...CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2,
+    },
     fixture: {
-      hash: 'c'.repeat(64),
+      hash: Effect2.pipe('c', EffectString.repeat(64)),
       indexedMemoryCandidates: 200,
       legacyV1MemoryCandidates: 128,
       readyGraphSetupMilliseconds: 1,
       recallIndexBuildMilliseconds: 1,
       requestedMemoryCandidates: 200,
-      worksetGenerationDigests: ['d'.repeat(64), 'e'.repeat(64)],
+      worksetGenerationDigests: [
+        Effect2.pipe('d', EffectString.repeat(64)),
+        Effect2.pipe('e', EffectString.repeat(64)),
+      ],
       worksetRepositoryIdentities: [50, 128],
     },
     gate: contextBriefCitationScaleGate([
@@ -1101,7 +1199,7 @@ function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
 
 function releaseScaleArtifact(sourceVersion: string, runtime = 'bun/1.3.14'): ContextBriefCitationScaleArtifactV2 {
   const base = scaleArtifact();
-  const profiles = budget.profiles.map(profile => {
+  const profiles = EffectArray.map(budget.profiles, profile => {
     const observations = Array.from({length: CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES}, (_, ordinal) =>
       scaleObservation(profile, {}, {}, {observationId: `context-rss-${profile.id}-${ordinal}`, ordinal}),
     );
@@ -1113,7 +1211,7 @@ function releaseScaleArtifact(sourceVersion: string, runtime = 'bun/1.3.14'): Co
     ...base,
     environment: {
       ...base.environment,
-      candidateCommit: 'a'.repeat(40),
+      candidateCommit: Effect2.pipe('a', EffectString.repeat(40)),
       dirty: false,
       githubActions: true,
       runnerArchitecture: 'ARM64',
@@ -1152,7 +1250,7 @@ function tamperScaleArtifact(
   if (target === 'claimed-profile-aggregate') {
     return {
       ...artifact,
-      profiles: artifact.profiles.map((candidate, index) =>
+      profiles: EffectArray.map(artifact.profiles, (candidate, index) =>
         index === profileIndex
           ? {
               ...candidate,
@@ -1188,11 +1286,11 @@ function tamperScaleArtifact(
   if (target === 'memory-observation') {
     return {
       ...artifact,
-      profiles: artifact.profiles.map((candidate, index) =>
+      profiles: EffectArray.map(artifact.profiles, (candidate, index) =>
         index === profileIndex
           ? {
               ...candidate,
-              observations: candidate.observations.map((observation, observationIndex) =>
+              observations: EffectArray.map(candidate.observations, (observation, observationIndex) =>
                 observationIndex === 0
                   ? {
                       ...observation,
@@ -1214,11 +1312,11 @@ function tamperScaleArtifact(
   if (target === 'memory-workload') {
     return {
       ...artifact,
-      profiles: artifact.profiles.map((candidate, index) =>
+      profiles: EffectArray.map(artifact.profiles, (candidate, index) =>
         index === profileIndex
           ? {
               ...candidate,
-              observations: candidate.observations.map((observation, observationIndex) =>
+              observations: EffectArray.map(candidate.observations, (observation, observationIndex) =>
                 observationIndex === 0
                   ? {
                       ...observation,

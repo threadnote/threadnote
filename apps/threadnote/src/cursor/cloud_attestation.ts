@@ -3,13 +3,18 @@ import {cursorCloudMemoryEndpoint} from './cloud.js';
 import {CommandExecutor, type CommandOptions} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {CommandResult} from '@threadnote/platform/command';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CURSOR_AGENT_SOCKET_DEFAULT = '/run/cursor/api.sock';
 const CURSOR_OIDC_PATH = 'http://cursor-agent/v1/tokens/oidc';
 const CHALLENGE_MAX_FUTURE_MILLISECONDS = 10 * 60 * 1_000;
 const CURL_OUTPUT_MAX_BYTES = 16 * 1_024;
 
-export class CursorAttestationError extends Schema.TaggedError<CursorAttestationError>()('CursorAttestationError', {
+export class CursorAttestationError extends Schema.TaggedError<
+  CursorAttestationError,
+  {readonly brand: unique symbol}
+>()('CursorAttestationError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
@@ -260,14 +265,18 @@ function curlJson(
 }
 
 function parseCurlOutput(output: string): {readonly body: string; readonly status: number} {
-  const separator = output.lastIndexOf('\n');
-  const statusText = separator >= 0 ? output.slice(separator + 1) : '';
+  const separator = Effect2.pipe(
+    output,
+    EffectString.lastIndexOf('\n'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const statusText = separator >= 0 ? Effect2.pipe(output, EffectString.slice(separator + 1)) : '';
   if (!/^\d{3}$/u.test(statusText)) {
     throw CursorAttestationError.make({
       message: 'Cursor workload attestation network exchange returned an invalid response.',
     });
   }
-  return {body: output.slice(0, separator), status: Number(statusText)};
+  return {body: Effect2.pipe(output, EffectString.slice(0, separator)), status: Number(statusText)};
 }
 
 function parseObject(body: string): Record<string, unknown> | undefined {
@@ -319,7 +328,12 @@ function portableOpaqueValue(value: unknown, name: string, maximum: number, mini
 }
 
 function requiredString(value: unknown, name: string, maximum: number): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > maximum || value.trim() !== value) {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > maximum ||
+    Effect2.pipe(value, EffectString.trim) !== value
+  ) {
     throw CursorAttestationError.make({message: `Cursor attestation ${name} is required and exceeds its safe bounds.`});
   }
   return value;
@@ -335,8 +349,11 @@ function optionalTimestamp(value: string | undefined): string | undefined {
 }
 
 function cursorAgentSocket(value: string | undefined): string {
-  const socket = value?.trim() || CURSOR_AGENT_SOCKET_DEFAULT;
-  if (!socket.startsWith('/') || socket.length > 1_024 || /[\0\r\n]/u.test(socket)) {
+  const socket =
+    Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || CURSOR_AGENT_SOCKET_DEFAULT;
+  if (!Effect2.pipe(socket, EffectString.startsWith('/')) || socket.length > 1_024 || /[\0\r\n]/u.test(socket)) {
     throw CursorAttestationError.make({message: 'CURSOR_AGENT_SOCKET must be a bounded absolute Unix socket path.'});
   }
   return socket;

@@ -6,11 +6,18 @@ import {
 } from '@threadnote/memory/code/citation-policy';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {MemoryOperationError} from './migrations.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function validateImportedMemory(uri: string, content: string): MemoryRecord | undefined {
   assertMemoryDocumentSchemaWritable(content);
   const parsed = parseMemoryDocument(uri, content);
-  const marker = content.trim().replace(/\r\n?/gu, '\n').split('\n', 1)[0]?.trim();
+  const marker = Effect.pipe(
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+    Effect.pipe(content, EffectString.trim, EffectString.replace(/\r\n?/gu, '\n')).split('\n', 1)[0],
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   if ((marker === 'MEMORY' || marker === 'HANDOFF') && !parsed) {
     throw MemoryOperationError.make({message: `Invalid Threadnote memory document in pack: ${uri}.`});
   }

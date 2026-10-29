@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -5,9 +6,35 @@ import {dirname, join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {parseMemoryDocument} from '@threadnote/memory/hygiene';
 import {expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execute = promisify(execFile);
 const standalone = join(process.cwd(), 'apps', 'threadnote', 'src', 'standalone.ts');
+
+function parseContentionGraphStatus(stdout: string) {
+  const value: unknown = JSON.parse(stdout);
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    EffectArray.isArray(value) ||
+    !('identity' in value) ||
+    typeof value.identity !== 'object' ||
+    value.identity === null ||
+    EffectArray.isArray(value.identity) ||
+    !('checkoutId' in value.identity) ||
+    typeof value.identity.checkoutId !== 'string' ||
+    !('readySnapshot' in value) ||
+    typeof value.readySnapshot !== 'object' ||
+    value.readySnapshot === null ||
+    EffectArray.isArray(value.readySnapshot) ||
+    !('id' in value.readySnapshot) ||
+    typeof value.readySnapshot.id !== 'string'
+  ) {
+    throw new Error('Code graph status JSON had an invalid contention fixture shape.');
+  }
+  return {identity: {checkoutId: value.identity.checkoutId}, readySnapshot: {id: value.readySnapshot.id}};
+}
 
 it('refuses a strict save promptly while the graph writer is busy and retries after its release', async () => {
   const root = await mkdtemp(join(tmpdir(), 'threadnote-citation-contention-'));
@@ -34,10 +61,7 @@ it('refuses a strict save promptly while the graph writer is busy and retries af
       },
     );
     await run(['graph', 'index', '--no-vectors', '--json']);
-    const status = JSON.parse((await run(['graph', 'status', '--json'])).stdout) as {
-      identity: {checkoutId: string};
-      readySnapshot: {id: string};
-    };
+    const status = parseContentionGraphStatus((await run(['graph', 'status', '--json'])).stdout);
     const lock = join(home, 'locks', 'indexes', 'code-graph', 'database-writes', `${status.identity.checkoutId}.lock`);
     await mkdir(dirname(lock), {recursive: true});
     // A live fixture-owned writer; no normal user home or runtime is involved.
@@ -90,9 +114,10 @@ it('refuses a strict save promptly while the graph writer is busy and retries af
       ['default', []],
       ['explicit', ['--defer-code-refs']],
     ] as const) {
-      const deferredArgs = args
-        .filter(argument => argument !== '--require-current-code-refs')
-        .map(argument => (argument === 'contention' ? `contention-${topic}` : argument));
+      const deferredArgs = EffectArray.map(
+        EffectArray.filter(args, argument => argument !== '--require-current-code-refs'),
+        argument => (argument === 'contention' ? `contention-${topic}` : argument),
+      );
       const pendingPath = join(dirname(memory), `contention-${topic}.md`);
       await run([...deferredArgs, ...deferArgs, '--dry-run']);
       await expect(readFile(pendingPath, 'utf8')).rejects.toThrow();
@@ -101,7 +126,11 @@ it('refuses a strict save promptly while the graph writer is busy and retries af
       expect(savedPending.stdout).not.toContain('threadnote graph index');
       const pendingContent = await readFile(pendingPath, 'utf8');
       const pendingDocument = parseMemoryDocument(
-        savedPending.stdout.match(/Stored memory: (threadnote:\/\/\S+)/u)?.[1] ?? '',
+        Effect.pipe(
+          savedPending.stdout,
+          EffectString.match(/Stored memory: (threadnote:\/\/\S+)/u),
+          Effect.Option.getOrElse(() => null),
+        )?.[1] ?? '',
         pendingContent,
       );
       expect(pendingDocument).toBeDefined();
@@ -112,7 +141,7 @@ it('refuses a strict save promptly while the graph writer is busy and retries af
 
     await rm(lock);
     const finalized = JSON.parse(
-      (await run(['finalize-code-refs', ...pending.flatMap(item => ['--uri', item.uri])])).stdout,
+      (await run(['finalize-code-refs', ...EffectArray.flatMap(pending, item => ['--uri', item.uri])])).stdout,
     );
     expect(finalized).toMatchObject({finalizedCount: 2, failedCount: 0, pendingCount: 0});
     for (const item of pending) {
@@ -125,7 +154,11 @@ it('refuses a strict save promptly while the graph writer is busy and retries af
     expect(saved.stdout).toContain('Stored memory:');
     const content = await readFile(memory, 'utf8');
     expect(content).toContain('Keep the source invariant.');
-    const uri = saved.stdout.match(/Stored memory: (threadnote:\/\/\S+)/u)?.[1];
+    const uri = Effect.pipe(
+      saved.stdout,
+      EffectString.match(/Stored memory: (threadnote:\/\/\S+)/u),
+      Effect.Option.getOrElse(() => null),
+    )?.[1];
     expect(uri).toBeDefined();
     expect(uri && parseMemoryDocument(uri, content)?.metadata.codeCitations).toEqual([
       expect.objectContaining({path: 'source.ts', target: {kind: 'file'}}),

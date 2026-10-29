@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {CodeMemoryLinkAgentAbManifestV1} from './code-memory-link-agent-ab.js';
 import {
@@ -9,6 +10,7 @@ import {
 } from './code-memory-link-attestation.js';
 import {CODE_MEMORY_LINK_DOGFOOD_APPROVED_EVIDENCE_HASHES} from './code-memory-link-approvals.js';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
 
 export {CODE_MEMORY_LINK_DOGFOOD_APPROVED_EVIDENCE_HASHES} from './code-memory-link-approvals.js';
 
@@ -259,7 +261,7 @@ function normalizeArtifact(value: unknown): Omit<CodeMemoryLinkDogfoodArtifactV1
     runId,
   );
   assertUniqueCodeMemoryLinkAttestations(
-    [...observations.map(observation => observation.attestation), deferredAnchorLifecycle.attestation],
+    [...EffectArray.map(observations, observation => observation.attestation), deferredAnchorLifecycle.attestation],
     'practical dogfood observations',
   );
   return {
@@ -289,13 +291,15 @@ function parseObservations(
   harnessCommit: string,
   runId: string,
 ): readonly CodeMemoryLinkDogfoodObservationV1[] {
-  if (!Array.isArray(value) || value.length !== CODE_MEMORY_LINK_DOGFOOD_CASE_IDS.length) {
+  if (!EffectArray.isArray(value) || value.length !== CODE_MEMORY_LINK_DOGFOOD_CASE_IDS.length) {
     invalid(`dogfood observations must contain exactly ${CODE_MEMORY_LINK_DOGFOOD_CASE_IDS.length} cases`);
   }
-  const observations = value.map((observation, sequence) =>
+  const observations = EffectArray.map(value, (observation, sequence) =>
     parseObservation(observation, candidate, harnessCommit, runId, sequence),
   );
-  if (observations.some((observation, index) => observation.id !== CODE_MEMORY_LINK_DOGFOOD_CASE_IDS[index])) {
+  if (
+    EffectArray.some(observations, (observation, index) => observation.id !== CODE_MEMORY_LINK_DOGFOOD_CASE_IDS[index])
+  ) {
     invalid('dogfood observations must use the canonical required case order');
   }
   return observations;
@@ -552,8 +556,8 @@ function qualityGateFailures(
   observations: readonly CodeMemoryLinkDogfoodObservationV1[],
   deferred: CodeMemoryLinkDeferredAnchorObservationV2,
 ): string[] {
-  const byId = new Map(observations.map(observation => [observation.id, observation]));
-  const failures = observations.flatMap(observation => commonFailures(observation));
+  const byId = new Map(EffectArray.map(observations, observation => [observation.id, observation]));
+  const failures = EffectArray.flatMap(observations, observation => commonFailures(observation));
   expected(byId.get('task-only-memory'), {direct: 0, matches: 1, requested: 0, resolved: 0, version: 2}, failures);
   expected(
     byId.get('file-backlink'),
@@ -683,9 +687,9 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const expectedKeys = [...keys].sort();
-  if (actual.length !== expectedKeys.length || actual.some((key, index) => key !== expectedKeys[index])) {
+  if (actual.length !== expectedKeys.length || EffectArray.some(actual, (key, index) => key !== expectedKeys[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }

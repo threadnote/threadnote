@@ -1,3 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export interface ScrubberPattern {
   readonly name: string;
   // When present, applyScrubber can replace every match with this string when
@@ -93,8 +97,13 @@ export function applyScrubber(content: string, options: ScrubberOptions): Scrubb
       return {blocker: pattern.name, cleaned: content, redactions: []};
     }
     const globalRegex = globalize(pattern.regex);
-    const matches = cleaned.match(globalRegex) ?? [];
-    cleaned = cleaned.replace(globalRegex, pattern.placeholder);
+    const matches =
+      Effect.pipe(
+        cleaned,
+        EffectString.match(globalRegex),
+        Effect.Option.getOrElse(() => null),
+      ) ?? [];
+    cleaned = Effect.pipe(cleaned, EffectString.replace(globalRegex, pattern.placeholder));
     redactions.push({count: matches.length, name: pattern.name});
   }
   return {cleaned, redactions};
@@ -127,7 +136,7 @@ export function redactSensitiveText(content: string): string {
   let redacted = redactCredentialAssignments(content);
   for (const pattern of SCRUBBER_PATTERNS) {
     const placeholder = pattern.placeholder ?? '<secret>';
-    redacted = redacted.replace(globalize(pattern.regex), placeholder);
+    redacted = Effect.pipe(redacted, EffectString.replace(globalize(pattern.regex), placeholder));
   }
   return redacted;
 }
@@ -137,7 +146,9 @@ function redactCredentialAssignments(content: string): string {
   let cursor = 0;
   let search = 0;
   while (search < content.length) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const colon = content.indexOf(':', search);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const equals = content.indexOf('=', search);
     const separator = colon < 0 ? equals : equals < 0 ? colon : Math.min(colon, equals);
     if (separator < 0) break;
@@ -145,7 +156,7 @@ function redactCredentialAssignments(content: string): string {
     while (keyEnd > cursor && isAssignmentWhitespace(content[keyEnd - 1])) keyEnd -= 1;
     let keyStart = keyEnd;
     while (keyStart > cursor && isCredentialKeyCharacter(content[keyStart - 1])) keyStart -= 1;
-    const key = content.slice(keyStart, keyEnd).toLowerCase();
+    const key = Effect.pipe(content, EffectString.slice(keyStart, keyEnd), EffectString.toLowerCase);
     let valueStart = separator + 1;
     while (valueStart < content.length && isAssignmentWhitespace(content[valueStart])) valueStart += 1;
     const valueEnd = sensitiveCredentialKey(key) ? credentialValueEnd(content, valueStart) : undefined;
@@ -153,25 +164,25 @@ function redactCredentialAssignments(content: string): string {
       search = separator + 1;
       continue;
     }
-    output.push(content.slice(cursor, valueStart), '[REDACTED]');
+    output.push(Effect.pipe(content, EffectString.slice(cursor, valueStart)), '[REDACTED]');
     cursor = valueEnd;
     search = valueEnd;
   }
-  output.push(content.slice(cursor));
-  return output.join('');
+  output.push(Effect.pipe(content, EffectString.slice(cursor)));
+  return EffectArray.join(output, '');
 }
 
 function sensitiveCredentialKey(key: string): boolean {
   return (
-    key.includes('token') ||
-    key.includes('secret') ||
-    key.includes('password') ||
-    key.includes('apikey') ||
-    key.includes('api_key') ||
-    key.includes('api-key') ||
-    key.includes('authorization') ||
-    key.includes('credential') ||
-    key.includes('session')
+    Effect.pipe(key, EffectString.includes('token')) ||
+    Effect.pipe(key, EffectString.includes('secret')) ||
+    Effect.pipe(key, EffectString.includes('password')) ||
+    Effect.pipe(key, EffectString.includes('apikey')) ||
+    Effect.pipe(key, EffectString.includes('api_key')) ||
+    Effect.pipe(key, EffectString.includes('api-key')) ||
+    Effect.pipe(key, EffectString.includes('authorization')) ||
+    Effect.pipe(key, EffectString.includes('credential')) ||
+    Effect.pipe(key, EffectString.includes('session'))
   );
 }
 
@@ -179,10 +190,17 @@ function credentialValueEnd(content: string, start: number): number | undefined 
   if (start >= content.length || isAssignmentWhitespace(content[start])) return undefined;
   const quote = content[start];
   if (quote === '"' || quote === "'") {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const closing = content.indexOf(quote, start + 1);
     if (closing > start + 1) return closing + 1;
   }
-  if (content.slice(start, start + 'Bearer'.length).toLowerCase() === 'bearer') {
+  if (
+    Effect.pipe(content, __effectPipeInput => {
+      const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.slice(start, start + 'Bearer'.length));
+      const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.toLowerCase);
+      return __effectPipeStage1;
+    }) === 'bearer'
+  ) {
     let tokenStart = start + 'Bearer'.length;
     if (isAssignmentWhitespace(content[tokenStart])) {
       while (tokenStart < content.length && isAssignmentWhitespace(content[tokenStart])) tokenStart += 1;
@@ -205,7 +223,11 @@ function credentialValueEnd(content: string, start: number): number | undefined 
 
 function isCredentialKeyCharacter(value: string | undefined): boolean {
   if (!value) return false;
-  const code = value.charCodeAt(0);
+  const code = Effect.pipe(
+    value,
+    EffectString.charCodeAt(0),
+    Effect.Option.getOrElse(() => NaN),
+  );
   return (
     value === '_' ||
     value === '.' ||
@@ -233,7 +255,7 @@ function globalize(regex: RegExp): RegExp {
     cached.regex.lastIndex = 0;
     return cached.regex;
   }
-  const globalRegex = new RegExp(source, flags.includes('g') ? flags : `${flags}g`);
+  const globalRegex = new RegExp(source, Effect.pipe(flags, EffectString.includes('g')) ? flags : `${flags}g`);
   if (source.length <= MAXIMUM_CACHED_PATTERN_CODE_UNITS)
     globalPatterns.set(regex, {source, flags, regex: globalRegex});
   else globalPatterns.delete(regex);

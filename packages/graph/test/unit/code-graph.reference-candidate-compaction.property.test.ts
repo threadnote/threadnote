@@ -1,4 +1,5 @@
-import {Database} from 'bun:sqlite';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -9,6 +10,8 @@ import {
   type PersistedReferenceResolutionInput,
   resolvePersistedReferenceSelections,
 } from '@threadnote/graph/store';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface CandidateMetadata {
   readonly candidateCount: number;
@@ -37,25 +40,30 @@ describe('persistent reference candidate compaction', () => {
           try {
             const cursor = limits.cursorIndex === 0 ? '' : edgeId(Math.min(limits.cursorIndex, metadata.length));
             const statement = codeGraphPersistentReferencePageStatement('snapshot', cursor, limits);
-            const actual = database.query(statement.text).all(...statement.parameters) as readonly {
-              readonly candidate_count: number;
-              readonly candidate_payload_bytes: number;
-              readonly edge_id: string;
-            }[];
-            const eligible = metadata
-              .map((value, index) => ({...value, edgeId: edgeId(index + 1)}))
-              .filter(value => value.edgeId > cursor)
-              .slice(0, limits.references);
+            const actual = database
+              .query<
+                {
+                  readonly candidate_count: number;
+                  readonly candidate_payload_bytes: number;
+                  readonly edge_id: string;
+                },
+                SQLQueryBindings[]
+              >(statement.text)
+              .all(...statement.parameters);
+            const eligible = EffectArray.filter(
+              EffectArray.map(metadata, (value, index) => ({...value, edgeId: edgeId(index + 1)})),
+              value => value.edgeId > cursor,
+            ).slice(0, limits.references);
             const expected = boundedPrefix(eligible, limits.candidateCount, limits.payloadBytes);
 
-            expect(actual.map(row => row.edge_id)).toEqual(expected.map(row => row.edgeId));
+            expect(EffectArray.map(actual, row => row.edge_id)).toEqual(EffectArray.map(expected, row => row.edgeId));
             expect(actual.length).toBeLessThanOrEqual(limits.references);
-            expect(actual.reduce((total, row) => total + row.candidate_count, 0)).toBeLessThanOrEqual(
+            expect(EffectArray.reduce(actual, 0, (total, row) => total + row.candidate_count)).toBeLessThanOrEqual(
               limits.candidateCount,
             );
-            expect(actual.reduce((total, row) => total + row.candidate_payload_bytes, 0)).toBeLessThanOrEqual(
-              limits.payloadBytes,
-            );
+            expect(
+              EffectArray.reduce(actual, 0, (total, row) => total + row.candidate_payload_bytes),
+            ).toBeLessThanOrEqual(limits.payloadBytes);
           } finally {
             database.close(false);
           }
@@ -105,12 +113,14 @@ describe('persistent reference candidate compaction', () => {
         ],
         1,
       );
-      const plan = database
-        .query(`EXPLAIN QUERY PLAN ${statement.text}`)
-        .all(...statement.parameters)
-        .map(row => (row as {readonly detail: string}).detail);
+      const plan = EffectArray.map(
+        database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters),
+        row => Schema.decodeUnknownSync(Schema.Struct({detail: Schema.String}))(row).detail,
+      );
       expect(plan).toContain('SEARCH lookup USING PRIMARY KEY (snapshot_id=? AND lookup_key=?)');
-      expect(plan.some(detail => detail.includes('USE TEMP B-TREE'))).toBe(false);
+      expect(EffectArray.some(plan, detail => Effect.pipe(detail, EffectString.includes('USE TEMP B-TREE')))).toBe(
+        false,
+      );
       expect(database.query(statement.text).all(...statement.parameters)).toHaveLength(2);
     } finally {
       database.close(false);
@@ -124,9 +134,10 @@ describe('persistent reference candidate compaction', () => {
         const expected = rawResolutionModel(testCase.references, testCase.rows);
         const actual = resolvePersistedReferenceSelections(testCase.references, summaries);
         const reversed = resolvePersistedReferenceSelections(
-          [...testCase.references]
-            .reverse()
-            .map(reference => ({...reference, lookupTiers: reference.lookupTiers.map(tier => [...tier].reverse())})),
+          EffectArray.map([...testCase.references].reverse(), reference => ({
+            ...reference,
+            lookupTiers: EffectArray.map(reference.lookupTiers, tier => [...tier].reverse()),
+          })),
           [...summaries].reverse(),
         );
 
@@ -144,7 +155,7 @@ describe('persistent reference candidate compaction', () => {
           .uniqueArray(fc.stringMatching(/^[a-z][a-z0-9-]{0,15}$/), {maxLength: 80})
           .chain(edgeIds => fc.subarray(edgeIds).map(referenceIds => ({edgeIds, referenceIds}))),
         ({edgeIds, referenceIds}) => {
-          const edges = edgeIds.map(id => ({
+          const edges = EffectArray.map(edgeIds, id => ({
             confidence: 0.5,
             evidencePath: `src/${id}.ts`,
             evidenceSpan: {column: 1, endColumn: 2, endLine: 1, line: 1},
@@ -155,8 +166,10 @@ describe('persistent reference candidate compaction', () => {
             sourceName: `source${id}`,
             targetName: `target${id}`,
           }));
-          const references = referenceIds.map(edgeId => {
-            const edge = edges.find(candidate => candidate.id === edgeId)!;
+          const references = EffectArray.map(referenceIds, edgeId => {
+            const edge = EffectOption.getOrUndefined(
+              EffectArray.findFirst(edges, candidate => candidate.id === edgeId),
+            )!;
             return {
               edgeId,
               evidencePath: edge.evidencePath,
@@ -174,15 +187,15 @@ describe('persistent reference candidate compaction', () => {
           const partition = partitionPersistedReferenceEdges(edges, references);
           const reversed = partitionPersistedReferenceEdges([...edges].reverse(), [...references].reverse());
           const expectedReferenceIds = [...referenceIds].sort();
-          const expectedDirectIds = edgeIds.filter(id => !referenceIds.includes(id)).sort();
+          const expectedDirectIds = EffectArray.filter(edgeIds, id => !referenceIds.includes(id)).sort();
 
           expect([...partition.referenceEdges.keys()].sort()).toEqual(expectedReferenceIds);
-          expect(partition.directEdges.map(edge => edge.id).sort()).toEqual(expectedDirectIds);
-          expect([...partition.directEdges, ...partition.referenceEdges.values()].map(edge => edge.id).sort()).toEqual(
-            [...edgeIds].sort(),
-          );
+          expect(EffectArray.map(partition.directEdges, edge => edge.id).sort()).toEqual(expectedDirectIds);
+          expect(
+            EffectArray.map([...partition.directEdges, ...partition.referenceEdges.values()], edge => edge.id).sort(),
+          ).toEqual([...edgeIds].sort());
           expect([...reversed.referenceEdges.keys()].sort()).toEqual(expectedReferenceIds);
-          expect(reversed.directEdges.map(edge => edge.id).sort()).toEqual(expectedDirectIds);
+          expect(EffectArray.map(reversed.directEdges, edge => edge.id).sort()).toEqual(expectedDirectIds);
           expect(JSON.stringify({edges, references})).toBe(before);
         },
       ),
@@ -257,7 +270,7 @@ const resolutionCaseArbitrary = rawLookupRowsArbitrary.chain(rows =>
       {maxLength: 20},
     )
     .map(references => ({
-      references: references.map((reference, index) => ({...reference, edgeId: `edge-${index}`})),
+      references: EffectArray.map(references, (reference, index) => ({...reference, edgeId: `edge-${index}`})),
       rows,
     })),
 );
@@ -314,12 +327,12 @@ function lookupSummaries(rows: readonly RawLookupRow[]): readonly PersistedLooku
     if (group === undefined) grouped.set(key, [row]);
     else group.push(row);
   }
-  return [...grouped.values()].map(group => {
-    const ids = group.map(row => row.symbolId).sort();
-    const exportedIds = group
-      .filter(row => row.exported)
-      .map(row => row.symbolId)
-      .sort();
+  return EffectArray.map([...grouped.values()], group => {
+    const ids = EffectArray.map(group, row => row.symbolId).sort();
+    const exportedIds = EffectArray.map(
+      EffectArray.filter(group, (row, __effectArrayIndex2) => __effectArrayIndex2 in group && row.exported),
+      row => row.symbolId,
+    ).sort();
     return {
       exportedSymbolCount: exportedIds.length,
       lookupKey: group[0].lookupKey,
@@ -337,18 +350,20 @@ function rawResolutionModel(references: readonly PersistedReferenceResolutionInp
   const resolved: Array<{readonly edgeId: string; readonly symbolId: string}> = [];
   for (const reference of references) {
     for (const tier of reference.lookupTiers) {
-      const options = tier.map(lookupKey =>
-        rows.filter(
-          row =>
+      const options = EffectArray.map(tier, lookupKey =>
+        EffectArray.filter(
+          rows,
+          (row, __effectArrayIndex) =>
+            __effectArrayIndex in rows &&
             row.lookupKey === lookupKey &&
             row.resolutionDomain === reference.resolutionDomain &&
             (!reference.exportedOnly || row.exported) &&
             (reference.relation !== 'overrides' || row.symbolId !== reference.sourceId),
         ),
       );
-      if (options.every(option => option.length === 0)) continue;
-      const symbolIds = new Set(options.flatMap(option => option.map(row => row.symbolId)));
-      if (options.every(option => option.length <= 1) && symbolIds.size === 1) {
+      if (EffectArray.every(options, option => option.length === 0)) continue;
+      const symbolIds = new Set(EffectArray.flatMap(options, option => EffectArray.map(option, row => row.symbolId)));
+      if (EffectArray.every(options, option => option.length <= 1) && symbolIds.size === 1) {
         resolved.push({edgeId: reference.edgeId, symbolId: symbolIds.values().next().value!});
       }
       break;
@@ -359,7 +374,9 @@ function rawResolutionModel(references: readonly PersistedReferenceResolutionInp
 
 function normalizedSelections(selections: readonly {readonly edgeId: string; readonly symbolId: string}[]) {
   return [...selections].sort(
-    (left, right) => left.edgeId.localeCompare(right.edgeId) || left.symbolId.localeCompare(right.symbolId),
+    (left, right) =>
+      Effect.pipe(left.edgeId, EffectString.localeCompare(right.edgeId)) ||
+      Effect.pipe(left.symbolId, EffectString.localeCompare(right.symbolId)),
   );
 }
 
@@ -383,5 +400,5 @@ function boundedPrefix(
 }
 
 function edgeId(index: number): string {
-  return `edge-${String(index).padStart(3, '0')}`;
+  return `edge-${Effect.pipe(String(index), EffectString.padStart(3, '0'))}`;
 }

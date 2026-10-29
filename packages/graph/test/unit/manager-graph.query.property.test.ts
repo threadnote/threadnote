@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {managerGraphQueryWorkingSet} from '@threadnote/graph/visualization';
@@ -19,18 +20,22 @@ describe('Manager graph query properties', () => {
         fc.integer({min: 1, max: 500}),
         (nodeCount, relationships, nodeLimit, edgeLimit) => {
           const nodes = Array.from({length: nodeCount}, (_, index) => queryNode(index));
-          const edges = relationships.map((relationship, index) =>
+          const edges = EffectArray.map(relationships, (relationship, index) =>
             queryEdge(index, relationship.source, relationship.target),
           );
           const result = managerGraphQueryWorkingSet(nodes, edges, {edgeLimit, nodeLimit});
-          const visibleIds = new Set(result.nodes.map(node => node.id));
+          const visibleIds = new Set(EffectArray.map(result.nodes, node => node.id));
 
           expect(result.nodes.length).toBeLessThanOrEqual(nodeLimit);
           expect(result.edges.length).toBeLessThanOrEqual(edgeLimit);
           expect(visibleIds.size).toBe(result.nodes.length);
-          expect(result.edges.every(edge => visibleIds.has(edge.sourceId) && visibleIds.has(edge.targetId))).toBe(true);
-          expect(result.edges.every(edge => edge.sourceId !== edge.targetId)).toBe(true);
-          expect(result.nodes.every(node => typeof node.score === 'number' && Number.isFinite(node.score))).toBe(true);
+          expect(
+            EffectArray.every(result.edges, edge => visibleIds.has(edge.sourceId) && visibleIds.has(edge.targetId)),
+          ).toBe(true);
+          expect(EffectArray.every(result.edges, edge => edge.sourceId !== edge.targetId)).toBe(true);
+          expect(
+            EffectArray.every(result.nodes, node => typeof node.score === 'number' && Number.isFinite(node.score)),
+          ).toBe(true);
           if (nodeCount > nodeLimit || edges.length > result.edges.length) expect(result.truncated).toBe(true);
         },
       ),

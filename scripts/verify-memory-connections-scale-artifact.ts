@@ -10,6 +10,9 @@ import {
 } from '@threadnote/threadnote/evaluation/memory-connections-scale-contract';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const DEFAULT_BUDGET = 'apps/threadnote/test/evaluation/baselines/memory-connections-scale-v1/budget.json';
 export const MAX_MEMORY_CONNECTIONS_SCALE_ARTIFACT_BYTES = 32 * 1024 * 1024;
@@ -30,7 +33,7 @@ const program = Effect.gen(function* () {
     catch: cause => ScriptError.make({message: 'Memory Connections scale artifact replay failed.', cause}),
   });
   if (!artifact.gate.passed || artifact.evidenceClass !== 'release-scale') {
-    return yield* ScriptError.make({message: artifact.gate.failures.join('\n')});
+    return yield* ScriptError.make({message: EffectArray.join(artifact.gate.failures, '\n')});
   }
   yield* printJson({
     artifact: options.artifactPath,
@@ -96,7 +99,9 @@ const readCandidateBinding = Effect.fn('memoryConnectionsScaleVerifier.readCandi
 
 function gitText(args: readonly string[]): string | undefined {
   const result = Bun.spawnSync({cmd: ['git', ...args], stderr: 'ignore', stdout: 'pipe'});
-  return result.exitCode === 0 && result.stdout ? new TextDecoder().decode(result.stdout).trim() : undefined;
+  return result.exitCode === 0 && result.stdout
+    ? Effect2.pipe(new TextDecoder().decode(result.stdout), EffectString.trim)
+    : undefined;
 }
 
 function commit(value: string | undefined, option: string): string {
@@ -108,6 +113,7 @@ function commit(value: string | undefined, option: string): string {
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {outlineNativeDocument, renderNativeDocument, type NativeDocumentKind} from '../src/documents.js';
 import {
@@ -6,6 +7,7 @@ import {
   nativeDocumentTemplateVersion,
   type NativeDocumentTemplateDefinition,
 } from '../src/templates.js';
+import * as EffectRecord from 'effect/Record';
 
 const caught = (run: () => unknown): unknown => {
   try {
@@ -95,18 +97,23 @@ describe('native authoring templates', () => {
       index: ['summary', 'entries'],
       experience: ['summary', 'evidence'],
     };
-    for (const kind of Object.keys(expected) as NativeDocumentKind[]) {
+    for (const kind of EffectRecord.keys(expected)) {
       const definition: NativeDocumentTemplateDefinition = nativeDocumentTemplateDefinitions[kind];
-      expect(definition.sections.map(section => `${section.id}:${section.heading}`)).toEqual(expected[kind]);
-      expect(definition.sections.filter(section => section.required === true).map(section => section.id)).toEqual(
-        required[kind],
+      expect(EffectArray.map(definition.sections, section => `${section.id}:${section.heading}`)).toEqual(
+        expected[kind],
       );
+      expect(
+        EffectArray.map(
+          EffectArray.filter(definition.sections, section => section.required === true),
+          section => section.id,
+        ),
+      ).toEqual(required[kind]);
     }
   });
 
   it('defines stable descriptive sections and builds every supported document kind', () => {
     expect(nativeDocumentTemplateVersion).toBe(1);
-    for (const kind of Object.keys(nativeDocumentTemplateDefinitions) as NativeDocumentKind[]) {
+    for (const kind of EffectRecord.keys(nativeDocumentTemplateDefinitions)) {
       const definition: NativeDocumentTemplateDefinition = nativeDocumentTemplateDefinitions[kind];
       const supplied: Record<string, string> = {};
       for (const section of definition.sections) {
@@ -114,15 +121,21 @@ describe('native authoring templates', () => {
       }
       const document = createNativeDocument({kind, title: `Native ${kind}`, sections: supplied});
       expect(document).toMatchObject({schemaVersion: 1, templateVersion: 1, kind, title: `Native ${kind}`});
-      expect(document.sections.map(section => section.id)).toEqual(
-        definition.sections.filter(section => section.required).map(section => section.id),
+      expect(EffectArray.map(document.sections, section => section.id)).toEqual(
+        EffectArray.map(
+          EffectArray.filter(definition.sections, section => section.required === true),
+          section => section.id,
+        ),
       );
-      expect(document.sections.map(section => section.heading)).toEqual(
-        definition.sections.filter(section => section.required).map(section => section.heading),
+      expect(EffectArray.map(document.sections, section => section.heading)).toEqual(
+        EffectArray.map(
+          EffectArray.filter(definition.sections, section => section.required === true),
+          section => section.heading,
+        ),
       );
       expect(renderNativeDocument(document)).toContain(`# Native ${kind}\n`);
-      expect(outlineNativeDocument(document).sections.map(section => section.id)).toEqual(
-        document.sections.map(section => section.id),
+      expect(EffectArray.map(outlineNativeDocument(document).sections, section => section.id)).toEqual(
+        EffectArray.map(document.sections, section => section.id),
       );
     }
   });
@@ -139,7 +152,12 @@ describe('native authoring templates', () => {
         domain: '   ',
       },
     });
-    expect(document.sections.map(section => section.id)).toEqual(['summary', 'problem', 'requirements', 'acceptance']);
+    expect(EffectArray.map(document.sections, section => section.id)).toEqual([
+      'summary',
+      'problem',
+      'requirements',
+      'acceptance',
+    ]);
     expect(document.sections[1]?.body).toBe('An actual problem statement.');
   });
 
@@ -160,7 +178,8 @@ describe('native authoring templates', () => {
       {kind: 'source', title: 'Source', sections: {summary: 'Summary', content: 4}},
       {kind: '__proto__', title: 'Unsafe', sections: {summary: 'Summary'}},
     ])
-      expect(caught(() => createNativeDocument(input as never))).toMatchObject({code: 'invalid-document'});
+      // @ts-expect-error -- These malformed unknown-shaped payloads exercise the runtime validator boundary.
+      expect(caught(() => createNativeDocument(input))).toMatchObject({code: 'invalid-document'});
 
     expect(
       caught(() =>

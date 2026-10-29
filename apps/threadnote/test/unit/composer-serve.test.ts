@@ -7,6 +7,8 @@ import {
   releaseFailedComposerStart,
 } from '@threadnote/threadnote/remote_memory/composer_serve';
 import {LOCAL_COMPOSER_DEFAULT_LISTEN} from '@threadnote/threadnote/remote_memory/local_idp';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const listenAddress = {hostname: '127.0.0.1' as const, port: 18788};
 
@@ -30,7 +32,7 @@ describe('composer serve', () => {
     });
     expect(environment.THREADNOTE_REMOTE_CANONICAL_STORE).toBe('git');
     expect(environment.THREADNOTE_REMOTE_OAUTH_ISSUER).toBe('http://127.0.0.1:18788');
-    expect(environment.THREADNOTE_REMOTE_ALLOWED_HOSTS.split(',')).toEqual(
+    expect(Effect.pipe(environment.THREADNOTE_REMOTE_ALLOWED_HOSTS, EffectString.split(','))).toEqual(
       expect.arrayContaining(['127.0.0.1:18788', 'localhost:18788']),
     );
     const config = remoteMemoryConfigFromEnvironment(environment);

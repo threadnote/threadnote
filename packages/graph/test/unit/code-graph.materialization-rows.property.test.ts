@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -13,6 +14,8 @@ import {
   codeGraphMaterializationSymbolTermRows,
 } from '@threadnote/graph/materialization/rows';
 import type {CodeGraphEdge, CodeGraphReference, CodeGraphSymbol} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const edgeArbitrary = FC.record({
   confidence: FC.integer({max: 100, min: 0}).map(value => value / 100),
@@ -44,14 +47,15 @@ fcProp(
   'materializes lookup rows deterministically independent of unique symbol order',
   {symbols: FC.uniqueArray(symbolArbitrary, {maxLength: 24, selector: symbol => symbol.id})},
   ({symbols}) => {
-    const materialized = symbols.map(codeGraphSymbol);
+    const materialized = EffectArray.map(symbols, codeGraphSymbol);
     const reversed = [...materialized].reverse();
     const forward = codeGraphMaterializationSymbolLookupRows(materialized);
     const reverse = codeGraphMaterializationSymbolLookupRows(reversed);
     expect(reverse).toEqual(forward);
-    expect(new Set(forward.map(row => `${row.lookupKey}\0${row.symbolId}`)).size).toBe(forward.length);
+    expect(new Set(EffectArray.map(forward, row => `${row.lookupKey}\0${row.symbolId}`)).size).toBe(forward.length);
     expect(
-      forward.every(
+      EffectArray.every(
+        forward,
         (row, index) =>
           index === 0 ||
           forward[index - 1].lookupKey < row.lookupKey ||
@@ -59,8 +63,8 @@ fcProp(
       ),
     ).toBe(true);
     expect(codeGraphMaterializationSymbolRows(reversed)).toEqual(codeGraphMaterializationSymbolRows(materialized));
-    expect(codeGraphMaterializationSymbolRows(materialized).map(row => row.id)).toEqual(
-      materialized.map(symbol => symbol.id).sort(),
+    expect(EffectArray.map(codeGraphMaterializationSymbolRows(materialized), row => row.id)).toEqual(
+      EffectArray.map(materialized, symbol => symbol.id).sort(),
     );
   },
   {fastCheck: {numRuns: 100}},
@@ -71,9 +75,9 @@ fcProp(
   'materializes prepared symbol terms independent of unique symbol order',
   {symbols: FC.uniqueArray(symbolArbitrary, {maxLength: 24, selector: symbol => symbol.id})},
   ({symbols}) => {
-    const materialized = symbols.map(codeGraphSymbol);
+    const materialized = EffectArray.map(symbols, codeGraphSymbol);
     const terms = new Map(
-      materialized.map(symbol => [
+      EffectArray.map(materialized, symbol => [
         symbol,
         [
           [`term-${symbol.id}`, 5],
@@ -84,7 +88,8 @@ fcProp(
     const forward = codeGraphMaterializationSymbolTermRows(materialized, terms);
     expect(codeGraphMaterializationSymbolTermRows([...materialized].reverse(), terms)).toEqual(forward);
     expect(
-      forward.every(
+      EffectArray.every(
+        forward,
         (row, index) =>
           index === 0 ||
           forward[index - 1].term < row.term ||
@@ -130,7 +135,7 @@ fcProp(
   'materializes direct edge rows independent of unique edge order',
   {edges: FC.uniqueArray(edgeArbitrary, {maxLength: 24, selector: edge => edge.id})},
   ({edges}) => {
-    const materialized = edges.map(edge => ({
+    const materialized = EffectArray.map(edges, edge => ({
       ...edge,
       evidencePath: 'src/source.ts',
       evidenceSpan: {column: 1, endColumn: 2, endLine: 1, line: 1},
@@ -140,8 +145,10 @@ fcProp(
     }));
     const forward = codeGraphMaterializationEdgeRows(materialized);
     expect(codeGraphMaterializationEdgeRows([...materialized].reverse())).toEqual(forward);
-    expect(forward.map(row => row.id)).toEqual(materialized.map(edge => edge.id).sort());
-    expect(forward.every(row => row.evidenceSpanJson === '{"column":1,"endColumn":2,"endLine":1,"line":1}')).toBe(true);
+    expect(EffectArray.map(forward, row => row.id)).toEqual(EffectArray.map(materialized, edge => edge.id).sort());
+    expect(
+      EffectArray.every(forward, row => row.evidenceSpanJson === '{"column":1,"endColumn":2,"endLine":1,"line":1}'),
+    ).toBe(true);
   },
   {fastCheck: {numRuns: 100}},
 );
@@ -151,20 +158,27 @@ fcProp(
   'materializes unresolved references independent of unique input order',
   {references: FC.uniqueArray(referenceArbitrary, {maxLength: 24, selector: reference => reference.edgeId})},
   ({references}) => {
-    const materialized = references.map(reference => codeGraphReference(reference));
-    const edges = materialized.map(reference => referenceEdge(reference));
-    const forward = codeGraphMaterializationReferenceRows(materialized, new Map(edges.map(edge => [edge.id, edge])));
+    const materialized = EffectArray.map(references, reference => codeGraphReference(reference));
+    const edges = EffectArray.map(materialized, reference => referenceEdge(reference));
+    const forward = codeGraphMaterializationReferenceRows(
+      materialized,
+      new Map(EffectArray.map(edges, edge => [edge.id, edge])),
+    );
     const reverse = codeGraphMaterializationReferenceRows(
       [...materialized].reverse(),
-      new Map([...edges].reverse().map(edge => [edge.id, edge])),
+      new Map(EffectArray.map([...edges].reverse(), edge => [edge.id, edge])),
     );
     expect(reverse).toEqual(forward);
-    expect(forward.map(row => row.edgeId)).toEqual(materialized.map(reference => reference.edgeId).sort());
+    expect(EffectArray.map(forward, row => row.edgeId)).toEqual(
+      EffectArray.map(materialized, reference => reference.edgeId).sort(),
+    );
     for (const row of forward) {
-      const tiers = JSON.parse(row.lookupTiersJson) as readonly (readonly string[])[];
-      expect(row.candidateCount).toBe(tiers.reduce((total, tier) => total + tier.length, 0));
+      const tiers = Schema.decodeUnknownSync(Schema.Array(Schema.Array(Schema.String)))(
+        JSON.parse(row.lookupTiersJson),
+      );
+      expect(row.candidateCount).toBe(EffectArray.reduce(tiers, 0, (total, tier) => total + tier.length));
       expect(row.candidatePayloadBytes).toBe(new TextEncoder().encode(row.lookupTiersJson).byteLength);
-      expect(tiers.every(tier => new Set(tier).size === tier.length)).toBe(true);
+      expect(EffectArray.every(tiers, tier => new Set(tier).size === tier.length)).toBe(true);
     }
   },
   {fastCheck: {numRuns: 100}},
@@ -191,14 +205,14 @@ it('deduplicates and orders canonical TypeScript re-export rows', () => {
 
 it('deduplicates and encodes canonical moniker rows independent of input order', () => {
   const first = codeGraphPackageMoniker({
-    componentId: `cgp_${'1'.repeat(32)}`,
+    componentId: `cgp_${Effect.pipe('1', EffectString.repeat(32))}`,
     evidence: {path: 'package.json', span: {column: 1, endColumn: 2, endLine: 1, line: 1}},
     packageName: '@scope/first',
     packageVersion: '1.0.0',
     role: 'export',
   });
   const second = codeGraphPackageMoniker({
-    componentId: `cgp_${'2'.repeat(32)}`,
+    componentId: `cgp_${Effect.pipe('2', EffectString.repeat(32))}`,
     dependencyKind: 'runtime',
     evidence: {path: 'package.json', span: {column: 3, endColumn: 4, endLine: 1, line: 1}},
     packageName: '@scope/second',
@@ -228,7 +242,7 @@ function codeGraphSymbol(input: {
 }): CodeGraphSymbol {
   return {
     ...input,
-    contentHash: 'a'.repeat(64),
+    contentHash: Effect.pipe('a', EffectString.repeat(64)),
     kind: 'function',
     language: 'typescript',
     name: input.id,

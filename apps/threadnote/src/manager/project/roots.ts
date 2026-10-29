@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {observeRepositoryBranch} from '@threadnote/graph/repository';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -6,11 +7,16 @@ import {platformPathFor, SystemInfo} from '@threadnote/platform/system';
 import type {ProjectManifest} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
 import {portablePath} from '../../utils.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const UTF8 = new TextEncoder();
 const PATH_BYTES_MAXIMUM = 4_096;
 
-export class ManagerProjectRootError extends Schema.TaggedError<ManagerProjectRootError>()('ManagerProjectRootError', {
+export class ManagerProjectRootError extends Schema.TaggedError<
+  ManagerProjectRootError,
+  {readonly brand: unique symbol}
+>()('ManagerProjectRootError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
@@ -54,7 +60,12 @@ export const validateManagerProjectRoots = Effect.fn('managerProjectRoots.valida
       confirmed.push(root);
     }
     return {
-      fingerprint: sha256HexSync([...confirmed, candidateRoot].map(root => root.receipt).join('\n')),
+      fingerprint: sha256HexSync(
+        EffectArray.join(
+          EffectArray.map([...confirmed, candidateRoot], root => root.receipt),
+          '\n',
+        ),
+      ),
       path: candidateRoot.path,
     } satisfies ManagerProjectRootValidation;
   }).pipe(
@@ -140,7 +151,7 @@ const observeRoot = Effect.fn('managerProjectRoots.observe')(function* (project:
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   const cheap = yield* observeCheapRoot(project);
-  if (!cheap.key.startsWith('present:')) return cheap;
+  if (!Effect2.pipe(cheap.key, EffectString.startsWith('present:'))) return cheap;
   const expanded = yield* expandPath(project.path);
   const result = yield* runCommandEffect(
     'git',
@@ -154,11 +165,11 @@ const observeRoot = Effect.fn('managerProjectRoots.observe')(function* (project:
   if (result.exitCode === 124 || result.exitCode === 127) {
     return yield* ManagerProjectRootError.make({message: 'Git could not inspect the configured project root safely.'});
   }
-  const rawRoot = result.exitCode === 0 ? result.stdout.replace(/\r?\n$/u, '') : expanded;
+  const rawRoot = result.exitCode === 0 ? Effect2.pipe(result.stdout, EffectString.replace(/\r?\n$/u, '')) : expanded;
   if (
     rawRoot.length === 0 ||
-    rawRoot.includes('\n') ||
-    rawRoot.includes('\r') ||
+    Effect2.pipe(rawRoot, EffectString.includes('\n')) ||
+    Effect2.pipe(rawRoot, EffectString.includes('\r')) ||
     !path.isAbsolute(rawRoot) ||
     UTF8.encode(rawRoot).byteLength > PATH_BYTES_MAXIMUM
   ) {
@@ -183,21 +194,25 @@ const observeRoot = Effect.fn('managerProjectRoots.observe')(function* (project:
 
 function rootsCanCollide(left: ObservedRoot, right: ObservedRoot): boolean {
   if (left.key === right.key) return true;
-  if (!left.key.startsWith('present:') || !right.key.startsWith('present:')) return false;
-  const leftPath = left.key.slice('present:'.length);
-  const rightPath = right.key.slice('present:'.length);
+  if (
+    !Effect2.pipe(left.key, EffectString.startsWith('present:')) ||
+    !Effect2.pipe(right.key, EffectString.startsWith('present:'))
+  )
+    return false;
+  const leftPath = Effect2.pipe(left.key, EffectString.slice('present:'.length));
+  const rightPath = Effect2.pipe(right.key, EffectString.slice('present:'.length));
   return (
-    leftPath.startsWith(`${rightPath}/`) ||
-    leftPath.startsWith(`${rightPath}\\`) ||
-    rightPath.startsWith(`${leftPath}/`) ||
-    rightPath.startsWith(`${leftPath}\\`)
+    Effect2.pipe(leftPath, EffectString.startsWith(`${rightPath}/`)) ||
+    Effect2.pipe(leftPath, EffectString.startsWith(`${rightPath}\\`)) ||
+    Effect2.pipe(rightPath, EffectString.startsWith(`${leftPath}/`)) ||
+    Effect2.pipe(rightPath, EffectString.startsWith(`${leftPath}\\`))
   );
 }
 
 function foreignRoot(value: string, platform: NodeJS.Platform): ObservedRoot {
   const foreignPath = platformPathFor(platform === 'win32' ? 'linux' : 'win32');
   const raw = foreignPath.normalize(value);
-  const normalized = platform === 'win32' ? raw : raw.toLowerCase();
+  const normalized = platform === 'win32' ? raw : Effect2.pipe(raw, EffectString.toLowerCase);
   return {key: `foreign:${normalized}`, path: value, receipt: `foreign:${normalized}`};
 }
 
@@ -290,22 +305,24 @@ function fileIdentity(info: FileSystem.File.Info): string {
 }
 
 function rootKey(value: string, platform: NodeJS.Platform): string {
-  const normalized = platformPathFor(platform)
-    .normalize(value)
-    .replace(/[\\/]+$/u, '');
-  return platform === 'win32' ? normalized.toLowerCase() : normalized;
+  const normalized = Effect2.pipe(platformPathFor(platform).normalize(value), EffectString.replace(/[\\/]+$/u, ''));
+  return platform === 'win32' ? Effect2.pipe(normalized, EffectString.toLowerCase) : normalized;
 }
 
 export function managerProjectPathIsForeign(value: string, platform: NodeJS.Platform): boolean {
   return platform === 'win32'
-    ? value.startsWith('/')
-    : /^[a-z]:[\\/]/iu.test(value) || /^\\\\/u.test(value) || value.startsWith('~\\');
+    ? Effect2.pipe(value, EffectString.startsWith('/'))
+    : /^[a-z]:[\\/]/iu.test(value) || /^\\\\/u.test(value) || Effect2.pipe(value, EffectString.startsWith('~\\'));
 }
 
 function managerProjectStoredPathIsSafe(value: string): boolean {
   if (value.length === 0 || UTF8.encode(value).byteLength > PATH_BYTES_MAXIMUM) return false;
   for (const character of value) {
-    const codePoint = character.codePointAt(0)!;
+    const codePoint = Effect2.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect2.Option.getOrElse(() => undefined),
+    )!;
     if (codePoint <= 0x1f || codePoint === 0x7f) return false;
   }
   return true;
@@ -313,16 +330,16 @@ function managerProjectStoredPathIsSafe(value: string): boolean {
 
 function safeProjectLabel(value: string): string {
   return (
-    value
-      .replace(/[\r\n\t\0]/gu, ' ')
-      .trim()
-      .slice(0, 256) || 'unknown'
+    Effect2.pipe(value, EffectString.replace(/[\r\n\t\0]/gu, ' '), EffectString.trim, EffectString.slice(0, 256)) ||
+    'unknown'
   );
 }
 
 function safeProjectPath(value: string): string {
-  return value
-    .replace(/[\r\n\t\0]/gu, ' ')
-    .trim()
-    .slice(0, PATH_BYTES_MAXIMUM);
+  return Effect2.pipe(
+    value,
+    EffectString.replace(/[\r\n\t\0]/gu, ' '),
+    EffectString.trim,
+    EffectString.slice(0, PATH_BYTES_MAXIMUM),
+  );
 }

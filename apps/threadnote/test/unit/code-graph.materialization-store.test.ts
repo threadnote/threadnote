@@ -1,6 +1,8 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {DateTime, Deferred, Effect, Fiber, FileSystem, Option, Ref} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -62,12 +64,20 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {claimPersistentBuildForTest} from '@threadnote/graph/test/helpers/code-graph-build';
 import {join, mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row from a materialization store test query.'});
+  return row;
+}
 
 const temporaryRoots: string[] = [];
 const unprotectedCacheWrite: CodeGraphDirectPersistentCapacityProtector = (_boundary, transaction) => transaction;
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryRoots.splice(0), root => rm(root, {force: true, recursive: true})));
 });
 
 function observedStoreFailure(cause: unknown) {
@@ -114,19 +124,45 @@ describe('code graph full-build materialization store', () => {
         'extractor-v4',
         'derivation-v4',
       );
-      const plan = (
-        database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-          readonly detail: string;
-        }[]
-      ).map(row => row.detail);
-      const requestedScan = plan.findIndex(detail => detail.includes('SCAN requested VIRTUAL TABLE'));
-      const associationLookup = plan.findIndex(detail =>
-        detail.includes('SEARCH association USING PRIMARY KEY (snapshot_id=? AND path=?)'),
+      const plan = EffectArray.map(
+        database
+          .query<
+            {
+              readonly detail: string;
+            },
+            SQLQueryBindings[]
+          >(`EXPLAIN QUERY PLAN ${statement.text}`)
+          .all(...statement.parameters),
+        row => row.detail,
+      );
+      const requestedScan = Option.getOrElse(
+        EffectArray.findFirstIndex(
+          plan,
+          __effectArrayValue =>
+            !!(detail => Effect2.pipe(detail, EffectString.includes('SCAN requested VIRTUAL TABLE')))(
+              __effectArrayValue,
+            ),
+        ),
+        () => -1,
+      );
+      const associationLookup = Option.getOrElse(
+        EffectArray.findFirstIndex(
+          plan,
+          __effectArrayValue =>
+            !!(detail =>
+              Effect2.pipe(
+                detail,
+                EffectString.includes('SEARCH association USING PRIMARY KEY (snapshot_id=? AND path=?)'),
+              ))(__effectArrayValue),
+        ),
+        () => -1,
       );
 
       expect(requestedScan).toBeGreaterThanOrEqual(0);
       expect(associationLookup).toBeGreaterThan(requestedScan);
-      expect(plan.join('\n')).not.toMatch(/SEARCH association USING PRIMARY KEY \(snapshot_id=\?\)(?! AND path)/u);
+      expect(EffectArray.join(plan, '\n')).not.toMatch(
+        /SEARCH association USING PRIMARY KEY \(snapshot_id=\?\)(?! AND path)/u,
+      );
     } finally {
       database.close(false);
     }
@@ -252,18 +288,19 @@ describe('code graph full-build materialization store', () => {
       stateAfterRetry: 'ready',
       synchronousAfterFailure: 2,
     });
-    const durability = observed.filter(settings => settings.phase !== 'connection');
-    expect(durability.map(settings => [settings.phase, settings.synchronous])).toEqual([
+    const durability = EffectArray.filter(observed, settings => settings.phase !== 'connection');
+    expect(EffectArray.map(durability, settings => [settings.phase, settings.synchronous])).toEqual([
       ['building', 1],
       ['publication', 2],
       ['publication', 2],
     ]);
-    expect(durability.every(settings => settings.journalMode === 'wal')).toBe(true);
-    expect(staging.map(progress => progress.stage)).toEqual(
+    expect(EffectArray.every(durability, settings => settings.journalMode === 'wal')).toBe(true);
+    expect(EffectArray.map(staging, progress => progress.stage)).toEqual(
       expect.arrayContaining(['analysis', 'committed', 'committing', 'receipt', 'validating']),
     );
     expect(
-      staging.every(
+      EffectArray.every(
+        staging,
         progress =>
           (progress.stageElapsedMilliseconds ?? -1) >= 0 &&
           (progress.stageElapsedMilliseconds ?? Number.POSITIVE_INFINITY) <= progress.elapsedMilliseconds,
@@ -344,12 +381,18 @@ describe('code graph full-build materialization store', () => {
           Option.some('cgs_cursor'),
           100_000,
         );
-        const plan = (
-          database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-            readonly detail: string;
-          }[]
-        ).map(row => row.detail);
-        const output = plan.join('\n');
+        const plan = EffectArray.map(
+          database
+            .query<
+              {
+                readonly detail: string;
+              },
+              SQLQueryBindings[]
+            >(`EXPLAIN QUERY PLAN ${statement.text}`)
+            .all(...statement.parameters),
+          row => row.detail,
+        );
+        const output = EffectArray.join(plan, '\n');
         const index = endpoint === 'source' ? 'edges_source' : 'edges_target_resolved';
         const column = endpoint === 'source' ? 'source_id' : 'target_id';
 
@@ -368,12 +411,19 @@ describe('code graph full-build materialization store', () => {
           ('snapshot', 'edge-4', 'endpoint-b-missing', NULL, 'calls');
       `);
       const first = codeGraphPersistedEndpointValidationPageStatement('snapshot', 'source', Option.none(), 2);
-      const firstPage = database.query(first.text).get(...first.parameters) as {
-        readonly cursor: string;
-        readonly invalid_symbol_id: string;
-        readonly raw_rows: number;
-        readonly rows_examined: number;
-      };
+      const firstPage = requiredRow(
+        database
+          .query<
+            {
+              readonly cursor: string;
+              readonly invalid_symbol_id: string;
+              readonly raw_rows: number;
+              readonly rows_examined: number;
+            },
+            SQLQueryBindings[]
+          >(first.text)
+          .get(...first.parameters),
+      );
       expect(firstPage).toEqual({
         cursor: 'endpoint-a-present',
         invalid_symbol_id: '',
@@ -438,9 +488,16 @@ describe('code graph full-build materialization store', () => {
       );
 
       const database = new Database(fixture.databasePath, {readonly: true, strict: true});
-      const persisted = database.query('SELECT state FROM snapshots WHERE id = ?').get(snapshot.id) as {
-        readonly state: string;
-      };
+      const persisted = requiredRow(
+        database
+          .query<
+            {
+              readonly state: string;
+            },
+            SQLQueryBindings[]
+          >('SELECT state FROM snapshots WHERE id = ?')
+          .get(snapshot.id),
+      );
       database.close(false);
 
       expect(failure).toContain(invalid.id);
@@ -455,7 +512,7 @@ describe('code graph full-build materialization store', () => {
       const fixture = yield* Effect.promise(materializationFixture);
       const root = {
         ...symbol('cache-budget-module', 'cacheBudgetModule', ['typescript:name:cacheBudgetModule']),
-        documentation: `private-cache-sentinel ${'漢'.repeat(2_850_000)}`,
+        documentation: `private-cache-sentinel ${Effect2.pipe('漢', EffectString.repeat(2_850_000))}`,
         kind: 'module',
       } satisfies CodeGraphSymbol;
       const declaration = symbol('cache-budget-declaration', 'cacheBudgetDeclaration', [
@@ -492,15 +549,20 @@ describe('code graph full-build materialization store', () => {
       const row = yield* Effect.sync(() => {
         const database = new Database(fixture.databasePath, {readonly: true, strict: true});
         try {
-          return database
-            .query(
-              `SELECT facts_json, length(CAST(facts_json AS BLOB)) AS facts_bytes
+          return requiredRow(
+            database
+              .query<
+                {
+                  readonly facts_bytes: number;
+                  readonly facts_json: string;
+                },
+                SQLQueryBindings[]
+              >(
+                `SELECT facts_json, length(CAST(facts_json AS BLOB)) AS facts_bytes
                FROM file_blobs WHERE extractor_set = ? AND path_hint = ?`,
-            )
-            .get('alternate-caller-cache', fixture.file.path) as {
-            readonly facts_bytes: number;
-            readonly facts_json: string;
-          };
+              )
+              .get('alternate-caller-cache', fixture.file.path),
+          );
         } finally {
           database.close(false);
         }
@@ -509,8 +571,8 @@ describe('code graph full-build materialization store', () => {
 
       expect(row.facts_bytes).toBeLessThanOrEqual(CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM);
       expect(row.facts_bytes).toBe(new TextEncoder().encode(row.facts_json).byteLength);
-      expect(persisted.symbols.map(value => value.id)).toEqual([root.id, declaration.id]);
-      expect(persisted.symbols.every(value => value.documentation === undefined)).toBe(true);
+      expect(EffectArray.map(persisted.symbols, value => value.id)).toEqual([root.id, declaration.id]);
+      expect(EffectArray.every(persisted.symbols, value => value.documentation === undefined)).toBe(true);
       expect(persisted.edges).toEqual([declares]);
       expect(persisted.diagnostics[0]).toMatch(/^Cached code graph facts exceeded the per-file persistence budget/);
       expect(persisted.diagnostics[0]).not.toMatch(/private-cache-sentinel|materialization\.ts/);
@@ -520,7 +582,7 @@ describe('code graph full-build materialization store', () => {
   effectIt.effect('persists same-path cache batches with distinct physical identities', () =>
     Effect.gen(function* () {
       const fixture = yield* Effect.promise(materializationFixture);
-      const replacement = {...fixture.file, contentHash: 'j'.repeat(64)};
+      const replacement = {...fixture.file, contentHash: Effect2.pipe('j', EffectString.repeat(64))};
       const facts: CodeGraphFileFacts = {
         diagnostics: [],
         edges: [],
@@ -604,7 +666,7 @@ describe('code graph full-build materialization store', () => {
         expect(mismatch).toBeInstanceOf(CodeGraphStoreError);
         expect(mismatch.message).toMatch(/inputs are inconsistent/u);
 
-        const oversizedExtractor = 'x'.repeat(32 * 1_048_576 + 1);
+        const oversizedExtractor = Effect2.pipe('x', EffectString.repeat(32 * 1_048_576 + 1));
         const oversized = yield* store
           .withSession(
             fixture.databasePath,
@@ -696,7 +758,7 @@ describe('code graph full-build materialization store', () => {
             )
             .run(
               canonicalId,
-              'x'.repeat(64),
+              Effect2.pipe('x', EffectString.repeat(64)),
               `${extractorSet}-wrong`,
               `${derivationIdentity}-wrong`,
               'corrupt/canonical-id.ts',
@@ -763,15 +825,16 @@ describe('code graph full-build materialization store', () => {
       const fixture = yield* Effect.promise(materializationFixture);
       const secondFile: CodeGraphInventoryFile = {
         ...fixture.file,
-        blobId: 'd'.repeat(40),
-        contentHash: 'i'.repeat(64),
+        blobId: Effect2.pipe('d', EffectString.repeat(40)),
+        contentHash: Effect2.pipe('i', EffectString.repeat(64)),
         path: 'src/other.ts',
       };
       const files = [fixture.file, secondFile];
-      const facts = files.map(
+      const facts = EffectArray.map(
+        files,
         file => ({diagnostics: [], edges: [], path: file.path, symbols: []}) satisfies CodeGraphFileFacts,
       );
-      const expectedPaths = files.map(file => file.path).sort();
+      const expectedPaths = EffectArray.map(files, file => file.path).sort();
       const extractorSet = 'materialized-shard-identity';
       const derivationIdentity = 'materialized-shard-derivation';
       const store = yield* CodeGraphStore;
@@ -787,7 +850,7 @@ describe('code graph full-build materialization store', () => {
           unprotectedCacheWrite,
         );
       const expectOnlySecondFile = (loaded: Effect.Success<ReturnType<typeof load>>) => {
-        expect([...loaded.facts.entries()].map(([path, value]) => [path, value.path])).toEqual([
+        expect(EffectArray.map([...loaded.facts.entries()], ([path, value]) => [path, value.path])).toEqual([
           [secondFile.path, secondFile.path],
         ]);
         expect(loaded.keys ? [...loaded.keys] : undefined).toEqual([secondFile.path]);
@@ -940,10 +1003,10 @@ describe('code graph full-build materialization store', () => {
       const derivationIdentity = 'materialized-shard-multi-row-race-v1';
       const files = Array.from({length: CODE_GRAPH_CACHE_TRANSACTION_LIMITS.rows}, (_, index) => ({
         ...fixture.file,
-        contentHash: index.toString(16).padStart(64, '0'),
-        path: `src/batched-${index.toString().padStart(3, '0')}.ts`,
+        contentHash: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+        path: `src/batched-${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}.ts`,
       }));
-      const facts = files.map(file => ({
+      const facts = EffectArray.map(files, file => ({
         diagnostics: [`canonical ${file.path}`],
         edges: [],
         path: file.path,
@@ -1051,7 +1114,7 @@ describe('code graph full-build materialization store', () => {
       const batches = Array.from({length: 4}, (_, index) => {
         const file = {
           ...fixture.file,
-          contentHash: (index + 1).toString(16).padStart(64, '0'),
+          contentHash: Effect2.pipe((index + 1).toString(16), EffectString.padStart(64, '0')),
           path: `src/coalesced-${index}.ts`,
         };
         return {
@@ -1236,7 +1299,7 @@ describe('code graph full-build materialization store', () => {
             database.transaction(() => {
               insertShard.run(
                 canonicalId,
-                'x'.repeat(64),
+                Effect2.pipe('x', EffectString.repeat(64)),
                 `${extractorSet}-wrong`,
                 `${derivationIdentity}-wrong`,
                 'corrupt/canonical-id.ts',
@@ -1256,7 +1319,7 @@ describe('code graph full-build materialization store', () => {
               );
               insertShard.run(
                 unrelatedShardId,
-                'u'.repeat(64),
+                Effect2.pipe('u', EffectString.repeat(64)),
                 extractorSet,
                 derivationIdentity,
                 'src/unrelated.ts',
@@ -1267,12 +1330,12 @@ describe('code graph full-build materialization store', () => {
               for (let index = 0; index < 1_025; index += 1) {
                 insertAssociation.run(
                   targetSnapshotId,
-                  `target/${index.toString().padStart(4, '0')}.ts`,
+                  `target/${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}.ts`,
                   index % 2 === 0 ? canonicalId : tupleConflictId,
                 );
                 insertAssociation.run(
                   unrelatedSnapshotId,
-                  `unrelated/${index.toString().padStart(4, '0')}.ts`,
+                  `unrelated/${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}.ts`,
                   unrelatedShardId,
                 );
               }
@@ -1317,9 +1380,10 @@ describe('code graph full-build materialization store', () => {
           protector,
         );
 
-        expect(boundaries.map(boundary => boundary.rowCount)).toEqual([512, 512, 1, 3]);
+        expect(EffectArray.map(boundaries, boundary => boundary.rowCount)).toEqual([512, 512, 1, 3]);
         expect(
-          boundaries.every(
+          EffectArray.every(
+            boundaries,
             boundary =>
               boundary.operation === 'cache materialized code graph file shards' &&
               boundary.rowCount <= 512 &&
@@ -1440,7 +1504,7 @@ describe('code graph full-build materialization store', () => {
         protector,
       );
 
-      expect(boundaries.map(boundary => boundary.rowCount)).toEqual([1, 2, 2]);
+      expect(EffectArray.map(boundaries, boundary => boundary.rowCount)).toEqual([1, 2, 2]);
       yield* Effect.sync(() => {
         const database = new Database(fixture.databasePath, {readonly: true, strict: true});
         try {
@@ -1525,8 +1589,8 @@ describe('code graph full-build materialization store', () => {
 
           competingWriter.query('DELETE FROM snapshot_file_shards WHERE shard_id = ?').run(shardId);
           const frozenPage = [first.value!, ...iterator];
-          expect(frozenPage.map(row => row.association_count)).toEqual([2, 2]);
-          expect(frozenPage.map(row => row.path)).toEqual(['target/a.ts', 'target/b.ts']);
+          expect(EffectArray.map(frozenPage, row => row.association_count)).toEqual([2, 2]);
+          expect(EffectArray.map(frozenPage, row => row.path)).toEqual(['target/a.ts', 'target/b.ts']);
           expect(
             competingWriter.query('SELECT COUNT(*) AS count FROM snapshot_file_shards WHERE shard_id = ?').get(shardId),
           ).toEqual({count: 0});
@@ -1656,7 +1720,7 @@ describe('code graph full-build materialization store', () => {
     expect(interrupted.skippedBatch).toContain('contiguous order');
     expect(resumed.wrongFinalCount).toContain('incomplete or non-contiguous receipts');
     expect(resumed.afterFinalization).toContain('outside the registered plan');
-    expect(resumed.graph.symbols.map(value => value.id)).toEqual([first.id, second.id]);
+    expect(EffectArray.map(resumed.graph.symbols, value => value.id)).toEqual([first.id, second.id]);
   });
 
   it('expands deep scoped barrel chains across batches in bounded passes and terminates cycles', async () => {
@@ -1711,7 +1775,7 @@ describe('code graph full-build materialization store', () => {
       qualifiedName: 'feature',
       resolutionScopeId: scope,
     } satisfies CodeGraphSymbol;
-    const chain = chainPaths.map((path, index) => {
+    const chain = EffectArray.map(chainPaths, (path, index) => {
       const source = moduleSymbol(path, String(index));
       const targetPath = chainPaths[index + 1] ?? terminalPath;
       return {source, ...reference(source, targetPath, 'feature')};
@@ -1738,7 +1802,7 @@ describe('code graph full-build materialization store', () => {
     const cycleAReference = reference(cycleA, cycleB.path, 'cycle');
     const cycleBReference = reference(cycleB, cycleA.path, 'cycle');
     const batches = [
-      ...chain.map((entry, index) => ({
+      ...EffectArray.map(chain, (entry, index) => ({
         edges: [entry.edge],
         references: [entry.reference],
         symbols: index === chain.length - 1 ? [entry.source, terminal] : [entry.source],
@@ -1747,13 +1811,13 @@ describe('code graph full-build materialization store', () => {
       {edges: [cycleAReference.edge], references: [cycleAReference.reference], symbols: [cycleA]},
       {edges: [cycleBReference.edge], references: [cycleBReference.reference], symbols: [cycleB]},
     ] as const;
-    const allSymbols = batches.flatMap(batch => batch.symbols);
-    const allEdges = batches.flatMap(batch => batch.edges);
-    const paths = [...new Set(allSymbols.map(value => value.path))];
-    const files = paths.map((path, index): CodeGraphInventoryFile => ({
+    const allSymbols = EffectArray.flatMap(batches, batch => batch.symbols);
+    const allEdges = EffectArray.flatMap(batches, batch => batch.edges);
+    const paths = [...new Set(EffectArray.map(allSymbols, value => value.path))];
+    const files = EffectArray.map(paths, (path, index): CodeGraphInventoryFile => ({
       ...fixture.file,
-      blobId: String(index + 1).padStart(40, '0'),
-      contentHash: String(index + 1).padStart(64, '0'),
+      blobId: Effect2.pipe(String(index + 1), EffectString.padStart(40, '0')),
+      contentHash: Effect2.pipe(String(index + 1), EffectString.padStart(64, '0')),
       path,
     }));
     const snapshot: CodeGraphSnapshot = {
@@ -1793,12 +1857,22 @@ describe('code graph full-build materialization store', () => {
     );
 
     const resolvedPaths = new Set([...chainPaths, consumer.path]);
-    const expectedResolved = result.graph.edges.filter(value => resolvedPaths.has(value.evidencePath));
-    const cycleEdges = result.graph.edges.filter(value => value.evidencePath.includes('barrel-cycle-'));
+    const expectedResolved = EffectArrayPipe(result.graph.edges, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (value, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && resolvedPaths.has(value.evidencePath),
+      ),
+    );
+    const edges = result.graph.edges;
+    const cycleEdges = EffectArray.filter(
+      edges,
+      (value, index) => index in edges && Effect2.pipe(value.evidencePath, EffectString.includes('barrel-cycle-')),
+    );
     expect(expectedResolved).toHaveLength(chain.length + 1);
-    expect(expectedResolved.every(value => value.targetId === terminal.id)).toBe(true);
+    expect(EffectArray.every(expectedResolved, value => value.targetId === terminal.id)).toBe(true);
     expect(cycleEdges).toHaveLength(2);
-    expect(cycleEdges.every(value => value.targetId === undefined)).toBe(true);
+    expect(EffectArray.every(cycleEdges, value => value.targetId === undefined)).toBe(true);
     expect(result.resolution.resolved).toBe(chain.length + 1);
     expect(result.resolution.passesCompleted).toBeLessThanOrEqual(2);
     expect(result.resolution.referencesExamined).toBeLessThanOrEqual(allEdges.length * 2);
@@ -1897,17 +1971,18 @@ describe('code graph full-build materialization store', () => {
     expect(result.resolution.resolved).toBe(1);
     expect(result.graph.edges[0]).toMatchObject({sourceId: caller.id, targetId: target.id});
     expect(result.receipt).toMatchObject({fileSetFingerprint: 'files', workspaceFingerprint: 'workspace'});
-    expect(materialization.some(progress => (progress.durableDatabaseBytes ?? 0) > 0)).toBe(true);
-    expect(materialization.every(progress => progress.temporaryDatabaseBytes === undefined)).toBe(true);
-    expect(activation.map(progress => progress.stage)).not.toContain('copying-files');
-    expect(activation.map(progress => progress.stage)).not.toContain('copying-symbols');
-    expect(activation.map(progress => progress.stage)).not.toContain('copying-terms');
-    expect(activation.map(progress => progress.stage)).not.toContain('copying-edges');
-    expect(activation.filter(progress => progress.state === 'completed').map(progress => progress.stage)).toEqual([
-      'validating-input',
-      'recording-completion',
-      'committing-snapshot',
-    ]);
+    expect(EffectArray.some(materialization, progress => (progress.durableDatabaseBytes ?? 0) > 0)).toBe(true);
+    expect(EffectArray.every(materialization, progress => progress.temporaryDatabaseBytes === undefined)).toBe(true);
+    expect(EffectArray.map(activation, progress => progress.stage)).not.toContain('copying-files');
+    expect(EffectArray.map(activation, progress => progress.stage)).not.toContain('copying-symbols');
+    expect(EffectArray.map(activation, progress => progress.stage)).not.toContain('copying-terms');
+    expect(EffectArray.map(activation, progress => progress.stage)).not.toContain('copying-edges');
+    expect(
+      EffectArray.map(
+        EffectArray.filter(activation, progress => progress.state === 'completed'),
+        progress => progress.stage,
+      ),
+    ).toEqual(['validating-input', 'recording-completion', 'committing-snapshot']);
   });
 
   it('atomically activates a self-contained dirty full build without publishing a reusable base', async () => {
@@ -1957,8 +2032,8 @@ describe('code graph full-build materialization store', () => {
     expect(result.ready).toMatchObject({baseSnapshotId: undefined, dirty: true, state: 'ready'});
     expect(result.graph.symbols).toEqual([stored]);
     expect(result.receipt).toBeUndefined();
-    expect(materialization.some(progress => (progress.durableDatabaseBytes ?? 0) > 0)).toBe(true);
-    expect(materialization.every(progress => progress.temporaryDatabaseBytes === undefined)).toBe(true);
+    expect(EffectArray.some(materialization, progress => (progress.durableDatabaseBytes ?? 0) > 0)).toBe(true);
+    expect(EffectArray.every(materialization, progress => progress.temporaryDatabaseBytes === undefined)).toBe(true);
   });
 
   it('drains production-shaped unresolved staging rows in bounded restart-safe transactions', async () => {
@@ -1967,14 +2042,14 @@ describe('code graph full-build materialization store', () => {
     const targetName = 'missingDrainTarget';
     const referenceCount = 5_100;
     const callers = Array.from({length: referenceCount}, (_, index) => {
-      const suffix = String(index).padStart(5, '0');
+      const suffix = Effect2.pipe(String(index), EffectString.padStart(5, '0'));
       return symbol(`drain-caller-${suffix}`, `drainCaller${suffix}`, [`typescript:name:drainCaller${suffix}`]);
     });
-    const edges = callers.map((caller, index) => ({
-      ...edge(`drain-edge-${String(index).padStart(5, '0')}`, caller, targetName),
+    const edges = EffectArray.map(callers, (caller, index) => ({
+      ...edge(`drain-edge-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}`, caller, targetName),
       evidenceSpan: {column: 1, endColumn: 2, endLine: index + 1, line: index + 1},
     }));
-    const references = edges.map((relationship, index): CodeGraphReference => ({
+    const references = EffectArray.map(edges, (relationship, index): CodeGraphReference => ({
       edgeId: relationship.id,
       evidencePath: fixture.file.path,
       evidenceSpan: relationship.evidenceSpan,
@@ -2020,15 +2095,23 @@ describe('code graph full-build materialization store', () => {
     );
 
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
-    const ready = database.query('SELECT state FROM snapshots WHERE id = ?').get(snapshot.id) as {
-      readonly state: string;
-    };
+    const ready = requiredRow(
+      database
+        .query<
+          {
+            readonly state: string;
+          },
+          SQLQueryBindings[]
+        >('SELECT state FROM snapshots WHERE id = ?')
+        .get(snapshot.id),
+    );
     database.close(false);
 
     expect(ready.state).toBe('ready');
     expect(staging).toEqual({batches: 0, candidates: 0, refs: 0});
     expect(
-      activation.filter(
+      EffectArray.filter(
+        activation,
         progress =>
           progress.stage === 'validating-input' &&
           progress.state === 'progress' &&
@@ -2074,12 +2157,23 @@ describe('code graph full-build materialization store', () => {
     );
 
     const repaired = new Database(fixture.databasePath, {readonly: true, strict: true});
-    const ready = repaired.query('SELECT state FROM snapshots WHERE id = ?').get(snapshot.id) as {
-      readonly state: string;
-    };
-    const receipts = repaired
-      .query('SELECT COUNT(*) AS count FROM building_materialization_batches WHERE snapshot_id = ?')
-      .get(snapshot.id) as {readonly count: number};
+    const ready = requiredRow(
+      repaired
+        .query<
+          {
+            readonly state: string;
+          },
+          SQLQueryBindings[]
+        >('SELECT state FROM snapshots WHERE id = ?')
+        .get(snapshot.id),
+    );
+    const receipts = requiredRow(
+      repaired
+        .query<{readonly count: number}, SQLQueryBindings[]>(
+          'SELECT COUNT(*) AS count FROM building_materialization_batches WHERE snapshot_id = ?',
+        )
+        .get(snapshot.id),
+    );
     repaired.close(false);
     expect(ready.state).toBe('ready');
     expect(receipts.count).toBe(0);
@@ -2388,36 +2482,49 @@ describe('code graph full-build materialization store', () => {
         Effect.sync(() => new Database(fixture.databasePath, {readonly: true, strict: true})),
         interrupted =>
           Effect.sync(() => ({
-            durableCandidates: interrupted
-              .query('SELECT COUNT(*) AS count FROM building_reference_candidates WHERE snapshot_id = ?')
-              .get(snapshot.id) as {readonly count: number},
-            receipt: interrupted
-              .query('SELECT candidate_count FROM building_materialization_batches WHERE snapshot_id = ?')
-              .get(snapshot.id) as {readonly candidate_count: number},
+            durableCandidates: requiredRow(
+              interrupted
+                .query<{readonly count: number}, SQLQueryBindings[]>(
+                  'SELECT COUNT(*) AS count FROM building_reference_candidates WHERE snapshot_id = ?',
+                )
+                .get(snapshot.id),
+            ),
+            receipt: requiredRow(
+              interrupted
+                .query<{readonly candidate_count: number}, SQLQueryBindings[]>(
+                  'SELECT candidate_count FROM building_materialization_batches WHERE snapshot_id = ?',
+                )
+                .get(snapshot.id),
+            ),
             stagedEdge: interrupted
               .query('SELECT id FROM edges WHERE snapshot_id = ? AND id = ?')
               .get(snapshot.id, unresolved.id),
-            stored: interrupted
-              .query(
-                `SELECT lookup_tiers_json, candidate_count, candidate_payload_bytes,
+            stored: requiredRow(
+              interrupted
+                .query<
+                  {
+                    readonly candidate_count: number;
+                    readonly candidate_payload_bytes: number;
+                    readonly confidence: number;
+                    readonly evidence_path: string;
+                    readonly evidence_span_json: string;
+                    readonly lookup_tiers_json: string;
+                    readonly provenance: string;
+                    readonly relation: string;
+                    readonly source_id: string | null;
+                    readonly source_name: string;
+                    readonly target_name: string;
+                  },
+                  SQLQueryBindings[]
+                >(
+                  `SELECT lookup_tiers_json, candidate_count, candidate_payload_bytes,
                    source_id, source_name, relation, target_name, provenance, confidence,
                    evidence_path, evidence_span_json
                  FROM building_references
                  WHERE snapshot_id = ? AND edge_id = ?`,
-              )
-              .get(snapshot.id, unresolved.id) as {
-              readonly candidate_count: number;
-              readonly candidate_payload_bytes: number;
-              readonly confidence: number;
-              readonly evidence_path: string;
-              readonly evidence_span_json: string;
-              readonly lookup_tiers_json: string;
-              readonly provenance: string;
-              readonly relation: string;
-              readonly source_id: string | null;
-              readonly source_name: string;
-              readonly target_name: string;
-            },
+                )
+                .get(snapshot.id, unresolved.id),
+            ),
           })),
         interrupted => Effect.sync(() => interrupted.close(false)),
       );
@@ -2465,7 +2572,9 @@ describe('code graph full-build materialization store', () => {
       const lookupKey = 'typescript:name:highFanoutTarget';
       const caller = symbol('high-fanout-caller', 'highFanoutCaller', ['typescript:name:highFanoutCaller']);
       const candidates = Array.from({length: 10_002}, (_, index) => ({
-        ...symbol(`high-fanout-${String(index).padStart(5, '0')}`, `highFanout${index}`, [lookupKey]),
+        ...symbol(`high-fanout-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}`, `highFanout${index}`, [
+          lookupKey,
+        ]),
         exported: index === 10_001,
       }));
       const target = candidates.at(-1)!;
@@ -2633,8 +2742,8 @@ describe('code graph full-build materialization store', () => {
     const fixture = await materializationFixture();
     const secondIdentity: RepositoryIdentity = {
       ...fixture.identity,
-      checkoutId: 'd'.repeat(64),
-      worktreeId: 'x'.repeat(64),
+      checkoutId: Effect2.pipe('d', EffectString.repeat(64)),
+      worktreeId: Effect2.pipe('x', EffectString.repeat(64)),
     };
     const buildFacts = (suffix: string) => {
       const caller = symbol(`interleaved-caller-${suffix}`, `interleavedCaller${suffix}`, [
@@ -2692,16 +2801,23 @@ describe('code graph full-build materialization store', () => {
 
     const staged = new Database(fixture.databasePath, {readonly: true, strict: true});
     const payloads = staged
-      .query(
+      .query<{readonly lookup_tiers_json: string; readonly snapshot_id: string}, SQLQueryBindings[]>(
         `SELECT snapshot_id, lookup_tiers_json
          FROM building_references
          WHERE edge_id = 'interleaved-shared-edge'
          ORDER BY snapshot_id`,
       )
-      .all() as readonly {readonly lookup_tiers_json: string; readonly snapshot_id: string}[];
-    const durableCandidateRows = staged.query('SELECT COUNT(*) AS count FROM building_reference_candidates').get() as {
-      readonly count: number;
-    };
+      .all();
+    const durableCandidateRows = requiredRow(
+      staged
+        .query<
+          {
+            readonly count: number;
+          },
+          SQLQueryBindings[]
+        >('SELECT COUNT(*) AS count FROM building_reference_candidates')
+        .get(),
+    );
     staged.close(false);
     expect(payloads).toEqual([
       {
@@ -2747,21 +2863,28 @@ describe('code graph full-build materialization store', () => {
 
     const lexical = new Database(fixture.databasePath, {readonly: true, strict: true});
     const formats = lexical
-      .query(
+      .query<
+        {
+          readonly posting_count: number;
+          readonly snapshot_id: string;
+        },
+        SQLQueryBindings[]
+      >(
         `SELECT snapshot_id, posting_count
          FROM lexical_storage_formats
          WHERE snapshot_id IN (?, ?)
          ORDER BY snapshot_id`,
       )
-      .all(firstSnapshot.id, secondSnapshot.id) as readonly {
-      readonly posting_count: number;
-      readonly snapshot_id: string;
-    }[];
+      .all(firstSnapshot.id, secondSnapshot.id);
     const firstTerms = readLexicalTerms(lexical, firstSnapshot.id);
     const secondTerms = readLexicalTerms(lexical, secondSnapshot.id);
-    const legacyPostings = lexical
-      .query('SELECT COUNT(*) AS count FROM symbol_terms WHERE snapshot_id IN (?, ?)')
-      .get(firstSnapshot.id, secondSnapshot.id) as {readonly count: number};
+    const legacyPostings = requiredRow(
+      lexical
+        .query<{readonly count: number}, SQLQueryBindings[]>(
+          'SELECT COUNT(*) AS count FROM symbol_terms WHERE snapshot_id IN (?, ?)',
+        )
+        .get(firstSnapshot.id, secondSnapshot.id),
+    );
     lexical.close(false);
 
     expect(firstGraph.edges).toHaveLength(1);
@@ -2769,11 +2892,11 @@ describe('code graph full-build materialization store', () => {
     expect(secondGraph.edges).toHaveLength(1);
     expect(secondGraph.edges[0]?.targetId).toBe(second.target.id);
     expect(formats).toHaveLength(2);
-    expect(formats.every(format => format.posting_count > 0)).toBe(true);
-    expect(firstTerms.some(row => row.symbol_id === first.target.id)).toBe(true);
-    expect(firstTerms.some(row => row.symbol_id === second.target.id)).toBe(false);
-    expect(secondTerms.some(row => row.symbol_id === second.target.id)).toBe(true);
-    expect(secondTerms.some(row => row.symbol_id === first.target.id)).toBe(false);
+    expect(EffectArray.every(formats, format => format.posting_count > 0)).toBe(true);
+    expect(EffectArray.some(firstTerms, row => row.symbol_id === first.target.id)).toBe(true);
+    expect(EffectArray.some(firstTerms, row => row.symbol_id === second.target.id)).toBe(false);
+    expect(EffectArray.some(secondTerms, row => row.symbol_id === second.target.id)).toBe(true);
+    expect(EffectArray.some(secondTerms, row => row.symbol_id === first.target.id)).toBe(false);
     expect(legacyPostings.count).toBe(0);
   });
 
@@ -2869,27 +2992,42 @@ describe('code graph full-build materialization store', () => {
       expect.objectContaining({completed_batch_count: 1, symbol_count: 1}),
     ]);
     expect(result.mismatch).toContain('batch contents changed');
-    expect(result.graph.symbols.map(entry => entry.id)).toEqual([replacement.id]);
+    expect(EffectArray.map(result.graph.symbols, entry => entry.id)).toEqual([replacement.id]);
     const lexical = new Database(fixture.databasePath, {readonly: true, strict: true});
-    const receipt = lexical
-      .query('SELECT posting_count, symbol_count FROM lexical_storage_formats WHERE snapshot_id = ?')
-      .get(snapshot.id) as {readonly posting_count: number; readonly symbol_count: number};
+    const receipt = requiredRow(
+      lexical
+        .query<{readonly posting_count: number; readonly symbol_count: number}, SQLQueryBindings[]>(
+          'SELECT posting_count, symbol_count FROM lexical_storage_formats WHERE snapshot_id = ?',
+        )
+        .get(snapshot.id),
+    );
     const terms = readLexicalTerms(lexical, snapshot.id);
-    const legacyRows = lexical
-      .query('SELECT COUNT(*) AS count FROM symbol_terms WHERE snapshot_id = ?')
-      .get(snapshot.id) as {readonly count: number};
+    const legacyRows = requiredRow(
+      lexical
+        .query<{readonly count: number}, SQLQueryBindings[]>(
+          'SELECT COUNT(*) AS count FROM symbol_terms WHERE snapshot_id = ?',
+        )
+        .get(snapshot.id),
+    );
     const auditStatement = codeGraphCompactLexicalDeepAuditStatement(snapshot.id);
-    const deepAudit = lexical.query(auditStatement.text).get(...auditStatement.parameters) as {
-      readonly expected_posting_count: number;
-      readonly expected_symbol_count: number;
-      readonly expected_term_count: number;
-      readonly posting_count: number;
-      readonly symbol_count: number;
-      readonly term_count: number;
-    };
+    const deepAudit = requiredRow(
+      lexical
+        .query<
+          {
+            readonly expected_posting_count: number;
+            readonly expected_symbol_count: number;
+            readonly expected_term_count: number;
+            readonly posting_count: number;
+            readonly symbol_count: number;
+            readonly term_count: number;
+          },
+          SQLQueryBindings[]
+        >(auditStatement.text)
+        .get(...auditStatement.parameters),
+    );
     lexical.close(false);
     expect(receipt).toMatchObject({posting_count: terms.length, symbol_count: 1});
-    expect(new Set(terms.map(row => row.symbol_id))).toEqual(new Set([replacement.id]));
+    expect(new Set(EffectArray.map(terms, row => row.symbol_id))).toEqual(new Set([replacement.id]));
     expect(legacyRows.count).toBe(0);
     expect(deepAudit).toMatchObject({
       posting_count: deepAudit.expected_posting_count,
@@ -2957,7 +3095,7 @@ describe('code graph full-build materialization store', () => {
         expect(rebuilt.reusableReady).toBeUndefined();
         expect(rebuilt.current?.id).toBe(snapshot.id);
         expect(rebuilt.active?.id).toBe(snapshot.id);
-        expect(rebuilt.graph.symbols.map(entry => entry.id)).toEqual([replacement.id]);
+        expect(EffectArray.map(rebuilt.graph.symbols, entry => entry.id)).toEqual([replacement.id]);
       }).pipe(provideTestLayer(ApplicationLayer)),
     ),
   );
@@ -2986,12 +3124,20 @@ describe('code graph full-build materialization store', () => {
 
       const interrupted = new Database(fixture.databasePath, {strict: true});
       interrupted.transaction(() => {
-        const compact = interrupted
-          .query('SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id = ?')
-          .get(snapshot.id) as {readonly snapshot_key: number};
-        const compactSymbol = interrupted
-          .query('SELECT symbol_key FROM lexical_compact_symbols WHERE snapshot_key = ? LIMIT 1')
-          .get(compact.snapshot_key) as {readonly symbol_key: number};
+        const compact = requiredRow(
+          interrupted
+            .query<{readonly snapshot_key: number}, SQLQueryBindings[]>(
+              'SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id = ?',
+            )
+            .get(snapshot.id),
+        );
+        const compactSymbol = requiredRow(
+          interrupted
+            .query<{readonly symbol_key: number}, SQLQueryBindings[]>(
+              'SELECT symbol_key FROM lexical_compact_symbols WHERE snapshot_key = ? LIMIT 1',
+            )
+            .get(compact.snapshot_key),
+        );
         interrupted
           .query(
             `WITH RECURSIVE sequence(value) AS (
@@ -3027,20 +3173,33 @@ describe('code graph full-build materialization store', () => {
         END
       `);
       })();
-      const retiredState = interrupted.query('SELECT state FROM snapshots WHERE id = ?').get(snapshot.id) as {
-        readonly state: string;
-      };
-      const staleRows = interrupted
-        .query('SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?')
-        .get(snapshot.id) as {readonly count: number};
-      const stalePostings = interrupted
-        .query(
-          `SELECT COUNT(*) AS count
+      const retiredState = requiredRow(
+        interrupted
+          .query<
+            {
+              readonly state: string;
+            },
+            SQLQueryBindings[]
+          >('SELECT state FROM snapshots WHERE id = ?')
+          .get(snapshot.id),
+      );
+      const staleRows = requiredRow(
+        interrupted
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            'SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?',
+          )
+          .get(snapshot.id),
+      );
+      const stalePostings = requiredRow(
+        interrupted
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            `SELECT COUNT(*) AS count
          FROM lexical_compact_postings AS posting
          JOIN lexical_compact_snapshots AS compact ON compact.snapshot_key = posting.snapshot_key
          WHERE compact.snapshot_id = ?`,
-        )
-        .get(snapshot.id) as {readonly count: number};
+          )
+          .get(snapshot.id),
+      );
       interrupted.close(false);
       expect(retiredState.state).toBe('retired');
       expect(staleRows.count).toBe(1);
@@ -3062,11 +3221,15 @@ describe('code graph full-build materialization store', () => {
       );
 
       expect(graph.snapshot.state).toBe('ready');
-      expect(graph.symbols.map(entry => entry.id)).toEqual([replacement.id]);
-      expect(graph.symbols.some(entry => entry.id === stale.id)).toBe(false);
+      expect(EffectArray.map(graph.symbols, entry => entry.id)).toEqual([replacement.id]);
+      expect(EffectArray.some(graph.symbols, entry => entry.id === stale.id)).toBe(false);
       const storage = new Database(fixture.databasePath, {readonly: true, strict: true});
-      const freelist = storage.query('PRAGMA freelist_count').get() as {readonly freelist_count: number};
-      const pages = storage.query('PRAGMA page_count').get() as {readonly page_count: number};
+      const freelist = requiredRow(
+        storage.query<{readonly freelist_count: number}, SQLQueryBindings[]>('PRAGMA freelist_count').get(),
+      );
+      const pages = requiredRow(
+        storage.query<{readonly page_count: number}, SQLQueryBindings[]>('PRAGMA page_count').get(),
+      );
       storage.close(false);
       // Logical reclamation stays bounded; physical file compaction remains an
       // explicit, disk-preflighted `graph compact` operation.
@@ -3080,12 +3243,12 @@ describe('code graph full-build materialization store', () => {
     const referenceFixture = await materializationFixture();
     const secondFile: CodeGraphInventoryFile = {
       ...interruptedFixture.file,
-      blobId: 'd'.repeat(40),
-      contentHash: 'i'.repeat(64),
+      blobId: Effect2.pipe('d', EffectString.repeat(40)),
+      contentHash: Effect2.pipe('i', EffectString.repeat(64)),
       path: 'src/materialization-second.ts',
     };
     const files = [interruptedFixture.file, secondFile] as const;
-    const rawFacts = files.map((file, index): CodeGraphFileFacts => {
+    const rawFacts = EffectArray.map(files, (file, index): CodeGraphFileFacts => {
       const owner = {
         ...symbol(`attributed-owner-${index}`, `attributedOwner${index}`, [`typescript:name:attributedOwner${index}`]),
         contentHash: file.contentHash,
@@ -3097,7 +3260,7 @@ describe('code graph full-build materialization store', () => {
         derivationInputs: {
           rationale: [
             {
-              documentation: `attributed-rationale-${index}-${'x'.repeat(2_150_000)}`,
+              documentation: `attributed-rationale-${index}-${Effect2.pipe('x', EffectString.repeat(2_150_000))}`,
               line: 2,
               marker: 'WHY',
               name: `WHY-${index}`,
@@ -3110,19 +3273,19 @@ describe('code graph full-build materialization store', () => {
         symbols: [owner],
       };
     });
-    const rawBytesByPath = new Map(rawFacts.map(fact => [fact.path, cachedCodeGraphFactBytes(fact)]));
+    const rawBytesByPath = new Map(EffectArray.map(rawFacts, fact => [fact.path, cachedCodeGraphFactBytes(fact)]));
     const attributed = createCachedCodeGraphFactsAttributor(
       files,
       discoverManifestWorkspace(files),
-    )(rawFacts.map((fact, index) => augmentRationaleFacts(files[index], fact)));
+    )(EffectArray.map(rawFacts, (fact, index) => augmentRationaleFacts(files[index], fact)));
     const finalBatches = finalCodeGraphFactBatches(attributed);
-    const stagedBatches = finalBatches.map(batch => ({
-      edges: batch.flatMap(value => value.facts.edges),
-      references: batch.flatMap(value => value.facts.references ?? []),
-      symbols: batch.flatMap(value => value.facts.symbols),
+    const stagedBatches = EffectArray.map(finalBatches, batch => ({
+      edges: EffectArray.flatMap(batch, value => value.facts.edges),
+      references: EffectArray.flatMap(batch, value => value.facts.references ?? []),
+      symbols: EffectArray.flatMap(batch, value => value.facts.symbols),
     }));
-    const symbolCount = stagedBatches.reduce((total, batch) => total + batch.symbols.length, 0);
-    const edgeCount = stagedBatches.reduce((total, batch) => total + batch.edges.length, 0);
+    const symbolCount = EffectArray.reduce(stagedBatches, 0, (total, batch) => total + batch.symbols.length);
+    const edgeCount = EffectArray.reduce(stagedBatches, 0, (total, batch) => total + batch.edges.length);
     const snapshot: CodeGraphSnapshot = {
       ...readySnapshot(interruptedFixture.identity, symbolCount, edgeCount),
       fileCount: files.length,
@@ -3131,10 +3294,14 @@ describe('code graph full-build materialization store', () => {
 
     expect(factMaterializationBatches(files, rawBytesByPath)).toHaveLength(1);
     expect(finalBatches).toHaveLength(2);
-    expect(finalBatches.flat().map(value => value.facts.path)).toEqual(files.map(file => file.path));
+    expect(EffectArray.map(finalBatches.flat(), value => value.facts.path)).toEqual(
+      EffectArray.map(files, file => file.path),
+    );
     expect(
-      finalBatches.every(
-        batch => batch.reduce((total, value) => total + value.bytes, 0) <= CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM,
+      EffectArray.every(
+        finalBatches,
+        batch =>
+          EffectArray.reduce(batch, 0, (total, value) => total + value.bytes) <= CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM,
       ),
     ).toBe(true);
 
@@ -3186,15 +3353,20 @@ describe('code graph full-build materialization store', () => {
     );
 
     const interruptedDatabase = new Database(interruptedFixture.databasePath, {readonly: true, strict: true});
-    const interruptedState = interruptedDatabase
-      .query(
-        `SELECT snapshot.state, owner.expected_batch_count,
+    const interruptedState = requiredRow(
+      interruptedDatabase
+        .query<
+          {readonly expected_batch_count: number; readonly receipts: number; readonly state: string},
+          SQLQueryBindings[]
+        >(
+          `SELECT snapshot.state, owner.expected_batch_count,
            (SELECT COUNT(*) FROM building_materialization_batches WHERE snapshot_id = snapshot.id) AS receipts
          FROM snapshots AS snapshot
          JOIN snapshot_build_owners AS owner ON owner.snapshot_id = snapshot.id
          WHERE snapshot.id = ?`,
-      )
-      .get(snapshot.id) as {readonly expected_batch_count: number; readonly receipts: number; readonly state: string};
+        )
+        .get(snapshot.id),
+    );
     interruptedDatabase.close(false);
 
     expect(interrupted).toContain('incomplete batch receipts');
@@ -3257,7 +3429,7 @@ describe('code graph full-build materialization store', () => {
               );
               yield* store.stageActivationFactBatches(
                 fixture.databasePath,
-                stagedBatches.map((batch, batchIndex) => ({batchIndex, ...batch})),
+                EffectArray.map(stagedBatches, (batch, batchIndex) => ({batchIndex, ...batch})),
                 (batchIndex, progress) =>
                   Effect.sync(() => {
                     const events = progressByDatabase.get(fixture.databasePath) ?? [];
@@ -3282,13 +3454,24 @@ describe('code graph full-build materialization store', () => {
     expect(resumedEvidence).toEqual(referenceEvidence);
     expect(resumedEvidence.files).toBe(files.length);
     expect(resumedEvidence.distinctFiles).toBe(files.length);
-    expect(new Set(resumed.symbols.map(value => value.id)).size).toBe(symbolCount);
-    expect(new Set(resumed.edges.map(value => value.id)).size).toBe(edgeCount);
+    expect(new Set(EffectArray.map(resumed.symbols, value => value.id)).size).toBe(symbolCount);
+    expect(new Set(EffectArray.map(resumed.edges, value => value.id)).size).toBe(edgeCount);
     const resumeProgress = progressByDatabase.get(interruptedFixture.databasePath) ?? [];
-    expect(resumeProgress.filter(event => event.stage === 'committing').map(event => event.batchIndex)).toEqual([1]);
-    expect(resumeProgress.filter(event => event.stage === 'committed').map(event => event.batchIndex)).toEqual([1]);
     expect(
-      resumeProgress.some(
+      EffectArray.map(
+        EffectArray.filter(resumeProgress, event => event.stage === 'committing'),
+        event => event.batchIndex,
+      ),
+    ).toEqual([1]);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(resumeProgress, event => event.stage === 'committed'),
+        event => event.batchIndex,
+      ),
+    ).toEqual([1]);
+    expect(
+      EffectArray.some(
+        resumeProgress,
         event =>
           event.batchIndex === 1 && event.stage !== 'committed' && event.stage !== 'committing' && event.rows > 0,
       ),
@@ -3343,18 +3526,23 @@ describe('code graph full-build materialization store', () => {
             yield* store.markFailed(fixture.databasePath, snapshot.id, 'stale owner must not win', staleOwnerToken);
             const ownership = yield* Effect.sync(() => {
               const database = new Database(fixture.databasePath, {readonly: true, strict: true});
-              const row = database
-                .query(
-                  `SELECT snapshot.state, snapshot.failure_summary, owner.owner_token
+              const row = requiredRow(
+                database
+                  .query<
+                    {
+                      readonly failure_summary: unknown;
+                      readonly owner_token: string;
+                      readonly state: string;
+                    },
+                    SQLQueryBindings[]
+                  >(
+                    `SELECT snapshot.state, snapshot.failure_summary, owner.owner_token
                    FROM snapshots AS snapshot
                    JOIN snapshot_build_owners AS owner ON owner.snapshot_id = snapshot.id
                    WHERE snapshot.id = ?`,
-                )
-                .get(snapshot.id) as {
-                readonly failure_summary: unknown;
-                readonly owner_token: string;
-                readonly state: string;
-              };
+                  )
+                  .get(snapshot.id),
+              );
               database.close(false);
               return row;
             });
@@ -3399,7 +3587,7 @@ describe('code graph full-build materialization store', () => {
       state: 'building',
     });
     expect(graph.snapshot.state).toBe('ready');
-    expect(graph.symbols.map(entry => entry.id)).toEqual([replacementSymbol.id]);
+    expect(EffectArray.map(graph.symbols, entry => entry.id)).toEqual([replacementSymbol.id]);
   });
 
   it('fences a replaced persistent owner between resolution pages before any durable mutation', async () => {
@@ -3413,16 +3601,18 @@ describe('code graph full-build materialization store', () => {
     // fixture one row beyond that boundary so replacement is still exercised
     // between two production-shaped bulk pages.
     const callers = Array.from({length: 5_001}, (_, index) => {
-      const suffix = String(index).padStart(4, '0');
+      const suffix = Effect2.pipe(String(index), EffectString.padStart(4, '0'));
       return symbol(`resolution-owner-caller-${suffix}`, `resolutionOwnerCaller${suffix}`, [
         `typescript:name:resolutionOwnerCaller${suffix}`,
       ]);
     });
-    const unresolved = callers.map((caller, index) =>
-      edge(`resolution-owner-edge-${String(index).padStart(4, '0')}`, caller, target.name),
+    const unresolved = EffectArray.map(callers, (caller, index) =>
+      edge(`resolution-owner-edge-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`, caller, target.name),
     );
-    const references = unresolved.map<CodeGraphReference>((candidate, index) => ({
-      aliasLookupKeys: [`typescript:name:resolutionOwnerAlias${String(index).padStart(4, '0')}`],
+    const references: CodeGraphReference[] = EffectArray.map(unresolved, (candidate, index): CodeGraphReference => ({
+      aliasLookupKeys: [
+        `typescript:name:resolutionOwnerAlias${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`,
+      ],
       edgeId: candidate.id,
       evidencePath: fixture.file.path,
       evidenceSpan: candidate.evidenceSpan,
@@ -3530,7 +3720,7 @@ describe('code graph full-build materialization store', () => {
     expect(replacementResult.resolution.resolved).toBe(1);
     expect(replacementResult.graph.snapshot.state).toBe('ready');
     expect(replacementResult.graph.edges).toHaveLength(unresolved.length);
-    expect(replacementResult.graph.edges.every(candidate => candidate.targetId === target.id)).toBe(true);
+    expect(EffectArray.every(replacementResult.graph.edges, candidate => candidate.targetId === target.id)).toBe(true);
   });
 
   it('purges durable terms before replacing a failed snapshot without a symbol-first index', async () => {
@@ -3567,19 +3757,26 @@ describe('code graph full-build materialization store', () => {
     );
 
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
-    const termOwners = [...new Set(readLexicalTerms(database, snapshot.id).map(row => row.symbol_id))].sort();
+    const termOwners = [
+      ...new Set(EffectArray.map(readLexicalTerms(database, snapshot.id), row => row.symbol_id)),
+    ].sort();
     const foreignKeyViolations = database.query('PRAGMA foreign_key_check').all();
-    const indexes = database.query("SELECT name FROM sqlite_master WHERE type = 'index'").all() as readonly {
-      readonly name: string;
-    }[];
+    const indexes = database
+      .query<
+        {
+          readonly name: string;
+        },
+        SQLQueryBindings[]
+      >("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all();
     database.close(false);
 
     expect(result.graph.symbols).toEqual([replacement]);
-    expect(result.replacementSearch.map(node => node.id)).toEqual([replacement.id]);
+    expect(EffectArray.map(result.replacementSearch, node => node.id)).toEqual([replacement.id]);
     expect(result.staleSearch).toEqual([]);
     expect(termOwners).toEqual([replacement.id]);
     expect(foreignKeyViolations).toEqual([]);
-    expect(indexes.map(index => index.name)).not.toContain('terms_symbol');
+    expect(EffectArray.map(indexes, index => index.name)).not.toContain('terms_symbol');
   });
 
   it('produces the same resolved graph through direct and legacy full materialization', async () => {
@@ -3678,7 +3875,7 @@ describe('code graph full-build materialization store', () => {
     };
     const overlayFile: CodeGraphInventoryFile = {
       ...fixture.file,
-      contentHash: 'o'.repeat(64),
+      contentHash: Effect2.pipe('o', EffectString.repeat(64)),
       source: 'worktree',
     };
     const activation: CodeGraphActivationProgress[] = [];
@@ -3710,16 +3907,17 @@ describe('code graph full-build materialization store', () => {
     );
 
     const completedRows = new Map(
-      activation
-        .filter(progress => progress.state === 'completed')
-        .map(progress => [progress.stage, progress.rows] as const),
+      EffectArray.map(
+        EffectArray.filter(activation, progress => progress.state === 'completed'),
+        progress => [progress.stage, progress.rows] as const,
+      ),
     );
     expect(completedRows.get('copying-files')).toBe(1);
     expect(completedRows.get('copying-symbols')).toBe(2);
     expect(completedRows.get('copying-terms')).toBeGreaterThan(0);
     expect(completedRows.get('copying-edges')).toBe(2);
-    expect(graph.symbols.map(value => value.id)).toEqual([replacementSymbol.id]);
-    expect(graph.edges.map(value => value.id)).toEqual([replacementEdge.id]);
+    expect(EffectArray.map(graph.symbols, value => value.id)).toEqual([replacementSymbol.id]);
+    expect(EffectArray.map(graph.edges, value => value.id)).toEqual([replacementEdge.id]);
   });
 
   it('reports bounded staging progress and resolves references without a lookup-key-first candidate index', async () => {
@@ -3780,17 +3978,25 @@ describe('code graph full-build materialization store', () => {
     expect(result.resolution.resolved).toBe(1);
     expect(result.graph.edges).toHaveLength(1);
     expect(result.graph.edges[0]).toMatchObject({sourceId: caller.id, targetId: target.id});
-    expect(result.search.map(node => ({id: node.id, score: node.score}))).toEqual([
+    expect(EffectArray.map(result.search, node => ({id: node.id, score: node.score}))).toEqual([
       {id: caller.id, score: 0.05},
       {id: target.id, score: 0.05},
     ]);
     expect(observations.at(-1)?.stage).toBe('committed');
     expect(
-      observations.some(progress => progress.stage === 'reference-candidates' && progress.rowsCompleted === 1),
+      EffectArray.some(
+        observations,
+        progress => progress.stage === 'reference-candidates' && progress.rowsCompleted === 1,
+      ),
     ).toBe(true);
-    expect(observations.some(progress => (progress.temporaryDatabaseBytes ?? 0) > 0)).toBe(true);
-    expect(observations.every(progress => progress.elapsedMilliseconds >= 0)).toBe(true);
-    expect(activation.filter(progress => progress.state === 'completed').map(progress => progress.stage)).toEqual([
+    expect(EffectArray.some(observations, progress => (progress.temporaryDatabaseBytes ?? 0) > 0)).toBe(true);
+    expect(EffectArray.every(observations, progress => progress.elapsedMilliseconds >= 0)).toBe(true);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(activation, progress => progress.state === 'completed'),
+        progress => progress.stage,
+      ),
+    ).toEqual([
       'validating-input',
       'copying-workspace',
       'copying-files',
@@ -3801,17 +4007,26 @@ describe('code graph full-build materialization store', () => {
       'committing-snapshot',
       'checkpointing-snapshot',
     ]);
-    expect(activation.every(progress => progress.elapsedMilliseconds >= progress.stageElapsedMilliseconds)).toBe(true);
     expect(
-      activation.some(
+      EffectArray.every(activation, progress => progress.elapsedMilliseconds >= progress.stageElapsedMilliseconds),
+    ).toBe(true);
+    expect(
+      EffectArray.some(
+        activation,
         progress => progress.stage === 'validating-input' && progress.state === 'progress' && progress.rows === 1,
       ),
     ).toBe(true);
     expect(
-      activation.find(progress => progress.stage === 'copying-symbols' && progress.state === 'completed')?.rows,
+      Option.getOrUndefined(
+        EffectArray.findFirst(
+          activation,
+          progress => progress.stage === 'copying-symbols' && progress.state === 'completed',
+        ),
+      )?.rows,
     ).toBe(2);
     expect(
-      activation.some(
+      EffectArray.some(
+        activation,
         progress =>
           progress.stage === 'copying-symbols' &&
           progress.state === 'progress' &&
@@ -3821,16 +4036,21 @@ describe('code graph full-build materialization store', () => {
     ).toBe(true);
 
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
-    const indexes = database.query("SELECT name FROM sqlite_master WHERE type = 'index'").all() as readonly {
-      readonly name: string;
-    }[];
+    const indexes = database
+      .query<
+        {
+          readonly name: string;
+        },
+        SQLQueryBindings[]
+      >("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all();
     const lookupPlan = database
-      .query(
+      .query<{readonly detail: string}, SQLQueryBindings[]>(
         `EXPLAIN QUERY PLAN
          SELECT symbol_id FROM snapshot_symbol_lookup
          WHERE snapshot_id = ? AND lookup_key = ? AND resolution_domain = ? AND exported = 1`,
       )
-      .all(result.graph.snapshot.id, 'typescript:name:target', 'typescript') as readonly {readonly detail: string}[];
+      .all(result.graph.snapshot.id, 'typescript:name:target', 'typescript');
     const rankedTerms = codeGraphTermCandidateQueryStatement(
       result.graph.snapshot.id,
       undefined,
@@ -3838,29 +4058,36 @@ describe('code graph full-build materialization store', () => {
       100,
     );
     const rankedTermPlan = database
-      .query(`EXPLAIN QUERY PLAN ${rankedTerms.text}`)
-      .all(...rankedTerms.parameters) as readonly {readonly detail: string}[];
+      .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${rankedTerms.text}`)
+      .all(...rankedTerms.parameters);
     database.close(false);
-    expect(indexes.map(index => index.name)).not.toContain('snapshot_symbol_lookup_key');
-    expect(indexes.map(index => index.name)).not.toContain('terms_lookup');
-    expect(indexes.map(index => index.name)).not.toContain('terms_symbol');
-    expect(lookupPlan.some(row => /PRIMARY KEY.*snapshot_id=.*lookup_key=/i.test(row.detail))).toBe(true);
+    expect(EffectArray.map(indexes, index => index.name)).not.toContain('snapshot_symbol_lookup_key');
+    expect(EffectArray.map(indexes, index => index.name)).not.toContain('terms_lookup');
+    expect(EffectArray.map(indexes, index => index.name)).not.toContain('terms_symbol');
+    expect(EffectArray.some(lookupPlan, row => /PRIMARY KEY.*snapshot_id=.*lookup_key=/i.test(row.detail))).toBe(true);
     expect(
-      rankedTermPlan.some(row =>
+      EffectArray.some(rankedTermPlan, row =>
         /SEARCH current_compact_terms USING COVERING INDEX .*snapshot_key=.*term=/i.test(row.detail),
       ),
     ).toBe(true);
     expect(
-      rankedTermPlan.some(
-        row => row.detail.includes('current_compact_postings') && row.detail.includes('USING PRIMARY KEY'),
+      EffectArray.some(
+        rankedTermPlan,
+        row =>
+          Effect2.pipe(row.detail, EffectString.includes('current_compact_postings')) &&
+          Effect2.pipe(row.detail, EffectString.includes('USING PRIMARY KEY')),
       ),
     ).toBe(true);
     expect(
-      rankedTermPlan
-        .filter(row => /SEARCH (?:current|base)_legacy_terms/i.test(row.detail))
-        .every(row => /PRIMARY KEY.*snapshot_id=.*term=/i.test(row.detail)),
+      EffectArray.every(
+        EffectArray.filter(
+          rankedTermPlan,
+          (row, index) => index in rankedTermPlan && /SEARCH (?:current|base)_legacy_terms/i.test(row.detail),
+        ),
+        row => /PRIMARY KEY.*snapshot_id=.*term=/i.test(row.detail),
+      ),
     ).toBe(true);
-    expect(rankedTermPlan.every(row => !/terms_symbol/i.test(row.detail))).toBe(true);
+    expect(EffectArray.every(rankedTermPlan, row => !/terms_symbol/i.test(row.detail))).toBe(true);
   });
 
   effectIt.effect('prefers an implementation symbol over test and documentation copies of the same product name', () =>
@@ -3891,7 +4118,7 @@ describe('code graph full-build materialization store', () => {
         }),
       );
 
-      expect(search.map(node => node.path)).toEqual([
+      expect(EffectArray.map(search, node => node.path)).toEqual([
         'apps/threadnote/src/mcp/server/index.ts',
         'apps/threadnote/test/integration/mcp.native-tools.test.ts',
         'AGENTS.md',
@@ -3929,7 +4156,7 @@ describe('code graph full-build materialization store', () => {
       }),
     );
 
-    expect(search.map(node => node.path)).toEqual([
+    expect(EffectArray.map(search, node => node.path)).toEqual([
       'apps/threadnote/test/integration/mcp.native-tools.test.ts',
       'apps/threadnote/src/mcp/server/index.ts',
     ]);
@@ -3957,7 +4184,7 @@ describe('code graph full-build materialization store', () => {
       }),
     );
 
-    expect(search.map(node => node.id)).toEqual(['owner', 'state', 'test-copy']);
+    expect(EffectArray.map(search, node => node.id)).toEqual(['owner', 'state', 'test-copy']);
   });
 
   it('fails fast on duplicate full-build IDs without replacing already staged facts', async () => {
@@ -4052,15 +4279,17 @@ describe('code graph full-build materialization store', () => {
     );
 
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
-    const counts = database
-      .query(
-        `SELECT
+    const counts = requiredRow(
+      database
+        .query<{readonly aliases: number; readonly lookups: number}, SQLQueryBindings[]>(
+          `SELECT
            COUNT(*) AS lookups,
            COALESCE(SUM(CASE WHEN provenance = 'alias' THEN 1 ELSE 0 END), 0) AS aliases
          FROM snapshot_symbol_lookup
          WHERE snapshot_id = ?`,
-      )
-      .get(result.snapshot.id) as {readonly aliases: number; readonly lookups: number};
+        )
+        .get(result.snapshot.id),
+    );
     database.close(false);
 
     expect(counts.aliases).toBe(1);
@@ -4124,9 +4353,16 @@ describe('code graph full-build materialization store', () => {
     );
 
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
-    const state = database.query('SELECT state FROM snapshots WHERE id = ?').get(mismatched.id) as {
-      readonly state: string;
-    };
+    const state = requiredRow(
+      database
+        .query<
+          {
+            readonly state: string;
+          },
+          SQLQueryBindings[]
+        >('SELECT state FROM snapshots WHERE id = ?')
+        .get(mismatched.id),
+    );
     database.close(false);
 
     expect(failure).toContain('Staged symbol count does not match');
@@ -4282,9 +4518,13 @@ describe('code graph full-build materialization store', () => {
       }),
     );
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
-    const interruptedRows = database
-      .query('SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?')
-      .get(interruptedSnapshot.id) as {readonly count: number};
+    const interruptedRows = requiredRow(
+      database
+        .query<{readonly count: number}, SQLQueryBindings[]>(
+          'SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?',
+        )
+        .get(interruptedSnapshot.id),
+    );
     const interruptedTerms = readLexicalTerms(database, interruptedSnapshot.id);
     const foreignKeyViolations = database.query('PRAGMA foreign_key_check').all();
     database.close(false);
@@ -4303,7 +4543,7 @@ describe('code graph full-build materialization store', () => {
     Effect.gen(function* () {
       const fixture = yield* Effect.promise(materializationFixture);
       const symbols = Array.from({length: 5_100}, (_, index) => {
-        const id = `batch-${String(index).padStart(5, '0')}`;
+        const id = `batch-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}`;
         return symbol(id, id, [`typescript:name:${id}`]);
       });
       const snapshot = readySnapshot(fixture.identity, symbols.length, 0);
@@ -4373,7 +4613,7 @@ describe('code graph full-build materialization store', () => {
       const content = JSON.stringify({
         'flat.key': {leaf: true},
         flat: {key: {leaf: false}},
-        ...Object.fromEntries(Array.from({length: 100}, (_, index) => [`entry-${index}`, {leaf: index}])),
+        ...EffectRecord.fromEntries(Array.from({length: 100}, (_, index) => [`entry-${index}`, {leaf: index}])),
       });
       const donor = structuredCacheFile('config/donor.json', content);
       const target = structuredCacheFile('config/copies/target.json', content);
@@ -4563,12 +4803,23 @@ describe('code graph full-build materialization store', () => {
       );
 
       const before = new Database(fixture.databasePath, {readonly: true, strict: true});
-      const retiredBefore = before.query('SELECT state FROM snapshots WHERE id = ?').get(firstSnapshot.id) as {
-        readonly state: string;
-      };
-      const retiredSymbolsBefore = before
-        .query('SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?')
-        .get(firstSnapshot.id) as {readonly count: number};
+      const retiredBefore = requiredRow(
+        before
+          .query<
+            {
+              readonly state: string;
+            },
+            SQLQueryBindings[]
+          >('SELECT state FROM snapshots WHERE id = ?')
+          .get(firstSnapshot.id),
+      );
+      const retiredSymbolsBefore = requiredRow(
+        before
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            'SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?',
+          )
+          .get(firstSnapshot.id),
+      );
       const retiredTermsBefore = readLexicalTerms(before, firstSnapshot.id);
       before.close(false);
       expect(retiredBefore.state).toBe('retired');
@@ -4579,12 +4830,23 @@ describe('code graph full-build materialization store', () => {
 
       const after = new Database(fixture.databasePath, {readonly: true, strict: true});
       const retiredAfter = after.query('SELECT state FROM snapshots WHERE id = ?').get(firstSnapshot.id);
-      const currentAfter = after.query('SELECT state FROM snapshots WHERE id = ?').get(currentSnapshot.id) as {
-        readonly state: string;
-      };
-      const activeAfter = after
-        .query('SELECT snapshot_id FROM active_snapshots WHERE worktree_id = ?')
-        .get(fixture.identity.worktreeId) as {readonly snapshot_id: string};
+      const currentAfter = requiredRow(
+        after
+          .query<
+            {
+              readonly state: string;
+            },
+            SQLQueryBindings[]
+          >('SELECT state FROM snapshots WHERE id = ?')
+          .get(currentSnapshot.id),
+      );
+      const activeAfter = requiredRow(
+        after
+          .query<{readonly snapshot_id: string}, SQLQueryBindings[]>(
+            'SELECT snapshot_id FROM active_snapshots WHERE worktree_id = ?',
+          )
+          .get(fixture.identity.worktreeId),
+      );
       const retiredTermsAfter = readLexicalTerms(after, firstSnapshot.id);
       const currentTermsAfter = readLexicalTerms(after, currentSnapshot.id);
       const foreignKeyViolations = after.query('PRAGMA foreign_key_check').all();
@@ -4699,8 +4961,10 @@ describe('code graph full-build materialization store', () => {
       );
 
       expect(lookupDeletesPerTransaction.length).toBeGreaterThan(1);
-      expect(lookupDeletesPerTransaction.reduce((total, deleted) => total + deleted, 0)).toBe(lookupRowCount);
-      expect(lookupDeletesPerTransaction.every(deleted => deleted <= 20_000)).toBe(true);
+      expect(EffectArray.reduce(lookupDeletesPerTransaction, 0, (total, deleted) => total + deleted)).toBe(
+        lookupRowCount,
+      );
+      expect(EffectArray.every(lookupDeletesPerTransaction, deleted => deleted <= 20_000)).toBe(true);
       const after = new Database(fixture.databasePath, {readonly: true, strict: true});
       try {
         expect(after.query('SELECT state FROM snapshots WHERE id = ?').get(retiredSnapshot.id)).toBeNull();
@@ -4721,9 +4985,9 @@ describe('code graph full-build materialization store', () => {
       const fixture = yield* Effect.promise(materializationFixture);
       const files = Array.from({length: 2_501}, (_, index): CodeGraphInventoryFile => ({
         ...fixture.file,
-        blobId: index.toString(16).padStart(40, '0'),
-        contentHash: index.toString(16).padStart(64, '0'),
-        path: `src/capacity-${String(index).padStart(4, '0')}-🙂.ts`,
+        blobId: Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
+        contentHash: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+        path: `src/capacity-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}-🙂.ts`,
       }));
       const snapshot = {
         ...readySnapshot(fixture.identity, 0, 0),
@@ -5081,10 +5345,10 @@ describe('code graph full-build materialization store', () => {
         sourceName: source.name,
         targetName: target.name,
       };
-      const files = [sourcePath, targetPath].map((path, index): CodeGraphInventoryFile => ({
+      const files = EffectArray.map([sourcePath, targetPath], (path, index): CodeGraphInventoryFile => ({
         ...fixture.file,
-        blobId: String(index + 1).padStart(40, '0'),
-        contentHash: String(index + 1).padStart(64, '0'),
+        blobId: Effect2.pipe(String(index + 1), EffectString.padStart(40, '0')),
+        contentHash: Effect2.pipe(String(index + 1), EffectString.padStart(64, '0')),
         path,
       }));
       const snapshot = {
@@ -5185,11 +5449,17 @@ describe('code graph full-build materialization store', () => {
       expect(result.afterAliasPause).toEqual({aliases: 0, remainingReferences: 1, resolvedEdges: 0});
 
       expect(isCodeGraphStoreNoSpaceError(result.pageFailure)).toBe(true);
-      expect(result.pagePause.some(value => value.operation === 'resolve persistent code graph reexport aliases')).toBe(
-        true,
-      );
-      const pageBoundary = result.pagePause.find(
-        value => value.operation === 'resolve persistent code graph references',
+      expect(
+        EffectArray.some(
+          result.pagePause,
+          value => value.operation === 'resolve persistent code graph reexport aliases',
+        ),
+      ).toBe(true);
+      const pageBoundary = Option.getOrUndefined(
+        EffectArray.findFirst(
+          result.pagePause,
+          value => value.operation === 'resolve persistent code graph references',
+        ),
       );
       expect(pageBoundary?.rowCount).toBeGreaterThan(0);
       expect(pageBoundary?.finalFactBytes).toBeGreaterThan(0);
@@ -5198,7 +5468,9 @@ describe('code graph full-build materialization store', () => {
 
       expect(result.resolution.resolved).toBe(1);
       expect(result.afterResume).toEqual({remainingReferences: 0, resolvedEdges: 1});
-      expect(result.resumed.some(value => value.operation === 'resolve persistent code graph references')).toBe(true);
+      expect(
+        EffectArray.some(result.resumed, value => value.operation === 'resolve persistent code graph references'),
+      ).toBe(true);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
@@ -5240,8 +5512,11 @@ describe('code graph full-build materialization store', () => {
             const tokens = Array.from({length: 128}, (_, index) => `promotion-lease-${offset + index}`);
             yield* sql.unsafe(
               `INSERT INTO snapshot_leases (token, snapshot_id, expires_at, retire_when_inactive)
-               VALUES ${tokens.map(() => '(?, ?, ?, 0)').join(', ')}`,
-              tokens.flatMap(token => [token, snapshot.id, Date.now() + 60_000]),
+               VALUES ${EffectArray.join(
+                 EffectArray.map(tokens, () => '(?, ?, ?, 0)'),
+                 ', ',
+               )}`,
+              EffectArray.flatMap(tokens, token => [token, snapshot.id, Date.now() + 60_000]),
             );
             const unrelatedTokens = Array.from(
               {length: 128},
@@ -5249,8 +5524,11 @@ describe('code graph full-build materialization store', () => {
             );
             yield* sql.unsafe(
               `INSERT INTO snapshot_leases (token, snapshot_id, expires_at, retire_when_inactive)
-               VALUES ${unrelatedTokens.map(() => '(?, ?, ?, 0)').join(', ')}`,
-              unrelatedTokens.flatMap(token => [token, unrelatedSnapshotId, Date.now() + 60_000]),
+               VALUES ${EffectArray.join(
+                 EffectArray.map(unrelatedTokens, () => '(?, ?, ?, 0)'),
+                 ', ',
+               )}`,
+              EffectArray.flatMap(unrelatedTokens, token => [token, unrelatedSnapshotId, Date.now() + 60_000]),
             );
           }
 
@@ -5593,7 +5871,7 @@ describe('code graph full-build materialization store', () => {
           operation: 'stage persistent code graph facts',
         });
         expect(result.factResume[0].rowCount).toBeGreaterThanOrEqual(
-          Object.values(result.physicalFactRows).reduce((total, value) => total + Number(value), 0),
+          EffectArray.reduce(EffectRecord.values(result.physicalFactRows), 0, (total, value) => total + Number(value)),
         );
 
         const expectedPlanBoundary: CodeGraphDirectPersistentCapacityBoundary = {
@@ -5659,18 +5937,24 @@ describe('code graph full-build materialization store', () => {
           yield* Effect.promise(() => child.exited);
 
           const interruptedDatabase = new Database(fixture.databasePath, {readonly: true, strict: true});
-          const interruptedRows = interruptedDatabase
-            .query('SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?')
-            .get(testSnapshotId(5_100)) as {readonly count: number};
-          const interruptedState = interruptedDatabase
-            .query('SELECT state FROM snapshots WHERE id = ?')
-            .get(testSnapshotId(5_100)) as {readonly state: string};
+          const interruptedRows = requiredRow(
+            interruptedDatabase
+              .query<{readonly count: number}, SQLQueryBindings[]>(
+                'SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?',
+              )
+              .get(testSnapshotId(5_100)),
+          );
+          const interruptedState = requiredRow(
+            interruptedDatabase
+              .query<{readonly state: string}, SQLQueryBindings[]>('SELECT state FROM snapshots WHERE id = ?')
+              .get(testSnapshotId(5_100)),
+          );
           interruptedDatabase.close(false);
           expect(interruptedRows.count).toBe(5_000);
           expect(interruptedState.state).toBe('building');
 
           const replacementSymbols = Array.from({length: 5_100}, (_, index) => {
-            const id = `replacement-${String(index).padStart(5, '0')}`;
+            const id = `replacement-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}`;
             return symbol(id, id, [`typescript:name:${id}`]);
           });
           const originalSnapshot = {...readySnapshot(fixture.identity, 1, 0), id: testSnapshotId(1)};
@@ -5709,7 +5993,13 @@ describe('code graph full-build materialization store', () => {
           };
 
           expect(recovered.activeBeforeRepair?.id).toBe(originalSnapshot.id);
-          expect(recovered.graphBeforeRepair?.symbols.map(entry => entry.id)).toEqual(['original']);
+          expect(
+            Option.getOrUndefined(
+              Option.map(Option.fromNullishOr(recovered.graphBeforeRepair?.symbols), __effectArrayReceiver =>
+                EffectArray.map(__effectArrayReceiver, entry => entry.id),
+              ),
+            ),
+          ).toEqual(['original']);
           expect(recovered.healthBeforeRepair?.buildingSnapshots).toBe(1);
           expect(recovered.repaired?.removedSnapshots).toBe(1);
           expect(recovered.activeAfterRetry?.id).toBe(interruptedSnapshot.id);
@@ -5732,9 +6022,18 @@ async function readJsonLine(
       const next = await reader.read();
       if (next.done) throw TestError.make({message: 'Activation kill child exited before reporting progress.'});
       buffered += decoder.decode(next.value, {stream: true});
-      const newline = buffered.indexOf('\n');
+      const newline = Effect2.pipe(
+        buffered,
+        EffectString.indexOf('\n'),
+        Effect2.Option.getOrElse(() => -1),
+      );
       if (newline >= 0)
-        return JSON.parse(buffered.slice(0, newline)) as {readonly event?: string; readonly rows?: number};
+        return Schema.decodeUnknownSync(
+          Schema.StructWithRest(
+            Schema.Struct({event: Schema.optional(Schema.String), rows: Schema.optional(Schema.Finite)}),
+            [Schema.Record(Schema.String, Schema.Unknown)],
+          ),
+        )(JSON.parse(Effect2.pipe(buffered, EffectString.slice(0, newline))));
     }
   };
   return Promise.race([
@@ -5750,18 +6049,18 @@ async function materializationFixture() {
   temporaryRoots.push(root);
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'materialization-fixture',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'r'.repeat(64),
-    worktreeId: 'w'.repeat(64),
+    repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
   };
   const file: CodeGraphInventoryFile = {
-    blobId: 'b'.repeat(40),
-    contentHash: 'h'.repeat(64),
+    blobId: Effect2.pipe('b', EffectString.repeat(40)),
+    contentHash: Effect2.pipe('h', EffectString.repeat(64)),
     language: 'typescript',
     mode: '100644',
     path: 'src/materialization.ts',
@@ -5813,7 +6112,14 @@ function expectedPersistentInventoryBoundary(
 ): CodeGraphDirectPersistentCapacityBoundary {
   return {
     finalFactBytes: utf8PayloadBytes(
-      files.flatMap(file => [snapshotId, file.path, file.contentHash, file.language, file.mode, file.source]),
+      EffectArray.flatMap(files, file => [
+        snapshotId,
+        file.path,
+        file.contentHash,
+        file.language,
+        file.mode,
+        file.source,
+      ]),
     ),
     operation: 'stage persistent code graph inventory',
     rowCount: files.length,
@@ -5869,7 +6175,7 @@ function expectedPersistentWorkspaceBoundary(
 
 function utf8PayloadBytes(values: readonly string[]): number {
   const encoder = new TextEncoder();
-  return values.reduce((total, value) => total + encoder.encode(value).byteLength, 0);
+  return EffectArray.reduce(values, 0, (total, value) => total + encoder.encode(value).byteLength);
 }
 
 function persistentPreparationEvidence(
@@ -5883,21 +6189,26 @@ function persistentPreparationEvidence(
 } {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database
-      .query(
-        `SELECT owner.expected_batch_count AS expectedBatchCount,
+    return requiredRow(
+      database
+        .query<
+          {
+            readonly distinctFiles: number;
+            readonly expectedBatchCount: number | null;
+            readonly files: number;
+            readonly lexicalCounters: number;
+          },
+          SQLQueryBindings[]
+        >(
+          `SELECT owner.expected_batch_count AS expectedBatchCount,
            (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_id = owner.snapshot_id) AS files,
            (SELECT COUNT(DISTINCT path) FROM snapshot_files WHERE snapshot_id = owner.snapshot_id) AS distinctFiles,
            (SELECT COUNT(*) FROM building_lexical_counters WHERE snapshot_id = owner.snapshot_id) AS lexicalCounters
          FROM snapshot_build_owners AS owner
          WHERE owner.snapshot_id = ?`,
-      )
-      .get(snapshotId) as {
-      readonly distinctFiles: number;
-      readonly expectedBatchCount: number | null;
-      readonly files: number;
-      readonly lexicalCounters: number;
-    };
+        )
+        .get(snapshotId),
+    );
   } finally {
     database.close(false);
   }
@@ -5918,33 +6229,41 @@ interface PersistentGraphEvidence {
 
 function persistentGraphEvidence(databasePath: string, snapshotId: string): PersistentGraphEvidence {
   const database = new Database(databasePath, {readonly: true, strict: true});
-  const evidence = database
-    .query(
-      `SELECT
+  try {
+    return requiredRow(
+      database
+        .query<PersistentGraphEvidence, SQLQueryBindings[]>(
+          `SELECT
          (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_id = snapshot.id) AS files,
          (SELECT COUNT(DISTINCT path) FROM snapshot_files WHERE snapshot_id = snapshot.id) AS distinctFiles,
          (SELECT COUNT(*) FROM symbols WHERE snapshot_id = snapshot.id) AS symbols,
          (SELECT COUNT(*) FROM edges WHERE snapshot_id = snapshot.id) AS edges
        FROM snapshots AS snapshot
        WHERE snapshot.id = ?`,
-    )
-    .get(snapshotId) as PersistentGraphEvidence;
-  database.close(false);
-  return evidence;
+        )
+        .get(snapshotId),
+    );
+  } finally {
+    database.close(false);
+  }
 }
 
 function readCompletedBuildRows(databasePath: string, snapshotId: string): CompletedBuildRows {
   const database = new Database(databasePath, {readonly: true, strict: true});
-  const rows = database
-    .query(
-      `SELECT
+  try {
+    return requiredRow(
+      database
+        .query<CompletedBuildRows, SQLQueryBindings[]>(
+          `SELECT
          (SELECT COUNT(*) FROM building_references WHERE snapshot_id = ?) AS refs,
          (SELECT COUNT(*) FROM building_reference_candidates WHERE snapshot_id = ?) AS candidates,
          (SELECT COUNT(*) FROM building_materialization_batches WHERE snapshot_id = ?) AS batches`,
-    )
-    .get(snapshotId, snapshotId, snapshotId) as CompletedBuildRows;
-  database.close(false);
-  return rows;
+        )
+        .get(snapshotId, snapshotId, snapshotId),
+    );
+  } finally {
+    database.close(false);
+  }
 }
 
 function readPersistentResolutionState(databasePath: string, snapshotId: string): string {
@@ -6047,18 +6366,23 @@ function readLexicalTerms(
   snapshotId: string,
 ): readonly {readonly symbol_id: string; readonly term: string; readonly weight: number}[] {
   const statement = codeGraphEffectiveSymbolTermsQueryStatement(snapshotId, undefined);
-  return database.query(statement.text).all(...statement.parameters) as readonly {
-    readonly symbol_id: string;
-    readonly term: string;
-    readonly weight: number;
-  }[];
+  return database
+    .query<
+      {
+        readonly symbol_id: string;
+        readonly term: string;
+        readonly weight: number;
+      },
+      SQLQueryBindings[]
+    >(statement.text)
+    .all(...statement.parameters);
 }
 
 function structuredCacheFile(path: string, content: string): CodeGraphInventoryFile {
   return {
-    blobId: 'a'.repeat(40),
+    blobId: Effect2.pipe('a', EffectString.repeat(40)),
     content,
-    contentHash: 'b'.repeat(64),
+    contentHash: Effect2.pipe('b', EffectString.repeat(64)),
     language: 'json',
     mode: '100644',
     path,
@@ -6113,5 +6437,5 @@ function readySnapshot(identity: RepositoryIdentity, symbolCount: number, edgeCo
 }
 
 function testSnapshotId(value: number): string {
-  return `cgsn_${'0'.repeat(40)}-full-${value.toString(16).padStart(16, '0')}`;
+  return `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}-full-${Effect2.pipe(value.toString(16), EffectString.padStart(16, '0'))}`;
 }

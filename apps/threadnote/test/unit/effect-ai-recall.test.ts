@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -29,11 +30,12 @@ import {
 import {
   jevConfiguration,
   runJevRecallCandidateSelection,
-  type JevConfiguration,
   type JevTransport,
 } from '@threadnote/threadnote/effect/ai/jev';
 import {selectedRecallCandidateUris} from '@threadnote/recall/runtime';
 import {recallScoreThresholdPolicy, validatedRecallScoreThreshold} from '@threadnote/recall/threshold';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Effect AI recall expansion', () => {
   const enforcedJev = jevConfiguration({
@@ -41,7 +43,8 @@ describe('Effect AI recall expansion', () => {
     THREADNOTE_JEV_MODE: 'enforced',
     THREADNOTE_JEV_MODEL: 'jev-1.13.0',
     TYPESAFE_API_KEY: 'test-key',
-  }) as JevConfiguration;
+  });
+  if (!enforcedJev) throw new Error('The enforced Jev fixture configuration was not accepted.');
 
   it('only expands weak deterministic recalls', () => {
     expect(shouldExpandRecall({level: 'no_answer'})).toBe(true);
@@ -59,7 +62,7 @@ describe('Effect AI recall expansion', () => {
         'qx7 worker lease coordinator',
         'heartbeat renewal configuration',
         'ignored third rewrite',
-        'x'.repeat(700),
+        Effect2.pipe('x', EffectString.repeat(700)),
       ]),
     ).toEqual(['QX7 worker lease coordinator', 'heartbeat renewal configuration']);
   });
@@ -171,7 +174,7 @@ describe('Effect AI recall expansion', () => {
     }));
     expect(
       normalizeRecallCandidateSelection(
-        {candidateIds: manyCandidates.map(candidate => candidate.id), relevant: true},
+        {candidateIds: EffectArray.map(manyCandidates, candidate => candidate.id), relevant: true},
         manyCandidates,
       ),
     ).toHaveLength(8);

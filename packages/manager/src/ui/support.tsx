@@ -1,4 +1,13 @@
 import {
+  isGraphAnalysis,
+  isGraphCatalogPage,
+  isGraphNodeDetail,
+  isGraphQueryVisualization,
+  isGraphViewPage,
+  isGraphVisualization,
+} from '../api/response_guards.js';
+import {Array as EffectArray} from 'effect';
+import {
   House,
   Library,
   ScanText,
@@ -14,6 +23,7 @@ import {
 import {Schema} from 'effect';
 import React from 'react';
 import {trimTrailingCharacters} from '@threadnote/platform/string-boundaries';
+import {requireApiResponse, type ApiResponseGuard} from '../api/response_guard.js';
 import type {
   GraphAnalysis,
   GraphAdministrationAction,
@@ -25,6 +35,8 @@ import type {
 } from '@threadnote/manager/graph';
 import type {ManagerGraphVisualizationLimits} from '@threadnote/graph/visualization/limits';
 import type {BulkItemResult, PanelName, TreeNode} from '@threadnote/manager/ui/contracts';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const token = typeof window === 'undefined' ? '' : (new URLSearchParams(window.location.search).get('token') ?? '');
 export const GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS = 10_000;
@@ -73,13 +85,16 @@ export function loadSidebarWidth(): number {
   return Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored) : SIDEBAR_WIDTH_DEFAULT;
 }
 
-export class ManagerApiError extends Schema.TaggedError<ManagerApiError>()('ManagerApiError', {
-  code: Schema.optionalKey(Schema.String),
-  message: Schema.String,
-  retryAfterMilliseconds: Schema.optionalKey(Schema.Finite),
-  recovery: Schema.optionalKey(Schema.Unknown),
-  status: Schema.Finite,
-}) {
+export class ManagerApiError extends Schema.TaggedError<ManagerApiError, {readonly brand: unique symbol}>()(
+  'ManagerApiError',
+  {
+    code: Schema.optionalKey(Schema.String),
+    message: Schema.String,
+    retryAfterMilliseconds: Schema.optionalKey(Schema.Finite),
+    recovery: Schema.optionalKey(Schema.Unknown),
+    status: Schema.Finite,
+  },
+) {
   static of(
     message: string,
     status: number,
@@ -97,6 +112,27 @@ export class ManagerApiError extends Schema.TaggedError<ManagerApiError>()('Mana
   }
 }
 
+function api<T>(
+  path: string,
+  body: Record<string, unknown> | undefined,
+  options:
+    | {
+        readonly signal?: AbortSignal;
+        readonly timeoutMilliseconds?: number;
+        readonly headers?: Readonly<Record<string, string>>;
+      }
+    | undefined,
+  guard: ApiResponseGuard<T>,
+): Promise<T>;
+function api(
+  path: string,
+  body?: Record<string, unknown>,
+  options?: {
+    readonly signal?: AbortSignal;
+    readonly timeoutMilliseconds?: number;
+    readonly headers?: Readonly<Record<string, string>>;
+  },
+): Promise<unknown>;
 async function api<T>(
   path: string,
   body?: Record<string, unknown>,
@@ -105,7 +141,8 @@ async function api<T>(
     readonly timeoutMilliseconds?: number;
     readonly headers?: Readonly<Record<string, string>>;
   } = {},
-): Promise<T> {
+  guard?: ApiResponseGuard<T>,
+): Promise<unknown> {
   const controller = options.timeoutMilliseconds === undefined ? undefined : new AbortController();
   let timedOut = false;
   const abortFromCaller = () => controller?.abort(options.signal?.reason);
@@ -131,23 +168,25 @@ async function api<T>(
       method: body ? 'POST' : 'GET',
       signal: controller?.signal ?? options.signal,
     });
-    const data = (await response.json()) as {
-      readonly code?: string;
-      readonly error?: string;
-      readonly reason?: string;
-      readonly retryAfterMilliseconds?: number;
-      readonly recovery?: unknown;
-    };
+    const data: unknown = await response.json();
     if (!response.ok) {
+      const envelope = Schema.is(Schema.Record(Schema.String, Schema.Unknown))(data) ? data : undefined;
+      const error = typeof envelope?.error === 'string' ? envelope.error : undefined;
+      const reason = typeof envelope?.reason === 'string' ? envelope.reason : undefined;
+      const code = typeof envelope?.code === 'string' ? envelope.code : undefined;
+      const retryAfterMilliseconds =
+        typeof envelope?.retryAfterMilliseconds === 'number' && Number.isFinite(envelope.retryAfterMilliseconds)
+          ? envelope.retryAfterMilliseconds
+          : undefined;
       throw ManagerApiError.of(
-        data.error ?? data.reason ?? `HTTP ${response.status}`,
+        error ?? reason ?? `HTTP ${response.status}`,
         response.status,
-        data.code,
-        data.retryAfterMilliseconds,
-        data.recovery,
+        code,
+        retryAfterMilliseconds,
+        envelope?.recovery,
       );
     }
-    return data as T;
+    return guard ? requireApiResponse(data, guard) : data;
   } catch (cause) {
     if (timedOut) {
       throw new Error(`Manager request timed out after ${options.timeoutMilliseconds} ms. Retry the operation.`, {
@@ -195,6 +234,7 @@ function loadManagerGraph(
     `/api/graph?repository=${encodeURIComponent(repositoryId)}&snapshot=${encodeURIComponent(snapshotId)}&project=${encodeURIComponent(projectId)}&nodeLimit=${limits.nodeLimit}&edgeLimit=${limits.edgeLimit}`,
     undefined,
     {signal, timeoutMilliseconds: GRAPH_DETAIL_REQUEST_TIMEOUT_MILLISECONDS},
+    isGraphVisualization,
   );
 }
 
@@ -210,6 +250,7 @@ function loadManagerGraphCatalogPage(
     `/api/graphs/page?repository=${encodeURIComponent(repositoryId)}&snapshot=${encodeURIComponent(snapshotId)}&offset=${projectOffset}&workspaceOffset=${workspaceOffset}${query ? `&query=${encodeURIComponent(query)}` : ''}`,
     undefined,
     {signal, timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS},
+    isGraphCatalogPage,
   );
 }
 
@@ -220,11 +261,15 @@ function loadManagerGraphViewsPage(
   scopeIds: readonly string[],
   signal: AbortSignal,
 ): Promise<GraphViewPage> {
-  const scopeQuery = scopeIds.map(scopeId => `&scope=${encodeURIComponent(scopeId)}`).join('');
+  const scopeQuery = EffectArray.join(
+    EffectArray.map(scopeIds, scopeId => `&scope=${encodeURIComponent(scopeId)}`),
+    '',
+  );
   return api<GraphViewPage>(
     `/api/graphs/views?repository=${encodeURIComponent(repositoryId)}&offset=${offset}${query ? `&query=${encodeURIComponent(query)}` : ''}${scopeQuery}`,
     undefined,
     {signal, timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS},
+    isGraphViewPage,
   );
 }
 
@@ -237,6 +282,7 @@ function loadManagerGraphAnalysis(
     `/api/graph/analysis?repository=${encodeURIComponent(repositoryId)}&snapshot=${encodeURIComponent(snapshotId)}`,
     undefined,
     {signal, timeoutMilliseconds: GRAPH_DETAIL_REQUEST_TIMEOUT_MILLISECONDS},
+    isGraphAnalysis,
   );
 }
 
@@ -250,6 +296,7 @@ function loadManagerGraphNodeDetail(
     `/api/graph/node?repository=${encodeURIComponent(repositoryId)}&snapshot=${encodeURIComponent(snapshotId)}&node=${encodeURIComponent(nodeId)}`,
     undefined,
     {signal, timeoutMilliseconds: GRAPH_DETAIL_REQUEST_TIMEOUT_MILLISECONDS},
+    isGraphNodeDetail,
   );
 }
 
@@ -264,6 +311,7 @@ function loadManagerGraphQuery(
     `/api/graph/query?repository=${encodeURIComponent(repositoryId)}&snapshot=${encodeURIComponent(snapshotId)}&query=${encodeURIComponent(query)}&nodeLimit=${limits.nodeLimit}&edgeLimit=${limits.edgeLimit}`,
     undefined,
     {signal, timeoutMilliseconds: GRAPH_DETAIL_REQUEST_TIMEOUT_MILLISECONDS},
+    isGraphQueryVisualization,
   );
 }
 
@@ -303,26 +351,27 @@ export function managerProjectOptions(tree: TreeNode | undefined): readonly stri
 function uniqueSelectorValues(values: readonly string[]): readonly string[] {
   const unique = new Map<string, string>();
   for (const value of values) {
-    const trimmed = value.trim();
+    const trimmed = Effect.pipe(value, EffectString.trim);
     if (!trimmed) continue;
-    const normalized = trimmed.toLocaleLowerCase();
+    const normalized = Effect.pipe(trimmed, EffectString.toLocaleLowerCase());
     if (!unique.has(normalized)) unique.set(normalized, trimmed);
   }
-  return [...unique.values()].sort((left, right) => left.localeCompare(right));
+  return [...unique.values()].sort((left, right) => Effect.pipe(left, EffectString.localeCompare(right)));
 }
 
 function treeItemClass(active: boolean, readOnly: boolean, base?: string): string | undefined {
-  const classes = [base, active ? 'is-active' : undefined, readOnly ? 'is-readonly' : undefined].filter(
+  const classes = EffectArray.filter(
+    [base, active ? 'is-active' : undefined, readOnly ? 'is-readonly' : undefined],
     (value): value is string => typeof value === 'string',
   );
-  return classes.length > 0 ? classes.join(' ') : undefined;
+  return classes.length > 0 ? EffectArray.join(classes, ' ') : undefined;
 }
 
 function countFiles(node: TreeNode): number {
   if (!node.isDir) {
     return 1;
   }
-  return (node.children ?? []).reduce((total, child) => total + countFiles(child), 0);
+  return EffectArray.reduce(node.children ?? [], 0, (total, child) => total + countFiles(child));
 }
 
 export function selectableMemoryUris(
@@ -338,7 +387,7 @@ export function selectableMemoryUris(
   if (!node.isDir) {
     return [node.uri];
   }
-  return (node.children ?? []).flatMap(child => selectableMemoryUris(child, options));
+  return EffectArray.flatMap(node.children ?? [], child => selectableMemoryUris(child, options));
 }
 
 export function pruneSelectedMemoryUris(
@@ -367,42 +416,68 @@ function isMarkdownNode(node: TreeNode): boolean {
 }
 
 function isMarkdownUri(uri: string): boolean {
-  return uri.toLowerCase().endsWith('.md');
+  return Effect.pipe(uri, EffectString.toLowerCase, EffectString.endsWith('.md'));
 }
 
 function isResourceUri(uri: string): boolean {
-  return uri === 'threadnote://resources' || uri.startsWith('threadnote://resources/');
+  return uri === 'threadnote://resources' || Effect.pipe(uri, EffectString.startsWith('threadnote://resources/'));
 }
 
 function markdownBodyForPreview(content: string): string {
-  if (!content.startsWith('MEMORY\n') && !content.startsWith('HANDOFF\n')) {
+  if (
+    !Effect.pipe(content, EffectString.startsWith('MEMORY\n')) &&
+    !Effect.pipe(content, EffectString.startsWith('HANDOFF\n'))
+  ) {
     return content;
   }
-  const separatorIndex = content.indexOf('\n\n');
-  return separatorIndex === -1 ? '' : content.slice(separatorIndex + 2).trimStart();
+  const separatorIndex = Effect.pipe(
+    content,
+    EffectString.indexOf('\n\n'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  return separatorIndex === -1
+    ? ''
+    : Effect.pipe(content, EffectString.slice(separatorIndex + 2), EffectString.trimStart);
 }
 
 function nodeMatches(node: TreeNode, filter: string): boolean {
-  const needle = filter.toLowerCase();
-  if (node.name.toLowerCase().includes(needle) || node.uri.toLowerCase().includes(needle)) {
+  const needle = Effect.pipe(filter, EffectString.toLowerCase);
+  if (
+    Effect.pipe(node.name, EffectString.toLowerCase, EffectString.includes(needle)) ||
+    Effect.pipe(node.uri, EffectString.toLowerCase, EffectString.includes(needle))
+  ) {
     return true;
   }
-  return (node.children ?? []).some(child => nodeMatches(child, filter));
+  return EffectArray.some(node.children ?? [], child => nodeMatches(child, filter));
 }
 
 function resourceUrisFromText(text: string): readonly string[] {
-  const matches = text.match(/threadnote:\/\/[^\s)"'<>`\]]+/g) ?? [];
-  return [...new Set(matches.map(uri => trimTrailingCharacters(uri, '.,;:')))];
+  const matches =
+    Effect.pipe(
+      text,
+      EffectString.match(/threadnote:\/\/[^\s)"'<>`\]]+/g),
+      Effect.Option.getOrElse(() => null),
+    ) ?? [];
+  return [...new Set(EffectArray.map(matches, uri => trimTrailingCharacters(uri, '.,;:')))];
 }
 
 function formatBulkResults(action: string, results: readonly BulkItemResult[]): string {
-  const succeeded = results.filter(result => result.ok);
-  const failed = results.filter(result => !result.ok);
-  return [
-    `Bulk ${action} complete: ${succeeded.length} succeeded, ${failed.length} failed.`,
-    '',
-    ...results.map(result => `${result.ok ? 'OK' : 'FAIL'} ${result.uri}${result.error ? ` (${result.error})` : ''}`),
-  ].join('\n');
+  const succeeded = EffectArray.filter(
+    results,
+    (result, __effectArrayIndex) => __effectArrayIndex in results && result.ok,
+  );
+  const failed = EffectArray.filter(results, result => !result.ok);
+  return EffectArray.join(
+    [
+      `Bulk ${action} complete: ${succeeded.length} succeeded, ${failed.length} failed.`,
+      '',
+      ...EffectArray.map(
+        results,
+        result => `${result.ok ? 'OK' : 'FAIL'} ${result.uri}${result.error ? ` (${result.error})` : ''}`,
+      ),
+    ],
+    '\n',
+  );
 }
 
 function bulkActionLabel(action: 'archive' | 'forget' | 'publish' | 'unpublish'): string {

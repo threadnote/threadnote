@@ -1,3 +1,5 @@
+import {Schema} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Exit, Fiber} from 'effect';
@@ -22,6 +24,9 @@ import {
   parseDiagnosticArguments,
 } from '../citation-phase-contract.js';
 import {budget, releaseScaleArtifact} from './citation-phase.fixture.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('citation observation wrapper', () => {
   const descriptor = {pass: 'timed' as const, profileId: 'local-100k' as const, ordinal: 0};
@@ -68,7 +73,7 @@ describe('citation observation wrapper', () => {
       expect(Exit.isFailure(interrupted)).toBe(true);
       expect(finalized).toBe(1);
       expect(seen).toHaveLength(4);
-      expect(seen.every(value => value === descriptor)).toBe(true);
+      expect(EffectArray.every(seen, value => value === descriptor)).toBe(true);
     }),
   );
 
@@ -76,12 +81,14 @@ describe('citation observation wrapper', () => {
     const expected = expectedObservationDescriptors(DIAGNOSTIC_SAMPLES, DIAGNOSTIC_WARMUPS);
     expect(expected).toHaveLength(615);
     const artifact = releaseScaleArtifact('threadnote-5.3.0', 'bun/1.4.2');
-    const markers = expected.map((entry, id) => ({
+    const markers = EffectArray.map(expected, (entry, id) => ({
       ...entry,
       id,
       outcome: 'success' as const,
       details: entry.profileId === 'local-100k' ? ('collected' as const) : ('intentionally-omitted' as const),
-      counters: artifact.profiles.find(profile => profile.profile.id === entry.profileId)!.observations[0].counters,
+      counters: EffectOption.getOrUndefined(
+        EffectArray.findFirst(artifact.profiles, profile => profile.profile.id === entry.profileId),
+      )!.observations[0].counters,
     }));
     expect(observationCoverage(markers, 100, 5)).toMatchObject({
       complete: true,
@@ -95,7 +102,7 @@ describe('citation observation wrapper', () => {
 });
 
 it('removes release envelopes even from otherwise fully qualifying hosted evidence, preserving actual runner and workload', () => {
-  const candidate = contextBriefCitationScaleCandidateBinding('a'.repeat(40), {
+  const candidate = contextBriefCitationScaleCandidateBinding(Effect2.pipe('a', EffectString.repeat(40)), {
     version: '5.3.0',
     packageManager: 'bun@1.4.2',
   });
@@ -119,55 +126,96 @@ it('removes release envelopes even from otherwise fully qualifying hosted eviden
   expect(projected).not.toHaveProperty('suite');
   expect(projected).not.toHaveProperty('gate');
   expect(() => parseContextBriefCitationScaleArtifactV2(projected, budget, candidate)).toThrow();
-  for (const nested of Object.values(projected))
+  for (const nested of EffectRecord.values(projected))
     expect(() => parseContextBriefCitationScaleArtifactV2(nested, budget, candidate)).toThrow();
 });
 
 it('fixes workload parameters and accepts only candidate/output/internal digest options', () => {
   expect([DIAGNOSTIC_MEMORY_CANDIDATES, DIAGNOSTIC_SAMPLES, DIAGNOSTIC_WARMUPS]).toEqual([100_000, 100, 5]);
-  const args = ['--candidate', 'a'.repeat(40), '--built-artifact-sha256', 'b'.repeat(64)];
-  expect(parseDiagnosticArguments(args)).toMatchObject({candidate: 'a'.repeat(40)});
+  const args = [
+    '--candidate',
+    Effect2.pipe('a', EffectString.repeat(40)),
+    '--built-artifact-sha256',
+    Effect2.pipe('b', EffectString.repeat(64)),
+  ];
+  expect(parseDiagnosticArguments(args)).toMatchObject({candidate: Effect2.pipe('a', EffectString.repeat(40))});
   for (const extra of [
     ['--samples', '1'],
     ['--script', 'anything'],
-    ['--candidate', 'b'.repeat(40)],
+    ['--candidate', Effect2.pipe('b', EffectString.repeat(40))],
     ['--mode', 'release-scale'],
   ])
     expect(() => parseDiagnosticArguments([...args, ...extra])).toThrow();
 });
 
 it('uses a default-off separate ARM64 diagnostic job and leaves the ordinary scale gate command intact', () => {
-  interface Step {
-    readonly run?: string;
-  }
-  interface Job {
-    readonly if: string;
-    readonly 'runs-on': string;
-    readonly steps: readonly Step[];
-  }
-  const workflow = load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}) as {
-    readonly on: {readonly workflow_dispatch: {readonly inputs: Readonly<Record<string, unknown>>}};
-    readonly jobs: Readonly<Record<string, Job>>;
-  };
+  const StepSchema = Schema.Struct({run: Schema.optionalKey(Schema.String)});
+  const JobSchema = Schema.Struct({if: Schema.String, 'runs-on': Schema.String, steps: Schema.Array(StepSchema)});
+  const WorkflowSchema = Schema.Struct({
+    on: Schema.Struct({workflow_dispatch: Schema.Struct({inputs: Schema.Record(Schema.String, Schema.Unknown)})}),
+    jobs: Schema.Record(Schema.String, Schema.Unknown),
+  });
+  const rawWorkflow: unknown = load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA});
+  if (!Schema.is(WorkflowSchema)(rawWorkflow)) throw new Error('Invalid benchmark workflow.');
+  const workflow = rawWorkflow;
   expect(workflow.on.workflow_dispatch.inputs.include_context_brief_citation_diagnostics).toMatchObject({
     type: 'boolean',
     default: false,
     required: false,
   });
   const diagnostic = workflow.jobs['context-brief-citation-phase-diagnostic'];
+  if (!Schema.is(JobSchema)(diagnostic)) throw new Error('Invalid citation diagnostic job.');
   expect(diagnostic.if).toBe(
     "github.event_name == 'workflow_dispatch' && inputs.include_context_brief_citation_diagnostics",
   );
   expect(diagnostic['runs-on']).toBe('macos-15');
-  const run = diagnostic.steps.find(step => step.run?.includes('build-citation-phase-diagnostic'))?.run;
+  const run = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      diagnostic.steps,
+      __effectArrayValue =>
+        !!(step =>
+          Effect2.pipe(step.run, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.includes('build-citation-phase-diagnostic')),
+          ))(__effectArrayValue),
+    ),
+  )?.run;
   expect(run).toBe(
     'bun tools/diagnostics/build-citation-phase-diagnostic.ts --candidate "${{ github.sha }}" --output artifacts/context-brief-citation-phase-diagnostic.json',
   );
   expect(run).not.toContain('inputs.');
-  expect(diagnostic.steps.find(step => step.run?.includes('RUNNER_ARCH'))?.run).toBe('test "$RUNNER_ARCH" = "ARM64"');
+  expect(
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        diagnostic.steps,
+        __effectArrayValue =>
+          !!(step =>
+            Effect2.pipe(step.run, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect2.pipe(effectOptionalString, EffectString.includes('RUNNER_ARCH')),
+            ))(__effectArrayValue),
+      ),
+    )?.run,
+  ).toBe('test "$RUNNER_ARCH" = "ARM64"');
   const gate = workflow.jobs['context-brief-citations-scale'];
+  if (!Schema.is(JobSchema)(gate)) throw new Error('Invalid citation scale job.');
   expect(gate.if).toBe("github.event_name == 'schedule' || inputs.include_context_brief_citations_scale");
-  expect(gate.steps.find(step => step.run?.includes('bench:context-brief-citations'))?.run).toBe(
+  expect(
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        gate.steps,
+        __effectArrayValue =>
+          !!(step =>
+            Effect2.pipe(step.run, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect2.pipe(effectOptionalString, EffectString.includes('bench:context-brief-citations')),
+            ))(__effectArrayValue),
+      ),
+    )?.run,
+  ).toBe(
     'bun run bench:context-brief-citations -- --candidate-commit "${{ github.sha }}" --memory-candidates 100000 --samples 100 --warmups 5 --fail-on-budget --output artifacts/context-brief-citations-scale-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}.json',
   );
 });

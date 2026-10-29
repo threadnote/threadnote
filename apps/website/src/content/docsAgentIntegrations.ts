@@ -1,8 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {agentCapabilityNames, agentIntegrations, capabilityLabel, tierLabels} from './agentIntegrations.js';
 import type {DocsArticle, DocsSection} from './docsTypes.js';
 
 function agentDetailsArticle(integration: (typeof agentIntegrations)[number]): DocsArticle {
-  const capabilityRows = agentCapabilityNames.map(capability => {
+  const capabilityRows = EffectArray.map(agentCapabilityNames, capability => {
     const details = integration.capabilities[capability];
     return [capabilityLabel(capability), details.status, details.reason ?? 'Managed as described by this surface.'];
   });
@@ -13,9 +14,10 @@ function agentDetailsArticle(integration: (typeof agentIntegrations)[number]): D
       ? `Managed target: ${integration.projectGuidance.targetPath}.`
       : integration.projectGuidance.reason,
   ]);
-  const officialLinks = integration.officialDocs
-    .map((url, index) => `[Official documentation ${index + 1}](${url})`)
-    .join(' · ');
+  const officialLinks = EffectArray.join(
+    EffectArray.map(integration.officialDocs, (url, index) => `[Official documentation ${index + 1}](${url})`),
+    ' · ',
+  );
 
   return {
     id: `agent-${integration.id}`,
@@ -33,13 +35,13 @@ function agentDetailsArticle(integration: (typeof agentIntegrations)[number]): D
         type: 'paragraph',
         text:
           integration.devSkills.status === 'managed'
-            ? `Profile: ${integration.devSkills.profile}. Native skill scopes: ${integration.devSkills.scopes.join(', ')}. Platforms: ${integration.devSkills.platforms.join(', ')}. Layout: ${integration.devSkills.layout}. ${integration.devSkills.scopeReason ?? ''} See [Development workflows](/docs/development-workflows/).`
+            ? `Profile: ${integration.devSkills.profile}. Native skill scopes: ${EffectArray.join(integration.devSkills.scopes, ', ')}. Platforms: ${EffectArray.join(integration.devSkills.platforms, ', ')}. Layout: ${integration.devSkills.layout}. ${integration.devSkills.scopeReason ?? ''} See [Development workflows](/docs/development-workflows/).`
             : `Bundled development workflow installation is unsupported: ${integration.devSkills.reason}`,
       },
       {type: 'heading', text: 'Scope and platform'},
       {
         type: 'paragraph',
-        text: `Scopes: ${integration.scopes.length ? integration.scopes.join(', ') : 'No managed install scope.'} · Platforms: ${integration.platforms.join(', ')}.`,
+        text: `Scopes: ${integration.scopes.length ? EffectArray.join(integration.scopes, ', ') : 'No managed install scope.'} · Platforms: ${EffectArray.join(integration.platforms, ', ')}.`,
       },
       {type: 'heading', text: 'Setup and verification'},
       {
@@ -47,7 +49,7 @@ function agentDetailsArticle(integration: (typeof agentIntegrations)[number]): D
         items: [...integration.setup, `Last verified: ${integration.lastVerified}.`, integration.verification],
       },
       ...(integration.caveats.length
-        ? ([{type: 'warning' as const, text: integration.caveats.join(' ')}] as const)
+        ? ([{type: 'warning' as const, text: EffectArray.join(integration.caveats, ' ')}] as const)
         : []),
       {type: 'paragraph', text: officialLinks},
     ],
@@ -234,6 +236,6 @@ threadnote agents remove <surface> --apply`,
         },
       ],
     },
-    ...agentIntegrations.map(agentDetailsArticle),
+    ...EffectArray.map(agentIntegrations, agentDetailsArticle),
   ],
 };

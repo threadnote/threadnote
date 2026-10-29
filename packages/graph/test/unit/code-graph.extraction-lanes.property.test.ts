@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -48,10 +49,14 @@ describe('code graph extraction scheduling', () => {
 
         expect(first).toEqual(second);
         expect(first).toHaveLength(groups.length === 0 ? 0 : 1);
-        const planned = first.flatMap(lane => lane.groups);
-        expect(planned.map(group => group.id).sort()).toEqual(groups.map(group => group.id).sort());
-        expect(first.every(lane => lane.concurrency === capacity && lane.kind === 'cost-ordered')).toBe(true);
-        const scores = planned.map(group => model.estimate(group).score);
+        const planned = EffectArray.flatMap(first, lane => lane.groups);
+        expect(EffectArray.map(planned, group => group.id).sort()).toEqual(
+          EffectArray.map(groups, group => group.id).sort(),
+        );
+        expect(EffectArray.every(first, lane => lane.concurrency === capacity && lane.kind === 'cost-ordered')).toBe(
+          true,
+        );
+        const scores = EffectArray.map(planned, group => model.estimate(group).score);
         expect(scores).toEqual([...scores].sort((left, right) => right - left));
       }),
       {numRuns: 250},
@@ -68,11 +73,11 @@ describe('code graph extraction scheduling', () => {
         fc.integer({max: 16, min: 1}),
         (groups, capacity) => {
           const reversed = [...groups].reverse();
-          const planned = planCodeGraphExtractionLanes(groups, capacity).flatMap(lane =>
-            lane.groups.map(group => group.id),
+          const planned = EffectArray.flatMap(planCodeGraphExtractionLanes(groups, capacity), lane =>
+            EffectArray.map(lane.groups, group => group.id),
           );
-          const replanned = planCodeGraphExtractionLanes(reversed, capacity).flatMap(lane =>
-            lane.groups.map(group => group.id),
+          const replanned = EffectArray.flatMap(planCodeGraphExtractionLanes(reversed, capacity), lane =>
+            EffectArray.map(lane.groups, group => group.id),
           );
           expect(planned).toEqual(replanned);
         },
@@ -93,8 +98,8 @@ describe('code graph extraction scheduling', () => {
       for (const {file, ...observation} of ordered) model.observe(file, observation);
       return {
         estimates: [model.estimate(typescript), model.estimate(python)],
-        order: planCodeGraphExtractionLanes([typescript, python], 4, model).flatMap(lane =>
-          lane.groups.map(candidate => candidate.id),
+        order: EffectArray.flatMap(planCodeGraphExtractionLanes([typescript, python], 4, model), lane =>
+          EffectArray.map(lane.groups, candidate => candidate.id),
         ),
       };
     };
@@ -111,12 +116,14 @@ describe('code graph extraction scheduling', () => {
         while (remaining.length > 0) {
           const [window, rest] = takeCodeGraphExtractionWindow(remaining, maximumFiles);
           expect(window.length).toBeGreaterThan(0);
-          const windowFiles = window.reduce((total, group) => total + group.files.length, 0);
+          const windowFiles = EffectArray.reduce(window, 0, (total, group) => total + group.files.length);
           expect(windowFiles).toBeLessThanOrEqual(maximumFiles);
           selected.push(...window);
           remaining.splice(0, remaining.length, ...rest);
         }
-        expect(selected.flatMap(group => group.files)).toEqual(groups.flatMap(group => group.files));
+        expect(EffectArray.flatMap(selected, group => group.files)).toEqual(
+          EffectArray.flatMap(groups, group => group.files),
+        );
       }),
       {numRuns: 200},
     );
@@ -129,7 +136,7 @@ describe('code graph extraction scheduling', () => {
         const windowSizes: number[] = [];
         while (remaining.length > 0) {
           const [window, rest] = takeCodeGraphExtractionWindow(remaining, maximumFiles);
-          windowSizes.push(window.reduce((total, group) => total + group.files.length, 0));
+          windowSizes.push(EffectArray.reduce(window, 0, (total, group) => total + group.files.length));
           remaining.splice(0, remaining.length, ...rest);
         }
         if (windowSizes.length > 1) {
@@ -143,11 +150,11 @@ describe('code graph extraction scheduling', () => {
       group('typescript', `src/heavy-tail-${index}.ts`, 1),
     );
     const windowSizes: number[] = [];
-    let remaining = heavyTailGroups;
+    let remaining: readonly TestGroup[] = heavyTailGroups;
     while (remaining.length > 0) {
       const [window, rest] = takeCodeGraphExtractionWindow(remaining, codeGraphExtractionWindowSize(8));
-      windowSizes.push(window.reduce((total, candidate) => total + candidate.files.length, 0));
-      remaining = rest as TestGroup[];
+      windowSizes.push(EffectArray.reduce(window, 0, (total, candidate) => total + candidate.files.length));
+      remaining = rest;
     }
     expect(windowSizes).toEqual([90, 89, 89]);
   });

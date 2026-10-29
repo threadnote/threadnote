@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
@@ -20,13 +21,16 @@ import {
 } from '@threadnote/graph/sharing/contribution';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const sharingLayer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 
 const announcement = {
-  actionKey: 'a'.repeat(64),
+  actionKey: Effect2.pipe('a', EffectString.repeat(64)),
   attestationDigest: sha256Digest('1'),
-  batchId: 'b'.repeat(40),
+  batchId: Effect2.pipe('b', EffectString.repeat(40)),
   resultManifestDigest: sha256Digest('2'),
   semanticDigest: sha256Digest('3'),
 };
@@ -36,13 +40,13 @@ describe('graph share contribution queue persistence', () => {
     const now = GRAPH_SHARE_QUEUE_MAXIMUM_AGE_MILLISECONDS + 1_000;
     const announcements = Array.from({length: GRAPH_SHARE_QUEUE_MAXIMUM_ANNOUNCEMENTS + 10}, (_, index) => ({
       ...announcement,
-      actionKey: index.toString(16).padStart(64, '0'),
+      actionKey: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
     }));
     const queue = {
       announcements,
       mode: 'passive' as const,
       schemaVersion: 1 as const,
-      queuedAtMilliseconds: announcements.map((_, index) => (index < 5 ? 0 : now)),
+      queuedAtMilliseconds: EffectArray.map(announcements, (_, index) => (index < 5 ? 0 : now)),
     };
     const before = JSON.stringify(queue);
     const pruned = pruneGraphShareContributionQueue(queue, now);
@@ -61,9 +65,9 @@ describe('graph share contribution queue persistence', () => {
         timestamps => {
           const now = GRAPH_SHARE_QUEUE_MAXIMUM_AGE_MILLISECONDS + 100;
           const queue = {
-            announcements: timestamps.map((_, index) => ({
+            announcements: EffectArray.map(timestamps, (_, index) => ({
               ...announcement,
-              batchId: index.toString(16).padStart(40, '0'),
+              batchId: Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
             })),
             mode: 'passive' as const,
             schemaVersion: 1 as const,
@@ -71,13 +75,19 @@ describe('graph share contribution queue persistence', () => {
           };
           const before = JSON.stringify(queue);
           const pruned = pruneGraphShareContributionQueue(queue, now);
-          const expected = queue.announcements
-            .filter((_, index) => timestamps[index] >= now - GRAPH_SHARE_QUEUE_MAXIMUM_AGE_MILLISECONDS)
-            .slice(-GRAPH_SHARE_QUEUE_MAXIMUM_ANNOUNCEMENTS);
+          const expected = EffectArray.filter(
+            queue.announcements,
+            (_, index) => timestamps[index] >= now - GRAPH_SHARE_QUEUE_MAXIMUM_AGE_MILLISECONDS,
+          ).slice(-GRAPH_SHARE_QUEUE_MAXIMUM_ANNOUNCEMENTS);
           expect(pruned.announcements).toEqual(expected);
           expect(
-            pruned.queuedAtMilliseconds?.every(
-              timestamp => timestamp <= now && timestamp >= now - GRAPH_SHARE_QUEUE_MAXIMUM_AGE_MILLISECONDS,
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(pruned.queuedAtMilliseconds), __effectArrayReceiver =>
+                EffectArray.every(
+                  __effectArrayReceiver,
+                  timestamp => timestamp <= now && timestamp >= now - GRAPH_SHARE_QUEUE_MAXIMUM_AGE_MILLISECONDS,
+                ),
+              ),
             ),
           ).toBe(true);
           expect(new TextEncoder().encode(JSON.stringify(pruned)).byteLength).toBeLessThanOrEqual(
@@ -96,7 +106,7 @@ describe('graph share contribution queue persistence', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-queue-retention-'});
-        const repositoryId = 'c'.repeat(64);
+        const repositoryId = Effect2.pipe('c', EffectString.repeat(64));
         yield* writeGraphShareContributionQueue(home, repositoryId, {
           announcements: [announcement],
           mode: 'off',
@@ -114,21 +124,23 @@ describe('graph share contribution queue persistence', () => {
   it('acknowledgement preserves unsent order and is idempotent without mutating its inputs', () => {
     FC.assert(
       FC.property(FC.array(FC.boolean(), {maxLength: 32}), flags => {
-        const announcements = flags.map((_, index) => ({
+        const announcements = EffectArray.map(flags, (_, index) => ({
           ...announcement,
-          batchId: index.toString(16).padStart(40, '0'),
+          batchId: Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
         }));
         const queue = {
           announcements,
           mode: 'passive' as const,
           schemaVersion: 1 as const,
-          queuedAtMilliseconds: flags.map((_, index) => index * 1_000),
+          queuedAtMilliseconds: EffectArray.map(flags, (_, index) => index * 1_000),
         };
-        const sent = announcements.filter((_, index) => flags[index]);
+        const sent = EffectArray.filter(announcements, (_, index) => index in announcements && flags[index]);
         const before = JSON.stringify({queue, sent});
         const remaining = removeAcknowledgedGraphShareContributions(queue, sent);
-        expect(remaining.announcements).toEqual(announcements.filter((_, index) => !flags[index]));
-        expect(remaining.queuedAtMilliseconds).toEqual(queue.queuedAtMilliseconds.filter((_, index) => !flags[index]));
+        expect(remaining.announcements).toEqual(EffectArray.filter(announcements, (_, index) => !flags[index]));
+        expect(remaining.queuedAtMilliseconds).toEqual(
+          EffectArray.filter(queue.queuedAtMilliseconds, (_, index) => !flags[index]),
+        );
         expect(removeAcknowledgedGraphShareContributions(remaining, sent)).toEqual(remaining);
         expect(JSON.stringify({queue, sent})).toBe(before);
       }),
@@ -141,11 +153,11 @@ describe('graph share contribution queue persistence', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-queue-upgrade-'});
-        const repositoryId = 'c'.repeat(64);
+        const repositoryId = Effect2.pipe('c', EffectString.repeat(64));
         const legacy = {
           announcements: Array.from({length: 12_000}, (_, index) => ({
             ...announcement,
-            actionKey: index.toString(16).padStart(64, '0'),
+            actionKey: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
           })),
           mode: 'passive' as const,
           schemaVersion: 1 as const,
@@ -154,7 +166,7 @@ describe('graph share contribution queue persistence', () => {
         const target = `${home}/graph-sharing/contribution/${repositoryId}.json`;
         const oldSize = Number((yield* fs.stat(target)).size);
         expect(oldSize).toBeGreaterThan(4 * 1_024 * 1_024);
-        const fresh = {...announcement, actionKey: 'f'.repeat(64)};
+        const fresh = {...announcement, actionKey: Effect2.pipe('f', EffectString.repeat(64))};
         expect(
           (yield* enqueuePersistedGraphShareContribution(home, repositoryId, 'join', fresh, 'passive')).queued,
         ).toBe(true);
@@ -170,10 +182,10 @@ describe('graph share contribution queue persistence', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-queue-ack-'});
-        const repositoryId = 'c'.repeat(64);
+        const repositoryId = Effect2.pipe('c', EffectString.repeat(64));
         yield* enqueuePersistedGraphShareContribution(home, repositoryId, 'join', announcement, 'passive');
         const snapshot = yield* readGraphShareContributionQueue(home, repositoryId, 'passive');
-        const added = {...announcement, actionKey: 'd'.repeat(64)};
+        const added = {...announcement, actionKey: Effect2.pipe('d', EffectString.repeat(64))};
         yield* enqueuePersistedGraphShareContribution(home, repositoryId, 'join', added, 'passive');
         yield* acknowledgeGraphShareContributions(home, repositoryId, snapshot.announcements, 'passive');
         yield* acknowledgeGraphShareContributions(home, repositoryId, snapshot.announcements, 'passive');
@@ -187,10 +199,10 @@ describe('graph share contribution queue persistence', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-queue-concurrent-'});
-        const repositoryId = 'c'.repeat(64);
+        const repositoryId = Effect2.pipe('c', EffectString.repeat(64));
         const additions = Array.from({length: 12}, (_, index) => ({
           ...announcement,
-          actionKey: index.toString(16).padStart(64, '0'),
+          actionKey: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
         }));
         yield* Effect.forEach(
           additions,
@@ -198,8 +210,8 @@ describe('graph share contribution queue persistence', () => {
           {concurrency: 12},
         );
         const persisted = yield* readGraphShareContributionQueue(home, repositoryId, 'passive');
-        expect(new Set(persisted.announcements.map(item => item.actionKey))).toEqual(
-          new Set(additions.map(item => item.actionKey)),
+        expect(new Set(EffectArray.map(persisted.announcements, item => item.actionKey))).toEqual(
+          new Set(EffectArray.map(additions, item => item.actionKey)),
         );
       }).pipe(provideTestLayer(sharingLayer)),
     ),
@@ -209,7 +221,7 @@ describe('graph share contribution queue persistence', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-share-queue-'});
-      const repositoryId = 'c'.repeat(64);
+      const repositoryId = Effect2.pipe('c', EffectString.repeat(64));
       const first = yield* enqueuePersistedGraphShareContribution(home, repositoryId, 'join', announcement, 'passive');
       expect(first.queued).toBe(true);
       if ((yield* SystemInfo).platform !== 'win32') {
@@ -227,7 +239,7 @@ describe('graph share contribution queue persistence', () => {
       expect(loaded.announcements).toHaveLength(1);
       const blocked = yield* enqueuePersistedGraphShareContribution(
         home,
-        `${repositoryId.slice(0, -1)}d`,
+        `${Effect2.pipe(repositoryId, EffectString.slice(0, -1))}d`,
         'read-only',
         announcement,
         'passive',

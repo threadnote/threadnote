@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
 import {Context, Effect, FileSystem, Layer, Path} from 'effect';
@@ -14,11 +15,14 @@ import {
   readCodeGraphEmbeddingDemandPage,
   validateCodeGraphEmbeddingDemandClaim,
 } from '../../src/vector/demand.js';
-const worktreeId = 'b'.repeat(64);
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const worktreeId = Effect2.pipe('b', EffectString.repeat(64));
 const scopeId = CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY;
-const model = {id: 'test', sha256: 'a'.repeat(64), dimensions: 2, templateVersion: 1};
+const model = {id: 'test', sha256: Effect2.pipe('a', EffectString.repeat(64)), dimensions: 2, templateVersion: 1};
 const owner = (token: string) => ({token, processId: 123, processStartIdentity: 'process'});
-const snapshot = (n: number) => `cgsn_${n.toString(16).padStart(40, '0')}`;
+const snapshot = (n: number) => `cgsn_${Effect2.pipe(n.toString(16), EffectString.padStart(40, '0'))}`;
 const epoch = (n: number) => new Date(n).toISOString();
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -30,12 +34,20 @@ const fixture = Effect.gen(function* () {
   yield* initializeSchema(sql);
   yield* sql.unsafe(
     "INSERT INTO repositories (id, display_name, object_format, created_at, last_used_at) VALUES (?, 'test', 'sha1', ?, ?)",
-    ['a'.repeat(64), epoch(0), epoch(0)],
+    [Effect2.pipe('a', EffectString.repeat(64)), epoch(0), epoch(0)],
   );
   for (const n of [1, 2]) {
     yield* sql.unsafe(
       "INSERT INTO snapshots (id, repository_id, worktree_id, commit_id, graph_content_id, extractor_set, dirty, state, file_count, symbol_count, edge_count, started_at, completed_at) VALUES (?, ?, ?, ?, ?, 'test', 0, 'ready', 0, 0, 0, ?, ?)",
-      [snapshot(n), 'a'.repeat(64), worktreeId, 'c'.repeat(40), snapshot(n), epoch(0), epoch(0)],
+      [
+        snapshot(n),
+        Effect2.pipe('a', EffectString.repeat(64)),
+        worktreeId,
+        Effect2.pipe('c', EffectString.repeat(40)),
+        snapshot(n),
+        epoch(0),
+        epoch(0),
+      ],
     );
     yield* sql.unsafe('INSERT INTO snapshot_extractor_generations VALUES (?, ?)', [
       snapshot(n),
@@ -178,7 +190,7 @@ effectIt.layer(citationPlatformLayer)(it => {
       expect(
         yield* claimCodeGraphEmbeddingDemand(sql, {worktreeId, owner: owner('later'), model, now: now + 1_000_000}),
       ).toBeUndefined();
-      const changed = {...model, sha256: 'c'.repeat(64)};
+      const changed = {...model, sha256: Effect2.pipe('c', EffectString.repeat(64))};
       expect(
         yield* claimCodeGraphEmbeddingDemand(sql, {
           worktreeId,
@@ -209,7 +221,7 @@ effectIt.layer(citationPlatformLayer)(it => {
       expect(rebound).toMatchObject({state: 'queued', snapshotId: snapshot(1), activatedAt: epoch(0)});
       expect(rebound?.active).toBeUndefined();
       expect(yield* acknowledgeCodeGraphEmbeddingDemand(sql, oldClaim!, {kind: 'finish', now: 2})).toBeUndefined();
-      const modelB = {...model, id: 'test-b', sha256: 'b'.repeat(64)};
+      const modelB = {...model, id: 'test-b', sha256: Effect2.pipe('b', EffectString.repeat(64))};
       const newClaim = yield* claimCodeGraphEmbeddingDemand(sql, {
         worktreeId,
         owner: owner('model-b'),
@@ -223,7 +235,7 @@ effectIt.layer(citationPlatformLayer)(it => {
     Effect.gen(function* () {
       const {sql} = yield* fixture;
       for (let n = 0; n < 130; n++) {
-        const id = n.toString(16).padStart(64, '0');
+        const id = Effect2.pipe(n.toString(16), EffectString.padStart(64, '0'));
         yield* sql.unsafe(
           'INSERT INTO active_snapshots (worktree_id, scope_id, snapshot_id, activated_at) VALUES (?, ?, ?, ?)',
           [id, scopeId, snapshot(1), epoch(0)],
@@ -239,7 +251,7 @@ effectIt.layer(citationPlatformLayer)(it => {
       const second = yield* readCodeGraphEmbeddingDemandPage(sql, {after: first.at(-1), limit: 1000});
       const final = yield* readCodeGraphEmbeddingDemandPage(sql, {after: second.at(-1), limit: 1000});
       expect([first.length, second.length, final.length]).toEqual([64, 64, 2]);
-      expect(new Set([...first, ...second, ...final].map(lane => lane.worktreeId)).size).toBe(130);
+      expect(new Set(EffectArray.map([...first, ...second, ...final], lane => lane.worktreeId)).size).toBe(130);
     }),
   );
   it.effect('does not synthesize demand on a ready graph read and fails closed on a future schema', () =>

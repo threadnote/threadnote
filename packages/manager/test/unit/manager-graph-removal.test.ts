@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
@@ -13,6 +14,9 @@ import {
 import {managerGraphViewRemovalApprovalDigest} from '@threadnote/manager/graph/removal_digest';
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
 import type {GraphCatalog, GraphRepository, GraphRepositoryGroup} from '@threadnote/manager/graph';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 describe('Manager graph view removal', () => {
   it('offers destructive approval only for the exact ready preview', () => {
@@ -45,17 +49,27 @@ describe('Manager graph view removal', () => {
     expect(graphViewRemovalTargetIsAbsent(response('not-found'))).toBe(true);
     expect(graphViewRemovalTargetIsAbsent(response('stale-target'))).toBe(false);
     expect(
-      withoutRemovedGraphCatalogView(catalog, target)?.repositories[0]?.views.map(view => view.worktreeId),
+      EffectOption.getOrUndefined(
+        EffectOption.map(
+          EffectOption.fromNullishOr(withoutRemovedGraphCatalogView(catalog, target)?.repositories[0]?.views),
+          __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, view => view.worktreeId),
+        ),
+      ),
     ).toEqual(['worktree-a']);
     expect(
-      withoutRemovedGraphDiagnosticsView(diagnostics, target)?.databases[0]?.views.map(view => view.viewWorktreeId),
+      EffectOption.getOrUndefined(
+        EffectOption.map(
+          EffectOption.fromNullishOr(withoutRemovedGraphDiagnosticsView(diagnostics, target)?.databases[0]?.views),
+          __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, view => view.viewWorktreeId),
+        ),
+      ),
     ).toEqual(['worktree-a']);
     expect(withoutRemovedGraphDiagnosticsView(diagnostics, target)?.summary.viewCount).toBe(1);
   });
 
   it('removes only the selected scope when full and scoped views share a worktree', () => {
     const worktreeId = 'worktree-a';
-    const scopeId = `code-graph-scope:${'a'.repeat(64)}`;
+    const scopeId = `code-graph-scope:${Effect2.pipe('a', EffectString.repeat(64))}`;
     const full = viewFixture(worktreeId);
     const scoped = {...viewFixture(worktreeId), id: 'view-worktree-a-scope-a', scopeId};
     const catalog: GraphCatalog = {
@@ -74,7 +88,7 @@ describe('Manager graph view removal', () => {
     const baseDiagnostics = diagnosticsFixture([worktreeId]);
     const diagnostics: CodeGraphLocalDiagnosticsReport = {
       ...baseDiagnostics,
-      databases: baseDiagnostics.databases.map(database => ({
+      databases: EffectArray.map(baseDiagnostics.databases, database => ({
         ...database,
         views: [...database.views, {...database.views[0], viewScopeId: scopeId}],
       })),
@@ -96,14 +110,14 @@ describe('Manager graph view removal', () => {
   effectIt.effect('binds the selected scope into the destructive approval digest', () =>
     Effect.gen(function* () {
       const target = {
-        checkoutId: 'a'.repeat(64),
-        snapshotId: `cgsn_${'b'.repeat(40)}-direct`,
-        worktreeId: 'c'.repeat(64),
+        checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+        snapshotId: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}-direct`,
+        worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
       };
       const full = yield* managerGraphViewRemovalApprovalDigest(target);
       const scoped = yield* managerGraphViewRemovalApprovalDigest({
         ...target,
-        scopeId: `code-graph-scope:${'d'.repeat(64)}`,
+        scopeId: `code-graph-scope:${Effect2.pipe('d', EffectString.repeat(64))}`,
       });
 
       expect(scoped).toMatch(/^sha256:[0-9a-f]{64}$/u);
@@ -129,14 +143,14 @@ describe('Manager graph view removal', () => {
 
 function response(state: ManagerGraphViewRemovalState): ManagerGraphViewRemovalResponse {
   return {
-    approvalDigest: `sha256:${'a'.repeat(64)}`,
+    approvalDigest: `sha256:${Effect2.pipe('a', EffectString.repeat(64))}`,
     output: 'Would remove exact view and preserve shared snapshot data.',
     result: {state},
   };
 }
 
 function catalogFixture(worktreeIds: readonly string[]): GraphCatalog {
-  const views = worktreeIds.map(viewFixture);
+  const views = EffectArray.map(worktreeIds, viewFixture);
   return {
     builds: [],
     diagnostics: [],
@@ -168,7 +182,7 @@ function diagnosticsFixture(worktreeIds: readonly string[]): CodeGraphLocalDiagn
         issues: [],
         lifecycle: [],
         storage: {checkoutId: 'checkout', state: 'missing'},
-        views: worktreeIds.map(worktreeId => ({
+        views: EffectArray.map(worktreeIds, worktreeId => ({
           localAssociation: {available: false, state: 'missing'},
           managementAvailable: true,
           metrics: 'deferred',

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {codeGraphSnapshotAdmissionCurrentForIdentity} from '../admission_freshness.js';
 import type {CodeGraphLayout} from '../layout.js';
@@ -13,11 +15,17 @@ export function codeGraphSnapshotMatchesCurrentLanguagePacks(
   languagePacks: CodeGraphLanguagePackRegistryShape,
 ): boolean {
   if (provenance === undefined) return false;
-  const previousIds = new Set(provenance.map(pack => pack.id));
+  const previousIds = new Set(EffectArray.map(provenance, pack => pack.id));
   if (previousIds.size !== provenance.length) return false;
-  const currentProvenance = languagePacks.packs
-    .filter(pack => previousIds.has(pack.id))
-    .map(codeGraphLanguagePackProvenance);
+  const currentProvenance = EffectArray.map(
+    EffectArrayPipe(languagePacks.packs, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (pack, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && previousIds.has(pack.id),
+      ),
+    ),
+    codeGraphLanguagePackProvenance,
+  );
   if (currentProvenance.length !== previousIds.size) return false;
   return (
     extractorSetIdentityFromPackProvenance(provenance) === snapshot.extractorSet &&

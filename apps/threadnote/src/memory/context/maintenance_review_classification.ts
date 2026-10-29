@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import type {CandidateReview} from '@threadnote/memory/candidate';
 import type {PreparedMemoryV1} from './maintenance_preparation_state.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 /** A generated journal is replaceable only while no human or writer has taken ownership. */
 export function untouchedAutomaticReview(review: CandidateReview): boolean {
@@ -13,7 +16,7 @@ export function untouchedAutomaticReview(review: CandidateReview): boolean {
     review.candidates[0].state === 'pending' &&
     !review.maintenanceApproval &&
     !review.maintenanceClosedConflict &&
-    review.auditEvents.every(event => event.action === 'create_review')
+    EffectArray.every(review.auditEvents, event => event.action === 'create_review')
   );
 }
 
@@ -35,13 +38,14 @@ export function automaticReviewCanConverge(
   if (
     basis.targetUri !== prepared.assessment.target.uri ||
     basis.observationRevision === prepared.relevantRevision ||
-    prepared.omissions.some(reason =>
+    EffectArray.some(prepared.omissions, reason =>
       /unavailable|unreadable|unknown|ambiguous|time-boundary|not-ready|changed|policy/.test(reason),
     )
   )
     return false;
   // A transient empty code vector is not proof that the previously admitted context became obsolete.
   return (
-    !basis.reads.some(read => read.uri.startsWith('code:')) || prepared.reads.some(read => read.uri.startsWith('code:'))
+    !EffectArray.some(basis.reads, read => Effect.pipe(read.uri, EffectString.startsWith('code:'))) ||
+    EffectArray.some(prepared.reads, read => Effect.pipe(read.uri, EffectString.startsWith('code:')))
   );
 }

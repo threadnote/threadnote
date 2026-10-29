@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
@@ -23,11 +24,19 @@ import {createActivationReceiptV1} from '@threadnote/threadnote/activation/recei
 import {secondSurfaceChallengeIdV1} from '@threadnote/threadnote/activation/second/surface_store';
 import {secondSurfaceProofContextHashV1} from '@threadnote/threadnote/activation/second/surface';
 import {createProcedureVerificationReceipt, parseProcedureManifest} from '@threadnote/context/procedure/contract';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const commit = 'a'.repeat(40);
+const commit = Effect2.pipe('a', EffectString.repeat(40));
 const identity = {
   attempt: 0,
-  candidate: {commit, executableSha256: 'b'.repeat(64), id: 'threadnote-5.0.0', version: `5.0.0-local.g${commit}`},
+  candidate: {
+    commit,
+    executableSha256: Effect2.pipe('b', EffectString.repeat(64)),
+    id: 'threadnote-5.0.0',
+    version: `5.0.0-local.g${commit}`,
+  },
   scenario: 'solo',
   trial: 0,
   version: 1,
@@ -43,55 +52,55 @@ const layers = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
 const productCaptureSinkModule = new URL('../../src/evaluation/threadnote-5-product-capture-sink.ts', import.meta.url)
   .href;
 const activationPlan = createActivationPlanV1({
-  catalogSnapshotHash: 'a'.repeat(64),
+  catalogSnapshotHash: Effect2.pipe('a', EffectString.repeat(64)),
   primarySurfaceId: 'codex',
   publicationMode: 'proposal',
-  repositoryIdentityHash: 'b'.repeat(64),
+  repositoryIdentityHash: Effect2.pipe('b', EffectString.repeat(64)),
   secondarySurfaceId: 'claude',
-  selectedSourceSetHash: 'c'.repeat(64),
-  taskHash: 'd'.repeat(64),
+  selectedSourceSetHash: Effect2.pipe('c', EffectString.repeat(64)),
+  taskHash: Effect2.pipe('d', EffectString.repeat(64)),
   teamId: 'default',
-  teamShareStateHash: 'e'.repeat(64),
+  teamShareStateHash: Effect2.pipe('e', EffectString.repeat(64)),
   threadnoteVersion: identity.candidate.version,
 });
 const proofContext = {
-  activationId: '1'.repeat(64),
-  activationReceiptRevision: '2'.repeat(64),
+  activationId: Effect2.pipe('1', EffectString.repeat(64)),
+  activationReceiptRevision: Effect2.pipe('2', EffectString.repeat(64)),
   catalogRevision: 'catalog-v1',
-  catalogSnapshotHash: '3'.repeat(64),
+  catalogSnapshotHash: Effect2.pipe('3', EffectString.repeat(64)),
   decision: {
     canonicalUri: 'threadnote://user/tester/memories/shared/default/durable/projects/threadnote/decision.md',
-    contentHash: '4'.repeat(64),
+    contentHash: Effect2.pipe('4', EffectString.repeat(64)),
     memoryId: 'tn_capture_decision',
-    publicationReceiptHash: '5'.repeat(64),
+    publicationReceiptHash: Effect2.pipe('5', EffectString.repeat(64)),
   },
   primary: {
     access: 'local-stdio',
-    capabilitiesFingerprint: '6'.repeat(64),
+    capabilitiesFingerprint: Effect2.pipe('6', EffectString.repeat(64)),
     configurationState: 'current',
     mcpCapability: 'managed',
     surfaceId: 'codex',
   },
-  queryFingerprint: '7'.repeat(64),
-  repositoryIdentityHash: '8'.repeat(64),
+  queryFingerprint: Effect2.pipe('7', EffectString.repeat(64)),
+  repositoryIdentityHash: Effect2.pipe('8', EffectString.repeat(64)),
   repositoryState: 'clean',
   secondary: {
     access: 'local-stdio',
-    capabilitiesFingerprint: '9'.repeat(64),
+    capabilitiesFingerprint: Effect2.pipe('9', EffectString.repeat(64)),
     configurationState: 'current',
     mcpCapability: 'managed',
     surfaceId: 'claude',
   },
   startedAt: '2026-09-19T00:00:00.000Z',
   teamId: 'default',
-  teamShareStateHash: 'a'.repeat(64),
+  teamShareStateHash: Effect2.pipe('a', EffectString.repeat(64)),
 } as const;
 const challenge = {
   challengeId: secondSurfaceChallengeIdV1(proofContext),
   context: proofContext,
   contextHash: secondSurfaceProofContextHashV1(proofContext),
   issuedAt: proofContext.startedAt,
-  nonceHash: 'b'.repeat(64),
+  nonceHash: Effect2.pipe('b', EffectString.repeat(64)),
   type: 'threadnote-second-surface-challenge',
   version: 1,
 } as const;
@@ -107,20 +116,20 @@ const contextCheckReport = {
   version: 2,
 } as const;
 const guidanceReceipt = {
-  expectedManagedBlockHash: 'c'.repeat(64),
+  expectedManagedBlockHash: Effect2.pipe('c', EffectString.repeat(64)),
   previousManagedBlockHash: null,
   project: 'threadnote',
   removeTargetWhenEmpty: true,
   repositoryId: 'repository',
-  sources: [{contentHash: 'd'.repeat(64), uri: 'threadnote://memory/tn_capture_guidance'}],
+  sources: [{contentHash: Effect2.pipe('d', EffectString.repeat(64)), uri: 'threadnote://memory/tn_capture_guidance'}],
   state: 'current',
-  targetIdentity: 'e'.repeat(64),
+  targetIdentity: Effect2.pipe('e', EffectString.repeat(64)),
   targetPath: 'AGENTS.md',
   version: 2,
   wrapperOwned: false,
 } as const;
 const procedureManifest = parseProcedureManifest({
-  artifact: {id: 'team.example/capture', semanticVersion: '1.0.0', sha256: 'f'.repeat(64)},
+  artifact: {id: 'team.example/capture', semanticVersion: '1.0.0', sha256: Effect2.pipe('f', EffectString.repeat(64))},
   compatible: {capabilities: ['filesystem.read'], surfaceIds: ['terminal']},
   dependencies: [],
   owner: 'owner-opaque',
@@ -199,15 +208,17 @@ describe('private product capture contract', () => {
     expect(capture.digest).toMatch(/^[0-9a-f]{64}$/u);
     expect(productCaptureFilename(capture)).toBe('context-brief-000.json');
     expect(() => parseThreadnote5ProductCaptureV1({...capture, networkCalls: 0})).toThrow();
-    expect(() => parseThreadnote5ProductCaptureV1({...capture, digest: '0'.repeat(64)})).toThrow();
+    expect(() =>
+      parseThreadnote5ProductCaptureV1({...capture, digest: Effect2.pipe('0', EffectString.repeat(64))}),
+    ).toThrow();
   });
 
   it('canonicalizes object key insertion order and preserves meaningful array order', () => {
     fc.assert(
-      fc.property(fc.shuffledSubarray(Object.entries(request), {minLength: 4, maxLength: 4}), entries => {
-        expect(createThreadnote5ProductCaptureV1(identity, {...event, payload: Object.fromEntries(entries)})).toEqual(
-          createThreadnote5ProductCaptureV1(identity, event),
-        );
+      fc.property(fc.shuffledSubarray(EffectRecord.toEntries(request), {minLength: 4, maxLength: 4}), entries => {
+        expect(
+          createThreadnote5ProductCaptureV1(identity, {...event, payload: EffectRecord.fromEntries(entries)}),
+        ).toEqual(createThreadnote5ProductCaptureV1(identity, event));
       }),
       {numRuns: 30},
     );
@@ -273,31 +284,37 @@ describe('private product capture contract', () => {
 
   it('enforces exact field, container, depth and UTF-8 byte bounds', () => {
     const limit = PRODUCT_CAPTURE_LIMITS;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     expect(() => productCaptureCanonicalJson('a'.repeat(limit.stringBytes))).not.toThrow();
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     expect(() => productCaptureCanonicalJson('a'.repeat(limit.stringBytes + 1))).toThrow();
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     expect(() => productCaptureCanonicalJson('é'.repeat(limit.stringBytes / 2 + 1))).toThrow();
     expect(() => productCaptureCanonicalJson(Array.from({length: limit.arrayItems}, () => null))).not.toThrow();
     expect(() => productCaptureCanonicalJson(Array.from({length: limit.arrayItems + 1}, () => null))).toThrow();
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     expect(() => productCaptureCanonicalJson({['x'.repeat(limit.keyBytes)]: null})).not.toThrow();
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     expect(() => productCaptureCanonicalJson({['x'.repeat(limit.keyBytes + 1)]: null})).toThrow();
     const nested = (depth: number): unknown => (depth === 0 ? null : [nested(depth - 1)]);
     expect(() => productCaptureCanonicalJson(nested(limit.depth))).not.toThrow();
     expect(() => productCaptureCanonicalJson(nested(limit.depth + 1))).toThrow();
     expect(() =>
       productCaptureCanonicalJson(
-        Object.fromEntries(Array.from({length: limit.objectFields}, (_, index) => [`f${index}`, null])),
+        EffectRecord.fromEntries(Array.from({length: limit.objectFields}, (_, index) => [`f${index}`, null])),
       ),
     ).not.toThrow();
     expect(() =>
       productCaptureCanonicalJson(
-        Object.fromEntries(Array.from({length: limit.objectFields + 1}, (_, index) => [`f${index}`, null])),
+        EffectRecord.fromEntries(Array.from({length: limit.objectFields + 1}, (_, index) => [`f${index}`, null])),
       ),
     ).toThrow();
-    const exactEntries = Object.fromEntries(
+    const exactEntries = EffectRecord.fromEntries(
       Array.from({length: 32}, (_, index) => [`f${index}`, Array.from({length: 255}, () => null)]),
     );
     expect(() => productCaptureCanonicalJson(exactEntries)).not.toThrow();
     expect(() => productCaptureCanonicalJson({...exactEntries, f0: Array.from({length: 256}, () => null)})).toThrow();
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     const exactBytes = Array.from({length: 16}, (_, index) => 'a'.repeat(limit.stringBytes - (index === 0 ? 49 : 0)));
     expect(Buffer.byteLength(productCaptureCanonicalJson(exactBytes))).toBe(limit.bytes);
     exactBytes[0] += 'a';
@@ -314,6 +331,7 @@ describe('private product capture contract', () => {
   it('accepts exact scalar/container bounds and rejects every generated excess', () => {
     fc.assert(
       fc.property(fc.integer({min: -4, max: 4}), offset => {
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const scalar = () => productCaptureCanonicalJson('x'.repeat(PRODUCT_CAPTURE_LIMITS.stringBytes + offset));
         const array = () =>
           productCaptureCanonicalJson(Array.from({length: PRODUCT_CAPTURE_LIMITS.arrayItems + offset}, () => null));
@@ -381,7 +399,7 @@ describe('private product capture sink', () => {
   fcEffectProp(
     effectIt,
     'rejects malformed explicit configuration without evaluating source data',
-    [fc.constantFrom('', '{}', 'null', 'false', '{', 'x'.repeat(8193))],
+    [fc.constantFrom('', '{}', 'null', 'false', '{', Effect2.pipe('x', EffectString.repeat(8193)))],
     ([configuration]) =>
       captureThreadnote5ProductEventV1(configuration, () => {
         throw new Error('must not evaluate');
@@ -406,17 +424,22 @@ describe('private product capture sink', () => {
         yield* fs.chmod(root, 0o700);
         const configuration = JSON.stringify({...identity, root});
         const results = yield* Effect.forEach(
-          sequences.flatMap(sequence => [sequence, sequence]),
+          EffectArray.flatMap(sequences, sequence => [sequence, sequence]),
           sequence => captureThreadnote5ProductEventV1(configuration, () => ({...event, sequence})).pipe(Effect.result),
           {concurrency: 'unbounded'},
         );
-        const successes = results.filter(result => result._tag === 'Success');
+        const successes = EffectArray.filter(results, result => result._tag === 'Success');
         expect(successes).toHaveLength(sequences.length);
         const directory = path.dirname(successes[0].success!);
-        expect((yield* fs.readDirectory(directory)).filter(name => name.endsWith('.json')).sort()).toEqual(
-          sequences
-            .map(sequence => productCaptureFilename(createThreadnote5ProductCaptureV1(identity, {...event, sequence})))
-            .sort(),
+        expect(
+          EffectArray.filter(
+            yield* fs.readDirectory(directory),
+            __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+          ).sort(),
+        ).toEqual(
+          EffectArray.map(sequences, sequence =>
+            productCaptureFilename(createThreadnote5ProductCaptureV1(identity, {...event, sequence})),
+          ).sort(),
         );
         for (const sequence of sequences) {
           const capture = createThreadnote5ProductCaptureV1(identity, {...event, sequence});
@@ -448,9 +471,12 @@ describe('private product capture sink', () => {
       expect(yield* fs.readFileString(published!)).toBe(content);
       const second = yield* captureThreadnote5ProductEventV1(configuration, () => ({...event, sequence: 1}));
       expect(second).not.toBe(published);
-      expect((yield* fs.readDirectory(path.dirname(published!))).filter(name => name.endsWith('.json')).sort()).toEqual(
-        ['context-brief-000.json', 'context-brief-001.json'],
-      );
+      expect(
+        EffectArray.filter(
+          yield* fs.readDirectory(path.dirname(published!)),
+          __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+        ).sort(),
+      ).toEqual(['context-brief-000.json', 'context-brief-001.json']);
       const sentinel = path.join(root, 'sentinel');
       yield* fs.writeFileString(sentinel, 'unchanged');
       const occupied = path.join(path.dirname(published!), 'context-brief-002.json');
@@ -612,12 +638,24 @@ describe('private product capture sink', () => {
 
           if (phase === 'before-link') {
             for (let attempt = 0; attempt < 20; attempt += 1) {
-              expect((yield* fs.readDirectory(directory)).filter(name => name.endsWith('.json'))).toEqual([]);
+              expect(
+                EffectArray.filter(
+                  yield* fs.readDirectory(directory),
+                  __effectArrayValue =>
+                    !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+                ),
+              ).toEqual([]);
               yield* Effect.promise(() => Bun.sleep(1));
             }
           } else {
             for (let attempt = 0; attempt < 20; attempt += 1) {
-              expect((yield* fs.readDirectory(directory)).filter(name => name.endsWith('.json'))).toEqual([outputName]);
+              expect(
+                EffectArray.filter(
+                  yield* fs.readDirectory(directory),
+                  __effectArrayValue =>
+                    !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+                ),
+              ).toEqual([outputName]);
               expect(yield* fs.readFileString(output)).toBe(expected);
               expect((yield* fs.stat(output)).mode & 0o777).toBe(0o600);
               yield* Effect.promise(() => Bun.sleep(1));

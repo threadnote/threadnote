@@ -1,15 +1,16 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {ManagerLiveChangeHints} from '../../manager/live_sources.js';
 import {prepareAutomaticMaintenance} from './maintenance_preparation.js';
 import {publicStatus} from './maintenance_projection.js';
 import {reviewedSemanticMaintenanceCases, saveReviewedSemanticMaintenanceCases} from './semantic_review_state.js';
 import type {
-  ContextMaintenanceCaseV2,
   ContextMaintenanceReceiptV2,
   ContextMaintenanceReadOptions,
   MaintenanceState,
   UndoJournal,
 } from './maintenance_contracts.js';
+import {isMaintenanceState, isUndoJournal} from './maintenance_json.js';
 import {MaintenancePauseFenceBusy} from './maintenance_contracts.js';
 export type {
   ContextMaintenanceCaseV2,
@@ -19,15 +20,14 @@ export type {
   MaintenanceState,
 } from './maintenance_contracts.js';
 import {
+  migrateMaintenanceCases,
   selectFairMaintenanceWork,
   selectMaintenanceCitationCaseTask,
   nextMaintenanceDeadline,
   maintenanceContentHash as contentHash,
   maintenanceCheckpointCurrent,
   duplicateArchiveSafe,
-  artifactOnlySharedRelationProposal,
   reconcileRepositoryRecoveryCases,
-  mergeMaintenanceCaseLineage,
   upsertCase,
   resolveRelationTarget,
   resolveMaintenanceRelationPolicy,
@@ -69,11 +69,7 @@ import {
 import {hasTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
 import type {TopicMaintenanceReviewPayload} from '@threadnote/memory/topic-maintenance-draft';
 import {memoryIdentityLockKey, memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
-import {
-  contextHealthCaseIdV2,
-  contextHealthCitationCaseSlotV2,
-  migrateContextHealthCitationCaseSlotV2,
-} from '@threadnote/context/health_maintenance';
+import {contextHealthCaseIdV2, contextHealthCitationCaseSlotV2} from '@threadnote/context/health_maintenance';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
 import {readMaintenanceMemoryRecords} from '../maintenance/records.js';
@@ -111,13 +107,12 @@ import {
   previewAutomaticContextHealthArchiveReceipt,
 } from './health_repair_commands.js';
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
-import {buildContextMaintenancePacket} from './maintenance_packet.js';
+import {makeContextMaintenancePacketReader} from './maintenance_packet.js';
 import {
   advanceScheduledTopicMaintenance,
   enrolledTopicCandidate,
   reconcileAcceptedTopicMaintenanceState,
   pruneAbsentTopicCheckpoints,
-  readTopicMaintenanceCasePacket,
   selectRetainedMaintenanceCases,
   topicMaintenanceCaseId,
   validTopicMaintenanceCheckpoints,
@@ -140,10 +135,17 @@ import {
   maintenanceWorkerCheckpointReusable,
   invalidateMaintenanceWorkerBatch,
 } from './maintenance_batch.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 const MAX_RECEIPTS = 100;
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
 const LOCK = {retryIntervalMilliseconds: 25, staleAfterMilliseconds: 60_000, waitTimeoutMilliseconds: 50};
-export class ContextMaintenanceError extends Schema.TaggedError<ContextMaintenanceError>()('ContextMaintenanceError', {
+export class ContextMaintenanceError extends Schema.TaggedError<
+  ContextMaintenanceError,
+  {readonly brand: unique symbol}
+>()('ContextMaintenanceError', {
   message: Schema.String,
 }) {}
 
@@ -248,7 +250,9 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
     Effect.gen(function* () {
       let state = yield* readState(config);
       const selectedCase =
-        options.caseId === undefined ? undefined : state.cases.find(item => item.caseId === options.caseId);
+        options.caseId === undefined
+          ? undefined
+          : EffectOption.getOrUndefined(EffectArray.findFirst(state.cases, item => item.caseId === options.caseId));
       if (options.caseId !== undefined) {
         if (selectedCase === undefined || (options.project !== undefined && selectedCase.project !== options.project))
           return yield* fail('The exact maintenance case is unavailable in this project.');
@@ -286,22 +290,24 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       }
       const inventory = snapshot.success;
       const corpus = yield* readMaintenanceInventorySubjects(config, inventory.records, inventory.hashes);
-      if (!corpus.every((record): record is MemoryRecord => record !== undefined))
+      if (!EffectArray.every(corpus, (record): record is MemoryRecord => record !== undefined))
         return yield* fail('The approved-support inventory subject changed; refresh maintenance.');
+      const completeCorpus = EffectArray.filter(corpus, (record): record is MemoryRecord => record !== undefined);
       const logicalHashes = snapshot.success.canonicalContentHashes;
       if (selectedCase === undefined)
         state = {
           ...state,
-          cases: migrateMaintenanceCases(state.cases, corpus, logicalHashes, snapshot.success.complete),
+          cases: migrateMaintenanceCases(state.cases, completeCorpus, logicalHashes, snapshot.success.complete),
         };
-      const active = corpus
-        .filter(record => record.metadata.status === 'active')
-        .map(record =>
+      const active = EffectArray.map(
+        EffectArray.filter(completeCorpus, record => record.metadata.status === 'active'),
+        record =>
           record.metadata.project === undefined
             ? {...record, metadata: {...record.metadata, project: 'unscoped'}}
             : record,
-        );
-      const topicRecords = active.filter(
+      );
+      const topicRecords = EffectArray.filter(
+        active,
         record =>
           (options.project === undefined || record.metadata.project === options.project) &&
           enrolledTopicCandidate(record),
@@ -310,7 +316,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       const generation = snapshot.success.generation;
       const roots = yield* prepareAutomaticMaintenance(config, snapshot.success, options);
       const checkpoints = {...state.checkpoints};
-      const caseMap = new Map(state.cases.map(item => [item.caseId, item]));
+      const caseMap = new Map(EffectArray.map(state.cases, item => [item.caseId, item]));
       const evidencePage = yield* readContextMaintenanceEvidenceRequestPage(
         config,
         state.workSchedule?.requestDiscovery?.lastFile,
@@ -361,15 +367,18 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           caseMap.set(id, {...item, disposition: 'resolved', reason: 'candidate-review-completed', lastChecked: now});
       const receipts = [
         ...new Map(
-          [
-            ...state.receipts,
-            ...(selectedCase === undefined ? yield* recoverReceiptJournals(config, state.receipts) : []),
-          ].map(item => [item.receiptId, item]),
+          EffectArray.map(
+            [
+              ...state.receipts,
+              ...(selectedCase === undefined ? yield* recoverReceiptJournals(config, state.receipts) : []),
+            ],
+            item => [item.receiptId, item],
+          ),
         ).values(),
       ];
       const sourceRevisions = new Map<string, string>();
       const recordSourceRevisions = new Map<string, string>();
-      const tasks = active.flatMap(record => {
+      const tasks = EffectArray.flatMap(active, record => {
         const chunks = Math.max(1, Math.ceil(currentMemoryCodeCitations(record).length / 64));
         return Array.from({length: chunks}, (_, chunk) => ({
           record,
@@ -379,7 +388,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           revision: snapshot.success.hashes.get(record.uri) ?? contentHash(record.content),
         }));
       });
-      const keys = new Set(tasks.map(task => task.key));
+      const keys = new Set(EffectArray.map(tasks, task => task.key));
       const selectedTask =
         selectedCase === undefined ? undefined : selectMaintenanceCitationCaseTask(tasks, selectedCase);
       if (selectedCase !== undefined && selectedTask === undefined)
@@ -393,10 +402,13 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         });
       const topicCheckpoints = pruneAbsentTopicCheckpoints(
         state.topicCheckpoints ?? {},
-        new Set(topicRecords.map(topicMaintenanceCaseId)),
+        new Set(EffectArray.map(topicRecords, topicMaintenanceCaseId)),
         snapshot.success.complete && options.project === undefined,
       );
-      const pending = tasks.filter(task => options.project === undefined || task.project === options.project);
+      const pending = EffectArray.filter(
+        tasks,
+        task => options.project === undefined || task.project === options.project,
+      );
       const rotated = [...pending].sort((left, right) => {
         const priority = (task: typeof left) => {
           const check = checkpoints[task.key];
@@ -409,11 +421,12 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           return check?.memoryHash !== logicalHashes.get(task.record.uri) ? 1 : 0;
         };
         if (priority(left) !== priority(right)) return priority(right) - priority(left);
-        if (left.project !== right.project) return left.project.localeCompare(right.project);
+        if (left.project !== right.project)
+          return Effect2.pipe(left.project, EffectString.localeCompare(right.project));
         const cursor = state.lastTaskByProject?.[left.project];
         const leftAfter = cursor === undefined || left.key > cursor;
         const rightAfter = cursor === undefined || right.key > cursor;
-        return Number(rightAfter) - Number(leftAfter) || left.key.localeCompare(right.key);
+        return Number(rightAfter) - Number(leftAfter) || Effect2.pipe(left.key, EffectString.localeCompare(right.key));
       });
       const {
         projects: semanticProjects,
@@ -428,15 +441,26 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         snapshot.success.complete,
       );
       for (const item of caseMap.values()) {
+        const projectProgress = state.semanticProgress?.[item.project];
+        const progressNeedsRefresh =
+          projectProgress === undefined ||
+          projectProgress.version !== 2 ||
+          projectProgress.analyzerVersion !== CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION;
         if (
           (options.project === undefined || item.project === options.project) &&
           item.family === 'semantic-contradiction' &&
           item.disposition === 'needs-decision' &&
-          (state.semanticProgress?.[item.project]?.analyzerVersion !== CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION ||
-            item.subjectContentHashes?.some(subject => {
-              const current = logicalHashes.get(subject.uri);
-              return current === undefined ? snapshot.success.complete : current !== subject.hash;
-            }))
+          (progressNeedsRefresh ||
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(item.subjectContentHashes), __effectOptionalArray =>
+                Boolean(
+                  EffectArray.some(__effectOptionalArray, subject => {
+                    const current = logicalHashes.get(subject.uri);
+                    return current === undefined ? snapshot.success.complete : current !== subject.hash;
+                  }),
+                ),
+              ),
+            ))
         ) {
           upsertCase(
             caseMap,
@@ -468,6 +492,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         const project = work.project!;
         const revision = semanticGenerations.get(project)!;
         const progress = semanticProgress[project];
+        if (progress.version !== 2) return yield* fail('Semantic work was selected without current analyzer progress.');
         const headroom =
           MAX_STATE_BYTES -
           new TextEncoder().encode(JSON.stringify({...state, cases: [...caseMap.values()]})).length -
@@ -483,8 +508,10 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         };
       }
       if (selectedCase === undefined && work.phase === 'requested') {
-        const request = evidenceRequests.find(item => contextMaintenanceEvidenceRequestKey(item) === work.root)!;
-        yield* runRequestedMaintenanceProjection(config, request, active, corpus, snapshot.success.complete);
+        const request = EffectOption.getOrUndefined(
+          EffectArray.findFirst(evidenceRequests, item => contextMaintenanceEvidenceRequestKey(item) === work.root),
+        )!;
+        yield* runRequestedMaintenanceProjection(config, request, active, completeCorpus, snapshot.success.complete);
       }
       if (selectedCase === undefined && work.phase === 'topic') {
         state = yield* advanceScheduledTopicMaintenance(
@@ -562,7 +589,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         const relationCorpus =
           snapshot.success.complete && (record.metadata.relations?.length ?? 0) > 0
             ? yield* readMaintenanceMemoryRecords(config, {requireReadable: true})
-            : corpus;
+            : completeCorpus;
         task.revision = maintenanceRecordRevision(
           record,
           relationCorpus,
@@ -572,7 +599,8 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         );
         const check = checkpoints[task.key];
         const workerEvidence = batchByTask.get(task.key);
-        const legacy = state.cases.some(
+        const legacy = EffectArray.some(
+          state.cases,
           item =>
             item.memoryId === memoryId &&
             ['needs-decision', 'waiting-evidence'].includes(item.disposition) &&
@@ -583,21 +611,23 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           maintenanceWorkerCheckpointReusable(record, check, workerEvidence, task.revision, now, legacy)
         )
           continue;
-        const previousCases = [...caseMap.values()].filter(
+        const previousCases = EffectArray.filter(
+          [...caseMap.values()],
           item =>
             item.project === task.project &&
             item.memoryId === memoryId &&
-            (item.family.startsWith('citation')
+            (Effect2.pipe(item.family, EffectString.startsWith('citation'))
               ? item.family === 'citation-coverage'
                 ? item.slot === String(task.chunk)
-                : currentMemoryCodeCitations(record)
-                    .slice(task.chunk * 64, (task.chunk + 1) * 64)
-                    .some(citation => contextHealthCitationCaseSlotV2(citation) === item.slot)
+                : EffectArray.some(
+                    currentMemoryCodeCitations(record).slice(task.chunk * 64, (task.chunk + 1) * 64),
+                    citation => contextHealthCitationCaseSlotV2(citation) === item.slot,
+                  )
               : selectedCase === undefined && task.chunk === 0 && item.family !== TOPIC_MAINTENANCE_FAMILY),
         );
         const seen = new Set<string>();
         if (selectedCase === undefined && task.chunk === 0) {
-          const changes = (record.metadata.relations ?? []).flatMap(relation => {
+          const changes = EffectArray.flatMap(record.metadata.relations ?? [], relation => {
             const policy = resolveMaintenanceRelationPolicy(
               record,
               relation,
@@ -606,7 +636,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             );
             return policy.state === 'prunable' || policy.state === 'redirectable' ? [{relation, policy}] : [];
           });
-          const removal = changes.map(change => change.relation);
+          const removal = EffectArray.map(changes, change => change.relation);
           for (const relation of record.metadata.relations ?? []) {
             if (isAgentArtifactUri(relation.uri)) continue;
             const target = resolveRelationTarget(relationCorpus, relation.uri);
@@ -617,7 +647,10 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
               relationCorpus,
               snapshot.success.complete,
             );
-            const removable = removal.some(item => item.type === relation.type && item.uri === relation.uri);
+            const removable = EffectArray.some(
+              removal,
+              item => item.type === relation.type && item.uri === relation.uri,
+            );
             const disposition =
               target.state === 'missing' && !snapshot.success.complete
                 ? 'waiting-evidence'
@@ -653,7 +686,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           if (isSharedMemoryUri(record.uri)) {
             for (const relation of record.metadata.relations ?? []) {
               if (isAgentArtifactUri(relation.uri)) continue;
-              const target = resolveRelationTarget(corpus, relation.uri);
+              const target = resolveRelationTarget(completeCorpus, relation.uri);
               if (target.state !== 'missing') continue;
               const item = upsertCase(
                 caseMap,
@@ -682,19 +715,22 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
                   project: task.project,
                   memoryId,
                   family: 'relation',
-                  slot: resolveRelationTarget(corpus, relation.uri).record?.metadata.memoryId ?? relation.uri,
+                  slot: resolveRelationTarget(completeCorpus, relation.uri).record?.metadata.memoryId ?? relation.uri,
                 });
                 const item = caseMap.get(id);
                 if (item !== undefined)
                   caseMap.set(id, {
                     ...item,
-                    disposition: (record.metadata.relations ?? []).some(
+                    disposition: EffectArray.some(
+                      record.metadata.relations ?? [],
                       link =>
                         link.uri === relation.uri &&
-                        !removal.some(removed => removed.type === link.type && removed.uri === link.uri),
+                        !EffectArray.some(removal, removed => removed.type === link.type && removed.uri === link.uri),
                     )
                       ? 'historical'
-                      : changes.find(change => change.relation.uri === relation.uri)?.policy.state === 'redirectable'
+                      : EffectOption.getOrUndefined(
+                            EffectArray.findFirst(changes, change => change.relation.uri === relation.uri),
+                          )?.policy.state === 'redirectable'
                         ? 'resolved'
                         : 'retired',
                     reason: 'relation-repair-verified',
@@ -724,20 +760,23 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         const citations = currentMemoryCodeCitations(record).slice(task.chunk * 64, (task.chunk + 1) * 64);
         const duplicateRecords = yield* readMemoryRecordsByUri(
           config,
-          active
-            .filter(
+          EffectArray.map(
+            EffectArray.filter(
+              active,
               item =>
                 item.uri !== record.uri &&
                 snapshot.success.bodyHashes.get(item.uri) === snapshot.success.bodyHashes.get(record.uri),
-            )
-            .slice(0, 16)
-            .map(item => item.uri),
+            ).slice(0, 16),
+            item => item.uri,
+          ),
         );
         const repairCorpus = [
           record,
           ...duplicateRecords,
-          ...corpus.filter(
-            item => item.uri !== record.uri && !duplicateRecords.some(duplicate => duplicate.uri === item.uri),
+          ...EffectArray.filter(
+            completeCorpus,
+            item =>
+              item.uri !== record.uri && !EffectArray.some(duplicateRecords, duplicate => duplicate.uri === item.uri),
           ),
         ];
         const collected = yield* collectContextHealthEvidence(
@@ -746,7 +785,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           [{...record, metadata: {...record.metadata, relations: []}}],
           roots.get(task.project) ?? options.cwd,
           {
-            relationCorpus: corpus,
+            relationCorpus: completeCorpus,
             duplicateCorpus: [record, ...duplicateRecords],
             evidenceMode: 'worker',
             workerEvidence: batchByTask.get(task.key),
@@ -764,28 +803,34 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             !isSharedMemoryUri(record.uri) &&
             !hasTopicMaintenanceEnrollment(record)
           ) {
-            const archive = previewContextHealthRepairPlanV1(report.success, repairCorpus).proposals.find(
-              proposal =>
-                proposal.mutation.kind === 'archive-memory' &&
-                proposal.mutation.subjectUri === record.uri &&
-                (proposal.category === 'validity-expired' ||
-                  (proposal.category === 'exact-duplicate' &&
-                    snapshot.success.complete &&
-                    options.project === undefined &&
-                    !activeIncomingDependency(record, active) &&
-                    duplicateArchiveSafe(
-                      record,
-                      duplicateRecords.find(
-                        item =>
-                          item.uri ===
-                          (proposal.mutation.kind === 'archive-memory' ? proposal.mutation.survivorUri : undefined),
-                      ),
-                    ))),
+            const archive = Effect2.Option.getOrUndefined(
+              EffectArray.findFirst(
+                previewContextHealthRepairPlanV1(report.success, repairCorpus).proposals,
+                proposal =>
+                  proposal.mutation.kind === 'archive-memory' &&
+                  proposal.mutation.subjectUri === record.uri &&
+                  (proposal.category === 'validity-expired' ||
+                    (proposal.category === 'exact-duplicate' &&
+                      snapshot.success.complete &&
+                      options.project === undefined &&
+                      !activeIncomingDependency(record, active) &&
+                      duplicateArchiveSafe(
+                        record,
+                        EffectOption.getOrUndefined(
+                          EffectArray.findFirst(
+                            duplicateRecords,
+                            item =>
+                              item.uri ===
+                              (proposal.mutation.kind === 'archive-memory' ? proposal.mutation.survivorUri : undefined),
+                          ),
+                        ),
+                      ))),
+              ),
             );
             if (archive !== undefined && state.policyOverrides?.[memoryId] !== contentHash(record.content)) {
               const prepared = previewAutomaticContextHealthArchiveReceipt(config, archive, record, now);
               const pendingReceipt: UndoJournal = {
-                receiptId: `maintenance-${sha256HexSync(archive.revision).slice(0, 40)}`,
+                receiptId: `maintenance-${Effect2.pipe(sha256HexSync(archive.revision), EffectString.slice(0, 40))}`,
                 project: task.project,
                 subjectUri: record.uri,
                 archivedUri: prepared.uri,
@@ -812,13 +857,16 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
                 Result.isSuccess(result) &&
                 (result.success.status === 'applied' || result.success.status === 'already-applied')
               ) {
-                const archivedRecord = (yield* readMaintenanceMemoryRecords(config, {requireReadable: true})).find(
-                  item =>
-                    item.metadata.archivedFrom === record.uri && item.metadata.memoryId === record.metadata.memoryId,
+                const archivedRecord = EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    yield* readMaintenanceMemoryRecords(config, {requireReadable: true}),
+                    item =>
+                      item.metadata.archivedFrom === record.uri && item.metadata.memoryId === record.metadata.memoryId,
+                  ),
                 );
                 if (archivedRecord !== undefined) {
                   const receipt: UndoJournal = {
-                    receiptId: `maintenance-${sha256HexSync(archive.revision).slice(0, 40)}`,
+                    receiptId: `maintenance-${Effect2.pipe(sha256HexSync(archive.revision), EffectString.slice(0, 40))}`,
                     project: task.project,
                     subjectUri: record.uri,
                     archivedUri: archivedRecord.uri,
@@ -852,9 +900,10 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           const enrolled = hasTopicMaintenanceEnrollment(record);
           for (const finding of report.success.findings) {
             if (enrolled && ['citation-changed', 'citation-missing'].includes(finding.category)) continue;
-            if (selectedCase !== undefined && !finding.category.startsWith('citation-')) continue;
+            if (selectedCase !== undefined && !Effect2.pipe(finding.category, EffectString.startsWith('citation-')))
+              continue;
             if (finding.caseIdentity?.family === 'candidate') continue;
-            if (finding.category.startsWith('relation-')) continue;
+            if (Effect2.pipe(finding.category, EffectString.startsWith('relation-'))) continue;
             if (
               finding.repair.subjectUri !== undefined &&
               finding.repair.subjectUri !== record.uri &&
@@ -862,19 +911,29 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             )
               continue;
             if (
-              [...caseMap.values()].some(
+              EffectArray.some(
+                [...caseMap.values()],
                 item =>
                   item.memoryId === memoryId && item.family === finding.category && item.disposition === 'retired',
               )
             )
               continue;
-            const identity = contextHealthFindingCaseIdentityV2({project: task.project, finding, records: corpus});
+            const identity = contextHealthFindingCaseIdentityV2({
+              project: task.project,
+              finding,
+              records: completeCorpus,
+            });
             const receipt = Result.isSuccess(collected)
-              ? collected.success.citationValidations
-                  .flatMap(item => item.receipts)
-                  .find(item => `${record.uri}#${item.citationId}` === finding.repair.targetUri)
+              ? EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    EffectArray.flatMap(collected.success.citationValidations, item => item.receipts),
+                    item => `${record.uri}#${item.citationId}` === finding.repair.targetUri,
+                  ),
+                )
               : undefined;
-            const citation = currentMemoryCodeCitations(record).find(item => item.id === receipt?.citationId);
+            const citation = EffectOption.getOrUndefined(
+              EffectArray.findFirst(currentMemoryCodeCitations(record), item => item.id === receipt?.citationId),
+            );
             const disposition =
               receipt?.provenance === 'historical-verified'
                 ? 'historical'
@@ -909,7 +968,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           if (
             coverage !== undefined &&
             coverage.deferred > 0 &&
-            !report.success.findings.some(item => item.category === 'citation-unknown')
+            !EffectArray.some(report.success.findings, item => item.category === 'citation-unknown')
           ) {
             const item = upsertCase(
               caseMap,
@@ -921,10 +980,13 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
                 evidenceRevision: task.revision,
                 disposition: 'waiting-evidence',
                 reason:
-                  coverage.reasons
-                    .map(item => item.reason)
-                    .join(', ')
-                    .slice(0, 300) || 'citation-evidence-unavailable',
+                  Effect2.pipe(
+                    EffectArray.join(
+                      EffectArray.map(coverage.reasons, item => item.reason),
+                      ', ',
+                    ),
+                    EffectString.slice(0, 300),
+                  ) || 'citation-evidence-unavailable',
               },
               now,
             );
@@ -933,7 +995,8 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           for (const item of previousCases) {
             if (
               item.family === 'current-support' &&
-              [...caseMap.values()].some(
+              EffectArray.some(
+                [...caseMap.values()],
                 anchor =>
                   anchor.memoryId === item.memoryId &&
                   anchor.slot === item.slot &&
@@ -969,7 +1032,10 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           );
           seen.add(item.caseId);
         }
-        const waiting = [...seen].map(id => caseMap.get(id)).filter(item => item?.disposition === 'waiting-evidence');
+        const waiting = EffectArray.filter(
+          EffectArray.map([...seen], id => caseMap.get(id)),
+          item => item?.disposition === 'waiting-evidence',
+        );
         for (const id of seen) {
           const item = caseMap.get(id);
           if (item === undefined) continue;
@@ -1012,9 +1078,10 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             ...(waiting.length === 0
               ? {}
               : {
-                  retryAt: [nextMaintenanceDeadline(record, now), ...waiting.map(item => item?.nextAttemptAt)]
-                    .filter((date): date is string => date !== undefined)
-                    .sort()[0],
+                  retryAt: EffectArray.filter(
+                    [nextMaintenanceDeadline(record, now), ...EffectArray.map(waiting, item => item?.nextAttemptAt)],
+                    (date): date is string => date !== undefined,
+                  ).sort()[0],
                 }),
           };
         state = {
@@ -1040,7 +1107,8 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             selectedCase === undefined ? checkpoints : {},
           );
       if (selectedCase === undefined && snapshot.success.complete) {
-        for (const record of active.filter(
+        for (const record of EffectArray.filter(
+          active,
           record => options.project === undefined || record.metadata.project === options.project,
         )) {
           if (!maintenanceAnchorChunksComplete(record, checkpoints, logicalHashes.get(record.uri))) continue;
@@ -1051,18 +1119,26 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         }
       }
       if (selectedCase === undefined) reconcileRepositoryRecoveryCases(caseMap, now);
-      const activeIds = new Set(active.map(record => record.metadata.memoryId ?? record.uri));
-      const caseValues = [...caseMap.values()].map(item =>
+      const activeIds = new Set(EffectArray.map(active, record => record.metadata.memoryId ?? record.uri));
+      const caseValues = EffectArray.map([...caseMap.values()], item =>
         selectedCase !== undefined ||
         (item.family === 'candidate' && pendingCandidateIds.has(item.caseId)) ||
         (item.family === 'repository-recovery' &&
-          item.subjectContentHashes?.some(subject => active.some(record => record.uri === subject.uri))) ||
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(item.subjectContentHashes), findArray =>
+              EffectArray.some(findArray, subject => EffectArray.some(active, record => record.uri === subject.uri)),
+            ),
+          )) ||
         !snapshot.success.complete ||
         (options.project !== undefined && item.project !== options.project) ||
         activeIds.has(item.memoryId) ||
         (item.family === 'semantic-contradiction' &&
           ((item.subjectContentHashes?.length ?? 0) < 2 ||
-            item.subjectContentHashes?.every(subject => active.some(record => record.uri === subject.uri)))) ||
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(item.subjectContentHashes), findArray =>
+                EffectArray.every(findArray, subject => EffectArray.some(active, record => record.uri === subject.uri)),
+              ),
+            ))) ||
         item.disposition === 'retired' ||
         item.disposition === 'historical'
           ? item
@@ -1090,13 +1166,13 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         }
         sourceRevisions.set(task.project, epoch);
       }
-      const semanticStillPending = semanticProjects.some(project => {
+      const semanticStillPending = EffectArray.some(semanticProjects, project => {
         const progress = state.semanticProgress?.[project];
-        return progress === undefined || maintenanceSemanticProgressPending(progress);
+        return progress === undefined || progress.version !== 2 || maintenanceSemanticProgressPending(progress);
       });
-      const semanticEvidencePartial = semanticProjects.some(project => {
+      const semanticEvidencePartial = EffectArray.some(semanticProjects, project => {
         const progress = state.semanticProgress?.[project];
-        return progress !== undefined && maintenanceSemanticProgressUnsupported(progress);
+        return progress?.version === 2 && maintenanceSemanticProgressUnsupported(progress);
       });
       const requestedStillPending = yield* contextMaintenanceEvidenceDiscoveryPending(
         config,
@@ -1110,14 +1186,14 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         checkpoints,
         cases,
         receipts: receipts.slice(-MAX_RECEIPTS),
-        state: cases.some(item => item.disposition === 'needs-decision')
+        state: EffectArray.some(cases, item => item.disposition === 'needs-decision')
           ? 'needs-decision'
-          : cases.some(item => item.disposition === 'waiting-evidence')
+          : EffectArray.some(cases, item => item.disposition === 'waiting-evidence')
             ? 'waiting-evidence'
             : snapshot.success.complete &&
                 !semanticStillPending &&
                 !requestedStillPending &&
-                tasks.every(task =>
+                EffectArray.every(tasks, task =>
                   maintenanceCheckpointCurrent(
                     checkpoints[task.key],
                     logicalHashes.get(task.record.uri),
@@ -1129,33 +1205,38 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
                 ? 'waiting-evidence'
                 : 'idle'
               : 'running',
-        projects: [...new Set(active.map(record => record.metadata.project!))].sort().map(project => {
-          const selected = tasks.filter(task => task.project === project);
-          const checked = selected.filter(task =>
-            maintenanceCheckpointCurrent(
-              checkpoints[task.key],
-              logicalHashes.get(task.record.uri),
-              sourceRevisions.get(project),
-              now,
-            ),
-          );
-          return {
-            project,
-            generation,
-            cursor: checked.length,
-            eligible: selected.length,
-            checked: checked.length,
-            eligibleCitations: selected.reduce(
-              (count, task) =>
-                count + currentMemoryCodeCitations(task.record).slice(task.chunk * 64, (task.chunk + 1) * 64).length,
-              0,
-            ),
-            checkedCitations: checked.reduce(
-              (count, task) => count + (checkpoints[task.key]?.checkedCitations ?? 0),
-              0,
-            ),
-          };
-        }),
+        projects: EffectArray.map(
+          [...new Set(EffectArray.map(active, record => record.metadata.project!))].sort(),
+          project => {
+            const selected = EffectArray.filter(tasks, task => task.project === project);
+            const checked = EffectArray.filter(selected, task =>
+              maintenanceCheckpointCurrent(
+                checkpoints[task.key],
+                logicalHashes.get(task.record.uri),
+                sourceRevisions.get(project),
+                now,
+              ),
+            );
+            return {
+              project,
+              generation,
+              cursor: checked.length,
+              eligible: selected.length,
+              checked: checked.length,
+              eligibleCitations: EffectArray.reduce(
+                selected,
+                0,
+                (count, task) =>
+                  count + currentMemoryCodeCitations(task.record).slice(task.chunk * 64, (task.chunk + 1) * 64).length,
+              ),
+              checkedCitations: EffectArray.reduce(
+                checked,
+                0,
+                (count, task) => count + (checkpoints[task.key]?.checkedCitations ?? 0),
+              ),
+            };
+          },
+        ),
       };
       yield* writeState(config, state);
       if (selectedCase === undefined) yield* pruneReceiptJournals(config, state.receipts);
@@ -1173,7 +1254,7 @@ const repairRelations = Effect.fn('contextMaintenance.repairRelations')(function
   timestamp: string,
   expectedPostHash?: string,
 ) {
-  const removed = changes.map(change => change.relation);
+  const removed = EffectArray.map(changes, change => change.relation);
   const fs = yield* FileSystem.FileSystem;
   return yield* withMemoryUriLocks(
     fs,
@@ -1183,16 +1264,22 @@ const repairRelations = Effect.fn('contextMaintenance.repairRelations')(function
       ...(memoryIdentityLockKey(original.metadata.memoryId) === undefined
         ? []
         : [memoryIdentityLockKey(original.metadata.memoryId)!]),
-      ...changes.flatMap(({relation: item, policy}) =>
-        [
-          item.uri,
-          policy.target?.uri,
-          policy.successor?.uri,
-          ...(policy.lineage ?? []).flatMap(record => [record.uri, memoryIdentityLockKey(record.metadata.memoryId)]),
-          memoryIdentityLockKey(policy.target?.metadata.memoryId),
-          memoryIdentityLockKey(policy.successor?.metadata.memoryId),
-          memoryIdentityLockKey(memoryIdFromIdentityAlias(item.uri)),
-        ].filter((key): key is string => key !== undefined),
+      ...EffectArray.flatMap(changes, ({relation: item, policy}) =>
+        EffectArray.filter(
+          [
+            item.uri,
+            policy.target?.uri,
+            policy.successor?.uri,
+            ...EffectArray.flatMap(policy.lineage ?? [], record => [
+              record.uri,
+              memoryIdentityLockKey(record.metadata.memoryId),
+            ]),
+            memoryIdentityLockKey(policy.target?.metadata.memoryId),
+            memoryIdentityLockKey(policy.successor?.metadata.memoryId),
+            memoryIdentityLockKey(memoryIdFromIdentityAlias(item.uri)),
+          ],
+          (key): key is string => key !== undefined,
+        ),
       ),
     ],
     Effect.gen(function* () {
@@ -1203,23 +1290,26 @@ const repairRelations = Effect.fn('contextMaintenance.repairRelations')(function
         try: () => assertMemoryDocumentSchemaWritable(current.content),
         catch: () => fail('Relation subject schema is not writable.'),
       });
-      const lines = canonicalMemoryDocumentContent(current.content).split('\n');
+      const lines = Effect2.pipe(canonicalMemoryDocumentContent(current.content), EffectString.split('\n'));
       const separator = lines.indexOf('');
-      const after = lines
-        .flatMap((line, index) => {
+      const after = EffectArray.join(
+        EffectArray.flatMap(lines, (line, index) => {
           if (index > separator) return [line];
-          const change = changes.find(({relation}) => line === `relation: ${relation.type} ${relation.uri}`);
+          const change = EffectOption.getOrUndefined(
+            EffectArray.findFirst(changes, ({relation}) => line === `relation: ${relation.type} ${relation.uri}`),
+          );
           if (change === undefined) return [line];
           return change.policy.successor === undefined
             ? []
             : [`relation: ${change.relation.type} threadnote://memory/${change.policy.successor.metadata.memoryId}`];
-        })
-        .join('\n');
+        }),
+        '\n',
+      );
       if (expectedPostHash !== undefined && contentHash(after) !== expectedPostHash)
         return yield* fail('The journal relation proof changed.');
       if (after === current.content || parseMemoryDocument(current.uri, after) === undefined)
         return yield* fail('Relation repair could not be represented safely.');
-      const receiptId = `maintenance-${sha256HexSync(`${original.uri}\0${contentHash(current.content)}\0${contentHash(after)}`).slice(0, 40)}`;
+      const receiptId = `maintenance-${Effect2.pipe(sha256HexSync(`${original.uri}\0${contentHash(current.content)}\0${contentHash(after)}`), EffectString.slice(0, 40))}`;
       const journal: UndoJournal = {
         receiptId,
         project: original.metadata.project ?? 'unscoped',
@@ -1230,11 +1320,15 @@ const repairRelations = Effect.fn('contextMaintenance.repairRelations')(function
         before: current.content,
         after,
         removed,
-        relationChanges: changes.map(({relation, policy}) => ({
+        relationChanges: EffectArray.map(changes, ({relation, policy}) => ({
           relation,
           targetHash: policy.target === undefined ? undefined : contentHash(policy.target.content),
           successorHash: policy.successor === undefined ? undefined : contentHash(policy.successor.content),
-          lineageHashes: policy.lineage?.map(record => contentHash(record.content)),
+          lineageHashes: EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(policy.lineage), lineage =>
+              EffectArray.map(lineage, record => contentHash(record.content)),
+            ),
+          ),
         })),
       };
       const journalFile = yield* receiptPath(config, receiptId);
@@ -1283,9 +1377,11 @@ export const undoContextMaintenance = Effect.fn('contextMaintenance.undo')(funct
     config,
     Effect.gen(function* () {
       const state = yield* readState(config);
-      const journal = yield* readJson<UndoJournal>(yield* receiptPath(config, receiptId));
-      if (journal === undefined || journal.receiptId !== receiptId)
-        return yield* fail('The maintenance receipt expired or is unavailable.');
+      const value = yield* readJson(yield* receiptPath(config, receiptId));
+      if (value === undefined) return yield* fail('The maintenance receipt expired or is unavailable.');
+      if (!isUndoJournal(value)) return yield* fail('Maintenance receipt integrity failed.');
+      const journal = value;
+      if (journal.receiptId !== receiptId) return yield* fail('The maintenance receipt expired or is unavailable.');
       if (journal.state === 'undone') return {status: 'already-undone' as const, receiptId};
       const fs = yield* FileSystem.FileSystem;
       return yield* withMemoryUriLocks(
@@ -1294,7 +1390,7 @@ export const undoContextMaintenance = Effect.fn('contextMaintenance.undo')(funct
         [
           journal.subjectUri,
           ...(journal.archivedUri === undefined ? [] : [journal.archivedUri]),
-          ...journal.removed.map(item => item.uri),
+          ...EffectArray.map(journal.removed, item => item.uri),
         ],
         Effect.gen(function* () {
           if (journal.postHash !== contentHash(journal.after) || isSharedMemoryUri(journal.subjectUri))
@@ -1308,8 +1404,12 @@ export const undoContextMaintenance = Effect.fn('contextMaintenance.undo')(funct
             )
               return {status: 'conflict' as const, receiptId, reason: 'validity-policy-still-expired'};
             const observed = yield* readMemoryRecordsByUri(config, [journal.subjectUri, journal.archivedUri]);
-            const source = observed.find(item => item.uri === journal.subjectUri);
-            const archive = observed.find(item => item.uri === journal.archivedUri);
+            const source = EffectOption.getOrUndefined(
+              EffectArray.findFirst(observed, item => item.uri === journal.subjectUri),
+            );
+            const archive = EffectOption.getOrUndefined(
+              EffectArray.findFirst(observed, item => item.uri === journal.archivedUri),
+            );
             if (source !== undefined && contentHash(source.content) !== contentHash(journal.before))
               return {status: 'conflict' as const, receiptId, reason: 'memory-changed'};
             if (
@@ -1324,7 +1424,7 @@ export const undoContextMaintenance = Effect.fn('contextMaintenance.undo')(funct
                   ...state.policyOverrides,
                   [original.metadata.memoryId ?? original.uri]: contentHash(original.content),
                 },
-                receipts: state.receipts.map(item =>
+                receipts: EffectArray.map(state.receipts, item =>
                   item.receiptId === receiptId ? {...item, state: 'undone'} : item,
                 ),
               });
@@ -1334,7 +1434,8 @@ export const undoContextMaintenance = Effect.fn('contextMaintenance.undo')(funct
               return {status: 'conflict' as const, receiptId, reason: 'archive-changed'};
             const corpus = yield* readMaintenanceMemoryRecords(config, {requireReadable: true});
             if (
-              (original.metadata.relations ?? []).some(
+              EffectArray.some(
+                original.metadata.relations ?? [],
                 item =>
                   resolveRelationTarget(corpus, item.uri).state === 'missing' ||
                   resolveRelationTarget(corpus, item.uri).state === 'conflicted',
@@ -1354,7 +1455,9 @@ export const undoContextMaintenance = Effect.fn('contextMaintenance.undo')(funct
                 ...state.policyOverrides,
                 [original.metadata.memoryId ?? original.uri]: contentHash(original.content),
               },
-              receipts: state.receipts.map(item => (item.receiptId === receiptId ? {...item, state: 'undone'} : item)),
+              receipts: EffectArray.map(state.receipts, item =>
+                item.receiptId === receiptId ? {...item, state: 'undone'} : item,
+              ),
             });
             return {status: 'undone' as const, receiptId};
           }
@@ -1362,7 +1465,7 @@ export const undoContextMaintenance = Effect.fn('contextMaintenance.undo')(funct
           if (current === undefined || contentHash(current.content) !== journal.postHash)
             return {status: 'conflict' as const, receiptId, reason: 'memory-changed'};
           const corpus = yield* readMaintenanceMemoryRecords(config, {requireReadable: true});
-          if (journal.removed.some(item => resolveRelationTarget(corpus, item.uri).state !== 'active'))
+          if (EffectArray.some(journal.removed, item => resolveRelationTarget(corpus, item.uri).state !== 'active'))
             return {status: 'conflict' as const, receiptId, reason: 'restored-target-not-active'};
           const result = yield* writeMemoryFileChecked(
             config,
@@ -1375,7 +1478,9 @@ export const undoContextMaintenance = Effect.fn('contextMaintenance.undo')(funct
               const subject = (yield* readMemoryRecordsByUri(config, [current.uri]))[0];
               if (subject?.content !== current.content) return yield* fail('The relation subject changed.');
               const closing = yield* readMaintenanceMemoryRecords(config, {requireReadable: true});
-              if (journal.removed.some(item => resolveRelationTarget(closing, item.uri).state !== 'active'))
+              if (
+                EffectArray.some(journal.removed, item => resolveRelationTarget(closing, item.uri).state !== 'active')
+              )
                 return yield* fail('The restored relation target changed.');
             }),
             {quiet: true},
@@ -1386,7 +1491,9 @@ export const undoContextMaintenance = Effect.fn('contextMaintenance.undo')(funct
           yield* atomicJson(yield* receiptPath(config, receiptId), {...journal, state: 'undone'});
           yield* writeState(config, {
             ...state,
-            receipts: state.receipts.map(item => (item.receiptId === receiptId ? {...item, state: 'undone'} : item)),
+            receipts: EffectArray.map(state.receipts, item =>
+              item.receiptId === receiptId ? {...item, state: 'undone'} : item,
+            ),
           });
           return {status: 'undone' as const, receiptId};
         }),
@@ -1403,7 +1510,9 @@ export const retireContextMaintenanceAnchor = Effect.fn('contextMaintenance.reti
     config,
     Effect.gen(function* () {
       const state = yield* readState(config);
-      const item = state.cases.find(item => item.caseId === input.caseId);
+      const item = EffectOption.getOrUndefined(
+        EffectArray.findFirst(state.cases, item => item.caseId === input.caseId),
+      );
       if (item === undefined || item.family !== 'citation' || item.evidenceRevision !== input.evidenceRevision)
         return yield* fail('The exact anchor case changed. Refresh its packet before retirement.');
       if (item.retirement?.expectedContentHash === input.expectedContentHash)
@@ -1417,28 +1526,44 @@ export const retireContextMaintenanceAnchor = Effect.fn('contextMaintenance.reti
           'Reviewed historicalization requires an exact unsupported anchor case. It never proves permanent evidence loss.',
         );
       const corpus = yield* readMaintenanceMemoryRecords(config, {requireReadable: true});
-      const record = corpus.find(record => (record.metadata.memoryId ?? record.uri) === item.memoryId);
+      const record = EffectOption.getOrUndefined(
+        EffectArray.findFirst(corpus, record => (record.metadata.memoryId ?? record.uri) === item.memoryId),
+      );
       if (record !== undefined && hasTopicMaintenanceEnrollment(record))
         return yield* fail('An enrolled topic anchor requires reviewed topic maintenance.');
       if (
         record === undefined ||
         contentHash(record.content) !== input.expectedContentHash ||
-        item.subjectContentHashes?.find(subject => subject.uri === record.uri)?.hash !== input.expectedContentHash
+        Effect2.Option.getOrUndefined(
+          Effect2.Option.map(Effect2.Option.fromNullishOr(item.subjectContentHashes), __effectSubjects =>
+            Effect2.Option.getOrUndefined(
+              EffectArray.findFirst(__effectSubjects, subject => subject.uri === record.uri),
+            ),
+          ),
+        )?.hash !== input.expectedContentHash
       )
         return yield* fail('The anchor subject changed.');
       return yield* withMemoryUriLocks(
         yield* FileSystem.FileSystem,
         config.agentContextHome,
-        [record.uri, memoryIdentityLockKey(record.metadata.memoryId)!].filter(
+        EffectArray.filter(
+          [record.uri, memoryIdentityLockKey(record.metadata.memoryId)!],
           (key): key is string => key !== undefined,
         ),
         Effect.gen(function* () {
           const current = (yield* readMemoryRecordsByUri(config, [record.uri]))[0];
           if (current === undefined || contentHash(current.content) !== input.expectedContentHash)
             return yield* fail('The anchor subject changed before CAS.');
-          const citation = current.metadata.codeCitations?.find(
-            citation => citation.id === item.citationId && contextHealthCitationCaseSlotV2(citation) === item.slot,
-          );
+          const citation =
+            current.metadata.codeCitations === undefined
+              ? undefined
+              : EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    current.metadata.codeCitations,
+                    citation =>
+                      citation.id === item.citationId && contextHealthCitationCaseSlotV2(citation) === item.slot,
+                  ),
+                );
           if (
             citation === undefined ||
             item.sourceSnapshot === undefined ||
@@ -1452,7 +1577,12 @@ export const retireContextMaintenanceAnchor = Effect.fn('contextMaintenance.reti
             citation,
             {maximumBytes: 4_000, maximumLines: 24},
           );
-          if (evidence.excerpts.some(excerpt => excerpt.provenance === 'current-verified' && excerpt.supportsCitation))
+          if (
+            EffectArray.some(
+              evidence.excerpts,
+              excerpt => excerpt.provenance === 'current-verified' && excerpt.supportsCitation,
+            )
+          )
             return yield* fail('Current support recovered. Refresh the packet before choosing another workflow.');
           if (
             (yield* sourceGeneration(config, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.generation ||
@@ -1460,7 +1590,7 @@ export const retireContextMaintenanceAnchor = Effect.fn('contextMaintenance.reti
           )
             return yield* fail('Source evidence changed during reviewed historicalization.');
           const now = DateTime.formatIso(yield* DateTime.now);
-          const cases = new Map(state.cases.map(item => [item.caseId, item]));
+          const cases = new Map(EffectArray.map(state.cases, item => [item.caseId, item]));
           const retired = {
             ...item,
             disposition: 'retired' as const,
@@ -1474,7 +1604,8 @@ export const retireContextMaintenanceAnchor = Effect.fn('contextMaintenance.reti
               expectedContentHash: input.expectedContentHash,
               retiredAt: now,
               reason: item.reason,
-              provenance: evidence.excerpts.some(
+              provenance: EffectArray.some(
+                evidence.excerpts,
                 excerpt => excerpt.provenance === 'historical-verified' && excerpt.supportsCitation,
               )
                 ? ('historical-verified' as const)
@@ -1508,18 +1639,18 @@ export const retireContextMaintenanceAnchor = Effect.fn('contextMaintenance.reti
           }
           yield* writeState(config, {
             ...state,
-            checkpoints: Object.fromEntries(
-              Object.entries(state.checkpoints).map(([key, checkpoint]) => [
+            checkpoints: EffectRecord.fromEntries(
+              EffectArray.map(EffectRecord.toEntries(state.checkpoints), ([key, checkpoint]) => [
                 key,
-                key.startsWith(`${item.memoryId}:`)
+                Effect2.pipe(key, EffectString.startsWith(`${item.memoryId}:`))
                   ? {...checkpoint, retryAt: nextMaintenanceDeadline(current, now)}
                   : checkpoint,
               ]),
             ),
             cases: [...cases.values()],
-            state: [...cases.values()].some(item => item.disposition === 'needs-decision')
+            state: EffectArray.some([...cases.values()], item => item.disposition === 'needs-decision')
               ? 'needs-decision'
-              : [...cases.values()].some(item => item.disposition === 'waiting-evidence')
+              : EffectArray.some([...cases.values()], item => item.disposition === 'waiting-evidence')
                 ? 'waiting-evidence'
                 : 'idle',
           });
@@ -1559,7 +1690,11 @@ export const wakeContextMaintenance = Effect.fn('contextMaintenance.wake')(funct
     }),
   ).pipe(Effect.orElseSucceed(() => false));
   if (!state) return false;
-  const executableName = system.executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  const executableName = Effect2.pipe(
+    Effect2.pipe(system.executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   const script = executableName === 'bun' || executableName === 'bun.exe' ? system.processArguments[1] : undefined;
   const args = [
     ...(script === undefined ? [] : [script]),
@@ -1601,7 +1736,10 @@ function emptyState(): MaintenanceState {
   };
 }
 function upsertMaintenanceReceipt(receipts: ContextMaintenanceReceiptV2[], receipt: ContextMaintenanceReceiptV2): void {
-  const index = receipts.findIndex(item => item.receiptId === receipt.receiptId);
+  const index = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(receipts, item => item.receiptId === receipt.receiptId),
+    () => -1,
+  );
   if (index === -1) receipts.push(receipt);
   else receipts.splice(index, 1, receipt);
 }
@@ -1631,22 +1769,13 @@ export function withStateLock<A, E, R>(config: RuntimeConfig, effect: Effect.Eff
   });
 }
 export const readState = Effect.fn('contextMaintenance.readState')(function* (config: RuntimeConfig) {
-  const state = yield* readJson<MaintenanceState>(yield* statePath(config));
-  if (state === undefined) return emptyState();
-  if (
-    state.version !== 2 ||
-    typeof state.paused !== 'boolean' ||
-    !Array.isArray(state.cases) ||
-    !Array.isArray(state.receipts) ||
-    !Array.isArray(state.projects) ||
-    typeof state.checkpoints !== 'object' ||
-    state.checkpoints === null ||
-    !validTopicMaintenanceCheckpoints(state.topicCheckpoints)
-  )
-    return yield* fail('Maintenance state is malformed; preserve it for recovery.');
+  const value = yield* readJson(yield* statePath(config));
+  if (value === undefined) return emptyState();
+  if (!isMaintenanceState(value)) return yield* fail('Maintenance state is malformed; preserve it for recovery.');
+  const state = value;
   return {...state, cases: migrateMaintenanceCases(state.cases)};
 });
-function readJson<A>(file: string) {
+function readJson(file: string) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const stat = yield* fs.stat(file).pipe(Effect.result);
@@ -1657,7 +1786,13 @@ function readJson<A>(file: string) {
     if (stat.success.type !== 'File' || Number(stat.success.size) > MAX_STATE_BYTES)
       return yield* fail('Maintenance state exceeds its read boundary.');
     const text = yield* fs.readFileString(file);
-    return yield* Effect.try({try: () => JSON.parse(text) as A, catch: () => fail('Maintenance state is malformed.')});
+    return yield* Effect.try({
+      try: () => {
+        const value: unknown = JSON.parse(text);
+        return value;
+      },
+      catch: () => fail('Maintenance state is malformed.'),
+    });
   });
 }
 const atomicJson = Effect.fn('contextMaintenance.atomicJson')(function* (file: string, value: unknown) {
@@ -1699,7 +1834,7 @@ const pruneReceiptJournals = Effect.fn('contextMaintenance.pruneReceipts')(funct
   const path = yield* Path.Path;
   const directory = path.dirname(yield* receiptPath(config, 'unused'));
   if (!(yield* fs.exists(directory))) return;
-  const retained = new Set(receipts.map(item => `${item.receiptId}.json`));
+  const retained = new Set(EffectArray.map(receipts, item => `${item.receiptId}.json`));
   for (const name of yield* fs.readDirectory(directory)) {
     if (/^maintenance-[0-9a-f]{40}\.json$/u.test(name) && !retained.has(name))
       yield* fs.remove(path.join(directory, name));
@@ -1728,21 +1863,33 @@ const recoverReceiptJournals = Effect.fn('contextMaintenance.recoverReceipts')(f
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const directory = path.dirname(yield* receiptPath(config, 'unused'));
-  if (!(yield* fs.exists(directory))) return [] as ContextMaintenanceReceiptV2[];
-  const existing = new Set(known.map(item => item.receiptId));
+  if (!(yield* fs.exists(directory))) {
+    const noReceipts: ContextMaintenanceReceiptV2[] = [];
+    return noReceipts;
+  }
+  const existing = new Set(EffectArray.map(known, item => item.receiptId));
   const recovered: ContextMaintenanceReceiptV2[] = [];
-  for (const name of (yield* fs.readDirectory(directory))
-    .filter(name => /^maintenance-[0-9a-f]{40}\.json$/u.test(name))
-    .slice(-MAX_RECEIPTS)) {
-    const journal = yield* readJson<UndoJournal>(path.join(directory, name));
-    if (journal === undefined || (existing.has(journal.receiptId) && journal.state !== 'applying')) continue;
+  const directoryEntries = yield* fs.readDirectory(directory);
+  for (const name of EffectArray.filter(
+    directoryEntries,
+    (name, index) => index in directoryEntries && /^maintenance-[0-9a-f]{40}\.json$/u.test(name),
+  ).slice(-MAX_RECEIPTS)) {
+    const value = yield* readJson(path.join(directory, name));
+    if (value === undefined) continue;
+    if (!isUndoJournal(value)) return yield* fail('Maintenance receipt integrity failed.');
+    const journal = value;
+    if (existing.has(journal.receiptId) && journal.state !== 'applying') continue;
     if (journal.postHash !== contentHash(journal.after) || isSharedMemoryUri(journal.subjectUri))
       return yield* fail('Maintenance receipt integrity failed.');
     if (journal.state === 'applying') {
       if (journal.archivedUri !== undefined) {
         const records = yield* readMemoryRecordsByUri(config, [journal.subjectUri, journal.archivedUri]);
-        const archive = records.find(item => item.uri === journal.archivedUri);
-        const source = records.find(item => item.uri === journal.subjectUri);
+        const archive = EffectOption.getOrUndefined(
+          EffectArray.findFirst(records, item => item.uri === journal.archivedUri),
+        );
+        const source = EffectOption.getOrUndefined(
+          EffectArray.findFirst(records, item => item.uri === journal.subjectUri),
+        );
         if (archive !== undefined && contentHash(archive.content) === journal.postHash && source === undefined) {
           yield* atomicJson(path.join(directory, name), {...journal, state: 'applied'});
           recovered.push(receiptProjection({...journal, state: 'applied'}));
@@ -1777,25 +1924,42 @@ const recoverReceiptJournals = Effect.fn('contextMaintenance.recoverReceipts')(f
         recovered.push(receiptProjection({...journal, state: 'applied'}));
       } else if (current !== undefined && contentHash(current.content) === contentHash(journal.before)) {
         const corpus = yield* readMaintenanceMemoryRecords(config, {requireReadable: true});
-        const changes = journal.removed.map(relation => ({
+        const changes = EffectArray.map(journal.removed, relation => ({
           relation,
           policy: resolveMaintenanceRelationPolicy(current, relation, corpus),
         }));
-        const proofChanged = journal.relationChanges?.some(saved => {
-          const policy = changes.find(
-            item => item.relation.type === saved.relation.type && item.relation.uri === saved.relation.uri,
-          )?.policy;
-          return (
-            saved.targetHash !== (policy?.target === undefined ? undefined : contentHash(policy.target.content)) ||
-            saved.successorHash !==
-              (policy?.successor === undefined ? undefined : contentHash(policy.successor.content)) ||
-            (saved.lineageHashes !== undefined &&
-              JSON.stringify(saved.lineageHashes) !==
-                JSON.stringify(policy?.lineage?.map(record => contentHash(record.content))))
-          );
-        });
+        const proofChanged = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(journal.relationChanges), __effectOptionalArray =>
+            Boolean(
+              EffectArray.some(__effectOptionalArray, saved => {
+                const policy = EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    changes,
+                    item => item.relation.type === saved.relation.type && item.relation.uri === saved.relation.uri,
+                  ),
+                )?.policy;
+                return (
+                  saved.targetHash !==
+                    (policy?.target === undefined ? undefined : contentHash(policy.target.content)) ||
+                  saved.successorHash !==
+                    (policy?.successor === undefined ? undefined : contentHash(policy.successor.content)) ||
+                  (saved.lineageHashes !== undefined &&
+                    JSON.stringify(saved.lineageHashes) !==
+                      JSON.stringify(
+                        EffectOption.getOrUndefined(
+                          EffectOption.map(EffectOption.fromNullishOr(policy?.lineage), lineage =>
+                            EffectArray.map(lineage, record => contentHash(record.content)),
+                          ),
+                        ),
+                      ))
+                );
+              }),
+            ),
+          ),
+        );
         const result = yield* (
-          proofChanged || changes.some(change => !['prunable', 'redirectable'].includes(change.policy.state))
+          proofChanged ||
+          EffectArray.some(changes, change => !['prunable', 'redirectable'].includes(change.policy.state))
             ? Effect.fail(fail('The journal relation proof changed.'))
             : repairRelations(config, current, changes, journal.timestamp, journal.postHash)
         ).pipe(Effect.result);
@@ -1807,184 +1971,8 @@ const recoverReceiptJournals = Effect.fn('contextMaintenance.recoverReceipts')(f
   return recovered;
 });
 
-export const readContextMaintenancePacket = Effect.fn('contextMaintenance.packet')(function* (
-  config: RuntimeConfig,
-  caseId: string,
-  selection: {
-    readonly citationId?: string;
-    readonly memoryUri?: string;
-    readonly startLine?: number;
-    readonly maximumLines?: number;
-  } = {},
-  selectedRecords?: readonly MemoryRecord[],
-) {
-  const state = yield* readState(config);
-  const item = state.cases.find(item => item.caseId === caseId);
-  if (item === undefined) return yield* fail('The selected maintenance case changed or expired.');
-  if (item.family === 'candidate') {
-    const current = (yield* readMaintenanceCandidateDecisions(config, item.project)).find(
-      decision => decision.candidate.candidateId === item.slot,
-    );
-    if (current === undefined || current.revision !== item.evidenceRevision)
-      return yield* fail('The candidate review changed or completed. Refresh maintenance and the review inbox.');
-    return {
-      version: 2 as const,
-      caseId: item.caseId,
-      project: item.project,
-      subject: {
-        kind: 'candidate-review' as const,
-        reviewId: current.review.reviewId,
-        candidateId: item.slot,
-        revision: current.review.revision,
-      },
-      memoryUri: current.candidate.targetUri,
-      memoryId: item.memoryId,
-      evidenceRevision: item.evidenceRevision,
-      expectedContentHash: current.revision,
-      disposition: item.disposition,
-      reason: item.reason,
-      choices: [
-        'Preview the exact candidate review',
-        'Approve an explicitly reviewed candidate',
-        'Defer or reject the candidate',
-      ],
-      allowedOperations: ['list_memory_candidates', 'apply_memory_candidates'],
-      reviewInbox: {
-        reviewId: current.review.reviewId,
-        candidateId: item.slot,
-        command: `threadnote closeout preview --review-id ${current.review.reviewId} --candidate-id ${item.slot} --json`,
-      },
-      instructions:
-        'Preview this exact review revision before choosing approve, defer, or reject. Approval and destructive replacement require explicit user authorization. Candidate decisions use the review inbox, not context-health memory repair.',
-    };
-  }
-  const corpus = yield* selectedMaintenance.readPacketRecords(config, item, selectedRecords);
-  const relatedMemories = ['semantic-contradiction', 'repository-recovery'].includes(item.family)
-    ? corpus.filter(record => item.subjectContentHashes?.some(subject => subject.uri === record.uri) === true)
-    : [];
-  const record =
-    corpus.find(record => (record.metadata.memoryId ?? record.uri) === item.memoryId) ?? relatedMemories[0];
-  if (record === undefined) return yield* fail('The selected memory is unavailable.');
-  const stale =
-    item.subjectContentHashes === undefined ||
-    item.subjectContentHashes.some(
-      subject => contentHash(corpus.find(record => record.uri === subject.uri)?.content ?? '') !== subject.hash,
-    );
-  if (stale)
-    return yield* fail(
-      'The selected maintenance case is stale. Use context maintain --action refresh --project <project> --case-id <case-id> --json to refresh this exact decision.',
-    );
-  if (item.family === TOPIC_MAINTENANCE_FAMILY) {
-    const assertTopicCaseCurrent = Effect.gen(function* () {
-      const latest = (yield* readState(config)).cases.find(current => current.caseId === item.caseId);
-      if (
-        latest?.evidenceRevision !== item.evidenceRevision ||
-        latest.disposition !== item.disposition ||
-        latest.reason !== item.reason
-      )
-        return yield* fail('The enrolled topic case changed. Refresh maintenance.');
-    });
-    return yield* readTopicMaintenanceCasePacket(
-      config,
-      item,
-      record,
-      state.topicCheckpoints?.[item.caseId],
-      selection,
-      assertTopicCaseCurrent,
-    );
-  }
-  if (
-    item.sourceSnapshot !== undefined &&
-    ((yield* sourceGeneration(config, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.generation ||
-      (yield* recordSourceRevision(config, record, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.revision)
-  )
-    return yield* fail(
-      'The selected maintenance case is stale. Source evidence changed; use context maintain --action refresh --project <project> --case-id <case-id> --json to check this exact decision.',
-    );
-  const assertCurrent = Effect.gen(function* () {
-    const latest = (yield* readState(config)).cases.find(current => current.caseId === item.caseId);
-    if (latest?.evidenceRevision !== item.evidenceRevision || latest.disposition !== item.disposition)
-      return yield* fail('The selected maintenance case changed. Refresh its packet.');
-    const subjects = yield* selectedMaintenance.readPacketSubjects(config, item, latest);
-    if (
-      item.subjectContentHashes?.some(
-        subject => contentHash(subjects.find(record => record.uri === subject.uri)?.content ?? '') !== subject.hash,
-      )
-    )
-      return yield* fail('The selected maintenance subject changed. Refresh its packet.');
-    for (const source of item.sourceSnapshots ?? []) {
-      const subject = subjects.find(record => record.uri === source.uri);
-      if (
-        subject === undefined ||
-        (yield* sourceGeneration(config, source.cwd)) !== source.generation ||
-        (yield* recordSourceRevision(config, subject, source.cwd)) !== source.revision
-      )
-        return yield* fail('The selected repository recovery source changed. Refresh its packet.');
-    }
-    if (
-      item.sourceSnapshot !== undefined &&
-      ((yield* sourceGeneration(config, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.generation ||
-        (yield* recordSourceRevision(config, record, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.revision)
-    )
-      return yield* fail('The selected maintenance source changed. Refresh its packet.');
-  });
-  const callerCwd = item.sourceSnapshot?.cwd ?? (yield* SystemInfo).currentDirectory();
-  return yield* buildContextMaintenancePacket(config, {item, record, corpus, callerCwd, selection}, assertCurrent);
-});
+export const readContextMaintenancePacket = Effect.fn('contextMaintenance.packet')(
+  makeContextMaintenancePacketReader(readState, fail),
+);
 
-export function migrateMaintenanceCases(
-  cases: readonly ContextMaintenanceCaseV2[],
-  records: readonly MemoryRecord[] = [],
-  hashes?: ReadonlyMap<string, string>,
-  inventoryComplete = false,
-): readonly ContextMaintenanceCaseV2[] {
-  const identities = new Map<string, ContextMaintenanceCaseV2>();
-  for (const item of cases) {
-    const subject = records.find(record => (record.metadata.memoryId ?? record.uri) === item.memoryId);
-    const citations = subject ? currentMemoryCodeCitations(subject) : [];
-    const ordinal = /^(?:anchor:)?(\d+)$/u.exec(item.slot);
-    const unchangedSubject =
-      subject !== undefined &&
-      item.subjectContentHashes?.some(
-        reference =>
-          reference.uri === subject.uri &&
-          reference.hash === (hashes?.get(subject.uri) ?? contentHash(subject.content)),
-      );
-    const citationId =
-      item.citationId ?? (unchangedSubject && ordinal !== null ? citations[Number(ordinal[1])]?.id : undefined);
-    const slot =
-      item.family === 'citation'
-        ? records.length === 0 || item.slot.startsWith('legacy-unresolved:')
-          ? item.slot
-          : /^anchor:tncc_[0-9a-f]{40}$/u.test(item.slot) &&
-              !citations.some(citation => contextHealthCitationCaseSlotV2(citation) === item.slot)
-            ? item.slot
-            : (migrateContextHealthCitationCaseSlotV2({
-                slot: item.slot,
-                citationId,
-                citations,
-              }) ?? `legacy-unresolved:${item.caseId}`)
-        : item.family === 'relation'
-          ? item.slot.replace(/^(?:depends_on|references|related_to|supersedes|evidence_for):(?=threadnote:\/\/)/u, '')
-          : item.slot === item.family && item.family !== 'citation'
-            ? 'record'
-            : item.slot;
-    // Remove non-memory findings before a current checkpoint can skip record work.
-    if (item.family === 'relation' && isAgentArtifactUri(slot)) continue;
-    if (inventoryComplete && unchangedSubject && artifactOnlySharedRelationProposal(item, subject, records)) continue;
-    const canonicalSlot =
-      item.family === 'relation' ? (resolveRelationTarget(records, slot).record?.metadata.memoryId ?? slot) : slot;
-    const next = {
-      ...item,
-      slot: canonicalSlot,
-      disposition:
-        item.family === 'review-overdue' && item.disposition === 'deferred-policy'
-          ? ('needs-decision' as const)
-          : item.disposition,
-      caseId: contextHealthCaseIdV2({...item, slot: canonicalSlot}),
-    };
-    const prior = identities.get(next.caseId);
-    identities.set(next.caseId, prior === undefined ? next : mergeMaintenanceCaseLineage(prior, next));
-  }
-  return [...identities.values()];
-}
+export {migrateMaintenanceCases} from './maintenance_policy.js';

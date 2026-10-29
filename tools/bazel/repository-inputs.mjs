@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- Input discovery runs before the declared Bazel graph exists. */
 import ts from 'typescript-compiler';
 import {posix} from 'node:path';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 /** Authored inputs include tracked and legitimate untracked files, using Git's ignore policy. */
 export const listRepositoryFiles = root => {
@@ -10,7 +13,9 @@ export const listRepositoryFiles = root => {
     stderr: 'pipe',
   });
   if (child.exitCode !== 0) throw new Error('Unable to enumerate repository source files with git ls-files');
-  return new Set(new TextDecoder().decode(child.stdout).split('\0').filter(Boolean));
+  return new Set(
+    EffectArray.filter(Effect.pipe(new TextDecoder().decode(child.stdout), EffectString.split('\0')), Boolean),
+  );
 };
 
 const callPathFunctions = new Set([
@@ -36,8 +41,14 @@ const staticText = node =>
 const normalizeCandidate = (path, value, relativeToSource) => {
   const portable = value.replaceAll('\\', '/');
   const rooted = relativeToSource && /^\.\.?\//u.test(portable) ? posix.join(posix.dirname(path), portable) : portable;
-  const normalized = posix.normalize(rooted).replace(/^\.\//u, '');
-  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../')) return undefined;
+  const normalized = Effect.pipe(posix.normalize(rooted), EffectString.replace(/^\.\//u, ''));
+  if (
+    !normalized ||
+    normalized === '.' ||
+    normalized === '..' ||
+    Effect.pipe(normalized, EffectString.startsWith('../'))
+  )
+    return undefined;
   if (posix.isAbsolute(normalized) || /^[a-zA-Z]:\//u.test(normalized)) return undefined;
   return normalized;
 };
@@ -61,9 +72,13 @@ const isProcessCwd = node =>
 
 const templateDirectory = node => {
   if (node === undefined || !ts.isTemplateExpression(node)) return undefined;
-  const prefix = node.head.text.replaceAll('\\', '/');
-  const separator = prefix.lastIndexOf('/');
-  return separator < 0 ? undefined : prefix.slice(0, separator);
+  const prefix = Effect.pipe(node.head.text, EffectString.replaceAll('\\', '/'));
+  const separator = Effect.pipe(
+    prefix,
+    EffectString.lastIndexOf('/'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  return separator < 0 ? undefined : Effect.pipe(prefix, EffectString.slice(0, separator));
 };
 
 /** Extracts repository-relative path candidates from static source literals. */
@@ -80,7 +95,10 @@ export function sourceRepositoryPathCandidates(path, content) {
   };
   collectRootDeclarations(source);
   const repositoryRoots = new Set(
-    [...rootDeclarations].filter(([, repositoryRoot]) => repositoryRoot).map(([name]) => name),
+    EffectArray.map(
+      EffectArray.filter([...rootDeclarations], ([, repositoryRoot]) => repositoryRoot),
+      ([name]) => name,
+    ),
   );
   const isRepositoryRoot = node => isProcessCwd(node) || (ts.isIdentifier(node) && repositoryRoots.has(node.text));
   const add = (value, relativeToSource = true) => {
@@ -97,14 +115,14 @@ export function sourceRepositoryPathCandidates(path, content) {
         if (directory) add(directory);
       }
       if (composePathFunctions.has(name)) {
-        const allStatic = node.arguments.every(argument => staticText(argument) !== undefined);
+        const allStatic = EffectArray.every(node.arguments, argument => staticText(argument) !== undefined);
         const rootedStatic =
           node.arguments.length > 1 &&
           isRepositoryRoot(node.arguments[0]) &&
-          node.arguments.slice(1).every(argument => staticText(argument) !== undefined);
+          EffectArray.every(node.arguments.slice(1), argument => staticText(argument) !== undefined);
         if (allStatic || rootedStatic) {
           const start = rootedStatic ? 1 : 0;
-          add(posix.join(...node.arguments.slice(start).map(argument => staticText(argument))), false);
+          add(posix.join(...EffectArray.map(node.arguments.slice(start), argument => staticText(argument))), false);
         }
       }
     }

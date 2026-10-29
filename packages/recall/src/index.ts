@@ -1,4 +1,6 @@
-import {Cause, Clock, Crypto, Effect, FileSystem, Layer, Option, Path, Predicate, Schema} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Cause, Clock, Effect, FileSystem, Layer, Option, Path, Predicate, Schema} from 'effect';
 import {
   recallCodeLinkMatchesResult,
   recallExactMatchesResult,
@@ -8,8 +10,6 @@ import {
 } from './index/result.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
-import {SEED_STATE_FILE} from '@threadnote/workspace/constants';
-import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {
@@ -24,12 +24,8 @@ import {
   type CanonicalMutationGenerationTransition,
 } from '@threadnote/store/resource/mutation_generation';
 import {SystemInfo} from '@threadnote/platform/system';
-import {parseSeedManifest} from '@threadnote/workspace/manifest';
 import {parseMemoryDocument} from '@threadnote/memory/document';
-import type {ProjectManifest} from '@threadnote/workspace/config';
 import {errorMessage} from '@threadnote/platform/errors';
-import {globToRegExp} from '@threadnote/platform/glob';
-import {expandPath} from '@threadnote/platform/paths';
 import {
   candidatePostings,
   indexTerms,
@@ -105,21 +101,22 @@ import {
   RECALL_REFRESH_SOURCE_TABLE,
   scanRecallSources,
   stageRecallRefreshAffectedTerms,
-  type CanonicalResourcePolicy,
   type IndexedRecallSource,
 } from './index/refresh.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {loadCanonicalResourcePolicy, verifyCanonicalResource} from './index/canonical_resource.js';
 
 export {recallUriMatchesScopes} from './index/scope.js';
 
-class RecallIndexOperationError extends Schema.TaggedError<RecallIndexOperationError>()('RecallIndexOperationError', {
+class RecallIndexOperationError extends Schema.TaggedError<
+  RecallIndexOperationError,
+  {readonly brand: unique symbol}
+>()('RecallIndexOperationError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
-
-interface SeedStateEntry {
-  readonly mtimeMs: number;
-  readonly size: number;
-}
 
 interface RecallIndexConfig {
   readonly account: string;
@@ -199,7 +196,6 @@ const INACTIVE_DATABASE_FILENAME = `with-inactive-v${RECALL_INDEX_DATABASE_VERSI
 const DEFAULT_QUERY_RESULT_LIMIT = 100;
 const QUERY_POSTING_POOL_MULTIPLIER = 5;
 const MINIMUM_QUERY_POSTING_POOL = 500;
-const SEED_FILE_MTIME_TOLERANCE_MILLISECONDS = 1;
 let staleGenerationCounter = 0;
 
 interface RecallIndexPointer {
@@ -207,18 +203,21 @@ interface RecallIndexPointer {
   readonly version: typeof RECALL_INDEX_POINTER_VERSION;
 }
 
-class RecallIndexCorrupt extends Schema.TaggedError<RecallIndexCorrupt>()('RecallIndexCorrupt', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
-
-class RecallIndexSchemaIncompatible extends Schema.TaggedError<RecallIndexSchemaIncompatible>()(
-  'RecallIndexSchemaIncompatible',
+class RecallIndexCorrupt extends Schema.TaggedError<RecallIndexCorrupt, {readonly brand: unique symbol}>()(
+  'RecallIndexCorrupt',
   {
     cause: Schema.optionalKey(Schema.Defect()),
     message: Schema.String,
   },
 ) {}
+
+class RecallIndexSchemaIncompatible extends Schema.TaggedError<
+  RecallIndexSchemaIncompatible,
+  {readonly brand: unique symbol}
+>()('RecallIndexSchemaIncompatible', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 interface LoadRecallIndexOptions {
   readonly allowedUriScopes?: readonly string[];
@@ -339,6 +338,13 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
         account: config.account,
         user: config.user,
       });
+      const externalLocation = {home: config.agentContextHome, account: config.account, user: config.user};
+      const allowedExternalCandidate = (candidate: RecallCandidate) =>
+        !isExternalResourceUri(candidate.uri)
+          ? Effect.succeed(true)
+          : externalResourceAccess(externalLocation, candidate.uri, undefined, candidate.contentHash).pipe(
+              Effect.map(access => access && candidate.authority === 'external' && candidate.trust === 'untrusted'),
+            );
       const accessEligibility = (policy: RecallEligibilityPolicy | undefined): RecallEligibilityPolicy => ({
         ...(policy ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
         externalResources,
@@ -347,16 +353,20 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
         'selections' in options
           ? {
               ...options,
-              selections: options.selections.map(selection => ({
+              selections: EffectArray.map(options.selections, selection => ({
                 ...selection,
                 eligibility: accessEligibility(selection.eligibility),
               })),
             }
           : {...options, eligibility: accessEligibility(options.eligibility)};
       const result = yield* 'anchors' in effectiveOptions
-        ? selectRecallCodeLinks(sql, effectiveOptions)
+        ? selectRecallCodeLinks(sql, effectiveOptions).pipe(
+            Effect.flatMap(matches => filterExternalUriMatches(matches, externalLocation, externalResources)),
+          )
         : 'memorySeeds' in effectiveOptions
-          ? selectRecallMemoryLinks(sql, effectiveOptions)
+          ? selectRecallMemoryLinks(sql, effectiveOptions).pipe(
+              Effect.flatMap(matches => filterExternalUriMatches(matches, externalLocation, externalResources)),
+            )
           : Effect.gen(function* () {
               const metadata = yield* loadRecallMetadata(sql);
               const generation = metadata.get('content_generation') ?? '';
@@ -372,16 +382,23 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
                   metadata.has('document_count') ? Number(metadata.get('document_count')) : undefined,
                 );
               return 'terms' in effectiveOptions
-                ? yield* selectRecallExactMatches(sql, effectiveOptions)
+                ? yield* selectRecallExactMatches(sql, effectiveOptions).pipe(
+                    Effect.flatMap(matches => filterExternalUriMatches(matches, externalLocation, externalResources)),
+                  )
                 : 'selections' in effectiveOptions
                   ? yield* Effect.forEach(
                       effectiveOptions.selections,
-                      selection => selectData({...selection, includeInactive: effectiveOptions.includeInactive}),
+                      selection =>
+                        selectData({...selection, includeInactive: effectiveOptions.includeInactive}).pipe(
+                          Effect.flatMap(data => filterExternalRecallData(data, allowedExternalCandidate)),
+                        ),
                       {concurrency: 1},
                     )
-                  : yield* selectData(effectiveOptions);
+                  : yield* selectData(effectiveOptions).pipe(
+                      Effect.flatMap(data => filterExternalRecallData(data, allowedExternalCandidate)),
+                    );
             });
-      const finalResult = yield* filterExternalRecallResult(result, config, externalResources);
+      const finalResult = result;
       if (prepareForActivation) {
         yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
         yield* sql.unsafe('PRAGMA journal_mode = DELETE');
@@ -744,13 +761,15 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
           ? yield* selectRecallDocumentSample(sql, options)
           : yield* sql<RecallDocumentRow>`SELECT id, uri, candidate_json FROM documents ORDER BY uri`;
     const logicalCandidates = deduplicateLogicalRecallCandidates(
-      rows.map(decodeCandidateRow).filter(candidate => recallIndexCandidateIsEligible(options.eligibility, candidate)),
+      EffectArray.filter(EffectArray.map(rows, decodeCandidateRow), candidate =>
+        recallIndexCandidateIsEligible(options.eligibility, candidate),
+      ),
     );
     const candidates = options.limit === undefined ? logicalCandidates : logicalCandidates.slice(0, options.limit);
     const identityConflicts = yield* loadIdentityConflicts(
       options.allowedUriScopes,
       options.eligibility,
-      candidates.flatMap(candidate => (candidate.memoryId ? [candidate.memoryId] : [])),
+      EffectArray.flatMap(candidates, candidate => (candidate.memoryId ? [candidate.memoryId] : [])),
     );
     return {
       candidates: RecallIndexIdentity.markRecallIdentityConflicts(candidates, identityConflicts),
@@ -761,10 +780,10 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
   }
   const selected: RecallCandidate[] = [];
   const selectedIds = new Set<number>();
-  const requiredUris = [...new Set((options.requiredUris ?? []).map(stripRecallAnchor))];
+  const requiredUris = [...new Set(EffectArray.map(options.requiredUris ?? [], stripRecallAnchor))];
   if (requiredUris.length > 0) {
     const requiredRows = yield* selectRecallDocumentRows(sql, 'uri', requiredUris);
-    const rowByUri = new Map(requiredRows.map(row => [row.uri, row]));
+    const rowByUri = new Map(EffectArray.map(requiredRows, row => [row.uri, row]));
     for (const uri of requiredUris) {
       const row = rowByUri.get(uri);
       if (!row || selectedIds.has(row.id) || !recallUriMatchesScopes(row.uri, options.allowedUriScopes)) continue;
@@ -844,17 +863,19 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
     );
     scores.set(posting.document_id, (scores.get(posting.document_id) ?? 0) + score);
   }
-  const uriByDocumentId = new Map(postingRows.map(posting => [posting.document_id, posting.uri]));
-  const rankedIds = [...scores]
-    .sort(
+  const uriByDocumentId = new Map(EffectArray.map(postingRows, posting => [posting.document_id, posting.uri]));
+  const rankedIds = EffectArray.map(
+    [...scores].sort(
       ([leftId, leftScore], [rightId, rightScore]) =>
-        rightScore - leftScore || (uriByDocumentId.get(leftId) ?? '').localeCompare(uriByDocumentId.get(rightId) ?? ''),
-    )
-    .map(([documentId]) => documentId);
+        rightScore - leftScore ||
+        Effect2.pipe(uriByDocumentId.get(leftId) ?? '', EffectString.localeCompare(uriByDocumentId.get(rightId) ?? '')),
+    ),
+    ([documentId]) => documentId,
+  );
   const candidateDecodeLimit = boundedRecallPhysicalCandidateLimit(resultLimit);
   const boundedRankedIds = rankedIds.slice(0, candidateDecodeLimit);
   const rankedRows = yield* selectRecallDocumentRows(sql, 'id', boundedRankedIds);
-  const rowById = new Map(rankedRows.map(row => [row.id, row]));
+  const rowById = new Map(EffectArray.map(rankedRows, row => [row.id, row]));
   for (const documentId of boundedRankedIds) {
     const row = rowById.get(documentId);
     if (row && !selectedIds.has(documentId)) {
@@ -867,19 +888,35 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
   }
   const deduplicated = deduplicateLogicalRecallCandidates(selected);
   const requiredUriSet = new Set(requiredUris);
-  const requiredCandidates = deduplicated.filter(candidate =>
-    [candidate.uri, ...(candidate.equivalentUris ?? [])].some(uri => requiredUriSet.has(stripRecallAnchor(uri))),
+  const requiredCandidates = EffectArray.filter(
+    deduplicated,
+    (candidate, __effectArrayIndex) =>
+      __effectArrayIndex in deduplicated &&
+      EffectArray.some([candidate.uri, ...(candidate.equivalentUris ?? [])], uri =>
+        requiredUriSet.has(stripRecallAnchor(uri)),
+      ),
   );
-  const rankedCandidates = deduplicated
-    .filter(candidate => !requiredCandidates.includes(candidate))
-    .slice(0, resultLimit);
+  const rankedCandidates = EffectArray.filter(deduplicated, candidate => !requiredCandidates.includes(candidate)).slice(
+    0,
+    resultLimit,
+  );
   const candidates = [...requiredCandidates, ...rankedCandidates];
-  const recentCandidates = deduplicateLogicalRecallCandidates(recentRows.map(decodeCandidateRow)).filter(
-    candidate =>
-      recallUriMatchesScopes(candidate.uri, options.allowedUriScopes) &&
-      recallIndexCandidateIsEligible(options.eligibility, candidate) &&
-      recallProjectMatches(options.project, candidate.fields?.project) &&
-      recallWorkspaceScopeMatches(options.workspaceScope, candidate.fields?.workspaceScope, options.workspaceScopeMode),
+  const recentCandidates = EffectArrayPipe(
+    deduplicateLogicalRecallCandidates(EffectArray.map(recentRows, decodeCandidateRow)),
+    __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (candidate, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues &&
+          recallUriMatchesScopes(candidate.uri, options.allowedUriScopes) &&
+          recallIndexCandidateIsEligible(options.eligibility, candidate) &&
+          recallProjectMatches(options.project, candidate.fields?.project) &&
+          recallWorkspaceScopeMatches(
+            options.workspaceScope,
+            candidate.fields?.workspaceScope,
+            options.workspaceScopeMode,
+          ),
+      ),
   );
   const queryExhaustive = recallQuerySelectionIsExhaustive({
     candidateDecodeLimit,
@@ -887,7 +924,7 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
     documentFrequency: queryCorpusStatistics.documentFrequency,
     indexedQueryTerms,
     postingPoolLimit,
-    postingTerms: postingRows.map(posting => posting.term),
+    postingTerms: EffectArray.map(postingRows, posting => posting.term),
     queryTerms,
     rankedDocumentCount: rankedIds.length,
     resultLimit,
@@ -895,7 +932,9 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
   const identityConflicts = yield* loadIdentityConflicts(
     options.allowedUriScopes,
     options.eligibility,
-    [...candidates, ...recentCandidates].flatMap(candidate => (candidate.memoryId ? [candidate.memoryId] : [])),
+    EffectArray.flatMap([...candidates, ...recentCandidates], candidate =>
+      candidate.memoryId ? [candidate.memoryId] : [],
+    ),
   );
   return {
     candidates: RecallIndexIdentity.markRecallIdentityConflicts(candidates, identityConflicts),
@@ -912,13 +951,16 @@ const selectRecallExactMatches = Effect.fn('recall.selectExactMatches')(function
 ) {
   const terms = [
     ...new Map(
-      options.terms
-        .map(term => term.trim())
-        .filter(Boolean)
-        .map(term => [term.toLocaleLowerCase(), term] as const),
+      EffectArray.map(
+        EffectArray.filter(
+          EffectArray.map(options.terms, term => Effect2.pipe(term, EffectString.trim)),
+          Boolean,
+        ),
+        term => [Effect2.pipe(term, EffectString.toLocaleLowerCase()), term] as const,
+      ),
     ).values(),
   ];
-  const scopes = [...new Set(options.uriScopes.map(stripRecallAnchor))];
+  const scopes = [...new Set(EffectArray.map(options.uriScopes, stripRecallAnchor))];
   const limitPerTerm = Math.max(0, Math.floor(options.limitPerTerm ?? 25));
   if (terms.length === 0 || scopes.length === 0 || limitPerTerm === 0) {
     return [] satisfies readonly RecallExactMatch[];
@@ -930,7 +972,7 @@ const selectRecallExactMatches = Effect.fn('recall.selectExactMatches')(function
       recallEligibilityPredicate('d', options.eligibility),
     );
     for (const term of terms) {
-      const phrase = `"${normalizeRecallSearchText(term).replaceAll('"', '""')}"`;
+      const phrase = `"${Effect2.pipe(normalizeRecallSearchText(term), EffectString.replaceAll('"', '""'))}"`;
       const rows = yield* sql.unsafe<{readonly uri: string}>(
         `SELECT d.uri
          FROM exact_search
@@ -948,12 +990,13 @@ const selectRecallExactMatches = Effect.fn('recall.selectExactMatches')(function
       }
     }
   }
-  return [...matchedTermsByUri]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([uri, matched]) => ({
-      terms: terms.filter(term => matched.has(term)),
+  return EffectArray.map(
+    [...matchedTermsByUri].sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right))),
+    ([uri, matched]) => ({
+      terms: EffectArray.filter(terms, term => matched.has(term)),
       uri,
-    })) satisfies readonly RecallExactMatch[];
+    }),
+  ) satisfies readonly RecallExactMatch[];
 });
 
 export function recallIndexDatabaseFilename(includeInactive: boolean): string {
@@ -969,7 +1012,10 @@ function recallIndexRoot(path: Path.Path, home: string): string {
 }
 
 function recallIndexPointerPath(path: Path.Path, home: string, includeInactive: boolean): string {
-  const databaseName = recallIndexDatabaseFilename(includeInactive).replace(/\.sqlite$/, '');
+  const databaseName = Effect2.pipe(
+    recallIndexDatabaseFilename(includeInactive),
+    EffectString.replace(/\.sqlite$/, ''),
+  );
   return path.join(recallIndexRoot(path, home), `${databaseName}.pointer.json`);
 }
 
@@ -994,17 +1040,23 @@ const resolveActiveRecallDatabasePath = Effect.fn('recall.resolveActiveDatabaseP
   }
   if (!Predicate.isObject(parsed.value)) return fixedPath;
   const pointer = parsed.value;
-  const relative = typeof pointer.database === 'string' ? pointer.database.replaceAll('\\', '/') : undefined;
+  const relative =
+    typeof pointer.database === 'string'
+      ? Effect2.pipe(pointer.database, EffectString.replaceAll('\\', '/'))
+      : undefined;
   if (
     pointer.version !== RECALL_INDEX_POINTER_VERSION ||
     !relative ||
-    !relative.startsWith('generations/') ||
-    relative.split('/').some(segment => segment === '' || segment === '.' || segment === '..') ||
-    !relative.endsWith('.sqlite')
+    !Effect2.pipe(relative, EffectString.startsWith('generations/')) ||
+    EffectArray.some(
+      Effect2.pipe(relative, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    ) ||
+    !Effect2.pipe(relative, EffectString.endsWith('.sqlite'))
   ) {
     return fixedPath;
   }
-  const databasePath = path.join(recallIndexRoot(path, home), ...relative.split('/'));
+  const databasePath = path.join(recallIndexRoot(path, home), ...Effect2.pipe(relative, EffectString.split('/')));
   if (!(yield* fs.exists(databasePath))) {
     return fixedPath;
   }
@@ -1022,7 +1074,7 @@ const writeActiveRecallDatabasePointer = Effect.fn('recall.writeActiveDatabasePo
   const pointerPath = recallIndexPointerPath(path, home, includeInactive);
   const temporaryPath = `${pointerPath}.${system.processId}.${nextRecallGenerationCounter()}.tmp`;
   const pointer: RecallIndexPointer = {
-    database: database.replaceAll('\\', '/'),
+    database: Effect2.pipe(database, EffectString.replaceAll('\\', '/')),
     version: RECALL_INDEX_POINTER_VERSION,
   };
   yield* fs.writeFileString(temporaryPath, `${JSON.stringify(pointer, undefined, 2)}\n`, {mode: 0o600});
@@ -1192,7 +1244,7 @@ const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function
   for (const table of ['documents', 'postings', 'term_statistics', 'code_links', 'memory_links'] as const) {
     for (const operation of ['INSERT', 'UPDATE', 'DELETE'] as const) {
       yield* sql.unsafe(`
-        CREATE TRIGGER IF NOT EXISTS ${table}_integrity_${operation.toLowerCase()}
+        CREATE TRIGGER IF NOT EXISTS ${table}_integrity_${Effect2.pipe(operation, EffectString.toLowerCase)}
         AFTER ${operation} ON ${table}
         BEGIN
           UPDATE metadata
@@ -1318,7 +1370,9 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
     config.agentContextHome,
     config.account,
   );
-  const canonicalResourcePolicy = yield* loadCanonicalResourcePolicy(config);
+  const canonicalResourcePolicy = yield* loadCanonicalResourcePolicy(config, input =>
+    RecallIndexOperationError.make(input),
+  );
   const previousMetadata = yield* loadRecallMetadata(sql);
   const markerChanged = previousMetadata.get('stale_generation') !== (staleGeneration ?? '');
   const canonicalMutationGenerationChanged =
@@ -1579,7 +1633,10 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
         ['validated_at', String(Math.max(now, previousValidatedAt + 1))],
       ] as const;
       yield* sql.unsafe(
-        `INSERT INTO metadata (key, value) VALUES ${metadataEntries.map(() => '(?, ?)').join(', ')}
+        `INSERT INTO metadata (key, value) VALUES ${EffectArray.join(
+          EffectArray.map(metadataEntries, () => '(?, ?)'),
+          ', ',
+        )}
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
         metadataEntries.flat(),
       );
@@ -1601,7 +1658,7 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
 
 function loadRecallMetadata(sql: SqlClient.SqlClient) {
   return sql<RecallMetadataRow>`SELECT key, value FROM metadata`.pipe(
-    Effect.map(rows => new Map(rows.map(row => [row.key, row.value]))),
+    Effect.map(rows => new Map(EffectArray.map(rows, row => [row.key, row.value]))),
   );
 }
 
@@ -1674,7 +1731,9 @@ const loadRecallCorpusStatistics = Effect.fn('recall.loadCorpusStatistics')(func
   return {
     averageDocumentLength: documentCount === 0 ? 1 : totalDocumentLength / documentCount,
     documentCount,
-    documentFrequency: Object.assign(Object.fromEntries(rows.map(row => [row.term, row.document_frequency]))),
+    documentFrequency: Object.assign(
+      EffectRecord.fromEntries(EffectArray.map(rows, row => [row.term, row.document_frequency])),
+    ),
     totalDocumentLength,
   } satisfies RecallCorpusStatistics;
 });
@@ -1762,221 +1821,32 @@ function chunkValues<Value>(values: readonly Value[], size: number): readonly (r
   return chunks;
 }
 
-function loadCanonicalResourcePolicy(
-  config: RecallIndexConfig,
-): Effect.Effect<CanonicalResourcePolicy, never, Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo> {
-  const manifestPath = config.manifestPath;
-  if (!manifestPath) {
-    return Effect.succeed({entryKeyByUri: new Map(), sourcePathByUri: new Map()});
-  }
-  return Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const pathService = yield* Path.Path;
-    const manifestRaw = yield* fs.readFileString(manifestPath);
-    const manifest = yield* Effect.try({
-      try: () => parseSeedManifest(manifestRaw, manifestPath),
-      catch: cause =>
-        RecallIndexOperationError.make({cause, message: cause instanceof Error ? cause.message : String(cause)}),
-    });
-    const seedStateRaw = yield* fs.readFileString(pathService.join(config.agentContextHome, SEED_STATE_FILE));
-    const seedState = yield* Effect.try({
-      try: () => parseSeedState(seedStateRaw),
-      catch: cause =>
-        RecallIndexOperationError.make({cause, message: cause instanceof Error ? cause.message : String(cause)}),
-    });
-    const entryKeyByUri = new Map<string, string>();
-    const sourcePathByUri = new Map<string, string>();
-    for (const [uri, recorded] of [...seedState].sort(([left], [right]) => left.localeCompare(right))) {
-      const source = yield* resolveSeededResourceSource(fs, manifest.projects, uri, recorded);
-      if (!source) {
-        continue;
-      }
-      const match = seededResourceMatch(manifest.projects, uri);
-      if (!match) {
-        continue;
-      }
-      sourcePathByUri.set(uri, source);
-      entryKeyByUri.set(
-        uri,
-        yield* sha256Hex(
-          JSON.stringify({
-            project: {
-              path: yield* expandPath(match.project.path),
-              seed: [...match.project.seed],
-              uri: normalizedResourceRoot(match.project.uri),
-            },
-            recorded,
-            source,
-            uri,
-          }),
-        ),
-      );
-    }
-    return {entryKeyByUri, sourcePathByUri};
-  }).pipe(
-    Effect.orElseSucceed(() => ({
-      entryKeyByUri: new Map<string, string>(),
-      sourcePathByUri: new Map<string, string>(),
-    })),
-  );
-}
-
-function parseSeedState(raw: string): ReadonlyMap<string, SeedStateEntry> {
-  const value: unknown = JSON.parse(raw);
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    !('version' in value) ||
-    value.version !== 1 ||
-    !('files' in value) ||
-    typeof value.files !== 'object' ||
-    value.files === null
-  ) {
-    return new Map();
-  }
-  const entries: Array<[string, SeedStateEntry]> = [];
-  for (const [uri, entry] of Object.entries(value.files)) {
-    if (
-      typeof entry === 'object' &&
-      entry !== null &&
-      'mtimeMs' in entry &&
-      typeof entry.mtimeMs === 'number' &&
-      Number.isFinite(entry.mtimeMs) &&
-      'size' in entry &&
-      typeof entry.size === 'number' &&
-      Number.isFinite(entry.size)
-    ) {
-      entries.push([uri, {mtimeMs: entry.mtimeMs, size: entry.size}]);
-    }
-  }
-  return new Map(entries);
-}
-
-function resolveSeededResourceSource(
-  fs: FileSystem.FileSystem,
-  projects: readonly ProjectManifest[],
-  uri: string,
-  recorded: SeedStateEntry,
-): Effect.Effect<string | undefined, never, Path.Path | SystemInfo> {
-  return Effect.gen(function* () {
-    const pathService = yield* Path.Path;
-    const match = seededResourceMatch(projects, uri);
-    if (!match) {
-      return undefined;
-    }
-    const projectRoot = yield* expandPath(match.project.path);
-    const sourcePath = pathService.join(projectRoot, ...match.relativePath.split('/'));
-    const relativeSourcePath = pathService.relative(projectRoot, sourcePath);
-    if (
-      relativeSourcePath === '' ||
-      relativeSourcePath.startsWith(`..${pathService.sep}`) ||
-      relativeSourcePath === '..' ||
-      pathService.isAbsolute(relativeSourcePath)
-    ) {
-      return undefined;
-    }
-    const [realProjectRoot, realSourcePath, info] = yield* Effect.all([
-      fs.realPath(projectRoot),
-      fs.realPath(sourcePath),
-      fs.stat(sourcePath),
-    ]);
-    const realRelativePath = pathService.relative(realProjectRoot, realSourcePath);
-    if (
-      realRelativePath.startsWith(`..${pathService.sep}`) ||
-      realRelativePath === '..' ||
-      pathService.isAbsolute(realRelativePath) ||
-      info.type !== 'File' ||
-      Number(info.size) !== recorded.size
-    ) {
-      return undefined;
-    }
-    const modifiedAt = Option.getOrUndefined(info.mtime)?.getTime();
-    if (modifiedAt === undefined || Math.abs(modifiedAt - recorded.mtimeMs) > SEED_FILE_MTIME_TOLERANCE_MILLISECONDS) {
-      return undefined;
-    }
-    return sourcePath;
-  }).pipe(Effect.orElseSucceed(() => undefined));
-}
-
-function seededResourceMatch(
-  projects: readonly ProjectManifest[],
-  uri: string,
-): {readonly project: ProjectManifest; readonly relativePath: string} | undefined {
-  for (const project of projects) {
-    const root = normalizedResourceRoot(project.uri);
-    if (!uri.startsWith(`${root}/`)) {
-      continue;
-    }
-    const relativePath = uri.slice(root.length + 1).replaceAll('\\', '/');
-    if (
-      relativePath.length === 0 ||
-      relativePath.startsWith('/') ||
-      relativePath.split('/').some(segment => segment === '' || segment === '.' || segment === '..') ||
-      !project.seed.some(pattern => globToRegExp(pattern.replaceAll('\\', '/')).test(relativePath))
-    ) {
-      continue;
-    }
-    return {project, relativePath};
-  }
-  return undefined;
-}
-
-function normalizedResourceRoot(uri: string): string {
-  return stripRecallAnchor(uri).replace(/\/+$/, '');
-}
-
-function verifyCanonicalResource(
-  fs: FileSystem.FileSystem,
-  uri: string,
-  indexedContent: string,
-  policy: CanonicalResourcePolicy,
-): Effect.Effect<boolean, never> {
-  const sourcePath = policy.sourcePathByUri.get(uri);
-  if (!sourcePath) {
-    return Effect.succeed(false);
-  }
-  return fs.readFileString(sourcePath).pipe(
-    Effect.map(sourceContent => sourceContent === indexedContent),
-    Effect.orElseSucceed(() => false),
-  );
-}
-
-function filterExternalRecallResult<A>(
-  result: A,
-  config: RecallIndexConfig,
+function filterExternalUriMatches<A>(
+  matches: readonly A[],
+  location: {readonly home: string; readonly account: string; readonly user: string},
   externalResources: Readonly<Record<string, string>>,
-): Effect.Effect<A, never, FileSystem.FileSystem | Path.Path> {
-  const location = {home: config.agentContextHome, account: config.account, user: config.user};
-  const allowed = (candidate: RecallCandidate) =>
-    !isExternalResourceUri(candidate.uri)
-      ? Effect.succeed(true)
-      : externalResourceAccess(location, candidate.uri, undefined, candidate.contentHash).pipe(
-          Effect.map(access => access && candidate.authority === 'external' && candidate.trust === 'untrusted'),
-        );
-  const filterData = (data: RecallIndexData) =>
-    Effect.gen(function* () {
-      const candidates = yield* Effect.filter(data.candidates, allowed);
-      const recentCandidates =
-        data.recentCandidates === undefined ? undefined : yield* Effect.filter(data.recentCandidates, allowed);
-      return {...data, candidates, ...(recentCandidates === undefined ? {} : {recentCandidates})};
-    });
-  if (Array.isArray(result))
-    return Effect.forEach(result, value => {
-      if (typeof value === 'object' && value !== null && 'candidates' in value)
-        return filterData(value as RecallIndexData);
-      if (
-        typeof value === 'object' &&
-        value !== null &&
-        'uri' in value &&
-        typeof value.uri === 'string' &&
-        isExternalResourceUri(value.uri)
-      )
-        return externalResourceAccess(location, value.uri, undefined, externalResources[value.uri]).pipe(
+): Effect.Effect<readonly A[], never, FileSystem.FileSystem | Path.Path> {
+  return Effect.forEach(matches, value => {
+    const uri =
+      typeof value === 'object' && value !== null && 'uri' in value && typeof value.uri === 'string'
+        ? value.uri
+        : undefined;
+    return uri !== undefined && isExternalResourceUri(uri)
+      ? externalResourceAccess(location, uri, undefined, externalResources[uri]).pipe(
           Effect.map(access => (access ? value : undefined)),
-        );
-      return Effect.succeed(value);
-    }).pipe(Effect.map(value => value.filter(item => item !== undefined) as A));
-  if (typeof result === 'object' && result !== null && 'candidates' in result)
-    return filterData(result as unknown as RecallIndexData).pipe(Effect.map(value => value as A));
-  return Effect.succeed(result);
+        )
+      : Effect.succeed(value);
+  }).pipe(Effect.map(values => EffectArray.filter(values, (value): value is A => value !== undefined)));
+}
+
+function filterExternalRecallData(
+  data: RecallIndexData,
+  allowed: (candidate: RecallCandidate) => Effect.Effect<boolean, never, FileSystem.FileSystem | Path.Path>,
+): Effect.Effect<RecallIndexData, never, FileSystem.FileSystem | Path.Path> {
+  return Effect.gen(function* () {
+    const candidates = yield* Effect.filter(data.candidates, allowed);
+    const recentCandidates =
+      data.recentCandidates === undefined ? undefined : yield* Effect.filter(data.recentCandidates, allowed);
+    return {...data, candidates, ...(recentCandidates === undefined ? {} : {recentCandidates})};
+  });
 }

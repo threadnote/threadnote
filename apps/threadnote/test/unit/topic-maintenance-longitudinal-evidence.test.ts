@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
@@ -5,6 +6,8 @@ import {
   projectTopicStudyPreflightAblationsV1,
   selectTopicStudyCurrentCaseV1,
 } from '../../../../scripts/topic-maintenance-longitudinal-native-adapter.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const declared = {
   hash: 'source-hash',
@@ -50,7 +53,7 @@ describe('longitudinal source evidence diagnostics', () => {
       {path: 'config.ts', selection: 'not-returned-by-public-brief', sources: []},
     ]);
     const coverage = diagnoseTopicStudySourceCoverageV1(projection, declared);
-    expect(coverage.refs.map(ref => ref.public)).toEqual(['included', 'omitted']);
+    expect(EffectArray.map(coverage.refs, ref => ref.public)).toEqual(['included', 'omitted']);
     expect(coverage.counts).toEqual({included: 1, omitted: 1, truncated: 0, unknown: 0});
     expect(coverage.scopeFreshness).toBe('fresh');
     expect(coverage.evidenceState).toBe('partial');
@@ -58,7 +61,7 @@ describe('longitudinal source evidence diagnostics', () => {
 
     const staleProjection = {...JSON.parse(projection), scopeFreshness: 'stale'};
     const stale = diagnoseTopicStudySourceCoverageV1(JSON.stringify(staleProjection), declared);
-    expect(stale.refs.map(ref => ref.public)).toEqual(['included', 'omitted']);
+    expect(EffectArray.map(stale.refs, ref => ref.public)).toEqual(['included', 'omitted']);
     expect(stale.scopeFreshness).toBe('stale');
     expect(stale.evidenceState).toBe('partial');
     expect(stale.fullDeclaredSourceEligible).toBe(false);
@@ -88,7 +91,7 @@ describe('longitudinal source evidence diagnostics', () => {
       ]),
       declared,
     );
-    expect(coverage.refs.map(ref => ref.public)).toEqual(['truncated', 'included']);
+    expect(EffectArray.map(coverage.refs, ref => ref.public)).toEqual(['truncated', 'included']);
   });
 
   it('does not offer full-source input when declared sources are ineligible', () => {
@@ -100,7 +103,10 @@ describe('longitudinal source evidence diagnostics', () => {
     expect(
       projectTopicStudyPreflightAblationsV1(
         'topic',
-        {...declared, files: [{...declared.files[0], content: 'é'.repeat(5000)}, declared.files[1]]},
+        {
+          ...declared,
+          files: [{...declared.files[0], content: Effect.pipe('é', EffectString.repeat(5000))}, declared.files[1]],
+        },
         'fresh',
       ).fullDeclaredSource.answerInput,
     ).toBeNull();

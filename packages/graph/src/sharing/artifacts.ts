@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {canonicalJson} from '../checkpoint/canonical_json.js';
@@ -5,6 +6,9 @@ import {graphSharingFailure} from './errors.js';
 import {parseSha256Digest, sha256Digest, SHA256_HEX, type Sha256Digest} from './digest.js';
 import {validateGraphShareFrontierDeltaChain} from './delta.js';
 import {isGraphShareGitObjectId} from './git.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function asBufferSource(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return new Uint8Array(bytes);
@@ -167,14 +171,14 @@ export function parseGraphShareFrontierManifest(value: unknown): GraphShareFront
   }
   const generation = requiredGeneration(value.generation);
   const previousManifestDigest = parsePreviousManifestDigest(value.previousManifestDigest, generation);
-  if (!Array.isArray(value.deltas) || value.deltas.length > 64) {
+  if (!EffectArray.isArray(value.deltas) || value.deltas.length > 64) {
     throw graphSharingFailure('Frontier delta list is invalid.');
   }
   const checkpoint = parseCheckpoint(value.checkpoint);
   const manifest: GraphShareFrontierManifestV1 = {
     branch: requiredText(value.branch, 'branch'),
     checkpoint,
-    deltas: value.deltas.map(parseDelta),
+    deltas: EffectArray.map(value.deltas, parseDelta),
     generation,
     graphAbi: requiredText(value.graphAbi, 'graphAbi'),
     graphContentId: requiredText(value.graphContentId, 'graphContentId'),
@@ -188,7 +192,7 @@ export function parseGraphShareFrontierManifest(value: unknown): GraphShareFront
     sourceCommit: requiredGitObjectId(value.sourceCommit, 'sourceCommit'),
   };
   validateGraphShareFrontierDeltaChain(manifest);
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(Object.keys(manifest).sort())) {
+  if (JSON.stringify(EffectRecord.keys(value).sort()) !== JSON.stringify(EffectRecord.keys(manifest).sort())) {
     throw graphSharingFailure('Frontier manifest contains unsupported fields.');
   }
   return manifest;
@@ -207,7 +211,7 @@ export function parseGraphShareSignatureEnvelope(value: unknown): GraphShareSign
   if (value.algorithm !== GRAPH_SHARE_SIGNATURE_ALGORITHM || value.schemaVersion !== 1) {
     throw graphSharingFailure('Frontier signature envelope schema is invalid.');
   }
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(Object.keys(envelope).sort())) {
+  if (JSON.stringify(EffectRecord.keys(value).sort()) !== JSON.stringify(EffectRecord.keys(envelope).sort())) {
     throw graphSharingFailure('Frontier signature envelope contains unsupported fields.');
   }
   return envelope;
@@ -246,6 +250,7 @@ function parseCheckpoint(value: unknown): GraphShareFrontierCheckpointV1 {
       ? {}
       : {metadataDigest: parseSha256Digest(requiredText(value.metadataDigest, 'checkpoint.metadataDigest'))}),
   };
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
   if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(Object.keys(checkpoint).sort())) {
     throw graphSharingFailure('Frontier checkpoint descriptor contains unsupported fields.');
   }
@@ -263,6 +268,7 @@ function parseDelta(value: unknown): GraphShareFrontierDeltaV1 {
       ? {}
       : {metadataDigest: parseSha256Digest(requiredText(value.metadataDigest, 'delta.metadataDigest'))}),
   };
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
   if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(Object.keys(delta).sort())) {
     throw graphSharingFailure('Frontier delta descriptor contains unsupported fields.');
   }
@@ -307,23 +313,26 @@ function importPrivateKey(hex: string) {
 }
 
 function bytesToHex(bytes: Uint8Array): string {
-  return [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  return EffectArray.join(
+    EffectArray.map([...bytes], byte => Effect2.pipe(byte.toString(16), EffectString.padStart(2, '0'))),
+    '',
+  );
 }
 
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
   for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+    bytes[index] = Number.parseInt(Effect2.pipe(hex, EffectString.slice(index * 2, index * 2 + 2)), 16);
   }
   return bytes;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function requiredText(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 512) {
+  if (typeof value !== 'string' || Effect2.pipe(value, EffectString.trim).length === 0 || value.length > 512) {
     throw graphSharingFailure(`Frontier field ${label} is invalid.`);
   }
   return value;

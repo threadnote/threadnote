@@ -1,6 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {join} from '@threadnote/testing/node-path';
 import {Effect, Layer, Option, Result} from 'effect';
 import {describe, expect, it} from 'vitest';
@@ -24,8 +25,17 @@ import {
 } from '@threadnote/recall/vector-index';
 import {mkdir, mkdtemp, rm, stat, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
+
+const manifest = Option.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
 
 const modelStoreLayer = Layer.succeed(
   LocalModelStore,
@@ -71,7 +81,9 @@ describe('vector index generations', () => {
   it('activates a complete fake-embedding generation and supports semantic query lookup', async () => {
     const home = await mkdtemp('threadnote-vector-index-');
     try {
-      const runtimeLayer = fakeRuntimeLayer(input => (input.toLowerCase().includes('alpha') ? 0 : 1));
+      const runtimeLayer = fakeRuntimeLayer(input =>
+        Effect2.pipe(input, EffectString.toLowerCase, EffectString.includes('alpha')) ? 0 : 1,
+      );
       const effect = Effect.gen(function* () {
         const catalog = yield* LocalModelCatalog;
         yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
@@ -100,7 +112,13 @@ describe('vector index generations', () => {
       expect(scores?.get('threadnote://user/me/memories/shared/team-b/durable/projects/demo/a.md')).toBeCloseTo(1);
       expect(scores?.has('threadnote://resources/repos/b.md')).toBe(false);
       expect(
-        [...(scores?.keys() ?? [])].some(uri => uri.includes('/shared/team-') && uri.endsWith('/irrelevant.md')),
+        EffectArray.some(
+          [...(scores?.keys() ?? [])],
+          __effectArrayValue =>
+            !!(uri =>
+              Effect2.pipe(uri, EffectString.includes('/shared/team-')) &&
+              Effect2.pipe(uri, EffectString.endsWith('/irrelevant.md')))(__effectArrayValue),
+        ),
       ).toBe(false);
     } finally {
       await rm(home, {force: true, recursive: true});
@@ -123,7 +141,7 @@ describe('vector index generations', () => {
           {text: '# Alpha\n\nSQLite vector rows.', uri: 'threadnote://resources/repos/a.md'},
           {text: '# Beta\n\nPaged exact search.', uri: 'threadnote://resources/repos/b.md'},
         ]).pipe(
-          provideTestLayer(fakeRuntimeLayer(input => (input.includes('Alpha') ? 0 : 1))),
+          provideTestLayer(fakeRuntimeLayer(input => (Effect2.pipe(input, EffectString.includes('Alpha')) ? 0 : 1))),
           provideTestLayer(modelStoreLayer),
         ),
       );
@@ -283,7 +301,9 @@ describe('vector index generations', () => {
       {text: '# Beta\n\nRepair this vector row.', uri: 'threadnote://resources/repos/b.md'},
     ];
     try {
-      const runtimeLayer = fakeRuntimeLayer(input => (input.toLowerCase().includes('alpha') ? 0 : 1));
+      const runtimeLayer = fakeRuntimeLayer(input =>
+        Effect2.pipe(input, EffectString.toLowerCase, EffectString.includes('alpha')) ? 0 : 1,
+      );
       await runEffect(
         Effect.gen(function* () {
           const catalog = yield* LocalModelCatalog;
@@ -466,7 +486,7 @@ describe('vector index generations', () => {
     try {
       const embeddedInputs: string[][] = [];
       const runtimeLayer = fakeRuntimeLayer(
-        input => (input.toLowerCase().includes('alpha') ? 0 : 1),
+        input => (Effect2.pipe(input, EffectString.toLowerCase, EffectString.includes('alpha')) ? 0 : 1),
         inputs => embeddedInputs.push([...inputs]),
       );
       const candidates = [
@@ -484,14 +504,14 @@ describe('vector index generations', () => {
       const first = await rebuild(candidates);
       const unchanged = await rebuild(candidates);
       const beforeChange = new Database(vectorDatabasePath(home), {readonly: true});
-      const stableVectorId = (
+      const stableVectorId = requiredRow(
         beforeChange
-          .query(
+          .query<{readonly vector_id: number}, SQLQueryBindings[]>(
             `SELECT vector_id
              FROM vector_chunks
              WHERE uri = 'threadnote://resources/repos/a.md'`,
           )
-          .get() as {readonly vector_id: number}
+          .get(),
       ).vector_id;
       beforeChange.close();
       const changed = await rebuild([
@@ -505,7 +525,7 @@ describe('vector index generations', () => {
       expect(unchanged.reusedChunkCount).toBe(2);
       expect(changed.embeddedChunkCount).toBe(1);
       expect(changed.reusedChunkCount).toBe(1);
-      expect(embeddedInputs.map(inputs => inputs.length)).toEqual([2, 1]);
+      expect(EffectArray.map(embeddedInputs, inputs => inputs.length)).toEqual([2, 1]);
       const database = new Database(vectorDatabasePath(home), {readonly: true});
       try {
         expect(database.query('SELECT COUNT(*) AS count FROM vector_values').get()).toEqual({count: 2});
@@ -533,7 +553,7 @@ describe('vector index generations', () => {
     try {
       const embeddedInputs: string[][] = [];
       const runtimeLayer = fakeRuntimeLayer(
-        input => (input.toLowerCase().includes('alpha') ? 0 : 1),
+        input => (Effect2.pipe(input, EffectString.toLowerCase, EffectString.includes('alpha')) ? 0 : 1),
         inputs => embeddedInputs.push([...inputs]),
       );
       const initial = [
@@ -569,7 +589,7 @@ describe('vector index generations', () => {
       expect(metadataOnlyRefreshIsCurrent).toBe(true);
       expect(refreshed.embeddedChunkCount).toBe(1);
       expect(refreshed.reusedChunkCount).toBe(1);
-      expect(embeddedInputs.map(inputs => inputs.length)).toEqual([2, 1]);
+      expect(EffectArray.map(embeddedInputs, inputs => inputs.length)).toEqual([2, 1]);
       expect(status.ready).toBe(true);
     } finally {
       await rm(home, {force: true, recursive: true});
@@ -596,7 +616,8 @@ describe('vector index generations', () => {
             () =>
               new Promise<readonly (readonly number[])[]>(resolve => {
                 reportEmbeddingStarted();
-                releaseEmbedding = () => resolve(inputs.map(() => unitVector(requested.dimensions ?? 0, 0)));
+                releaseEmbedding = () =>
+                  resolve(EffectArray.map(inputs, () => unitVector(requested.dimensions ?? 0, 0)));
               }),
           );
         },
@@ -661,7 +682,7 @@ describe('vector index generations', () => {
         diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
         embedMany: ({inputs, manifest: requested}) => {
           embeddingCalls += 1;
-          const vectors = inputs.map(() => unitVector(requested.dimensions ?? 0, 0));
+          const vectors = EffectArray.map(inputs, () => unitVector(requested.dimensions ?? 0, 0));
           if (embeddingCalls !== 1) return Effect.succeed(vectors);
           return Effect.promise(
             () =>
@@ -790,8 +811,11 @@ describe('vector index generations', () => {
       LocalModelRuntime.of({
         diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
         embedMany: ({inputs, manifest: requested}) => {
-          const vectors = inputs.map(() => unitVector(requested.dimensions ?? 0, 0));
-          if (!delayQuery || !inputs.some(input => input.includes('generation-race-query'))) {
+          const vectors = EffectArray.map(inputs, () => unitVector(requested.dimensions ?? 0, 0));
+          if (
+            !delayQuery ||
+            !EffectArray.some(inputs, input => Effect2.pipe(input, EffectString.includes('generation-race-query')))
+          ) {
             return Effect.succeed(vectors);
           }
           return Effect.promise(
@@ -888,7 +912,9 @@ describe('vector index generations', () => {
                 }),
               );
             }
-            return Effect.succeed(inputs.map((_, index) => unitVector(requested.dimensions ?? 0, index % 2)));
+            return Effect.succeed(
+              EffectArray.map(inputs, (_, index) => unitVector(requested.dimensions ?? 0, index % 2)),
+            );
           },
           generate: () => Effect.die(TestError.make({message: 'Unexpected generation'})),
           rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking'})),
@@ -969,7 +995,8 @@ describe('vector index generations', () => {
             () =>
               new Promise<readonly (readonly number[])[]>(resolve => {
                 embeddingStarted();
-                releaseEmbedding = () => resolve(inputs.map(() => unitVector(requested.dimensions ?? 0, 0)));
+                releaseEmbedding = () =>
+                  resolve(EffectArray.map(inputs, () => unitVector(requested.dimensions ?? 0, 0)));
               }),
           ),
         generate: () => Effect.die(TestError.make({message: 'Unexpected generation'})),
@@ -1023,7 +1050,7 @@ function fakeRuntimeLayer(
       embedMany: ({inputs, manifest: requested}) =>
         Effect.sync(() => {
           onInputs(inputs);
-          return inputs.map(input => unitVector(requested.dimensions ?? 0, vectorIndex(input)));
+          return EffectArray.map(inputs, input => unitVector(requested.dimensions ?? 0, vectorIndex(input)));
         }),
       generate: () => Effect.die(TestError.make({message: 'Unexpected generation'})),
       rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking'})),
@@ -1045,7 +1072,11 @@ function vectorPointerIsExternallyVisible(home: string): boolean {
   let database: Database | undefined;
   try {
     database = new Database(vectorDatabasePath(home), {readonly: true});
-    const row = database.query('SELECT COUNT(*) AS count FROM vector_pointer').get() as {readonly count: number};
+    const row = requiredRow(
+      database
+        .query<{readonly count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM vector_pointer')
+        .get(),
+    );
     return Number(row.count) > 0;
   } catch {
     return false;

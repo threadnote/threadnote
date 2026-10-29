@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {normalizeRemoteCitationSources, type RemoteCitationSource} from '@threadnote/memory/remote/citation_sources';
 import type {MemoryRelation} from '@threadnote/memory/document';
 import {parseRemoteRememberInputV1, type RemoteRememberInputV1} from '@threadnote/memory/remote/contracts';
@@ -6,6 +7,8 @@ import {normalizeRemoteMemoryRelations} from '@threadnote/memory/remote/relation
 import {inspectRemoteMemoryContent} from '@threadnote/memory/remote/content';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {remoteMemoryError} from './errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const REMOTE_MEMORY_PROPOSAL_VERSION = 1 as const;
 export const REMOTE_MEMORY_PROPOSAL_STATUSES = ['pending', 'approved', 'rejected', 'conflict', 'expired'] as const;
@@ -146,7 +149,7 @@ export function remoteDurableProposalRequestHash(input: {
 export function durableProposalPayload(
   input: RemoteRememberInputV1 | RemoteDurableProposalInputV1,
 ): RemoteDurableProposalPayloadV1 {
-  const text = input.text.trim();
+  const text = Effect.pipe(input.text, EffectString.trim);
   if (!text) throw remoteMemoryError('invalid_request', 'A durable memory proposal requires non-empty text.');
   const inspected = inspectRemoteMemoryContent(text);
   if (!inspected.allowed) {
@@ -234,7 +237,7 @@ export function remoteMemoryProposalSummaryFromRow(
 export function durableProposalPayloadFromUnknown(value: unknown): RemoteDurableProposalPayloadV1 {
   try {
     const parsed = parseRemoteRememberInputV1({
-      ...(typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {}),
+      ...(typeof value === 'object' && value !== null && !EffectArray.isArray(value) ? value : {}),
       kind: 'durable',
       operationId: 'proposal-payload-validation',
       version: 1,
@@ -246,7 +249,9 @@ export function durableProposalPayloadFromUnknown(value: unknown): RemoteDurable
 }
 
 export function normalizedProposalReviewReason(input: RemoteMemoryProposalReviewInputV1): string | undefined {
-  const reason = input.reason?.trim();
+  const reason = Effect.pipe(input.reason, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   if (input.decision === 'reject' && !reason) {
     throw remoteMemoryError('invalid_request', 'A rejection requires a non-empty reason.');
   }

@@ -11,6 +11,8 @@ import {
 } from '@threadnote/graph/cli/progress';
 import type {CodeGraphProgress} from '@threadnote/graph/types';
 import {graphMaintenanceRemainingMilliseconds} from '@threadnote/manager/graph/model';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph compact CLI progress', () => {
   it('never includes a scanning activity path or newline', () => {
@@ -57,7 +59,9 @@ describe('code graph compact CLI progress', () => {
     ({path, completed, total}) =>
       Effect.sync(() => {
         const line = formatCodeGraphIndexProgressLine(scanningProgress(path, completed, total));
-        expect(line.includes('\n') || line.includes('\r')).toBe(false);
+        expect(Effect2.pipe(line, EffectString.includes('\n')) || Effect2.pipe(line, EffectString.includes('\r'))).toBe(
+          false,
+        );
         expect(line).not.toContain(path);
       }),
     {fastCheck: {numRuns: 40}},

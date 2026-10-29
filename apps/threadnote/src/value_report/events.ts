@@ -1,7 +1,14 @@
-import {Crypto, Effect, FileSystem, Option, Path, Predicate} from 'effect';
+import {
+  isSafeInteger as checkedIsSafeInteger,
+  isFiniteNumber as checkedIsFiniteNumber,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
+import {Crypto, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {CandidateReview} from '@threadnote/memory/candidate';
 import type {ValueReportCountsInputV1} from './index.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const VALUE_EVENT_VERSION = 1 as const;
 const VALUE_EVENT_FILE = 'value-events-v1.jsonl';
@@ -142,9 +149,12 @@ export const recordHealthValueSnapshot = Effect.fn('valueReport.recordHealthSnap
     LOCK_OPTIONS,
     Effect.gen(function* () {
       const existing = yield* readValueEvents(fs, path);
-      const previous = [...existing]
-        .reverse()
-        .find((event): event is HealthValueEventV1 => event.kind === 'health' && event.project === input.project);
+      const previous = Option.getOrUndefined(
+        EffectArray.findFirst(
+          [...existing].reverse(),
+          (event): event is HealthValueEventV1 => event.kind === 'health' && event.project === input.project,
+        ),
+      );
       const activeFindings = boundedCount(input.activeFindings);
       const previousActive = previous?.activeFindings ?? 0;
       const event: HealthValueEventV1 = {
@@ -207,12 +217,12 @@ export const pruneLocalValueEvents = Effect.fn('valueReport.pruneEvents')(functi
   agentContextHome: string,
   input: {readonly apply: boolean; readonly now: Date; readonly retentionDays: number},
 ) {
-  if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 1) {
+  if (!checkedIsSafeInteger(input.retentionDays) || input.retentionDays < 1) {
     throw new RangeError('Value event retention days must be a positive whole number.');
   }
   const cutoff = input.now.getTime() - input.retentionDays * 86_400_000;
   return yield* mutateValueEvents(agentContextHome, input.apply, events =>
-    events.filter(event => Date.parse(event.timestamp) >= cutoff),
+    EffectArray.filter(events, event => Date.parse(event.timestamp) >= cutoff),
   );
 });
 
@@ -227,66 +237,78 @@ export function summarizeLocalValueEvents(
   events: readonly LocalValueEventV1[],
   options: {readonly from: Date; readonly project?: string; readonly to: Date},
 ): ValueReportCountsInputV1 {
-  const contextBriefEvents = events.filter(
+  const contextBriefEvents = EffectArray.filter(
+    events,
     (event): event is ContextBriefValueEventV1 => event.kind === 'context-brief' && eventMatches(event, options),
   );
-  const healthEvents = events.filter(
+  const healthEvents = EffectArray.filter(
+    events,
     (event): event is HealthValueEventV1 => event.kind === 'health' && eventMatches(event, options),
   );
-  const setupCompletionEvents = events.filter(
+  const setupCompletionEvents = EffectArray.filter(
+    events,
     (event): event is SetupCompletionValueEventV1 =>
       event.kind === 'setup' && timestampInPeriod(event.timestamp, options),
   );
-  const setupLifecycleEvents = events.filter(
+  const setupLifecycleEvents = EffectArray.filter(
+    events,
     (event): event is SetupLifecycleValueEventV1 =>
       event.kind === 'setup-lifecycle' && timestampInPeriod(event.timestamp, options),
   );
-  const activationEvents = events.filter(
+  const activationEvents = EffectArray.filter(
+    events,
     (event): event is ActivationValueEventV1 =>
       event.kind === 'activation' && timestampInPeriod(event.timestamp, options),
   );
   return {
     contextBrief: {
       attempts: contextBriefEvents.length,
-      coverageGaps: sum(contextBriefEvents.map(event => event.coverageGaps)),
-      estimatedTokens: sum(contextBriefEvents.map(event => event.estimatedTokens)),
-      requestedCodeAnchors: sum(contextBriefEvents.map(event => event.requestedCodeAnchors)),
-      resolvedCodeAnchors: sum(contextBriefEvents.map(event => event.resolvedCodeAnchors)),
-      successful: contextBriefEvents.filter(event => event.successful).length,
-      timeToFirstSuccessfulMillisecondsSamples: contextBriefEvents
-        .filter(event => event.successful)
-        .map(event => event.durationMilliseconds)
-        .sort((left, right) => left - right),
+      coverageGaps: sum(EffectArray.map(contextBriefEvents, event => event.coverageGaps)),
+      estimatedTokens: sum(EffectArray.map(contextBriefEvents, event => event.estimatedTokens)),
+      requestedCodeAnchors: sum(EffectArray.map(contextBriefEvents, event => event.requestedCodeAnchors)),
+      resolvedCodeAnchors: sum(EffectArray.map(contextBriefEvents, event => event.resolvedCodeAnchors)),
+      successful: EffectArray.filter(contextBriefEvents, event => event.successful).length,
+      timeToFirstSuccessfulMillisecondsSamples: EffectArray.map(
+        EffectArray.filter(contextBriefEvents, event => event.successful),
+        event => event.durationMilliseconds,
+      ).sort((left, right) => left - right),
     },
     health: {
-      opened: sum(healthEvents.map(event => event.opened)),
-      resolved: sum(healthEvents.map(event => event.resolved)),
+      opened: sum(EffectArray.map(healthEvents, event => event.opened)),
+      resolved: sum(EffectArray.map(healthEvents, event => event.resolved)),
     },
     ...(setupCompletionEvents.length === 0 && setupLifecycleEvents.length === 0 && activationEvents.length === 0
       ? {}
       : {
           setup: {
             completed: sum([
-              ...setupCompletionEvents.map(event => event.completed),
-              ...activationEvents.filter(event => event.phase === 'completed').map(() => 1),
+              ...EffectArray.map(setupCompletionEvents, event => event.completed),
+              ...EffectArray.map(
+                EffectArray.filter(activationEvents, event => event.phase === 'completed'),
+                () => 1,
+              ),
             ]),
-            failed: setupLifecycleEvents.filter(event => event.phase === 'failed').length,
+            failed: EffectArray.filter(setupLifecycleEvents, event => event.phase === 'failed').length,
             started:
-              setupLifecycleEvents.filter(event => event.phase === 'started').length +
-              activationEvents.filter(event => event.phase === 'started').length,
+              EffectArray.filter(setupLifecycleEvents, event => event.phase === 'started').length +
+              EffectArray.filter(activationEvents, event => event.phase === 'started').length,
             supportedAgentReuse: sum([
-              ...setupCompletionEvents.map(event => event.supportedAgentReuse),
-              ...activationEvents.filter(event => event.phase === 'second-surface-proof').map(() => 1),
+              ...EffectArray.map(setupCompletionEvents, event => event.supportedAgentReuse),
+              ...EffectArray.map(
+                EffectArray.filter(activationEvents, event => event.phase === 'second-surface-proof'),
+                () => 1,
+              ),
             ]),
             timeToFirstEvidenceMillisecondsSamples: [
-              ...setupLifecycleEvents.flatMap(event =>
+              ...EffectArray.flatMap(setupLifecycleEvents, event =>
                 event.phase === 'completed' && event.timeToFirstEvidenceMilliseconds !== undefined
                   ? [event.timeToFirstEvidenceMilliseconds]
                   : [],
               ),
-              ...activationEvents
-                .filter(event => event.phase === 'first-evidence')
-                .map(event => event.durationMilliseconds),
+              ...EffectArray.map(
+                EffectArray.filter(activationEvents, event => event.phase === 'first-evidence'),
+                event => event.durationMilliseconds,
+              ),
             ],
           },
         }),
@@ -305,7 +327,7 @@ export function summarizeCandidateReviewValue(
   for (const review of reviews) {
     if (options.project !== undefined && review.project !== options.project) continue;
     if (timestampInPeriod(review.createdAt, options)) proposed += review.candidates.length;
-    const candidates = new Map(review.candidates.map(candidate => [candidate.candidateId, candidate]));
+    const candidates = new Map(EffectArray.map(review.candidates, candidate => [candidate.candidateId, candidate]));
     for (const event of review.auditEvents) {
       if (!timestampInPeriod(event.at, options)) continue;
       if (event.action === 'apply') {
@@ -337,7 +359,7 @@ const appendValueEvent = Effect.fn('valueReport.appendEvent')(function* (
       const existing = yield* readValueEvents(fs, path);
       if (
         'eventId' in event &&
-        existing.some(candidate => 'eventId' in candidate && candidate.eventId === event.eventId)
+        EffectArray.some(existing, candidate => 'eventId' in candidate && candidate.eventId === event.eventId)
       ) {
         return;
       }
@@ -375,14 +397,15 @@ function eventMatches(
 
 function timestampInPeriod(timestamp: string, options: {readonly from: Date; readonly to: Date}): boolean {
   const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed) && parsed >= options.from.getTime() && parsed <= options.to.getTime();
+  return checkedIsFiniteNumber(parsed) && parsed >= options.from.getTime() && parsed <= options.to.getTime();
 }
 
 function retainEvents(events: readonly LocalValueEventV1[], now: string): readonly LocalValueEventV1[] {
   const nowMilliseconds = Date.parse(now);
-  return events
-    .filter(event => nowMilliseconds - Date.parse(event.timestamp) <= VALUE_EVENT_RETENTION_MILLISECONDS)
-    .slice(-MAX_VALUE_EVENTS);
+  return EffectArray.filter(
+    events,
+    event => nowMilliseconds - Date.parse(event.timestamp) <= VALUE_EVENT_RETENTION_MILLISECONDS,
+  ).slice(-MAX_VALUE_EVENTS);
 }
 
 function valueEventPath(path: Path.Path, agentContextHome: string): string {
@@ -396,11 +419,10 @@ function readValueEvents(
   return Effect.gen(function* () {
     if (!(yield* fs.exists(path))) return [];
     const raw = yield* fs.readFileString(path);
-    return raw
-      .split('\n')
-      .map(parseValueEvent)
-      .filter((event): event is LocalValueEventV1 => event !== undefined)
-      .slice(-MAX_VALUE_EVENTS);
+    return EffectArray.filter(
+      EffectArray.map(Effect2.pipe(raw, EffectString.split('\n')), parseValueEvent),
+      (event): event is LocalValueEventV1 => event !== undefined,
+    ).slice(-MAX_VALUE_EVENTS);
   });
 }
 
@@ -414,7 +436,13 @@ function writeValueEvents(
     yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
     const crypto = yield* Crypto.Crypto;
     const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
-    const content = events.length === 0 ? '' : `${events.map(event => JSON.stringify(event)).join('\n')}\n`;
+    const content =
+      events.length === 0
+        ? ''
+        : `${EffectArray.join(
+            EffectArray.map(events, event => JSON.stringify(event)),
+            '\n',
+          )}\n`;
     yield* fs.writeFileString(temporaryPath, content, {mode: 0o600});
     yield* fs
       .rename(temporaryPath, path)
@@ -422,8 +450,88 @@ function writeValueEvents(
   });
 }
 
+const ValueEventJsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [ValueEventJsonRecordSchema]);
+const ActivationValueEventSchema = withRest(
+  Schema.Struct({
+    durationMilliseconds: Schema.Finite,
+    eventId: Schema.String,
+    kind: Schema.Literal('activation'),
+    phase: Schema.Literals(['started', 'first-evidence', 'completed', 'second-surface-proof']),
+    timestamp: Schema.String,
+    version: Schema.Literal(VALUE_EVENT_VERSION),
+  }),
+);
+const CodexResumePreloadValueEventSchema = withRest(
+  Schema.Struct({
+    continuationEvidenceState: Schema.optionalKey(Schema.Literals(['background', 'evidence-bearing'])),
+    durationMilliseconds: Schema.Finite,
+    estimatedTokens: Schema.Finite,
+    evidenceState: Schema.optionalKey(Schema.Literals(['degraded', 'no-match', 'partial', 'sufficient'])),
+    kind: Schema.Literal('codex-resume-preload'),
+    outcome: Schema.Literals([
+      'already-preloaded',
+      'disabled',
+      'ineligible-evidence',
+      'injected',
+      'invalid-input',
+      'lookup-unavailable',
+      'manual-context',
+      'over-limit',
+    ]),
+    outputBytes: Schema.Finite,
+    timestamp: Schema.String,
+    version: Schema.Literal(VALUE_EVENT_VERSION),
+  }),
+);
+const ContextBriefValueEventSchema = withRest(
+  Schema.Struct({
+    coverageGaps: Schema.Finite,
+    durationMilliseconds: Schema.Finite,
+    estimatedTokens: Schema.Finite,
+    kind: Schema.Literal('context-brief'),
+    project: Schema.optionalKey(Schema.String),
+    requestedCodeAnchors: Schema.Finite,
+    resolvedCodeAnchors: Schema.Finite,
+    successful: Schema.Boolean,
+    timestamp: Schema.String,
+    version: Schema.Literal(VALUE_EVENT_VERSION),
+  }),
+);
+const HealthValueEventSchema = withRest(
+  Schema.Struct({
+    activeFindings: Schema.Finite,
+    kind: Schema.Literal('health'),
+    opened: Schema.Finite,
+    project: Schema.String,
+    resolved: Schema.Finite,
+    timestamp: Schema.String,
+    version: Schema.Literal(VALUE_EVENT_VERSION),
+  }),
+);
+const SetupCompletionValueEventSchema = withRest(
+  Schema.Struct({
+    completed: Schema.Literal(1),
+    kind: Schema.Literal('setup'),
+    supportedAgentReuse: Schema.Literals([0, 1]),
+    timestamp: Schema.String,
+    version: Schema.Literal(VALUE_EVENT_VERSION),
+  }),
+);
+const SetupLifecycleValueEventSchema = withRest(
+  Schema.Struct({
+    durationMilliseconds: Schema.Finite,
+    kind: Schema.Literal('setup-lifecycle'),
+    phase: Schema.Literals(['started', 'completed', 'failed']),
+    timeToFirstEvidenceMilliseconds: Schema.optionalKey(Schema.Finite),
+    timestamp: Schema.String,
+    version: Schema.Literal(VALUE_EVENT_VERSION),
+  }),
+);
+
 function parseValueEvent(line: string): LocalValueEventV1 | undefined {
-  if (!line.trim()) return undefined;
+  if (!Effect2.pipe(line, EffectString.trim)) return undefined;
   const value = Option.getOrUndefined(Option.liftThrowable((text: string): unknown => JSON.parse(text))(line));
   if (
     !Predicate.isObject(value) ||
@@ -442,7 +550,7 @@ function parseValueEvent(line: string): LocalValueEventV1 | undefined {
       value.phase === 'second-surface-proof') &&
     validCount(value.durationMilliseconds)
   ) {
-    return value as unknown as ActivationValueEventV1;
+    return Schema.decodeUnknownSync(ActivationValueEventSchema)(value);
   }
   if (
     value.kind === 'codex-resume-preload' &&
@@ -469,7 +577,7 @@ function parseValueEvent(line: string): LocalValueEventV1 | undefined {
     validCount(value.estimatedTokens) &&
     validCount(value.outputBytes)
   ) {
-    return value as unknown as CodexResumePreloadValueEventV1;
+    return Schema.decodeUnknownSync(CodexResumePreloadValueEventSchema)(value);
   }
   if (
     value.kind === 'context-brief' &&
@@ -480,7 +588,7 @@ function parseValueEvent(line: string): LocalValueEventV1 | undefined {
     validCount(value.requestedCodeAnchors) &&
     validCount(value.resolvedCodeAnchors)
   ) {
-    return value as unknown as ContextBriefValueEventV1;
+    return Schema.decodeUnknownSync(ContextBriefValueEventSchema)(value);
   }
   if (
     value.kind === 'health' &&
@@ -489,11 +597,11 @@ function parseValueEvent(line: string): LocalValueEventV1 | undefined {
     validCount(value.opened) &&
     validCount(value.resolved)
   ) {
-    return value as unknown as HealthValueEventV1;
+    return Schema.decodeUnknownSync(HealthValueEventSchema)(value);
   }
   if (value.kind === 'setup' && value.project === undefined && value.completed === 1) {
     if (value.supportedAgentReuse === 0 || value.supportedAgentReuse === 1)
-      return value as unknown as SetupCompletionValueEventV1;
+      return Schema.decodeUnknownSync(SetupCompletionValueEventSchema)(value);
   }
   if (
     value.kind === 'setup-lifecycle' &&
@@ -503,23 +611,23 @@ function parseValueEvent(line: string): LocalValueEventV1 | undefined {
     (value.timeToFirstEvidenceMilliseconds === undefined || validCount(value.timeToFirstEvidenceMilliseconds)) &&
     (value.phase === 'completed') === (value.timeToFirstEvidenceMilliseconds !== undefined)
   ) {
-    return value as unknown as SetupLifecycleValueEventV1;
+    return Schema.decodeUnknownSync(SetupLifecycleValueEventSchema)(value);
   }
   return undefined;
 }
 
 function boundedCount(value: number): number {
-  return Number.isSafeInteger(value) && value > 0 ? Math.min(10_000, value) : 0;
+  return checkedIsSafeInteger(value) && value > 0 ? Math.min(10_000, value) : 0;
 }
 
 function boundedDuration(value: number): number {
-  return Number.isSafeInteger(value) && value > 0 ? Math.min(604_800_000, value) : 0;
+  return checkedIsSafeInteger(value) && value > 0 ? Math.min(604_800_000, value) : 0;
 }
 
 function validCount(value: unknown): boolean {
-  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= 604_800_000;
+  return checkedIsSafeInteger(value) && value >= 0 && value <= 604_800_000;
 }
 
 function sum(values: readonly number[]): number {
-  return values.reduce((total, value) => Math.min(10_000, total + boundedCount(value)), 0);
+  return EffectArray.reduce(values, 0, (total, value) => Math.min(10_000, total + boundedCount(value)));
 }

@@ -1,5 +1,5 @@
 import {it} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -21,6 +21,8 @@ import {
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {ShareOperationError} from '../../src/share/core.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const fixture = Effect.fn('test.workflowPublicationFixture')(function* (prefix = 'threadnote-workflow-publish-') {
   const fs = yield* FileSystem.FileSystem;
@@ -43,7 +45,15 @@ const fixture = Effect.fn('test.workflowPublicationFixture')(function* (prefix =
     JSON.stringify({
       version: 1,
       defaultTeam: 'default',
-      teams: {default: {name: 'default', access: 'read-write', remote, worktree, gitdir: path.join(worktree, '.git')}},
+      teams: {
+        default: {
+          name: 'default',
+          access: 'read-write',
+          remote,
+          worktree,
+          gitdir: path.join(worktree, '.git'),
+        },
+      },
     }),
   );
   const config = {
@@ -53,7 +63,10 @@ const fixture = Effect.fn('test.workflowPublicationFixture')(function* (prefix =
     user: 'tester',
     manifestPath: path.join(home, 'manifest.yaml'),
   };
-  const scope = {team: 'default', root: 'threadnote://user/tester/memories/shared/default'};
+  const scope = {
+    team: 'default',
+    root: 'threadnote://user/tester/memories/shared/default',
+  };
   const params: WriteDurableMemoryParams = {
     operation: 'create',
     bodyText: 'Approved architecture — 仕様.',
@@ -75,17 +88,24 @@ describe('personal workflow publication', () => {
     Effect.gen(function* () {
       const f = yield* fixture();
       const prepared = yield* prepareCursorCloudSharedMemory(f.config, f.scope, f.params);
-      const relativePath = prepared.memoryUri.split('/shared/default/')[1];
+      const relativePath = Effect2.pipe(prepared.memoryUri, EffectString.split('/shared/default/'))[1];
       const store = yield* ResourceStore;
       yield* store.write(resourceStoreLocation(f.config), prepared.memoryUri, prepared.memory, {mode: 'create'});
       yield* writeSharedWorktreeFile(f.worktree, relativePath, prepared.memory);
       const result = yield* writeCursorCloudSharedMemory(f.config, f.scope, {
         ...f.params,
-        sharedPublication: {prepared, expectedRemote: f.remote, expectedBranch: 'main', resume: true},
+        sharedPublication: {
+          prepared,
+          expectedRemote: f.remote,
+          expectedBranch: 'main',
+          resume: true,
+        },
       });
       expect(result.isError).not.toBe(true);
       expect((yield* f.git(f.remote, ['show', `main:${relativePath}`])).stdout).toBe(prepared.memory);
-      expect((yield* f.git(f.worktree, ['rev-list', '--count', 'HEAD'])).stdout.trim()).toBe('2');
+      expect(Effect2.pipe((yield* f.git(f.worktree, ['rev-list', '--count', 'HEAD'])).stdout, EffectString.trim)).toBe(
+        '2',
+      );
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
@@ -95,7 +115,10 @@ describe('personal workflow publication', () => {
       const initial = yield* prepareCursorCloudSharedMemory(f.config, f.scope, f.params);
       expect((yield* writeCursorCloudSharedMemory(f.config, f.scope, f.params)).isError).not.toBe(true);
       const store = yield* ResourceStore;
-      const concurrent = initial.memory.replace(f.params.bodyText, 'Concurrent accepted edit');
+      const concurrent = Effect2.pipe(
+        initial.memory,
+        EffectString.replace(f.params.bodyText, 'Concurrent accepted edit'),
+      );
       const intercepted = ResourceStore.of({
         ...store,
         writeChecked: (location, uri, content, options, check) =>
@@ -119,13 +142,18 @@ describe('personal workflow publication', () => {
     Effect.gen(function* () {
       const f = yield* fixture();
       const prepared = yield* prepareCursorCloudSharedMemory(f.config, f.scope, f.params);
-      const relativePath = prepared.memoryUri.split('/shared/default/')[1];
+      const relativePath = Effect2.pipe(prepared.memoryUri, EffectString.split('/shared/default/'))[1];
       yield* writeSharedWorktreeFile(f.worktree, relativePath, 'Concurrent staged edit');
       yield* f.git(f.worktree, ['add', relativePath]);
       yield* writeSharedWorktreeFile(f.worktree, relativePath, prepared.memory);
       const result = yield* writeCursorCloudSharedMemory(f.config, f.scope, {
         ...f.params,
-        sharedPublication: {prepared, expectedRemote: f.remote, expectedBranch: 'main', resume: true},
+        sharedPublication: {
+          prepared,
+          expectedRemote: f.remote,
+          expectedBranch: 'main',
+          resume: true,
+        },
       });
       expect(result.isError).toBe(true);
       const store = yield* ResourceStore;
@@ -141,7 +169,11 @@ describe('personal workflow publication', () => {
       const relativePath = 'durable/projects/fixture/architecture.md';
       const content = 'Exact approved content — 仕様.\n';
       yield* writeSharedWorktreeFile(f.worktree, relativePath, content);
-      const options = {content, expectedRemote: f.remote, expectedBranch: 'main'};
+      const options = {
+        content,
+        expectedRemote: f.remote,
+        expectedBranch: 'main',
+      };
       let committed: ShareGitCommitReceipt | undefined;
       const failed = yield* publishShareGitChangeVerified(f.worktree, relativePath, 'publish', {
         ...options,
@@ -178,6 +210,7 @@ describe('personal workflow publication', () => {
       for (const length of lengths) {
         expect(length).toBeGreaterThanOrEqual(4);
         expect(length).toBeLessThanOrEqual(220);
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const relativePath = 'x'.repeat(length - 3) + '.md';
         expect(Buffer.byteLength(relativePath)).toBe(length);
         if (process.platform === 'win32') {
@@ -188,7 +221,11 @@ describe('personal workflow publication', () => {
           expect(absoluteTarget.length + 41).toBeGreaterThan(260);
         }
         yield* writeSharedWorktreeFile(f.worktree, relativePath, content);
-        const options = {content, expectedRemote: f.remote, expectedBranch: 'main'};
+        const options = {
+          content,
+          expectedRemote: f.remote,
+          expectedBranch: 'main',
+        };
         const receipt = yield* publishShareGitChangeVerified(
           f.worktree,
           relativePath,
@@ -197,7 +234,7 @@ describe('personal workflow publication', () => {
         );
         expect(receipt.path).toBe(relativePath);
         expect(receipt.contentHash).toBe(sha256HexSync(content));
-        const head = (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
+        const head = Effect2.pipe((yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout, EffectString.trim);
         expect(receipt.commit).toBe(head);
         expect(yield* gitFileContent(f.worktree, receipt.commit, relativePath)).toBe(content);
         expect((yield* f.git(f.remote, ['show', `${receipt.commit}:${relativePath}`, '--'])).stdout).toBe(content);
@@ -206,7 +243,7 @@ describe('personal workflow publication', () => {
           committed: receipt,
         });
         expect(replay).toEqual(receipt);
-        expect((yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(head);
+        expect(Effect2.pipe((yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout, EffectString.trim)).toBe(head);
       }
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
@@ -216,7 +253,9 @@ describe('personal workflow publication', () => {
       const f = yield* fixture();
       const prepared = yield* prepareCursorCloudSharedMemory(f.config, f.scope, f.params);
       const hook = f.path.join(f.remote, 'hooks', 'pre-receive');
-      yield* f.fs.writeFileString(hook, '#!/bin/sh\nexit 1\n', {mode: 0o700});
+      yield* f.fs.writeFileString(hook, '#!/bin/sh\nexit 1\n', {
+        mode: 0o700,
+      });
       let committed: ShareGitCommitReceipt | undefined;
       const sharedPublication = {
         prepared,
@@ -227,7 +266,10 @@ describe('personal workflow publication', () => {
             committed = receipt;
           }),
       };
-      const failed = yield* writeCursorCloudSharedMemory(f.config, f.scope, {...f.params, sharedPublication});
+      const failed = yield* writeCursorCloudSharedMemory(f.config, f.scope, {
+        ...f.params,
+        sharedPublication,
+      });
       expect(failed.isError).toBe(true);
       expect(committed).toBeDefined();
       const store = yield* ResourceStore;
@@ -239,7 +281,9 @@ describe('personal workflow publication', () => {
         sharedPublication: {...sharedPublication, committed, resume: true},
       });
       expect(resumed.isError).not.toBe(true);
-      expect(resumed.structuredContent).toMatchObject({publication: {commit: committed!.commit, verified: true}});
+      expect(resumed.structuredContent).toMatchObject({
+        publication: {commit: committed!.commit, verified: true},
+      });
       expect((yield* f.git(f.worktree, ['rev-list', '--count', 'HEAD'])).stdout).toBe(before);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
@@ -260,7 +304,7 @@ describe('personal workflow publication', () => {
       };
       const wrongHash = yield* writeCursorCloudSharedMemory(f.config, f.scope, {
         ...replacement,
-        expectedReplaceContentHash: '0'.repeat(64),
+        expectedReplaceContentHash: Effect2.pipe('0', EffectString.repeat(64)),
       });
       const wrongIdentity = yield* writeCursorCloudSharedMemory(f.config, f.scope, {
         ...replacement,
@@ -279,7 +323,11 @@ describe('personal workflow publication', () => {
       const next = yield* prepareCursorCloudSharedMemory(f.config, f.scope, update);
       const updated = yield* writeCursorCloudSharedMemory(f.config, f.scope, {
         ...update,
-        sharedPublication: {prepared: next, expectedRemote: f.remote, expectedBranch: 'main'},
+        sharedPublication: {
+          prepared: next,
+          expectedRemote: f.remote,
+          expectedBranch: 'main',
+        },
       });
       expect(updated.isError).not.toBe(true);
       expect(yield* store.read(resourceStoreLocation(f.config), next.memoryUri)).toBe(next.memory);
@@ -292,17 +340,33 @@ describe('personal workflow publication', () => {
       const prepared = yield* prepareCursorCloudSharedMemory(f.config, f.scope, f.params);
       const store = yield* ResourceStore;
       yield* store.write(resourceStoreLocation(f.config), prepared.memoryUri, prepared.memory, {mode: 'create'});
-      const sharedPublication = {prepared, expectedRemote: f.remote, expectedBranch: 'main', resume: true};
+      const sharedPublication = {
+        prepared,
+        expectedRemote: f.remote,
+        expectedBranch: 'main',
+        resume: true,
+      };
       // Simulate a crash immediately after the native write.
-      const result = yield* writeCursorCloudSharedMemory(f.config, f.scope, {...f.params, sharedPublication});
+      const result = yield* writeCursorCloudSharedMemory(f.config, f.scope, {
+        ...f.params,
+        sharedPublication,
+      });
       expect(result.isError).not.toBe(true);
-      const relativePath = (result.structuredContent as {publication: {path: string}}).publication.path;
+      const publication = yield* Schema.decodeUnknownEffect(
+        Schema.Struct({
+          publication: Schema.Struct({path: Schema.String}),
+        }),
+      )(result.structuredContent);
+      const relativePath = publication.publication.path;
       yield* f.fs.writeFileString(f.path.join(f.worktree, relativePath), 'Concurrent worktree edit');
       const conflict = yield* writeCursorCloudSharedMemory(f.config, f.scope, {...f.params, sharedPublication});
       expect(conflict.isError).toBe(true);
       expect(yield* f.fs.readFileString(f.path.join(f.worktree, relativePath))).toBe('Concurrent worktree edit');
       yield* f.git(f.worktree, ['remote', 'set-url', 'origin', f.remote + '-changed']);
-      const changed = yield* writeCursorCloudSharedMemory(f.config, f.scope, {...f.params, sharedPublication});
+      const changed = yield* writeCursorCloudSharedMemory(f.config, f.scope, {
+        ...f.params,
+        sharedPublication,
+      });
       expect(changed.isError).toBe(true);
       expect(yield* store.read(resourceStoreLocation(f.config), prepared.memoryUri)).toBe(prepared.memory);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
@@ -314,7 +378,11 @@ describe('personal workflow publication', () => {
       const relativePath = 'durable/projects/fixture/architecture.md';
       const content = 'Approved\n';
       yield* writeSharedWorktreeFile(f.worktree, relativePath, content);
-      const options = {content, expectedRemote: f.remote, expectedBranch: 'main'};
+      const options = {
+        content,
+        expectedRemote: f.remote,
+        expectedBranch: 'main',
+      };
       const receipt = yield* publishShareGitChangeVerified(f.worktree, relativePath, 'publish', options);
       yield* f.fs.writeFileString(f.path.join(f.worktree, relativePath), 'New remote content\n');
       yield* f.git(f.worktree, ['add', relativePath]);
@@ -333,11 +401,11 @@ describe('personal workflow publication', () => {
   it.effect('refuses foreign unpublished ancestors without discarding their commits', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const remoteBefore = (yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim();
+      const remoteBefore = Effect2.pipe((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout, EffectString.trim);
       yield* f.fs.writeFileString(f.path.join(f.worktree, 'README.md'), 'Unapproved pending change\n');
       yield* f.git(f.worktree, ['add', 'README.md']);
       yield* f.git(f.worktree, ['commit', '-m', 'foreign pending change']);
-      const foreignCommit = (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
+      const foreignCommit = Effect2.pipe((yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       const path = 'durable/projects/fixture/approved.md';
       const content = 'Approved document\n';
       yield* writeSharedWorktreeFile(f.worktree, path, content);
@@ -353,7 +421,9 @@ describe('personal workflow publication', () => {
       }).pipe(Effect.result);
       expect(result).toMatchObject({_tag: 'Failure'});
       expect(committed).toBeDefined();
-      expect((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim()).toBe(remoteBefore);
+      expect(Effect2.pipe((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout, EffectString.trim)).toBe(
+        remoteBefore,
+      );
       expect((yield* f.git(f.worktree, ['show', `${foreignCommit}:README.md`])).stdout).toBe(
         'Unapproved pending change\n',
       );
@@ -364,22 +434,24 @@ describe('personal workflow publication', () => {
   it.effect('refuses an unpublished no-op receipt whose commit also changes unapproved paths', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const remoteBefore = (yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim();
+      const remoteBefore = Effect2.pipe((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout, EffectString.trim);
       const path = 'durable/projects/fixture/approved.md';
       const content = 'Approved document\n';
       yield* writeSharedWorktreeFile(f.worktree, path, content);
       yield* f.fs.writeFileString(f.path.join(f.worktree, 'README.md'), 'Unapproved companion change\n');
       yield* f.git(f.worktree, ['add', path, 'README.md']);
       yield* f.git(f.worktree, ['commit', '-m', 'mixed pending change']);
-      const head = (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
+      const head = Effect2.pipe((yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       const result = yield* publishShareGitChangeVerified(f.worktree, path, 'adopt existing document', {
         content,
         expectedRemote: f.remote,
         expectedBranch: 'main',
       }).pipe(Effect.result);
       expect(result).toMatchObject({_tag: 'Failure'});
-      expect((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim()).toBe(remoteBefore);
-      expect((yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(head);
+      expect(Effect2.pipe((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout, EffectString.trim)).toBe(
+        remoteBefore,
+      );
+      expect(Effect2.pipe((yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout, EffectString.trim)).toBe(head);
       expect((yield* f.git(f.worktree, ['show', `${head}:README.md`])).stdout).toBe('Unapproved companion change\n');
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );

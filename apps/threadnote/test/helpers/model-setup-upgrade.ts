@@ -1,9 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {lstat, readFile, readdir, readlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const executeUpgradeCommand = promisify(execFile);
 export const PREDECESSOR_VERSION = '5.3.0-beta.4';
@@ -30,8 +34,8 @@ export function upgradeQualificationAllowed(environment: NodeJS.ProcessEnv, plat
 
 export function upgradeEnvironment(run: string): NodeJS.ProcessEnv {
   // No CI/test/cloud exclusions, credentials, THREADNOTE_HOME, or HOME/CODEX_HOME redirection.
-  const inherited = Object.fromEntries(
-    ['HOME', 'CODEX_HOME', 'PATH', 'USER', 'LOGNAME', 'LANG'].flatMap(key =>
+  const inherited = EffectRecord.fromEntries(
+    EffectArray.flatMap(['HOME', 'CODEX_HOME', 'PATH', 'USER', 'LOGNAME', 'LANG'], key =>
       process.env[key] === undefined ? [] : [[key, process.env[key]]],
     ),
   );
@@ -72,7 +76,7 @@ export async function recordUpgradeAttempt(file: string, attempt: () => Promise<
       JSON.stringify(
         {
           status: 'failed',
-          error: String(cause).slice(0, 2048),
+          error: Effect.pipe(String(cause), EffectString.slice(0, 2048)),
         },
         null,
         2,
@@ -114,13 +118,13 @@ export function serveUpgradeCandidate(archive: string, checksum: string, version
       if (url.pathname === '/releases') {
         return Response.json([
           {
-            assets: [artifact, `${artifact}.sha256`].map(name => ({
+            assets: EffectArray.map([artifact, `${artifact}.sha256`], name => ({
               name,
               browser_download_url: `${url.origin}/${name}`,
             })),
             draft: false,
             immutable: true,
-            prerelease: version.includes('-'),
+            prerelease: Effect.pipe(version, EffectString.includes('-')),
             tag_name: `v${version}`,
           },
         ]);
@@ -141,8 +145,9 @@ export async function observeUpgradeProcesses(releaseRoot: string) {
   let failure: unknown;
   const sample = async () => {
     const {stdout} = await executeUpgradeCommand('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,command=']);
-    for (const line of stdout.split('\n')) {
-      if (line.includes(`${releaseRoot}/`) && observed.size < 256) observed.add(line.trim().slice(0, 2048));
+    for (const line of Effect.pipe(stdout, EffectString.split('\n'))) {
+      if (Effect.pipe(line, EffectString.includes(`${releaseRoot}/`)) && observed.size < 256)
+        observed.add(Effect.pipe(line, EffectString.trim, EffectString.slice(0, 2048)));
     }
   };
   await sample();

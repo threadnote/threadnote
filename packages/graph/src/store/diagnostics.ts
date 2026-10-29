@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphDatabaseHealth} from './models.js';
@@ -40,7 +41,7 @@ const diagnoseDatabase = Effect.fn('codeGraph.diagnoseDatabase')(function* () {
   const activeRows = yield* sql<{readonly count: number}>`SELECT COUNT(*) AS count FROM active_snapshots`;
   const cacheRows = yield* sql<{readonly count: number}>`SELECT COUNT(*) AS count FROM file_blobs`;
   const foreignKeyRows = yield* sql.unsafe('PRAGMA foreign_key_check');
-  const counts = new Map(stateRows.map(row => [row.state, Number(row.count)]));
+  const counts = new Map(EffectArray.map(stateRows, row => [row.state, Number(row.count)]));
   const integrityOk =
     integrityRows.length === 1 && integrityRows[0]?.integrity_check === 'ok' && foreignKeyRows.length === 0;
   return {

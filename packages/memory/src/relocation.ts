@@ -1,4 +1,5 @@
-import {Data, Effect, FileSystem, Option, Path, Predicate} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Predicate} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {fileSystemModeIsPrivate, runtimePlatform} from '@threadnote/platform/system';
@@ -7,6 +8,9 @@ import {threadnoteStorageLayout} from '@threadnote/store/layout';
 import {makeResourceIdScopeChecker, parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const MEMORY_RELOCATION_RECEIPT_VERSION = 1 as const;
 export const MAX_MEMORY_RELOCATION_DEPTH = 8;
@@ -14,14 +18,15 @@ const MAX_MEMORY_RELOCATION_RECEIPT_BYTES = 16 * 1024;
 const MAX_MEMORY_RELOCATION_RECEIPT_COUNT = 1_024;
 const MAX_MEMORY_RELOCATION_RECEIPT_TOTAL_BYTES = 2 * 1024 * 1024;
 
-export class MemoryRelocationError extends Data.TaggedError('MemoryRelocationError')<{
-  readonly message: string;
-}> {}
+export class MemoryRelocationError extends Schema.TaggedError<MemoryRelocationError, {readonly brand: unique symbol}>()(
+  'MemoryRelocationError',
+  {message: Schema.String},
+) {}
 
-export class MemoryPointerNotFound extends Data.TaggedError('MemoryPointerNotFound')<{
-  readonly message: string;
-  readonly uri: string;
-}> {}
+export class MemoryPointerNotFound extends Schema.TaggedError<MemoryPointerNotFound, {readonly brand: unique symbol}>()(
+  'MemoryPointerNotFound',
+  {message: Schema.String, uri: Schema.String},
+) {}
 
 export interface MemoryRelocationReceiptV1 {
   readonly fromUri: string;
@@ -116,11 +121,15 @@ export const readMemoryWithRelocations = Effect.fn('memoryRelocation.read')(func
 ) {
   const resourceIds = makeResourceIdScopeChecker();
   const requestedUri = yield* canonicalManagedMemoryUri(config, requestedInput);
-  const allowedUriScopes = options.allowedUriScopes?.map(scope => resourceIds.parse(scope).canonicalUri);
+  const allowedUriScopes = Option.getOrUndefined(
+    Option.map(Option.fromNullishOr(options.allowedUriScopes), __effectArrayReceiver =>
+      EffectArray.map(__effectArrayReceiver, scope => resourceIds.parse(scope).canonicalUri),
+    ),
+  );
   const isAuthorized = (uri: string) =>
-    allowedUriScopes === undefined || allowedUriScopes.some(scope => resourceIds.isWithin(uri, scope));
+    allowedUriScopes === undefined || EffectArray.some(allowedUriScopes, scope => resourceIds.isWithin(uri, scope));
   if (!isAuthorized(requestedUri)) {
-    return yield* new MemoryPointerNotFound({
+    return yield* MemoryPointerNotFound.make({
       message: `Memory resource does not exist: ${requestedUri}`,
       uri: requestedUri,
     });
@@ -148,7 +157,7 @@ export const readMemoryWithRelocations = Effect.fn('memoryRelocation.read')(func
     const receipt = yield* readMemoryRelocationReceipt(config, currentUri);
     if (receipt === undefined) {
       return depth === 1
-        ? yield* new MemoryPointerNotFound({
+        ? yield* MemoryPointerNotFound.make({
             message: `Memory resource does not exist: ${requestedUri}`,
             uri: requestedUri,
           })
@@ -169,7 +178,7 @@ export const readMemoryWithRelocations = Effect.fn('memoryRelocation.read')(func
     // must be checked before the destination read so the receipt cannot become
     // an existence oracle for a private or different-team memory.
     if (!isAuthorized(receipt.toUri)) {
-      return yield* new MemoryPointerNotFound({
+      return yield* MemoryPointerNotFound.make({
         message: `Memory resource does not exist: ${requestedUri}`,
         uri: requestedUri,
       });
@@ -209,7 +218,13 @@ export const loadMemoryRelocationIdentityWitnesses = Effect.fn('memoryRelocation
   allowedUriScopes: readonly string[],
   options: {readonly destinationUris?: readonly string[]} = {},
 ) {
-  const requestedMemoryIds = new Set(memoryIds.filter(validMemoryId));
+  const requestedMemoryIds = new Set(
+    EffectArray.filter(
+      memoryIds,
+      (__effectFilterValue: (typeof memoryIds)[number], __effectFilterIndex: number) =>
+        __effectFilterIndex in memoryIds && validMemoryId(__effectFilterValue),
+    ),
+  );
   const requestedDestinationUris = new Set(options.destinationUris ?? []);
   if ((requestedMemoryIds.size === 0 && requestedDestinationUris.size === 0) || allowedUriScopes.length === 0)
     return [];
@@ -217,7 +232,10 @@ export const loadMemoryRelocationIdentityWitnesses = Effect.fn('memoryRelocation
   if (root === undefined) return [];
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const entries = (yield* fs.readDirectory(root)).filter(entry => entry.endsWith('.json')).sort();
+  const entries = EffectArray.filter(
+    yield* fs.readDirectory(root),
+    __effectArrayValue => !!(entry => Effect2.pipe(entry, EffectString.endsWith('.json')))(__effectArrayValue),
+  ).sort();
   if (entries.length > MAX_MEMORY_RELOCATION_RECEIPT_COUNT) {
     return yield* relocationError(
       `Memory relocation identity scan exceeds the maximum receipt count of ${MAX_MEMORY_RELOCATION_RECEIPT_COUNT}.`,
@@ -256,7 +274,7 @@ export const loadMemoryRelocationIdentityWitnesses = Effect.fn('memoryRelocation
   const candidates = new Map<string, MemoryRelocationIdentityWitnessCandidate>();
   for (const receipt of receipts) {
     if (!requestedMemoryIds.has(receipt.memoryId)) continue;
-    if (!allowedUriScopes.some(scope => resourceIdIsWithin(receipt.toUri, scope))) continue;
+    if (!EffectArray.some(allowedUriScopes, scope => resourceIdIsWithin(receipt.toUri, scope))) continue;
     let record = destinationRecords.get(receipt.toUri);
     if (!destinationRecords.has(receipt.toUri)) {
       const destination = yield* store.read(location, receipt.toUri).pipe(
@@ -279,17 +297,15 @@ export const loadMemoryRelocationIdentityWitnesses = Effect.fn('memoryRelocation
     });
   }
 
-  return [...candidates.values()]
-    .map(candidate =>
-      candidate.missingMemoryId && (receiptClaimsByDestination.get(candidate.uri)?.size ?? 0) > 1
-        ? {...candidate, identityConflict: true}
-        : candidate,
-    )
-    .sort((left, right) =>
-      left.memoryId === right.memoryId
-        ? left.uri.localeCompare(right.uri)
-        : left.memoryId.localeCompare(right.memoryId),
-    );
+  return EffectArray.map([...candidates.values()], candidate =>
+    candidate.missingMemoryId && (receiptClaimsByDestination.get(candidate.uri)?.size ?? 0) > 1
+      ? {...candidate, identityConflict: true}
+      : candidate,
+  ).sort((left, right) =>
+    left.memoryId === right.memoryId
+      ? Effect2.pipe(left.uri, EffectString.localeCompare(right.uri))
+      : Effect2.pipe(left.memoryId, EffectString.localeCompare(right.memoryId)),
+  );
 });
 
 const writeMemoryRelocationReceipt = Effect.fn('memoryRelocation.writeReceipt')(function* (
@@ -363,7 +379,7 @@ const readMemoryRelocationReceiptFile = Effect.fn('memoryRelocation.readReceiptF
   }
   return yield* Effect.try({
     catch: cause =>
-      cause instanceof MemoryRelocationError
+      Schema.is(MemoryRelocationError)(cause)
         ? cause
         : relocationError(cause instanceof Error ? cause.message : 'Memory relocation receipt is invalid.'),
     try: () => parseMemoryRelocationReceipt(content),
@@ -408,7 +424,7 @@ const canonicalManagedMemoryUri = Effect.fn('memoryRelocation.canonicalUri')(
   (config: RelocationRuntime, input: string) =>
     Effect.try({
       catch: cause =>
-        cause instanceof MemoryRelocationError
+        Schema.is(MemoryRelocationError)(cause)
           ? cause
           : relocationError(cause instanceof Error ? cause.message : 'Invalid memory relocation URI.'),
       try: () => {
@@ -419,7 +435,9 @@ const canonicalManagedMemoryUri = Effect.fn('memoryRelocation.canonicalUri')(
           resource.segments[0] !== uriSegment(config.user) ||
           resource.segments[1] !== 'memories' ||
           resource.segments.length < 4 ||
-          !resource.segments.at(-1)?.endsWith('.md')
+          !Effect2.pipe(resource.segments.at(-1), effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.endsWith('.md')),
+          )
         ) {
           throw relocationError('Relocation receipts require a canonical memory URI owned by the current user.');
         }
@@ -498,7 +516,9 @@ export function isMemoryRelocationUri(config: Pick<RuntimeConfig, 'user'>, input
       resource.segments[0] === uriSegment(config.user) &&
       resource.segments[1] === 'memories' &&
       resource.segments.length >= 4 &&
-      resource.segments.at(-1)?.endsWith('.md') === true
+      Effect2.pipe(resource.segments.at(-1), effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.endsWith('.md')),
+      ) === true
     );
   } catch {
     return false;
@@ -506,13 +526,13 @@ export function isMemoryRelocationUri(config: Pick<RuntimeConfig, 'user'>, input
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+  return actual.length === expected.length && EffectArray.every(actual, (key, index) => key === expected[index]);
 }
 
 function relocationError(message: string): MemoryRelocationError {
-  return new MemoryRelocationError({message});
+  return MemoryRelocationError.make({message});
 }
 
 function resourceStoreLocation(config: RelocationRuntime) {

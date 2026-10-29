@@ -1,5 +1,7 @@
 import {enforceCodeGraphBenchmarkRatchet} from '../../scripts/benchmark-code-graph.js';
 import {parseBenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface GateArguments {
   readonly artifactPath: string;
@@ -13,7 +15,7 @@ interface GateArguments {
 function requiredValue(args: readonly string[], name: string): string {
   const index = args.indexOf(name);
   const value = index === -1 ? undefined : args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${name} requires a value.`);
+  if (!value || Effect.pipe(value, EffectString.startsWith('--'))) throw new Error(`${name} requires a value.`);
   return value;
 }
 

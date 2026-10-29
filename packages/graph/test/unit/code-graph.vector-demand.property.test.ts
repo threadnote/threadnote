@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -9,9 +10,11 @@ import {
   selectCodeGraphEmbeddingDemandLane,
   type CodeGraphEmbeddingDemandLane,
 } from '../../src/vector/demand_scheduler.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const model = {id: 'model', sha256: 'a'.repeat(64), dimensions: 2, templateVersion: 1};
-const laneId = {worktreeId: 'b'.repeat(64), scopeId: 'full'};
+const model = {id: 'model', sha256: Effect2.pipe('a', EffectString.repeat(64)), dimensions: 2, templateVersion: 1};
+const laneId = {worktreeId: Effect2.pipe('b', EffectString.repeat(64)), scopeId: 'full'};
 const target = (snapshot: number, epoch: number) => ({
   ...laneId,
   snapshotId: `snapshot-${snapshot}`,
@@ -136,7 +139,10 @@ effectIt.effect.prop(
   },
   ({count, noise}) =>
     Effect.sync(() => {
-      const lanes = Array.from({length: count}, (_, n) => ({key: n.toString().padStart(3, '0'), revision: 0}));
+      const lanes = Array.from({length: count}, (_, n) => ({
+        key: Effect2.pipe(n.toString(), EffectString.padStart(3, '0')),
+        revision: 0,
+      }));
       let cursor: string | undefined;
       for (let round = 0; round < 3; round += 1) {
         const visited = new Set<string>();
@@ -146,7 +152,7 @@ effectIt.effect.prop(
           visited.add(selected.key);
           cursor = selected.key;
         }
-        expect(visited).toEqual(new Set(lanes.map(lane => lane.key)));
+        expect(visited).toEqual(new Set(EffectArray.map(lanes, lane => lane.key)));
       }
     }),
   {arbitrary: {runs: 32, seed: 25026}},

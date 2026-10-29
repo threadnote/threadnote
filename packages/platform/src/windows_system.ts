@@ -2,11 +2,16 @@ import {dlopen} from 'bun:ffi';
 import {Effect, Stream, Schema} from 'effect';
 import {WINDOWS_DISK_CAPACITY_WORKER_PROTOCOL_VERSION} from './windows-disk-worker-contract.js';
 import {fromPromiseInterruptibleAwaiting} from './errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class WindowsSystemError extends Schema.TaggedError<WindowsSystemError>()('WindowsSystemError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class WindowsSystemError extends Schema.TaggedError<WindowsSystemError, {readonly brand: unique symbol}>()(
+  'WindowsSystemError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 const DOTNET_TICKS_AT_WINDOWS_FILE_TIME_EPOCH = 504_911_232_000_000_000n;
@@ -36,7 +41,12 @@ export function windowsAvailableDiskBytesFromNative(value: unknown): number | un
 /** Encode one NUL-terminated Windows UTF-16 string for a native pointer. */
 function windowsWideString(value: string): Uint16Array {
   const wide = new Uint16Array(value.length + 1);
-  for (let index = 0; index < value.length; index += 1) wide[index] = value.charCodeAt(index);
+  for (let index = 0; index < value.length; index += 1)
+    wide[index] = Effect2.pipe(
+      value,
+      EffectString.charCodeAt(index),
+      Effect2.Option.getOrElse(() => NaN),
+    );
   return wide;
 }
 
@@ -46,7 +56,12 @@ function windowsWideString(value: string): Uint16Array {
  */
 export function readWindowsAvailableDiskBytesNative(path: string): Effect.Effect<number | undefined> {
   return Effect.sync(() => {
-    if (path.length === 0 || path.length > WINDOWS_PATH_CODE_UNIT_LIMIT || path.includes('\0')) return undefined;
+    if (
+      path.length === 0 ||
+      path.length > WINDOWS_PATH_CODE_UNIT_LIMIT ||
+      Effect2.pipe(path, EffectString.includes('\0'))
+    )
+      return undefined;
     try {
       const kernel = dlopen('kernel32.dll', {
         GetDiskFreeSpaceExW: {
@@ -103,7 +118,7 @@ function decodeWindowsDiskCapacityWorkerRequest(line: string): WindowsDiskCapaci
       typeof value.path !== 'string' ||
       value.path.length === 0 ||
       value.path.length > WINDOWS_PATH_CODE_UNIT_LIMIT ||
-      value.path.includes('\0') ||
+      Effect2.pipe(value.path, EffectString.includes('\0')) ||
       value.protocol !== WINDOWS_DISK_CAPACITY_WORKER_PROTOCOL_VERSION
     ) {
       return undefined;
@@ -148,10 +163,14 @@ export function serveWindowsDiskCapacityWorker(
     Effect.gen(function* () {
       buffered += typeof chunk === 'string' ? chunk : decoder.decode(chunk, {stream: true});
       for (;;) {
-        const newline = buffered.indexOf('\n');
+        const newline = Effect2.pipe(
+          buffered,
+          EffectString.indexOf('\n'),
+          Effect2.Option.getOrElse(() => -1),
+        );
         if (newline < 0) break;
-        const line = buffered.slice(0, newline).replace(/\r$/u, '');
-        buffered = buffered.slice(newline + 1);
+        const line = Effect2.pipe(buffered, EffectString.slice(0, newline), EffectString.replace(/\r$/u, ''));
+        buffered = Effect2.pipe(buffered, EffectString.slice(newline + 1));
         if (line) yield* handleLine(line);
       }
       if (encoder.encode(buffered).byteLength > WINDOWS_DISK_CAPACITY_WORKER_INPUT_LIMIT_BYTES) {
@@ -165,7 +184,7 @@ export function serveWindowsDiskCapacityWorker(
     Effect.andThen(
       Effect.gen(function* () {
         buffered += decoder.decode();
-        const finalLine = buffered.replace(/\r$/u, '');
+        const finalLine = Effect2.pipe(buffered, EffectString.replace(/\r$/u, ''));
         if (finalLine) yield* handleLine(finalLine);
       }),
     ),
@@ -204,7 +223,13 @@ export function readWindowsHardwareInfo(environment: NodeJS.ProcessEnv) {
 
         const memoryBytes = Number(memoryView.getBigUint64(MEMORY_STATUS_TOTAL_PHYSICAL_OFFSET, true));
         const cpuModel =
-          environment.PROCESSOR_IDENTIFIER?.trim() || environment.PROCESSOR_ARCHITECTURE?.trim() || 'Windows processor';
+          Effect2.pipe(environment.PROCESSOR_IDENTIFIER, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          ) ||
+          Effect2.pipe(environment.PROCESSOR_ARCHITECTURE, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          ) ||
+          'Windows processor';
         const operatingSystem = `Windows ${versionView.getUint32(WINDOWS_VERSION_MAJOR_OFFSET, true)}.${versionView.getUint32(
           WINDOWS_VERSION_MINOR_OFFSET,
           true,

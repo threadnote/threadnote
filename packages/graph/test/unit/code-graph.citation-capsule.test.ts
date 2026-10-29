@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
 import {
@@ -15,16 +16,18 @@ import {
   retainCodeGraphCitationEvidence,
 } from '@threadnote/graph/citation/capsule';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const bytes = new TextEncoder().encode('export const original = true;\n');
 const source = {
   extractorSet: 'test',
   fileContentHash: sha256HexSync(bytes),
   path: 'src/source.ts',
-  repositoryId: 'a'.repeat(64),
-  sourceCommit: 'b'.repeat(40),
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+  sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+  sourceSnapshotId: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
 };
 
 describe('bounded historical citation capsules', () => {
@@ -34,7 +37,7 @@ describe('bounded historical citation capsules', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'expired-neighbor-capsule-'});
-        const checkoutId = 'e'.repeat(64);
+        const checkoutId = Effect2.pipe('e', EffectString.repeat(64));
         const directory = path.join(
           home,
           'indexes/code-graph/repositories',
@@ -43,7 +46,9 @@ describe('bounded historical citation capsules', () => {
         );
         const expiredSource = {...source, path: 'src/expired.ts'};
         const oldTime = DateTime.formatIso(yield* DateTime.now);
-        const old = createCodeGraphCitationEvidenceCapsule(expiredSource, 'sha1', bytes, oldTime, ['d'.repeat(64)])!;
+        const old = createCodeGraphCitationEvidenceCapsule(expiredSource, 'sha1', bytes, oldTime, [
+          Effect2.pipe('d', EffectString.repeat(64)),
+        ])!;
         yield* fs.makeDirectory(directory, {recursive: true});
         const oldFile = path.join(directory, `${old.id}.json`);
         const oldBytes = JSON.stringify(old) + '\n';
@@ -54,7 +59,7 @@ describe('bounded historical citation capsules', () => {
           bytes,
           checkoutId,
           objectFormat: 'sha1' as const,
-          referenceId: 'f'.repeat(64),
+          referenceId: Effect2.pipe('f', EffectString.repeat(64)),
           source,
           threadnoteHome: home,
           retainedAt: DateTime.formatIso(yield* DateTime.now),
@@ -72,7 +77,7 @@ describe('bounded historical citation capsules', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'reserved-byte-capacity-'});
-        const checkoutId = 'e'.repeat(64);
+        const checkoutId = Effect2.pipe('e', EffectString.repeat(64));
         const directory = path.join(
           home,
           'indexes/code-graph/repositories',
@@ -80,7 +85,8 @@ describe('bounded historical citation capsules', () => {
           'local-context/citation-evidence',
         );
         yield* fs.makeDirectory(directory, {recursive: true});
-        const file = path.join(directory, `${'0'.repeat(64)}.json`);
+        const file = path.join(directory, `${Effect2.pipe('0', EffectString.repeat(64))}.json`);
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const physicalBytes = ' '.repeat(CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumBytes);
         yield* fs.writeFileString(file, physicalBytes);
         yield* fs.utimes(file, 0, 0);
@@ -89,13 +95,13 @@ describe('bounded historical citation capsules', () => {
           bytes,
           checkoutId,
           objectFormat: 'sha1',
-          referenceId: 'f'.repeat(64),
+          referenceId: Effect2.pipe('f', EffectString.repeat(64)),
           source,
           threadnoteHome: home,
           retainedAt: DateTime.formatIso(yield* DateTime.now),
         });
         expect(retained).toBe(false);
-        expect(yield* fs.readDirectory(directory)).toEqual([`${'0'.repeat(64)}.json`]);
+        expect(yield* fs.readDirectory(directory)).toEqual([`${Effect2.pipe('0', EffectString.repeat(64))}.json`]);
         expect(yield* fs.readFileString(file)).toBe(physicalBytes);
       }),
     );
@@ -104,7 +110,7 @@ describe('bounded historical citation capsules', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'reserved-capacity-capsule-'});
-        const checkoutId = 'e'.repeat(64);
+        const checkoutId = Effect2.pipe('e', EffectString.repeat(64));
         const directory = path.join(
           home,
           'indexes/code-graph/repositories',
@@ -120,7 +126,7 @@ describe('bounded historical citation capsules', () => {
             'sha1',
             bytes,
             originalTime,
-            ['d'.repeat(64)],
+            [Effect2.pipe('d', EffectString.repeat(64))],
           )!;
           const name = `${original.id}.json`;
           const content = JSON.stringify(original) + '\n';
@@ -133,7 +139,7 @@ describe('bounded historical citation capsules', () => {
           bytes,
           checkoutId,
           objectFormat: 'sha1' as const,
-          referenceId: 'f'.repeat(64),
+          referenceId: Effect2.pipe('f', EffectString.repeat(64)),
           source,
           threadnoteHome: home,
           retainedAt: DateTime.formatIso(yield* DateTime.now),
@@ -144,8 +150,8 @@ describe('bounded historical citation capsules', () => {
           const current = new Set(names);
           expect({
             retained,
-            retired: [...originals.keys()].filter(name => !current.has(name)),
-            added: names.filter(name => !originals.has(name)).length,
+            retired: EffectArray.filter([...originals.keys()], name => !current.has(name)),
+            added: EffectArray.filter(names, name => !originals.has(name)).length,
           }).toEqual({retained: false, retired: [], added: 0});
           for (const [name, content] of originals)
             expect(yield* fs.readFileString(path.join(directory, name))).toBe(content);
@@ -156,24 +162,31 @@ describe('bounded historical citation capsules', () => {
     it.effect('preserves an earlier retained origin time when a new fixed reference shares its exact capsule', () =>
       Effect.gen(function* () {
         const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped({prefix: 'fixed-origin-capsule-'});
-        const checkoutId = 'e'.repeat(64);
+        const checkoutId = Effect2.pipe('e', EffectString.repeat(64));
         const retainedAt = DateTime.formatIso(yield* DateTime.now);
         const first = {
           bytes,
           checkoutId,
           objectFormat: 'sha1' as const,
-          referenceId: 'd'.repeat(64),
+          referenceId: Effect2.pipe('d', EffectString.repeat(64)),
           source,
           threadnoteHome: home,
           retainedAt,
         };
         expect(yield* retainCodeGraphCitationEvidence(first)).toBe(true);
         yield* TestClock.adjust('2 days');
-        const approved = {...first, referenceId: 'f'.repeat(64), retainedAt: DateTime.formatIso(yield* DateTime.now)};
+        const approved = {
+          ...first,
+          referenceId: Effect2.pipe('f', EffectString.repeat(64)),
+          retainedAt: DateTime.formatIso(yield* DateTime.now),
+        };
         expect(yield* retainCodeGraphCitationEvidence(approved)).toBe(true);
         const result = yield* readRetainedCodeGraphCitationEvidence(home, checkoutId, source);
         expect(result?.capsule.retainedAt).toBe(retainedAt);
-        expect(result?.capsule.referenceIds).toEqual(['d'.repeat(64), 'f'.repeat(64)]);
+        expect(result?.capsule.referenceIds).toEqual([
+          Effect2.pipe('d', EffectString.repeat(64)),
+          Effect2.pipe('f', EffectString.repeat(64)),
+        ]);
         expect(result?.bytes).toEqual(bytes);
         yield* TestClock.adjust('2 days');
         expect(yield* retainCodeGraphCitationEvidence(approved)).toBe(true);
@@ -189,13 +202,13 @@ describe('bounded historical citation capsules', () => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'fixed-capsule-'});
-          const checkoutId = 'e'.repeat(64);
+          const checkoutId = Effect2.pipe('e', EffectString.repeat(64));
           const retainedAt = DateTime.formatIso(yield* DateTime.now);
           const input = {
             bytes,
             checkoutId,
             objectFormat: 'sha1' as const,
-            referenceId: 'd'.repeat(64),
+            referenceId: Effect2.pipe('d', EffectString.repeat(64)),
             source,
             threadnoteHome: home,
             retainedAt,
@@ -236,13 +249,13 @@ describe('bounded historical citation capsules', () => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'fixed-capsule-property-'});
-          const checkoutId = 'e'.repeat(64);
+          const checkoutId = Effect2.pipe('e', EffectString.repeat(64));
           const retainedAt = DateTime.formatIso(yield* DateTime.now);
           const input = {
             bytes,
             checkoutId,
             objectFormat: 'sha1' as const,
-            referenceId: 'd'.repeat(64),
+            referenceId: Effect2.pipe('d', EffectString.repeat(64)),
             source,
             threadnoteHome: home,
             retainedAt,
@@ -272,12 +285,12 @@ describe('bounded historical citation capsules', () => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-citation-capsule-'});
-          const checkoutId = 'e'.repeat(64);
+          const checkoutId = Effect2.pipe('e', EffectString.repeat(64));
           const retained = yield* retainCodeGraphCitationEvidence({
             bytes,
             checkoutId,
             objectFormat: 'sha1',
-            referenceId: 'd'.repeat(64),
+            referenceId: Effect2.pipe('d', EffectString.repeat(64)),
             source,
             threadnoteHome: home,
           });
@@ -307,7 +320,7 @@ describe('bounded historical citation capsules', () => {
               bytes: new Uint8Array(256 * 1_024 + 1),
               checkoutId,
               objectFormat: 'sha1',
-              referenceId: 'd'.repeat(64),
+              referenceId: Effect2.pipe('d', EffectString.repeat(64)),
               source,
               threadnoteHome: home,
             }),
@@ -318,7 +331,7 @@ describe('bounded historical citation capsules', () => {
 
     it('preserves exact original source provenance and rejects changed bytes or metadata', () => {
       const capsule = createCodeGraphCitationEvidenceCapsule(source, 'sha1', bytes, '2026-10-03T00:00:00.000Z', [
-        'd'.repeat(64),
+        Effect2.pipe('d', EffectString.repeat(64)),
       ]);
       expect(capsule).toBeDefined();
       const parsed = parseCodeGraphCitationEvidenceCapsule(JSON.stringify(capsule), source);
@@ -331,7 +344,10 @@ describe('bounded historical citation capsules', () => {
         ),
       ).toBeUndefined();
       expect(
-        parseCodeGraphCitationEvidenceCapsule(JSON.stringify(capsule), {...source, repositoryId: 'f'.repeat(64)}),
+        parseCodeGraphCitationEvidenceCapsule(JSON.stringify(capsule), {
+          ...source,
+          repositoryId: Effect2.pipe('f', EffectString.repeat(64)),
+        }),
       ).toBeUndefined();
       expect(
         createCodeGraphCitationEvidenceCapsule(
@@ -353,7 +369,7 @@ describe('bounded historical citation capsules', () => {
           ),
           values => {
             const now = Date.parse('2026-10-03T00:00:00.000Z');
-            const entries = values.map(value => ({
+            const entries = EffectArray.map(values, value => ({
               id: value.id,
               bytes: value.bytes,
               retainedAt: new Date(now - value.age * 86_400_000).toISOString(),
@@ -362,13 +378,18 @@ describe('bounded historical citation capsules', () => {
             const selected = selectCodeGraphCitationCapsuleRetention(entries, now, limits);
             expect(selectCodeGraphCitationCapsuleRetention([...entries].reverse(), now, limits)).toEqual(selected);
             expect(selected.retain.length).toBeLessThanOrEqual(8);
-            expect(selected.retain.reduce((total, value) => total + value.bytes, 0)).toBeLessThanOrEqual(4_000);
+            expect(EffectArray.reduce(selected.retain, 0, (total, value) => total + value.bytes)).toBeLessThanOrEqual(
+              4_000,
+            );
             expect(
-              selected.retain.every(value => now - Date.parse(value.retainedAt) <= limits.maximumAgeMilliseconds),
+              EffectArray.every(
+                selected.retain,
+                value => now - Date.parse(value.retainedAt) <= limits.maximumAgeMilliseconds,
+              ),
             ).toBe(true);
             expect(selectCodeGraphCitationCapsuleRetention(selected.retain, now, limits).retire).toEqual([]);
-            expect([...selected.retain, ...selected.retire].map(value => value.id).sort()).toEqual(
-              entries.map(value => value.id).sort(),
+            expect(EffectArray.map([...selected.retain, ...selected.retire], value => value.id).sort()).toEqual(
+              EffectArray.map(entries, value => value.id).sort(),
             );
           },
         ),

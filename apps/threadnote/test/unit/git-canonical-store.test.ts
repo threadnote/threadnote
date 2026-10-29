@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {testGitWorktreeLock} from '../helpers/git-worktree-lock.js';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
@@ -14,6 +15,8 @@ import {
   parseGitCanonicalSharePath,
 } from '@threadnote/remote-memory/git/canonical_store';
 import {cloneGitShareWorktree, createGitShareWorktreeFixture, git} from '@threadnote/testing/git-share-worktree';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const portableSegment = FC.stringMatching(/^[a-z][a-z0-9-]{0,15}$/u).map(value => `project-${value}`);
 
@@ -55,7 +58,9 @@ describe('git canonical memory store', () => {
   it('rejects malformed git share paths', () => {
     FC.assert(
       FC.property(FC.string({maxLength: 64}), value => {
-        expect(parseGitCanonicalSharePath(value) === undefined || value.split('/').length === 4).toBe(true);
+        expect(
+          parseGitCanonicalSharePath(value) === undefined || Effect.pipe(value, EffectString.split('/')).length === 4,
+        ).toBe(true);
       }),
     );
     expect(parseGitCanonicalSharePath('')).toBeUndefined();
@@ -72,7 +77,7 @@ describe('git canonical memory store', () => {
         FC.boolean(),
         (gitProjects, knownProjects, restrict) => {
           const known = new Set(knownProjects);
-          const allowed = restrict ? new Set(gitProjects.filter((_, index) => index % 2 === 0)) : 'all';
+          const allowed = restrict ? new Set(EffectArray.filter(gitProjects, (_, index) => index % 2 === 0)) : 'all';
           const ensured = gitIngestProjectsToEnsure({
             allowedProjects: allowed,
             gitProjects,
@@ -123,7 +128,9 @@ describe('git canonical memory store', () => {
     try {
       const missing = join(fixture.root, 'missing');
       expect(await ensureLiveGitShareWorktree({cloneUrl: fixture.remote, worktree: missing})).toBe(missing);
-      expect((await git(['rev-parse', '--verify', 'HEAD'], missing)).trim()).toMatch(/^[0-9a-f]{40}$/u);
+      expect(Effect.pipe(await git(['rev-parse', '--verify', 'HEAD'], missing), EffectString.trim)).toMatch(
+        /^[0-9a-f]{40}$/u,
+      );
       const emptyDir = join(fixture.root, 'empty-dir');
       await mkdir(emptyDir, {recursive: true});
       expect(await ensureLiveGitShareWorktree({cloneUrl: fixture.remote, worktree: emptyDir})).toBe(emptyDir);
@@ -195,8 +202,12 @@ describe('git canonical memory store', () => {
       const other = gitCanonicalSharePath('durable', 'threadnote', 'composer-sibling');
       await store.commit({content: '# MEMORY\n\nSibling.\n', message: 'remember sibling', path: other});
       const afterSibling = await store.listCanonicalPaths();
-      expect(afterSibling.find(entry => entry.gitPath === path)?.blobId).toBe(listed[0]?.blobId);
-      expect(afterSibling.find(entry => entry.gitPath === path)?.gitCommit).not.toBe(committed.gitCommit);
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(afterSibling, entry => entry.gitPath === path))?.blobId,
+      ).toBe(listed[0]?.blobId);
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(afterSibling, entry => entry.gitPath === path))?.gitCommit,
+      ).not.toBe(committed.gitCommit);
       const clone = join(fixture.root, 'laptop');
       await cloneGitShareWorktree(fixture.remote, clone);
       expect(await git(['show', `HEAD:${path}`], clone)).toBe(content);
@@ -213,13 +224,13 @@ describe('git canonical memory store', () => {
         push: false,
         worktree: fixture.worktree,
       });
-      const base = (await git(['rev-parse', 'HEAD'], fixture.worktree)).trim();
+      const base = Effect.pipe(await git(['rev-parse', 'HEAD'], fixture.worktree), EffectString.trim);
       let authorizationCalls = 0;
       const committed = await store.commit({
         authorizeRefUpdate: async requiredValidityMilliseconds => {
           authorizationCalls += 1;
           expect(requiredValidityMilliseconds).toBe(GIT_REF_UPDATE_TIMEOUT_MILLISECONDS);
-          expect((await git(['rev-parse', 'HEAD'], fixture.worktree)).trim()).toBe(base);
+          expect(Effect.pipe(await git(['rev-parse', 'HEAD'], fixture.worktree), EffectString.trim)).toBe(base);
           expect(await git(['status', '--porcelain=v1', '--untracked-files=all'], fixture.worktree)).toBe('');
         },
         content: '# MEMORY\n\nLocally authorized.\n',
@@ -227,7 +238,9 @@ describe('git canonical memory store', () => {
         path: gitCanonicalSharePath('durable', 'threadnote', 'local-authority'),
       });
       expect(authorizationCalls).toBe(1);
-      expect((await git(['rev-parse', 'HEAD'], fixture.worktree)).trim()).toBe(committed.gitCommit);
+      expect(Effect.pipe(await git(['rev-parse', 'HEAD'], fixture.worktree), EffectString.trim)).toBe(
+        committed.gitCommit,
+      );
     } finally {
       await rm(fixture.root, {force: true, recursive: true});
     }
@@ -254,7 +267,7 @@ describe('git canonical memory store', () => {
       await expect(
         composer.commit({
           content: '# MEMORY\n\nStale update.\n',
-          expectedContentHash: 'ab'.repeat(32),
+          expectedContentHash: Effect.pipe('ab', EffectString.repeat(32)),
           message: 'remember stale update',
           path,
         }),
@@ -338,7 +351,7 @@ describe('git canonical memory store', () => {
       const laptop = join(fixture.root, 'laptop');
       await cloneGitShareWorktree(fixture.remote, laptop);
       await git(['checkout', 'main'], laptop);
-      const laptopPath = join(laptop, ...path.split('/'));
+      const laptopPath = join(laptop, ...Effect.pipe(path, EffectString.split('/')));
       await mkdir(dirname(laptopPath), {recursive: true});
       await writeFile(laptopPath, '# MEMORY\n\nLaptop publish.\n', 'utf8');
       await git(['add', '--', path], laptop);

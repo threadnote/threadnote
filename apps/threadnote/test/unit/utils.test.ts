@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {chmod, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -46,6 +47,8 @@ import {
 } from '@threadnote/threadnote/utils';
 import {globToRegExp} from '@threadnote/platform/glob';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function rankingMemoryRecord(uri: string, body: string): MemoryRecord {
   return {
@@ -238,7 +241,9 @@ describe('redactText', () => {
   it('redacts provider tokens and credential URLs that appear outside key=value contexts', () => {
     expect(redactText('dsn postgres://user:password@db.example.com/app')).toBe('dsn <secret>');
     expect(
-      redactText(['webhook https://hooks.slack.com/services/T00000000/B00000000/', 'abcdefghijklmnop'].join('')),
+      redactText(
+        EffectArray.join(['webhook https://hooks.slack.com/services/T00000000/B00000000/', 'abcdefghijklmnop'], ''),
+      ),
     ).toBe('webhook <secret>');
   });
 
@@ -664,7 +669,7 @@ describe('collectExactMatches + formatExactMatchPointers', () => {
             ? ['threadnote://prefs.md#chunk_0002']
             : [];
       return Effect.succeed(
-        JSON.stringify({ok: true, result: {matches: uris.map((uri, line) => ({line, uri, content: ''}))}}),
+        JSON.stringify({ok: true, result: {matches: EffectArray.map(uris, (uri, line) => ({line, uri, content: ''}))}}),
       );
     };
     const matches = await collectExactMatches(['style', 'tone'], ['threadnote://scope'], runGrep);
@@ -686,7 +691,7 @@ describe('collectExactMatches + formatExactMatchPointers', () => {
             ? ['threadnote://dup.md']
             : [];
       return Effect.succeed(
-        JSON.stringify({ok: true, result: {matches: uris.map((uri, line) => ({line, uri, content: ''}))}}),
+        JSON.stringify({ok: true, result: {matches: EffectArray.map(uris, (uri, line) => ({line, uri, content: ''}))}}),
       );
     };
     const matches = await collectExactMatches(['term'], ['threadnote://a', 'threadnote://b'], runGrep);
@@ -696,7 +701,12 @@ describe('collectExactMatches + formatExactMatchPointers', () => {
   it('caps the pointer list and notes the overflow', () => {
     const matches = Array.from({length: 10}, (_unused, index) => ({terms: ['t'], uri: `threadnote://m${index}.md`}));
     const text = formatExactMatchPointers(matches, 3) ?? '';
-    expect(text.split('\n').filter(line => line.startsWith('- ')).length).toBe(3);
+    expect(
+      EffectArray.filter(
+        Effect2.pipe(text, EffectString.split('\n')),
+        __effectArrayValue2 => !!(line => Effect2.pipe(line, EffectString.startsWith('- ')))(__effectArrayValue2),
+      ).length,
+    ).toBe(3);
     expect(text).toContain('(+7 more exact matches');
   });
 
@@ -750,7 +760,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
         },
       }),
     );
-    expect(hits.map(hit => hit.uri)).toEqual(['threadnote://user/me/memories/durable/projects/x/real.md']);
+    expect(EffectArray.map(hits, hit => hit.uri)).toEqual(['threadnote://user/me/memories/durable/projects/x/real.md']);
   });
 
   it('uses the hybrid ranker for live recall and explains why a relevant canonical resource leads', () => {
@@ -790,7 +800,13 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
     expect(sections.semanticSection).toContain('Recall confidence:');
     expect(sections.semanticSection).toContain('why:');
     expect(sections.exactTail).toBeUndefined();
-    expect(sections.ranked[0]?.rankReasons?.map(reason => reason.code)).toContain('field_match');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(sections.ranked[0]?.rankReasons), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, reason => reason.code),
+        ),
+      ),
+    ).toContain('field_match');
   });
 
   it('does not emit rejected exact pointers after hybrid ranking', () => {
@@ -854,9 +870,13 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
 
     expect(sections.ranked[0]?.uri).toContain('alpha-42.md');
     expect(sections.ranked[0]?.score).toBe(0);
-    expect(sections.ranked[0]?.rankReasons?.map(reason => reason.code)).toEqual(
-      expect.arrayContaining(['bm25_lexical', 'field_match']),
-    );
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(sections.ranked[0]?.rankReasons), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, reason => reason.code),
+        ),
+      ),
+    ).toEqual(expect.arrayContaining(['bm25_lexical', 'field_match']));
   });
 
   it('keeps vector-index semantic corroboration for a document promoted by the exact-match pass', () => {
@@ -934,9 +954,13 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
 
     expect(sections.ranked[0]?.uri).toBe(uri);
     expect(sections.ranked[0]?.score).toBe(0);
-    expect(sections.ranked[0]?.rankReasons?.map(reason => reason.code)).toEqual(
-      expect.arrayContaining(['bm25_lexical', 'exact_term_match', 'field_match', 'memory_kind_intent']),
-    );
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(sections.ranked[0]?.rankReasons), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, reason => reason.code),
+        ),
+      ),
+    ).toEqual(expect.arrayContaining(['bm25_lexical', 'exact_term_match', 'field_match', 'memory_kind_intent']));
     expect(sections.semanticSection).not.toContain(RECALL_LOW_CONFIDENCE_NOTE);
   });
 
@@ -1008,7 +1032,9 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       },
     );
 
-    expect(sections.ranked.map(hit => hit.uri)).toEqual(['threadnote://resources/repos/threadnote/alpha-42.md']);
+    expect(EffectArray.map(sections.ranked, hit => hit.uri)).toEqual([
+      'threadnote://resources/repos/threadnote/alpha-42.md',
+    ]);
     expect(sections.exactTail).toBeUndefined();
   });
 
@@ -1054,7 +1080,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       query: 'worker lease renewal',
     });
 
-    expect(sections.ranked.map(hit => hit.uri)).toEqual([selectedUri]);
+    expect(EffectArray.map(sections.ranked, hit => hit.uri)).toEqual([selectedUri]);
   });
 
   it('does not rank an indexed memory URI that is absent from provided records', () => {
@@ -1088,9 +1114,9 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       records: [rankingMemoryRecord(liveUri, 'ranked-live-gate live memory body')],
     });
 
-    expect(sections.ranked.map(hit => hit.uri)).toContain(liveUri);
-    expect(sections.ranked.map(hit => hit.uri)).not.toContain(ghostUri);
-    expect(sections.ranked.map(hit => hit.uri)).toContain(resourceUri);
+    expect(EffectArray.map(sections.ranked, hit => hit.uri)).toContain(liveUri);
+    expect(EffectArray.map(sections.ranked, hit => hit.uri)).not.toContain(ghostUri);
+    expect(EffectArray.map(sections.ranked, hit => hit.uri)).toContain(resourceUri);
   });
 
   it('keeps indexed memory URIs when records is an empty array rather than a loaded set', () => {
@@ -1116,10 +1142,12 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       records: [rankingMemoryRecord(liveUri, 'ranked-live-gate live memory body')],
     });
 
-    expect(emptyHydration.ranked.map(hit => hit.uri)).toEqual(unchecked.ranked.map(hit => hit.uri));
-    expect(emptyHydration.ranked.map(hit => hit.uri)).toEqual(expect.arrayContaining([liveUri, ghostUri]));
-    expect(loadedMissing.ranked.map(hit => hit.uri)).toContain(liveUri);
-    expect(loadedMissing.ranked.map(hit => hit.uri)).not.toContain(ghostUri);
+    expect(EffectArray.map(emptyHydration.ranked, hit => hit.uri)).toEqual(
+      EffectArray.map(unchecked.ranked, hit => hit.uri),
+    );
+    expect(EffectArray.map(emptyHydration.ranked, hit => hit.uri)).toEqual(expect.arrayContaining([liveUri, ghostUri]));
+    expect(EffectArray.map(loadedMissing.ranked, hit => hit.uri)).toContain(liveUri);
+    expect(EffectArray.map(loadedMissing.ranked, hit => hit.uri)).not.toContain(ghostUri);
   });
 
   it('drops extra-hydration misses even when records is an empty array', () => {
@@ -1144,14 +1172,14 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       records: [],
     });
 
-    expect(sections.ranked.map(hit => hit.uri)).toContain(liveUri);
-    expect(sections.ranked.map(hit => hit.uri)).not.toContain(ghostUri);
+    expect(EffectArray.map(sections.ranked, hit => hit.uri)).toContain(liveUri);
+    expect(EffectArray.map(sections.ranked, hit => hit.uri)).not.toContain(ghostUri);
   });
 
   it('never ranks extra-hydration misses even when records is empty', () => {
     fc.assert(
       fc.property(fc.array(fc.boolean(), {minLength: 1, maxLength: 5}), flags => {
-        const candidates = flags.map((_live, index) => ({
+        const candidates = EffectArray.map(flags, (_live, index) => ({
           fields: {
             identifiers: [`ranked-live-gate-${index}`],
             project: 'threadnote',
@@ -1161,15 +1189,18 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
           text: `ranked-live-gate candidate ${index}`,
           uri: `threadnote://user/me/memories/durable/projects/threadnote/ranked-gate-${index}.md`,
         }));
-        const absentMemoryUris = flags.flatMap((live, index) => (live ? [] : [candidates[index].uri]));
+        const absentMemoryUris = EffectArray.flatMap(flags, (live, index) => (live ? [] : [candidates[index].uri]));
         const sections = buildRecallSections([], [], 12, {
           absentMemoryUris,
           indexedCandidates: candidates,
           query: 'ranked-live-gate',
           records: [],
         });
-        const rankedMemories = sections.ranked.map(hit => hit.uri).filter(uri => uri.includes('/memories/'));
-        expect(rankedMemories.every(uri => !absentMemoryUris.includes(uri))).toBe(true);
+        const rankedMemories = EffectArray.filter(
+          EffectArray.map(sections.ranked, hit => hit.uri),
+          uri => Effect2.pipe(uri, EffectString.includes('/memories/')),
+        );
+        expect(EffectArray.every(rankedMemories, uri => !absentMemoryUris.includes(uri))).toBe(true);
       }),
     );
   });
@@ -1177,7 +1208,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
   it('ranks only live memory URIs when a non-empty record set is provided', () => {
     fc.assert(
       fc.property(fc.array(fc.boolean(), {minLength: 1, maxLength: 5}), flags => {
-        const candidates = flags.map((_live, index) => ({
+        const candidates = EffectArray.map(flags, (_live, index) => ({
           fields: {
             identifiers: [`ranked-live-gate-${index}`],
             project: 'threadnote',
@@ -1187,7 +1218,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
           text: `ranked-live-gate candidate ${index}`,
           uri: `threadnote://user/me/memories/durable/projects/threadnote/ranked-gate-${index}.md`,
         }));
-        const records = flags.flatMap((live, index) =>
+        const records = EffectArray.flatMap(flags, (live, index) =>
           live ? [rankingMemoryRecord(candidates[index].uri, candidates[index].text)] : [],
         );
         const sections = buildRecallSections([], [], 12, {
@@ -1195,19 +1226,25 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
           query: 'ranked-live-gate',
           records,
         });
-        const rankedMemories = sections.ranked.map(hit => hit.uri).filter(uri => uri.includes('/memories/'));
+        const rankedMemories = EffectArray.filter(
+          EffectArray.map(sections.ranked, hit => hit.uri),
+          uri => Effect2.pipe(uri, EffectString.includes('/memories/')),
+        );
         if (records.length === 0) {
           const unchecked = buildRecallSections([], [], 12, {
             indexedCandidates: candidates,
             query: 'ranked-live-gate',
           });
           expect(rankedMemories).toEqual(
-            unchecked.ranked.map(hit => hit.uri).filter(uri => uri.includes('/memories/')),
+            EffectArray.filter(
+              EffectArray.map(unchecked.ranked, hit => hit.uri),
+              uri => Effect2.pipe(uri, EffectString.includes('/memories/')),
+            ),
           );
           return;
         }
-        const liveUris = new Set(records.map(record => record.uri));
-        expect(rankedMemories.every(uri => liveUris.has(uri))).toBe(true);
+        const liveUris = new Set(EffectArray.map(records, record => record.uri));
+        expect(EffectArray.every(rankedMemories, uri => liveUris.has(uri))).toBe(true);
       }),
     );
   });
@@ -1216,7 +1253,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
     const indexedCandidates = Array.from({length: 250}, (_unused, index) => ({
       fields: {identifiers: ['alpha-42']},
       text: `alpha-42 candidate ${index}`,
-      uri: `threadnote://resources/repos/threadnote/${String(index).padStart(3, '0')}.md`,
+      uri: `threadnote://resources/repos/threadnote/${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`,
     }));
 
     const sections = buildRecallSections([], [], 3, {
@@ -1235,6 +1272,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       [{terms: ['kubernetes'], uri: 'threadnote://user/me/memories/durable/projects/x/unrelated.md'}],
       12,
     );
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native split indexing preserves the first-line assertion.
     expect(semanticSection?.split('\n')[0]).toBe(RECALL_LOW_CONFIDENCE_NOTE);
     expect(semanticSection).toContain('keyword-only: kubernetes');
   });
@@ -1284,7 +1322,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       }),
     );
 
-    expect(hits.map(hit => hit.uri)).toEqual([
+    expect(EffectArray.map(hits, hit => hit.uri)).toEqual([
       'threadnote://user/denys/memories/durable/projects/threadnote/current.md',
     ]);
   });
@@ -1307,7 +1345,9 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       {includeArchived: true},
     );
 
-    expect(hits.map(hit => hit.uri)).toEqual(['threadnote://user/denys/memories/durable/archived/threadnote/old.md']);
+    expect(EffectArray.map(hits, hit => hit.uri)).toEqual([
+      'threadnote://user/denys/memories/durable/archived/threadnote/old.md',
+    ]);
   });
 
   it('merges passes, collapses chunks to one document, keeps the best score, ranks desc', () => {
@@ -1326,7 +1366,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       }),
     );
     const merged = mergeRecallHits([base, scoped]);
-    expect(merged.map(hit => ({score: hit.score, uri: hit.uri}))).toEqual([
+    expect(EffectArray.map(merged, hit => ({score: hit.score, uri: hit.uri}))).toEqual([
       {score: 0.8, uri: 'threadnote://doc.md'},
       {score: 0.6, uri: 'threadnote://other.md'},
     ]);
@@ -1345,7 +1385,11 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
         }),
       ),
     ]);
-    expect(merged.map(hit => hit.uri)).toEqual(['threadnote://mem.md', 'threadnote://res.md', 'threadnote://skill.md']);
+    expect(EffectArray.map(merged, hit => hit.uri)).toEqual([
+      'threadnote://mem.md',
+      'threadnote://res.md',
+      'threadnote://skill.md',
+    ]);
   });
 
   it('formats a capped numbered list with overflow note', () => {
@@ -1395,7 +1439,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       12,
     );
     // One resource kept (highest score), both memories kept despite identical snippet.
-    expect(ranked.map(hit => hit.uri)).toEqual([
+    expect(EffectArray.map(ranked, hit => hit.uri)).toEqual([
       'threadnote://m1.md',
       'threadnote://m2.md',
       'threadnote://r/.agents/skills/x/SKILL.md',
@@ -1420,7 +1464,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       [],
       12,
     );
-    expect(ranked.map(hit => hit.uri)).toEqual(['threadnote://r/a.md', 'threadnote://r/b.md']);
+    expect(EffectArray.map(ranked, hit => hit.uri)).toEqual(['threadnote://r/a.md', 'threadnote://r/b.md']);
   });
 
   it('keeps the exact-matched twin when a content-duplicate would otherwise be dropped', () => {
@@ -1452,7 +1496,7 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
       [{terms: ['chaos'], uri: 'threadnote://r/.claude/skills/x/SKILL.md'}],
       12,
     );
-    expect(ranked.map(hit => hit.uri)).toEqual(['threadnote://r/.claude/skills/x/SKILL.md']);
+    expect(EffectArray.map(ranked, hit => hit.uri)).toEqual(['threadnote://r/.claude/skills/x/SKILL.md']);
   });
 
   it('builds an exact tail that excludes matches already shown in the ranked window', () => {
@@ -1471,7 +1515,9 @@ describe('parseRecallHits / mergeRecallHits / formatRecallHits', () => {
     // shown.md is in the ranked window, so it is filtered out of the tail; the
     // exact-only doc was promoted into the window too, so the tail is empty.
     expect(sections.exactTail).toBeUndefined();
-    expect(sections.ranked.map(hit => hit.uri)).toContain('threadnote://resources/repos/coda/only-exact.md');
+    expect(EffectArray.map(sections.ranked, hit => hit.uri)).toContain(
+      'threadnote://resources/repos/coda/only-exact.md',
+    );
   });
 });
 
@@ -1484,7 +1530,10 @@ describe('buildRecallSections per-category reserve', () => {
     uri: `threadnote://${category}/${index}`,
   });
   const numberedLines = (section: string | undefined): number =>
-    (section ?? '').split('\n').filter(line => /^\d+\. /.test(line)).length;
+    EffectArray.filter(
+      Effect2.pipe(section ?? '', EffectString.split('\n')),
+      __effectArrayValue2 => !!(line => /^\d+\. /.test(line))(__effectArrayValue2),
+    ).length;
 
   it('reserves window slots for resources and skills in a memory-heavy result', () => {
     const hits = [
@@ -1501,14 +1550,41 @@ describe('buildRecallSections per-category reserve', () => {
     expect(text).toContain('threadnote://skills/0');
     expect(text).toContain('threadnote://skills/1');
     // Memories still take every remaining slot: 12 - 2 - 2 = 8.
-    expect((text.match(/threadnote:\/\/memories\//g) ?? []).length).toBe(8);
+    expect(
+      (
+        Effect2.pipe(
+          text,
+          EffectString.match(/threadnote:\/\/memories\//g),
+          Effect2.Option.getOrElse(() => null),
+        ) ?? []
+      ).length,
+    ).toBe(8);
     // Display stays fully category-first: every memory precedes every resource,
     // which precedes every skill.
-    const lines = text.split('\n').filter(line => /^\d+\. /.test(line));
-    const lastMemory = lines.map(l => l.includes('memories/')).lastIndexOf(true);
-    const firstResource = lines.findIndex(l => l.includes('resources/'));
-    const lastResource = lines.map(l => l.includes('resources/')).lastIndexOf(true);
-    const firstSkill = lines.findIndex(l => l.includes('skills/'));
+    const lines = EffectArray.filter(
+      Effect2.pipe(text, EffectString.split('\n')),
+      __effectArrayValue2 => !!(line => /^\d+\. /.test(line))(__effectArrayValue2),
+    );
+    const lastMemory = EffectArray.map(lines, l => Effect2.pipe(l, EffectString.includes('memories/'))).lastIndexOf(
+      true,
+    );
+    const firstResource = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        lines,
+        __effectArrayValue => !!(l => Effect2.pipe(l, EffectString.includes('resources/')))(__effectArrayValue),
+      ),
+      () => -1,
+    );
+    const lastResource = EffectArray.map(lines, l => Effect2.pipe(l, EffectString.includes('resources/'))).lastIndexOf(
+      true,
+    );
+    const firstSkill = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        lines,
+        __effectArrayValue => !!(l => Effect2.pipe(l, EffectString.includes('skills/')))(__effectArrayValue),
+      ),
+      () => -1,
+    );
     expect(firstResource).toBeGreaterThan(lastMemory);
     expect(firstSkill).toBeGreaterThan(lastResource);
     expect(numberedLines(semanticSection)).toBe(12);
@@ -1517,8 +1593,11 @@ describe('buildRecallSections per-category reserve', () => {
   it('shows every hit in category-first order when the result fits the window', () => {
     const hits = [mk('skills', 0, 0.4), mk('memories', 0, 0.9), mk('resources', 0, 0.5)];
     const {semanticSection} = buildRecallSections([hits], [], 12);
-    const lines = (semanticSection ?? '').split('\n').filter(line => /^\d+\. /.test(line));
-    expect(lines.map(l => l.replace(/^\d+\. .* · /, ''))).toEqual([
+    const lines = EffectArray.filter(
+      Effect2.pipe(semanticSection ?? '', EffectString.split('\n')),
+      __effectArrayValue2 => !!(line => /^\d+\. /.test(line))(__effectArrayValue2),
+    );
+    expect(EffectArray.map(lines, l => Effect2.pipe(l, EffectString.replace(/^\d+\. .* · /, '')))).toEqual([
       'threadnote://memories/0',
       'threadnote://resources/0',
       'threadnote://skills/0',
@@ -1546,7 +1625,13 @@ describe('buildRecallSections per-category reserve', () => {
     const hits = Array.from({length: 15}, (_unused, i) => mk('memories', i, 0.9 - i * 0.01));
     const {semanticSection} = buildRecallSections([hits], [], 12);
     expect(numberedLines(semanticSection)).toBe(12);
-    expect((semanticSection ?? '').match(/threadnote:\/\/memories\//g)?.length).toBe(12);
+    expect(
+      Effect2.pipe(
+        semanticSection ?? '',
+        EffectString.match(/threadnote:\/\/memories\//g),
+        Effect2.Option.getOrElse(() => null),
+      )?.length,
+    ).toBe(12);
   });
 });
 
@@ -1593,7 +1678,8 @@ describe('memoryUriProjectSegment', () => {
 });
 
 describe('memoryFrontmatterField', () => {
-  const doc = ['MEMORY', 'kind: durable', 'status: active', 'project: mobile-native', 'topic: auth', '', 'Body.'].join(
+  const doc = EffectArray.join(
+    ['MEMORY', 'kind: durable', 'status: active', 'project: mobile-native', 'topic: auth', '', 'Body.'],
     '\n',
   );
   it('reads a header field from the leading block', () => {
@@ -1660,7 +1746,7 @@ describe('applyExactMatchBoost', () => {
       [hit({uri: 'threadnote://a', score: 0.6}), hit({uri: 'threadnote://b', score: 0.9})],
       [{terms: ['release', 'test'], uri: 'threadnote://a'}],
     );
-    const a = ranked.find(entry => entry.uri === 'threadnote://a');
+    const a = EffectOption.getOrUndefined(EffectArray.findFirst(ranked, entry => entry.uri === 'threadnote://a'));
     expect(a?.exactTerms).toEqual(['release', 'test']);
     // Exact match leads its category despite lower semantic score.
     expect(ranked[0]?.uri).toBe('threadnote://a');
@@ -1671,7 +1757,9 @@ describe('applyExactMatchBoost', () => {
       [hit({uri: 'threadnote://sem', score: 0.9})],
       [{terms: ['conventions'], uri: 'threadnote://resources/repos/coda/CLAUDE.md'}],
     );
-    const promoted = ranked.find(entry => entry.uri === 'threadnote://resources/repos/coda/CLAUDE.md');
+    const promoted = EffectOption.getOrUndefined(
+      EffectArray.findFirst(ranked, entry => entry.uri === 'threadnote://resources/repos/coda/CLAUDE.md'),
+    );
     expect(promoted).toMatchObject({
       category: 'resources',
       contextType: 'resource',
@@ -1694,7 +1782,7 @@ describe('applyExactMatchBoost', () => {
         {terms: ['a', 'b'], uri: 'threadnote://r-two-terms'},
       ],
     );
-    expect(ranked.map(entry => entry.uri)).toEqual([
+    expect(EffectArray.map(ranked, entry => entry.uri)).toEqual([
       'threadnote://user/me/memories/m.md',
       'threadnote://r-two-terms',
       'threadnote://r-one-term',
@@ -1710,7 +1798,7 @@ describe('applyExactMatchBoost', () => {
       ],
     );
     // Same single-term match → higher semantic score wins.
-    expect(ranked.map(entry => entry.uri)).toEqual(['threadnote://hi', 'threadnote://lo']);
+    expect(EffectArray.map(ranked, entry => entry.uri)).toEqual(['threadnote://hi', 'threadnote://lo']);
   });
 
   it('renders promoted exact-only hits without a score and annotates boosted hits', () => {
@@ -1721,8 +1809,14 @@ describe('applyExactMatchBoost', () => {
         {terms: ['y', 'z'], uri: 'threadnote://resources/repos/coda/CLAUDE.md'},
       ],
     );
-    const lines = (formatRecallHits(ranked, 5) ?? '').split('\n');
-    const promotedIndex = lines.findIndex(line => line.includes('CLAUDE.md'));
+    const lines = Effect2.pipe(formatRecallHits(ranked, 5) ?? '', EffectString.split('\n'));
+    const promotedIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        lines,
+        __effectArrayValue => !!(line => Effect2.pipe(line, EffectString.includes('CLAUDE.md')))(__effectArrayValue),
+      ),
+      () => -1,
+    );
     // Promoted exact-only line is labelled keyword-only (no semantic match),
     // carries no "score" token, and is not followed by a wrapped (3-space
     // indented) snippet line, since its snippet is empty.
@@ -1732,7 +1826,7 @@ describe('applyExactMatchBoost', () => {
     expect(lines[promotedIndex]).not.toContain('score');
     expect(lines[promotedIndex + 1] ?? '').not.toMatch(/^ {3}/);
     // A semantic hit that a term also matched keeps the "exact:" label.
-    expect(lines.join('\n')).toContain('resource · score 0.62 · exact: x · threadnote://sem');
+    expect(EffectArray.join(lines, '\n')).toContain('resource · score 0.62 · exact: x · threadnote://sem');
   });
 
   it('weights a rare exact term above a common one (inverse document frequency)', () => {

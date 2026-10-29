@@ -1,3 +1,5 @@
+import {isRuntimeUpdates} from './api/response_guards.js';
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
 import {ArrowDownToLine, BookOpen, Check, CircleAlert, RefreshCw, ShieldCheck} from 'lucide-react';
 import {api, errorMessage} from './ui/support.js';
@@ -5,6 +7,8 @@ import {MarkdownViewer} from './ui/controls.js';
 import type {RuntimeReleaseNotes, RuntimeUpdates} from './update_contracts.js';
 import {ModelSetupPanel} from './model_setup.js';
 import {useManagerLiveQuery} from './live/provider.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const endpoint = '/api/runtime/updates';
 
@@ -15,8 +19,17 @@ export function RuntimeUpdatesPanel({onChanged}: {readonly onChanged: () => void
   const [generation, setGeneration] = useState(0);
   const changed = useRef(onChanged);
   changed.current = onChanged;
-  const live = useManagerLiveQuery<RuntimeUpdates>({topic: 'runtime-updates', scope: 'account'}, 'status', signal =>
-    api<RuntimeUpdates>(endpoint + '?view=status', undefined, {signal, timeoutMilliseconds: 10_000}),
+  const live = useManagerLiveQuery<RuntimeUpdates>(
+    {topic: 'runtime-updates', scope: 'account'},
+    'status',
+    signal =>
+      api<RuntimeUpdates>(
+        endpoint + '?view=status',
+        undefined,
+        {signal, timeoutMilliseconds: 10_000},
+        isRuntimeUpdates,
+      ),
+    isRuntimeUpdates,
   );
   const fallback = !live.active || live.snapshot.status === 'unsupported';
   const completed = useRef<string | undefined>(undefined);
@@ -24,7 +37,12 @@ export function RuntimeUpdatesPanel({onChanged}: {readonly onChanged: () => void
   useEffect(() => {
     const controller = new AbortController();
     setBusy('Loading updates');
-    void api<RuntimeUpdates>(endpoint, undefined, {signal: controller.signal, timeoutMilliseconds: 20_000})
+    void api<RuntimeUpdates>(
+      endpoint,
+      undefined,
+      {signal: controller.signal, timeoutMilliseconds: 20_000},
+      isRuntimeUpdates,
+    )
       .then(next => {
         if (next.automaticRunning) previousAutomaticRunning.current = true;
         setData(next);
@@ -61,10 +79,15 @@ export function RuntimeUpdatesPanel({onChanged}: {readonly onChanged: () => void
     let timer: ReturnType<typeof setTimeout>;
     async function poll(): Promise<void> {
       try {
-        const next = await api<RuntimeUpdates>(endpoint + '?view=status', undefined, {
-          signal: controller.signal,
-          timeoutMilliseconds: 10_000,
-        });
+        const next = await api<RuntimeUpdates>(
+          endpoint + '?view=status',
+          undefined,
+          {
+            signal: controller.signal,
+            timeoutMilliseconds: 10_000,
+          },
+          isRuntimeUpdates,
+        );
         if (controller.signal.aborted) return;
         setData(next);
         setError('');
@@ -99,6 +122,7 @@ export function RuntimeUpdatesPanel({onChanged}: {readonly onChanged: () => void
           ...(action === 'policy' ? {policy: data?.policy === 'automatic' ? 'notify' : 'automatic'} : {}),
         },
         {timeoutMilliseconds: 20_000},
+        isRuntimeUpdates,
       );
       setData(next);
       live.invalidate();
@@ -282,11 +306,11 @@ function ReleaseNotes({
   if (!notes.length) return <p className="muted">No published release notes were found for this version.</p>;
   return (
     <div className="runtime-release-notes">
-      {[...notes].reverse().map((note, index) => (
+      {EffectArray.map([...notes].reverse(), (note, index) => (
         <details key={note.version} open={index === 0}>
           <summary>
             <span className="workspace-status neutral">v{note.version}</span>{' '}
-            {note.title.replace(/^v/, '') === note.version ? 'Release notes' : note.title}
+            {Effect.pipe(note.title, EffectString.replace(/^v/, '')) === note.version ? 'Release notes' : note.title}
           </summary>
           <MarkdownViewer markdown={note.body} />
         </details>

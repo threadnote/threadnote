@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {ManagerDialogOptions} from '@threadnote/manager/dialog';
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
 import type {GraphCatalog} from '../graph.js';
@@ -49,8 +50,8 @@ export function withoutRemovedGraphCatalogView(
 ): GraphCatalog | undefined {
   if (!catalog) return catalog;
   let changed = false;
-  const repositories = catalog.repositories.flatMap(group => {
-    const views = group.views.filter(view => {
+  const repositories = EffectArray.flatMap(catalog.repositories, group => {
+    const views = EffectArray.filter(group.views, view => {
       const removed = graphViewMatchesRemovalTarget(view, target);
       changed ||= removed;
       return !removed;
@@ -60,7 +61,9 @@ export function withoutRemovedGraphCatalogView(
     return [
       {
         ...group,
-        defaultViewId: views.some(view => view.id === group.defaultViewId) ? group.defaultViewId : views[0].id,
+        defaultViewId: EffectArray.some(views, view => view.id === group.defaultViewId)
+          ? group.defaultViewId
+          : views[0].id,
         views,
       },
     ];
@@ -75,9 +78,9 @@ export function withoutRemovedGraphDiagnosticsView(
 ): CodeGraphLocalDiagnosticsReport | undefined {
   if (!report) return report;
   let removedCount = 0;
-  const databases = report.databases.map(database => {
+  const databases = EffectArray.map(report.databases, database => {
     if (database.checkoutId !== target.checkoutId) return database;
-    const views = database.views.filter(view => {
+    const views = EffectArray.filter(database.views, view => {
       const removed =
         view.viewWorktreeId === target.worktreeId &&
         view.viewScopeId === target.scopeId &&

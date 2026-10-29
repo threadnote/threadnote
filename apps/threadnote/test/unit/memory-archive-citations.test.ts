@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {expect, it} from '@effect/vitest';
 import {Effect, FileSystem, Option, Path} from 'effect';
@@ -10,6 +11,8 @@ import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/docu
 import {loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('memory archive code citations', () => {
   it.effect('retains valid schema-v4 citations as machine-readable archive metadata', () =>
@@ -81,11 +84,14 @@ describe('memory archive code citations', () => {
         });
         expect(archived?.metadata.citationErrors).toBeUndefined();
         expect(archived?.body).toBe(
-          [
-            'Archived original Threadnote memory.',
-            '',
-            'The archived decision remains supported by precise code evidence.',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'Archived original Threadnote memory.',
+              '',
+              'The archived decision remains supported by precise code evidence.',
+            ],
+            '\n',
+          ),
         );
         expect(archived?.body).not.toContain(citation.id);
         expect(archived?.body).not.toContain(citation.fileContentHash.value);
@@ -108,17 +114,20 @@ describe('memory archive code citations', () => {
       Effect.gen(function* () {
         const {config, location, store} = yield* archiveFixture();
         const sourceUri = 'threadnote://user/tester/memories/durable/projects/threadnote/archive-malformed-citation.md';
-        const original = [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          'project: threadnote',
-          'topic: archive-malformed-citation',
-          `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-          'code_citation: {not-json}',
-          '',
-          'Malformed citation metadata must not be demoted to prose.',
-        ].join('\n');
+        const original = EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            'project: threadnote',
+            'topic: archive-malformed-citation',
+            `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+            'code_citation: {not-json}',
+            '',
+            'Malformed citation metadata must not be demoted to prose.',
+          ],
+          '\n',
+        );
         yield* store.write(location, sourceUri, original, {mode: 'create'});
 
         const failure = yield* Effect.flip(
@@ -159,13 +168,13 @@ const archiveFixture = Effect.fn('test.archiveFixture')(function* () {
 function archiveCitation() {
   return createMemoryCodeCitation({
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
     path: 'apps/threadnote/src/memory/index.ts',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });

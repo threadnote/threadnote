@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {analyzeContextHealthSemantics, contextHealthSemanticClaimRole} from '../src/health_semantic.js';
 import type {MemoryMetadata, MemoryRecord} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function record(name: string, body: string, metadata: Partial<MemoryMetadata> = {}): MemoryRecord {
   return {
@@ -41,7 +44,7 @@ describe('scoped English semantic review', () => {
         fc.array(fc.constantFrom(' ', '\t', '\u00a0'), {minLength: 1, maxLength: 8}),
         fc.integer({min: 1, max: 1000}),
         (spacing, value) => {
-          const text = `The cache size used${spacing.join('')}to be ${value} entries.`;
+          const text = `The cache size used${EffectArray.join(spacing, '')}to be ${value} entries.`;
           expect(contextHealthSemanticClaimRole(text)).toBe('historical');
         },
       ),
@@ -72,7 +75,7 @@ describe('scoped English semantic review', () => {
         fc.uniqueArray(fc.stringMatching(/^[a-z]{3,12}$/u), {minLength: 1, maxLength: 24}),
         fc.array(fc.boolean(), {minLength: 1, maxLength: 24}),
         (subjects, polarities) => {
-          const records = subjects.map((subject, index) =>
+          const records = EffectArray.map(subjects, (subject, index) =>
             record(
               `${subject}-${index}`,
               `${subject} must${polarities[index % polarities.length] ? ' not' : ''} retain verified context.`,
@@ -234,7 +237,7 @@ describe('scoped English semantic review', () => {
     const finding = analyze(body, '# Production\nTimeout is 60 seconds.').contradictions[0];
     expect(finding).toBeDefined();
     const claim = finding.left;
-    expect(body.slice(claim.span.start, claim.span.end)).toBe(claim.text);
+    expect(Effect.pipe(body, EffectString.slice(claim.span.start, claim.span.end))).toBe(claim.text);
     expect(claim.recordContentFingerprint).toMatch(/^[a-f0-9]{64}$/u);
     expect(analyze(body + '\n', '# Production\nTimeout is 60 seconds.').contradictions[0]?.contradictionId).not.toBe(
       finding.contradictionId,
@@ -274,7 +277,9 @@ describe('scoped English semantic review', () => {
       {...interval, timestamp: '2026-02-01'},
     );
     const context = first.contradictions[0].left.context;
-    expect(body.slice(context.headingEvidence[0].span.start, context.headingEvidence[0].span.end)).toBe('Production');
+    expect(
+      Effect.pipe(body, EffectString.slice(context.headingEvidence[0].span.start, context.headingEvidence[0].span.end)),
+    ).toBe('Production');
     expect(
       analyze(body, '# Production\nTimeout is 60 seconds.', {...interval, workspaceScope: 'apps/web'}, interval)
         .contradictions[0]?.left.claimFingerprint,
@@ -321,7 +326,7 @@ describe('scoped English semantic review', () => {
   it('disjoint periods never conflict and overlapping incompatible values require review', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 20}), fc.integer({min: 1, max: 1000}), (day, n) => {
-        const date = (d: number) => `2026-01-${String(d).padStart(2, '0')}`;
+        const date = (d: number) => `2026-01-${Effect.pipe(String(d), EffectString.padStart(2, '0'))}`;
         const a = {validFrom: date(day), validTo: date(day + 1)};
         const b = {validFrom: date(day + 1), validTo: date(day + 2)};
         expect(

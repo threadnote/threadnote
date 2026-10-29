@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -32,17 +33,28 @@ import {planAgentSurface} from '@threadnote/threadnote/agent_integration/surface
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 
 import {SystemInfo} from '@threadnote/platform/system';
-import type {JsonObject} from '@threadnote/platform/json';
+import {isJsonObject, type JsonObject} from '@threadnote/platform/json';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requireJsonObject(value: unknown): JsonObject {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 const commandLayer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(BunServices.layer),
   Layer.provide(TestSystemInfoLayer),
 );
 const testLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, commandLayer);
-const jsonAdapters = AGENT_ADAPTERS.filter(adapter =>
-  ['gemini-cli', 'qwen-code', 'amp-cli', 'factory-droid'].includes(adapter.catalog.id),
+const jsonAdapters = EffectArray.filter(
+  AGENT_ADAPTERS,
+  (adapter, __effectArrayIndex) =>
+    __effectArrayIndex in AGENT_ADAPTERS &&
+    ['gemini-cli', 'qwen-code', 'amp-cli', 'factory-droid'].includes(adapter.catalog.id),
 );
 const runtime = (home: string): RuntimeConfig => ({
   account: 'local',
@@ -63,11 +75,13 @@ const surfacePlan = (config: RuntimeConfig, selector: string) => planAgentSurfac
 
 describe('agent catalog and adapter contracts', () => {
   it('has one descriptor per catalog surface and no false managed claims', () => {
-    expect(AGENT_ADAPTERS.map(adapter => adapter.catalog.id)).toEqual(AGENT_CATALOG.map(entry => entry.id));
-    expect(new Set(AGENT_CATALOG.map(entry => entry.id)).size).toBe(AGENT_CATALOG.length);
+    expect(EffectArray.map(AGENT_ADAPTERS, adapter => adapter.catalog.id)).toEqual(
+      EffectArray.map(AGENT_CATALOG, entry => entry.id),
+    );
+    expect(new Set(EffectArray.map(AGENT_CATALOG, entry => entry.id)).size).toBe(AGENT_CATALOG.length);
     for (const adapter of AGENT_ADAPTERS) {
-      expect(Object.keys(adapter.actions).sort()).toEqual(['install', 'remove', 'repair', 'status']);
-      for (const action of Object.values(adapter.actions)) expect(action).toBeTypeOf('function');
+      expect(EffectRecord.keys(adapter.actions).sort()).toEqual(['install', 'remove', 'repair', 'status']);
+      for (const action of EffectRecord.values(adapter.actions)) expect(action).toBeTypeOf('function');
       expect(adapter.catalog.capabilities.mcp.status === 'managed').toBe(Boolean(adapter.json || adapter.legacyClient));
       if (adapter.catalog.projectGuidance.status === 'managed') {
         expect(
@@ -102,7 +116,7 @@ describe('agent catalog and adapter contracts', () => {
           fc.jsonValue(),
         ),
         (settings, servers) => {
-          const before = {...settings, mcpServers: servers} as JsonObject;
+          const before = requireJsonObject({...settings, mcpServers: servers});
           const entry = {command: 'threadnote-mcp-server', args: []};
           const after = mergeAgentServer(before, 'mcpServers', 'threadnote', entry);
           expect(mergeAgentServer(after, 'mcpServers', 'threadnote', entry)).toEqual(after);
@@ -119,7 +133,7 @@ describe('agent catalog and adapter contracts', () => {
       fc.property(fc.uniqueArray(fc.constantFrom('codex', 'claude', 'cursor', 'copilot', 'omp')), agents => {
         const receipt: AgentIntegrationHostReceipt = {
           artifactVersion: 1,
-          artifacts: {'/shared/SKILL.md': 'a'.repeat(64)},
+          artifacts: {'/shared/SKILL.md': Effect2.pipe('a', EffectString.repeat(64))},
           installedVersion: '4.7.7',
           mcp: {name: 'threadnote', repair: false},
           status: 'current',
@@ -127,14 +141,14 @@ describe('agent catalog and adapter contracts', () => {
         const v1 = {
           version: 1 as const,
           legacyInstructionsMigrated: true,
-          hosts: Object.fromEntries(agents.map(agent => [agent, receipt])),
+          hosts: EffectRecord.fromEntries(EffectArray.map(agents, agent => [agent, receipt])),
         };
         const migrated = migrateAgentIntegrationRegistry(v1);
         expect(migrated.hosts).toEqual(v1.hosts);
         expect(migrated.version).toBe(2);
         expect(migrateAgentIntegrationRegistry(migrated)).toEqual(migrated);
         expect(migrated.physicalArtifacts?.['/shared/SKILL.md'] ?? []).toEqual(
-          agents.map(agent => `legacy:${agent}`).sort(),
+          EffectArray.map(agents, agent => `legacy:${agent}`).sort(),
         );
         for (const agent of agents)
           expect(artifactHasOtherConsumers(migrated, '/shared/SKILL.md', `legacy:${agent}`)).toBe(agents.length > 1);
@@ -173,46 +187,59 @@ describe('agent catalog and adapter contracts', () => {
             });
             yield* Effect.gen(function* () {
               const initial = yield* planAgentSurface(config, adapter);
-              const fixture = {
-                'gemini-cli': {
-                  root: path.join(home, '.gemini'),
-                  mcpFile: 'settings.json',
-                  instruction: 'GEMINI.md',
-                  container: 'mcpServers',
-                },
-                'qwen-code': {
-                  root: path.join(home, '.qwen'),
-                  mcpFile: 'settings.json',
-                  instruction: 'QWEN.md',
-                  container: 'mcpServers',
-                },
-                'amp-cli': {
-                  root: path.join(root, 'config', 'amp'),
-                  mcpFile: 'settings.json',
-                  instruction: 'AGENTS.md',
-                  container: 'amp.mcpServers',
-                },
-                'factory-droid': {
-                  root: path.join(home, '.factory'),
-                  mcpFile: 'mcp.json',
-                  instruction: 'AGENTS.md',
-                  container: 'mcpServers',
-                },
-              }[adapter.catalog.id as 'gemini-cli' | 'qwen-code' | 'amp-cli' | 'factory-droid'];
+              const fixture = (() => {
+                switch (adapter.catalog.id) {
+                  case 'gemini-cli':
+                    return {
+                      root: path.join(home, '.gemini'),
+                      mcpFile: 'settings.json',
+                      instruction: 'GEMINI.md',
+                      container: 'mcpServers',
+                    };
+                  case 'qwen-code':
+                    return {
+                      root: path.join(home, '.qwen'),
+                      mcpFile: 'settings.json',
+                      instruction: 'QWEN.md',
+                      container: 'mcpServers',
+                    };
+                  case 'amp-cli':
+                    return {
+                      root: path.join(root, 'config', 'amp'),
+                      mcpFile: 'settings.json',
+                      instruction: 'AGENTS.md',
+                      container: 'amp.mcpServers',
+                    };
+                  case 'factory-droid':
+                    return {
+                      root: path.join(home, '.factory'),
+                      mcpFile: 'mcp.json',
+                      instruction: 'AGENTS.md',
+                      container: 'mcpServers',
+                    };
+                  default:
+                    throw new Error(`Unexpected adapter fixture ${adapter.catalog.id}.`);
+                }
+              })();
               expect(initial.root).toBe(fixture.root);
               expect(initial.mcpPath).toBe(path.join(fixture.root, fixture.mcpFile));
               expect(initial.artifacts[0].path).toBe(path.join(fixture.root, fixture.instruction));
               expect(initial.artifacts[0].content).toContain('`threadnote context brief --cwd <cwd> --task <task>`');
               expect(initial.artifacts[0].content).not.toContain('threadnote context brief --caller-cwd');
               expect(
-                initial.artifacts.find(artifact => artifact.name === 'skill threadnote-context')?.content,
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(initial.artifacts, artifact => artifact.name === 'skill threadnote-context'),
+                )?.content,
               ).toContain('`threadnote context brief --cwd <cwd> --task <task>`');
               expect(adapter.json!.container).toBe(fixture.container);
               yield* installAgentSurface(config, adapter.catalog.id);
               expect(yield* fs.exists(home)).toBe(false);
-              const staleInstruction = initial.artifacts[0].content.replace(
-                'threadnote context brief --cwd <cwd> --task <task>',
-                'threadnote context brief --caller-cwd <cwd> --task <task>',
+              const staleInstruction = Effect2.pipe(
+                initial.artifacts[0].content,
+                EffectString.replace(
+                  'threadnote context brief --cwd <cwd> --task <task>',
+                  'threadnote context brief --caller-cwd <cwd> --task <task>',
+                ),
               );
               expect(staleInstruction).not.toBe(initial.artifacts[0].content);
               yield* fs.makeDirectory(path.dirname(initial.artifacts[0].path), {recursive: true});
@@ -236,18 +263,24 @@ describe('agent catalog and adapter contracts', () => {
               yield* installAgentSurface(config, adapter.catalog.id, {apply: true});
               expect(yield* fs.readFileString(initial.mcpPath)).toBe(first);
               const customized = parseAgentJson(first);
-              const owned = (customized[fixture.container] as JsonObject).threadnote as JsonObject;
-              const customizedEntry = {...owned, env: {...(owned.env as JsonObject), CUSTOM_AGENT_OPTION: 'preserve'}};
+              const owned = requireJsonObject(requireJsonObject(customized[fixture.container]).threadnote);
+              const customizedEntry = {
+                ...owned,
+                env: {...requireJsonObject(owned.env), CUSTOM_AGENT_OPTION: 'preserve'},
+              };
               yield* fs.writeFileString(
                 initial.mcpPath,
                 JSON.stringify({
                   ...customized,
-                  [fixture.container]: {...(customized[fixture.container] as JsonObject), threadnote: customizedEntry},
+                  [fixture.container]: {
+                    ...requireJsonObject(customized[fixture.container]),
+                    threadnote: customizedEntry,
+                  },
                 }),
               );
               yield* installAgentSurface(config, adapter.catalog.id, {apply: true});
               const repaired = parseAgentJson(yield* fs.readFileString(initial.mcpPath));
-              expect(((repaired[fixture.container] as JsonObject).threadnote as JsonObject).env).toMatchObject({
+              expect(requireJsonObject(requireJsonObject(repaired[fixture.container]).threadnote).env).toMatchObject({
                 CUSTOM_AGENT_OPTION: 'preserve',
               });
               expect((yield* agentAdapterStatus(config, adapter)).state).toBe('current');
@@ -397,7 +430,8 @@ describe('agent catalog and adapter contracts', () => {
         const home = path.join(root, 'user');
         const config = runtime(path.join(home, '.threadnote'));
         const adapter = getAgentAdapter('gemini-cli')!;
-        const strategy = adapter.json as {container: string};
+        const strategy = adapter.json;
+        if (strategy === undefined) throw new Error('Gemini fixture has no JSON adapter.');
         const originalContainer = strategy.container;
         const testSystem = SystemInfo.of({...system, homeDirectory: home});
 
@@ -405,7 +439,8 @@ describe('agent catalog and adapter contracts', () => {
           yield* installAgentSurface(config, adapter.catalog.id, {apply: true});
           const receipt = (yield* readAgentIntegrationRegistry(config))!.surfaces![adapter.catalog.id];
           const installed = yield* fs.readFileString(receipt.mcp.path);
-          strategy.container = 'changedServers';
+          if (!Reflect.set(strategy, 'container', 'changedServers'))
+            throw new Error('Could not mutate adapter fixture.');
 
           expect((yield* installAgentSurface(config, adapter.catalog.id, {apply: true}).pipe(Effect.exit))._tag).toBe(
             'Failure',
@@ -413,7 +448,12 @@ describe('agent catalog and adapter contracts', () => {
           expect(yield* fs.readFileString(receipt.mcp.path)).toBe(installed);
           expect((yield* readAgentIntegrationRegistry(config))!.surfaces![adapter.catalog.id]).toEqual(receipt);
         }).pipe(
-          Effect.ensuring(Effect.sync(() => void (strategy.container = originalContainer))),
+          Effect.ensuring(
+            Effect.sync(() => {
+              if (!Reflect.set(strategy, 'container', originalContainer))
+                throw new Error('Could not restore adapter fixture.');
+            }),
+          ),
           Effect.provideService(SystemInfo, testSystem),
         );
       }),

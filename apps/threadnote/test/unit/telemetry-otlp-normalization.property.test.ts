@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {OtlpTracer} from 'effect/observability';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
@@ -17,16 +18,17 @@ it('preserves the frozen resource/scope envelope, span batches and input bytes u
           'threadnote.session.scope',
           'threadnote.telemetry.schema_version',
         ];
-        const resource = allowed.map(key => ({key, value: {stringValue: key}}));
+        const resource = EffectArray.map(allowed, key => ({key, value: {stringValue: key}}));
         const input: OtlpTracer.TraceData = {
           resourceSpans: [
             {
               resource: {
                 attributes: [
                   ...resource,
-                  ...metadata
-                    .filter(([key]) => !allowed.includes(key))
-                    .map(([key, stringValue]) => ({key, value: {stringValue}})),
+                  ...EffectArray.map(
+                    EffectArray.filter(metadata, ([key]) => !allowed.includes(key)),
+                    ([key, stringValue]) => ({key, value: {stringValue}}),
+                  ),
                 ],
                 droppedAttributesCount: 0,
               },

@@ -1,3 +1,7 @@
+import {isResolvedSuperhumanSelection} from '@threadnote/manager/api/response-guards';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import React, {useEffect, useRef, useState} from 'react';
 import {X} from 'lucide-react';
 import {SuperhumanSelectionIcon} from './selection-icon.js';
@@ -12,23 +16,32 @@ import {product} from './catalog.js';
 import {DetailModal} from '@threadnote/manager/detail-modal';
 import {useManagerDialogs} from '@threadnote/manager/dialog';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function linksFrom(value: string): readonly string[] {
-  return value
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean);
+  return EffectArray.filter(
+    EffectArray.map(Effect.pipe(value, EffectString.split('\n')), line => Effect.pipe(line, EffectString.trim)),
+    Boolean,
+  );
 }
 
 function scopeSummary(documents: readonly SuperhumanDocumentSelection[]): string {
-  const whole = documents.filter(document => document.pages === undefined).length;
-  const pages = documents.reduce((sum, document) => sum + (document.pages?.length ?? 0), 0);
-  return [
-    whole ? `${whole} whole ${whole === 1 ? 'document' : 'documents'}` : '',
-    pages ? `${pages} selected ${pages === 1 ? 'page' : 'pages'}` : '',
-  ]
-    .filter(Boolean)
-    .join(' · ');
+  const whole = EffectArray.filter(
+    documents,
+    (document, __effectArrayIndex) => __effectArrayIndex in documents && document.pages === undefined,
+  ).length;
+  const pages = EffectArray.reduce(documents, 0, (sum, document) => sum + (document.pages?.length ?? 0));
+  return EffectArray.join(
+    EffectArray.filter(
+      [
+        whole ? `${whole} whole ${whole === 1 ? 'document' : 'documents'}` : '',
+        pages ? `${pages} selected ${pages === 1 ? 'page' : 'pages'}` : '',
+      ],
+      Boolean,
+    ),
+    ' · ',
+  );
 }
 
 export function SuperhumanConnectionForm({
@@ -71,10 +84,15 @@ export function SuperhumanConnectionForm({
       : credentialMode === 'environment'
         ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
         : !!token || source?.credentialStorage === 'local';
+  const checkedSelections = needsCheck ? resolved?.selections : undefined;
   const checkedLinks = [
     ...new Set([
       ...linksFrom(links),
-      ...(needsCheck ? (resolved?.selections.flatMap(item => (item.browserLink ? [item.browserLink] : [])) ?? []) : []),
+      ...(checkedSelections
+        ? EffectArray.flatMap(checkedSelections, (item, index) =>
+            index in checkedSelections && item.browserLink ? [item.browserLink] : [],
+          )
+        : []),
     ]),
   ];
 
@@ -85,10 +103,11 @@ export function SuperhumanConnectionForm({
       '/api/integrations/superhuman',
       {action: 'describe-selection', id: source.id},
       {signal: controller.signal},
+      isResolvedSuperhumanSelection,
     ).then(
       selection => {
         if (controller.signal.aborted) return;
-        if (!Array.isArray(selection.selections)) {
+        if (!EffectArray.isArray(selection.selections)) {
           setTitleStatus('Titles could not be loaded. Your saved selection is still available.');
           return;
         }
@@ -97,10 +116,14 @@ export function SuperhumanConnectionForm({
           current
             ? {
                 ...current,
-                selections: current.selections.map(
+                selections: EffectArray.map(
+                  current.selections,
                   item =>
-                    selection.selections.find(
-                      fetched => fetched.documentId === item.documentId && fetched.pageId === item.pageId,
+                    EffectOption.getOrUndefined(
+                      EffectArray.findFirst(
+                        selection.selections,
+                        fetched => fetched.documentId === item.documentId && fetched.pageId === item.pageId,
+                      ),
                     ) ?? item,
                 ),
               }
@@ -142,12 +165,17 @@ export function SuperhumanConnectionForm({
     setBusy(true);
     setError('');
     try {
-      const selection = await api<ResolvedSuperhumanSelection>('/api/integrations/superhuman', {
-        action: 'resolve-links',
-        links: checkedLinks,
-        ...(credentialMode === 'environment' ? {credentialEnv} : token ? {token} : {}),
-        ...(source ? {id: source.id} : {}),
-      });
+      const selection = await api<ResolvedSuperhumanSelection>(
+        '/api/integrations/superhuman',
+        {
+          action: 'resolve-links',
+          links: checkedLinks,
+          ...(credentialMode === 'environment' ? {credentialEnv} : token ? {token} : {}),
+          ...(source ? {id: source.id} : {}),
+        },
+        undefined,
+        isResolvedSuperhumanSelection,
+      );
       if (selection.documents.length === 0) throw new Error('No document or page was selected.');
       if (
         mergeResolvedSuperhumanSelections([...(resolved?.selections ?? []), ...selection.selections]).selections
@@ -156,8 +184,13 @@ export function SuperhumanConnectionForm({
         throw new Error(`Choose up to ${MAX_SUPERHUMAN_MANAGER_LINKS} document or page links.`);
       setResolved(current =>
         mergeResolvedSuperhumanSelections([
-          ...(current?.selections.filter(item => !needsCheck || !item.browserLink) ?? []),
-          ...selection.selections.map(item => ({
+          ...(current
+            ? EffectArray.filter(
+                current.selections,
+                (item, index) => index in current.selections && (!needsCheck || !item.browserLink),
+              )
+            : []),
+          ...EffectArray.map(selection.selections, item => ({
             ...item,
             // Resolution responses associate titles with browser links. A single-link
             // response from an older Manager can still be displayed as a linked chip.
@@ -181,7 +214,14 @@ export function SuperhumanConnectionForm({
       current =>
         current &&
         mergeResolvedSuperhumanSelections(
-          current.selections.filter(item => item.documentId !== documentId || item.pageId !== pageId),
+          EffectArrayPipe(current.selections, __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (item, __effectFilterIndex) =>
+                __effectFilterIndex in __effectFilterValues &&
+                (item.documentId !== documentId || item.pageId !== pageId),
+            ),
+          ),
         ),
     );
     setDirty(true);
@@ -197,7 +237,7 @@ export function SuperhumanConnectionForm({
       linksFrom(links).length ||
       !credentialReady ||
       !projectMode ||
-      (projectMode === 'project' && !project.trim())
+      (projectMode === 'project' && !Effect.pipe(project, EffectString.trim))
     )
       return;
     setBusy(true);
@@ -209,7 +249,7 @@ export function SuperhumanConnectionForm({
         editing: !!source,
         ...(credentialMode === 'environment' ? {credentialEnv} : token ? {token} : {}),
         documents: resolved.documents,
-        project: projectMode === 'projectless' ? null : project.trim(),
+        project: projectMode === 'projectless' ? null : Effect.pipe(project, EffectString.trim),
         includeHidden,
         refreshIntervalMinutes,
         maxStaleHours,
@@ -297,7 +337,7 @@ export function SuperhumanConnectionForm({
             <label htmlFor="superhuman-links">Document or page links</label>
             {resolved?.selections.length ? (
               <ul className="integration-link-chips" aria-label="Selected documents and pages">
-                {resolved.selections.map(item => (
+                {EffectArray.map(resolved.selections, item => (
                   <li
                     className="integration-link-chip"
                     key={`${item.documentId}/${item.pageId ?? ''}`}
@@ -474,7 +514,7 @@ export function SuperhumanConnectionForm({
               !!linksFrom(links).length ||
               !credentialReady ||
               !projectMode ||
-              (projectMode === 'project' && !project.trim())
+              (projectMode === 'project' && !Effect.pipe(project, EffectString.trim))
             }
           >
             {busy ? 'Saving…' : source ? 'Save settings' : 'Create connection'}

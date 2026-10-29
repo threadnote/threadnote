@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -21,6 +22,9 @@ import {runStage3Gate} from '../../../../scripts/run-code-graph-stage3-gate.js';
 import '../../../../scripts/support/code-graph-stage3-lock-child.js';
 import {withStage3Cleanup} from '../../../../scripts/support/code-graph-stage3-lifecycle.js';
 import {assertStage3StrictStateEnvelope} from '../../../../scripts/support/code-graph-stage3-scenarios.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const planArguments = ['--mode', 'plan'];
 
@@ -28,13 +32,13 @@ const executeArguments = [
   '--mode',
   'execute',
   '--candidate-commit',
-  'a'.repeat(40),
+  Effect.pipe('a', EffectString.repeat(40)),
   '--candidate-ref',
   'candidate',
   '--candidate-executable',
   '/not-an-executable',
   '--candidate-executable-sha256',
-  'b'.repeat(64),
+  Effect.pipe('b', EffectString.repeat(64)),
   '--output',
   '/not-a-directory/gate.json',
 ];
@@ -61,7 +65,7 @@ function cleanupStatus(processId: number, processStartIdentity = 'identity') {
     identity: {worktreeId: 'stage3-tree'},
     observation: {liveness: 'active'},
     owner: {processId, processStartIdentity},
-  } as never;
+  };
 }
 
 function cleanupDriver(
@@ -77,7 +81,7 @@ function cleanupDriver(
     canonicalProcessStartIdentity: () => undefined,
     processStartIdentity: () => undefined,
   };
-  driver.hosts.push(
+  const cleanupHosts = [
     {
       dead: false,
       processId: 1,
@@ -87,7 +91,7 @@ function cleanupDriver(
           if (closeFails) throw new Error('close failed');
         },
       },
-    } as never,
+    },
     {
       dead: false,
       processId: 2,
@@ -96,12 +100,16 @@ function cleanupDriver(
           events.push('close-b');
         },
       },
-    } as never,
-  );
-  driver.worktrees.push({identity: {worktreeId: 'stage3-tree'}} as never);
+    },
+  ];
+  // @ts-expect-error -- The cleanup scenario supplies only the process and close fields it exercises.
+  driver.hosts.push(...cleanupHosts);
+  // @ts-expect-error -- This minimal worktree sentinel targets cleanup by identity without a checkout runtime.
+  driver.worktrees.push({identity: {worktreeId: 'stage3-tree'}});
   driver.locks.push({
+    // @ts-expect-error -- The lock sentinel contains only the process field observed by cleanup.
     process: {exitCode: null, kill: () => events.push('lock-kill'), exited: Promise.resolve(0)},
-  } as never);
+  });
   Object.assign(driver, {
     root: 'retained-fixture',
     runtime: {runPromise: async () => observedIdentity},
@@ -134,9 +142,13 @@ describe('Stage 3 live release gate contract', () => {
       [...planArguments, '--candidate-ref', 'candidate'],
       [...planArguments, '--mode', 'execute'],
       executeArguments.slice(2),
-      executeArguments.map(value => (value === 'a'.repeat(40) ? 'HEAD' : value)),
-      executeArguments.map(value => (value === 'b'.repeat(64) ? 'unknown' : value)),
-      executeArguments.map(value => (value === '/not-an-executable' ? './threadnote' : value)),
+      EffectArray.map(executeArguments, value =>
+        value === Effect.pipe('a', EffectString.repeat(40)) ? 'HEAD' : value,
+      ),
+      EffectArray.map(executeArguments, value =>
+        value === Effect.pipe('b', EffectString.repeat(64)) ? 'unknown' : value,
+      ),
+      EffectArray.map(executeArguments, value => (value === '/not-an-executable' ? './threadnote' : value)),
     ])
       expect(() => parseStage3Arguments(invalid)).toThrow();
   });
@@ -155,9 +167,10 @@ describe('Stage 3 live release gate contract', () => {
           return {isError: false, structuredContent: {operation: 'query'}};
         },
       },
-    } as never;
-    const tree = {cwd: '/fixture'} as never;
+    };
+    const tree = {cwd: '/fixture'};
     try {
+      // @ts-expect-error -- The call test provides only the host and checkout fields it exercises.
       await expect(driver.call(host, tree, {operation: 'query', responseFormat: 'agent'})).resolves.toEqual({
         operation: 'query',
       });
@@ -173,9 +186,15 @@ describe('Stage 3 live release gate contract', () => {
   });
 
   it('keeps fixture anchors stable while every target changes source', () => {
-    const variants = ['f1', 'f2', 'f3'].map(stage3Fixture);
+    const variants = EffectArray.map(['f1', 'f2', 'f3'], stage3Fixture);
     expect(new Set(variants).size).toBe(3);
-    expect(new Set(variants.map(value => value.split('\n').slice(0, 2).join('\n'))).size).toBe(1);
+    expect(
+      new Set(
+        EffectArray.map(variants, value =>
+          EffectArray.join(Effect.pipe(value, EffectString.split('\n')).slice(0, 2), '\n'),
+        ),
+      ).size,
+    ).toBe(1);
   });
 
   it.each(['path', 'impact'] as const)(
@@ -241,11 +260,11 @@ describe('Stage 3 live release gate contract', () => {
 
   it('rejects paths, native causes, PIDs, fingerprints, and unbounded retry guidance', () => {
     const observation: Stage3Observation = {phase: 'privacy-scan', state: 'observed'};
-    for (const [key, value] of Object.entries({
+    for (const [key, value] of EffectRecord.toEntries({
       path: '/private/repo',
       cause: 'SQLITE_BUSY',
       processId: 12345,
-      fingerprint: 'a'.repeat(64),
+      fingerprint: Effect.pipe('a', EffectString.repeat(64)),
     })) {
       expect(() => scanStage3Observations([{...observation, [key]: value}], [])).toThrow('privacy-field');
     }
@@ -265,7 +284,7 @@ describe('Stage 3 live release gate contract', () => {
       phase: 'blocked-writer-discovery',
       state: 'stale',
       retryAfterMilliseconds: 12345,
-      refresh: {state: 'active', currentTargetToken: `cgdq_${'12345'.padEnd(32, '0')}`},
+      refresh: {state: 'active', currentTargetToken: `cgdq_${Effect.pipe('12345', EffectString.padEnd(32, '0'))}`},
     };
     expect(() => scanStage3Observations([observation], ['12345'])).not.toThrow();
   });
@@ -276,7 +295,10 @@ describe('Stage 3 live release gate contract', () => {
         fc.array(fc.integer({min: 0, max: 15}), {minLength: 32, maxLength: 32}),
         fc.string({minLength: 1, maxLength: 64}),
         (digits, injected) => {
-          const token = `cgdq_${digits.map(value => value.toString(16)).join('')}`;
+          const token = `cgdq_${EffectArray.join(
+            EffectArray.map(digits, value => value.toString(16)),
+            '',
+          )}`;
           const refresh = {
             type: 'code-graph-refresh-continuity',
             version: 1,
@@ -414,7 +436,7 @@ describe('Stage 3 artifact lifecycle', () => {
           () => step('dispose'),
         ),
       ).rejects.toThrow('bounded test failure');
-      expect(events.filter(event => event === 'dispose')).toHaveLength(1);
+      expect(EffectArray.filter(events, event => event === 'dispose')).toHaveLength(1);
       if (failure !== 'publish') expect(events).not.toContain('publish');
     },
   );

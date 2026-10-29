@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {Resvg} from '@resvg/resvg-js';
 import {ScriptError} from './effect/errors.js';
 import type {WebsiteRelease} from './site-release-notes.js';
 import {websiteArticleSocialImageHeight, websiteArticleSocialImageWidth} from '../src/content/websiteArticles.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const headlineMaximumWidth = 760;
 const headlineMaximumHeight = 220;
@@ -23,13 +26,13 @@ function estimatedGlyphWidth(character: string): number {
 }
 
 function estimatedTextWidth(text: string, fontSize: number): number {
-  return [...text].reduce((width, character) => width + estimatedGlyphWidth(character), 0) * fontSize;
+  return EffectArray.reduce([...text], 0, (width, character) => width + estimatedGlyphWidth(character)) * fontSize;
 }
 
 function wrapHeadline(headline: string, fontSize: number): readonly string[] | undefined {
   const lines: string[] = [];
   let line = '';
-  for (const word of headline.split(' ')) {
+  for (const word of Effect.pipe(headline, EffectString.split(' '))) {
     if (estimatedTextWidth(word, fontSize) > headlineMaximumWidth) return undefined;
     const candidate = line ? `${line} ${word}` : word;
     if (estimatedTextWidth(candidate, fontSize) <= headlineMaximumWidth) {
@@ -53,12 +56,14 @@ export function layoutReleaseSocialHeadline(headline: string): ReleaseSocialHead
 }
 
 function escapeXml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;');
+  return Effect.pipe(
+    value,
+    EffectString.replaceAll('&', '&amp;'),
+    EffectString.replaceAll('<', '&lt;'),
+    EffectString.replaceAll('>', '&gt;'),
+    EffectString.replaceAll('"', '&quot;'),
+    EffectString.replaceAll("'", '&apos;'),
+  );
 }
 
 const graphPoints = [
@@ -125,29 +130,35 @@ const graphEdges = [
 ] as const;
 
 function graphMarkup(): string {
-  const edges = graphEdges
-    .map(([from, to], index) => {
+  const edges = EffectArray.join(
+    EffectArray.map(graphEdges, ([from, to], index) => {
       const left = graphPoints[from];
       const right = graphPoints[to];
       const dashed = index % 9 === 0 ? ' stroke-dasharray="5 8"' : '';
       return `<line x1="${left[0]}" y1="${left[1]}" x2="${right[0]}" y2="${right[1]}"${dashed} />`;
-    })
-    .join('');
-  const points = graphPoints
-    .map(([x, y, radius], index) => {
+    }),
+    '',
+  );
+  const points = EffectArray.join(
+    EffectArray.map(graphPoints, ([x, y, radius], index) => {
       const accent = index === 5 || index === 11 || index === 16;
       return `<circle cx="${x}" cy="${y}" r="${radius}" fill="${accent ? '#67e8c7' : '#7d899b'}" />`;
-    })
-    .join('');
+    }),
+    '',
+  );
   return `<g opacity="0.72" stroke="#718096" stroke-width="1">${edges}</g><g>${points}</g>`;
 }
 
 export function renderWebsiteReleaseSocialImageSvg(release: Pick<WebsiteRelease, 'headline' | 'version'>): string {
-  const version = release.version.replace(/^v/u, '');
+  const version = Effect.pipe(release.version, EffectString.replace(/^v/u, ''));
   const layout = layoutReleaseSocialHeadline(release.headline);
-  const headline = layout.lines
-    .map((line, index) => `<tspan x="70" dy="${index === 0 ? 0 : layout.lineHeight}">${escapeXml(line)}</tspan>`)
-    .join('');
+  const headline = EffectArray.join(
+    EffectArray.map(
+      layout.lines,
+      (line, index) => `<tspan x="70" dy="${index === 0 ? 0 : layout.lineHeight}">${escapeXml(line)}</tspan>`,
+    ),
+    '',
+  );
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${websiteArticleSocialImageWidth}" height="${websiteArticleSocialImageHeight}" viewBox="0 0 ${websiteArticleSocialImageWidth} ${websiteArticleSocialImageHeight}">
   <defs>
     <radialGradient id="glow" cx="83%" cy="45%" r="63%"><stop offset="0" stop-color="#123348"/><stop offset="0.52" stop-color="#091724"/><stop offset="1" stop-color="#050b13"/></radialGradient>

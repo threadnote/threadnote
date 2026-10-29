@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type {NativeCloseoutAdmission} from '@threadnote/workflow-automations/closeout';
 import type {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
@@ -5,6 +6,9 @@ import {createNativeDocument} from '@threadnote/workflow-automations/templates';
 import {encodeAuthoringDocument} from './authoring_artifacts.js';
 import {nativeWorkflowError} from './memory.js';
 import {stableJson} from '../workflow_memory/protocol.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface NativeCloseoutPlannedDocument {
   readonly key: string;
@@ -21,7 +25,10 @@ export const planNativeCloseoutDocuments = <E, R>(
 ): Effect.Effect<readonly NativeCloseoutPlannedDocument[], E | WorkflowAutomationError, R> =>
   Effect.gen(function* () {
     const planned: NativeCloseoutPlannedDocument[] = [];
-    const title = admission.documents.architecture.title.replace(/ — Implemented architecture$/u, '');
+    const title = Effect2.pipe(
+      admission.documents.architecture.title,
+      EffectString.replace(/ — Implemented architecture$/u, ''),
+    );
     const attempt = <A>(f: () => A) => Effect.try({try: f, catch: nativeWorkflowError});
     const add = (key: string, body: string, targets: readonly {uri: string}[] = []) =>
       Effect.gen(function* () {
@@ -31,7 +38,7 @@ export const planNativeCloseoutDocuments = <E, R>(
           body,
           uri: predicted.uri,
           relations: Object.freeze(
-            targets.map(target => Object.freeze({type: 'references' as const, uri: target.uri})),
+            EffectArray.map(targets, target => Object.freeze({type: 'references' as const, uri: target.uri})),
           ),
         });
         planned.push(item);
@@ -56,7 +63,10 @@ export const planNativeCloseoutDocuments = <E, R>(
             title: title + ' — Verified decisions',
             sections: {
               summary: 'Complete original decisions and actual implementation rationale.',
-              entries: links.map(item => '- ' + item.uri).join('\n'),
+              entries: EffectArray.join(
+                EffectArray.map(links, item => '- ' + item.uri),
+                '\n',
+              ),
             },
           }),
         ),
@@ -99,7 +109,7 @@ export const planNativeCloseoutDocuments = <E, R>(
             sections: {
               summary:
                 'Exact owned draft identities and admitted archive destinations. Completion is recorded in the native closeout receipt.',
-              entries: pages[index].join('\n') + (next ? '\n\nNext: ' + next.uri : ''),
+              entries: EffectArray.join(pages[index], '\n') + (next ? '\n\nNext: ' + next.uri : ''),
             },
           }),
         ),
@@ -118,8 +128,13 @@ export const planNativeCloseoutDocuments = <E, R>(
           kind: 'architecture-current',
           title: admission.documents.architecture.title,
           sections: {
-            ...Object.fromEntries(admission.documents.architecture.sections.map(section => [section.id, section.body])),
-            references: links.map(item => '- [Knowledge](' + item.uri + ')').join('\n'),
+            ...EffectRecord.fromEntries(
+              EffectArray.map(admission.documents.architecture.sections, section => [section.id, section.body]),
+            ),
+            references: EffectArray.join(
+              EffectArray.map(links, item => '- [Knowledge](' + item.uri + ')'),
+              '\n',
+            ),
           },
         }),
       ),

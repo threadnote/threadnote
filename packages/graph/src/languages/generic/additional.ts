@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import type {Node} from 'web-tree-sitter';
 import type {TreeSitterLanguageDefinition} from '../../tree_sitter/extractor.js';
@@ -18,6 +19,8 @@ import {
 import type {CodeGraphLanguagePack} from '../types.js';
 import {createGenericTreeSitterLanguagePack} from './factory.js';
 import {genericReferenceLookupTiers, genericSymbolLookupKeys, simpleImport} from './lookup.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const SOURCE_CAPABILITIES = new Set(['calls', 'declarations', 'imports', 'inheritance'] as const);
 
@@ -30,6 +33,7 @@ export const powershellLanguagePack = createGenericTreeSitterLanguagePack({
       (class_statement . (simple_name) @name) @definition.class
       (class_method_definition (simple_name) @name) @definition.method
     `,
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
     exported: node => !/\bprivate\b/i.test(node.text.split(/[\n{]/, 1)[0] ?? ''),
     id: 'powershell',
     importFromNode: node => powershellImport(node.text),
@@ -106,6 +110,7 @@ export const solidityLanguagePack = createGenericTreeSitterLanguagePack({
       (modifier_definition name: (identifier) @name) @definition.modifier
       (function_definition name: (identifier) @name) @definition.function
     `,
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
     exported: node => !/\b(?:internal|private)\b/.test(node.text.split(/[\n{]/, 1)[0] ?? ''),
     id: 'solidity',
     importFromNode: node => quotedImport(node.text),
@@ -162,6 +167,7 @@ export const scalaLanguagePack = createGenericTreeSitterLanguagePack({
       (function_definition name: (_) @name) @definition.function
       (function_declaration name: (_) @name) @definition.function
     `,
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
     exported: node => !/\bprivate\b/.test(node.text.split(/[\n{=]/, 1)[0] ?? ''),
     id: 'scala',
     importFromNode: node => scalaImport(node.text),
@@ -355,6 +361,7 @@ export const systemVerilogLanguagePack = createGenericTreeSitterLanguagePack({
       (function_body_declaration name: (_) @name) @definition.function
       (task_body_declaration name: (_) @name) @definition.task
     `,
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
     exported: node => !/\blocal\b|\bprotected\b/.test(node.text.split(/[;\n]/, 1)[0] ?? ''),
     id: 'systemverilog',
     importFromNode: node => systemVerilogImport(node.text),
@@ -448,12 +455,12 @@ function luaImport(value: string) {
 
 function scalaImport(value: string) {
   const match = /^\s*import\s+([^\s;{]+)(?:\s*\{[^}]*\})?/.exec(value);
-  return match ? simpleImport(match[1].replace(/\.(?:_|\*)$/, '')) : Option.none();
+  return match ? simpleImport(Effect.pipe(match[1], EffectString.replace(/\.(?:_|\*)$/, ''))) : Option.none();
 }
 
 function elixirImport(value: string) {
   const match = /^\s*(?:alias|import|require|use)\s+([A-Z][\w.]*)/.exec(value);
-  return match ? simpleImport(match[1], match[1].split('.').at(-1)) : Option.none();
+  return match ? simpleImport(match[1], Effect.pipe(match[1], EffectString.split('.')).at(-1)) : Option.none();
 }
 
 function elixirDeclarationKind(node: Node): string {
@@ -461,7 +468,12 @@ function elixirDeclarationKind(node: Node): string {
   if (keyword === 'defmodule') return 'module';
   if (keyword === 'defprotocol') return 'protocol';
   if (keyword === 'defimpl') return 'implementation';
-  if (keyword?.startsWith('defmacro')) return 'macro';
+  if (
+    Effect.pipe(keyword, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.startsWith('defmacro')),
+    )
+  )
+    return 'macro';
   return 'function';
 }
 
@@ -480,14 +492,17 @@ function zigImport(value: string) {
 
 function juliaImport(value: string) {
   const match = /^\s*(?:using|import)\s+([\w.]+)/.exec(value);
-  return match ? simpleImport(match[1], match[1].split('.').at(-1)) : Option.none();
+  return match ? simpleImport(match[1], Effect.pipe(match[1], EffectString.split('.')).at(-1)) : Option.none();
 }
 
 function juliaDeclarationName(declaration: Node, fallback: Node): string {
   const keyword = /^\s*(?:mutable\s+)?(?:struct|abstract\s+type|primitive\s+type)\s+([A-Za-z_]\w*)/.exec(
     declaration.text,
   );
-  return keyword?.[1] ?? fallback.text.replace(/^@/, '').split(/[({<:\s]/, 1)[0] ?? fallback.text;
+  return (
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+    keyword?.[1] ?? Effect.pipe(fallback.text, EffectString.replace(/^@/, '')).split(/[({<:\s]/, 1)[0] ?? fallback.text
+  );
 }
 
 function objectiveCImport(value: string) {
@@ -503,9 +518,13 @@ function systemVerilogImport(value: string) {
 }
 
 function objectiveCMethodName(node: Node): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const header = node.text.split(/[;{]/, 1)[0] ?? node.text;
-  const selectors = [...header.matchAll(/([A-Za-z_]\w*)\s*:/g)].map(match => `${match[1]}:`);
-  if (selectors.length > 0) return selectors.join('');
+  const selectors = EffectArray.map(
+    [...Effect.pipe(header, EffectString.matchAll(/([A-Za-z_]\w*)\s*:/g))],
+    match => `${match[1]}:`,
+  );
+  if (selectors.length > 0) return EffectArray.join(selectors, '');
   return /\)\s*([A-Za-z_]\w*)/.exec(header)?.[1] ?? 'method';
 }
 

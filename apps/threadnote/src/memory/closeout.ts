@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect} from 'effect';
 import {applyMemoryCandidate} from '../mcp/server/recall.js';
 import type {ApplyMemoryCandidateInput} from './candidate_apply_contract.js';
@@ -6,6 +7,8 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {loadCandidateReview} from '@threadnote/memory/candidate';
 import {projectKnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
 import {MemoryOperationError} from './migrations.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface CloseoutRuntime {
   readonly agentContextHome: string;
@@ -36,7 +39,7 @@ export const runCloseoutPreview = Effect.fn('memory.closeout.preview')(function*
     `Knowledge delta for ${delta.reviewId} (revision ${delta.revision})`,
     ...(delta.items.length === 0
       ? ['No candidates.']
-      : delta.items.flatMap(item => [
+      : EffectArray.flatMap(delta.items, item => [
           '',
           `${item.candidateId}: ${item.type} (${item.state})`,
           `  recommendation: ${item.recommendation}`,
@@ -46,10 +49,13 @@ export const runCloseoutPreview = Effect.fn('memory.closeout.preview')(function*
             ? [`  WARNING: ${item.mutationPreview.replacementSafety.warning}`]
             : []),
           `  reason: ${item.comparisonReason}`,
-          ...item.mutationPreview.bodyText.split('\n').map(line => `  ${line}`),
+          ...EffectArray.map(
+            Effect2.pipe(item.mutationPreview.bodyText, EffectString.split('\n')),
+            line => `  ${line}`,
+          ),
         ])),
   ];
-  yield* Console.log(lines.join('\n'));
+  yield* Console.log(EffectArray.join(lines, '\n'));
 });
 
 const previewEdit = Effect.fn('memory.closeout.previewEdit')(function* (options: {

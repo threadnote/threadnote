@@ -7,6 +7,9 @@ import {
   readNativeDocumentSection,
   renderNativeDocument,
 } from '../src/documents.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const envelope = {
   schemaVersion: 1,
@@ -54,7 +57,10 @@ describe('native document envelopes', () => {
   });
 
   it('rejects over-limit rendered UTF-8 bytes without truncation', () => {
-    const oversized = {...envelope, sections: [{id: 'overview', heading: 'Overview', body: '🧭'.repeat(15_000)}]};
+    const oversized = {
+      ...envelope,
+      sections: [{id: 'overview', heading: 'Overview', body: Effect.pipe('🧭', EffectString.repeat(15_000))}],
+    };
     expect(caught(() => decodeNativeDocument(oversized))).toMatchObject({code: 'invalid-document'});
     expect(caught(() => renderNativeDocument(oversized))).toMatchObject({code: 'invalid-document'});
   });
@@ -124,10 +130,10 @@ describe('native document envelopes', () => {
       fc.property(
         fc
           .array(fc.constantFrom('a', 'é', 'e\u0301', '漢', '🧭', '🌊', '\n', ' '), {maxLength: 120})
-          .map(x => x.join('')),
+          .map(x => EffectArray.join(x, '')),
         generated => {
           const doc = {...envelope, sections: [{id: 'overview', heading: 'Overview', body: generated}]};
-          const expected = generated.trim();
+          const expected = Effect.pipe(generated, EffectString.trim);
           let offsetBytes = 0;
           let sourceDigest: string | undefined;
           let actual = '';

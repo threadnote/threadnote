@@ -9,6 +9,8 @@ import {
   previewActivationResumeV1,
   recordActivationOutcomeV1,
 } from '@threadnote/threadnote/activation/index';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const hex = fc.string({unit: fc.constantFrom(...'0123456789abcdef'), minLength: 64, maxLength: 64});
 const identifier = fc
@@ -86,7 +88,7 @@ describe('activation core properties', () => {
           };
           const transition = recordActivationOutcomeV1({
             approval,
-            now: `2026-09-18T08:${String(index).padStart(2, '0')}:00.000Z`,
+            now: `2026-09-18T08:${Effect.pipe(String(index), EffectString.padStart(2, '0'))}:00.000Z`,
             operationId: operation.id,
             outcome,
             plan,
@@ -128,7 +130,7 @@ describe('activation core properties', () => {
 });
 
 function flipHash(value: string): string {
-  return `${value[0] === '0' ? '1' : '0'}${value.slice(1)}`;
+  return `${value[0] === '0' ? '1' : '0'}${Effect.pipe(value, EffectString.slice(1))}`;
 }
 
 function changedIdentifier(value: string, avoid: string): string {

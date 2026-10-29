@@ -1,3 +1,5 @@
+import * as MigrationSchema from 'effect/Schema';
+import {Array as EffectArray} from 'effect';
 import {Effect, Layer, Redacted} from 'effect';
 import {admittedSourceFetch} from '@threadnote/integration-core/source-coordinator';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -19,7 +21,7 @@ export async function probeGitHubSource(
   options: GitHubClientOptions & {readonly number?: number} = {},
 ) {
   if (options.number !== undefined && (!Number.isSafeInteger(options.number) || options.number < 1))
-    throw new GitHubClientError({code: 'contract-invalid'});
+    throw GitHubClientError.make({code: 'contract-invalid'});
   const client = createGitHubClient(token, options);
   try {
     const repository = await client.repository(repositoryName);
@@ -34,8 +36,8 @@ export async function probeGitHubSource(
         sampledItems: inventory.items.length,
         hasMore: inventory.hasMore,
         scope: 'first-page-sample' as const,
-        issues: inventory.items.filter(item => item.kind === 'issue').length,
-        pullRequests: inventory.items.filter(item => item.kind === 'pull').length,
+        issues: EffectArray.filter(inventory.items, item => item.kind === 'issue').length,
+        pullRequests: EffectArray.filter(inventory.items, item => item.kind === 'pull').length,
       },
       ...(conversation === undefined
         ? {}
@@ -47,7 +49,11 @@ export async function probeGitHubSource(
               comments: conversation.comments.length,
               reviews: conversation.reviews.length,
               reviewThreads: conversation.threads.length,
-              reviewComments: conversation.threads.reduce((count, thread) => count + thread.comments.length, 0),
+              reviewComments: EffectArray.reduce(
+                conversation.threads,
+                0,
+                (count, thread) => count + thread.comments.length,
+              ),
             },
           }),
       requests: client.requests,
@@ -64,7 +70,7 @@ if (import.meta.main) {
     const repository = process.env.GITHUB_PROBE_REPOSITORY;
     const numberText = process.env.GITHUB_PROBE_NUMBER;
     if (!token || !repository || (numberText !== undefined && !/^[1-9][0-9]*$/.test(numberText)))
-      throw new GitHubClientError({code: 'contract-invalid'});
+      throw GitHubClientError.make({code: 'contract-invalid'});
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const config = yield* getRuntimeConfig();
@@ -87,7 +93,7 @@ if (import.meta.main) {
     );
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (error) {
-    const code = error instanceof GitHubClientError ? error.code : 'transport-rejected';
+    const code = MigrationSchema.is(GitHubClientError)(error) ? error.code : 'transport-rejected';
     process.stderr.write(`GitHub source probe: ${code}\n`);
     process.exitCode = 1;
   }

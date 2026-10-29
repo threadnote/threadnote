@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {mkdtemp, rm, writeFile, mkdir} from '@threadnote/testing/node-fs-promises';
@@ -16,6 +17,8 @@ import type {CommandResult} from '@threadnote/platform/command';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import * as utils from '@threadnote/threadnote/utils';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 vi.mock('@threadnote/threadnote/utils', async importOriginal => {
   const actual = await importOriginal<typeof import('@threadnote/threadnote/utils')>();
@@ -61,20 +64,23 @@ async function makeSharedRuntime(): Promise<RuntimeConfig> {
   const gitdir = join(home, 'share', 'teams', 'default.gitdir');
   await mkdir(join(home, 'share'), {recursive: true});
   await mkdir(worktree, {recursive: true});
-  const sharedContent = [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: orion-worker',
-    'topic: lease',
-    'memory_id: tn_shared_lease',
-    'keywords: arc',
-    'keywords: karpenter',
-    'keywords: jitconfig',
-    '',
-    'Original shared lease memory.',
-    '',
-  ].join('\n');
+  const sharedContent = EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: orion-worker',
+      'topic: lease',
+      'memory_id: tn_shared_lease',
+      'keywords: arc',
+      'keywords: karpenter',
+      'keywords: jitconfig',
+      '',
+      'Original shared lease memory.',
+      '',
+    ],
+    '\n',
+  );
   const canonicalSharedPath = join(
     home,
     'data',
@@ -143,7 +149,7 @@ describe('remember keywords on replace', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   effectIt.effect('preserves prior keywords on replace by default and skips automatic enrichment', () =>
@@ -434,7 +440,9 @@ describe('normalizeManualMemoryKeywords', () => {
       FC.property(FC.array(FC.stringMatching(/^[A-Za-z][A-Za-z0-9 _-]{0,30}$/), {maxLength: 10}), keywords => {
         const once = normalizeManualMemoryKeywords(keywords);
         expect(normalizeManualMemoryKeywords(once)).toEqual(once);
-        expect(new Set(once.map(keyword => keyword.toLowerCase())).size).toBe(once.length);
+        expect(new Set(EffectArray.map(once, keyword => Effect2.pipe(keyword, EffectString.toLowerCase))).size).toBe(
+          once.length,
+        );
         expect(once.length).toBeLessThanOrEqual(32);
       }),
     );
@@ -447,7 +455,15 @@ describe('normalizeManualMemoryKeywords', () => {
           FC.oneof(
             FC.string({maxLength: 120}),
             FC.stringMatching(/^[A-Za-z][A-Za-z0-9 _-]{0,100}$/),
-            FC.constantFrom('', ' ', '  - ', '* ', 'x', 'a'.repeat(81), 'one two three four five six seven eight nine'),
+            FC.constantFrom(
+              '',
+              ' ',
+              '  - ',
+              '* ',
+              'x',
+              Effect2.pipe('a', EffectString.repeat(81)),
+              'one two three four five six seven eight nine',
+            ),
           ),
           {maxLength: 40},
         ),
@@ -458,7 +474,7 @@ describe('normalizeManualMemoryKeywords', () => {
           for (const keyword of once) {
             expect(keyword.length).toBeGreaterThanOrEqual(2);
             expect(keyword.length).toBeLessThanOrEqual(80);
-            expect(keyword.split(/\s+/).length).toBeLessThanOrEqual(8);
+            expect(Effect2.pipe(keyword, EffectString.split(/\s+/)).length).toBeLessThanOrEqual(8);
             expect(keyword).toMatch(/[a-z0-9]/i);
           }
         },

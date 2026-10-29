@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- Integration test of Bazel's on-disk graph and native diff process. */
 import {mkdirSync, mkdtempSync, renameSync, rmSync} from 'node:fs';
 import {join, resolve} from 'node:path';
@@ -5,6 +6,9 @@ import {bazelDiffPath, bazelPath} from './cli-tools.mjs';
 import {selectTargets} from '../ci/selection.mjs';
 import {readPreparedInventory} from './prepare.mjs';
 import {buildGenerationModel} from './generation-model.mjs';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const root = resolve(import.meta.dir, '../..');
 const {inventory} = await readPreparedInventory({root});
@@ -75,10 +79,12 @@ const compare = async (before, after, name, expected, inventory = ['//website:te
     '-o',
     path,
   ]);
-  const impacted = (await Bun.file(path).text())
-    .split('\n')
-    .map(value => value.trim())
-    .filter(Boolean);
+  const impacted = EffectArray.filter(
+    EffectArray.map(Effect.pipe(await Bun.file(path).text(), EffectString.split('\n')), value =>
+      Effect.pipe(value, EffectString.trim),
+    ),
+    Boolean,
+  );
   const result = selectTargets({
     inventory,
     impacted,
@@ -103,7 +109,8 @@ try {
     '--spawn_strategy=sandboxed',
   ]);
   await Bun.write(join(evidence, 'cold-website-only.log'), coldLog);
-  if (coldLog.includes('//graph:test')) throw new Error('Website-only cold run included the graph test');
+  if (Effect.pipe(coldLog, EffectString.includes('//graph:test')))
+    throw new Error('Website-only cold run included the graph test');
   previous = current;
   await write('website/unrelated.txt', 'exported but not a target input\n');
   current = await hash('unrelated-export');
@@ -204,7 +211,7 @@ const verifyFactoredHistories = async () => {
       sourceRoots: ['apps/website/roots'],
       exclude: path => path.endsWith('/excluded.ts'),
     },
-    ...['graph', 'provider-one', 'provider-two'].map(name => ({
+    ...EffectArray.map(['graph', 'provider-one', 'provider-two'], name => ({
       package: 'packages/' + name,
       name: 'test',
       kind: 'library',
@@ -297,10 +304,13 @@ const verifyFactoredHistories = async () => {
         impactFile,
       ]);
       const result = selectTargets({
-        inventory: after.model.inventory.map(target => target.label),
-        impacted: (await Bun.file(impactFile).text()).split('\n').filter(Boolean),
+        inventory: EffectArray.map(after.model.inventory, target => target.label),
+        impacted: EffectArray.filter(Effect.pipe(await Bun.file(impactFile).text(), EffectString.split('\n')), Boolean),
         changedFiles,
-        knownInputs: [...before.model.inventory, ...after.model.inventory].flatMap(target => target.inputs),
+        knownInputs: EffectArray.flatMap(
+          [...before.model.inventory, ...after.model.inventory],
+          target => target.inputs,
+        ),
       });
       equal(result.targets, [...expected].sort(), layout + ' ' + name);
       results.push(result.targets);
@@ -313,7 +323,7 @@ const verifyFactoredHistories = async () => {
     for (const layout of layouts) {
       const directory = mkdtempSync(join(evidence, layout + '-history-'));
       directories.set(layout, directory);
-      for (const [path, content] of Object.entries(authored)) await Bun.write(join(directory, path), content);
+      for (const [path, content] of EffectRecord.toEntries(authored)) await Bun.write(join(directory, path), content);
       for (const path of ['bun.bzl', 'package_files.bzl'])
         await Bun.write(join(directory, 'tools/bazel', path), Bun.file(join(root, 'tools/bazel', path)));
       await runAt(directory, ['git', 'init', '-q']);

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, readdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -13,12 +15,14 @@ import {
 } from '@threadnote/memory/document';
 import {afterEach, describe, expect, it} from 'vitest';
 import {promisify} from 'node:util';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execFilePromise = promisify(execFile);
 const homes: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('context health repair CLI', () => {
@@ -28,8 +32,10 @@ describe('context health repair CLI', () => {
     const before = await readFile(sourcePath, 'utf8');
 
     const preview = await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home);
-    const plan = JSON.parse(preview.stdout) as RepairPlan;
-    const proposal = plan.proposals.find(item => item.mutation.kind === 'archive-memory');
+    const plan = parseRepairPlan(JSON.parse(preview.stdout));
+    const proposal = EffectOption.getOrUndefined(
+      EffectArray.findFirst(plan.proposals, item => item.mutation.kind === 'archive-memory'),
+    );
 
     expect(proposal).toBeDefined();
     expect(await readFile(sourcePath, 'utf8')).toBe(before);
@@ -49,7 +55,10 @@ describe('context health repair CLI', () => {
         '--json',
       ],
       home,
-    ).catch(error => error as CliFailure);
+    ).catch(error => {
+      if (!isCliFailure(error)) throw error;
+      return error;
+    });
     expect(withoutApproval).toMatchObject({code: 1});
     expect(withoutApproval.stderr).toContain('requires --approved');
 
@@ -73,8 +82,14 @@ describe('context health repair CLI', () => {
     expect(retried).toMatchObject({proposalId: proposal?.proposalId, status: 'already-applied', version: 1});
     await expect(readFile(sourcePath, 'utf8')).rejects.toThrow();
     const memoryRoot = join(home, 'data', 'local', 'user', 'local', 'memories');
-    const archived = (await readdir(memoryRoot, {recursive: true})).filter(name => name.endsWith('.md'));
-    expect(archived.some(name => name.includes('archived'))).toBe(true);
+    const archived = EffectArrayPipe(await readdir(memoryRoot, {recursive: true}), __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (name, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && Effect.pipe(name, EffectString.endsWith('.md')),
+      ),
+    );
+    expect(EffectArray.some(archived, name => Effect.pipe(name, EffectString.includes('archived')))).toBe(true);
   });
 
   it('removes only the reviewed missing relation and preserves stable identity', async () => {
@@ -89,10 +104,12 @@ describe('context health repair CLI', () => {
     });
     await storedMemory(home, 'active', {memoryId: 'tn_active'});
 
-    const preview = JSON.parse(
-      (await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout,
-    ) as RepairPlan;
-    const proposal = preview.proposals.find(item => item.mutation.kind === 'remove-relations');
+    const preview = parseRepairPlan(
+      JSON.parse((await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout),
+    );
+    const proposal = EffectOption.getOrUndefined(
+      EffectArray.findFirst(preview.proposals, item => item.mutation.kind === 'remove-relations'),
+    );
     expect(proposal).toBeDefined();
 
     const result = JSON.parse(
@@ -149,24 +166,32 @@ describe('context health repair CLI', () => {
     );
     await writeFile(malformedPath, 'not a memory document\n', 'utf8');
 
-    const preview = JSON.parse(
-      (await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout,
-    ) as RepairPlan;
-    const malformed = preview.proposals.find(item => item.mutation.targetUri === malformedUri);
-    const missing = preview.proposals.find(item => item.mutation.targetUri === missingAlias);
-    const inactive = preview.proposals.find(item => item.mutation.targetUri === inactiveAlias);
+    const preview = parseRepairPlan(
+      JSON.parse((await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout),
+    );
+    const malformed = EffectOption.getOrUndefined(
+      EffectArray.findFirst(preview.proposals, item => item.mutation.targetUri === malformedUri),
+    );
+    const missing = EffectOption.getOrUndefined(
+      EffectArray.findFirst(preview.proposals, item => item.mutation.targetUri === missingAlias),
+    );
+    const inactive = EffectOption.getOrUndefined(
+      EffectArray.findFirst(preview.proposals, item => item.mutation.targetUri === inactiveAlias),
+    );
 
     expect(malformed).toMatchObject({category: 'relation-target-missing', mutation: {kind: 'review-only'}});
     expect(missing).toMatchObject({category: 'relation-target-missing', mutation: {kind: 'remove-relations'}});
     expect(inactive).toMatchObject({category: 'relation-target-inactive', mutation: {kind: 'remove-relations'}});
     await applyProposal(home, missing);
 
-    const refreshed = JSON.parse(
-      (await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout,
-    ) as RepairPlan;
+    const refreshed = parseRepairPlan(
+      JSON.parse((await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout),
+    );
     await applyProposal(
       home,
-      refreshed.proposals.find(item => item.mutation.targetUri === inactiveAlias),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(refreshed.proposals, item => item.mutation.targetUri === inactiveAlias),
+      ),
     );
 
     const updated = parseMemoryDocument('threadnote://memory/source', await readFile(sourcePath, 'utf8'));
@@ -180,10 +205,12 @@ describe('context health repair CLI', () => {
     const sourceUri = 'threadnote://user/local/memories/durable/projects/project-a/crash-recovery.md';
     const source = parseMemoryDocument(sourceUri, await readFile(sourcePath, 'utf8'));
     if (!source) throw new Error('Expected source memory.');
-    const plan = JSON.parse(
-      (await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout,
-    ) as RepairPlan;
-    const proposal = plan.proposals.find(item => item.mutation.kind === 'archive-memory');
+    const plan = parseRepairPlan(
+      JSON.parse((await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout),
+    );
+    const proposal = EffectOption.getOrUndefined(
+      EffectArray.findFirst(plan.proposals, item => item.mutation.kind === 'archive-memory'),
+    );
     if (!proposal) throw new Error('Expected archive proposal.');
     const timestamp = '2026-09-17T21:00:00.000Z';
     const archiveContent = formatMemoryDocument(
@@ -253,15 +280,23 @@ describe('context health repair CLI', () => {
 
     expect(applied).toMatchObject({status: 'applied'});
     await expect(readFile(sourcePath, 'utf8')).rejects.toThrow();
-    expect((await readdir(archiveDirectory)).filter(name => name.endsWith('.md'))).toEqual([archiveName]);
+    expect(
+      EffectArrayPipe(await readdir(archiveDirectory), __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (name, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && Effect.pipe(name, EffectString.endsWith('.md')),
+        ),
+      ),
+    ).toEqual([archiveName]);
   });
 
   it('rejects a non-hash revision before constructing a repair journal path', async () => {
     const home = await makeHome();
     await storedMemory(home, 'expired', {validTo: '2000-01-01T00:00:00.000Z'});
-    const preview = JSON.parse(
-      (await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout,
-    ) as RepairPlan;
+    const preview = parseRepairPlan(
+      JSON.parse((await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout),
+    );
     const proposal = preview.proposals[0];
     const escaped = join(home, 'escaped.json');
 
@@ -280,7 +315,10 @@ describe('context health repair CLI', () => {
         '--json',
       ],
       home,
-    ).catch(error => error as CliFailure);
+    ).catch(error => {
+      if (!isCliFailure(error)) throw error;
+      return error;
+    });
 
     expect(rejected).toMatchObject({code: 1});
     expect(rejected.stderr).toContain('valid exact proposal revision');
@@ -290,9 +328,9 @@ describe('context health repair CLI', () => {
   it('reports a stable conflict for a stale proposal revision without writing a journal', async () => {
     const home = await makeHome();
     await storedMemory(home, 'expired', {validTo: '2000-01-01T00:00:00.000Z'});
-    const preview = JSON.parse(
-      (await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout,
-    ) as RepairPlan;
+    const preview = parseRepairPlan(
+      JSON.parse((await runCli(['context', 'repair', 'preview', '--project', 'project-a', '--json'], home)).stdout),
+    );
     const proposal = preview.proposals[0];
     expect(proposal).toBeDefined();
 
@@ -308,7 +346,7 @@ describe('context health repair CLI', () => {
             '--proposal-id',
             proposal?.proposalId ?? '',
             '--revision',
-            'f'.repeat(64),
+            Effect.pipe('f', EffectString.repeat(64)),
             '--approved',
             '--json',
           ],
@@ -321,6 +359,45 @@ describe('context health repair CLI', () => {
     await expect(readFile(join(home, 'threadnote', 'context-health-repairs'), 'utf8')).rejects.toThrow();
   });
 });
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
+function parseRepairPlan(value: unknown): RepairPlan {
+  if (!isRepairPlan(value)) throw new Error('Context health repair preview returned an invalid proposal plan.');
+  return value;
+}
+
+function isRepairPlan(value: unknown): value is RepairPlan {
+  return (
+    isRecord(value) &&
+    EffectArray.isArray(value.proposals) &&
+    EffectArray.every(value.proposals, proposal => {
+      if (
+        !isRecord(proposal) ||
+        typeof proposal.category !== 'string' ||
+        typeof proposal.proposalId !== 'string' ||
+        typeof proposal.revision !== 'string' ||
+        !isRecord(proposal.mutation) ||
+        typeof proposal.mutation.kind !== 'string'
+      ) {
+        return false;
+      }
+      return proposal.mutation.targetUri === undefined || typeof proposal.mutation.targetUri === 'string';
+    })
+  );
+}
+
+function isCliFailure(error: unknown): error is CliFailure {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    typeof error.code === 'number' &&
+    'stderr' in error &&
+    typeof error.stderr === 'string'
+  );
+}
 
 interface RepairPlan {
   readonly proposals: readonly {

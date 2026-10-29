@@ -1,5 +1,7 @@
 import {Schema} from 'effect';
 import {parseValueReportExportV1, ValueReportExportV1Schema} from '../export.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const PILOT_RETENTION_DAYS = 28;
 export const PILOT_MAX_INPUT_BYTES = 4 * 1024 * 1024;
@@ -36,7 +38,7 @@ const day = Schema.String.check(
   Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/u),
   Schema.makeFilter(value => {
     const parsed = Date.parse(`${value}T00:00:00.000Z`);
-    return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === value;
+    return Number.isFinite(parsed) && Effect.pipe(new Date(parsed).toISOString(), EffectString.slice(0, 10)) === value;
   }),
 );
 const states = ['observed', 'missing', 'inapplicable', 'pending', 'failed'] as const;
@@ -132,7 +134,11 @@ export const PILOT_STRICT = {errors: 'all', onExcessProperty: 'error'} as const;
 export function parsePilotInput(value: unknown): PilotInput {
   const input = Schema.decodeUnknownSync(PilotInputSchema, PILOT_STRICT)(value);
   const start = Date.parse(`${input.windowStart}T00:00:00.000Z`);
-  if (!Number.isFinite(start) || new Date(start).toISOString().slice(0, 10) !== input.windowStart) invalid();
+  if (
+    !Number.isFinite(start) ||
+    Effect.pipe(new Date(start).toISOString(), EffectString.slice(0, 10)) !== input.windowStart
+  )
+    invalid();
   const end = start + input.elapsedDays * 86_400_000;
   const seen = new Set<string>();
   if (input.evidenceCoverage === 'unavailable' && input.evidence.length > 0) invalid();
@@ -148,7 +154,7 @@ export function parsePilotInput(value: unknown): PilotInput {
     unique(seen, `observation:${observation.actor}:${observation.metric}:${observation.sample}`);
     if ((observation.state === 'observed') !== (observation.value !== undefined)) invalid();
     if (isBinaryMetric(observation.metric) && observation.value !== undefined && observation.value > 1) invalid();
-    if (!observation.metric.endsWith('Rate') && observation.sample !== 0) invalid();
+    if (!Effect.pipe(observation.metric, EffectString.endsWith('Rate')) && observation.sample !== 0) invalid();
   }
   for (const event of input.evidence) {
     checkActor(event.actor, input.actors);
@@ -159,7 +165,11 @@ export function parsePilotInput(value: unknown): PilotInput {
 }
 
 export function isBinaryMetric(metric: PilotMetric): boolean {
-  return !metric.endsWith('Milliseconds') && !metric.endsWith('Tokens') && !metric.endsWith('Turns');
+  return (
+    !Effect.pipe(metric, EffectString.endsWith('Milliseconds')) &&
+    !Effect.pipe(metric, EffectString.endsWith('Tokens')) &&
+    !Effect.pipe(metric, EffectString.endsWith('Turns'))
+  );
 }
 function checkActor(slot: number, actors: number): void {
   if (slot >= actors) invalid();

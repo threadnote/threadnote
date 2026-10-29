@@ -13,11 +13,13 @@ import {
   observeCodeGraphSemanticStatus,
 } from '../../src/vector/status.js';
 import {TestClock} from 'effect/testing';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const snapshot: CodeGraphSnapshot = {
-  id: `cgsn_${'1'.repeat(40)}`,
-  worktreeId: 'b'.repeat(64),
-  commit: 'c'.repeat(40),
+  id: `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`,
+  worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+  commit: Effect2.pipe('c', EffectString.repeat(40)),
   dirty: false,
   edgeCount: 0,
   fileCount: 1,
@@ -32,7 +34,7 @@ const fixture = (version = 19) =>
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const home = yield* fs.makeTempDirectoryScoped({prefix: 'semantic-status-'});
-    const layout = codeGraphLayout(path, home, 'a'.repeat(64), snapshot.worktreeId);
+    const layout = codeGraphLayout(path, home, Effect2.pipe('a', EffectString.repeat(64)), snapshot.worktreeId);
     yield* fs.makeDirectory(layout.repositoryRoot, {recursive: true});
     yield* Effect.sync(() => {
       const db = new Database(layout.databasePath);
@@ -154,7 +156,7 @@ effectIt.layer(citationPlatformLayer)(it => {
         snapshotId: snapshot.id,
         activatedAt: epoch,
         owner: {token: 'owner', processId: 123, processStartIdentity: 'process'},
-        model: {id: 'model', sha256: 'a'.repeat(64), dimensions: 2, templateVersion: 1},
+        model: {id: 'model', sha256: Effect2.pipe('a', EffectString.repeat(64)), dimensions: 2, templateVersion: 1},
         expiresAt: 1000,
       };
       yield* demand('building', {active});
@@ -233,7 +235,10 @@ effectIt.layer(citationPlatformLayer)(it => {
     ({state, retryAt, reason}) =>
       Effect.gen(function* () {
         const {demand, observe, fs, layout} = yield* fixture();
-        yield* demand(state, {notBefore: retryAt, reason: reason.replaceAll('\0', '') || 'fixture'});
+        yield* demand(state, {
+          notBefore: retryAt,
+          reason: Effect2.pipe(reason, EffectString.replaceAll('\0', '')) || 'fixture',
+        });
         const before = yield* fs.readFile(layout.databasePath);
         const first = yield* observe();
         expect(first.state).toBe(state);
@@ -254,5 +259,7 @@ it('decodes legacy receipts without semantic and bounds optional semantic metada
     }),
   ).toEqual({semantic: {state: 'queued', snapshotId: snapshot.id, attempt: 0, retryAt: 1000}});
   expect(() => Schema.decodeSync(receipt)({semantic: {state: 'ready', completedSymbols: -1}})).toThrow();
-  expect(() => Schema.decodeSync(receipt)({semantic: {state: 'blocked', reason: 'x'.repeat(513)}})).toThrow();
+  expect(() =>
+    Schema.decodeSync(receipt)({semantic: {state: 'blocked', reason: Effect2.pipe('x', EffectString.repeat(513))}}),
+  ).toThrow();
 });

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -14,6 +15,8 @@ import {runRecall} from '../../src/memory/commands.js';
 import {EffectMcpServerRegistry} from '../../src/effect/ai/mcp.js';
 import {registerSearchTool} from '../../src/mcp/server/recall.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const expansion = vi.hoisted(() => ({
   calls: [] as Array<{scopes: readonly string[] | undefined; vocabulary: readonly string[]}>,
@@ -54,7 +57,7 @@ effectIt.effect(
         config.manifestPath,
         JSON.stringify({
           version: 1,
-          projects: ['product', 'product-mobile'].map(name => ({
+          projects: EffectArray.map(['product', 'product-mobile'], name => ({
             name,
             path: repo,
             seed: [],
@@ -63,14 +66,14 @@ effectIt.effect(
         }),
       );
       const store = yield* ResourceStore;
-      const records = ['product', 'product-mobile', 'foreign'].map(project => ({
+      const records = EffectArray.map(['product', 'product-mobile', 'foreign'], project => ({
         project,
         topic: `${project}-distinctive-hint`,
         uri: `threadnote://user/fixture/memories/durable/projects/${project}/hint.md`,
       }));
       yield* store.mutate(
         {account: 'local', home, user: 'fixture'},
-        records.map(record => ({
+        EffectArray.map(records, record => ({
           type: 'write' as const,
           uri: record.uri,
           options: {mode: 'create' as const},
@@ -95,10 +98,17 @@ effectIt.effect(
         includeInactive: false,
         project: 'product',
       });
-      expect(pinnedVocabulary.some(term => term.includes('product-mobile-distinctive-hint'))).toBe(true);
       expect(
-        pinnedVocabulary.some(
-          term => term.includes('foreign-distinctive-hint') || term.includes('product-distinctive-hint'),
+        EffectArray.some(pinnedVocabulary, term =>
+          Effect2.pipe(term, EffectString.includes('product-mobile-distinctive-hint')),
+        ),
+      ).toBe(true);
+      expect(
+        EffectArray.some(
+          pinnedVocabulary,
+          term =>
+            Effect2.pipe(term, EffectString.includes('foreign-distinctive-hint')) ||
+            Effect2.pipe(term, EffectString.includes('product-distinctive-hint')),
         ),
       ).toBe(false);
       const registry = new EffectMcpServerRegistry();
@@ -118,11 +128,21 @@ effectIt.effect(
           expect(expansion.calls).toHaveLength(1);
           const call = expansion.calls[0];
           expect(call.scopes).toEqual(uri === undefined ? undefined : [uri]);
-          expect(call.vocabulary.some(term => term.includes('product-mobile-distinctive-hint'))).toBe(
-            uri === undefined,
-          );
-          expect(call.vocabulary.some(term => term.includes('foreign-distinctive-hint'))).toBe(false);
-          expect(call.vocabulary.some(term => term.includes('product-distinctive-hint'))).toBe(uri === undefined);
+          expect(
+            EffectArray.some(call.vocabulary, term =>
+              Effect2.pipe(term, EffectString.includes('product-mobile-distinctive-hint')),
+            ),
+          ).toBe(uri === undefined);
+          expect(
+            EffectArray.some(call.vocabulary, term =>
+              Effect2.pipe(term, EffectString.includes('foreign-distinctive-hint')),
+            ),
+          ).toBe(false);
+          expect(
+            EffectArray.some(call.vocabulary, term =>
+              Effect2.pipe(term, EffectString.includes('product-distinctive-hint')),
+            ),
+          ).toBe(uri === undefined);
         }
       }
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),

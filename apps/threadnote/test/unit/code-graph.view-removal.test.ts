@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {legacyCodeGraphAuthorityStatements} from '@threadnote/graph/test/helpers/code-graph-legacy-authority';
 import {mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
@@ -15,6 +16,8 @@ import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {CODE_GRAPH_EXTRACTOR_GENERATION, CodeGraphStoreBusyError, CodeGraphStoreError} from '@threadnote/graph/types';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const temporaryRoots: string[] = [];
 
@@ -32,9 +35,20 @@ describe('code graph view removal core', () => {
       Effect.gen(function* () {
         const root = mkdtempSync(join(tmpdir(), 'threadnote-view-missing-'));
         temporaryRoots.push(root);
-        const databasePath = join(root, 'indexes', 'code-graph', 'repositories', 'a'.repeat(64), 'graph-v3.sqlite');
+        const databasePath = join(
+          root,
+          'indexes',
+          'code-graph',
+          'repositories',
+          Effect2.pipe('a', EffectString.repeat(64)),
+          'graph-v3.sqlite',
+        );
         const store = yield* CodeGraphStore;
-        const result = yield* store.removeView(databasePath, '1'.repeat(64), snapshotId('missing'));
+        const result = yield* store.removeView(
+          databasePath,
+          Effect2.pipe('1', EffectString.repeat(64)),
+          snapshotId('missing'),
+        );
         expect(result).toEqual({expectedSnapshotId: snapshotId('missing'), state: 'not-found'});
         expect(yield* Effect.promise(() => Bun.file(databasePath).exists())).toBe(false);
       }),
@@ -181,7 +195,7 @@ describe('code graph view removal core', () => {
             {baseSnapshotId: snapshotId('base-middle'), dirty: true, id: snapshotId('target'), worktreeId: target},
             {baseSnapshotId: snapshotId('target'), dirty: true, id: snapshotId('dependent'), worktreeId: dependent},
             {id: snapshotId('shared'), worktreeId: sharedA},
-            {dirty: true, id: snapshotId('unrelated-dirty'), worktreeId: 'e'.repeat(64)},
+            {dirty: true, id: snapshotId('unrelated-dirty'), worktreeId: Effect2.pipe('e', EffectString.repeat(64))},
           ],
           [
             {snapshotId: snapshotId('shared'), worktreeId: sharedA},
@@ -230,7 +244,7 @@ describe('code graph view removal core', () => {
           state: 'removed',
         });
         expect(leaseFlag).toBe(1);
-        expect(protectedSnapshots.map(snapshot => snapshot?.id)).toEqual([
+        expect(EffectArray.map(protectedSnapshots, snapshot => snapshot?.id)).toEqual([
           snapshotId('shared'),
           snapshotId('dependent'),
           snapshotId('target'),
@@ -287,7 +301,7 @@ describe('code graph view removal core', () => {
           state: 'already-removed',
         });
         expect(differentReady?.id).toBe(snapshotId('new'));
-        expect(differentCatalogs.map(catalog => [catalog.viewWorktreeId, catalog.snapshot.id])).toEqual([
+        expect(EffectArray.map(differentCatalogs, catalog => [catalog.viewWorktreeId, catalog.snapshot.id])).toEqual([
           [worktreeId, snapshotId('new')],
         ]);
         expect(tombstoneBeforeCurrentPromotion).toBe(snapshotId('original'));
@@ -310,8 +324,8 @@ describe('code graph view removal core', () => {
           ),
           {concurrency: 'unbounded'},
         );
-        expect(results.filter(result => result.state === 'removed')).toHaveLength(1);
-        expect(results.filter(result => result.state === 'already-removed')).toHaveLength(15);
+        expect(EffectArray.filter(results, result => result.state === 'removed')).toHaveLength(1);
+        expect(EffectArray.filter(results, result => result.state === 'already-removed')).toHaveLength(15);
         expect(removedView(fixture.databasePath, worktreeId)).toBe(snapshotId('load'));
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -407,7 +421,12 @@ describe('code graph view removal core', () => {
         const root = mkdtempSync(join(tmpdir(), 'threadnote-view-lock-error-'));
         temporaryRoots.push(root);
         writeFileSync(join(root, 'locks'), 'not-a-directory\n');
-        const observed = yield* withCodeGraphTargetWorktreeLock(root, 'a'.repeat(64), '1'.repeat(64), Effect.void).pipe(
+        const observed = yield* withCodeGraphTargetWorktreeLock(
+          root,
+          Effect2.pipe('a', EffectString.repeat(64)),
+          Effect2.pipe('1', EffectString.repeat(64)),
+          Effect.void,
+        ).pipe(
           Effect.match({
             onFailure: error => ({error, success: false as const}),
             onSuccess: () => ({success: true as const}),
@@ -452,15 +471,15 @@ function viewFixture(prefix: string) {
   return Effect.gen(function* () {
     const root = mkdtempSync(join(tmpdir(), prefix));
     temporaryRoots.push(root);
-    const checkoutId = 'a'.repeat(64);
-    const worktrees = ['1', '2', '3', '4'].map(digit => digit.repeat(64));
+    const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
+    const worktrees = EffectArray.map(['1', '2', '3', '4'], digit => Effect2.pipe(digit, EffectString.repeat(64)));
     const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
     const store = yield* CodeGraphStore;
     yield* store.initialize(databasePath);
     return {
       checkoutId,
       databasePath,
-      repositoryId: 'b'.repeat(64),
+      repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
       root,
       worktreeLockPath: join(root, 'locks', 'indexes', 'code-graph', 'worktrees', checkoutId, `${worktrees[0]}.lock`),
       worktrees,
@@ -496,7 +515,7 @@ function seedGraph(fixture: ViewFixture, snapshots: readonly SeedSnapshot[], vie
           snapshot.id,
           fixture.repositoryId,
           snapshot.worktreeId,
-          `${index}`.padStart(40, '0'),
+          Effect2.pipe(`${index}`, EffectString.padStart(40, '0')),
           `content-${snapshot.id}`,
           snapshot.baseSnapshotId ?? null,
           snapshot.dirty ? 1 : 0,
@@ -562,7 +581,7 @@ function identityFor(fixture: ViewFixture, worktreeId: string): RepositoryIdenti
     checkoutId: fixture.checkoutId,
     displayName: 'threadnote/view-removal-fixture',
     gitCommonDirectory: fixture.root,
-    headCommit: 'f'.repeat(40),
+    headCommit: Effect2.pipe('f', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repositoryId: fixture.repositoryId,
     repoRoot: fixture.root,

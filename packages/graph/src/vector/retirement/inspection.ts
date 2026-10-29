@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS} from '../generation_schema.js';
 import {requireCodeGraphGenerationSchema} from '../generation.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
@@ -25,6 +26,8 @@ import {
   VECTOR_SNAPSHOT_BYTES,
   sqliteStringLiteral,
 } from './schema.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface CodeGraphVectorRetirementMarker {
   readonly deleteAuthorized: boolean;
@@ -226,15 +229,15 @@ export const boundedVectorUserTableNames = Effect.fn('codeGraph.boundedVectorUse
      LIMIT ?`,
     [VECTOR_CORE_TABLE_NAMES.length + VECTOR_RETIREMENT_TABLE_NAMES.length + 2],
   );
-  if (rows.some(row => typeof row.name !== 'string')) return undefined;
-  return rows.map(row => String(row.name));
+  if (EffectArray.some(rows, row => typeof row.name !== 'string')) return undefined;
+  return EffectArray.map(rows, row => String(row.name));
 });
 
 export function sameStringSet(observed: readonly string[] | undefined, expected: readonly string[]): boolean {
   return (
     observed !== undefined &&
     observed.length === expected.length &&
-    [...observed].sort().every((value, index) => value === [...expected].sort()[index])
+    EffectArray.every([...observed].sort(), (value, index) => value === [...expected].sort()[index])
   );
 }
 
@@ -259,8 +262,10 @@ export const exactVectorIndexSet = Effect.fn('codeGraph.exactVectorIndexSet')(fu
     [expected.length + 1],
   );
   if (rows.length !== expected.length) return false;
-  const byName = [...expected].sort((left, right) => left.name.localeCompare(right.name));
-  const observed = [...rows].sort((left, right) => String(left.name).localeCompare(String(right.name)));
+  const byName = [...expected].sort((left, right) => Effect2.pipe(left.name, EffectString.localeCompare(right.name)));
+  const observed = [...rows].sort((left, right) =>
+    Effect2.pipe(String(left.name), EffectString.localeCompare(String(right.name))),
+  );
   for (let index = 0; index < byName.length; index += 1) {
     const definition = byName[index];
     const row = observed[index];
@@ -293,7 +298,7 @@ export const exactVectorIndexSet = Effect.fn('codeGraph.exactVectorIndexSet')(fu
     );
     if (
       columns.length !== definition.columns.length ||
-      columns.some((column, columnIndex) => {
+      EffectArray.some(columns, (column, columnIndex) => {
         const expectedColumn = definition.columns[columnIndex];
         return (
           column.seqno !== columnIndex ||
@@ -340,7 +345,7 @@ export const exactVectorForeignKeys = Effect.fn('codeGraph.exactVectorForeignKey
   );
   return (
     rows.length === expected.length &&
-    rows.every((row, index) => {
+    EffectArray.every(rows, (row, index) => {
       const definition = expected[index];
       return (
         row.id === definition?.id &&
@@ -387,8 +392,8 @@ export const codeGraphVectorCoreSchemaState = Effect.fn('codeGraph.vectorCoreSch
   ]);
   if (
     userTables === undefined ||
-    VECTOR_CORE_TABLE_NAMES.some(name => !userTables.includes(name)) ||
-    userTables.some(name => !allowedTables.has(name))
+    EffectArray.some(VECTOR_CORE_TABLE_NAMES, name => !userTables.includes(name)) ||
+    EffectArray.some(userTables, name => !allowedTables.has(name))
   ) {
     return 'incompatible' as const;
   }
@@ -475,7 +480,8 @@ export function sameLegacyPointerIndexPlan(left: LegacyPointerIndexPlan, right: 
     left.finalFactBytes === right.finalFactBytes &&
     sameVectorPageStorage(left.storage, right.storage) &&
     left.rows.length === right.rows.length &&
-    left.rows.every(
+    EffectArray.every(
+      left.rows,
       (row, index) =>
         row.worktreeId === right.rows[index]?.worktreeId && row.generation === right.rows[index]?.generation,
     )
@@ -496,7 +502,7 @@ export const codeGraphVectorRetirementSchemaState = Effect.fn('codeGraph.vectorR
       sql: CODE_GRAPH_VECTOR_RETIREMENT_ASSOCIATION_INDEX_SQL,
       type: 'index',
     },
-    ...CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS.map(trigger => ({
+    ...EffectArray.map(CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS, trigger => ({
       name: trigger.name,
       sql: trigger.sql,
       type: 'trigger' as const,
@@ -535,14 +541,14 @@ export const codeGraphVectorRetirementSchemaState = Effect.fn('codeGraph.vectorR
      LIMIT ?`,
     [CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS.length + CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS.length + 1],
   );
-  if (observed.every(state => state === 'absent')) {
+  if (EffectArray.every(observed, state => state === 'absent')) {
     const userTables = yield* boundedVectorUserTableNames(sql);
     const sequenceTable = yield* boundedSchemaObjects(sql, 'sqlite_sequence', 2);
     return triggerRows.length === 0 && sequenceTable.length === 0 && sameStringSet(userTables, VECTOR_CORE_TABLE_NAMES)
       ? ('absent' as const)
       : ('incompatible' as const);
   }
-  if (!observed.every(state => state === 'current')) return 'incompatible' as const;
+  if (!EffectArray.every(observed, state => state === 'current')) return 'incompatible' as const;
   const userTables = yield* boundedVectorUserTableNames(sql);
   if (
     !sameStringSet(userTables, [
@@ -558,19 +564,18 @@ export const codeGraphVectorRetirementSchemaState = Effect.fn('codeGraph.vectorR
     return 'incompatible' as const;
   }
   const expectedTriggerNames = [
-    ...(v3 ? CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS.map(trigger => `${trigger.name}\0${trigger.table}`) : []),
-    ...CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS.map(
+    ...(v3 ? EffectArray.map(CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS, trigger => `${trigger.name}\0${trigger.table}`) : []),
+    ...EffectArray.map(
+      CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS,
       trigger => `${trigger.name}\0${vectorRetirementTriggerTarget(trigger.name)}`,
     ),
   ].sort();
-  const observedTriggerNames = triggerRows
-    .map(row =>
-      typeof row.name === 'string' && typeof row.tbl_name === 'string' ? `${row.name}\0${row.tbl_name}` : '',
-    )
-    .sort();
+  const observedTriggerNames = EffectArray.map(triggerRows, row =>
+    typeof row.name === 'string' && typeof row.tbl_name === 'string' ? `${row.name}\0${row.tbl_name}` : '',
+  ).sort();
   if (
     observedTriggerNames.length !== expectedTriggerNames.length ||
-    observedTriggerNames.some((name, index) => name !== expectedTriggerNames[index])
+    EffectArray.some(observedTriggerNames, (name, index) => name !== expectedTriggerNames[index])
   ) {
     return 'incompatible' as const;
   }
@@ -784,9 +789,9 @@ export function useExistingVectorDatabase<A, E, R>(
 export function vectorRetirementTriggerTarget(
   name: (typeof CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS)[number]['name'],
 ): string {
-  if (name.includes('_marker_')) return 'vector_generation_retirements';
-  if (name.includes('_pointer_')) return 'vector_pointers';
-  if (name.includes('_generation_')) return 'vector_generations';
+  if (Effect2.pipe(name, EffectString.includes('_marker_'))) return 'vector_generation_retirements';
+  if (Effect2.pipe(name, EffectString.includes('_pointer_'))) return 'vector_pointers';
+  if (Effect2.pipe(name, EffectString.includes('_generation_'))) return 'vector_generations';
   return 'vectors';
 }
 
@@ -888,7 +893,7 @@ export function validBoundedText(value: string, maximumBytes: number): boolean {
   return (
     typeof value === 'string' &&
     value.length > 0 &&
-    !value.includes('\0') &&
+    !Effect2.pipe(value, EffectString.includes('\0')) &&
     new TextEncoder().encode(value).byteLength <= maximumBytes
   );
 }
@@ -931,18 +936,24 @@ export function normalizeSchemaDefinition(value: string): string {
       }
       break;
     }
-    quoted.push(value.slice(start, Math.min(index + 1, value.length)));
+    quoted.push(Effect2.pipe(value, EffectString.slice(start, Math.min(index + 1, value.length))));
     unquoted += `\u0000${quoted.length - 1}\u0000`;
   }
-  return unquoted
-    .toLowerCase()
-    .replace(/\bif not exists\b/gu, '')
-    .replace(/\s+/gu, ' ')
-    .replace(/\s*([(),])\s*/gu, '$1')
-    .trim()
-    .split('\u0000')
-    .map((segment, index) => (index % 2 === 1 ? (quoted[Number(segment)] ?? '') : segment))
-    .join('');
+  return EffectArray.join(
+    EffectArray.map(
+      Effect2.pipe(
+        unquoted,
+        EffectString.toLowerCase,
+        EffectString.replace(/\bif not exists\b/gu, ''),
+        EffectString.replace(/\s+/gu, ' '),
+        EffectString.replace(/\s*([(),])\s*/gu, '$1'),
+        EffectString.trim,
+        EffectString.split('\u0000'),
+      ),
+      (segment, index) => (index % 2 === 1 ? (quoted[Number(segment)] ?? '') : segment),
+    ),
+    '',
+  );
 }
 
 export const lastStatementChangeCount = Effect.fn('codeGraph.vectorRetirementChangeCount')(function* (

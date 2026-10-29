@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
@@ -16,13 +17,15 @@ import {
   type NativeWatchState,
   type NativeWatchSweep,
 } from '../src/watch.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const required = <A>(value: A | null | undefined): A => {
   if (value === null || value === undefined) throw new Error('Expected a fixture delivery.');
   return value;
 };
-const sha = (letter: string) => letter.repeat(40);
-const digest = (letter: string) => letter.repeat(64);
+const sha = (letter: string) => Effect.pipe(letter, EffectString.repeat(40));
+const digest = (letter: string) => Effect.pipe(letter, EffectString.repeat(64));
 const pr = 'https://github.com/example/project/pull/7';
 const sourceNames: readonly NativeWatchSource[] = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
 const entity = (id: string, overrides: Partial<NativeWatchEntity> = {}): NativeWatchEntity => ({
@@ -53,7 +56,7 @@ const errorCode = (run: () => unknown): string | undefined => {
 const withConsumer = (value: NativeWatchState, id = 'consumer-1', at = 10) =>
   attachNativeWatchConsumer(value, {id, wakeupId: 'wake-1'}, at);
 const allComplete = (at: number, head = sha('a')) =>
-  sourceNames.map(source => ({
+  EffectArray.map(sourceNames, source => ({
     source,
     complete: true as const,
     items: [] as NativeWatchEntity[],
@@ -81,7 +84,7 @@ describe('native watch domain', () => {
         ],
       }),
     );
-    expect(initial.events.map(event => event.key)).toEqual(['one']);
+    expect(EffectArray.map(initial.events, event => event.key)).toEqual(['one']);
     const next = reconcileNativeWatch(
       initial,
       sweep({
@@ -96,7 +99,7 @@ describe('native watch domain', () => {
         ],
       }),
     );
-    expect(next.events.map(event => [event.key, event.kind, event.removed])).toEqual([
+    expect(EffectArray.map(next.events, event => [event.key, event.kind, event.removed])).toEqual([
       ['one', 'comment', false],
       ['one', 'comment', false],
       ['three', 'comment', false],
@@ -138,7 +141,7 @@ describe('native watch domain', () => {
                   at: 1_000,
                   items: [
                     entity('old-failure', {kind: 'ci_error', head: sha('a')}),
-                    ...ids.map(id => entity('old-' + id, {kind: 'ci_update', head: sha('a')})),
+                    ...EffectArray.map(ids, id => entity('old-' + id, {kind: 'ci_update', head: sha('a')})),
                   ],
                 },
                 {
@@ -197,14 +200,30 @@ describe('native watch domain', () => {
               ],
             }),
           );
-          expect(next.events.filter(event => event.kind === 'head_changed')).toHaveLength(1);
-          expect(next.events.filter(event => event.kind === 'removed').map(event => event.key)).toEqual(['comment']);
-          expect(next.events.filter(event => event.kind === 'ci_error').map(event => event.key)).toEqual([
-            'current-failure',
-          ]);
-          expect(next.sources.find(item => item.source === source)?.items.map(item => item.id)).toEqual([
-            'current-failure',
-          ]);
+          expect(EffectArray.filter(next.events, event => event.kind === 'head_changed')).toHaveLength(1);
+          expect(
+            EffectArray.map(
+              EffectArray.filter(next.events, event => event.kind === 'removed'),
+              event => event.key,
+            ),
+          ).toEqual(['comment']);
+          expect(
+            EffectArray.map(
+              EffectArray.filter(next.events, event => event.kind === 'ci_error'),
+              event => event.key,
+            ),
+          ).toEqual(['current-failure']);
+          expect(
+            EffectOption.getOrUndefined(
+              EffectOption.map(
+                EffectOption.fromNullishOr(
+                  EffectOption.getOrUndefined(EffectArray.findFirst(next.sources, item => item.source === source))
+                    ?.items,
+                ),
+                __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, item => item.id),
+              ),
+            ),
+          ).toEqual(['current-failure']);
           expect(next.work).toEqual(before.work);
           expect(JSON.stringify(before)).toBe(original);
           const removed = reconcileNativeWatch(
@@ -250,7 +269,7 @@ describe('native watch domain', () => {
         sources: [{source: 'checks', complete: true, head: sha('b'), at: 2_000, items: []}],
       }),
     );
-    expect(after.events.map(event => event.kind)).toEqual(['head_changed', 'removed']);
+    expect(EffectArray.map(after.events, event => event.kind)).toEqual(['head_changed', 'removed']);
   });
 
   it('accepts canonical external HTTPS entity URLs and rejects insecure or credential URLs', () => {
@@ -297,7 +316,7 @@ describe('native watch domain', () => {
                   source: 'comments',
                   complete: true,
                   at: 1_000,
-                  items: beforeIds.map(id => entity(id)),
+                  items: EffectArray.map(beforeIds, id => entity(id)),
                 },
               ],
             }),
@@ -312,18 +331,24 @@ describe('native watch domain', () => {
                   source: 'comments',
                   complete: true,
                   at: 2_000,
-                  items: afterIds.map(id => entity(id)),
+                  items: EffectArray.map(afterIds, id => entity(id)),
                 },
               ],
             }),
           );
-          const diff = after.events
-            .slice(before.events.length)
-            .map(event => `${event.removed ? '-' : '+'}${event.key}`)
-            .sort();
+          const diff = EffectArray.map(
+            after.events.slice(before.events.length),
+            event => `${event.removed ? '-' : '+'}${event.key}`,
+          ).sort();
           const expected = [
-            ...afterIds.filter(id => !beforeIds.includes(id)).map(id => `+${id}`),
-            ...beforeIds.filter(id => !afterIds.includes(id)).map(id => `-${id}`),
+            ...EffectArray.map(
+              EffectArray.filter(afterIds, id => !beforeIds.includes(id)),
+              id => `+${id}`,
+            ),
+            ...EffectArray.map(
+              EffectArray.filter(beforeIds, id => !afterIds.includes(id)),
+              id => `-${id}`,
+            ),
           ].sort();
           expect(diff).toEqual(expected);
           expect(JSON.stringify(before)).toBe(original);
@@ -348,15 +373,19 @@ describe('native watch domain', () => {
         ],
       }),
     );
-    expect(failed.sources.find(item => item.source === 'comments')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(failed.sources, item => item.source === 'comments')),
+    ).toMatchObject({
       items: [entity('thread', {head: sha('b')})],
       lastCompleteAt: 1_000,
     });
-    expect(failed.sources.find(item => item.source === 'checks')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(failed.sources, item => item.source === 'checks')),
+    ).toMatchObject({
       items: [],
       error: {code: 'head_changed'},
     });
-    expect(failed.events.map(event => event.kind)).toEqual(['comment', 'source_error', 'source_error']);
+    expect(EffectArray.map(failed.events, event => event.kind)).toEqual(['comment', 'source_error', 'source_error']);
     const repeatedFailure = reconcileNativeWatch(
       failed,
       sweep({
@@ -369,7 +398,7 @@ describe('native watch domain', () => {
 
   it('checkpoints routine CI updates without relay events while preserving failures and aggregate completion', () => {
     const sourceResults = (at: number, checkVersion: string, statusVersion: string) =>
-      allComplete(at).map(result =>
+      EffectArray.map(allComplete(at), result =>
         result.source === 'checks'
           ? {...result, items: [entity('check-1', {kind: 'ci_update', version: checkVersion})]}
           : result.source === 'statuses'
@@ -388,34 +417,43 @@ describe('native watch domain', () => {
       );
       expect(current.events).toEqual([]);
     }
-    expect(current.sources.find(item => item.source === 'checks')?.items[0]?.version).toBe(digest('b'));
-    expect(current.sources.find(item => item.source === 'statuses')?.items[0]?.version).toBe(digest('c'));
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(current.sources, item => item.source === 'checks'))?.items[0]
+        ?.version,
+    ).toBe(digest('b'));
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(current.sources, item => item.source === 'statuses'))?.items[0]
+        ?.version,
+    ).toBe(digest('c'));
 
     const failed = reconcileNativeWatch(
       current,
       sweep({
         at: 8_000,
-        sources: sourceResults(8_000, digest('d'), digest('c')).map(result =>
+        sources: EffectArray.map(sourceResults(8_000, digest('d'), digest('c')), result =>
           result.source === 'checks'
             ? {...result, items: [entity('check-1', {kind: 'ci_error', version: digest('d')})]}
             : result,
         ),
       }),
     );
-    expect(failed.events.map(event => event.kind)).toEqual(['ci_error']);
-    expect(failed.sources.find(item => item.source === 'checks')?.items[0]?.kind).toBe('ci_error');
+    expect(EffectArray.map(failed.events, event => event.kind)).toEqual(['ci_error']);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(failed.sources, item => item.source === 'checks'))?.items[0]
+        ?.kind,
+    ).toBe('ci_error');
 
     const ci = {head: sha('a'), complete: true, count: 1, pending: 0, failed: 0, version: digest('e')};
     const firstComplete = reconcileNativeWatch(state(), sweep({sources: allComplete(1_000), ci}));
     const secondComplete = reconcileNativeWatch(firstComplete, sweep({at: 61_000, sources: allComplete(61_000), ci}));
-    expect(secondComplete.events.map(event => event.kind)).toEqual(['ci_complete']);
+    expect(EffectArray.map(secondComplete.events, event => event.kind)).toEqual(['ci_complete']);
   });
 
   it('emits head and terminal transitions once and ignores an initial head as noise', () => {
     const initial = reconcileNativeWatch(state(), sweep());
     expect(initial.events).toEqual([]);
     const changed = reconcileNativeWatch(initial, sweep({head: sha('b'), startedHead: sha('b'), at: 2_000}));
-    expect(changed.events.map(event => event.kind)).toEqual(['head_changed']);
+    expect(EffectArray.map(changed.events, event => event.kind)).toEqual(['head_changed']);
     const terminal = reconcileNativeWatch(
       changed,
       sweep({head: sha('b'), startedHead: sha('b'), state: 'merged', at: 3_000}),
@@ -424,7 +462,7 @@ describe('native watch domain', () => {
       terminal,
       sweep({head: sha('b'), startedHead: sha('b'), state: 'merged', at: 4_000}),
     );
-    expect(terminal.events.map(event => event.kind)).toEqual(['head_changed', 'merged']);
+    expect(EffectArray.map(terminal.events, event => event.kind)).toEqual(['head_changed', 'merged']);
     expect(repeated.events).toEqual(terminal.events);
   });
 
@@ -474,11 +512,13 @@ describe('native watch domain', () => {
         ci: {...ci, head: sha('b')},
       }),
     );
-    expect(newHeadConfirmed.events.filter(event => event.kind === 'ci_complete')).toHaveLength(2);
-    expect(newHeadConfirmed.events.filter(event => event.kind === 'ci_complete').map(event => event.head)).toEqual([
-      sha('a'),
-      sha('b'),
-    ]);
+    expect(EffectArray.filter(newHeadConfirmed.events, event => event.kind === 'ci_complete')).toHaveLength(2);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(newHeadConfirmed.events, event => event.kind === 'ci_complete'),
+        event => event.head,
+      ),
+    ).toEqual([sha('a'), sha('b')]);
   });
 
   it('pins and replays the same delivery after takeover, requiring all dispositions before ack', () => {
@@ -571,8 +611,12 @@ describe('native watch domain', () => {
         ],
       }),
     );
-    expect(later.sources.find(source => source.source === 'comments')?.items).toEqual([]);
-    expect(later.events.find(event => event.key === 'one')).toMatchObject({key: 'one', removed: true});
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(later.sources, source => source.source === 'comments'))?.items,
+    ).toEqual([]);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(later.events, event => event.key === 'one')),
+    ).toMatchObject({key: 'one', removed: true});
     const withNewDelivery = relayNativeWatch(later, 'consumer-1', 23);
     expect(withNewDelivery.work[0]?.event).toEqual(acked.work[0]?.event);
     expect(
@@ -611,20 +655,26 @@ describe('native watch domain', () => {
       [{eventId: open.eventId, status: 'resolved', reason: 'Fixed', evidence: 'commit abc'}],
       24,
     );
-    expect(resolved.work.find(item => item.eventId === open.eventId)?.status).toBe('resolved');
-    expect(resolved.work.find(item => item.eventId === open.eventId)?.event).toEqual(acked.work[0]?.event);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(resolved.work, item => item.eventId === open.eventId))?.status,
+    ).toBe('resolved');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(resolved.work, item => item.eventId === open.eventId))?.event,
+    ).toEqual(acked.work[0]?.event);
     const reopened = updateNativeWatchWork(
       resolved,
       'consumer-1',
       [{eventId: open.eventId, status: 'open', reason: 'Regression', evidence: 'new failing check'}],
       25,
     );
-    expect(reopened.work.find(item => item.eventId === open.eventId)?.status).toBe('open');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(reopened.work, item => item.eventId === open.eventId))?.status,
+    ).toBe('open');
     const recordedNew = recordNativeWatchDispositions(
       withNewDelivery.state,
       'consumer-1',
       withNewDelivery.delivery!.id,
-      withNewDelivery.delivery!.events.map(event => ({
+      EffectArray.map(withNewDelivery.delivery!.events, event => ({
         eventId: event.id,
         status: 'ignored' as const,
         reason: 'Duplicate context',
@@ -633,7 +683,9 @@ describe('native watch domain', () => {
       24,
     );
     const ackedNew = acknowledgeNativeWatch(recordedNew, 'consumer-1', withNewDelivery.delivery!.id, 25);
-    expect(ackedNew.work.find(item => item.eventId === open.eventId)?.status).toBe('open');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(ackedNew.work, item => item.eventId === open.eventId))?.status,
+    ).toBe('open');
   });
 
   it('compacts acknowledged terminal work on explicit updates while preserving pending dispositions', () => {
@@ -655,7 +707,12 @@ describe('native watch domain', () => {
       ...base,
       acknowledged,
       nextSequence: 133,
-      events: [131, 132].map(sequence => ({...event, id: `watch-1:${sequence}`, sequence, key: `event-${sequence}`})),
+      events: EffectArray.map([131, 132], sequence => ({
+        ...event,
+        id: `watch-1:${sequence}`,
+        sequence,
+        key: `event-${sequence}`,
+      })),
       consumer: {id: 'consumer-1', wakeupId: 'wake-1', lastSeenAt: 10, leaseUntil: 900_010, leaseMilliseconds: 900_000},
       delivery: {id: '131:132', first: 131, last: 132},
       work: [
@@ -683,9 +740,14 @@ describe('native watch domain', () => {
       [{eventId: 'watch-1:1', status: 'open', reason: 'Reopened explicitly', evidence: 'new evidence'}],
       20,
     );
-    expect(compacted.work.filter(item => item.status === 'ignored')).toHaveLength(129);
-    expect(compacted.work.find(item => item.eventId === 'watch-1:1')?.status).toBe('open');
-    expect(compacted.work.find(item => item.eventId === 'watch-1:132')?.reason).toBe('Pending terminal record');
+    expect(EffectArray.filter(compacted.work, item => item.status === 'ignored')).toHaveLength(129);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(compacted.work, item => item.eventId === 'watch-1:1'))?.status,
+    ).toBe('open');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(compacted.work, item => item.eventId === 'watch-1:132'))
+        ?.reason,
+    ).toBe('Pending terminal record');
     expect(compacted.acknowledged).toBe(acknowledged);
     expect(compacted.delivery).toEqual(handcrafted.delivery);
   });
@@ -845,7 +907,7 @@ describe('native watch domain', () => {
     );
     for (let at = 20; current.events.length > 0; at += 10) {
       const relayed = relayNativeWatch(current, 'consumer-1', at, 32);
-      const dispositions = relayed.delivery!.events.map(event => ({
+      const dispositions = EffectArray.map(relayed.delivery!.events, event => ({
         eventId: event.id,
         status: 'ignored' as const,
         reason: 'Reviewed duplicate',
@@ -935,8 +997,8 @@ describe('native merge conflict metadata', () => {
     const clear = reconcileNativeWatch(missing, conflict({mergeable: true, at: 3_000}));
     expect(clear.work).toEqual(initial.work);
     const renewed = reconcileNativeWatch(clear, conflict({at: 4_000}));
-    expect(renewed.events.filter(event => event.kind === 'merge_conflict')).toHaveLength(2);
-    expect(renewed.work.every(item => item.status === 'open')).toBe(true);
+    expect(EffectArray.filter(renewed.events, event => event.kind === 'merge_conflict')).toHaveLength(2);
+    expect(EffectArray.every(renewed.work, item => item.status === 'open')).toBe(true);
   });
   it('emits once per changed head/base and never infers a conflict from unknown or missing metadata', () => {
     let value = reconcileNativeWatch(state(), conflict());
@@ -945,16 +1007,19 @@ describe('native merge conflict metadata', () => {
       value,
       conflict({base: sha('c'), startedBase: sha('c'), head: sha('d'), startedHead: sha('d')}),
     );
-    expect(value.events.filter(event => event.kind === 'merge_conflict')).toHaveLength(3);
+    expect(EffectArray.filter(value.events, event => event.kind === 'merge_conflict')).toHaveLength(3);
     for (const metadata of [
       {mergeable: null},
       {},
       {mergeable: false},
       {state: 'closed' as const, mergeable: false, base: sha('b')},
     ]) {
-      expect(reconcileNativeWatch(state(), sweep(metadata)).events.some(event => event.kind === 'merge_conflict')).toBe(
-        false,
-      );
+      expect(
+        EffectArray.some(
+          reconcileNativeWatch(state(), sweep(metadata)).events,
+          event => event.kind === 'merge_conflict',
+        ),
+      ).toBe(false);
     }
   });
   it('suppresses advisory completion during explicit conflict and base drift while preserving all five source fences', () => {
@@ -977,7 +1042,7 @@ describe('native merge conflict metadata', () => {
     ]) {
       const first = reconcileNativeWatch(state(), {...green, ...metadata});
       const later = reconcileNativeWatch(first, {...green, ...metadata, at: 61_000});
-      expect(later.events.some(event => event.kind === 'ci_complete')).toBe(false);
+      expect(EffectArray.some(later.events, event => event.kind === 'ci_complete')).toBe(false);
     }
   });
   it('deduplicates the same pair across bounded arbitrary observations and JSON restarts', () => {
@@ -990,7 +1055,7 @@ describe('native merge conflict metadata', () => {
             decodeNativeWatchState(JSON.parse(JSON.stringify(current))),
             sweep({base: sha('b'), startedBase: sha('b'), ...metadata}),
           );
-          expect(current.events.filter(event => event.kind === 'merge_conflict')).toHaveLength(1);
+          expect(EffectArray.filter(current.events, event => event.kind === 'merge_conflict')).toHaveLength(1);
           expect(current.work).toHaveLength(1);
           expect(current.work[0].status).toBe('open');
         }
@@ -1001,9 +1066,7 @@ describe('native merge conflict metadata', () => {
   it('retains legacy native v1 decoding and rejects malformed optional metadata', () => {
     expect(decodeNativeWatchState(state()).base).toBeUndefined();
     for (const metadata of [{base: 'invalid'}, {startedBase: 'invalid'}, {mergeable: 'dirty'}]) {
-      expect(errorCode(() => reconcileNativeWatch(state(), sweep(metadata as Partial<NativeWatchSweep>)))).toBe(
-        'invalid-watch',
-      );
+      expect(errorCode(() => reconcileNativeWatch(state(), {...sweep(), ...metadata}))).toBe('invalid-watch');
     }
   });
 });

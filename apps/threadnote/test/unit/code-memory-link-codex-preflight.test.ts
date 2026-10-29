@@ -4,42 +4,47 @@ import {
   assertCodeMemoryLinkSelectedMemoryRosterV1,
   codeMemoryLinkContextBriefSelectedMemoriesV1,
 } from '../../../../scripts/code-memory-link-codex-preflight.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('Code Memory Link Codex graph preflight', () => {
-  const commit = '1'.repeat(40);
+  const commit = Effect.pipe('1', EffectString.repeat(40));
   const repositoryRoot = '/private/evaluation/repository';
   const origin = 'https://fixtures.threadnote.invalid/code-memory-link/tsk_1111111111111111.git';
-  const repositoryId = '2'.repeat(64);
+  const repositoryId = Effect.pipe('2', EffectString.repeat(64));
 
   it('requires the exact ready-current snapshot and repository identity', () => {
     expect(assertCodeMemoryLinkGraphStatusPreflight(status(), {commit, origin, repositoryRoot})).toEqual({
-      graphContentId: `cgc_${'4'.repeat(64)}`,
-      snapshotId: `cgsnap_${'3'.repeat(64)}`,
+      graphContentId: `cgc_${Effect.pipe('4', EffectString.repeat(64))}`,
+      snapshotId: `cgsnap_${Effect.pipe('3', EffectString.repeat(64))}`,
     });
     expect(
       assertCodeMemoryLinkGraphStatusPreflight({...status(), version: 3}, {commit, origin, repositoryRoot}),
     ).toEqual({
-      graphContentId: `cgc_${'4'.repeat(64)}`,
-      snapshotId: `cgsnap_${'3'.repeat(64)}`,
+      graphContentId: `cgc_${Effect.pipe('4', EffectString.repeat(64))}`,
+      snapshotId: `cgsnap_${Effect.pipe('3', EffectString.repeat(64))}`,
     });
     expect(
       assertCodeMemoryLinkGraphStatusPreflight({...status(), version: 4}, {commit, origin, repositoryRoot}),
     ).toEqual({
-      graphContentId: `cgc_${'4'.repeat(64)}`,
-      snapshotId: `cgsnap_${'3'.repeat(64)}`,
+      graphContentId: `cgc_${Effect.pipe('4', EffectString.repeat(64))}`,
+      snapshotId: `cgsnap_${Effect.pipe('3', EffectString.repeat(64))}`,
     });
     expect(
       assertCodeMemoryLinkGraphStatusPreflight({...status(), version: 5}, {commit, origin, repositoryRoot}),
     ).toEqual({
-      graphContentId: `cgc_${'4'.repeat(64)}`,
-      snapshotId: `cgsnap_${'3'.repeat(64)}`,
+      graphContentId: `cgc_${Effect.pipe('4', EffectString.repeat(64))}`,
+      snapshotId: `cgsnap_${Effect.pipe('3', EffectString.repeat(64))}`,
     });
   });
 
   it.each([
     [
       'head commit',
-      (value: ReturnType<typeof status>) => ({...value, identity: {...value.identity, headCommit: '9'.repeat(40)}}),
+      (value: ReturnType<typeof status>) => ({
+        ...value,
+        identity: {...value.identity, headCommit: Effect.pipe('9', EffectString.repeat(40))},
+      }),
     ],
     [
       'root',
@@ -56,7 +61,7 @@ describe('Code Memory Link Codex graph preflight', () => {
       'snapshot commit',
       (value: ReturnType<typeof status>) => ({
         ...value,
-        readySnapshot: {...value.readySnapshot, commit: '9'.repeat(40)},
+        readySnapshot: {...value.readySnapshot, commit: Effect.pipe('9', EffectString.repeat(40))},
       }),
     ],
     [
@@ -71,7 +76,7 @@ describe('Code Memory Link Codex graph preflight', () => {
       'other repository',
       (value: ReturnType<typeof status>) => ({
         ...value,
-        readySnapshot: {...value.readySnapshot, repositoryId: '9'.repeat(64)},
+        readySnapshot: {...value.readySnapshot, repositoryId: Effect.pipe('9', EffectString.repeat(64))},
       }),
     ],
     [
@@ -103,7 +108,10 @@ describe('Code Memory Link Codex graph preflight', () => {
       'selected-memory identity/content roster',
     );
     expect(() =>
-      assertCodeMemoryLinkSelectedMemoryRosterV1(roster, [{...roster[0], contentSha256: '0'.repeat(64)}, roster[1]]),
+      assertCodeMemoryLinkSelectedMemoryRosterV1(roster, [
+        {...roster[0], contentSha256: Effect.pipe('0', EffectString.repeat(64))},
+        roster[1],
+      ]),
     ).toThrow('selected-memory identity/content roster');
   });
 
@@ -118,8 +126,8 @@ describe('Code Memory Link Codex graph preflight', () => {
       readySnapshot: {
         commit,
         dirty: false,
-        graphContentId: `cgc_${'4'.repeat(64)}`,
-        id: `cgsnap_${'3'.repeat(64)}`,
+        graphContentId: `cgc_${Effect.pipe('4', EffectString.repeat(64))}`,
+        id: `cgsnap_${Effect.pipe('3', EffectString.repeat(64))}`,
         repositoryId,
         state: 'ready',
       },

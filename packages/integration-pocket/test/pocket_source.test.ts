@@ -1,3 +1,5 @@
+import * as MigrationSchema from 'effect/Schema';
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer, Redacted, Result} from 'effect';
@@ -16,7 +18,7 @@ import {
 } from '@threadnote/store/external-resource';
 import {removePocketCredential, resolvePocketCredential, storePocketCredential} from '../src/credentials.js';
 import {loadRecallIndexData} from '@threadnote/recall/index';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import {makeSourceConfigurationRegistry, sourceConfigurationStoreLayer} from '@threadnote/integration-runtime/config';
 import {externalSourcePolicyLayer} from '@threadnote/integration-runtime/access-policy';
 import {
@@ -39,6 +41,10 @@ import {renderPocketRecord} from '../src/render.js';
 import {createPocketClient, PocketClientError} from '../src/client.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readPocketSyncState} from '../src/state.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
 const baseServices = Layer.mergeAll(
   BunServices.layer,
@@ -92,7 +98,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-credential-reuse-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runPocketSourceAdd(config, {
         id: 'first',
         project: 'test',
@@ -110,7 +116,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-evidence-policy-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runPocketSourceAdd(config, {
         id: 'evidence',
         project: 'test',
@@ -131,7 +137,9 @@ describe('Pocket source', () => {
       expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'pocket')).toBeUndefined();
       yield* mutateSourceConfiguration(config, configuration => ({
         ...configuration,
-        sources: configuration.sources.map(source => (source.id === 'evidence' ? {...source, enabled: false} : source)),
+        sources: EffectArray.map(configuration.sources, source =>
+          source.id === 'evidence' ? {...source, enabled: false} : source,
+        ),
       }));
       expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'pocket')).toBeUndefined();
       yield* runPocketSourceRemove(config, {id: 'evidence', apply: true});
@@ -141,7 +149,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-source-inventory-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runPocketSourceAdd(config, {
         id: 'local',
         projectless: true,
@@ -158,7 +166,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-reflection-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       for (const apply of [false, true]) {
         const attempt = yield* runPocketSourceAdd(config, {
           id: 'env',
@@ -226,7 +234,7 @@ describe('Pocket source', () => {
         const first = renderPocketRecord(record);
         expect(renderPocketRecord({...record})).toEqual(first);
         expect(first).toHaveLength(1);
-        expect(first.every(chunk => Buffer.byteLength(chunk.body) <= 480 * 1024)).toBe(true);
+        expect(EffectArray.every(first, chunk => Buffer.byteLength(chunk.body) <= 480 * 1024)).toBe(true);
       }),
       {numRuns: 80},
     );
@@ -242,8 +250,8 @@ describe('Pocket source', () => {
       fetch: async () => new Response(null, {status: 429, headers: {'retry-after': '172800'}}),
     });
     try {
-      const failure = await client.list(1).catch(error => error as PocketClientError);
-      if (!(failure instanceof PocketClientError)) throw new Error('Expected Pocket quota failure.');
+      const failure: unknown = await client.list(1).catch((error: unknown) => error);
+      if (!MigrationSchema.is(PocketClientError)(failure)) throw new Error('Expected Pocket quota failure.');
       expect(failure.code).toBe('quota-rejected');
       expect(failure.retryAfterMilliseconds).toBe(172_800_000);
     } finally {
@@ -255,7 +263,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-source-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runPocketSourceAdd(config, {
         id: 'pocket-test',
         project: 'test',
@@ -268,9 +276,11 @@ describe('Pocket source', () => {
         expect(url.origin).toBe('https://public.heypocketai.com');
         expect(init.method).toBe('GET');
         expect(init.redirect).toBe('manual');
-        if (url.pathname.endsWith('/folders')) return json({success: true, data: [{id: 'folder_1', name: 'Work'}]});
-        if (url.pathname.endsWith('/tags')) return json({success: true, data: [{id: 'tag_1', name: 'Strategy'}]});
-        if (url.pathname.endsWith('/recordings'))
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/folders')))
+          return json({success: true, data: [{id: 'folder_1', name: 'Work'}]});
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/tags')))
+          return json({success: true, data: [{id: 'tag_1', name: 'Strategy'}]});
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/recordings')))
           return json({
             success: true,
             data: [{id: 'record_1', title: 'Meeting'}],
@@ -289,7 +299,7 @@ describe('Pocket source', () => {
       const first = yield* runPocketSourceSync(config, {id: 'pocket-test', apply: true, clientOptions: {fetch}});
       expect(first.syncedDocuments).toEqual(['record_1']);
       expect(calls).toHaveLength(4);
-      const doc = `r-${sha256HexSync('record_1').slice(0, 40)}`;
+      const doc = `r-${Effect2.pipe(sha256HexSync('record_1'), EffectString.slice(0, 40))}`;
       const state = yield* readExternalDocumentManifest(
         {home, account: 'local', user: 'tester'},
         'pocket-test',
@@ -297,7 +307,7 @@ describe('Pocket source', () => {
         'pocket',
       );
       expect(state?.status).toBe('active');
-      const uri = Object.keys(state!.chunks)[0];
+      const uri = EffectRecord.keys(state!.chunks)[0];
       const store = yield* ResourceStore;
       expect(yield* store.read({home, account: 'local', user: 'tester'}, uri)).toContain('needle transcript');
       const recalled = yield* loadRecallIndexData(config, {
@@ -306,7 +316,7 @@ describe('Pocket source', () => {
         requiredUris: [uri],
         eligibility: {kind: 'pinned-hard-uri-bypass'},
       });
-      expect(recalled.candidates.some(candidate => candidate.uri === uri)).toBe(true);
+      expect(EffectArray.some(recalled.candidates, candidate => candidate.uri === uri)).toBe(true);
       expect((yield* runPocketSourceInventory(config, 'pocket-test')).entries.length).toBe(3);
       yield* runPocketSourceRemove(config, {id: 'pocket-test', apply: true});
       expect(
@@ -327,17 +337,21 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-readable-migration-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runPocketSourceAdd(config, {
         id: 'migration',
         projectless: true,
         apply: true,
         apiToken: Redacted.make('pk_synthetic_migration'),
       });
-      const transcript = 'Full meeting transcript. '.repeat(1000);
+      const transcript = Effect2.pipe('Full meeting transcript. ', EffectString.repeat(1000));
       const fetch = async (url: URL) => {
-        if (url.pathname.endsWith('/folders') || url.pathname.endsWith('/tags')) return json({success: true, data: []});
-        if (url.pathname.endsWith('/recordings'))
+        if (
+          Effect2.pipe(url.pathname, EffectString.endsWith('/folders')) ||
+          Effect2.pipe(url.pathname, EffectString.endsWith('/tags'))
+        )
+          return json({success: true, data: []});
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/recordings')))
           return json({
             success: true,
             data: [{id: 'record_1'}],
@@ -347,11 +361,11 @@ describe('Pocket source', () => {
       };
       yield* runPocketSourceSync(config, {id: 'migration', apply: true, clientOptions: {fetch}});
       const location = {home, account: 'local', user: 'tester'};
-      const doc = `r-${sha256HexSync('record_1').slice(0, 40)}`;
+      const doc = `r-${Effect2.pipe(sha256HexSync('record_1'), EffectString.slice(0, 40))}`;
       const manifest = (yield* readExternalDocumentManifest(location, 'migration', doc, 'pocket'))!;
-      const [uri] = Object.keys(manifest.chunks);
-      const legacy = uri.replace('/content.md', '/part-0.md');
-      const legacy2 = uri.replace('/content.md', '/part-1.md');
+      const [uri] = EffectRecord.keys(manifest.chunks);
+      const legacy = Effect2.pipe(uri, EffectString.replace('/content.md', '/part-0.md'));
+      const legacy2 = Effect2.pipe(uri, EffectString.replace('/content.md', '/part-1.md'));
       const store = yield* ResourceStore;
       yield* store.mutate(location, [
         {type: 'write', uri: legacy, content: 'old metadata part', options: {mode: 'upsert'}},
@@ -369,8 +383,13 @@ describe('Pocket source', () => {
       ]);
       yield* runPocketSourceSync(config, {id: 'migration', apply: true, clientOptions: {fetch}});
       const current = (yield* readExternalDocumentManifest(location, 'migration', doc, 'pocket'))!;
-      expect(Object.keys(current.chunks)).toEqual([uri]);
-      expect((yield* store.read(location, uri)).includes(transcript.trim())).toBe(true);
+      expect(EffectRecord.keys(current.chunks)).toEqual([uri]);
+      expect(
+        Effect2.pipe(
+          yield* store.read(location, uri),
+          EffectString.includes(Effect2.pipe(transcript, EffectString.trim)),
+        ),
+      ).toBe(true);
       expect(
         yield* fs.exists(
           `${home}/data/local/resources/external/pocket/migration/docs/${doc}/pages/recording/part-0.md`,
@@ -388,7 +407,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-resume-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runPocketSourceAdd(config, {
         id: 'resume',
         project: 'test',
@@ -398,8 +417,12 @@ describe('Pocket source', () => {
       let inventory = Array.from({length: 14}, (_, index) => ({id: `record_${index}`, title: `Record ${index}`}));
       let listingStatus = 200;
       const fetch = async (url: URL) => {
-        if (url.pathname.endsWith('/folders') || url.pathname.endsWith('/tags')) return json({success: true, data: []});
-        if (url.pathname.endsWith('/recordings'))
+        if (
+          Effect2.pipe(url.pathname, EffectString.endsWith('/folders')) ||
+          Effect2.pipe(url.pathname, EffectString.endsWith('/tags'))
+        )
+          return json({success: true, data: []});
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/recordings')))
           return listingStatus === 201
             ? json({
                 success: true,
@@ -413,8 +436,8 @@ describe('Pocket source', () => {
                   pagination: {page: 1, limit: 100, total: inventory.length, total_pages: 1, has_more: false},
                 })
               : json({error: 'temporary'}, listingStatus);
-        const id = url.pathname.split('/').at(-1)!;
-        if (!inventory.some(item => item.id === id)) return json({}, 404);
+        const id = Effect2.pipe(url.pathname, EffectString.split('/')).at(-1)!;
+        if (!EffectArray.some(inventory, item => item.id === id)) return json({}, 404);
         return json({success: true, data: {id, title: id, transcript: [{text: `needle ${id}`}]}});
       };
       const imported = new Set<string>();
@@ -448,7 +471,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-denial-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runPocketSourceAdd(config, {
         id: 'denial',
         projectless: true,
@@ -456,8 +479,12 @@ describe('Pocket source', () => {
         apiToken: Redacted.make('pk_synthetic_denial'),
       });
       const healthy = async (url: URL) => {
-        if (url.pathname.endsWith('/folders') || url.pathname.endsWith('/tags')) return json({success: true, data: []});
-        if (url.pathname.endsWith('/recordings'))
+        if (
+          Effect2.pipe(url.pathname, EffectString.endsWith('/folders')) ||
+          Effect2.pipe(url.pathname, EffectString.endsWith('/tags'))
+        )
+          return json({success: true, data: []});
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/recordings')))
           return json({
             success: true,
             data: [{id: 'record_1'}],
@@ -466,14 +493,14 @@ describe('Pocket source', () => {
         return json({success: true, data: {id: 'record_1', transcript: [{text: 'denial needle'}]}});
       };
       yield* runPocketSourceSync(config, {id: 'denial', apply: true, clientOptions: {fetch: healthy}});
-      const doc = `r-${sha256HexSync('record_1').slice(0, 40)}`;
+      const doc = `r-${Effect2.pipe(sha256HexSync('record_1'), EffectString.slice(0, 40))}`;
       const state = yield* readExternalDocumentManifest(
         {home, account: 'local', user: 'tester'},
         'denial',
         doc,
         'pocket',
       );
-      const uri = Object.keys(state!.chunks)[0];
+      const uri = EffectRecord.keys(state!.chunks)[0];
       const store = yield* ResourceStore;
       expect(
         Result.isSuccess(yield* store.read({home, account: 'local', user: 'tester'}, uri).pipe(Effect.result)),
@@ -513,7 +540,7 @@ describe('Pocket source', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-scoped-denial-'});
-        const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+        const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
         yield* runPocketSourceAdd(config, {
           id: 'scoped',
           projectless: true,
@@ -522,12 +549,12 @@ describe('Pocket source', () => {
         });
         let phase: 'healthy' | 'poison' | 'list-denied' = 'healthy';
         const fetch = async (url: URL) => {
-          if (url.pathname.endsWith('/folders'))
+          if (Effect2.pipe(url.pathname, EffectString.endsWith('/folders')))
             return phase === 'poison'
               ? json({}, 403)
               : json({success: true, data: [{id: 'folder_1', name: 'old folder needle'}]});
-          if (url.pathname.endsWith('/tags')) return json({success: true, data: []});
-          if (url.pathname.endsWith('/recordings')) {
+          if (Effect2.pipe(url.pathname, EffectString.endsWith('/tags'))) return json({success: true, data: []});
+          if (Effect2.pipe(url.pathname, EffectString.endsWith('/recordings'))) {
             if (phase === 'list-denied') return json({}, 403);
             const items = phase === 'healthy' ? [{id: 'record_a'}] : [{id: 'record_a'}, {id: 'record_b'}];
             return json({
@@ -536,14 +563,14 @@ describe('Pocket source', () => {
               pagination: {page: 1, limit: 100, total: items.length, total_pages: 1, has_more: false},
             });
           }
-          const id = url.pathname.split('/').at(-1)!;
+          const id = Effect2.pipe(url.pathname, EffectString.split('/')).at(-1)!;
           if (phase === 'poison' && id === 'record_a') return json({}, 500);
           return json({success: true, data: {id, transcript: [{text: `needle ${id}`}]}});
         };
         yield* runPocketSourceSync(config, {id: 'scoped', apply: true, clientOptions: {fetch}});
         const location = {home, account: 'local', user: 'tester'};
         const catalog = yield* readExternalDocumentManifest(location, 'scoped', 'catalog-folders', 'pocket');
-        const catalogUri = Object.keys(catalog!.chunks)[0];
+        const catalogUri = EffectRecord.keys(catalog!.chunks)[0];
         const store = yield* ResourceStore;
         expect(Result.isSuccess(yield* store.read(location, catalogUri).pipe(Effect.result))).toBe(true);
         phase = 'poison';
@@ -551,16 +578,19 @@ describe('Pocket source', () => {
         expect(poisoned.syncedDocuments).toContain('record_b');
         expect(Result.isFailure(yield* store.read(location, catalogUri).pipe(Effect.result))).toBe(true);
         expect(
-          (yield* loadRecallIndexData(config, {
-            includeInactive: false,
-            query: 'old folder needle',
-            requiredUris: [catalogUri],
-            eligibility: {kind: 'pinned-hard-uri-bypass'},
-          })).candidates.some(candidate => candidate.uri === catalogUri),
+          EffectArray.some(
+            (yield* loadRecallIndexData(config, {
+              includeInactive: false,
+              query: 'old folder needle',
+              requiredUris: [catalogUri],
+              eligibility: {kind: 'pinned-hard-uri-bypass'},
+            })).candidates,
+            candidate => candidate.uri === catalogUri,
+          ),
         ).toBe(false);
-        const bDoc = `r-${sha256HexSync('record_b').slice(0, 40)}`;
+        const bDoc = `r-${Effect2.pipe(sha256HexSync('record_b'), EffectString.slice(0, 40))}`;
         const bManifest = yield* readExternalDocumentManifest(location, 'scoped', bDoc, 'pocket');
-        const bUri = Object.keys(bManifest!.chunks)[0];
+        const bUri = EffectRecord.keys(bManifest!.chunks)[0];
         expect(yield* store.read(location, bUri)).toContain('record_b');
         expect((yield* runPocketSourceInventory(config, 'scoped')).progress).toBeDefined();
         phase = 'list-denied';
@@ -580,7 +610,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-stable-page-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runPocketSourceAdd(config, {
         id: 'stable',
         projectless: true,
@@ -590,14 +620,18 @@ describe('Pocket source', () => {
       let ids = ['record_a', 'record_b', 'record_c'];
       let denyB = false;
       const fetch = async (url: URL) => {
-        if (url.pathname.endsWith('/folders') || url.pathname.endsWith('/tags')) return json({success: true, data: []});
-        if (url.pathname.endsWith('/recordings'))
+        if (
+          Effect2.pipe(url.pathname, EffectString.endsWith('/folders')) ||
+          Effect2.pipe(url.pathname, EffectString.endsWith('/tags'))
+        )
+          return json({success: true, data: []});
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/recordings')))
           return json({
             success: true,
-            data: ids.map(id => ({id})),
+            data: EffectArray.map(ids, id => ({id})),
             pagination: {page: 1, limit: 100, total: ids.length, total_pages: 1, has_more: false},
           });
-        const id = url.pathname.split('/').at(-1)!;
+        const id = Effect2.pipe(url.pathname, EffectString.split('/')).at(-1)!;
         if (id === 'record_b' && denyB) return json({}, 404);
         return json({success: true, data: {id, transcript: [{text: `stable needle ${id}`}]}});
       };
@@ -629,7 +663,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-page-shrink-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runPocketSourceAdd(config, {
         id: 'shrink',
         projectless: true,
@@ -640,12 +674,16 @@ describe('Pocket source', () => {
       let listing = original;
       const pages: number[] = [];
       const fetch = async (url: URL) => {
-        if (url.pathname.endsWith('/folders') || url.pathname.endsWith('/tags')) return json({success: true, data: []});
-        if (url.pathname.endsWith('/recordings')) {
+        if (
+          Effect2.pipe(url.pathname, EffectString.endsWith('/folders')) ||
+          Effect2.pipe(url.pathname, EffectString.endsWith('/tags'))
+        )
+          return json({success: true, data: []});
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/recordings'))) {
           const page = Number(url.searchParams.get('page'));
           pages.push(page);
           if ((page - 1) * 100 >= listing.length && page > 1) return json({}, 400);
-          const data = listing.slice((page - 1) * 100, page * 100).map(id => ({id}));
+          const data = EffectArray.map(listing.slice((page - 1) * 100, page * 100), id => ({id}));
           return json({
             success: true,
             data,
@@ -658,7 +696,7 @@ describe('Pocket source', () => {
             },
           });
         }
-        const id = url.pathname.split('/').at(-1)!;
+        const id = Effect2.pipe(url.pathname, EffectString.split('/')).at(-1)!;
         return json({success: true, data: {id, transcript: [{text: `retained ${id}`}]}});
       };
       const first: PocketSyncResult = yield* runPocketSourceSync(config, {
@@ -680,8 +718,9 @@ describe('Pocket source', () => {
       expect(recovered.syncedDocuments).toContain('record_fresh');
       expect(pages.slice(0, 3)).toEqual([1, 2, 1]);
       expect(
-        (yield* runPocketSourceInventory(config, 'shrink')).entries.some(
-          item => item.documentId === `r-${sha256HexSync('record_fresh').slice(0, 40)}`,
+        EffectArray.some(
+          (yield* runPocketSourceInventory(config, 'shrink')).entries,
+          item => item.documentId === `r-${Effect2.pipe(sha256HexSync('record_fresh'), EffectString.slice(0, 40))}`,
         ),
       ).toBe(true);
     }).pipe(TestClock.withLive, provide),
@@ -691,7 +730,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-confirm-deadline-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runPocketSourceAdd(config, {
         id: 'deadline',
         projectless: true,
@@ -702,28 +741,36 @@ describe('Pocket source', () => {
       let delayDetail = false;
       let detailCalls = 0;
       const fetch = async (url: URL) => {
-        if (url.pathname.endsWith('/folders') || url.pathname.endsWith('/tags')) return json({success: true, data: []});
-        if (url.pathname.endsWith('/recordings'))
+        if (
+          Effect2.pipe(url.pathname, EffectString.endsWith('/folders')) ||
+          Effect2.pipe(url.pathname, EffectString.endsWith('/tags'))
+        )
+          return json({success: true, data: []});
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/recordings')))
           return json({
             success: true,
-            data: listing.map(id => ({id})),
+            data: EffectArray.map(listing, id => ({id})),
             pagination: {page: 1, limit: 100, total: listing.length, total_pages: 1, has_more: false},
           });
         detailCalls++;
         if (delayDetail) await new Promise(resolve => setTimeout(resolve, 200));
-        const id = url.pathname.split('/').at(-1)!;
+        const id = Effect2.pipe(url.pathname, EffectString.split('/')).at(-1)!;
         return delayDetail ? json({success: true, data: {id}}) : json({}, 404);
       };
       // Prime active markers, then leave a confirmation cursor just before its first old ID.
       const importFetch = async (url: URL) => {
-        if (url.pathname.endsWith('/folders') || url.pathname.endsWith('/tags')) return json({success: true, data: []});
-        if (url.pathname.endsWith('/recordings'))
+        if (
+          Effect2.pipe(url.pathname, EffectString.endsWith('/folders')) ||
+          Effect2.pipe(url.pathname, EffectString.endsWith('/tags'))
+        )
+          return json({success: true, data: []});
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/recordings')))
           return json({
             success: true,
-            data: listing.map(id => ({id})),
+            data: EffectArray.map(listing, id => ({id})),
             pagination: {page: 1, limit: 100, total: listing.length, total_pages: 1, has_more: false},
           });
-        const id = url.pathname.split('/').at(-1)!;
+        const id = Effect2.pipe(url.pathname, EffectString.split('/')).at(-1)!;
         return json({success: true, data: {id, transcript: [{text: `old ${id}`}]}});
       };
       yield* runPocketSourceSync(config, {id: 'deadline', apply: true, clientOptions: {fetch: importFetch}});
@@ -749,7 +796,7 @@ describe('Pocket source', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-fair-refresh-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       for (let index = 0; index < 5; index++)
         yield* runPocketSourceAdd(config, {
           id: `fair${index}`,
@@ -760,8 +807,12 @@ describe('Pocket source', () => {
       let calls = 0;
       const fetch = async (url: URL) => {
         calls++;
-        if (url.pathname.endsWith('/folders') || url.pathname.endsWith('/tags')) return json({success: true, data: []});
-        if (url.pathname.endsWith('/recordings'))
+        if (
+          Effect2.pipe(url.pathname, EffectString.endsWith('/folders')) ||
+          Effect2.pipe(url.pathname, EffectString.endsWith('/tags'))
+        )
+          return json({success: true, data: []});
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/recordings')))
           return json({
             success: true,
             data: [{id: 'record_1'}],

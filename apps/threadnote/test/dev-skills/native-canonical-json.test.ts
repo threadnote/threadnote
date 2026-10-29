@@ -2,6 +2,9 @@ import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {makeRequestCanonicalJson} from '../../src/workflow_memory/canonical_json.js';
 import {stableJson} from '../../src/workflow_memory/protocol.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function deepFreeze<A>(value: A, seen = new WeakSet<object>()): A {
   if (value !== null && typeof value === 'object' && !seen.has(value)) {
@@ -36,7 +39,7 @@ describe('request canonical JSON fragments', () => {
           ['Ω', 'line\nquote"'],
         ];
         if (reverse) entries.reverse();
-        const value = Object.fromEntries(entries);
+        const value = EffectRecord.fromEntries(entries);
         expect(canonicalJson(value)).toBe(stableJson(value));
         const sparse = Object.assign(new Array(4), {0: value, 1: undefined, 3: '🧭'});
         expect(canonicalJson(sparse)).toBe(stableJson(sparse));
@@ -51,17 +54,17 @@ describe('request canonical JSON fragments', () => {
     const first = deepFreeze({
       id: 'operation-1',
       request: {body: 'First 🧭', relations: [{type: 'references', uri: 'threadnote://memory/one'}]},
-      intentDigest: 'a'.repeat(64),
+      intentDigest: Effect.pipe('a', EffectString.repeat(64)),
     });
     const second = deepFreeze({
       id: 'operation-2',
       request: {body: 'Second', relations: []},
-      intentDigest: 'b'.repeat(64),
+      intentDigest: Effect.pipe('b', EffectString.repeat(64)),
     });
     const replacement = deepFreeze({
       id: 'operation-3',
       request: {body: 'Replacement', relations: []},
-      intentDigest: 'c'.repeat(64),
+      intentDigest: Effect.pipe('c', EffectString.repeat(64)),
     });
     const initial = {operations: [first]};
     const appended = {operations: [first, second]};
@@ -177,7 +180,7 @@ describe('request canonical JSON fragments', () => {
   it('keeps output equivalent after the per-request cache budget fills', () => {
     const canonicalJson = makeRequestCanonicalJson({maximumCachedBytes: 16});
     const values = Array.from({length: 8}, (_, index) =>
-      deepFreeze({id: index, content: `large historical value ${index} 🧭`.repeat(4)}),
+      deepFreeze({id: index, content: Effect.pipe(`large historical value ${index} 🧭`, EffectString.repeat(4))}),
     );
     const state = {operations: values, current: {id: 'current', content: 'new'}};
     expect(canonicalJson(state)).toBe(stableJson(state));

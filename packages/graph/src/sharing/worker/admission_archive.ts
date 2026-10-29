@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Predicate} from 'effect';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readBoundedPrivateBytes, writeDurablePrivateJsonFile} from '../atomic.js';
@@ -12,6 +14,7 @@ import {
   parseGraphWorkerAdmissionReceiptPage,
   type GraphWorkerAdmissionReceiptV2,
 } from './admission_state.js';
+import * as EffectRecord from 'effect/Record';
 
 export const GRAPH_WORKER_ADMISSION_ARCHIVE_MAX_RECEIPTS = 32_768;
 export const GRAPH_WORKER_ADMISSION_ARCHIVE_MAX_BYTES = 128 * 1_024 * 1_024;
@@ -100,19 +103,19 @@ export function graphWorkerAdmissionReceiptSummary(receipt: GraphWorkerAdmission
 }
 
 export function graphWorkerAdmissionArchiveSummaries(manifest: Manifest) {
-  return manifest.segments.flatMap(segment =>
-    segment.receipts.map(receipt => ({...receipt, sourceCommit: segment.sourceCommit})),
+  return EffectArray.flatMap(manifest.segments, segment =>
+    EffectArray.map(segment.receipts, receipt => ({...receipt, sourceCommit: segment.sourceCommit})),
   );
 }
 
 function validManifest(value: unknown, policy: GraphControlPolicy): value is Manifest {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) return false;
+  const record = value;
   if (
-    Object.keys(record).sort().join(',') !== 'contentDigest,schemaVersion,scopeDigest,segments' ||
+    EffectArray.join(EffectRecord.keys(record).sort(), ',') !== 'contentDigest,schemaVersion,scopeDigest,segments' ||
     record.schemaVersion !== 1 ||
     record.scopeDigest !== scopeDigest(policy) ||
-    !Array.isArray(record.segments) ||
+    !EffectArray.isArray(record.segments) ||
     record.segments.length > MAX_SEGMENTS ||
     record.contentDigest !==
       sha256Digest(
@@ -129,10 +132,10 @@ function validManifest(value: unknown, policy: GraphControlPolicy): value is Man
   const digests = new Set<string>();
   const operations = new Set<string>();
   for (const candidate of record.segments) {
-    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return false;
-    const segment = candidate as Record<string, unknown>;
+    if (!Predicate.isObject(candidate)) return false;
+    const segment = candidate;
     if (
-      Object.keys(segment).sort().join(',') !== 'bytes,count,digest,receipts,sourceCommit' ||
+      EffectArray.join(EffectRecord.keys(segment).sort(), ',') !== 'bytes,count,digest,receipts,sourceCommit' ||
       typeof segment.digest !== 'string' ||
       !HEX.test(segment.digest) ||
       digests.has(segment.digest) ||
@@ -146,16 +149,15 @@ function validManifest(value: unknown, policy: GraphControlPolicy): value is Man
       !Number.isSafeInteger(segment.bytes) ||
       segment.bytes < 1 ||
       segment.bytes > MAX_SEGMENT_BYTES ||
-      !Array.isArray(segment.receipts) ||
+      !EffectArray.isArray(segment.receipts) ||
       segment.receipts.length !== segment.count
     )
       return false;
     for (const candidateReceipt of segment.receipts) {
-      if (typeof candidateReceipt !== 'object' || candidateReceipt === null || Array.isArray(candidateReceipt))
-        return false;
-      const summary = candidateReceipt as Record<string, unknown>;
+      if (!Predicate.isObject(candidateReceipt)) return false;
+      const summary = candidateReceipt;
       if (
-        Object.keys(summary).sort().join(',') !==
+        EffectArray.join(EffectRecord.keys(summary).sort(), ',') !==
           'actionKey,announcementDigest,graphAbi,operationId,receiptDigest,semanticDigest' ||
         typeof summary.operationId !== 'string' ||
         !SHA256_DIGEST.test(summary.operationId) ||
@@ -238,7 +240,7 @@ export const readGraphWorkerAdmissionArchive = Effect.fn('codeGraph.sharing.read
       (selection.kind === 'source' && segment.sourceCommit !== selection.sourceCommit) ||
       (selection.kind === 'sources' && !selection.sourceCommits.has(segment.sourceCommit)) ||
       (selection.kind === 'operation' &&
-        !segment.receipts.some(receipt => receipt.operationId === selection.operationId))
+        !EffectArray.some(segment.receipts, receipt => receipt.operationId === selection.operationId))
     )
       continue;
     const segmentFile = path.join(directory, `${segment.digest}.json`);
@@ -252,11 +254,11 @@ export const readGraphWorkerAdmissionArchive = Effect.fn('codeGraph.sharing.read
       try: () => JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(content)) as unknown,
       catch: () => graphSharingUnavailable('Graph worker admission archive segment is invalid.'),
     });
-    if (typeof page !== 'object' || page === null || Array.isArray(page))
+    if (!Predicate.isObject(page))
       return yield* graphSharingUnavailable('Graph worker admission archive segment is invalid.');
-    const record = page as Record<string, unknown>;
+    const record = page;
     if (
-      Object.keys(record).sort().join(',') !== 'receipts,schemaVersion,sourceCommit' ||
+      EffectArray.join(EffectRecord.keys(record).sort(), ',') !== 'receipts,schemaVersion,sourceCommit' ||
       record.schemaVersion !== 1 ||
       record.sourceCommit !== segment.sourceCommit
     )
@@ -267,11 +269,13 @@ export const readGraphWorkerAdmissionArchive = Effect.fn('codeGraph.sharing.read
     });
     if (
       parsed.length !== segment.count ||
-      parsed.some(
+      EffectArray.some(
+        parsed,
         (receipt, index) =>
           canonicalJson(graphWorkerAdmissionReceiptSummary(receipt)) !== canonicalJson(segment.receipts[index]),
       ) ||
-      parsed.some(
+      EffectArray.some(
+        parsed,
         receipt =>
           receipt.sourceCommit !== segment.sourceCommit ||
           receipt.announcement.body.repositoryId !== policy.repositoryId ||
@@ -299,17 +303,17 @@ export const parkGraphWorkerAdmissionReceipts = Effect.fn('codeGraph.sharing.par
   sourceCommit: string,
   receipts: readonly GraphWorkerAdmissionReceiptV2[],
 ) {
-  if (receipts.length === 0 || receipts.some(receipt => receipt.sourceCommit !== sourceCommit))
+  if (receipts.length === 0 || EffectArray.some(receipts, receipt => receipt.sourceCommit !== sourceCommit))
     return yield* graphSharingUnavailable('Graph worker admission parking source is invalid.');
   const summaries = graphWorkerAdmissionArchiveSummaries(archive.manifest);
-  const existing = new Set(summaries.map(receipt => receipt.operationId));
-  if (receipts.some(receipt => existing.has(receipt.announcement.body.idempotencyKey))) {
+  const existing = new Set(EffectArray.map(summaries, receipt => receipt.operationId));
+  if (EffectArray.some(receipts, receipt => existing.has(receipt.announcement.body.idempotencyKey))) {
     const prior = yield* readGraphWorkerAdmissionArchive(hotPath, policy, {kind: 'source', sourceCommit});
     const byOperation = new Map(
-      prior.receipts.map(receipt => [receipt.announcement.body.idempotencyKey, receipt] as const),
+      EffectArray.map(prior.receipts, receipt => [receipt.announcement.body.idempotencyKey, receipt] as const),
     );
     if (
-      receipts.some(receipt => {
+      EffectArray.some(receipts, receipt => {
         const archived = byOperation.get(receipt.announcement.body.idempotencyKey);
         return (
           existing.has(receipt.announcement.body.idempotencyKey) &&
@@ -319,7 +323,7 @@ export const parkGraphWorkerAdmissionReceipts = Effect.fn('codeGraph.sharing.par
     )
       return yield* graphSharingUnavailable('Graph worker admission copies conflict.');
   }
-  const additions = receipts.filter(receipt => !existing.has(receipt.announcement.body.idempotencyKey));
+  const additions = EffectArray.filter(receipts, receipt => !existing.has(receipt.announcement.body.idempotencyKey));
   if (additions.length === 0) return {status: 'parked' as const, archive};
   const segmentValue = {receipts: additions, schemaVersion: 1, sourceCommit};
   const bytes = new TextEncoder().encode(`${JSON.stringify(segmentValue)}\n`);
@@ -327,7 +331,7 @@ export const parkGraphWorkerAdmissionReceipts = Effect.fn('codeGraph.sharing.par
     bytes: bytes.byteLength,
     count: additions.length,
     digest: sha256HexSync(bytes),
-    receipts: additions.map(graphWorkerAdmissionReceiptSummary),
+    receipts: EffectArray.map(additions, graphWorkerAdmissionReceiptSummary),
     sourceCommit,
   };
   const next = makeManifest(archive.manifest.scopeDigest, [...archive.manifest.segments, segment]);
@@ -368,7 +372,7 @@ const removeOrphanSegments = Effect.fn('codeGraph.sharing.removeWorkerAdmissionA
   const names = yield* fs.readDirectory(directory);
   if (names.length > MAX_SEGMENTS * 2)
     return yield* graphSharingUnavailable('Graph worker admission archive directory is over capacity.');
-  const active = new Set(manifest.segments.map(segment => `${segment.digest}.json`));
+  const active = new Set(EffectArray.map(manifest.segments, segment => `${segment.digest}.json`));
   for (const name of names) {
     if (active.has(name)) continue;
     if (!(SEGMENT_FILE.test(name) || SEGMENT_TEMP_FILE.test(name)))
@@ -384,18 +388,23 @@ export const retireGraphWorkerAdmissionArchive = Effect.fn('codeGraph.sharing.re
   archive: GraphWorkerAdmissionArchive,
   covered: ReadonlySet<string>,
 ) {
-  const removed = archive.manifest.segments.filter(segment => covered.has(segment.sourceCommit));
+  const removed = EffectArrayPipe(archive.manifest.segments, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (segment, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && covered.has(segment.sourceCommit),
+    ),
+  );
   if (removed.length === 0) return {retired: 0};
-  if (removed.some(segment => !archive.verifiedSegments.has(segment.digest)))
+  if (EffectArray.some(removed, segment => !archive.verifiedSegments.has(segment.digest)))
     return yield* graphSharingUnavailable('Graph worker admission archive retirement is unverified.');
   const next = makeManifest(
     archive.manifest.scopeDigest,
-    archive.manifest.segments.filter(segment => !covered.has(segment.sourceCommit)),
+    EffectArray.filter(archive.manifest.segments, segment => !covered.has(segment.sourceCommit)),
   );
   yield* writeDurablePrivateJsonFile(manifestPath(hotPath), next);
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   for (const segment of removed)
     yield* fs.remove(path.join(segmentDirectory(hotPath), `${segment.digest}.json`), {force: true}).pipe(Effect.ignore);
-  return {retired: removed.reduce((total, segment) => total + segment.count, 0)};
+  return {retired: EffectArray.reduce(removed, 0, (total, segment) => total + segment.count)};
 });

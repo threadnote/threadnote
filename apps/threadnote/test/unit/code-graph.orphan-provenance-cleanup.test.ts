@@ -1,3 +1,5 @@
+import {TestError} from '@threadnote/testing/test-error';
+import {Array as EffectArray, Predicate} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -16,7 +18,7 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {Effect, FileSystem, Layer, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
@@ -42,12 +44,19 @@ import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {REMOVED_VIEW_CLEANUP_CURRENT_MAXIMUM_METADATA_ROWS} from '@threadnote/graph/store/schema/metadata';
 import {CODE_GRAPH_EXTRACTOR_GENERATION, type RepositoryIdentity} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const checkoutId = 'a'.repeat(64);
-const repositoryId = 'b'.repeat(64);
-const anchorWorktreeId = 'c'.repeat(64);
-const targetWorktreeId = 'd'.repeat(64);
-const registryRootIdentity = 'e'.repeat(64);
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
+
+const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
+const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
+const anchorWorktreeId = Effect2.pipe('c', EffectString.repeat(64));
+const targetWorktreeId = Effect2.pipe('d', EffectString.repeat(64));
+const registryRootIdentity = Effect2.pipe('e', EffectString.repeat(64));
 const privateRoot = '/private/threadnote/orphan-provenance-test';
 const temporaryRoots: string[] = [];
 const storeLayer = CodeGraphStore.layer.pipe(
@@ -65,7 +74,7 @@ const anchor: RepositoryIdentity = {
   checkoutId,
   displayName: 'threadnote/orphan-provenance-test',
   gitCommonDirectory: `${privateRoot}/.git`,
-  headCommit: '1'.repeat(40),
+  headCommit: Effect2.pipe('1', EffectString.repeat(40)),
   objectFormat: 'sha1',
   repositoryId,
   repoRoot: privateRoot,
@@ -75,10 +84,10 @@ const anchor: RepositoryIdentity = {
 const linkedEvidence: Extract<CodeGraphWorktreeReconciliationEvidenceCandidate, {readonly state: 'candidate'}> = {
   canonicalWorktreePath: `${privateRoot}/removed-linked-worktree`,
   checkoutId,
-  evidenceToken: '2'.repeat(64),
-  recordDigest: '3'.repeat(64),
-  recordIdentity: '4'.repeat(64),
-  registration: {adminNameKeys: ['5'.repeat(64)], kind: 'linked'},
+  evidenceToken: Effect2.pipe('2', EffectString.repeat(64)),
+  recordDigest: Effect2.pipe('3', EffectString.repeat(64)),
+  recordIdentity: Effect2.pipe('4', EffectString.repeat(64)),
+  registration: {adminNameKeys: [Effect2.pipe('5', EffectString.repeat(64))], kind: 'linked'},
   repositoryId,
   state: 'candidate',
   worktreeId: targetWorktreeId,
@@ -148,26 +157,30 @@ describe('automatic orphan provenance cleanup', () => {
                 missing: predicates.missingPath,
                 registryAbsent: initial ? predicates.initialAbsent : predicates.finalAbsent,
                 registryRootIdentity:
-                  !initial && !predicates.registryRootStable ? 'f'.repeat(64) : registryRootIdentity,
+                  !initial && !predicates.registryRootStable
+                    ? Effect2.pipe('f', EffectString.repeat(64))
+                    : registryRootIdentity,
               });
             }),
           observeView: () =>
             Effect.succeed(
               predicates.activeView
-                ? ({snapshotId: `cgsn_${'6'.repeat(40)}`, state: 'active'} as const)
+                ? ({snapshotId: `cgsn_${Effect2.pipe('6', EffectString.repeat(40))}`, state: 'active'} as const)
                 : ({state: 'absent'} as const),
             ),
           readEvidenceCandidate: () =>
             Effect.sync(() => {
               evidenceReads += 1;
               return evidenceReads > 1 && !predicates.evidenceStable
-                ? {...linkedEvidence, recordDigest: '7'.repeat(64)}
+                ? {...linkedEvidence, recordDigest: Effect2.pipe('7', EffectString.repeat(64))}
                 : linkedEvidence;
             }),
           resolveAnchor: () =>
             Effect.sync(() => {
               anchorReads += 1;
-              return anchorReads > 1 && !predicates.anchorStable ? {...anchor, repositoryId: '8'.repeat(64)} : anchor;
+              return anchorReads > 1 && !predicates.anchorStable
+                ? {...anchor, repositoryId: Effect2.pipe('8', EffectString.repeat(64))}
+                : anchor;
             }),
         });
 
@@ -195,8 +208,12 @@ describe('automatic orphan provenance cleanup', () => {
         const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
         const store = yield* CodeGraphStore;
         yield* store.initialize(databasePath);
-        const worktreeIds = Array.from({length: 70}, (_, index) => index.toString(16).padStart(64, '0'));
-        yield* Effect.sync(() => seedActiveView(databasePath, worktreeIds.at(-1)!));
+        const worktreeIds = Array.from({length: 70}, (_, index) =>
+          Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+        );
+        const activeWorktreeId = worktreeIds.at(-1);
+        if (activeWorktreeId === undefined) throw new Error('Expected the active fixture worktree.');
+        yield* Effect.sync(() => seedActiveView(databasePath, activeWorktreeId));
 
         const pages = yield* Effect.all(
           Array.from({length: 3}, () =>
@@ -209,11 +226,11 @@ describe('automatic orphan provenance cleanup', () => {
           ),
           {concurrency: 1},
         );
-        const claimed = new Set(pages.flatMap(page => page.worktreeIds));
-        expect(pages.map(page => page.worktreeIds.length)).toEqual([32, 32, 32]);
+        const claimed = new Set(EffectArray.flatMap(pages, page => page.worktreeIds));
+        expect(EffectArray.map(pages, page => page.worktreeIds.length)).toEqual([32, 32, 32]);
         expect(claimed.size).toBe(69);
-        expect(claimed.has(worktreeIds.at(-1)!)).toBe(false);
-        expect(yield* store.observeOrphanProvenanceView(databasePath, worktreeIds.at(-1)!)).toMatchObject({
+        expect(claimed.has(activeWorktreeId)).toBe(false);
+        expect(yield* store.observeOrphanProvenanceView(databasePath, activeWorktreeId)).toMatchObject({
           state: 'active',
         });
         expect(yield* store.observeOrphanProvenanceView(databasePath, worktreeIds[0])).toEqual({state: 'absent'});
@@ -233,15 +250,15 @@ describe('automatic orphan provenance cleanup', () => {
         const resumed = yield* store.claimOrphanProvenanceCandidates(databasePath, worktreeIds, 1);
         expect(resumed).toEqual({worktreeIds: [worktreeIds[1]]});
 
-        yield* Effect.sync(() => writeOrphanCursor(databasePath, 'x'.repeat(65)));
+        yield* Effect.sync(() => writeOrphanCursor(databasePath, Effect2.pipe('x', EffectString.repeat(65))));
         const structurallyInvalid = yield* store
           .claimOrphanProvenanceCandidates(databasePath, worktreeIds, 1)
           .pipe(Effect.exit);
         expect(structurallyInvalid._tag).toBe('Failure');
-        expect(readOrphanCursor(databasePath)).toBe('x'.repeat(65));
+        expect(readOrphanCursor(databasePath)).toBe(Effect2.pipe('x', EffectString.repeat(65)));
 
         yield* Effect.sync(() => writeOrphanCursor(databasePath, 'malformed'));
-        const allActive = yield* store.claimOrphanProvenanceCandidates(databasePath, [worktreeIds.at(-1)!], 1);
+        const allActive = yield* store.claimOrphanProvenanceCandidates(databasePath, [activeWorktreeId], 1);
         expect(allActive).toEqual({cursorRecovery: 'invalid-format', worktreeIds: []});
         expect(readOrphanCursor(databasePath)).toBeUndefined();
 
@@ -278,7 +295,9 @@ describe('automatic orphan provenance cleanup', () => {
             const databasePath = join(root, 'repositories', checkoutId, 'graph-v3.sqlite');
             const store = yield* CodeGraphStore;
             yield* store.initialize(databasePath);
-            const worktreeIds = Array.from({length: 4}, (_, index) => index.toString(16).padStart(64, '0'));
+            const worktreeIds = Array.from({length: 4}, (_, index) =>
+              Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+            );
             yield* Effect.sync(() => seedActiveView(databasePath, worktreeIds[3]));
 
             for (const malformedCursor of malformedCursors) {
@@ -313,13 +332,17 @@ describe('automatic orphan provenance cleanup', () => {
           yield* store.initialize(databasePath);
           if (withRemovedViewCursor) {
             yield* Effect.sync(() =>
-              upsertSchemaMetadata(databasePath, 'removed_view_cleanup_admission_cursor', 'f'.repeat(64)),
+              upsertSchemaMetadata(
+                databasePath,
+                'removed_view_cleanup_admission_cursor',
+                Effect2.pipe('f', EffectString.repeat(64)),
+              ),
             );
           }
           const before = yield* Effect.sync(() => fillOrphanCursorMetadataCapacity(databasePath));
 
           const claimed = yield* store
-            .claimOrphanProvenanceCandidates(databasePath, ['0'.repeat(64)], 1)
+            .claimOrphanProvenanceCandidates(databasePath, [Effect2.pipe('0', EffectString.repeat(64))], 1)
             .pipe(Effect.exit);
 
           expect(claimed._tag).toBe('Failure');
@@ -347,7 +370,7 @@ describe('automatic orphan provenance cleanup', () => {
           {concurrency: 1},
         );
         const [earlier, later] = [...fixtures].sort((left, right) =>
-          left.mainIdentity.checkoutId.localeCompare(right.mainIdentity.checkoutId),
+          Effect2.pipe(left.mainIdentity.checkoutId, EffectString.localeCompare(right.mainIdentity.checkoutId)),
         );
         expect(earlier).toBeDefined();
         expect(later).toBeDefined();
@@ -356,7 +379,7 @@ describe('automatic orphan provenance cleanup', () => {
           writeOrphanCursor(later.databasePath, 'malformed-cursor');
         });
         const maintenance = yield* CodeGraphMaintenanceCoordinator;
-        const targets: readonly CodeGraphLifecycleOpportunityTarget[] = [earlier, later].map(fixture => ({
+        const targets: readonly CodeGraphLifecycleOpportunityTarget[] = EffectArray.map([earlier, later], fixture => ({
           anchorIdentity: fixture.mainIdentity,
           checkoutId: fixture.mainIdentity.checkoutId,
           databasePath: fixture.databasePath,
@@ -374,12 +397,14 @@ describe('automatic orphan provenance cleanup', () => {
           targets,
           threadnoteHome: home,
         });
-        const persistedCursor = JSON.parse(
+        const parsedCursor: unknown = JSON.parse(
           readFileSync(
             join(home, 'locks', 'indexes', 'code-graph', 'lifecycle-opportunities', 'diagnostics.cursor-v1.json'),
             'utf8',
           ),
-        ) as {readonly checkoutId?: unknown; readonly lane?: unknown};
+        );
+        if (!Predicate.isObject(parsedCursor)) throw new Error('Persisted lifecycle cursor must be an object.');
+        const persistedCursor = parsedCursor;
         expect(persistedCursor).toMatchObject({
           checkoutId: later.mainIdentity.checkoutId,
           lane: 'reconciliation',
@@ -505,7 +530,7 @@ function completeAuthority(
   options: {readonly missing?: boolean; readonly registryAbsent?: boolean; readonly registryRootIdentity?: string} = {},
 ): Extract<CodeGraphWorktreeReconciliationAuthorityObservation, {readonly state: 'complete'}> {
   return {
-    contentDigest: '9'.repeat(64),
+    contentDigest: Effect2.pipe('9', EffectString.repeat(64)),
     entryCount: 0,
     pathStates: [options.missing === false ? 'present' : 'missing'],
     registryRootIdentity: options.registryRootIdentity ?? registryRootIdentity,
@@ -538,7 +563,7 @@ function pathAnchorTick() {
 function seedActiveView(databasePath: string, worktreeId: string): void {
   const database = new Database(databasePath, {strict: true});
   try {
-    const snapshotId = `cgsn_${'a'.repeat(40)}`;
+    const snapshotId = `cgsn_${Effect2.pipe('a', EffectString.repeat(40))}`;
     database
       .query(
         `INSERT INTO repositories (id, display_name, object_format, created_at, last_used_at)
@@ -554,7 +579,14 @@ function seedActiveView(databasePath: string, worktreeId: string): void {
          ) VALUES (?, ?, ?, ?, 'orphan-provenance-content', NULL, 'orphan-provenance-test',
                    0, NULL, 'ready', 0, 0, 0, ?, ?, NULL)`,
       )
-      .run(snapshotId, repositoryId, worktreeId, 'b'.repeat(40), new Date(0).toISOString(), new Date(1).toISOString());
+      .run(
+        snapshotId,
+        repositoryId,
+        worktreeId,
+        Effect2.pipe('b', EffectString.repeat(40)),
+        new Date(0).toISOString(),
+        new Date(1).toISOString(),
+      );
     database
       .query('INSERT INTO snapshot_extractor_generations (snapshot_id, generation) VALUES (?, ?)')
       .run(snapshotId, CODE_GRAPH_EXTRACTOR_GENERATION);
@@ -607,11 +639,14 @@ function upsertSchemaMetadata(databasePath: string, key: string, value: string):
 function readOrphanCursor(databasePath: string): string | undefined {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return (
-      database.query("SELECT value FROM schema_metadata WHERE key = 'orphan_provenance_cursor'").get() as {
-        value: string;
-      } | null
-    )?.value;
+    return database
+      .query<
+        {
+          value: string;
+        } | null,
+        SQLQueryBindings[]
+      >("SELECT value FROM schema_metadata WHERE key = 'orphan_provenance_cursor'")
+      .get()?.value;
   } finally {
     database.close(false);
   }
@@ -620,10 +655,15 @@ function readOrphanCursor(databasePath: string): string | undefined {
 function readSchemaMetadata(databasePath: string): readonly {readonly key: string; readonly value: string}[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database.query('SELECT key, value FROM schema_metadata ORDER BY key').all() as readonly {
-      readonly key: string;
-      readonly value: string;
-    }[];
+    return database
+      .query<
+        {
+          readonly key: string;
+          readonly value: string;
+        },
+        SQLQueryBindings[]
+      >('SELECT key, value FROM schema_metadata ORDER BY key')
+      .all();
   } finally {
     database.close(false);
   }
@@ -642,16 +682,23 @@ function fillOrphanCursorMetadataCapacity(
         ? REMOVED_VIEW_CLEANUP_CURRENT_MAXIMUM_METADATA_ROWS - 1
         : REMOVED_VIEW_CLEANUP_CURRENT_MAXIMUM_METADATA_ROWS;
     let count = Number(
-      (database.query('SELECT COUNT(*) AS count FROM schema_metadata').get() as {count: number}).count,
+      requiredRow(
+        database.query<{count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM schema_metadata').get(),
+      ).count,
     );
     while (count < limit) {
       database.query('INSERT INTO schema_metadata (key, value) VALUES (?, ?)').run(`capacity-${count}`, 'bounded');
       count += 1;
     }
-    return database.query('SELECT key, value FROM schema_metadata ORDER BY key').all() as readonly {
-      readonly key: string;
-      readonly value: string;
-    }[];
+    return database
+      .query<
+        {
+          readonly key: string;
+          readonly value: string;
+        },
+        SQLQueryBindings[]
+      >('SELECT key, value FROM schema_metadata ORDER BY key')
+      .all();
   } finally {
     database.close(false);
   }
@@ -717,12 +764,22 @@ function readGraphRowCounts(databasePath: string) {
   try {
     return {
       activeSnapshots: Number(
-        (database.query('SELECT COUNT(*) AS count FROM active_snapshots').get() as {count: number}).count,
+        requiredRow(
+          database.query<{count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM active_snapshots').get(),
+        ).count,
       ),
       cleanupRows: Number(
-        (database.query('SELECT COUNT(*) AS count FROM removed_view_cleanup').get() as {count: number}).count,
+        requiredRow(
+          database
+            .query<{count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM removed_view_cleanup')
+            .get(),
+        ).count,
       ),
-      snapshots: Number((database.query('SELECT COUNT(*) AS count FROM snapshots').get() as {count: number}).count),
+      snapshots: Number(
+        requiredRow(
+          database.query<{count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM snapshots').get(),
+        ).count,
+      ),
     };
   } finally {
     database.close(false);

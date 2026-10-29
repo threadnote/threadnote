@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 
 describe('source evidence citation browser boundary', () => {
@@ -7,7 +8,13 @@ describe('source evidence citation browser boundary', () => {
       target: 'browser',
     });
 
-    expect(result.success, result.logs.map(log => log.message).join('\n')).toBe(true);
+    expect(
+      result.success,
+      EffectArray.join(
+        EffectArray.map(result.logs, log => log.message),
+        '\n',
+      ),
+    ).toBe(true);
     expect(result.outputs.length).toBeGreaterThan(0);
   });
 });

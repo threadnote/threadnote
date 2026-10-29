@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256FileHex, sha256Hex} from '@threadnote/platform/digest';
 import {
@@ -17,6 +19,9 @@ import {
   STORAGE_LAYOUT_MIGRATION_ID,
 } from './layout.js';
 import {isLegacyLocalModelMigrationPending, migrateLegacyLocalModels} from './models.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const HOME_MIGRATION_ID = 'openviking-home-v1';
 export const HOME_MIGRATION_RECEIPT_VERSION = 1 as const;
@@ -133,30 +138,39 @@ interface RecoveryPreflight {
   readonly skippedLegacyEntries: ReadonlySet<string>;
 }
 
-export class HomeMigrationConflict extends Schema.TaggedError<HomeMigrationConflict>()('HomeMigrationConflict', {
-  message: Schema.String,
-  path: Schema.String,
-}) {}
-
-export class HomeMigrationFailed extends Schema.TaggedError<HomeMigrationFailed>()('HomeMigrationFailed', {
-  cause: Schema.Defect(),
-  message: Schema.String,
-  operation: Schema.String,
-}) {}
-
-export class HomeMigrationInsufficientSpace extends Schema.TaggedError<HomeMigrationInsufficientSpace>()(
-  'HomeMigrationInsufficientSpace',
+export class HomeMigrationConflict extends Schema.TaggedError<HomeMigrationConflict, {readonly brand: unique symbol}>()(
+  'HomeMigrationConflict',
   {
-    availableBytes: Schema.Finite,
     message: Schema.String,
-    requiredBytes: Schema.Finite,
+    path: Schema.String,
   },
 ) {}
 
-export class HomeMigrationUnsafe extends Schema.TaggedError<HomeMigrationUnsafe>()('HomeMigrationUnsafe', {
+export class HomeMigrationFailed extends Schema.TaggedError<HomeMigrationFailed, {readonly brand: unique symbol}>()(
+  'HomeMigrationFailed',
+  {
+    cause: Schema.Defect(),
+    message: Schema.String,
+    operation: Schema.String,
+  },
+) {}
+
+export class HomeMigrationInsufficientSpace extends Schema.TaggedError<
+  HomeMigrationInsufficientSpace,
+  {readonly brand: unique symbol}
+>()('HomeMigrationInsufficientSpace', {
+  availableBytes: Schema.Finite,
   message: Schema.String,
-  path: Schema.String,
+  requiredBytes: Schema.Finite,
 }) {}
+
+export class HomeMigrationUnsafe extends Schema.TaggedError<HomeMigrationUnsafe, {readonly brand: unique symbol}>()(
+  'HomeMigrationUnsafe',
+  {
+    message: Schema.String,
+    path: Schema.String,
+  },
+) {}
 
 export type HomeMigrationError =
   HomeMigrationConflict | HomeMigrationFailed | HomeMigrationInsufficientSpace | HomeMigrationUnsafe;
@@ -445,10 +459,10 @@ export const runHomeMigration = Effect.fn('homeMigration.run')(function* (option
     }
     if (modelResult.action === 'dry_run') {
       reportedBetaRecovery = true;
-      yield* Console.log(`Would preserve installed local model(s): ${modelResult.models.join(', ')}.`);
+      yield* Console.log(`Would preserve installed local model(s): ${EffectArray.join(modelResult.models, ', ')}.`);
     } else if (modelResult.action === 'migrated' || modelResult.action === 'resumed') {
       reportedBetaRecovery = true;
-      yield* Console.log(`Preserved installed local model(s): ${modelResult.models.join(', ')}.`);
+      yield* Console.log(`Preserved installed local model(s): ${EffectArray.join(modelResult.models, ', ')}.`);
     }
   }
   switch (result.action) {
@@ -645,13 +659,19 @@ function preflightMappedInventory(
   return Effect.gen(function* () {
     const currentShareState = yield* findCurrentShareRecoveryState(fs, path, targetHome, inventory, shareMigrations);
     const skippedLegacyEntries = new Set<string>(
-      inventory.entries
-        .filter(entry =>
-          [...currentShareState.authoritativeShareGitdirs.keys()].some(root =>
-            isRelativePathWithin(root, entry.relativePath),
+      EffectArray.map(
+        EffectArrayPipe(inventory.entries, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (entry, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues &&
+              EffectArray.some([...currentShareState.authoritativeShareGitdirs.keys()], root =>
+                isRelativePathWithin(root, entry.relativePath),
+              ),
           ),
-        )
-        .map(entry => entry.relativePath),
+        ),
+        entry => entry.relativePath,
+      ),
     );
     for (const entry of currentShareState.preservedLegacyEntries) {
       skippedLegacyEntries.add(entry);
@@ -830,15 +850,20 @@ function compareLegacyDerivedTree(
     const transientFiles =
       options.kind === 'gitdir'
         ? new Set(
-            currentInventory.entries
-              .filter(
-                entry =>
-                  entry.type !== 'directory' &&
-                  isTransientShareGitPath(
-                    portableInput(path.join(options.migration.stageGitdirRelative, entry.relativePath)),
-                  ),
-              )
-              .map(entry => entry.relativePath),
+            EffectArray.map(
+              EffectArrayPipe(currentInventory.entries, __effectArrayValues =>
+                EffectArray.filter(
+                  __effectArrayValues,
+                  (entry, __effectArrayIndex) =>
+                    __effectArrayIndex in __effectArrayValues &&
+                    entry.type !== 'directory' &&
+                    isTransientShareGitPath(
+                      portableInput(path.join(options.migration.stageGitdirRelative, entry.relativePath)),
+                    ),
+                ),
+              ),
+              entry => entry.relativePath,
+            ),
           )
         : new Set<string>();
     const transientOnlyDirectories = findTransientOnlyDirectories(currentInventory.entries, transientFiles);
@@ -892,15 +917,23 @@ function compareLegacyDerivedTree(
 }
 
 function inventoryEntriesWithin(inventory: HomeInventory, root: string): ReadonlyMap<string, InventoryEntry> {
-  const portableRoot = portableInput(root).replace(/\/+$/, '');
+  const portableRoot = Effect2.pipe(portableInput(root), EffectString.replace(/\/+$/, ''));
   const prefix = `${portableRoot}/`;
   return new Map(
-    inventory.entries
-      .filter(entry => entry.relativePath.startsWith(prefix))
-      .map(entry => [
-        entry.relativePath.slice(prefix.length),
-        {...entry, relativePath: entry.relativePath.slice(prefix.length)},
-      ]),
+    EffectArray.map(
+      EffectArrayPipe(inventory.entries, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (entry, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues &&
+            Effect2.pipe(entry.relativePath, EffectString.startsWith(prefix)),
+        ),
+      ),
+      entry => [
+        Effect2.pipe(entry.relativePath, EffectString.slice(prefix.length)),
+        {...entry, relativePath: Effect2.pipe(entry.relativePath, EffectString.slice(prefix.length))},
+      ],
+    ),
   );
 }
 
@@ -908,7 +941,7 @@ function findTransientOnlyDirectories(
   entries: readonly InventoryEntry[],
   transientFiles: ReadonlySet<string>,
 ): ReadonlySet<string> {
-  const candidates = new Set([...transientFiles].flatMap(relativePathAncestors));
+  const candidates = new Set(EffectArray.flatMap([...transientFiles], relativePathAncestors));
   for (const entry of entries) {
     if (transientFiles.has(entry.relativePath)) continue;
     if (entry.type === 'directory' && candidates.has(entry.relativePath)) continue;
@@ -920,10 +953,10 @@ function findTransientOnlyDirectories(
 }
 
 function relativePathAncestors(relativePath: string): readonly string[] {
-  const segments = portableInput(relativePath).split('/');
+  const segments = Effect2.pipe(portableInput(relativePath), EffectString.split('/'));
   const ancestors: string[] = [];
   for (let length = 1; length < segments.length; length += 1) {
-    ancestors.push(segments.slice(0, length).join('/'));
+    ancestors.push(EffectArray.join(segments.slice(0, length), '/'));
   }
   return ancestors;
 }
@@ -936,7 +969,7 @@ function managedShareRecoveryRoots(
 ): readonly ManagedShareRecoveryRoot[] {
   const roots = new Map<string, ManagedShareRecoveryRoot>();
   const plannedSourceGitdirRoots = new Set(
-    shareMigrations.map(migration => portableInput(migration.sourceGitdirRelative)),
+    EffectArray.map(shareMigrations, migration => portableInput(migration.sourceGitdirRelative)),
   );
   for (const migration of shareMigrations) {
     const sourceGitdirRelative = portableInput(migration.sourceGitdirRelative);
@@ -951,8 +984,12 @@ function managedShareRecoveryRoots(
   for (const entry of inventory.entries) {
     const standardRoot = managedShareGitdirRoot(entry.relativePath);
     if (!standardRoot || plannedSourceGitdirRoots.has(standardRoot)) continue;
-    const gitdirName = standardRoot.split('/').at(-1);
-    const teamName = gitdirName?.slice(0, -'.gitdir'.length);
+    const gitdirName = Effect2.pipe(standardRoot, EffectString.split('/')).at(-1);
+    const teamName = Effect2.pipe(gitdirName, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.slice(0, -'.gitdir'.length)),
+    );
     if (!teamName) continue;
     const currentGitdir = path.join(targetHome, standardRoot);
     const currentRootKey = portableInput(path.resolve(currentGitdir));
@@ -968,14 +1005,21 @@ function managedShareRecoveryRoots(
 }
 
 function managedShareGitdirRoot(relativePath: string): string | undefined {
-  const segments = portableInput(relativePath).split('/');
+  const segments = Effect2.pipe(portableInput(relativePath), EffectString.split('/'));
   const gitdirName = segments[2];
-  if (segments.length < 3 || segments[0] !== 'share' || segments[1] !== 'teams' || !gitdirName?.endsWith('.gitdir')) {
+  if (
+    segments.length < 3 ||
+    segments[0] !== 'share' ||
+    segments[1] !== 'teams' ||
+    !Effect2.pipe(gitdirName, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.endsWith('.gitdir')),
+    )
+  ) {
     return undefined;
   }
-  const teamName = gitdirName.slice(0, -'.gitdir'.length);
+  const teamName = Effect2.pipe(gitdirName, EffectString.slice(0, -'.gitdir'.length));
   return /^[a-z0-9][a-z0-9._-]*$/.test(teamName) && !/^\.+$/.test(teamName)
-    ? segments.slice(0, 3).join('/')
+    ? EffectArray.join(segments.slice(0, 3), '/')
     : undefined;
 }
 
@@ -988,8 +1032,10 @@ function readGitdirMarker(
     if (!(yield* fs.exists(marker))) return undefined;
     if (Option.isSome(yield* fs.readLink(marker).pipe(Effect.option))) return undefined;
     if ((yield* fs.stat(marker)).type !== 'File') return undefined;
-    const value = (yield* fs.readFileString(marker)).trim();
-    const gitdir = /^gitdir:\s*(.+)$/i.exec(value)?.[1]?.trim();
+    const value = Effect2.pipe(yield* fs.readFileString(marker), EffectString.trim);
+    const gitdir = Effect2.pipe(/^gitdir:\s*(.+)$/i.exec(value)?.[1], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
     return gitdir ? path.resolve(path.dirname(marker), gitdir) : undefined;
   }).pipe(Effect.orElseSucceed(() => undefined));
 }
@@ -997,7 +1043,9 @@ function readGitdirMarker(
 function isRelativePathWithin(root: string, candidate: string): boolean {
   const portableRoot = portableInput(root);
   const portableCandidate = portableInput(candidate);
-  return portableCandidate === portableRoot || portableCandidate.startsWith(`${portableRoot}/`);
+  return (
+    portableCandidate === portableRoot || Effect2.pipe(portableCandidate, EffectString.startsWith(`${portableRoot}/`))
+  );
 }
 
 function copyMappedInventory(
@@ -1072,13 +1120,13 @@ function mappedLegacyRelative(relativePath: string): string {
   const legacyPrefix = 'data/viking';
   return portable === legacyPrefix
     ? 'data'
-    : portable.startsWith(`${legacyPrefix}/`)
-      ? `data/${portable.slice(legacyPrefix.length + 1)}`
+    : Effect2.pipe(portable, EffectString.startsWith(`${legacyPrefix}/`))
+      ? `data/${Effect2.pipe(portable, EffectString.slice(legacyPrefix.length + 1))}`
       : portable;
 }
 
 function shouldPreserveCurrentRecoveryFile(relativePath: string): boolean {
-  return portableInput(relativePath).startsWith('data/');
+  return Effect2.pipe(portableInput(relativePath), EffectString.startsWith('data/'));
 }
 
 function hasCurrentBetaEntry(
@@ -1179,13 +1227,18 @@ function removeTransientLegacyDerivedGitEntries(
   return Effect.gen(function* () {
     const inventory = yield* inventoryHome(fs, path, migration.finalGitdir, () => true);
     const transientFiles = new Set(
-      inventory.entries
-        .filter(
-          entry =>
-            entry.type !== 'directory' &&
-            isTransientShareGitPath(portableInput(path.join(migration.stageGitdirRelative, entry.relativePath))),
-        )
-        .map(entry => entry.relativePath),
+      EffectArray.map(
+        EffectArrayPipe(inventory.entries, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (entry, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues &&
+              entry.type !== 'directory' &&
+              isTransientShareGitPath(portableInput(path.join(migration.stageGitdirRelative, entry.relativePath))),
+          ),
+        ),
+        entry => entry.relativePath,
+      ),
     );
     const transientOnlyDirectories = findTransientOnlyDirectories(inventory.entries, transientFiles);
     for (const relativePath of transientFiles) {
@@ -1299,9 +1352,17 @@ function inventoryEntryMatches(
 }
 
 function rewriteLegacyShareGitConfig(config: string, migration: LegacyShareMigration): string {
-  return config
-    .replaceAll(migration.sourceWorktree, migration.finalWorktree)
-    .replaceAll(migration.sourceGitdir, migration.finalGitdir);
+  return Effect2.pipe(config, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(
+      __effectPipeInput,
+      EffectString.replaceAll(migration.sourceWorktree, migration.finalWorktree),
+    );
+    const __effectPipeStage1 = Effect2.pipe(
+      __effectPipeStage0,
+      EffectString.replaceAll(migration.sourceGitdir, migration.finalGitdir),
+    );
+    return __effectPipeStage1;
+  });
 }
 
 function assertSeparateHomes(path: Path.Path, legacyHome: string, targetHome: string): void {
@@ -1329,7 +1390,9 @@ function inventoryHome(
     const entries: InventoryEntry[] = [];
     const visit = (directory: string, relativeDirectory: string): Effect.Effect<void, unknown, Crypto.Crypto> =>
       Effect.gen(function* () {
-        const names = (yield* fs.readDirectory(directory)).sort((left, right) => left.localeCompare(right));
+        const names = (yield* fs.readDirectory(directory)).sort((left, right) =>
+          Effect2.pipe(left, EffectString.localeCompare(right)),
+        );
         for (const name of names) {
           const relativePath = portableRelative(path, path.join(relativeDirectory, name));
           if (!include(relativePath)) continue;
@@ -1381,17 +1444,20 @@ function inventoryHome(
       });
     yield* visit(root, '');
     const treeSha256 = yield* sha256Hex(
-      entries
-        .filter(entry => entry.type !== 'directory')
-        .map(entry => `${entry.type}\0${entry.relativePath}\0${entry.size}\0${entry.digest}\n`)
-        .join(''),
+      EffectArray.join(
+        EffectArray.map(
+          EffectArray.filter(entries, entry => entry.type !== 'directory'),
+          entry => `${entry.type}\0${entry.relativePath}\0${entry.size}\0${entry.digest}\n`,
+        ),
+        '',
+      ),
     );
     return {
-      bytes: entries.reduce((total, entry) => total + (entry.type === 'file' ? entry.size : 0), 0),
-      directories: entries.filter(entry => entry.type === 'directory').length,
+      bytes: EffectArray.reduce(entries, 0, (total, entry) => total + (entry.type === 'file' ? entry.size : 0)),
+      directories: EffectArray.filter(entries, entry => entry.type === 'directory').length,
       entries,
-      files: entries.filter(entry => entry.type === 'file').length,
-      symlinks: entries.filter(entry => entry.type === 'symlink').length,
+      files: EffectArray.filter(entries, entry => entry.type === 'file').length,
+      symlinks: EffectArray.filter(entries, entry => entry.type === 'symlink').length,
       treeSha256,
     };
   });
@@ -1448,7 +1514,10 @@ function findResumableStage(
 ): Effect.Effect<{readonly path: string; readonly receipt: HomeMigrationReceipt} | undefined, unknown, Crypto.Crypto> {
   return Effect.gen(function* () {
     const prefix = `${path.basename(targetHome)}.migrate-`;
-    const names = (yield* fs.readDirectory(parent)).filter(name => name.startsWith(prefix)).sort();
+    const names = EffectArray.filter(
+      yield* fs.readDirectory(parent),
+      __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.startsWith(prefix)))(__effectArrayValue),
+    ).sort();
     let currentSourceInventory: HomeInventory | undefined;
     for (const name of names) {
       const candidate = path.join(parent, name);
@@ -1548,7 +1617,7 @@ function parseLegacyTeamsFile(value: unknown): LegacyTeamsFile {
   if (rawTeams === undefined) return {...value};
   if (!Predicate.isObject(rawTeams)) throw new Error('Legacy share teams value is not an object.');
   const teams: Record<string, Record<string, unknown>> = {};
-  for (const [name, entry] of Object.entries(rawTeams)) {
+  for (const [name, entry] of EffectRecord.toEntries(rawTeams)) {
     if (!Predicate.isObject(entry)) throw new Error(`Legacy share team ${name} is not an object.`);
     teams[name] = entry;
   }
@@ -1578,7 +1647,7 @@ function planLegacyShareMigrations(
     if (!Predicate.isObject(teams)) return [];
 
     const plans: LegacyShareMigration[] = [];
-    for (const [name, value] of Object.entries(teams)) {
+    for (const [name, value] of EffectRecord.toEntries(teams)) {
       if (!/^[a-z0-9][a-z0-9._-]*$/.test(name) || /^\.+$/.test(name)) {
         return yield* HomeMigrationUnsafe.make({
           message: `Legacy share has an unsafe team name: ${name}.`,
@@ -1618,19 +1687,29 @@ function checkedLegacyRelative(path: Path.Path, legacyHome: string, value: strin
 }
 
 function duplicatedMigrationBytes(inventory: HomeInventory, migrations: readonly LegacyShareMigration[]): number {
-  const roots = migrations.flatMap(migration => [
+  const roots = EffectArray.flatMap(migrations, migration => [
     portableInput(migration.sourceWorktreeRelative),
     ...(migration.sourceGitdirRelative === migration.stageGitdirRelative
       ? []
       : [portableInput(migration.sourceGitdirRelative)]),
   ]);
-  return inventory.entries
-    .filter(
-      entry =>
-        entry.type === 'file' &&
-        roots.some(root => entry.relativePath === root || entry.relativePath.startsWith(`${root}/`)),
-    )
-    .reduce((total, entry) => total + entry.size, 0);
+  return EffectArray.reduce(
+    EffectArrayPipe(inventory.entries, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (entry, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues &&
+          entry.type === 'file' &&
+          EffectArray.some(
+            roots,
+            root =>
+              entry.relativePath === root || Effect2.pipe(entry.relativePath, EffectString.startsWith(`${root}/`)),
+          ),
+      ),
+    ),
+    0,
+    (total, entry) => total + entry.size,
+  );
 }
 
 function migrateLegacyShares(
@@ -1690,8 +1769,8 @@ function migrateLegacyShares(
 
 function shouldIncludeLegacyPath(relativePath: string): boolean {
   const portable = portableInput(relativePath);
-  const top = portable.split('/')[0] ?? '';
-  const basename = portable.split('/').at(-1) ?? '';
+  const top = Effect2.pipe(portable, EffectString.split('/'))[0] ?? '';
+  const basename = Effect2.pipe(portable, EffectString.split('/')).at(-1) ?? '';
   return (
     !EXCLUDED_LEGACY_PATHS.has(top) &&
     !EXCLUDED_LEGACY_THREADNOTE_PATHS.has(portable) &&
@@ -1701,41 +1780,48 @@ function shouldIncludeLegacyPath(relativePath: string): boolean {
 }
 
 function isTransientShareGitPath(relativePath: string): boolean {
-  const segments = relativePath.split('/');
+  const segments = Effect2.pipe(relativePath, EffectString.split('/'));
   if (
     segments.length < 4 ||
     segments[0] !== 'share' ||
     segments[1] !== 'teams' ||
-    segments[2]?.endsWith('.gitdir') !== true
+    Effect2.pipe(segments[2], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.endsWith('.gitdir')),
+    ) !== true
   ) {
     return false;
   }
   const gitSegments = segments.slice(3);
   const filename = gitSegments.at(-1) ?? '';
   if (gitSegments.length === 1 && TRANSIENT_SHARE_GIT_ROOT_FILENAMES.has(filename)) return true;
-  if (!filename.endsWith('.lock')) return false;
+  if (!Effect2.pipe(filename, EffectString.endsWith('.lock'))) return false;
   return gitSegments.length === 1 || TRANSIENT_SHARE_GIT_LOCK_ROOTS.has(gitSegments[0] ?? '');
 }
 
 function portableRelative(path: Path.Path, value: string): string {
-  return portableInput(path.normalize(value)).replace(/^\/+/, '');
+  return Effect2.pipe(portableInput(path.normalize(value)), EffectString.replace(/^\/+/, ''));
 }
 
 function portableInput(value: string): string {
-  return value.replaceAll('\\', '/');
+  return Effect2.pipe(value, EffectString.replaceAll('\\', '/'));
 }
 
 function resolveHomeInput(path: Path.Path, userHome: string, value: string): string {
   if (value === '~') return path.resolve(userHome);
-  if (value.startsWith('~/') || value.startsWith('~\\')) {
-    return path.resolve(userHome, value.slice(2));
+  if (Effect2.pipe(value, EffectString.startsWith('~/')) || Effect2.pipe(value, EffectString.startsWith('~\\'))) {
+    return path.resolve(userHome, Effect2.pipe(value, EffectString.slice(2)));
   }
   return path.resolve(value);
 }
 
 function isWithin(path: Path.Path, parent: string, candidate: string): boolean {
   const relative = path.relative(parent, candidate);
-  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  return (
+    relative !== '' &&
+    relative !== '..' &&
+    !Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)) &&
+    !path.isAbsolute(relative)
+  );
 }
 
 function isWithinOrSame(path: Path.Path, parent: string, candidate: string): boolean {

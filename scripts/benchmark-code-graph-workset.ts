@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Effect} from 'effect';
@@ -25,6 +26,8 @@ import {
   removePreparedCodeGraphWorksetFixture,
   type CodeGraphWorksetFixtureSize,
 } from './support/code-graph-workset-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_SAMPLES = 5;
 const DEFAULT_WARMUPS = 1;
@@ -59,7 +62,11 @@ export function parseCodeGraphWorksetBenchmarkArguments(args: readonly string[])
 export const benchmarkCodeGraphWorkset = Effect.scoped(
   Effect.gen(function* () {
     const options = parseCodeGraphWorksetBenchmarkArguments(yield* scriptArguments());
-    const maximumSize = Math.max(...options.sizes) as CodeGraphWorksetFixtureSize;
+    const initialSize = options.sizes[0];
+    if (initialSize === undefined)
+      return yield* ScriptError.make({message: 'At least one benchmark size is required.'});
+    let maximumSize: CodeGraphWorksetFixtureSize = initialSize;
+    for (const size of options.sizes) if (size > maximumSize) maximumSize = size;
     const prepared = yield* Effect.acquireRelease(
       Effect.tryPromise({
         try: () => prepareCodeGraphWorksetFixture({size: maximumSize, stateProfile: 'all-clean'}),
@@ -72,19 +79,25 @@ export const benchmarkCodeGraphWorkset = Effect.scoped(
         }).pipe(Effect.ignore),
     );
     yield* indexPreparedCodeGraphWorksetFixture(prepared);
-    const selectedWorksets = options.sizes.map(size => {
-      const workset = prepared.plan.worksets.find(candidate => candidate.size === size);
+    const selectedWorksets = EffectArray.map(options.sizes, size => {
+      const workset = EffectOption.getOrUndefined(
+        EffectArray.findFirst(prepared.plan.worksets, candidate => candidate.size === size),
+      );
       if (!workset) throw ScriptError.make({message: `Fixture did not emit a size-${size} workset.`});
       return workset.name;
     });
     yield* publishIndexedCodeGraphWorksetCatalog(prepared, selectedWorksets);
     const config = codeGraphWorksetRuntimeConfig(prepared);
-    const query = prepared.plan.queries.find(candidate => candidate.id === BENCHMARK_QUERY_ID);
+    const query = EffectOption.getOrUndefined(
+      EffectArray.findFirst(prepared.plan.queries, candidate => candidate.id === BENCHMARK_QUERY_ID),
+    );
     if (!query) return yield* ScriptError.make({message: `Fixture is missing benchmark query ${BENCHMARK_QUERY_ID}.`});
 
     const samples = [];
     for (const worksetSize of options.sizes) {
-      const workset = prepared.plan.worksets.find(candidate => candidate.size === worksetSize);
+      const workset = EffectOption.getOrUndefined(
+        EffectArray.findFirst(prepared.plan.worksets, candidate => candidate.size === worksetSize),
+      );
       if (!workset) return yield* ScriptError.make({message: `Fixture did not emit a size-${worksetSize} workset.`});
       for (let warmup = 0; warmup < options.warmups; warmup += 1) {
         yield* measureCodeGraphWorksetQuery(config, workset.name, query.query);
@@ -126,7 +139,10 @@ export const benchmarkCodeGraphWorkset = Effect.scoped(
         currentRepositoryCap: 0,
         evidenceUnit: 'globally-ranked-v2-evidence-card',
         firstEvidenceSemantics: 'buffered-response; delivered time-to-first equals completion',
-        requestedSizes: options.sizes.join(','),
+        requestedSizes: EffectArray.join(
+          EffectArray.map(options.sizes, item => (item === null || item === undefined ? '' : String(item))),
+          ',',
+        ),
         responseSurface: 'canonical Workset Search 2.0 structuredContent plus terse text',
         routingMode: 'complete indexed catalog with adaptive 4/4/16 deep expansion',
       },
@@ -138,29 +154,42 @@ export const benchmarkCodeGraphWorkset = Effect.scoped(
     yield* printJson(artifact);
     if (options.failOnBudget) {
       const failures = codeGraphWorksetBenchmarkBudgetFailures(measurements, options.sizes);
-      if (failures.length > 0) return yield* ScriptError.make({message: failures.join('\n')});
+      if (failures.length > 0) return yield* ScriptError.make({message: EffectArray.join(failures, '\n')});
     }
   }),
 );
 
 function parseBenchmarkSizes(value: string): readonly CodeGraphWorksetFixtureSize[] {
-  const parts = value.split(',');
-  if (parts.length === 0 || parts.some(part => !part.trim()))
+  const parts = Effect2.pipe(value, EffectString.split(','));
+  if (parts.length === 0 || EffectArray.some(parts, part => !Effect2.pipe(part, EffectString.trim)))
     throw ScriptError.make({message: '--sizes requires comma-separated sizes.'});
-  const sizes = parts.map(part => Number(part.trim()));
-  if (sizes.some(size => !Number.isSafeInteger(size) || size < 1)) {
+  const sizes: number[] = EffectArray.map(parts, (part: string): number =>
+    Number(Effect2.pipe(part, EffectString.trim)),
+  );
+  if (EffectArray.some(sizes, size => !Number.isSafeInteger(size) || size < 1)) {
     throw ScriptError.make({message: '--sizes requires positive integer sizes.'});
   }
   if (new Set(sizes).size !== sizes.length) throw ScriptError.make({message: '--sizes sizes must be unique.'});
-  const allowed = new Set<number>(CODE_GRAPH_WORKSET_FIXTURE_SUPPORTED_SIZES);
   for (const size of sizes) {
-    if (!allowed.has(size)) {
+    if (!isCodeGraphWorksetFixtureSize(size)) {
       throw ScriptError.make({
-        message: `--sizes only accepts benchmark sizes: ${CODE_GRAPH_WORKSET_FIXTURE_SUPPORTED_SIZES.join(', ')}. Received ${size}.`,
+        message: `--sizes only accepts benchmark sizes: ${EffectArray.join(
+          EffectArray.map(CODE_GRAPH_WORKSET_FIXTURE_SUPPORTED_SIZES, item =>
+            item === null || item === undefined ? '' : String(item),
+          ),
+          ', ',
+        )}. Received ${size}.`,
       });
     }
   }
-  return [...sizes].sort((left, right) => left - right) as readonly CodeGraphWorksetFixtureSize[];
+  return EffectArray.filter(
+    [...sizes].sort((left, right) => left - right),
+    isCodeGraphWorksetFixtureSize,
+  );
+}
+
+function isCodeGraphWorksetFixtureSize(value: number): value is CodeGraphWorksetFixtureSize {
+  return EffectArray.some(CODE_GRAPH_WORKSET_FIXTURE_SUPPORTED_SIZES, size => size === value);
 }
 
 function integer(value: string | undefined, option: string, minimum: number, maximum: number): number {
@@ -172,6 +201,7 @@ function integer(value: string | undefined, option: string, minimum: number, max
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
@@ -189,7 +219,7 @@ function benchmarkCreatedAt(environment: NodeJS.ProcessEnv): string {
 
 const sourceGit = Effect.fn('benchmarkCodeGraphWorkset.git')((args: readonly string[]) =>
   runCommandEffect('git', ['-C', process.cwd(), ...args], {maxOutputBytes: 1_048_576, timeoutMs: 30_000}).pipe(
-    Effect.map(result => result.stdout.trim()),
+    Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
   ),
 );
 

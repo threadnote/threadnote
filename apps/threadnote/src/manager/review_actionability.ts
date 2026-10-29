@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Context, Effect, FileSystem, Option, Path, Result, Scope} from 'effect';
 import {loadCandidateReviewOptional, type CandidateReview} from '@threadnote/memory/candidate';
 import {localMemoryPathForUri} from '@threadnote/memory/local-path';
@@ -20,6 +21,8 @@ import {readContextMaintenanceCanonicalRecord} from '../memory/context/maintenan
 import {maintenanceContentHash} from '../memory/context/maintenance_policy.js';
 import {ManagerConsumerClockHints} from './live_consumer_sources.js';
 import {ManagerHealthObservationHints} from './live_health_sources.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export type ReviewEligibility = 'actionable' | 'assessment' | 'waiting' | 'obsolete' | 'protected';
 export interface ReviewReadiness {
@@ -63,12 +66,18 @@ export function invalidateManagerReviewReadiness(config: RuntimeConfig): void {
 }
 
 export function reviewReadinessReason(error: unknown): ManagerReviewReadinessReason {
-  const reason = (error as {readonly reason?: unknown})?.reason;
-  return ['target-changed', 'source-changed', 'source-unavailable', 'scope-changed', 'policy-changed'].includes(
-    String(reason),
-  )
-    ? (reason as ManagerReviewReadinessReason)
-    : 'verification-unavailable';
+  if (typeof error !== 'object' || error === null || !('reason' in error)) return 'verification-unavailable';
+  const reason = error.reason;
+  switch (reason) {
+    case 'target-changed':
+    case 'source-changed':
+    case 'source-unavailable':
+    case 'scope-changed':
+    case 'policy-changed':
+      return reason;
+    default:
+      return 'verification-unavailable';
+  }
 }
 
 /** Pure partition shared by every count, scope and tab. Protected work retains its existing recovery route. */
@@ -96,7 +105,7 @@ export function projectManagerReviewEligibility(
     }
     byReview.set(review.reviewId, eligibility);
     if (eligibility === 'actionable' || eligibility === 'protected')
-      pendingCount += review.candidates.filter(candidate =>
+      pendingCount += EffectArray.filter(review.candidates, candidate =>
         ['pending', 'deferred', 'applying'].includes(candidate.state),
       ).length;
   }
@@ -122,7 +131,10 @@ const observeMarkers = Effect.fn('managerReviews.observeMarkers')(function* (
       const uris = [
         ...new Set([
           review.maintenance.basis.targetUri,
-          ...review.maintenance.basis.reads.map(read => read.uri).filter(uri => !uri.startsWith('code:')),
+          ...EffectArray.filter(
+            EffectArray.map(review.maintenance.basis.reads, read => read.uri),
+            uri => !Effect2.pipe(uri, EffectString.startsWith('code:')),
+          ),
         ]),
       ].sort();
       for (const uri of uris) {
@@ -143,19 +155,19 @@ const observeMarkers = Effect.fn('managerReviews.observeMarkers')(function* (
       }
     }
     const codeAccess = [];
-    const configured = configuredManifest.projects.filter(project => project.name === review.project);
+    const configured = EffectArray.filter(configuredManifest.projects, project => project.name === review.project);
     const root = configured.length === 1 ? yield* expandPath(configured[0].path) : undefined;
     if (root && review.maintenance?.version === 3) {
       const files = [
         ...new Set(
-          review.maintenance.basis.assessment.evidence.flatMap(item =>
+          EffectArray.flatMap(review.maintenance.basis.assessment.evidence, item =>
             item.source.kind === 'code' ? [item.source.citation.path] : [],
           ),
         ),
       ].sort();
       for (const relative of files) {
         const file = path.resolve(root, relative);
-        if (!file.startsWith(`${root}${path.sep}`)) {
+        if (!Effect2.pipe(file, EffectString.startsWith(`${root}${path.sep}`))) {
           codeAccess.push([relative, 'outside']);
           continue;
         }
@@ -187,11 +199,11 @@ const observeEpoch = Effect.fn('managerReviews.observeEpoch')(function* (
   review: CandidateReview,
 ) {
   const manifest = yield* readSeedManifest(config.manifestPath);
-  const configured = manifest.projects.filter(candidate => candidate.name === review.project);
+  const configured = EffectArray.filter(manifest.projects, candidate => candidate.name === review.project);
   const root = configured.length === 1 ? yield* expandPath(configured[0].path) : undefined;
   const citations =
     review.maintenance?.version === 3
-      ? review.maintenance.basis.assessment.evidence.flatMap(item =>
+      ? EffectArray.flatMap(review.maintenance.basis.assessment.evidence, item =>
           item.source.kind === 'code' ? [item.source.citation] : [],
         )
       : [];
@@ -229,7 +241,10 @@ export const readManagerReviewEligibility = Effect.fn('managerReviews.eligibilit
   config: RuntimeConfig,
   reviews: readonly CandidateReview[],
 ) {
-  const candidates = reviews.filter(review => untouchedAutomaticReview(review) && !automaticReviewIsAssessment(review));
+  const candidates = EffectArray.filter(
+    reviews,
+    review => untouchedAutomaticReview(review) && !automaticReviewIsAssessment(review),
+  );
   if (!candidates.length) return projectManagerReviewEligibility(reviews);
   const now = yield* Clock.currentTimeMillis;
   const owner = yield* ManagerReviewVerificationScope;
@@ -266,9 +281,10 @@ export const readManagerReviewEligibility = Effect.fn('managerReviews.eligibilit
     }
   }
   if (!active.has(homeKey) && queue.size) {
-    const sorted = [...queue.values()].sort((a, b) => a.reviewId.localeCompare(b.reviewId));
+    const sorted = [...queue.values()].sort((a, b) => Effect2.pipe(a.reviewId, EffectString.localeCompare(b.reviewId)));
     const cursor = cursors.get(homeKey) ?? '';
-    const selected = sorted.find(entry => entry.reviewId > cursor) ?? sorted[0];
+    const selected =
+      Option.getOrUndefined(EffectArray.findFirst(sorted, entry => entry.reviewId > cursor)) ?? sorted[0];
     const {config: selectedConfig} = selected;
     const identity = `${selected.reviewId}:${selected.revision}`;
     const key = JSON.stringify([homeKey, identity]);
@@ -277,7 +293,7 @@ export const readManagerReviewEligibility = Effect.fn('managerReviews.eligibilit
     while (cursors.size > 32) cursors.delete(cursors.keys().next().value!);
     const token = Symbol('review-readiness');
     active.set(homeKey, token);
-    const projects = [...reviews.map(item => item.project), selected.project];
+    const projects = [...EffectArray.map(reviews, item => item.project), selected.project];
     const run = Effect.gen(function* () {
       let marker = 'unavailable';
       let requiresSourceObservation = false;
@@ -290,7 +306,9 @@ export const readManagerReviewEligibility = Effect.fn('managerReviews.eligibilit
           };
         requiresSourceObservation =
           review.maintenance?.version === 3 &&
-          review.maintenance.basis.reads.some(read => read.uri.startsWith('code:'));
+          EffectArray.some(review.maintenance.basis.reads, read =>
+            Effect2.pipe(read.uri, EffectString.startsWith('code:')),
+          );
         marker = (yield* observeMarkers(selectedConfig, [review])).get(identity)!;
         const opening = yield* observeEpoch(selectedConfig, review);
         const result = yield* verify(selectedConfig, review).pipe(Effect.result);
@@ -341,7 +359,7 @@ export const readManagerReviewEligibility = Effect.fn('managerReviews.eligibilit
       yield* run.pipe(Effect.provide(environment), Effect.forkIn(owner));
     } else {
       yield* run;
-      if (candidates.some(candidate => candidate.reviewId === selected.reviewId))
+      if (EffectArray.some(candidates, candidate => candidate.reviewId === selected.reviewId))
         ready.set(identity, cache.get(key)?.value ?? {state: 'waiting', reason: 'verification-unavailable'});
     }
   }
@@ -349,7 +367,7 @@ export const readManagerReviewEligibility = Effect.fn('managerReviews.eligibilit
   const result = projectManagerReviewEligibility(reviews, ready);
   if (Number.isFinite(nextRetryAt))
     yield* registerRetry(
-      reviews.map(review => review.project),
+      EffectArray.map(reviews, review => review.project),
       nextRetryAt,
     );
   return {...result, background: {...result.background, ...(Number.isFinite(nextRetryAt) ? {nextRetryAt} : {})}};

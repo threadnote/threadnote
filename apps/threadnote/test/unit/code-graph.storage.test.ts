@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {copyFile, rename} from '@threadnote/testing/node-fs-promises';
 import {Database} from 'bun:sqlite';
@@ -18,12 +19,14 @@ import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {join, mkdir, mkdtemp, rm, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('active code graph storage', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('reserves two database copies plus WAL and a separate safety margin for VACUUM', () => {
@@ -70,7 +73,9 @@ describe('active code graph storage', () => {
       );
       expect(attribution.objectsTruncated).toBe(false);
       expect(attribution.objects).toHaveLength(attribution.objectCount);
-      expect(attribution.objects.reduce((total, object) => total + object.bytes, 0)).toBe(attribution.attributedBytes);
+      expect(EffectArray.reduce(attribution.objects, 0, (total, object) => total + object.bytes)).toBe(
+        attribution.attributedBytes,
+      );
       expect(attribution.objects).toEqual(
         expect.arrayContaining([
           expect.objectContaining({kind: 'internal', name: 'sqlite_schema'}),
@@ -212,7 +217,7 @@ describe('active code graph storage', () => {
   it('defers without opening an invalid database while linked worktree builds share the checkout store', async () => {
     const home = await mkdtemp('threadnote-graph-storage-locked-');
     homes.push(home);
-    const checkoutId = 'b'.repeat(64);
+    const checkoutId = Effect2.pipe('b', EffectString.repeat(64));
     const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
     const databasePath = join(repositoryRoot, `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`);
     await mkdir(repositoryRoot, {recursive: true});
@@ -234,8 +239,8 @@ describe('active code graph storage', () => {
         });
         const owners = yield* Effect.forEach(
           [
-            {acquired: acquiredA, worktreeId: 'c'.repeat(64)},
-            {acquired: acquiredB, worktreeId: 'd'.repeat(64)},
+            {acquired: acquiredA, worktreeId: Effect2.pipe('c', EffectString.repeat(64))},
+            {acquired: acquiredB, worktreeId: Effect2.pipe('d', EffectString.repeat(64))},
           ],
           entry =>
             Effect.forkChild(
@@ -276,8 +281,8 @@ describe('active code graph storage', () => {
         const release = yield* Deferred.make<void>();
         const owners = yield* Effect.forEach(
           [
-            {acquired: acquiredA, worktreeId: 'c'.repeat(64)},
-            {acquired: acquiredB, worktreeId: 'd'.repeat(64)},
+            {acquired: acquiredA, worktreeId: Effect2.pipe('c', EffectString.repeat(64))},
+            {acquired: acquiredB, worktreeId: Effect2.pipe('d', EffectString.repeat(64))},
           ],
           entry =>
             Effect.forkChild(
@@ -325,7 +330,12 @@ describe('active code graph storage', () => {
     const lockPath = await runEffect(
       Effect.gen(function* () {
         const path = yield* Path.Path;
-        return codeGraphWorktreeLockPath(path, fixture.home, fixture.checkoutId, 'e'.repeat(64));
+        return codeGraphWorktreeLockPath(
+          path,
+          fixture.home,
+          fixture.checkoutId,
+          Effect2.pipe('e', EffectString.repeat(64)),
+        );
       }),
     );
     await mkdir(join(lockPath, '..'), {recursive: true});
@@ -399,7 +409,7 @@ describe('active code graph storage', () => {
 async function storageFixture(homes: string[]) {
   const home = await mkdtemp('threadnote-graph-storage-');
   homes.push(home);
-  const checkoutId = 'a'.repeat(64);
+  const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
   const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
   const databasePath = join(repositoryRoot, `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`);
   await mkdir(repositoryRoot, {recursive: true});

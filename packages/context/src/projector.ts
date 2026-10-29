@@ -1,4 +1,8 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Predicate, Schema} from 'effect';
+import {isContextBriefAgentViewV1, isContextBriefV1} from './projector-validation.js';
 import {
   AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
   AgentResponseBudgetTooSmallError,
@@ -20,17 +24,13 @@ import {
   CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION,
   CONTEXT_BRIEF_TOPIC_VERSION,
   CONTEXT_BRIEF_VERSION,
-  type ContextBriefGraphCardV1,
-  type ContextBriefGraphContractV1,
   type ContextBriefLogicalResultV1,
   type ContextBriefAgentViewV1,
   type ContextBriefLogicalMemoryEvidenceV1,
-  type ContextBriefMemoryEvidenceV1,
   type ContextBriefResponseFormat,
   type ContextBriefV1,
   type ProjectedContextBriefV1,
 } from './types.js';
-import {isMemoryId, memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {legacyEvidenceState, renderContextBriefAgentViewText, renderContextBriefText} from './agent_view_text.js';
 import {parseVerifiedProcedureEvidenceList} from './procedure/selection.js';
 import {
@@ -42,7 +42,6 @@ import {
 } from './topic_projection.js';
 import {
   contextBriefResumeFocusUri,
-  contextBriefRelationshipMemoryByUri,
   deriveContextBriefEvidenceState,
   isContextBriefGraphOnlyGap,
   requiredContextBriefAgentMemoryItem,
@@ -62,15 +61,24 @@ import {
   validateContextBriefSourceExcerpt,
   withAdjustedContextBriefSourceExcerpt,
 } from './source_projection.js';
-import {jsonStringPrefix, utf8Prefix} from './projection_text.js';
+import {jsonStringPrefix} from './projection_text.js';
 import {
   compactContextBriefScope,
-  compactContinuationCard,
   compactMinimumContextBriefScope,
   preservesBaselineEvidence,
   projectContextBriefAgentView,
 } from './projection_view.js';
 import {preservesResumeBaselineEvidence} from './projection_view.js';
+import {
+  compactProjectedFollowUp,
+  compactProjectedGraphCard,
+  compactProjectedGraphContract,
+  compactProjectedIssue,
+  compactProjectedMemory,
+} from './projector/compaction.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export {
   CONTEXT_BRIEF_AGENT_VIEW_CITATION_RECEIPT_FIELD_POLICY,
@@ -139,7 +147,8 @@ export function projectContextBrief(
 ): ProjectedContextBriefV1 {
   const resumeFocusUri = contextBriefResumeFocusUri(logical);
   if (
-    ![...logical.activeHandoffs, ...logical.durableDecisions].some(
+    !EffectArray.some(
+      [...logical.activeHandoffs, ...logical.durableDecisions],
       memory => memory.actionCard !== undefined || (logical.mode === 'resume' && memory.continuationCard !== undefined),
     )
   ) {
@@ -147,10 +156,12 @@ export function projectContextBrief(
   }
   const withoutCards = {
     ...logical,
-    activeHandoffs: logical.activeHandoffs.map(
+    activeHandoffs: EffectArray.map(
+      logical.activeHandoffs,
       ({actionCard: _actionCard, continuationCard: _continuationCard, ...memory}) => memory,
     ),
-    durableDecisions: logical.durableDecisions.map(
+    durableDecisions: EffectArray.map(
+      logical.durableDecisions,
       ({actionCard: _actionCard, continuationCard: _continuationCard, ...memory}) => memory,
     ),
   };
@@ -171,19 +182,26 @@ function projectContextBriefCore(
   const items = projectionItems(logical, responseFormat, resumeFocusUri);
   const graphRecoveryItem = requiredGraphRecoveryItem(logical, items);
   const baseRequiredItems = uniqueProjectionItems(
-    [
-      requiredCoverageGapItem(items),
-      ...(resumeFocusUri === undefined
-        ? []
-        : items.filter(item => item.lane === 'coverage-gap' || item.lane === 'verified-procedure')),
-      ...requiredAgentGraphEvidenceItems(logical, items, responseFormat, graphRecoveryItem),
-      items.find(item => item.lane === 'handoff' && item.id === resumeFocusUri),
-      requiredContextBriefAgentMemoryItem(logical, items, responseFormat),
-      ...requiredContextBriefSourceProjectionItems(logical, items),
-      ...requiredAgentWorksetRecoveryItems(logical, items, responseFormat),
-      ...(resumeFocusUri === undefined ? [] : [items.find(item => item.lane === 'graph-card')]),
-      graphRecoveryItem,
-    ].filter((item): item is ProjectionItem => item !== undefined),
+    EffectArray.filter(
+      [
+        requiredCoverageGapItem(items),
+        ...(resumeFocusUri === undefined
+          ? []
+          : EffectArray.filter(items, item => item.lane === 'coverage-gap' || item.lane === 'verified-procedure')),
+        ...requiredAgentGraphEvidenceItems(logical, items, responseFormat, graphRecoveryItem),
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(items, item => item.lane === 'handoff' && item.id === resumeFocusUri),
+        ),
+        requiredContextBriefAgentMemoryItem(logical, items, responseFormat),
+        ...requiredContextBriefSourceProjectionItems(logical, items),
+        ...requiredAgentWorksetRecoveryItems(logical, items, responseFormat),
+        ...(resumeFocusUri === undefined
+          ? []
+          : [EffectOption.getOrUndefined(EffectArray.findFirst(items, item => item.lane === 'graph-card'))]),
+        graphRecoveryItem,
+      ],
+      (item): item is ProjectionItem => item !== undefined,
+    ),
   );
   const fixedCore =
     resumeFocusUri === undefined
@@ -202,8 +220,8 @@ function projectContextBriefCore(
     resumeFocusUri,
   );
   const fixedMeasurement = measureContextBriefResponse(fixedProjection, responseFormat);
-  const baseKeys = new Set(baseRequiredItems.map(projectionItemKey));
-  const fixedCoreHasExtras = fixedCore.requiredItems.some(item => !baseKeys.has(projectionItemKey(item)));
+  const baseKeys = new Set(EffectArray.map(baseRequiredItems, projectionItemKey));
+  const fixedCoreHasExtras = EffectArray.some(fixedCore.requiredItems, item => !baseKeys.has(projectionItemKey(item)));
   const admitFixedCore = fixedMeasurement.totalBytes <= maximumBytes;
   const requiredItems = admitFixedCore ? fixedCore.requiredItems : uniqueProjectionItems(baseRequiredItems);
   const compactMemoryUris = admitFixedCore ? fixedCore.compactMemoryUris : new Set<string>();
@@ -217,8 +235,8 @@ function projectContextBriefCore(
     logical.mode === 'locate' &&
     logical.coverage.memory.codeAnchors === undefined &&
     (logical.graph.sourceExcerpts?.length ?? 0) === 0;
-  const requiredKeys = new Set(requiredItems.map(projectionItemKey));
-  const eligibleOptionalItems = items.filter(item => {
+  const requiredKeys = new Set(EffectArray.map(requiredItems, projectionItemKey));
+  const eligibleOptionalItems = EffectArray.filter(items, item => {
     const key = projectionItemKey(item);
     return !requiredKeys.has(key) && !excludedKeys.has(key);
   });
@@ -283,7 +301,10 @@ function projectContextBriefCore(
   }
   if (
     codeLinkedFallbackItem !== undefined &&
-    !selectItems(selectedCount).some(item => projectionItemKey(item) === projectionItemKey(codeLinkedFallbackItem))
+    !EffectArray.some(
+      selectItems(selectedCount),
+      item => projectionItemKey(item) === projectionItemKey(codeLinkedFallbackItem),
+    )
   ) {
     const codeLinkedFallback = projectCodeLinkedFallback();
     if (codeLinkedFallback !== undefined) return codeLinkedFallback;
@@ -304,14 +325,22 @@ function fitRequiredSourceProjection(input: {
   readonly requiredItems: readonly ProjectionItem[];
   readonly responseFormat: ContextBriefResponseFormat;
 }): ContextBriefLogicalResultV1 {
-  const requiredSourceId = input.requiredItems.find(item => item.lane === 'source-excerpt')?.id;
-  const source = input.logical.graph.sourceExcerpts?.find(candidate => candidate.id === requiredSourceId);
+  const requiredSourceId = EffectOption.getOrUndefined(
+    EffectArray.findFirst(input.requiredItems, item => item.lane === 'source-excerpt'),
+  )?.id;
+  const source = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(input.logical.graph.sourceExcerpts), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(__effectArrayReceiver, candidate => candidate.id === requiredSourceId),
+      ),
+    ),
+  );
   if (source === undefined) return input.logical;
-  const lines = source.content.split('\n');
+  const lines = Effect.pipe(source.content, EffectString.split('\n'));
   for (let lineCount = lines.length - 1; lineCount >= 1; lineCount -= 1) {
     const adjusted = withAdjustedContextBriefSourceExcerpt(input.logical, source.id, {
       ...source,
-      content: lines.slice(0, lineCount).join('\n'),
+      content: EffectArray.join(lines.slice(0, lineCount), '\n'),
       endLine: Math.min(source.endLine, source.startLine + lineCount - 1),
       truncated: true,
     });
@@ -329,7 +358,7 @@ function fitRequiredSourceProjection(input: {
       ...input.logical.coverage,
       gaps: [
         CONTEXT_BRIEF_SOURCE_EXCERPT_BUDGET_GAP,
-        ...input.logical.coverage.gaps.filter(gap => gap !== CONTEXT_BRIEF_SOURCE_EXCERPT_BUDGET_GAP),
+        ...EffectArray.filter(input.logical.coverage.gaps, gap => gap !== CONTEXT_BRIEF_SOURCE_EXCERPT_BUDGET_GAP),
       ],
     },
     graph: {...input.logical.graph, sourceExcerpts: []},
@@ -384,7 +413,7 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
   const evidenceState = legacyEvidenceState(value);
   const mode = value.mode === undefined ? 'brief' : value.mode;
   const briefVersion = value.briefVersion ?? inferredContextBriefVersion(value);
-  const unsupported = Object.keys(value).filter(key => !allowedRootKeys.has(key));
+  const unsupported = EffectArray.filter(EffectRecord.keys(value), key => !allowedRootKeys.has(key));
   if (unsupported.length > 0)
     throw invalid(`agent view has unsupported field ${JSON.stringify(unsupported.sort()[0])}`);
   const readyRepositories = Predicate.isObject(value.scope) ? value.scope.readyRepositories : undefined;
@@ -429,8 +458,8 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
       !['project', 'full-repository'].includes(String(coverage.kind)) ||
       !['complete', 'partial'].includes(String(coverage.completeness)) ||
       !['selected-graph-only', 'unavailable'].includes(String(coverage.negativeProof)) ||
-      !Array.isArray(coverage.configuredRoots) ||
-      !coverage.configuredRoots.every(root => typeof root === 'string') ||
+      !EffectArray.isArray(coverage.configuredRoots) ||
+      !EffectArray.every(coverage.configuredRoots, root => typeof root === 'string') ||
       !nonNegativeInteger(coverage.rootComponents) ||
       !nonNegativeInteger(coverage.dependencyComponents) ||
       typeof coverage.observedWorktreeCommit !== 'string' ||
@@ -447,11 +476,11 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
     'recommendedFollowUps',
     'stalenessAndConflicts',
   ] as const) {
-    if (value[field] !== undefined && !Array.isArray(value[field])) throw invalid(`${field} must be an array`);
+    if (value[field] !== undefined && !EffectArray.isArray(value[field])) throw invalid(`${field} must be an array`);
   }
   for (const field of ['activeHandoffs', 'durableDecisions'] as const) {
     const memories = value[field];
-    if (!Array.isArray(memories)) continue;
+    if (!EffectArray.isArray(memories)) continue;
     for (const [index, memory] of memories.entries()) validateAgentViewMemory(memory, `${field}[${index}]`);
   }
   const topicError = topicProjectionError(value, value.version === CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION);
@@ -469,12 +498,12 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
   if (value.graph !== undefined) {
     if (!Predicate.isObject(value.graph)) throw invalid('graph must be an object');
     assertAgentViewKeys(value.graph, ['cards', 'continuation', 'contracts', 'sources'], 'graph');
-    if (value.graph.cards !== undefined && !Array.isArray(value.graph.cards))
+    if (value.graph.cards !== undefined && !EffectArray.isArray(value.graph.cards))
       throw invalid('graph.cards must be an array');
-    if (value.graph.contracts !== undefined && !Array.isArray(value.graph.contracts)) {
+    if (value.graph.contracts !== undefined && !EffectArray.isArray(value.graph.contracts)) {
       throw invalid('graph.contracts must be an array');
     }
-    if (value.graph.sources !== undefined && !Array.isArray(value.graph.sources)) {
+    if (value.graph.sources !== undefined && !EffectArray.isArray(value.graph.sources)) {
       throw invalid('graph.sources must be an array');
     }
     for (const [index, card] of (value.graph.cards ?? []).entries()) validateAgentViewGraphCard(card, index);
@@ -493,21 +522,21 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
     assertAgentViewKeys(value.output, ['omissions', 'truncated'], 'output');
     if (
       !Predicate.isObject(value.output.omissions) ||
-      Object.values(value.output.omissions).some(count => !nonNegativeInteger(count))
+      EffectArray.some(EffectRecord.values(value.output.omissions), count => !nonNegativeInteger(count))
     ) {
       throw invalid('output omissions must contain non-negative counts');
     }
   }
   const callerCwd =
     Predicate.isObject(value.scope) && typeof value.scope.callerCwd === 'string' ? value.scope.callerCwd : undefined;
-  const followUps = Array.isArray(value.recommendedFollowUps)
-    ? value.recommendedFollowUps.map(followUp => normalizeLegacyFollowUp(followUp, callerCwd))
+  const followUps = EffectArray.isArray(value.recommendedFollowUps)
+    ? EffectArray.map(value.recommendedFollowUps, followUp => normalizeLegacyFollowUp(followUp, callerCwd))
     : value.recommendedFollowUps;
-  for (const [index, followUp] of (Array.isArray(followUps) ? followUps : []).entries()) {
+  for (const [index, followUp] of (EffectArray.isArray(followUps) ? followUps : []).entries()) {
     validateContextBriefFollowUp(followUp, `recommendedFollowUps[${index}]`);
   }
   const issues = value.stalenessAndConflicts;
-  for (const [index, issue] of (Array.isArray(issues) ? issues : []).entries()) {
+  for (const [index, issue] of (EffectArray.isArray(issues) ? issues : []).entries()) {
     if (
       !Predicate.isObject(issue) ||
       typeof issue.id !== 'string' ||
@@ -519,14 +548,14 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
       throw invalid(`stalenessAndConflicts[${index}] is invalid`);
     }
   }
-  return {
+  const normalized = {
     ...value,
-    ...(Array.isArray(value.activeHandoffs)
-      ? {activeHandoffs: value.activeHandoffs.map(normalizeAgentViewMemory)}
+    ...(EffectArray.isArray(value.activeHandoffs)
+      ? {activeHandoffs: EffectArray.map(value.activeHandoffs, normalizeAgentViewMemory)}
       : {}),
     briefVersion,
-    ...(Array.isArray(value.durableDecisions)
-      ? {durableDecisions: value.durableDecisions.map(normalizeAgentViewMemory)}
+    ...(EffectArray.isArray(value.durableDecisions)
+      ? {durableDecisions: EffectArray.map(value.durableDecisions, normalizeAgentViewMemory)}
       : {}),
     evidenceState,
     mode,
@@ -536,7 +565,9 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
       requestedRepositories,
     },
     ...(followUps === undefined ? {} : {recommendedFollowUps: followUps}),
-  } as unknown as ContextBriefAgentViewV1;
+  };
+  if (!isContextBriefAgentViewV1(normalized)) throw invalid('agent view structure is invalid');
+  return normalized;
 }
 
 function validateAgentViewCoverage(value: unknown): void {
@@ -556,8 +587,8 @@ function validateAgentViewCoverage(value: unknown): void {
       !nonNegativeInteger(value.codeAnchors.requested) ||
       !nonNegativeInteger(value.codeAnchors.resolved) ||
       (value.codeAnchors.unresolvedOrdinals !== undefined &&
-        (!Array.isArray(value.codeAnchors.unresolvedOrdinals) ||
-          !value.codeAnchors.unresolvedOrdinals.every(nonNegativeInteger)))
+        (!EffectArray.isArray(value.codeAnchors.unresolvedOrdinals) ||
+          !EffectArray.every(value.codeAnchors.unresolvedOrdinals, nonNegativeInteger)))
     ) {
       throw invalid('coverage.codeAnchors is invalid');
     }
@@ -732,7 +763,8 @@ function validateAgentViewGraphCard(value: unknown, index: number): void {
   if (!Predicate.isObject(value)) throw invalid(`${label} must be an object`);
   assertAgentViewKeys(value, ['kind', 'line', 'path', 'qualifiedName', 'reason', 'ref', 'repositoryKey'], label);
   if (
-    !['kind', 'path', 'qualifiedName', 'reason', 'ref', 'repositoryKey'].every(
+    !EffectArray.every(
+      ['kind', 'path', 'qualifiedName', 'reason', 'ref', 'repositoryKey'],
       field => typeof value[field] === 'string',
     ) ||
     !nonNegativeInteger(value.line)
@@ -746,7 +778,8 @@ function validateAgentViewGraphContract(value: unknown, index: number): void {
   if (!Predicate.isObject(value)) throw invalid(`${label} must be an object`);
   assertAgentViewKeys(value, ['authority', 'evidence', 'provenance', 'relation', 'sourceRef', 'targetRef'], label);
   if (
-    !['authority', 'provenance', 'relation', 'sourceRef', 'targetRef'].every(
+    !EffectArray.every(
+      ['authority', 'provenance', 'relation', 'sourceRef', 'targetRef'],
       field => typeof value[field] === 'string',
     ) ||
     !Predicate.isObject(value.evidence) ||
@@ -818,7 +851,7 @@ function validateAgentViewMemory(value: unknown, label: string): void {
     !['fresh', 'stale', 'unknown'].includes(String(value.freshness)) ||
     !['code-citations', 'source-commit'].includes(String(freshnessBasis)) ||
     typeof value.uri !== 'string' ||
-    !value.uri.startsWith('threadnote://') ||
+    !Effect.pipe(value.uri, EffectString.startsWith('threadnote://')) ||
     (value.authority !== undefined &&
       !['agent_generated', 'canonical_repo', 'external', 'reviewed_shared', 'user_approved'].includes(
         String(value.authority),
@@ -843,10 +876,10 @@ function validateAgentViewMemory(value: unknown, label: string): void {
   }
   if (value.continuationCard !== undefined)
     validateContinuationCard(value.continuationCard, `${label}.continuationCard`);
-  if (value.citationActions !== undefined && !Array.isArray(value.citationActions)) {
+  if (value.citationActions !== undefined && !EffectArray.isArray(value.citationActions)) {
     throw invalid(`${label}.citationActions must be an array`);
   }
-  for (const [index, action] of (Array.isArray(value.citationActions) ? value.citationActions : []).entries()) {
+  for (const [index, action] of (EffectArray.isArray(value.citationActions) ? value.citationActions : []).entries()) {
     if (!Predicate.isObject(action)) throw invalid(`${label}.citationActions[${index}] must be an object`);
     assertAgentViewKeys(
       action,
@@ -856,7 +889,7 @@ function validateAgentViewMemory(value: unknown, label: string): void {
     const observedNodeIds = action.observedNodeIds;
     const relocationHints = action.relocationHints;
     if (
-      !Number.isSafeInteger(action.count) ||
+      !checkedIsSafeInteger(action.count) ||
       Number(action.count) < 1 ||
       Number(action.count) > CONTEXT_BRIEF_MAXIMUM_PUBLIC_CITATION_RECEIPTS ||
       typeof action.reason !== 'string' ||
@@ -898,7 +931,9 @@ function validateAgentViewMemory(value: unknown, label: string): void {
     assertAgentViewKeys(summary, ['coverage', 'exact', 'relocated', 'stale', 'unknown'], `${label}.citationSummary`);
     if (
       !['current-complete', 'incomplete'].includes(String(summary.coverage)) ||
-      !(['exact', 'relocated', 'stale', 'unknown'] as const).every(field => nonNegativeInteger(summary[field]))
+      !EffectArray.every(['exact', 'relocated', 'stale', 'unknown'] as const, field =>
+        nonNegativeInteger(summary[field]),
+      )
     ) {
       throw invalid(`${label}.citationSummary is invalid`);
     }
@@ -918,10 +953,10 @@ function validateContinuationCard(value: unknown, label: string): void {
   if (!Predicate.isObject(value)) throw invalid(`${label} must be an object`);
   const allowed =
     'anchors attempted avoidRepeat blockers decisions graphQuery graphQuestion invariants nextStep observations rationale risks task unresolved verification';
-  assertAgentViewKeys(value, allowed.split(' '), label);
+  assertAgentViewKeys(value, Effect.pipe(allowed, EffectString.split(' ')), label);
   if (
-    Object.keys(value).length === 0 ||
-    Object.values(value).some(field => typeof field !== 'string' || field.length === 0)
+    EffectRecord.keys(value).length === 0 ||
+    EffectArray.some(EffectRecord.values(value), field => typeof field !== 'string' || field.length === 0)
   ) {
     throw invalid(`${label} is invalid`);
   }
@@ -929,12 +964,12 @@ function validateContinuationCard(value: unknown, label: string): void {
 
 function assertAgentViewKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   const allowedKeys = new Set(allowed);
-  const unsupported = Object.keys(value).filter(key => !allowedKeys.has(key));
+  const unsupported = EffectArray.filter(EffectRecord.keys(value), key => !allowedKeys.has(key));
   if (unsupported.length > 0) throw invalid(`${label} has unsupported field ${JSON.stringify(unsupported.sort()[0])}`);
 }
 
 function stringArray(value: unknown): value is readonly string[] {
-  return Array.isArray(value) && value.every(item => typeof item === 'string');
+  return EffectArray.isArray(value) && EffectArray.every(value, item => typeof item === 'string');
 }
 
 /** Strict validation for the compact CLI/MCP-ready structured projection. */
@@ -943,11 +978,11 @@ export function parseContextBriefV1(value: unknown): ContextBriefV1 {
   const object: Record<string, unknown> = {
     ...value,
     evidenceState: legacyEvidenceState(value),
-    recommendedFollowUps: Array.isArray(value.recommendedFollowUps)
-      ? value.recommendedFollowUps.map(followUp => normalizeLegacyFollowUp(followUp))
+    recommendedFollowUps: EffectArray.isArray(value.recommendedFollowUps)
+      ? EffectArray.map(value.recommendedFollowUps, followUp => normalizeLegacyFollowUp(followUp))
       : value.recommendedFollowUps,
   };
-  const unknown = Object.keys(object).filter(key => !ROOT_KEYS.has(key));
+  const unknown = EffectArray.filter(EffectRecord.keys(object), key => !ROOT_KEYS.has(key));
   if (unknown.length > 0) throw invalid(`projection has unsupported field ${JSON.stringify(unknown.sort()[0])}`);
   if (
     object.type !== 'context-brief' ||
@@ -977,7 +1012,7 @@ export function parseContextBriefV1(value: unknown): ContextBriefV1 {
   const topicError = topicProjectionError(object, object.version === CONTEXT_BRIEF_TOPIC_VERSION);
   if (topicError !== undefined) throw invalid(topicError);
   const structuredFollowUps = object.recommendedFollowUps;
-  for (const [index, followUp] of (Array.isArray(structuredFollowUps) ? structuredFollowUps : []).entries()) {
+  for (const [index, followUp] of (EffectArray.isArray(structuredFollowUps) ? structuredFollowUps : []).entries()) {
     validateContextBriefFollowUp(followUp, `recommendedFollowUps[${index}]`);
   }
   if (object.version === CONTEXT_BRIEF_PROCEDURE_VERSION) {
@@ -994,13 +1029,13 @@ export function parseContextBriefV1(value: unknown): ContextBriefV1 {
   }
   if (
     !Predicate.isObject(object.graph) ||
-    !Array.isArray(object.graph.cards) ||
-    !Array.isArray(object.graph.contracts)
+    !EffectArray.isArray(object.graph.cards) ||
+    !EffectArray.isArray(object.graph.contracts)
   ) {
     throw invalid('graph must contain card and contract arrays');
   }
   if (object.graph.sources !== undefined) {
-    if (!Array.isArray(object.graph.sources)) throw invalid('graph.sources must be an array');
+    if (!EffectArray.isArray(object.graph.sources)) throw invalid('graph.sources must be an array');
     for (const [index, source] of object.graph.sources.entries()) {
       validateContextBriefSourceExcerpt(source, index);
     }
@@ -1017,7 +1052,8 @@ export function parseContextBriefV1(value: unknown): ContextBriefV1 {
   ) {
     throw invalid('output receipt is invalid');
   }
-  return object as unknown as ContextBriefV1;
+  if (!isContextBriefV1(object)) throw invalid('projection structure is invalid');
+  return object;
 }
 
 function renderProjection(
@@ -1033,16 +1069,21 @@ function renderProjection(
     ids.add(item.id);
     selectedByLane.set(item.lane, ids);
   }
-  const cards = selectById(logical.graph.cards, selectedByLane.get('graph-card')).map(compactProjectedGraphCard);
-  const contracts = selectById(logical.graph.contracts, selectedByLane.get('graph-contract')).map(
+  const cards = EffectArray.map(
+    selectById(logical.graph.cards, selectedByLane.get('graph-card')),
+    compactProjectedGraphCard,
+  );
+  const contracts = EffectArray.map(
+    selectById(logical.graph.contracts, selectedByLane.get('graph-contract')),
     compactProjectedGraphContract,
   );
   const retainedGraphRefs = new Set([
-    ...cards.map(card => card.ref),
-    ...contracts.flatMap(contract => [contract.sourceRef, contract.targetRef]),
+    ...EffectArray.map(cards, card => card.ref),
+    ...EffectArray.flatMap(contracts, contract => [contract.sourceRef, contract.targetRef]),
   ]);
   const sources = selectContextBriefProjectedSources(logical, selectedByLane.get('source-excerpt'), retainedGraphRefs);
-  const durableDecisions = selectById(logical.durableDecisions, selectedByLane.get('durable-decision'), 'uri').map(
+  const durableDecisions = EffectArray.map(
+    selectById(logical.durableDecisions, selectedByLane.get('durable-decision'), 'uri'),
     memory =>
       compactProjectedMemory(
         memory,
@@ -1054,30 +1095,39 @@ function renderProjection(
         memory.uri === resumeFocusUri,
       ),
   );
-  const activeHandoffs = selectById(logical.activeHandoffs, selectedByLane.get('handoff'), 'uri').map(memory =>
-    compactProjectedMemory(
-      memory,
-      memory.uri === protectedMemoryUri,
-      logical.coverage.memory.codeAnchors !== undefined,
-      compactMemoryUris.has(memory.uri),
-      true,
-      logical.mode === 'resume',
-      memory.uri === resumeFocusUri,
-    ),
+  const activeHandoffs = EffectArray.map(
+    selectById(logical.activeHandoffs, selectedByLane.get('handoff'), 'uri'),
+    memory =>
+      compactProjectedMemory(
+        memory,
+        memory.uri === protectedMemoryUri,
+        logical.coverage.memory.codeAnchors !== undefined,
+        compactMemoryUris.has(memory.uri),
+        true,
+        logical.mode === 'resume',
+        memory.uri === resumeFocusUri,
+      ),
   );
-  const stalenessAndConflicts = selectById(logical.stalenessAndConflicts, selectedByLane.get('issue')).map(issue =>
-    compactProjectedIssue(logical, issue, logical.coverage.memory.codeAnchors !== undefined),
+  const stalenessAndConflicts = EffectArray.map(
+    selectById(logical.stalenessAndConflicts, selectedByLane.get('issue')),
+    issue => compactProjectedIssue(logical, issue, logical.coverage.memory.codeAnchors !== undefined),
   );
-  const selectedFollowUps = selectById(logical.recommendedFollowUps, selectedByLane.get('follow-up')).map(followUp =>
-    compactProjectedFollowUp(logical, followUp, logical.coverage.memory.codeAnchors !== undefined),
+  const selectedFollowUps = EffectArray.map(
+    selectById(logical.recommendedFollowUps, selectedByLane.get('follow-up')),
+    followUp => compactProjectedFollowUp(logical, followUp, logical.coverage.memory.codeAnchors !== undefined),
   );
   const selectedProcedureIds = selectedByLane.get('verified-procedure');
   const logicalVerifiedProcedures = logical.verifiedProcedures ?? [];
-  const verifiedProcedures = logicalVerifiedProcedures.filter(procedure =>
-    selectedProcedureIds?.has(procedureProjectionId(procedure)),
+  const verifiedProcedures = EffectArray.filter(
+    logicalVerifiedProcedures,
+    (procedure, index) =>
+      index in logicalVerifiedProcedures && selectedProcedureIds?.has(procedureProjectionId(procedure)) === true,
   );
   const selectedGapIds = selectedByLane.get('coverage-gap');
-  const gaps = logical.coverage.gaps.filter(gap => selectedGapIds?.has(coverageGapProjectionId(gap)) === true);
+  const gaps = EffectArray.filter(
+    logical.coverage.gaps,
+    gap => selectedGapIds?.has(coverageGapProjectionId(gap)) === true,
+  );
   const evidenceState = deriveContextBriefEvidenceState({
     activeHandoffs,
     cards,
@@ -1103,7 +1153,8 @@ function renderProjection(
       ? {}
       : {verifiedProcedures: logicalVerifiedProcedures.length - verifiedProcedures.length}),
   };
-  const omittedItems = Object.values(omissions).reduce((total, value) => total + value, 0);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+  const omittedItems = EffectArray.reduce(Object.values(omissions), 0, (total, value) => total + value);
   const taskSummary = jsonStringPrefix(logical.task, 96);
   const task = {summary: taskSummary, truncated: taskSummary !== logical.task};
   const projectedVersion = projectedContextBriefVersion(logical.version, {
@@ -1176,18 +1227,26 @@ function renderMinimumProjection(
   requiredItems: readonly ProjectionItem[],
 ): ContextBriefV1 {
   const continueWorksetIds = new Set(
-    logical.recommendedFollowUps
-      .filter(followUp => followUp.operation === 'continue-workset')
-      .map(followUp => followUp.id),
+    EffectArray.map(
+      EffectArray.filter(logical.recommendedFollowUps, followUp => followUp.operation === 'continue-workset'),
+      followUp => followUp.id,
+    ),
   );
   const recoveryIds = new Set(
-    requiredItems
-      .filter(
+    EffectArray.map(
+      EffectArray.filter(
+        requiredItems,
         item => item.lane === 'follow-up' && (logical.graph.cards.length === 0 || !continueWorksetIds.has(item.id)),
-      )
-      .map(item => item.id),
+      ),
+      item => item.id,
+    ),
   );
-  const recommendedFollowUps = logical.recommendedFollowUps.filter(followUp => recoveryIds.has(followUp.id));
+  const recommendedFollowUps = EffectArrayPipe(logical.recommendedFollowUps, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (followUp, __effectArrayIndex2) => __effectArrayIndex2 in __effectArrayValues && recoveryIds.has(followUp.id),
+    ),
+  );
   const gaps = logical.coverage.gaps.slice(0, 1);
   const sourceExcerpts = contextBriefSourceExcerptOmissionCount(logical);
   const omissions = {
@@ -1201,7 +1260,8 @@ function renderMinimumProjection(
     stalenessAndConflicts: logical.stalenessAndConflicts.length,
     ...(logical.verifiedProcedures === undefined ? {} : {verifiedProcedures: logical.verifiedProcedures.length}),
   };
-  const omittedItems = Object.values(omissions).reduce((total, value) => total + value, 0) + 1;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+  const omittedItems = EffectArray.reduce(Object.values(omissions), 0, (total, value) => total + value) + 1;
   return {
     activeHandoffs: [],
     coverage: {
@@ -1243,31 +1303,35 @@ function projectionItems(
   resumeFocusUri?: string,
 ): readonly ProjectionItem[] {
   const hasCurrentCodeRelation = (memory: ContextBriefLogicalMemoryEvidenceV1): boolean =>
-    (memory.cohortCodeRelations ?? memory.codeRelations ?? []).some(
+    EffectArray.some(
+      memory.cohortCodeRelations ?? memory.codeRelations ?? [],
       relation => relation.status === 'exact' || relation.status === 'relocated',
     );
-  const hasCodeLinkedMemory = [...logical.activeHandoffs, ...logical.durableDecisions].some(
+  const hasCodeLinkedMemory = EffectArray.some(
+    [...logical.activeHandoffs, ...logical.durableDecisions],
     memory => memory.selectionBasis === 'code-citation',
   );
-  const hasCurrentCodeLinkedMemory = [...logical.activeHandoffs, ...logical.durableDecisions].some(
+  const hasCurrentCodeLinkedMemory = EffectArray.some(
+    [...logical.activeHandoffs, ...logical.durableDecisions],
     memory => memory.selectionBasis === 'code-citation' && hasCurrentCodeRelation(memory),
   );
   const firstStaleCodeLinkedMemoryUri = hasCurrentCodeLinkedMemory
     ? undefined
-    : [...logical.activeHandoffs, ...logical.durableDecisions]
-        .filter(memory => memory.selectionBasis === 'code-citation')
-        .sort((left, right) => left.rank - right.rank || compareText(left.uri, right.uri))[0]?.uri;
+    : EffectArray.filter(
+        [...logical.activeHandoffs, ...logical.durableDecisions],
+        memory => memory.selectionBasis === 'code-citation',
+      ).sort((left, right) => left.rank - right.rank || compareText(left.uri, right.uri))[0]?.uri;
   const sourceFirst =
     responseFormat === 'agent' && logical.coverage.memory.codeAnchors === undefined && logical.mode === 'locate';
   // Reserve one linked memory, then the exact card, before admitting more stale handoffs.
   const projected = [
-    ...logical.coverage.gaps.map((gap, rank) => ({
+    ...EffectArray.map(logical.coverage.gaps, (gap, rank) => ({
       id: coverageGapProjectionId(gap),
       lane: 'coverage-gap' as const,
       laneRank: rank,
       priority: 3,
     })),
-    ...logical.graph.cards.map(card => ({
+    ...EffectArray.map(logical.graph.cards, card => ({
       id: card.id,
       lane: 'graph-card' as const,
       laneRank: card.rank,
@@ -1281,7 +1345,7 @@ function projectionItems(
             : 2
           : 0,
     })),
-    ...logical.activeHandoffs.map(memory => ({
+    ...EffectArray.map(logical.activeHandoffs, memory => ({
       id: memory.uri,
       lane: 'handoff' as const,
       laneRank: memory.rank,
@@ -1299,7 +1363,7 @@ function projectionItems(
             : 2
           : 0,
     })),
-    ...logical.durableDecisions.map(memory => ({
+    ...EffectArray.map(logical.durableDecisions, memory => ({
       id: memory.uri,
       lane: 'durable-decision' as const,
       laneRank: memory.rank,
@@ -1317,7 +1381,7 @@ function projectionItems(
             : 2
           : 0,
     })),
-    ...logical.graph.contracts.map(contract => ({
+    ...EffectArray.map(logical.graph.contracts, contract => ({
       id: contract.id,
       lane: 'graph-contract' as const,
       laneRank: contract.rank,
@@ -1330,19 +1394,19 @@ function projectionItems(
             : 0,
     })),
     ...contextBriefSourceProjectionItems(logical),
-    ...logical.stalenessAndConflicts.map(issue => ({
+    ...EffectArray.map(logical.stalenessAndConflicts, issue => ({
       id: issue.id,
       lane: 'issue' as const,
       laneRank: issue.rank,
       priority: sourceFirst ? 4 : hasCodeLinkedMemory ? 2 : 0,
     })),
-    ...logical.recommendedFollowUps.map(followUp => ({
+    ...EffectArray.map(logical.recommendedFollowUps, followUp => ({
       id: followUp.id,
       lane: 'follow-up' as const,
       laneRank: followUp.rank,
       priority: sourceFirst ? 3 : hasCodeLinkedMemory ? 2 : 0,
     })),
-    ...(logical.verifiedProcedures ?? []).map((procedure, rank) => ({
+    ...EffectArray.map(logical.verifiedProcedures ?? [], (procedure, rank) => ({
       id: procedureProjectionId(procedure),
       lane: 'verified-procedure' as const,
       laneRank: rank,
@@ -1359,18 +1423,20 @@ function projectionItems(
   const primaryGraphCardId = [...logical.graph.cards].sort(
     (left, right) => left.rank - right.rank || compareText(left.id, right.id),
   )[0]?.id;
-  return projected.filter(
+  return EffectArray.filter(
+    projected,
     item =>
       (item.lane === 'handoff' && item.id === resumeFocusUri) ||
       (item.lane === 'graph-card' && item.id === primaryGraphCardId) ||
-      (item.lane === 'coverage-gap' && !isContextBriefGraphOnlyGap(item.id.slice('gap:'.length))) ||
+      (item.lane === 'coverage-gap' &&
+        !isContextBriefGraphOnlyGap(Effect.pipe(item.id, EffectString.slice('gap:'.length)))) ||
       item.lane === 'verified-procedure',
   );
 }
 
 /** Keep one explicit limitation whenever the logical result contains coverage gaps. */
 function requiredCoverageGapItem(items: readonly ProjectionItem[]): ProjectionItem | undefined {
-  return items.find(item => item.lane === 'coverage-gap');
+  return EffectOption.getOrUndefined(EffectArray.findFirst(items, item => item.lane === 'coverage-gap'));
 }
 
 /** A bounded locate answer must not strand a partial or unprepared Workset. */
@@ -1388,11 +1454,19 @@ function requiredAgentWorksetRecoveryItems(
     return [];
   }
   const recoveryIds = new Set(
-    logical.recommendedFollowUps
-      .filter(followUp => followUp.operation === 'continue-workset' && logical.graph.cards.length <= 2)
-      .map(followUp => followUp.id),
+    EffectArray.map(
+      EffectArray.filter(
+        logical.recommendedFollowUps,
+        followUp => followUp.operation === 'continue-workset' && logical.graph.cards.length <= 2,
+      ),
+      followUp => followUp.id,
+    ),
   );
-  return items.filter(item => item.lane === 'follow-up' && recoveryIds.has(item.id));
+  return EffectArray.filter(
+    items,
+    (item: (typeof items)[number], __effectArrayIndex) =>
+      __effectArrayIndex in items && item.lane === 'follow-up' && recoveryIds.has(item.id),
+  );
 }
 
 /**
@@ -1408,36 +1482,45 @@ function requiredAgentGraphEvidenceItems(
   if (responseFormat !== 'agent') return [];
   const recovery =
     recoveryItem?.lane === 'follow-up'
-      ? logical.recommendedFollowUps.find(followUp => followUp.id === recoveryItem.id)
+      ? EffectOption.getOrUndefined(
+          EffectArray.findFirst(logical.recommendedFollowUps, followUp => followUp.id === recoveryItem.id),
+        )
       : undefined;
   if (recovery?.operation === 'graph-status') return [];
   const primaryCard =
     recovery?.operation === 'inspect-node'
-      ? logical.graph.cards.find(card => card.ref === recovery.ref)
+      ? EffectOption.getOrUndefined(EffectArray.findFirst(logical.graph.cards, card => card.ref === recovery.ref))
       : [...logical.graph.cards].sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))[0];
   if (primaryCard === undefined) return [];
-  const cardItem = items.find(item => item.lane === 'graph-card' && item.id === primaryCard.id);
+  const cardItem = EffectOption.getOrUndefined(
+    EffectArray.findFirst(items, item => item.lane === 'graph-card' && item.id === primaryCard.id),
+  );
   if (cardItem === undefined) return [];
   if (logical.mode === 'locate' && logical.coverage.memory.codeAnchors === undefined) {
-    const secondCard = [...logical.graph.cards]
-      .filter(card => card.id !== primaryCard.id)
-      .sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))[0];
+    const secondCard = EffectArray.filter([...logical.graph.cards], card => card.id !== primaryCard.id).sort(
+      (left, right) => left.rank - right.rank || compareText(left.id, right.id),
+    )[0];
     const secondCardItem =
       secondCard === undefined
         ? undefined
-        : items.find(item => item.lane === 'graph-card' && item.id === secondCard.id);
+        : EffectOption.getOrUndefined(
+            EffectArray.findFirst(items, item => item.lane === 'graph-card' && item.id === secondCard.id),
+          );
     return secondCardItem === undefined ? [cardItem] : [cardItem, secondCardItem];
   }
   if (logical.mode !== 'trace' && logical.mode !== 'impact') {
     return [cardItem];
   }
-  const directContract = [...logical.graph.contracts]
-    .filter(contract => contract.sourceRef === primaryCard.ref || contract.targetRef === primaryCard.ref)
-    .sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))[0];
+  const directContract = EffectArray.filter(
+    [...logical.graph.contracts],
+    contract => contract.sourceRef === primaryCard.ref || contract.targetRef === primaryCard.ref,
+  ).sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))[0];
   const contractItem =
     directContract === undefined
       ? undefined
-      : items.find(item => item.lane === 'graph-contract' && item.id === directContract.id);
+      : EffectOption.getOrUndefined(
+          EffectArray.findFirst(items, item => item.lane === 'graph-contract' && item.id === directContract.id),
+        );
   return contractItem === undefined ? [cardItem] : [cardItem, contractItem];
 }
 
@@ -1451,28 +1534,37 @@ function requiredGraphRecoveryItem(
   logical: ContextBriefLogicalResultV1,
   items: readonly ProjectionItem[],
 ): ProjectionItem | undefined {
-  const graphStatus = logical.recommendedFollowUps.find(candidate => candidate.operation === 'graph-status');
+  const graphStatus = EffectOption.getOrUndefined(
+    EffectArray.findFirst(logical.recommendedFollowUps, candidate => candidate.operation === 'graph-status'),
+  );
   const staleRepositoryAnchors =
     logical.scope.kind === 'repository' &&
     logical.scope.freshness === 'stale' &&
     logical.scope.readyRepositories > 0 &&
     logical.coverage.memory.codeAnchors?.complete === false;
   if (staleRepositoryAnchors && graphStatus !== undefined) {
-    return items.find(item => item.lane === 'follow-up' && item.id === graphStatus.id);
+    return EffectOption.getOrUndefined(
+      EffectArray.findFirst(items, item => item.lane === 'follow-up' && item.id === graphStatus.id),
+    );
   }
   if (logical.graph.cards.length === 0) {
     if (logical.scope.readyRepositories !== 0 && !logical.coverage.gaps.includes('graph-repository-read-failed')) {
       return undefined;
     }
     if (graphStatus === undefined) return undefined;
-    return items.find(item => item.lane === 'follow-up' && item.id === graphStatus.id);
+    return EffectOption.getOrUndefined(
+      EffectArray.findFirst(items, item => item.lane === 'follow-up' && item.id === graphStatus.id),
+    );
   }
-  const cardRefs = new Set(logical.graph.cards.map(card => card.ref));
-  const followUp = [...logical.recommendedFollowUps]
-    .filter(candidate => candidate.operation === 'inspect-node' && cardRefs.has(candidate.ref))
-    .sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))[0];
+  const cardRefs = new Set(EffectArray.map(logical.graph.cards, card => card.ref));
+  const followUp = EffectArray.filter(
+    [...logical.recommendedFollowUps],
+    candidate => candidate.operation === 'inspect-node' && cardRefs.has(candidate.ref),
+  ).sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))[0];
   if (followUp === undefined) return undefined;
-  return items.find(item => item.lane === 'follow-up' && item.id === followUp.id);
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(items, item => item.lane === 'follow-up' && item.id === followUp.id),
+  );
 }
 
 /** Select one budget-independent ambiguity, relationship, and recovery core for every public budget. */
@@ -1483,7 +1575,7 @@ function requiredCodeLinkedEvidenceCore(
   responseFormat: ContextBriefResponseFormat,
 ): CodeLinkedEvidenceCoreProjection {
   const memories = new Map(
-    [...logical.activeHandoffs, ...logical.durableDecisions].map(memory => [memory.uri, memory] as const),
+    EffectArray.map([...logical.activeHandoffs, ...logical.durableDecisions], memory => [memory.uri, memory] as const),
   );
   const byAnchor = new Map<number, ProjectionItem[]>();
   for (const item of items) {
@@ -1491,9 +1583,13 @@ function requiredCodeLinkedEvidenceCore(
     const memory = memories.get(item.id);
     if (memory?.selectionBasis !== 'code-citation') continue;
     const ordinals = new Set(
-      (memory.cohortCodeRelations ?? memory.codeRelations ?? [])
-        .filter(relation => relation.status === 'exact' || relation.status === 'relocated')
-        .map(relation => relation.anchorOrdinal),
+      EffectArray.map(
+        EffectArray.filter(
+          memory.cohortCodeRelations ?? memory.codeRelations ?? [],
+          relation => relation.status === 'exact' || relation.status === 'relocated',
+        ),
+        relation => relation.anchorOrdinal,
+      ),
     );
     for (const ordinal of ordinals) {
       const group = byAnchor.get(ordinal) ?? [];
@@ -1502,19 +1598,22 @@ function requiredCodeLinkedEvidenceCore(
     }
   }
 
-  const groups = [...byAnchor.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([anchorOrdinal, rawItems]) => ({anchorOrdinal, items: uniqueProjectionItems(rawItems)}))
-    .filter(group => group.items.length >= 2);
+  const groups = EffectArray.filter(
+    EffectArray.map(
+      [...byAnchor.entries()].sort(([left], [right]) => left - right),
+      ([anchorOrdinal, rawItems]) => ({anchorOrdinal, items: uniqueProjectionItems(rawItems)}),
+    ),
+    group => group.items.length >= 2,
+  );
   const pendingGroups = [...groups];
   const connectedGroups: (typeof groups)[] = [];
   while (pendingGroups.length > 0) {
     const seed = pendingGroups.shift()!;
     const component = [seed];
-    const componentKeys = new Set(seed.items.map(projectionItemKey));
+    const componentKeys = new Set(EffectArray.map(seed.items, projectionItemKey));
     for (let index = 0; index < pendingGroups.length;) {
       const group = pendingGroups[index];
-      if (!group.items.some(item => componentKeys.has(projectionItemKey(item)))) {
+      if (!EffectArray.some(group.items, item => componentKeys.has(projectionItemKey(item)))) {
         index += 1;
         continue;
       }
@@ -1526,23 +1625,28 @@ function requiredCodeLinkedEvidenceCore(
     connectedGroups.push(component);
   }
 
-  const components = connectedGroups.map(component => ({
+  const components = EffectArray.map(connectedGroups, component => ({
     anchorCount: component.length,
-    requiredItems: uniqueProjectionItems(component.flatMap(group => group.items.slice(0, 2))),
+    requiredItems: uniqueProjectionItems(EffectArray.flatMap(component, group => group.items.slice(0, 2))),
   }));
   const allAmbiguityItems = uniqueProjectionItems(
-    connectedGroups.flatMap(component => component.flatMap(group => group.items)),
+    EffectArray.flatMap(connectedGroups, component => EffectArray.flatMap(component, group => group.items)),
   );
-  const allCohortKeys = new Set(allAmbiguityItems.map(projectionItemKey));
+  const allCohortKeys = new Set(EffectArray.map(allAmbiguityItems, projectionItemKey));
   const maximumPublicBytes = projectionMaximumBytes(CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS);
   const defaultPublicBytes = projectionMaximumBytes(CONTEXT_BRIEF_DEFAULT_ESTIMATED_TOKENS);
   let selected: EvidenceCoreCandidate | undefined;
   for (let mask = 0; mask < 2 ** components.length; mask += 1) {
-    const selectedComponents = components.filter((_, index) => (mask & (1 << index)) !== 0);
-    const admittedItems = uniqueProjectionItems(selectedComponents.flatMap(component => component.requiredItems));
-    const admittedKeys = new Set(admittedItems.map(projectionItemKey));
+    const selectedComponents = EffectArray.filter(components, (_, index) => (mask & (1 << index)) !== 0);
+    const admittedItems = uniqueProjectionItems(
+      EffectArray.flatMap(selectedComponents, component => component.requiredItems),
+    );
+    const admittedKeys = new Set(EffectArray.map(admittedItems, projectionItemKey));
     const ambiguityExclusions = new Set(
-      allAmbiguityItems.filter(item => !admittedKeys.has(projectionItemKey(item))).map(projectionItemKey),
+      EffectArray.map(
+        EffectArray.filter(allAmbiguityItems, item => !admittedKeys.has(projectionItemKey(item))),
+        projectionItemKey,
+      ),
     );
     const relationship = relationshipBundleItems(logical, items, baseRequiredItems, ambiguityExclusions);
     for (const includeRelationship of relationship === undefined ? [false] : [false, true]) {
@@ -1554,14 +1658,14 @@ function requiredCodeLinkedEvidenceCore(
       ]);
       if (!hasLanePrefix(baseRequiredItems, requiredItems)) continue;
       const excludedKeys = requiredLanePredecessorExclusions(items, requiredItems, ambiguityExclusions);
-      const compactMemoryUris = new Set(admittedItems.map(item => item.id));
+      const compactMemoryUris = new Set(EffectArray.map(admittedItems, item => item.id));
       const projection = renderProjection(logical, requiredItems, protectedMemoryUri, compactMemoryUris);
       const measurement = measureContextBriefResponse(projection, responseFormat);
       if (measurement.totalBytes > maximumPublicBytes) continue;
       const candidate: EvidenceCoreCandidate = {
         admittedMemoryCount: admittedItems.length,
         allCohortKeys,
-        anchorCount: selectedComponents.reduce((total, component) => total + component.anchorCount, 0),
+        anchorCount: EffectArray.reduce(selectedComponents, 0, (total, component) => total + component.anchorCount),
         compactMemoryUris,
         excludedKeys,
         fitsDefault: measurement.totalBytes <= defaultPublicBytes,
@@ -1598,18 +1702,21 @@ function currentCodeLinkedMemoryFallbackItem(
   items: readonly ProjectionItem[],
 ): ProjectionItem | undefined {
   if (logical.mode !== 'brief') return undefined;
-  const memories = [...logical.activeHandoffs, ...logical.durableDecisions]
-    .filter(
-      candidate =>
-        candidate.selectionBasis === 'code-citation' &&
-        (candidate.cohortCodeRelations ?? candidate.codeRelations ?? []).some(
-          relation => relation.status === 'exact' || relation.status === 'relocated',
-        ),
-    )
-    .sort((left, right) => left.rank - right.rank || compareText(left.uri, right.uri));
+  const memories = EffectArray.filter(
+    [...logical.activeHandoffs, ...logical.durableDecisions],
+    candidate =>
+      candidate.selectionBasis === 'code-citation' &&
+      EffectArray.some(
+        candidate.cohortCodeRelations ?? candidate.codeRelations ?? [],
+        relation => relation.status === 'exact' || relation.status === 'relocated',
+      ),
+  ).sort((left, right) => left.rank - right.rank || compareText(left.uri, right.uri));
   if (memories.length !== 1) return undefined;
-  return items.find(
-    item => (item.lane === 'handoff' || item.lane === 'durable-decision') && item.id === memories[0].uri,
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      items,
+      item => (item.lane === 'handoff' || item.lane === 'durable-decision') && item.id === memories[0].uri,
+    ),
   );
 }
 
@@ -1629,17 +1736,24 @@ function relationshipBundleItems(
   excludedKeys: ReadonlySet<string>,
 ): {readonly items: readonly ProjectionItem[]; readonly primaryMemory: ProjectionItem} | undefined {
   if (logical.mode !== 'trace' && logical.mode !== 'impact') return undefined;
-  const recoveryItem = baseRequiredItems.find(item => item.lane === 'follow-up');
-  const recovery = logical.recommendedFollowUps.find(candidate => candidate.id === recoveryItem?.id);
+  const recoveryItem = EffectOption.getOrUndefined(
+    EffectArray.findFirst(baseRequiredItems, item => item.lane === 'follow-up'),
+  );
+  const recovery = EffectOption.getOrUndefined(
+    EffectArray.findFirst(logical.recommendedFollowUps, candidate => candidate.id === recoveryItem?.id),
+  );
   if (recovery?.operation !== 'inspect-node') return undefined;
   const primaryMemory = primaryRelationshipMemoryItem(logical, items, excludedKeys);
-  const incidentContract = [...logical.graph.contracts]
-    .filter(contract => contract.sourceRef === recovery.ref || contract.targetRef === recovery.ref)
-    .sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))[0];
+  const incidentContract = EffectArray.filter(
+    [...logical.graph.contracts],
+    contract => contract.sourceRef === recovery.ref || contract.targetRef === recovery.ref,
+  ).sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))[0];
   const contractItem =
     incidentContract === undefined
       ? undefined
-      : items.find(item => item.lane === 'graph-contract' && item.id === incidentContract.id);
+      : EffectOption.getOrUndefined(
+          EffectArray.findFirst(items, item => item.lane === 'graph-contract' && item.id === incidentContract.id),
+        );
   return primaryMemory === undefined || contractItem === undefined
     ? undefined
     : {items: [primaryMemory, contractItem], primaryMemory};
@@ -1673,9 +1787,9 @@ function preferEvidenceCore(
 
 function hasLanePrefix(baseItems: readonly ProjectionItem[], candidateItems: readonly ProjectionItem[]): boolean {
   for (const lane of PROJECTION_LANES) {
-    const baseKeys = laneOrderedItems(baseItems, lane).map(projectionItemKey);
-    const candidateKeys = laneOrderedItems(candidateItems, lane).map(projectionItemKey);
-    if (baseKeys.some((key, index) => candidateKeys[index] !== key)) return false;
+    const baseKeys = EffectArray.map(laneOrderedItems(baseItems, lane), projectionItemKey);
+    const candidateKeys = EffectArray.map(laneOrderedItems(candidateItems, lane), projectionItemKey);
+    if (EffectArray.some(baseKeys, (key, index) => candidateKeys[index] !== key)) return false;
   }
   return true;
 }
@@ -1686,7 +1800,7 @@ function requiredLanePredecessorExclusions(
   initial: ReadonlySet<string>,
 ): ReadonlySet<string> {
   const excluded = new Set(initial);
-  const requiredKeys = new Set(requiredItems.map(projectionItemKey));
+  const requiredKeys = new Set(EffectArray.map(requiredItems, projectionItemKey));
   for (const lane of PROJECTION_LANES) {
     const laneItems = laneOrderedItems(items, lane);
     let lastRequiredIndex = -1;
@@ -1702,15 +1816,15 @@ function requiredLanePredecessorExclusions(
 }
 
 function laneOrderedItems(items: readonly ProjectionItem[], lane: ProjectionLane): readonly ProjectionItem[] {
-  return items
-    .filter(item => item.lane === lane)
-    .sort((left, right) => left.laneRank - right.laneRank || compareText(left.id, right.id));
+  return EffectArray.filter(items, item => item.lane === lane).sort(
+    (left, right) => left.laneRank - right.laneRank || compareText(left.id, right.id),
+  );
 }
 
 function laneStableOptionalProjectionItems(items: readonly ProjectionItem[]): readonly ProjectionItem[] {
-  const originalOrder = new Map(items.map((item, index) => [projectionItemKey(item), index] as const));
-  const lanes = PROJECTION_LANES.map(lane => laneOrderedItems(items, lane));
-  const offsets = lanes.map(() => 0);
+  const originalOrder = new Map(EffectArray.map(items, (item, index) => [projectionItemKey(item), index] as const));
+  const lanes = EffectArray.map(PROJECTION_LANES, lane => laneOrderedItems(items, lane));
+  const offsets = EffectArray.map(lanes, () => 0);
   const ordered: ProjectionItem[] = [];
   while (ordered.length < items.length) {
     let selectedLane = -1;
@@ -1739,7 +1853,7 @@ function agentSemanticOptionalProjectionItems(
 ): readonly ProjectionItem[] {
   const selectedCounts = new Map<ProjectionLane, number>();
   for (const item of requiredItems) selectedCounts.set(item.lane, (selectedCounts.get(item.lane) ?? 0) + 1);
-  return laneStableOptionalProjectionItems(items).filter(item => {
+  return EffectArray.filter(laneStableOptionalProjectionItems(items), item => {
     const limit = agentSemanticLaneLimit(item.lane);
     const selected = selectedCounts.get(item.lane) ?? 0;
     if (limit === 0 || selected >= limit) return false;
@@ -1758,23 +1872,33 @@ function primaryRelationshipMemoryItem(
   excludedKeys: ReadonlySet<string> = new Set(),
 ): ProjectionItem | undefined {
   if (logical.mode !== 'trace' && logical.mode !== 'impact') return undefined;
-  return items.find(item => {
-    if (excludedKeys.has(projectionItemKey(item))) return false;
-    if (item.lane === 'handoff') {
-      return logical.activeHandoffs.some(memory => memory.uri === item.id && memory.selectionBasis === 'code-citation');
-    }
-    if (item.lane === 'durable-decision') {
-      return logical.durableDecisions.some(
-        memory => memory.uri === item.id && memory.selectionBasis === 'code-citation',
-      );
-    }
-    return false;
-  });
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      items,
+      __effectArrayValue =>
+        !!(item => {
+          if (excludedKeys.has(projectionItemKey(item))) return false;
+          if (item.lane === 'handoff') {
+            return EffectArray.some(
+              logical.activeHandoffs,
+              memory => memory.uri === item.id && memory.selectionBasis === 'code-citation',
+            );
+          }
+          if (item.lane === 'durable-decision') {
+            return EffectArray.some(
+              logical.durableDecisions,
+              memory => memory.uri === item.id && memory.selectionBasis === 'code-citation',
+            );
+          }
+          return false;
+        })(__effectArrayValue),
+    ),
+  );
 }
 
 function uniqueProjectionItems(items: readonly ProjectionItem[]): readonly ProjectionItem[] {
   const seen = new Set<string>();
-  return items.filter(item => {
+  return EffectArray.filter(items, item => {
     const key = projectionItemKey(item);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -1811,164 +1935,20 @@ function selectById<T extends {readonly id?: string; readonly rank: number; read
   key: 'id' | 'uri' = 'id',
 ): readonly T[] {
   if (selected === undefined) return [];
-  return items
-    .filter(item => {
-      const id = item[key];
-      return typeof id === 'string' && selected.has(id);
-    })
-    .sort((left, right) => {
-      const leftId = left[key] ?? '';
-      const rightId = right[key] ?? '';
-      return left.rank - right.rank || compareText(leftId, rightId);
-    });
-}
-
-function compactProjectedMemory(
-  memory: ContextBriefLogicalResultV1['durableDecisions'][number],
-  protectRelationshipBundle = false,
-  allowIdentityAlias = false,
-  compactCodeLinkedCohort = false,
-  includeActionCard = false,
-  includeContinuationCard = false,
-  preserveContinuationDetails = false,
-): ContextBriefMemoryEvidenceV1 {
-  const {cohortCodeRelations, continuationCard, memoryId, ...withoutIdentity} = memory;
-  const compactContinuation =
-    !includeContinuationCard || continuationCard === undefined
-      ? {}
-      : {continuationCard: compactContinuationCard(continuationCard, preserveContinuationDetails)};
-  const hasProjectedCard =
-    (includeActionCard && memory.actionCard !== undefined) ||
-    (includeContinuationCard && continuationCard !== undefined);
-  const stableUri =
-    allowIdentityAlias && memoryId !== undefined && isMemoryId(memoryId) ? memoryIdentityAlias(memoryId) : memory.uri;
-  if (memory.selectionBasis !== 'code-citation') {
-    const {citationReceipts, ...resumeMemory} = withoutIdentity;
-    return {
-      ...(preserveContinuationDetails ? resumeMemory : withoutIdentity),
-      ...compactContinuation,
-      ...(preserveContinuationDetails && citationReceipts !== undefined ? {citationDetailsOmitted: true as const} : {}),
-      ...(hasProjectedCard ? {excerpt: ''} : {}),
-      uri: stableUri,
-    };
-  }
-  const {project: _project, sourceCommit: _sourceCommit, topic: _topic, ...compact} = withoutIdentity;
-  const compactActionCard =
-    !includeActionCard || memory.actionCard === undefined
-      ? {}
-      : {
-          actionCard: {
-            appliesTo: utf8Prefix(memory.actionCard.appliesTo, 32),
-            invariant: utf8Prefix(memory.actionCard.invariant, 56),
-            ...(memory.actionCard.avoid === undefined ? {} : {avoid: utf8Prefix(memory.actionCard.avoid, 48)}),
-            ...(memory.actionCard.verify === undefined ? {} : {verify: utf8Prefix(memory.actionCard.verify, 48)}),
-          },
-        };
-  if (compactCodeLinkedCohort) {
-    const {
-      actionCard: _actionCard,
-      citationSummary: _citationSummary,
-      preciseStatus: _preciseStatus,
-      ...cohortMemory
-    } = compact;
-    return {
-      ...cohortMemory,
-      ...compactActionCard,
-      ...compactContinuation,
-      ...(cohortCodeRelations === undefined ? {} : {codeRelations: cohortCodeRelations}),
-      excerpt: hasProjectedCard ? '' : utf8Prefix(memory.excerpt, 16),
-      uri: stableUri,
-    };
-  }
-  if (protectRelationshipBundle) {
-    const {
-      actionCard: _actionCard,
-      citationErrorCount,
-      citationReceipts,
-      citationSummary,
-      codeRelations,
-      ...protectedMemory
-    } = compact;
-    const citationDetailsOmitted =
-      citationErrorCount !== undefined ||
-      citationReceipts !== undefined ||
-      citationSummary !== undefined ||
-      codeRelations !== undefined;
-    return {
-      ...protectedMemory,
-      ...compactActionCard,
-      ...compactContinuation,
-      ...(citationDetailsOmitted ? {citationDetailsOmitted: true as const} : {}),
-      excerpt: hasProjectedCard ? '' : utf8Prefix(memory.excerpt, 32),
-      uri: stableUri,
-    };
-  }
-  const {citationReceipts, ...resumeCompact} = compact;
-  return {
-    ...(preserveContinuationDetails ? resumeCompact : compact),
-    ...compactActionCard,
-    ...compactContinuation,
-    ...(preserveContinuationDetails && citationReceipts !== undefined ? {citationDetailsOmitted: true as const} : {}),
-    excerpt: hasProjectedCard ? '' : utf8Prefix(memory.excerpt, 96),
-    uri: stableUri,
-  };
-}
-
-function compactProjectedFollowUp(
-  logical: ContextBriefLogicalResultV1,
-  followUp: ContextBriefLogicalResultV1['recommendedFollowUps'][number],
-  allowIdentityAlias: boolean,
-): ContextBriefLogicalResultV1['recommendedFollowUps'][number] {
-  if (followUp.operation !== 'read-memory') return followUp;
-  const memory = contextBriefRelationshipMemoryByUri(logical, followUp.uri);
-  if (!allowIdentityAlias || memory?.memoryId === undefined || !isMemoryId(memory.memoryId)) return followUp;
-  const uri = memoryIdentityAlias(memory.memoryId);
-  return {...followUp, arguments: {uri}, uri};
-}
-
-function compactProjectedIssue(
-  logical: ContextBriefLogicalResultV1,
-  issue: ContextBriefLogicalResultV1['stalenessAndConflicts'][number],
-  allowIdentityAlias: boolean,
-): ContextBriefLogicalResultV1['stalenessAndConflicts'][number] {
-  return {
-    ...issue,
-    uris: issue.uris.map(uri => {
-      const memory = contextBriefRelationshipMemoryByUri(logical, uri);
-      return allowIdentityAlias && memory?.memoryId !== undefined && isMemoryId(memory.memoryId)
-        ? memoryIdentityAlias(memory.memoryId)
-        : uri;
-    }),
-  };
-}
-
-function compactProjectedGraphContract(contract: ContextBriefGraphContractV1): ContextBriefGraphContractV1 {
-  const path = utf8Prefix(contract.evidence.path, 32);
-  const repositoryKey = utf8Prefix(contract.evidence.repositoryKey, 64);
-  const {
-    pathTruncated: _pathTruncated,
-    repositoryKeyTruncated: _repositoryKeyTruncated,
-    ...evidence
-  } = contract.evidence;
-  return {
-    ...contract,
-    evidence: {
-      ...evidence,
-      path,
-      ...(path === contract.evidence.path ? {} : {pathTruncated: true as const}),
-      repositoryKey,
-      ...(repositoryKey === contract.evidence.repositoryKey ? {} : {repositoryKeyTruncated: true as const}),
-    },
-  };
-}
-
-function compactProjectedGraphCard(card: ContextBriefGraphCardV1): ContextBriefGraphCardV1 {
-  return {...card, reason: utf8Prefix(card.reason, 48)};
+  return EffectArray.filter(items, (item, __effectArrayIndex) => {
+    if (!(__effectArrayIndex in items)) return false;
+    const id = item[key];
+    return typeof id === 'string' && selected.has(id);
+  }).sort((left, right) => {
+    const leftId = left[key] ?? '';
+    const rightId = right[key] ?? '';
+    return left.rank - right.rank || compareText(leftId, rightId);
+  });
 }
 
 function projectionMaximumBytes(tokens: number): number {
   if (
-    !Number.isSafeInteger(tokens) ||
+    !checkedIsSafeInteger(tokens) ||
     tokens < CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS ||
     tokens > CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS
   ) {
@@ -1980,7 +1960,7 @@ function projectionMaximumBytes(tokens: number): number {
 }
 
 function nonNegativeInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0;
+  return checkedIsSafeInteger(value) && value >= 0;
 }
 
 function compareText(left: string, right: string): number {

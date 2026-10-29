@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
@@ -6,6 +8,8 @@ import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-mainte
 import {buildContextHealthReport} from '@threadnote/context/health';
 import {contextHealthCitationCoverageV2} from '@threadnote/context/health_maintenance';
 import type {ContextBriefCitationValidationReceiptV2} from '@threadnote/context/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const now = new Date('2026-10-18T12:00:00.000Z');
 const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/topic.md';
@@ -14,13 +18,13 @@ const citation = (hash: string, path = 'src/draft.ts') =>
     version: 1,
     evidenceRetention: 'capsule-retained',
     extractorSet: 'fixture',
-    fileContentHash: {algorithm: 'sha256', value: hash.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe(hash, EffectString.repeat(64))},
     path,
-    repositoryId: '1'.repeat(64),
+    repositoryId: Effect.pipe('1', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote',
-    sourceCommit: '2'.repeat(40),
+    sourceCommit: Effect.pipe('2', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'3'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect.pipe('3', EffectString.repeat(40))}`,
     target: {kind: 'file'},
   });
 const original = citation('a');
@@ -70,9 +74,10 @@ function topic(version: 2 | 3 = 2): MemoryRecord {
           ...manifest,
           ...(version === 3 ? {version: 3 as const, sourceKind: 'code' as const} : {version: 2 as const}),
           originCitationIds: [original.id, policy.id].sort(),
-          acceptedSources: [original, current, policy]
-            .map(item => ({citationId: item.id, acceptedCitationId: item.id === original.id ? current.id : item.id}))
-            .sort((left, right) => left.citationId.localeCompare(right.citationId)),
+          acceptedSources: EffectArray.map([original, current, policy], item => ({
+            citationId: item.id,
+            acceptedCitationId: item.id === original.id ? current.id : item.id,
+          })).sort((left, right) => Effect.pipe(left.citationId, EffectString.localeCompare(right.citationId))),
         },
       },
       enrolled.body,
@@ -113,7 +118,14 @@ function report(record: MemoryRecord, receipts: readonly ContextBriefCitationVal
   });
 }
 const citationFindings = (value: ReturnType<typeof report>) =>
-  value.findings.filter(finding => finding.category.startsWith('citation-'));
+  EffectArrayPipe(value.findings, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (finding, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues &&
+        Effect.pipe(finding.category, EffectString.startsWith('citation-')),
+    ),
+  );
 
 describe.each([2, 3] as const)('accepted code V%s topic citation health', version => {
   it('does not reopen accepted prose for drift of original or previously accepted retained pins', () => {
@@ -142,12 +154,12 @@ describe.each([2, 3] as const)('accepted code V%s topic citation health', versio
         (activeStatus, [retainedStatus, reverse], omitActive) => {
           const record = topic(version);
           const receipts = [
-            ...retained.map(item => receipt(item.id, retainedStatus)),
+            ...EffectArray.map(retained, item => receipt(item.id, retainedStatus)),
             ...(!omitActive ? [receipt(current.id, activeStatus)] : []),
             receipt(policy.id, 'exact'),
           ];
           const result = report(record, reverse ? [...receipts].reverse() : receipts);
-          const targets = citationFindings(result).map(finding => finding.repair.targetUri);
+          const targets = EffectArray.map(citationFindings(result), finding => finding.repair.targetUri);
           expect(targets).toEqual(omitActive ? [] : [`${uri}#${current.id}`]);
           if (omitActive) expect(result.maintenance?.citationCoverage.state).not.toBe('complete');
         },
@@ -171,12 +183,10 @@ describe.each([2, 3] as const)('accepted code V%s topic citation health', versio
       receipt(current.id, 'changed'),
       receipt(policy.id, 'deleted'),
     ]);
-    expect(
-      citationFindings(result)
-        .map(finding => finding.repair.targetUri)
-        .sort(),
-    ).toEqual([`${uri}#${current.id}`, `${uri}#${policy.id}`].sort());
-    expect(citationFindings(result).every(finding => finding.classification === 'actionable')).toBe(true);
+    expect(EffectArray.map(citationFindings(result), finding => finding.repair.targetUri).sort()).toEqual(
+      [`${uri}#${current.id}`, `${uri}#${policy.id}`].sort(),
+    );
+    expect(EffectArray.every(citationFindings(result), finding => finding.classification === 'actionable')).toBe(true);
   });
 
   it('does not suppress drift for V1, ordinary records, invalid manifests or foreign receipt identities', () => {

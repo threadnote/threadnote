@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {compareCodeUnits} from '../ordering.js';
@@ -11,6 +12,8 @@ import type {
   CodeGraphCrossRepositoryBridgePageV1,
   CodeGraphCrossRepositoryEndpointKeyV1,
 } from './store.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAX_DEPTH = 16;
 const MAX_EDGES = 1_000;
@@ -324,7 +327,7 @@ function readAdjacency(
       if (localPage !== undefined) {
         coverage.localPagesRead += 1;
         if (localPage.edges.length > limit) throw new Error('Local neighbor reader exceeded its requested bound.');
-        edges.push(...localPage.edges.map(localTraversalEdge));
+        edges.push(...EffectArray.map(localPage.edges, localTraversalEdge));
         const next = validateLocalCursor(localPage.next, localAfter);
         if (next !== undefined && localPage.edges.length === 0) {
           throw new Error('Local neighbor reader returned an empty nonterminal page.');
@@ -346,7 +349,7 @@ function readAdjacency(
         if (bridgePage.next !== undefined && bridgePage.bridges.length === 0) {
           throw new Error('Bridge neighbor reader returned an empty nonterminal page.');
         }
-        edges.push(...bridgePage.bridges.map(bridge => bridgeTraversalEdge(input.generationId, bridge)));
+        edges.push(...EffectArray.map(bridgePage.bridges, bridge => bridgeTraversalEdge(input.generationId, bridge)));
         bridgeAfter = bridgePage.next;
         bridgeDone = bridgeAfter === undefined;
       } else if (bridgePageRequested) {
@@ -577,17 +580,23 @@ function endpointKeyInput(
 }
 
 function endpointKey(endpoint: CodeGraphCrossRepositoryTraversalEndpointV1): string {
-  return [
-    endpoint.repositoryId,
-    endpoint.repositoryKey,
-    endpoint.snapshotId,
-    endpoint.reference.kind,
-    endpoint.reference.kind === 'component' ? endpoint.reference.componentId : endpoint.reference.ref,
-  ].join('\0');
+  return EffectArray.join(
+    [
+      endpoint.repositoryId,
+      endpoint.repositoryKey,
+      endpoint.snapshotId,
+      endpoint.reference.kind,
+      endpoint.reference.kind === 'component' ? endpoint.reference.componentId : endpoint.reference.ref,
+    ],
+    '\0',
+  );
 }
 
 function traversalEdgeKey(edge: CodeGraphCrossRepositoryTraversalEdgeV1): string {
-  return [edge.provenance.kind, edge.id, endpointKey(edge.source), edge.relation, endpointKey(edge.target)].join('\0');
+  return EffectArray.join(
+    [edge.provenance.kind, edge.id, endpointKey(edge.source), edge.relation, endpointKey(edge.target)],
+    '\0',
+  );
 }
 
 function compareTraversalEdges(
@@ -626,7 +635,20 @@ function boundedRuntimeText(value: unknown, label: string, maximumBytes: number)
     typeof value !== 'string' ||
     value.length === 0 ||
     Buffer.byteLength(value, 'utf8') > maximumBytes ||
-    [...value].some(character => character.codePointAt(0)! < 32 || character.codePointAt(0) === 127)
+    EffectArray.some(
+      [...value],
+      character =>
+        Effect2.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect2.Option.getOrElse(() => undefined),
+        )! < 32 ||
+        Effect2.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect2.Option.getOrElse(() => undefined),
+        ) === 127,
+    )
   ) {
     throw new Error(`Traversal ${label} is invalid.`);
   }

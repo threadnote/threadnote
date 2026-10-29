@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -17,6 +18,8 @@ import {parseGraphControlPolicy} from '@threadnote/graph/sharing/control/authori
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {graphSharingFailure} from '@threadnote/graph/sharing/errors';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 const fixture = Effect.fn('test.graphEnrollmentFixture')(function* () {
@@ -28,10 +31,14 @@ const fixture = Effect.fn('test.graphEnrollmentFixture')(function* () {
     issuer: 'https://id.example.test/',
     jwksUrl: 'https://id.example.test/jwks',
     organization: 'acme',
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
     profileDigest: sha256Digest('profile'),
     schemaVersion: 1,
-    grants: ['private-a', 'private-b'].map(subject => ({expiresAt: now + 600, scopes: ['graph:contribute'], subject})),
+    grants: EffectArray.map(['private-a', 'private-b'], subject => ({
+      expiresAt: now + 600,
+      scopes: ['graph:contribute'],
+      subject,
+    })),
   });
   const principal = {
     expiresAt: now + 300,
@@ -58,7 +65,7 @@ describe('principal-owned graph worker enrollment', () => {
     TestClock.withLive(
       Effect.gen(function* () {
         const f = yield* fixture();
-        const signingPublicKey = 'a'.repeat(64);
+        const signingPublicKey = Effect2.pipe('a', EffectString.repeat(64));
         const enrolled = yield* enrollGraphControlWorker({
           ...f.input,
           request: {...f.request, signingPublicKey},
@@ -76,7 +83,7 @@ describe('principal-owned graph worker enrollment', () => {
         expect(authority.profileDigest).toBe(f.policy.profileDigest);
         for (const changed of [
           {...input, principalId: sha256Digest('other principal')},
-          {...input, signingPublicKey: 'b'.repeat(64)},
+          {...input, signingPublicKey: Effect2.pipe('b', EffectString.repeat(64))},
           {...input, readCurrentPolicy: Effect.succeed({...f.policy, grants: []})},
           {...input, initialPolicy: {...f.policy, profileDigest: sha256Digest('other profile')}},
         ])
@@ -98,7 +105,7 @@ describe('principal-owned graph worker enrollment', () => {
   effectIt.effect('binds a signing key to one enrollment operation and refuses key substitution on replay', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const request = {...f.request, signingPublicKey: 'a'.repeat(64)};
+      const request = {...f.request, signingPublicKey: Effect2.pipe('a', EffectString.repeat(64))};
       const first = yield* enrollGraphControlWorker({...f.input, request});
       expect(first.body.signingPublicKey).toBe(request.signingPublicKey);
       expect((yield* requireGraphControlWorker({...f.input, workerId: first.body.workerId})).signingPublicKey).toBe(
@@ -108,9 +115,10 @@ describe('principal-owned graph worker enrollment', () => {
       const before = yield* f.fs.readFile(f.target);
       expect(
         Result.isFailure(
-          yield* enrollGraphControlWorker({...f.input, request: {...request, signingPublicKey: 'b'.repeat(64)}}).pipe(
-            Effect.result,
-          ),
+          yield* enrollGraphControlWorker({
+            ...f.input,
+            request: {...request, signingPublicKey: Effect2.pipe('b', EffectString.repeat(64))},
+          }).pipe(Effect.result),
         ),
       ).toBe(true);
       expect(yield* f.fs.readFile(f.target)).toEqual(before);
@@ -146,7 +154,7 @@ describe('principal-owned graph worker enrollment', () => {
           {...input, principal: {...f.principal, expiresAt: f.now - 1}},
           {...input, readCurrentPolicy: Effect.succeed({...f.policy, grants: []})},
           {...input, initialPolicy: {...f.policy, profileDigest: sha256Digest('other')}},
-          {...input, workerId: 'gw_' + 'f'.repeat(32)},
+          {...input, workerId: 'gw_' + Effect2.pipe('f', EffectString.repeat(32))},
         ])
           expect(Result.isFailure(yield* requireGraphControlWorker(changed).pipe(Effect.result))).toBe(true);
         expect((yield* requireGraphControlWorker(input)).expiresAt).toBeLessThanOrEqual(f.principal.expiresAt);
@@ -196,7 +204,7 @@ describe('principal-owned graph worker enrollment', () => {
       Effect.gen(function* () {
         const request = {
           idempotencyKey: 'clé-🔐',
-          repositoryId: 'a'.repeat(64),
+          repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
           profileDigest: sha256Digest('profile'),
         };
         const bytes = new TextEncoder().encode(JSON.stringify(request));
@@ -219,8 +227,13 @@ describe('principal-owned graph worker enrollment', () => {
         const responses = yield* Effect.forEach(Array.from({length: 12}), () => enrollGraphControlWorker(f.input), {
           concurrency: 12,
         });
-        expect(responses.filter(response => response.created)).toHaveLength(1);
-        expect(new Set(responses.map(response => response.body.workerId)).size).toBe(1);
+        expect(
+          EffectArray.filter(
+            responses,
+            (response, __effectArrayIndex) => __effectArrayIndex in responses && response.created,
+          ),
+        ).toHaveLength(1);
+        expect(new Set(EffectArray.map(responses, response => response.body.workerId)).size).toBe(1);
         expect(responses[0].body.expiresAt).toBeLessThanOrEqual(f.now + 600);
         expect(responses[0].body.principalId).toBe(
           sha256Digest(JSON.stringify([f.principal.issuer, f.principal.subject])),
@@ -315,7 +328,7 @@ describe('principal-owned graph worker enrollment', () => {
             ...original,
             operationId: sha256Digest(`operation-${index}`),
             principalId: sha256Digest(`principal-${index}`),
-            workerId: `gw_${index.toString(16).padStart(32, '0')}`,
+            workerId: `gw_${Effect2.pipe(index.toString(16), EffectString.padStart(32, '0'))}`,
           })),
         ];
         yield* f.fs.writeFileString(f.target, JSON.stringify(saved));

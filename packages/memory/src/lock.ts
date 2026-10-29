@@ -2,6 +2,7 @@ import {Crypto, Effect, FileSystem, Path} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
+import {Array as EffectArray} from 'effect';
 
 const MEMORY_LOCK_STALE_MILLISECONDS = 5 * 60 * 1_000;
 const MEMORY_LOCK_RETRY_MILLISECONDS = 25;
@@ -24,7 +25,7 @@ export function withMemoryUriLocks<A, E, R>(
 ) {
   return Effect.gen(function* () {
     const pathService = yield* Path.Path;
-    const uniqueUris = [...new Set(uris.filter((uri): uri is string => uri !== undefined))];
+    const uniqueUris = [...new Set(EffectArray.filter(uris, (uri): uri is string => uri !== undefined))];
     const lockPaths = yield* Effect.forEach(uniqueUris, uri =>
       sha256Hex(uri).pipe(
         Effect.map(digest => pathService.join(agentContextHome, 'threadnote', 'memory-locks', `${digest}.lock`)),

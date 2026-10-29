@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import type {DevSkillsBundle, DevSkillsIssue, DevSkillsManifest, DevSkillsTarget} from './contract.js';
 import {AGENT_SKILLS} from '../agent_integration/skills.js';
@@ -5,6 +6,10 @@ import type {PhysicalReceipt} from './registry.js';
 import {entrypointPath, physicalDirectory} from './registry.js';
 import {assertSafePath, enumerateFiles, fail, hash, readOptional, statOptional, stableJson} from './files.js';
 import {hasHistoricalDevSkillsMembers} from './manifest.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export const generationRoot = (path: Path.Path, skillRoot: string, digest: string) =>
   path.join(physicalDirectory(path, skillRoot), 'generations', digest);
@@ -13,9 +18,17 @@ export function renderEntrypoints(path: Path.Path, target: DevSkillsTarget, bund
   const entries: Record<string, string> = {};
   for (const skill of bundle.manifest.skills) {
     const content = Buffer.from(bundle.files[`${skill.id}/SKILL.md`], 'base64').toString('utf8');
-    entries[entrypointPath(target.layout, skill.id)] = content
-      .replaceAll('{{THREADNOTE_SKILL_ROOT}}', path.join(root, skill.id))
-      .replaceAll('{{THREADNOTE_BUNDLE_ROOT}}', root);
+    entries[entrypointPath(target.layout, skill.id)] = Effect2.pipe(content, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(
+        __effectPipeInput,
+        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', path.join(root, skill.id)),
+      );
+      const __effectPipeStage1 = Effect2.pipe(
+        __effectPipeStage0,
+        EffectString.replaceAll('{{THREADNOTE_BUNDLE_ROOT}}', root),
+      );
+      return __effectPipeStage1;
+    });
   }
   return entries;
 }
@@ -27,9 +40,9 @@ export const verifyGeneration = Effect.fn('devSkills.verifyGeneration')(function
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const actual = yield* enumerateFiles(root);
-  const expected = Object.keys(manifest.hashes).sort();
+  const expected = EffectRecord.keys(manifest.hashes).sort();
   if (
-    actual.some(file => !(file in manifest.hashes)) ||
+    EffectArray.some(actual, file => !(file in manifest.hashes)) ||
     (!partial && JSON.stringify(actual) !== JSON.stringify(expected))
   )
     return yield* fail('generation-conflict', `Immutable generation inventory changed: ${root}`);
@@ -46,7 +59,7 @@ export const verifyReceiptProjection = Effect.fn('devSkills.verifyReceiptProject
   target: DevSkillsTarget,
   receipt: PhysicalReceipt,
 ) {
-  if (!Object.keys(receipt.consumers).length) return;
+  if (!EffectRecord.keys(receipt.consumers).length) return;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = generationRoot(path, target.skillRoot, receipt.manifest.digest);
@@ -84,7 +97,11 @@ export const inspectOwned = Effect.fn('devSkills.inspectOwned')(function* (
     'dev-plan',
     'dev-spec',
     'watch-pr',
-    ...(receipt?.manifest.skills.map(skill => skill.id) ?? []),
+    ...(EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(receipt?.manifest.skills), __effectArrayReceiver =>
+        EffectArray.map(__effectArrayReceiver, skill => skill.id),
+      ),
+    ) ?? []),
   ])) {
     const relative = entrypointPath(target.layout, id);
     const file = path.join(target.skillRoot, relative);
@@ -97,7 +114,7 @@ export const inspectOwned = Effect.fn('devSkills.inspectOwned')(function* (
       issues.push({code: 'unmanaged', message: 'Existing skills are never adopted or overwritten.', path: file});
     if (target.layout === 'directory') {
       const files = yield* enumerateFiles(path.dirname(file));
-      for (const extra of files.filter(member => member !== 'SKILL.md'))
+      for (const extra of EffectArray.filter(files, member => member !== 'SKILL.md'))
         issues.push({
           code: 'extra-file',
           message: 'Unowned files in a workflow directory are preserved.',
@@ -106,7 +123,7 @@ export const inspectOwned = Effect.fn('devSkills.inspectOwned')(function* (
     }
   }
   if (receipt)
-    for (const manifest of Object.values(receipt.generations)) {
+    for (const manifest of EffectRecord.values(receipt.generations)) {
       const verified = yield* verifyGeneration(generationRoot(path, target.skillRoot, manifest.digest), manifest).pipe(
         Effect.result,
       );
@@ -161,15 +178,16 @@ export const inspectDuplicates = Effect.fn('devSkills.inspectDuplicates')(functi
   for (const root of target.discoveryRoots) {
     for (const name of yield* directories(root)) {
       if (
-        name.startsWith('.') ||
+        Effect2.pipe(name, EffectString.startsWith('.')) ||
         ['threadnote', 'threadnote-packs'].includes(name) ||
-        AGENT_SKILLS.some(core => name === core || name === `${core}.md`)
+        EffectArray.some(AGENT_SKILLS, core => name === core || name === `${core}.md`)
       )
         continue;
       const file = path.join(root, name);
       const info = yield* statOptional(file);
       if (info?.type === 'Directory') yield* inspect(path.join(file, 'SKILL.md'), name);
-      else if (name.endsWith('.md')) yield* inspect(file, name.slice(0, -3));
+      else if (Effect2.pipe(name, EffectString.endsWith('.md')))
+        yield* inspect(file, Effect2.pipe(name, EffectString.slice(0, -3)));
     }
     for (const namespace of ['threadnote', 'threadnote-packs']) {
       const base = path.join(root, namespace);

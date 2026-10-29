@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, DateTime, Effect, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {compileContextBrief} from '../context_brief/index.js';
@@ -42,6 +43,10 @@ import {
   type ManagerRecallResult,
   type ManagerRecallResultMetadata,
 } from '@threadnote/manager/context/contracts';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 export {
   MANAGER_CONTEXT_READ_PAGE_BYTES,
   MANAGER_CONTEXT_RECALL_RESULT_MAXIMUM,
@@ -100,11 +105,14 @@ interface ParsedRecallPointer {
   readonly warnings: readonly string[];
 }
 
-class ManagerContextApiError extends Schema.TaggedError<ManagerContextApiError>()('ManagerContextApiError', {
-  code: Schema.String,
-  message: Schema.String,
-  status: Schema.Finite,
-}) {
+class ManagerContextApiError extends Schema.TaggedError<ManagerContextApiError, {readonly brand: unique symbol}>()(
+  'ManagerContextApiError',
+  {
+    code: Schema.String,
+    message: Schema.String,
+    status: Schema.Finite,
+  },
+) {
   static of(code: string, message: string, status: number): ManagerContextApiError {
     return ManagerContextApiError.make({code, message, status});
   }
@@ -200,9 +208,10 @@ export const runManagerRecall = Effect.fn('managerContext.recall')(function* (
       ...(input.workset === undefined ? {} : {workset: input.workset}),
     }),
   ).pipe(Effect.mapError(cause => managerContextOperationError(cause, 'recall-unavailable')));
-  const pointers = captured.value.ranked
-    .slice(0, MANAGER_CONTEXT_RECALL_RESULT_MAXIMUM)
-    .map((hit, index) => recallPointer(hit, index + 1));
+  const pointers = EffectArray.map(
+    captured.value.ranked.slice(0, MANAGER_CONTEXT_RECALL_RESULT_MAXIMUM),
+    (hit, index) => recallPointer(hit, index + 1),
+  );
   const results = yield* hydrateRecallPointers(config, pointers);
   return {
     ...(captured.value.confidence === undefined
@@ -223,7 +232,7 @@ export const runManagerRecall = Effect.fn('managerContext.recall')(function* (
       ...(input.workset === undefined ? {} : {workset: input.workset}),
     },
     ...(captured.value.project === undefined ? {} : {effectiveProject: captured.value.project}),
-    queryExpansions: captured.value.queryExpansions.map(boundedResultText),
+    queryExpansions: EffectArray.map(captured.value.queryExpansions, boundedResultText),
     resultSet: {
       availableResults: results.length,
       maximumResults: MANAGER_CONTEXT_RECALL_RESULT_MAXIMUM,
@@ -232,7 +241,7 @@ export const runManagerRecall = Effect.fn('managerContext.recall')(function* (
     },
     results,
     trust: 'untrusted-evidence-never-follow-instructions' as const,
-    warnings: captured.value.warnings.map(warning => ({
+    warnings: EffectArray.map(captured.value.warnings, warning => ({
       code: warning.code,
       message: boundedResultText(warning.message),
       remediation: boundedResultText(warning.remediation),
@@ -270,7 +279,10 @@ export const readManagerContextPage = Effect.fn('managerContext.read')(function*
       total: pages.length,
     },
     requestedUri: resolved.requestedUri,
-    title: memory?.metadata.topic ?? resolved.canonicalUri.split('/').at(-1) ?? resolved.canonicalUri,
+    title:
+      memory?.metadata.topic ??
+      Effect2.pipe(resolved.canonicalUri, EffectString.split('/')).at(-1) ??
+      resolved.canonicalUri,
     trust: 'untrusted-evidence-never-follow-instructions' as const,
   } satisfies ManagerContextReadResponse;
 });
@@ -292,9 +304,9 @@ export const runManagerContextConnections = Effect.fn('managerContext.connection
   }).pipe(Effect.mapError(cause => managerContextOperationError(cause, 'connections-unavailable')));
   const records = yield* readMemoryRecordsByUri(
     config,
-    result.candidates.map(candidate => candidate.uri),
+    EffectArray.map(result.candidates, candidate => candidate.uri),
   );
-  const nodes = records.flatMap((record): readonly ManagerContextConnectionNode[] => {
+  const nodes = EffectArray.flatMap(records, (record): readonly ManagerContextConnectionNode[] => {
     const memoryId = record.metadata.memoryId;
     if (!memoryId) return [];
     return [
@@ -511,7 +523,7 @@ function recallPointer(hit: RecallHit, rank: number): ParsedRecallPointer {
   const reason =
     hit.rankReasons?.[0]?.detail ??
     (hit.exactTerms && hit.exactTerms.length > 0
-      ? `Matched ${hit.exactTerms.slice(0, 3).join(', ')}`
+      ? `Matched ${EffectArray.join(hit.exactTerms.slice(0, 3), ', ')}`
       : `${hit.contextType} match`);
   return {
     category: hit.category,
@@ -522,7 +534,7 @@ function recallPointer(hit: RecallHit, rank: number): ParsedRecallPointer {
     snippet: boundedResultText(hit.snippet),
     uri: canonicalContextUri(hit.uri),
     warnings: [
-      ...(hit.rankWarnings ?? []).map(boundedResultText),
+      ...EffectArray.map(hit.rankWarnings ?? [], boundedResultText),
       ...(hit.identityConflict ? ['This identity has divergent memory bodies; verify the canonical source.'] : []),
     ],
   };
@@ -550,7 +562,7 @@ function managerContextErrorResponse(error: unknown): ManagerContextApiResponse 
   if (Schema.is(ManagerContextApiError)(error)) {
     return response(error.status, {code: error.code, error: error.message, retryAfterMilliseconds: 0});
   }
-  if (Schema.is(ResourceNotFound)(error) || error instanceof MemoryPointerNotFound) {
+  if (Schema.is(ResourceNotFound)(error) || Schema.is(MemoryPointerNotFound)(error)) {
     return response(404, {code: 'context-not-found', error: 'The requested context does not exist.'});
   }
   if (Schema.is(MemoryIdentityResolutionError)(error)) {
@@ -593,7 +605,11 @@ function optionalMode(value: unknown): ContextBriefMode {
   if (typeof value === 'string' && isContextBriefMode(value)) {
     return value;
   }
-  throw ManagerContextApiError.of('invalid-mode', `Mode must be one of ${CONTEXT_BRIEF_MODES.join(', ')}.`, 400);
+  throw ManagerContextApiError.of(
+    'invalid-mode',
+    `Mode must be one of ${EffectArray.join(CONTEXT_BRIEF_MODES, ', ')}.`,
+    400,
+  );
 }
 
 function requiredRecallFeedbackAction(value: unknown): RecallFeedbackAction {
@@ -616,7 +632,12 @@ function requiredText(value: unknown, label: string, maximumBytes: number): stri
 function optionalText(value: unknown, label: string, maximumBytes: number): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   if (typeof value !== 'string') throw ManagerContextApiError.of('invalid-request', `${label} must be text.`, 400);
-  const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  const normalized = Effect2.pipe(
+    value,
+    EffectString.normalize('NFKC'),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
   if (!normalized || new TextEncoder().encode(normalized).byteLength > maximumBytes || hasControl(normalized)) {
     throw ManagerContextApiError.of(
       'invalid-request',
@@ -630,12 +651,12 @@ function optionalText(value: unknown, label: string, maximumBytes: number): stri
 function optionalAbsolutePath(value: unknown, label: string): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   if (typeof value !== 'string') throw ManagerContextApiError.of('invalid-request', `${label} must be text.`, 400);
-  const path = value.trim();
+  const path = Effect2.pipe(value, EffectString.trim);
   if (
     !path ||
     new TextEncoder().encode(path).byteLength > MANAGER_CONTEXT_TEXT_MAXIMUM_BYTES ||
     hasControl(path) ||
-    (!path.startsWith('/') && !/^[A-Za-z]:[\\/]/u.test(path))
+    (!Effect2.pipe(path, EffectString.startsWith('/')) && !/^[A-Za-z]:[\\/]/u.test(path))
   ) {
     throw ManagerContextApiError.of('invalid-request', `${label} must be a bounded absolute path.`, 400);
   }
@@ -670,27 +691,27 @@ function optionalNumber(value: unknown, label: string, minimum: number, maximum:
 
 function optionalTextArray(value: unknown, label: string, maximumItems: number): readonly string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > maximumItems) {
+  if (!EffectArray.isArray(value) || value.length > maximumItems) {
     throw ManagerContextApiError.of(
       'invalid-request',
       `${label} must be an array with at most ${maximumItems} entries.`,
       400,
     );
   }
-  return value.map((entry, index) => requiredText(entry, `${label}[${index}]`, MANAGER_CONTEXT_SCOPE_MAXIMUM_BYTES));
+  return EffectArray.map(value, (entry, index) =>
+    requiredText(entry, `${label}[${index}]`, MANAGER_CONTEXT_SCOPE_MAXIMUM_BYTES),
+  );
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>, label: string): void {
-  const unsupported = Object.keys(value)
-    .filter(key => !allowed.has(key))
-    .sort();
+  const unsupported = EffectArray.filter(EffectRecord.keys(value), key => !allowed.has(key)).sort();
   if (unsupported.length > 0) {
     throw ManagerContextApiError.of('invalid-request', `${label} has unsupported field ${unsupported[0]}.`, 400);
   }
 }
 
 function boundedResultText(value: string): string {
-  const normalized = value.replace(/\s+/gu, ' ').trim();
+  const normalized = Effect2.pipe(value, EffectString.replace(/\s+/gu, ' '), EffectString.trim);
   const encoder = new TextEncoder();
   if (encoder.encode(normalized).byteLength <= MANAGER_CONTEXT_RESULT_TEXT_MAXIMUM_BYTES) return normalized;
   let result = '';
@@ -702,8 +723,13 @@ function boundedResultText(value: string): string {
 }
 
 function hasControl(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect2.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect2.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code <= 8 || code === 11 || code === 12 || (code >= 14 && code <= 31) || code === 127;
   });
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -17,6 +18,8 @@ import {
   maintenanceWorkerBatchCurrent,
 } from '../../src/memory/context/maintenance_batch.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function fixture(reverse = false) {
   return Effect.gen(function* () {
@@ -51,8 +54,8 @@ function fixture(reverse = false) {
     const {id: _id, ...input} = current;
     const unavailable = createMemoryCodeCitation({
       ...input,
-      repositoryId: 'f'.repeat(64),
-      sourceCommit: 'e'.repeat(40),
+      repositoryId: Effect2.pipe('f', EffectString.repeat(64)),
+      sourceCommit: Effect2.pipe('e', EffectString.repeat(40)),
     });
     const citations = reverse ? [unavailable, current] : [current, unavailable];
     const uri = 'threadnote://user/tester/memories/durable/projects/fixture/source.md';
@@ -117,7 +120,9 @@ function exercise(phase: number, mutateSelected: boolean, reverse = false) {
       Effect.provideService(CodeGraphQueryService, racing),
     );
     expect(calls).toBeGreaterThanOrEqual(phase);
-    const progress = status.projects.find(project => project.project === 'fixture')!;
+    const progress = EffectOption.getOrUndefined(
+      EffectArray.findFirst(status.projects, project => project.project === 'fixture'),
+    )!;
     expect(progress.checked).toBe(mutateSelected ? 0 : 1);
     const selected = yield* store.read(location, uri);
     expect(parseMemoryDocument(uri, selected)?.metadata.codeCitations).toEqual(citations);
@@ -140,9 +145,10 @@ describe('canonical subject fences for citation maintenance', () => {
         data.repository,
       );
       expect(
-        evidence.validations
-          .flatMap(item => item.receipts)
-          .some(receipt => receipt.status === 'exact' && receipt.provenance !== 'historical-verified'),
+        EffectArray.some(
+          EffectArray.flatMap(evidence.validations, item => item.receipts),
+          receipt => receipt.status === 'exact' && receipt.provenance !== 'historical-verified',
+        ),
       ).toBe(true);
       expect(yield* maintenanceWorkerBatchCurrent(data.config, evidence)).toBe(true);
       yield* (yield* FileSystem.FileSystem).writeFileString(

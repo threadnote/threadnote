@@ -4,6 +4,8 @@ import {describe, expect, it, vi} from 'vitest';
 import {graphAdministrationBusyLabel, mergeGraphCatalogStatus, type GraphCatalog} from '@threadnote/manager/graph';
 import {GraphAdministration, GraphReconciliationProgress} from '@threadnote/manager/graph/panels';
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const observed = {
   blockedRepositories: 1,
@@ -77,7 +79,19 @@ describe('Manager reconciliation visibility', () => {
     );
     expect(markup).toMatch(/<button(?![^>]*disabled)[^>]*>Diagnose all<\/button>/);
     expect(markup).toMatch(/<button(?![^>]*disabled)[^>]*>Index<\/button>/);
-    expect(markup.indexOf('Reconciliation pending')).toBeLessThan(markup.indexOf('graph-database-grid'));
+    expect(
+      Effect.pipe(
+        markup,
+        EffectString.indexOf('Reconciliation pending'),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    ).toBeLessThan(
+      Effect.pipe(
+        markup,
+        EffectString.indexOf('graph-database-grid'),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    );
     const busyMarkup = renderToStaticMarkup(
       createElement(GraphAdministration, {
         busy: 'Previewing purge',

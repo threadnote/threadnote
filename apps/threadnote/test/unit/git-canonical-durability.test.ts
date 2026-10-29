@@ -5,12 +5,14 @@ import {chmod, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promis
 import {join} from '@threadnote/testing/node-path';
 import {GitCanonicalMemoryStore, gitCanonicalSharePath} from '@threadnote/remote-memory/git/canonical_store';
 import {cloneGitShareWorktree, createGitShareWorktreeFixture, git} from '@threadnote/testing/git-share-worktree';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const path = gitCanonicalSharePath('durable', 'fixture', 'durability');
 const input = {content: '# MEMORY\n\nMust reach the remote.\n', message: 'fixture durability', path};
 
 async function head(worktree: string): Promise<string> {
-  return (await git(['rev-parse', 'HEAD'], worktree)).trim();
+  return Effect.pipe(await git(['rev-parse', 'HEAD'], worktree), EffectString.trim);
 }
 
 describe('git canonical durability', () => {
@@ -111,7 +113,7 @@ describe('git canonical durability', () => {
       await git(['commit', '-m', 'competing laptop commit'], laptop);
       const laptopHead = await head(laptop);
       const hook = join(fixture.worktree, '.git', 'hooks', 'pre-push');
-      const quotedLaptop = "'" + laptop.replaceAll("'", "'\\''") + "'";
+      const quotedLaptop = "'" + Effect.pipe(laptop, EffectString.replaceAll("'", "'\\''")) + "'";
       await writeFile(
         hook,
         `#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\ngit -C ${quotedLaptop} push origin main\n`,

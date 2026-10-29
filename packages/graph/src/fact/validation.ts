@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Predicate, Schema} from 'effect';
 import {parseCodeGraphMonikerV1} from '../cross_repository/monikers.js';
 import type {
@@ -10,6 +11,9 @@ import type {
   CodeGraphSpan,
   CodeGraphSymbol,
 } from '../types.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const ARRAY_ENTRIES_MAXIMUM = 1_000_000;
 const PATH_LENGTH_MAXIMUM = 4_096;
@@ -43,13 +47,13 @@ const RELATIONS = [
   'tests',
 ] as const satisfies readonly CodeGraphRelation[];
 
-export class CodeGraphFactValidationError extends Schema.TaggedError<CodeGraphFactValidationError>()(
-  'CodeGraphFactValidationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphFactValidationError extends Schema.TaggedError<
+  CodeGraphFactValidationError,
+  {readonly brand: unique symbol}
+>()('CodeGraphFactValidationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 /** Exact recursive validator for parser facts crossing a durable or portable boundary. */
 export function parseCodeGraphFileFacts(value: unknown): CodeGraphFileFacts {
@@ -57,14 +61,16 @@ export function parseCodeGraphFileFacts(value: unknown): CodeGraphFileFacts {
   exactKeys(input, ['diagnostics', 'edges', 'path', 'symbols'], ['derivationInputs', 'monikers', 'references']);
   const path = repositoryPath(input.path, 'File-fact path');
   const diagnostics = stringArray(input.diagnostics, 'File-fact diagnostics', TEXT_LENGTH_MAXIMUM);
-  const symbols = array(input.symbols, 'File-fact symbols').map(parseSymbol);
-  const edges = array(input.edges, 'File-fact edges').map(parseEdge);
+  const symbols = EffectArray.map(array(input.symbols, 'File-fact symbols'), parseSymbol);
+  const edges = EffectArray.map(array(input.edges, 'File-fact edges'), parseEdge);
   const references =
-    input.references === undefined ? undefined : array(input.references, 'File-fact references').map(parseReference);
+    input.references === undefined
+      ? undefined
+      : EffectArray.map(array(input.references, 'File-fact references'), parseReference);
   const monikers =
     input.monikers === undefined
       ? undefined
-      : array(input.monikers, 'File-fact monikers').map((moniker, index) => {
+      : EffectArray.map(array(input.monikers, 'File-fact monikers'), (moniker, index) => {
           try {
             return parseCodeGraphMonikerV1(moniker);
           } catch (cause) {
@@ -168,7 +174,7 @@ function parseReference(value: unknown, index: number): CodeGraphReference {
     ...(input.exportedOnly === undefined
       ? {}
       : {exportedOnly: bool(input.exportedOnly, 'Reference exported-only state')}),
-    lookupTiers: array(input.lookupTiers, 'Reference lookup tiers').map((tier, tierIndex) =>
+    lookupTiers: EffectArray.map(array(input.lookupTiers, 'Reference lookup tiers'), (tier, tierIndex) =>
       nonEmptyStringArray(tier, `Reference lookup tier ${tierIndex}`, false),
     ),
     provenance: provenance(input.provenance, 'Reference provenance'),
@@ -184,7 +190,7 @@ function parseDerivationInputs(value: unknown): CodeGraphDerivationInputs {
   const input = object(value, 'File-fact derivation inputs');
   exactKeys(input, [], ['rationale']);
   if (input.rationale === undefined) return {};
-  const rationale = array(input.rationale, 'File-fact rationale inputs').map((value, index) => {
+  const rationale = EffectArray.map(array(input.rationale, 'File-fact rationale inputs'), (value, index) => {
     const rationale = object(value, `File-fact rationale ${index}`);
     exactKeys(rationale, ['documentation', 'line', 'marker', 'name'], []);
     return {
@@ -218,7 +224,7 @@ function object(value: unknown, label: string): Record<string, unknown> {
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value) || value.length > ARRAY_ENTRIES_MAXIMUM) {
+  if (!EffectArray.isArray(value) || value.length > ARRAY_ENTRIES_MAXIMUM) {
     throw CodeGraphFactValidationError.make({message: `${label} must be a bounded array.`});
   }
   return value;
@@ -227,10 +233,10 @@ function array(value: unknown, label: string): readonly unknown[] {
 function exactKeys(input: Record<string, unknown>, required: readonly string[], optional: readonly string[]): void {
   const allowed = new Set([...required, ...optional]);
   for (const key of required) {
-    if (!Object.hasOwn(input, key))
+    if (!EffectRecord.has(input, key))
       throw CodeGraphFactValidationError.make({message: `Code graph facts are missing ${key}.`});
   }
-  for (const key of Object.keys(input)) {
+  for (const key of EffectRecord.keys(input)) {
     if (!allowed.has(key))
       throw CodeGraphFactValidationError.make({message: `Code graph facts contain unknown field ${key}.`});
   }
@@ -263,11 +269,11 @@ function boundedNonEmptyText(value: unknown, label: string): string {
 }
 
 function stringArray(value: unknown, label: string, maximum = SHORT_TEXT_LENGTH_MAXIMUM): readonly string[] {
-  return array(value, label).map(entry => text(entry, `${label} entry`, maximum));
+  return EffectArray.map(array(value, label), entry => text(entry, `${label} entry`, maximum));
 }
 
 function nonEmptyStringArray(value: unknown, label: string, controlFree: boolean): readonly string[] {
-  return array(value, label).map(entry =>
+  return EffectArray.map(array(value, label), entry =>
     controlFree ? shortText(entry, `${label} entry`) : boundedNonEmptyText(entry, `${label} entry`),
   );
 }
@@ -277,12 +283,15 @@ function repositoryPath(value: unknown, label: string): string {
     typeof value !== 'string' ||
     value.length === 0 ||
     value.length > PATH_LENGTH_MAXIMUM ||
-    value.startsWith('/') ||
-    value.startsWith('\\') ||
+    Effect.pipe(value, EffectString.startsWith('/')) ||
+    Effect.pipe(value, EffectString.startsWith('\\')) ||
     /^[A-Za-z]:/u.test(value) ||
-    value.includes('\\') ||
+    Effect.pipe(value, EffectString.includes('\\')) ||
     containsControlCharacter(value) ||
-    value.split('/').some(segment => segment.length === 0 || segment === '.' || segment === '..')
+    EffectArray.some(
+      Effect.pipe(value, EffectString.split('/')),
+      segment => segment.length === 0 || segment === '.' || segment === '..',
+    )
   ) {
     throw CodeGraphFactValidationError.make({message: `${label} must be a safe repository-relative POSIX path.`});
   }
@@ -290,11 +299,8 @@ function repositoryPath(value: unknown, label: string): string {
 }
 
 function containsControlCharacter(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) return true;
-  }
-  return false;
+  // C0/C1 controls are outside printable ASCII and the U+00A0-and-up range.
+  return /[^\u0020-\u007e\u00a0-\u{10ffff}]/u.test(value);
 }
 
 function digest(value: unknown, label: string): string {
@@ -333,7 +339,10 @@ function finiteRange(value: unknown, label: string, minimum: number, maximum: nu
 }
 
 function provenance(value: unknown, label: string): CodeGraphProvenance {
-  const matched = typeof value === 'string' ? PROVENANCE.find(candidate => candidate === value) : undefined;
+  const matched =
+    typeof value === 'string'
+      ? EffectOption.getOrUndefined(EffectArray.findFirst(PROVENANCE, candidate => candidate === value))
+      : undefined;
   if (matched === undefined) {
     throw CodeGraphFactValidationError.make({message: `${label} is invalid.`});
   }
@@ -341,7 +350,10 @@ function provenance(value: unknown, label: string): CodeGraphProvenance {
 }
 
 function relation(value: unknown, label: string): CodeGraphRelation {
-  const matched = typeof value === 'string' ? RELATIONS.find(candidate => candidate === value) : undefined;
+  const matched =
+    typeof value === 'string'
+      ? EffectOption.getOrUndefined(EffectArray.findFirst(RELATIONS, candidate => candidate === value))
+      : undefined;
   if (matched === undefined) {
     throw CodeGraphFactValidationError.make({message: `${label} is invalid.`});
   }

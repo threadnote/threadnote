@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {createCursorTokenVerifier} from '@threadnote/remote-memory/cursor_oidc';
 import {remoteMemoryConfigFromEnvironment, redactedRemoteMemoryConfig} from '@threadnote/remote-memory/config';
 import {COMPOSER_OAUTH_SCOPES} from '@threadnote/remote-memory/oauth';
@@ -17,6 +18,8 @@ import {
   type RemoteMemoryWorkerHealthRow,
 } from '@threadnote/remote-memory/worker_health';
 import {remoteMemoryFailureClass, superviseRemoteMemoryService, type RemoteMemoryServiceRuntime} from './main.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface ComposerListenAddress {
   readonly hostname: '127.0.0.1';
@@ -53,7 +56,7 @@ export interface ComposerServeReceipt {
 }
 
 export function parseComposerListenAddress(value: string): ComposerListenAddress {
-  const match = /^(127\.0\.0\.1|localhost):(\d+)$/u.exec(value.trim());
+  const match = /^(127\.0\.0\.1|localhost):(\d+)$/u.exec(Effect.pipe(value, EffectString.trim));
   const port = match ? Number(match[2]) : Number.NaN;
   if (!match || !Number.isSafeInteger(port) || port < 1 || port > 65_535) {
     throw remoteMemoryError('invalid_request', 'Composer listen must be loopback host:port such as 127.0.0.1:18788.');
@@ -74,22 +77,29 @@ export function composerServeEnvironment(
   const port = String(input.listenAddress.port);
   const hosts = [...new Set([`${input.listenAddress.hostname}:${port}`, `127.0.0.1:${port}`, `localhost:${port}`])];
   return {
-    THREADNOTE_REMOTE_ALLOWED_HOSTS: hosts.join(','),
-    THREADNOTE_REMOTE_ALLOWED_ORIGINS: [
-      'https://cursor.com',
-      'http://127.0.0.1:8787',
-      'http://localhost:8787',
-      origin,
-    ].join(','),
+    THREADNOTE_REMOTE_ALLOWED_HOSTS: EffectArray.join(hosts, ','),
+    THREADNOTE_REMOTE_ALLOWED_ORIGINS: EffectArray.join(
+      ['https://cursor.com', 'http://127.0.0.1:8787', 'http://localhost:8787', origin],
+      ',',
+    ),
     THREADNOTE_REMOTE_CANONICAL_STORE: 'git',
     THREADNOTE_REMOTE_DATABASE_URL: input.databaseUrl,
     THREADNOTE_REMOTE_ENABLED: 'true',
     THREADNOTE_REMOTE_HOST: input.listenAddress.hostname,
-    THREADNOTE_REMOTE_MEMORY_GIT_BRANCH: input.gitBranch?.trim() || 'main',
-    THREADNOTE_REMOTE_MEMORY_GIT_TENANT_ID: input.tenantId?.trim() || 'local-org',
+    THREADNOTE_REMOTE_MEMORY_GIT_BRANCH:
+      Effect.pipe(input.gitBranch, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) || 'main',
+    THREADNOTE_REMOTE_MEMORY_GIT_TENANT_ID:
+      Effect.pipe(input.tenantId, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) || 'local-org',
     THREADNOTE_REMOTE_MEMORY_GIT_SHARE_ID: input.shareId,
     THREADNOTE_REMOTE_MEMORY_GIT_PUSH: input.gitPush === true ? 'true' : 'false',
-    THREADNOTE_REMOTE_MEMORY_GIT_REMOTE: input.gitRemoteName?.trim() || 'origin',
+    THREADNOTE_REMOTE_MEMORY_GIT_REMOTE:
+      Effect.pipe(input.gitRemoteName, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) || 'origin',
     THREADNOTE_REMOTE_MEMORY_GIT_WORKTREE: input.gitWorktree,
     THREADNOTE_REMOTE_OAUTH_ISSUER: origin,
     THREADNOTE_REMOTE_OAUTH_JWKS_URL: `${origin}/.well-known/jwks.json`,
@@ -102,7 +112,11 @@ export async function runComposerServe(
   input: ComposerServeInput,
   runtime: RemoteMemoryServiceRuntime,
 ): Promise<ComposerServeReceipt> {
-  const listenAddress = parseComposerListenAddress(input.listen?.trim() || LOCAL_COMPOSER_DEFAULT_LISTEN);
+  const listenAddress = parseComposerListenAddress(
+    Effect.pipe(input.listen, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) || LOCAL_COMPOSER_DEFAULT_LISTEN,
+  );
   const gitWorktree = await ensureLiveGitShareWorktree({
     branch: input.gitBranch,
     cloneUrl: input.gitCloneUrl,
@@ -151,7 +165,10 @@ export async function runComposerServe(
       issuer: idp.issuer,
       shareId: input.shareId,
       subject: idp.subject,
-      tenantId: input.tenantId?.trim() || 'local-org',
+      tenantId:
+        Effect.pipe(input.tenantId, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) || 'local-org',
     });
     const repository = new PostgresRemoteMemoryRepository(sql, {gitStore});
     await repository.ingestActiveGitShares(`composer-start:${input.shareId}`);

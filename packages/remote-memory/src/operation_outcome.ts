@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {parseRemoteMemoryReceiptV1, type RemoteMemoryReceiptV1} from '@threadnote/memory/remote/receipts';
 import {RemoteMemoryError, remoteMemoryError, type RemoteMemoryErrorCode} from './errors.js';
 
@@ -34,7 +35,7 @@ export function storedOperationRejection(error: RemoteMemoryError): StoredOperat
 }
 
 function isStoredOperationRejection(value: unknown): value is StoredOperationRejectionV1 {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
   const error = 'error' in value ? value.error : undefined;
   return (
     'kind' in value &&
@@ -43,7 +44,7 @@ function isStoredOperationRejection(value: unknown): value is StoredOperationRej
     value.version === 1 &&
     typeof error === 'object' &&
     error !== null &&
-    !Array.isArray(error) &&
+    !EffectArray.isArray(error) &&
     'code' in error &&
     isRemoteMemoryErrorCode(error.code) &&
     'message' in error &&
@@ -51,7 +52,7 @@ function isStoredOperationRejection(value: unknown): value is StoredOperationRej
     'details' in error &&
     typeof error.details === 'object' &&
     error.details !== null &&
-    !Array.isArray(error.details)
+    !EffectArray.isArray(error.details)
   );
 }
 

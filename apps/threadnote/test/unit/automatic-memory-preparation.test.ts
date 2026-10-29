@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {automaticReviewPacket} from '../../src/memory/context/maintenance_draft.js';
 import {automaticInactiveCodeRootIds} from '../../src/memory/context/maintenance_code_capture.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -58,6 +59,8 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {runContextMaintenance} from '@threadnote/threadnote/memory/context/maintenance';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const system = SystemInfo.layer.pipe(
   Layer.provide(
@@ -78,6 +81,10 @@ const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
 const ROOT = 'threadnote://user/tester/memories/';
 const NOW = '2026-10-21T12:00:00.000Z';
 const scopeRevision = sha256HexSync('configured-scope');
+const verifiedCodeProvenances: ReadonlyArray<'current-verified' | 'historical-verified'> = [
+  'current-verified',
+  'historical-verified',
+];
 function record(name: string, body = 'Exact current statement.', metadata: Partial<MemoryMetadata> = {}): MemoryRecord {
   const uri = `${ROOT}durable/projects/selected/${name}.md`;
   const content = formatMemoryDocument(
@@ -85,7 +92,7 @@ function record(name: string, body = 'Exact current statement.', metadata: Parti
     {
       kind: 'durable',
       schemaVersion: 10,
-      memoryId: `tn_${name.toLowerCase()}`,
+      memoryId: `tn_${Effect2.pipe(name, EffectString.toLowerCase)}`,
       project: 'selected',
       status: 'active',
       timestamp: NOW,
@@ -140,25 +147,25 @@ const settle = (f: Effect.Success<ReturnType<typeof fixture>>, ticks = 25, budge
 function codeCitation(kind: 'file' | 'symbol' = 'file', path = 'src/current.ts') {
   return createMemoryCodeCitation({
     version: 1,
-    repositoryId: '1'.repeat(64),
+    repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote',
-    sourceCommit: '2'.repeat(40),
+    sourceCommit: Effect2.pipe('2', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'3'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`,
     extractorSet: 'native-code-graph-13',
     path,
-    fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('4', EffectString.repeat(64))},
     target:
       kind === 'file'
         ? {kind}
         : {
             kind,
             fragmentCanonicalization: 'utf8-source-span-v1',
-            fragmentHash: {algorithm: 'sha256', value: '7'.repeat(64)},
+            fragmentHash: {algorithm: 'sha256', value: Effect2.pipe('7', EffectString.repeat(64))},
             language: 'typescript',
             name: 'automaticBoundary',
             qualifiedName: 'automaticBoundary',
-            nodeId: `cgs_${'8'.repeat(32)}`,
+            nodeId: `cgs_${Effect2.pipe('8', EffectString.repeat(32))}`,
             span: {line: 1, column: 1, endLine: 2, endColumn: 2},
             symbolKind: 'function',
           },
@@ -174,7 +181,7 @@ function codeExcerpt(
   return {
     content,
     startLine: 1,
-    endLine: content.split('\n').length,
+    endLine: Effect2.pipe(content, EffectString.split('\n')).length,
     excerptHash: sha256HexSync(content),
     fileBytesHash: sha256HexSync(file),
     provenance: 'current-verified',
@@ -206,14 +213,14 @@ function prepareCode(citation: MemoryCodeCitationV1, excerpts: readonly ContextH
         availability: 'available',
       },
     ],
-    candidates: excerpts.map(excerpt => ({evidenceId, text: excerpt.content, excerpt})),
+    candidates: EffectArray.map(excerpts, excerpt => ({evidenceId, text: excerpt.content, excerpt})),
     reads: [{uri: `code:${citation.id}`, hash: sha256HexSync(JSON.stringify(excerpts))}],
   });
 }
 
 function reviewedCodeRecord(roots: readonly MemoryCodeCitationV1[], active: readonly MemoryCodeCitationV1[]) {
   const body = 'Current approved code behavior.';
-  const sources = active.map(citation => {
+  const sources = EffectArray.map(active, citation => {
     const source = {kind: 'code' as const, citation};
     return {id: automaticMaintenanceEvidenceId(source), source, scope: 'repository' as const};
   });
@@ -228,16 +235,16 @@ function reviewedCodeRecord(roots: readonly MemoryCodeCitationV1[], active: read
           hash: sha256HexSync(body),
           role: 'descriptive',
           support: 'direct',
-          evidenceIds: sources.map(source => source.id),
+          evidenceIds: EffectArray.map(sources, source => source.id),
         },
       ],
       sources,
       acceptance: {
         reviewId: 'review-preparation-boundary',
         approvedAt: NOW,
-        targetBeforeHash: '1'.repeat(64),
-        preparationDigest: '2'.repeat(64),
-        sourceVectorDigest: '3'.repeat(64),
+        targetBeforeHash: Effect2.pipe('1', EffectString.repeat(64)),
+        preparationDigest: Effect2.pipe('2', EffectString.repeat(64)),
+        sourceVectorDigest: Effect2.pipe('3', EffectString.repeat(64)),
       },
     }),
   };
@@ -253,7 +260,7 @@ const checkRelatedSourceBudget = Effect.fn('test.relatedSourceBudget')(function*
   const body = 'This exact current statement has eight approved sources.';
   const sources = Array.from({length: 9}, (_, index) => record(`budget_source_${index}`, body));
   for (const source of sources) yield* f.write(source);
-  const descriptors = sources.slice(0, 8).map(source => {
+  const descriptors = EffectArray.map(sources.slice(0, 8), source => {
     const fragment = memoryMaintenanceFragmentSource(source, 0);
     return {id: automaticMaintenanceEvidenceId(fragment), source: fragment, scope: 'personal' as const};
   });
@@ -265,22 +272,22 @@ const checkRelatedSourceBudget = Effect.fn('test.relatedSourceBudget')(function*
         hash: sha256HexSync(body),
         role: 'descriptive',
         support: 'direct',
-        evidenceIds: descriptors.map(descriptor => descriptor.id),
+        evidenceIds: EffectArray.map(descriptors, descriptor => descriptor.id),
       },
     ],
     sources: descriptors,
     acceptance: {
       reviewId: 'review-related-budget',
       approvedAt: NOW,
-      targetBeforeHash: '1'.repeat(64),
-      preparationDigest: '2'.repeat(64),
-      sourceVectorDigest: '3'.repeat(64),
+      targetBeforeHash: Effect2.pipe('1', EffectString.repeat(64)),
+      preparationDigest: Effect2.pipe('2', EffectString.repeat(64)),
+      sourceVectorDigest: Effect2.pipe('3', EffectString.repeat(64)),
     },
   });
   const target = record('budget_target', body, {
     schemaVersion: 11,
     reviewedSupport: {type: 'reviewed-memory-support', version: 1, active},
-    relations: [...aliases, ...(overflow ? [8] : [])].map(index => ({
+    relations: EffectArray.map([...aliases, ...(overflow ? [8] : [])], index => ({
       type: 'references',
       uri: memoryIdentityAlias(sources[index].metadata.memoryId!),
     })),
@@ -288,16 +295,16 @@ const checkRelatedSourceBudget = Effect.fn('test.relatedSourceBudget')(function*
   yield* f.write(target);
   const live = yield* readLiveAutomaticPreparation(f.config, target.uri);
   expect(live.prepared.reads).toHaveLength(9);
-  expect(new Set(live.prepared.reads.map(read => read.uri)).size).toBe(9);
+  expect(new Set(EffectArray.map(live.prepared.reads, read => read.uri)).size).toBe(9);
   expect(live.prepared.assessment.evidence).toHaveLength(8);
   expect(live.prepared.assessment.coverage.omittedSources).toBe(Number(overflow));
   expect(live.prepared.omissions.includes('related-source-budget')).toBe(overflow);
-  expect(live.prepared.reads.some(read => read.uri === sources[8].uri)).toBe(false);
+  expect(EffectArray.some(live.prepared.reads, read => read.uri === sources[8].uri)).toBe(false);
   if (batch) {
     yield* settle(f, 6, 100);
     const cached = (yield* readPreparedMemory(f.config, target.uri))!;
     expect(cached.reads).toHaveLength(9);
-    expect(new Set(cached.reads.map(read => read.uri)).size).toBe(9);
+    expect(new Set(EffectArray.map(cached.reads, read => read.uri)).size).toBe(9);
     expect(cached.assessment.coverage.omittedSources).toBe(Number(overflow));
     expect(cached.omissions.includes('related-source-budget')).toBe(overflow);
     expect(cached.relevantRevision).toBe(live.prepared.relevantRevision);
@@ -306,6 +313,25 @@ const checkRelatedSourceBudget = Effect.fn('test.relatedSourceBudget')(function*
 });
 
 describe('automatic private preparation', () => {
+  effectIt.effect('rejects cached preparation with malformed scope and evidence revision hashes', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const target = record('malformed_revision');
+      const prepared = prepareAutomaticMemory(target, {scopeRevision, evidence: [], candidates: [], reads: []});
+      yield* writePreparedMemory(f.config, prepared);
+      const cacheFile = f.path.join(
+        f.home,
+        'context-maintenance',
+        'automatic',
+        `${sha256HexSync(`target:${target.uri}`)}.json`,
+      );
+      const stored = JSON.parse(yield* f.fs.readFileString(cacheFile));
+      for (const field of ['scopeRevision', 'relevantRevision'] as const) {
+        yield* f.fs.writeFileString(cacheFile, JSON.stringify({...stored, [field]: 'not-a-sha256'}));
+        expect(yield* readPreparedMemory(f.config, target.uri)).toBeUndefined();
+      }
+    }).pipe(provide),
+  );
   effectIt.effect('retains legacy-origin ambiguity, partial inventory, successor and access fences after dedupe', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -329,7 +355,7 @@ describe('automatic private preparation', () => {
       });
       const reviewed = reviewConsolidation(
         body,
-        [origin, carrier].map(captureConsolidationSource),
+        EffectArray.map([origin, carrier], captureConsolidationSource),
         [
           {
             section: body,
@@ -378,14 +404,16 @@ describe('automatic private preparation', () => {
       expect(partial.omissions).toContain('related-source-inactive');
       expect(partial.omissions).toContain('related-source-policy');
       expect(partial.reads).toHaveLength(3);
-      expect(new Set(partial.reads.map(read => read.uri))).toEqual(new Set([target.uri, carrier.uri, origin.uri]));
+      expect(new Set(EffectArray.map(partial.reads, read => read.uri))).toEqual(
+        new Set([target.uri, carrier.uri, origin.uri]),
+      );
       yield* advance(true);
       const complete = (yield* readPreparedMemory(f.config, target.uri))!;
       expect(complete.omissions).toContain('related-source-unavailable');
       expect(complete.omissions).toContain('related-source-ambiguous');
       expect(complete.omissions).toContain('related-successor-candidate');
       expect(complete.omissions).toContain('related-source-policy');
-      expect(new Set(complete.reads.map(read => read.uri))).toEqual(
+      expect(new Set(EffectArray.map(complete.reads, read => read.uri))).toEqual(
         new Set([target.uri, carrier.uri, origin.uri, successor.uri]),
       );
       expect(complete.origin?.receipt).toEqual(reviewed.provenance);
@@ -393,7 +421,7 @@ describe('automatic private preparation', () => {
       yield* f.write(timestampOnly);
       yield* advance(
         true,
-        snapshot.records.map(record => (record.uri === origin.uri ? timestampOnly : record)),
+        EffectArray.map(snapshot.records, record => (record.uri === origin.uri ? timestampOnly : record)),
       );
       const refreshed = (yield* readPreparedMemory(f.config, target.uri))!;
       expect(refreshed.reads).not.toEqual(complete.reads);
@@ -441,8 +469,14 @@ describe('automatic private preparation', () => {
           authority: 'reviewed_shared',
           trust: 'approved',
         });
-        const teamA = {...shared, uri: shared.uri.replace('/memories/', '/memories/shared/team-a/')};
-        const teamB = {...shared, uri: shared.uri.replace('/memories/', '/memories/shared/team-b/')};
+        const teamA = {
+          ...shared,
+          uri: Effect2.pipe(shared.uri, EffectString.replace('/memories/', '/memories/shared/team-a/')),
+        };
+        const teamB = {
+          ...shared,
+          uri: Effect2.pipe(shared.uri, EffectString.replace('/memories/', '/memories/shared/team-b/')),
+        };
         const privateOnly = record('private_only');
         for (const source of [personal, teamA, teamB, privateOnly]) yield* f.write(source);
         const scopes = automaticMemorySourceUriScopes(f.config, teamA);
@@ -462,7 +496,7 @@ describe('automatic private preparation', () => {
         ).toMatchObject({reason: 'not-found'});
         const conflict = {
           ...record('conflict', 'Conflicting shared projection.', teamA.metadata),
-          uri: teamA.uri.replace('/scope.md', '/conflict.md'),
+          uri: Effect2.pipe(teamA.uri, EffectString.replace('/scope.md', '/conflict.md')),
         };
         yield* f.write(conflict);
         expect(
@@ -480,21 +514,21 @@ describe('automatic private preparation', () => {
         const roots = Array.from({length: 8}, (_, index) => codeCitation('file', `root-${index}.ts`));
         const active = Array.from({length: 8}, (_, index) => codeCitation('file', `active-${index}.ts`));
         const target = reviewedCodeRecord(roots, active);
-        const evidence = [...roots, ...active].map(citation => ({
+        const evidence = EffectArray.map([...roots, ...active], citation => ({
           id: automaticMaintenanceEvidenceId({kind: 'code', citation}),
           source: {kind: 'code' as const, citation},
           scope: 'repository' as const,
           authority: 'recorded' as const,
           availability: 'available' as const,
         }));
-        const candidates = evidence.flatMap(entry =>
-          ['current-verified', 'historical-verified'].map(provenance => {
-            const text = 'x'.repeat(4096);
+        const candidates = EffectArray.flatMap(evidence, entry =>
+          EffectArray.map(verifiedCodeProvenances, provenance => {
+            const text = Effect2.pipe('x', EffectString.repeat(4096));
             return {
               evidenceId: entry.id,
               text,
               excerpt: codeExcerpt(entry.source.citation, text, text, {
-                provenance: provenance as 'current-verified' | 'historical-verified',
+                provenance,
               }),
             };
           }),
@@ -555,9 +589,9 @@ describe('automatic private preparation', () => {
         const code = yield* readAutomaticCodeEvidence(f.config, target, repository);
         expect(code.evidence).toHaveLength(16);
         expect(code.reads).toHaveLength(16);
-        expect(code.candidates.filter(candidate => candidate.excerpt?.provenance === 'current-verified')).toHaveLength(
-          16,
-        );
+        expect(
+          EffectArray.filter(code.candidates, candidate => candidate.excerpt?.provenance === 'current-verified'),
+        ).toHaveLength(16);
         expect(code.omissions).not.toContain('code-source-budget');
         expect(code.omissions).not.toContain('code-evidence-budget');
         const prepared = prepareAutomaticMemory(target, {scopeRevision, ...code});
@@ -577,7 +611,10 @@ describe('automatic private preparation', () => {
         expect(legacy.omissions).toContain('code-evidence-budget');
         // The producer also bounds raw inventory input before canonical admission.
         const {id: originalId, ...rootInput} = roots[0];
-        const extra = createMemoryCodeCitation({...rootInput, sourceCommit: 'f'.repeat(40)});
+        const extra = createMemoryCodeCitation({
+          ...rootInput,
+          sourceCommit: Effect2.pipe('f', EffectString.repeat(40)),
+        });
         expect(extra.id).not.toBe(originalId);
         const overflow = yield* readAutomaticCodeEvidence(
           f.config,
@@ -593,7 +630,7 @@ describe('automatic private preparation', () => {
   effectIt.effect('backfills distinct encoded resource names through inventory and canonical cache lookup', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const originals = ['a b.md', 'a%20b.md', 'café.md', '100%.md'].map((name, index) => {
+      const originals = EffectArray.map(['a b.md', 'a%20b.md', 'café.md', '100%.md'], (name, index) => {
         const original = record(`encoded${index}`, `Distinct accepted content ${index}: ${name}`);
         return {
           ...original,
@@ -607,7 +644,9 @@ describe('automatic private preparation', () => {
         expect(prepared?.assessment.target.uri).toBe(original.uri);
         expect(prepared?.assessment.target.memoryId).toBe(original.metadata.memoryId);
         expect(prepared?.assessment.target.bodyHash).toBe(sha256HexSync(original.body));
-        expect(prepared?.assessment.target.canonicalHash).toBe(sha256HexSync(original.content.trim()));
+        expect(prepared?.assessment.target.canonicalHash).toBe(
+          sha256HexSync(Effect2.pipe(original.content, EffectString.trim)),
+        );
         expect(yield* f.store.read(f.location, original.uri)).toBe(original.content);
       }
     }).pipe(provide),
@@ -636,8 +675,8 @@ describe('automatic private preparation', () => {
         });
         const current = createMemoryCodeCitation({
           ...approvedFields,
-          sourceCommit: 'a'.repeat(40),
-          sourceSnapshotId: `cgsn_${'b'.repeat(40)}`,
+          sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
+          sourceSnapshotId: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}`,
           extractorSet: 'new-extractor-context',
         });
         const excerpt = codeExcerpt(current, text, text);
@@ -700,7 +739,10 @@ describe('automatic private preparation', () => {
         expect(before.omissions).toContain('current-code-citation-unsupported');
         expect(after.omissions).toContain('current-code-evidence-unavailable');
         expect(after.assessment.coverage.omittedSources).toBe(before.assessment.coverage.omittedSources + 1);
-        expect(after.assessment.evidence.find(e => e.id === rootId)?.availability).toBe('unknown');
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(after.assessment.evidence, e => e.id === rootId))
+            ?.availability,
+        ).toBe('unknown');
         expect(prepare(false, reverse, true).relevantRevision).not.toBe(after.relevantRevision);
         const proofLost = prepareAutomaticMemory(target, {
           scopeRevision,
@@ -716,7 +758,10 @@ describe('automatic private preparation', () => {
 
   it('invalidates cited file tails beyond the bounded current excerpt without binding incidental snapshots', () => {
     const citation = codeCitation();
-    const prefix = Array.from({length: 24}, (_, i) => `const prefix${i} = true;`).join('\n');
+    const prefix = EffectArray.join(
+      Array.from({length: 24}, (_, i) => `const prefix${i} = true;`),
+      '\n',
+    );
     const before = codeExcerpt(citation, prefix, `${prefix}\nconst relevantTail = true;`);
     const after = codeExcerpt(citation, prefix, `${prefix}\nconst relevantTail = false;`);
     const historical = codeExcerpt(citation, 'Historical statement.', 'Historical statement.', {
@@ -731,7 +776,11 @@ describe('automatic private preparation', () => {
     expect(first.assessment.coverage.outcome).toBe('partial');
     const unrelatedCommit = {
       ...after,
-      source: {...after.source, sourceCommit: '5'.repeat(40), sourceSnapshotId: `cgsn_${'6'.repeat(40)}`},
+      source: {
+        ...after.source,
+        sourceCommit: Effect2.pipe('5', EffectString.repeat(40)),
+        sourceSnapshotId: `cgsn_${Effect2.pipe('6', EffectString.repeat(40))}`,
+      },
     };
     const third = prepareCode(citation, [historical, unrelatedCommit]);
     expect(third.reads).not.toEqual(second.reads);
@@ -746,7 +795,7 @@ describe('automatic private preparation', () => {
     const first = codeExcerpt(citation, content, `${content}\nconst unrelated = true;`, {truncated: false});
     const unrelated = codeExcerpt(citation, content, `${content}\nconst unrelated = false;`, {truncated: false});
     expect(prepareCode(citation, [unrelated]).relevantRevision).toBe(prepareCode(citation, [first]).relevantRevision);
-    const changedContent = content.replace('true', 'false');
+    const changedContent = Effect2.pipe(content, EffectString.replace('true', 'false'));
     const changed = codeExcerpt(citation, changedContent, `${changedContent}\nconst unrelated = false;`, {
       truncated: false,
     });
@@ -780,7 +829,10 @@ describe('automatic private preparation', () => {
     expect(pin.id).not.toBe(id);
     expect(pin.source.citation.fileContentHash.value).toBe(sha256HexSync(excerpt.content));
     expect(pin.source.citation.fileContentHash.value).not.toBe(citation.fileContentHash.value);
-    expect(packet.basis.assessment.evidence.find(item => item.id === id)!.source).toEqual({kind: 'code', citation});
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(packet.basis.assessment.evidence, item => item.id === id))!
+        .source,
+    ).toEqual({kind: 'code', citation});
     const local = automaticReviewPacket(target, prepared, undefined, {
       repositoryId: excerpt.source.repositoryId,
       kind: 'local',
@@ -816,7 +868,11 @@ describe('automatic private preparation', () => {
           const after = codeExcerpt(citation, prefix, `${prefix}\n${JSON.stringify(afterTail)}`);
           const unchanged = {
             ...after,
-            source: {...after.source, sourceCommit: 'a'.repeat(40), sourceSnapshotId: `cgsn_${'b'.repeat(40)}`},
+            source: {
+              ...after.source,
+              sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
+              sourceSnapshotId: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}`,
+            },
           };
           const inputs = JSON.stringify([citation, before, after, unchanged]);
           const original = prepareCode(citation, [before]);
@@ -856,7 +912,7 @@ describe('automatic private preparation', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* fixture();
-        const records = (['durable', 'handoff', 'incident', 'preference', 'smoke'] as const).map(kind =>
+        const records = EffectArray.map(['durable', 'handoff', 'incident', 'preference', 'smoke'] as const, kind =>
           record(kind, undefined, {kind}),
         );
         const idless = record('idless', undefined, {memoryId: undefined});
@@ -865,7 +921,7 @@ describe('automatic private preparation', () => {
         for (const r of [...records, idless, shared, inactive]) yield* f.write(r);
         const observations = yield* Effect.forEach([...records, idless, shared], r =>
           Effect.gen(function* () {
-            const file = f.path.join(f.root, r.uri.slice(ROOT.length));
+            const file = f.path.join(f.root, Effect2.pipe(r.uri, EffectString.slice(ROOT.length)));
             return {r, file, info: yield* f.fs.stat(file)};
           }),
         );
@@ -904,7 +960,7 @@ describe('automatic private preparation', () => {
           });
           expect(result.isError).not.toBe(true);
           const accepted = yield* readContextMaintenanceCanonicalRecord(f.config, original.uri);
-          const file = f.path.join(f.root, original.uri.slice(ROOT.length));
+          const file = f.path.join(f.root, Effect2.pipe(original.uri, EffectString.slice(ROOT.length)));
           const info = yield* f.fs.stat(file);
           yield* runContextMaintenance(f.config, {cwd: f.home, maxRecords: 1});
           const prepared = yield* readPreparedMemory(f.config, original.uri);
@@ -932,7 +988,7 @@ describe('automatic private preparation', () => {
         const first = (yield* readPreparedMemory(f.config, a.uri))!;
         expect(first.assessment.paragraphs[0].currentSupport).toBe('direct');
         expect(first.assessment.paragraphs[0].role).toBe('unknown');
-        expect(first.assessment.evidence.filter(e => e.source.kind === 'memory')).toHaveLength(1);
+        expect(EffectArray.filter(first.assessment.evidence, e => e.source.kind === 'memory')).toHaveLength(1);
         yield* f.write(record('b', undefined, {...b.metadata, timestamp: '2026-10-22T12:00:00.000Z'}));
         yield* settle(f, 4, 100);
         const second = (yield* readPreparedMemory(f.config, a.uri))!;
@@ -944,7 +1000,10 @@ describe('automatic private preparation', () => {
         yield* f.write(record('b', undefined, {...b.metadata, project: 'other'}));
         yield* settle(f, 4, 100);
         expect((yield* readPreparedMemory(f.config, a.uri))?.assessment.evidence).toHaveLength(0);
-        const shared = {...a, uri: a.uri.replace('/memories/', '/memories/shared/default/')};
+        const shared = {
+          ...a,
+          uri: Effect2.pipe(a.uri, EffectString.replace('/memories/', '/memories/shared/default/')),
+        };
         yield* f.write(shared);
         yield* settle(f, 4, 100);
         expect((yield* readPreparedMemory(f.config, shared.uri))?.omissions).toContain('related-source-policy');
@@ -989,9 +1048,9 @@ describe('automatic private preparation', () => {
           expect(unbound.evidence).toHaveLength(0);
           const discovered = yield* readAutomaticCodeEvidence(f.config, target, repository);
           expect(discovered.candidates.length).toBeGreaterThan(0);
-          expect(discovered.candidates.every(candidate => candidate.excerpt?.provenance === 'current-verified')).toBe(
-            true,
-          );
+          expect(
+            EffectArray.every(discovered.candidates, candidate => candidate.excerpt?.provenance === 'current-verified'),
+          ).toBe(true);
           const assessment = prepareAutomaticMemory(target, {
             scopeRevision,
             evidence: discovered.evidence,
@@ -1000,9 +1059,11 @@ describe('automatic private preparation', () => {
           expect(assessment.assessment.paragraphs[0].historicalEvidenceIds).toEqual([]);
           expect(assessment.assessment.paragraphs[0].currentSupport).toBe('unresolved');
           const packet = automaticReviewPacket(target, assessment);
-          const current = packet.reviewEvidence.find(entry => entry.descriptor.source.kind === 'code')!;
-          const actual = discovered.candidates.find(
-            entry => entry.excerpt?.provenance === 'current-verified',
+          const current = EffectOption.getOrUndefined(
+            EffectArray.findFirst(packet.reviewEvidence, entry => entry.descriptor.source.kind === 'code'),
+          )!;
+          const actual = EffectOption.getOrUndefined(
+            EffectArray.findFirst(discovered.candidates, entry => entry.excerpt?.provenance === 'current-verified'),
           )!.excerpt!;
           if (current.descriptor.source.kind !== 'code') throw new Error('Expected current code pin.');
           expect(current.descriptor.source.citation.fileContentHash.value).toBe(actual.source.fileContentHash);
@@ -1012,7 +1073,11 @@ describe('automatic private preparation', () => {
             fileBytesHash: actual.fileBytesHash,
           });
           expect(current.descriptor.source.citation.target.kind).toBe('symbol');
-          expect(packet.reviewEvidence.some(entry => entry.handleId.startsWith('historical:'))).toBe(false);
+          expect(
+            EffectArray.some(packet.reviewEvidence, entry =>
+              Effect2.pipe(entry.handleId, EffectString.startsWith('historical:')),
+            ),
+          ).toBe(false);
 
           yield* f.write(target);
           const snapshot = yield* prepareContextMaintenanceInventory(f.config, undefined, 100);
@@ -1029,15 +1094,15 @@ describe('automatic private preparation', () => {
   it('preserves validated V1/V2 reviewed consolidation origin outside provisional current evidence', () => {
     const code = createMemoryCodeCitation({
       version: 1,
-      repositoryId: '1'.repeat(64),
+      repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
       repositoryIdentityKind: 'remote',
-      sourceCommit: '2'.repeat(40),
+      sourceCommit: Effect2.pipe('2', EffectString.repeat(40)),
       sourceDirty: false,
-      sourceSnapshotId: `cgsn_${'3'.repeat(40)}`,
+      sourceSnapshotId: `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`,
       extractorSet: 'native-code-graph-13',
       evidenceRetention: 'capsule-retained',
       path: 'src/current.ts',
-      fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+      fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('4', EffectString.repeat(64))},
       target: {kind: 'file'},
     });
     const source = record('original', undefined, {codeCitations: [code]});
@@ -1066,7 +1131,7 @@ describe('automatic private preparation', () => {
     expect(selectAutomaticMemorySourceReferences(v1)).toEqual({refs: [source.uri], omittedSources: 0});
     expect(origin.assessment.preparation.kind).toBe('derived');
     expect(origin.assessment.paragraphs[0].historicalEvidenceIds).toEqual([]);
-    expect(origin.assessment.evidence.some(e => e.source.kind === 'memory')).toBe(true);
+    expect(EffectArray.some(origin.assessment.evidence, e => e.source.kind === 'memory')).toBe(true);
     const updatedBody = 'Updated current statement.';
     const legacy = buildTopicMaintenanceManifest(record('output', updatedBody, {codeCitations: [code]}), {
       paragraphs: [{role: 'descriptive', support: 'direct', citationIds: [code.id]}],
@@ -1080,8 +1145,8 @@ describe('automatic private preparation', () => {
     const v2 = buildConsolidationProvenanceV2(reviewed.provenance, body, updatedBody, manifest, {
       reviewId: 'review-automatic-origin',
       targetBeforeHash: sha256HexSync(v1.content),
-      packetDigest: '5'.repeat(64),
-      observationRevision: '6'.repeat(64),
+      packetDigest: Effect2.pipe('5', EffectString.repeat(64)),
+      observationRevision: Effect2.pipe('6', EffectString.repeat(64)),
     });
     const maintained = record('output', updatedBody, {
       consolidation: v2,
@@ -1104,9 +1169,16 @@ describe('automatic private preparation', () => {
       Effect.gen(function* () {
         const f = yield* fixture();
         const unrelated = Array.from({length: 9}, (_, i) => record(`a${i}`));
-        const source = record('zz_origin', Array.from({length: 51}, (_, i) => `Origin paragraph ${i}.`).join('\n\n'), {
-          relations: unrelated.map(r => ({type: 'related_to', uri: r.uri})),
-        });
+        const source = record(
+          'zz_origin',
+          EffectArray.join(
+            Array.from({length: 51}, (_, i) => `Origin paragraph ${i}.`),
+            '\n\n',
+          ),
+          {
+            relations: EffectArray.map(unrelated, r => ({type: 'related_to', uri: r.uri})),
+          },
+        );
         const body = 'Origin paragraph 50.';
         const captured = captureConsolidationSource(source);
         const reviewed = reviewConsolidation(
@@ -1121,7 +1193,7 @@ describe('automatic private preparation', () => {
                   sourceUri: source.uri,
                   fragment: 50,
                   citationIds: [],
-                  relationIndexes: unrelated.map((_, i) => i),
+                  relationIndexes: EffectArray.map(unrelated, (_, i) => i),
                 },
               ],
             },
@@ -1145,7 +1217,9 @@ describe('automatic private preparation', () => {
         for (const r of unrelated) yield* f.write(r);
         const snapshot = yield* prepareContextMaintenanceInventory(f.config, undefined, 100);
         const prepared = prepareAutomaticMemory(target, {sources: [...unrelated, source], scopeRevision});
-        const memory = prepared.assessment.evidence.find(e => e.source.kind === 'memory');
+        const memory = EffectOption.getOrUndefined(
+          EffectArray.findFirst(prepared.assessment.evidence, e => e.source.kind === 'memory'),
+        );
         expect(memory?.source).toMatchObject({
           kind: 'memory',
           uri: source.uri,
@@ -1162,7 +1236,14 @@ describe('automatic private preparation', () => {
         yield* settle(f, 8, 100);
         const cached = yield* readPreparedMemory(f.config, target.uri);
         expect(
-          cached?.assessment.evidence.some(e => e.source.kind === 'memory' && e.source.fragment.ordinal === 50),
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(cached?.assessment.evidence), __effectArrayReceiver =>
+              EffectArray.some(
+                __effectArrayReceiver,
+                e => e.source.kind === 'memory' && e.source.fragment.ordinal === 50,
+              ),
+            ),
+          ),
         ).toBe(true);
       }).pipe(TestClock.withLive, provide),
   );
@@ -1178,7 +1259,7 @@ describe('automatic private preparation', () => {
       const reviewed = reviewConsolidation(
         body,
         [captureConsolidationSource(sourceA), captureConsolidationSource(sourceB)],
-        [sourceA, sourceB].map((source, ordinal) => ({
+        EffectArray.map([sourceA, sourceB], (source, ordinal) => ({
           section: source.body,
           disposition: 'direct',
           supports: [{sourceUri: source.uri, fragment: 0, citationIds: [], relationIndexes: ordinal ? [0] : []}],
@@ -1198,7 +1279,7 @@ describe('automatic private preparation', () => {
       for (const source of records) yield* f.write(source);
       const observations = yield* Effect.forEach(records, source =>
         Effect.gen(function* () {
-          const file = f.path.join(f.root, source.uri.slice(ROOT.length));
+          const file = f.path.join(f.root, Effect2.pipe(source.uri, EffectString.slice(ROOT.length)));
           return {source, file, info: yield* f.fs.stat(file)};
         }),
       );
@@ -1214,10 +1295,11 @@ describe('automatic private preparation', () => {
       const cached = yield* readPreparedMemory(f.config, target.uri);
       expect(cached).toBeDefined();
       const currentMemory = (prepared: NonNullable<typeof cached>) =>
-        prepared.assessment.evidence.filter(
+        EffectArray.filter(
+          prepared.assessment.evidence,
           entry => entry.source.kind === 'memory' && entry.availability === 'available',
         );
-      expect(currentMemory(cached!).map(entry => entry.source)).toEqual(
+      expect(EffectArray.map(currentMemory(cached!), entry => entry.source)).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             kind: 'memory',
@@ -1240,7 +1322,10 @@ describe('automatic private preparation', () => {
       expect(live.prepared.origin?.receipt).toEqual(reviewed.provenance);
       const packet = automaticReviewPacket(live.record, live.prepared);
       expect(
-        packet.reviewEvidence.some(entry => entry.content === sourceB.body && entry.handleId.startsWith('current:')),
+        EffectArray.some(
+          packet.reviewEvidence,
+          entry => entry.content === sourceB.body && Effect2.pipe(entry.handleId, EffectString.startsWith('current:')),
+        ),
       ).toBe(true);
       for (const {source, file, info} of observations) {
         expect(yield* f.fs.readFileString(file)).toBe(source.content);
@@ -1252,8 +1337,8 @@ describe('automatic private preparation', () => {
   it('selects deterministic origin and active references without mutation or duplicate budget use', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 0, max: 20}), {minLength: 2, maxLength: 4}), ids => {
-        const base = ids.map(id => record(`origin_${id}`));
-        const relations = [...base, record('unrelated')].map(source => ({
+        const base = EffectArray.map(ids, id => record(`origin_${id}`));
+        const relations = EffectArray.map([...base, record('unrelated')], source => ({
           type: 'references' as const,
           uri: source.uri,
         }));
@@ -1262,7 +1347,7 @@ describe('automatic private preparation', () => {
         const review = (ordered: readonly MemoryRecord[]) =>
           reviewConsolidation(
             body,
-            ordered.map(captureConsolidationSource),
+            EffectArray.map(ordered, captureConsolidationSource),
             [
               {
                 section: body,
@@ -1272,7 +1357,7 @@ describe('automatic private preparation', () => {
                     sourceUri: sources[0].uri,
                     fragment: 0,
                     citationIds: [],
-                    relationIndexes: relations.map((_, index) => index),
+                    relationIndexes: EffectArray.map(relations, (_, index) => index),
                   },
                 ],
               },
@@ -1297,10 +1382,7 @@ describe('automatic private preparation', () => {
         const result = selectAutomaticMemorySourceReferences(legacy);
         expect(result.refs).toEqual([
           sources[0].uri,
-          ...sources
-            .slice(1)
-            .map(source => source.uri)
-            .sort(),
+          ...EffectArray.map(sources.slice(1), source => source.uri).sort(),
           record('unrelated').uri,
         ]);
         expect(new Set(result.refs).size).toBe(result.refs.length);
@@ -1314,7 +1396,7 @@ describe('automatic private preparation', () => {
         expect(selectAutomaticMemorySourceReferences(reordered)).toEqual(result);
         expect(JSON.stringify(legacy)).toBe(before);
 
-        const descriptors = sources.slice(1).map(source => {
+        const descriptors = EffectArray.map(sources.slice(1), source => {
           const descriptor = memoryMaintenanceFragmentSource(source, 0);
           return {id: automaticMaintenanceEvidenceId(descriptor), source: descriptor, scope: 'personal' as const};
         });
@@ -1326,16 +1408,16 @@ describe('automatic private preparation', () => {
               hash: sha256HexSync(body),
               role: 'descriptive',
               support: 'direct',
-              evidenceIds: descriptors.map(source => source.id),
+              evidenceIds: EffectArray.map(descriptors, source => source.id),
             },
           ],
           sources: descriptors,
           acceptance: {
             reviewId: 'review-source-selector',
             approvedAt: NOW,
-            targetBeforeHash: '1'.repeat(64),
-            preparationDigest: '2'.repeat(64),
-            sourceVectorDigest: '3'.repeat(64),
+            targetBeforeHash: Effect2.pipe('1', EffectString.repeat(64)),
+            preparationDigest: Effect2.pipe('2', EffectString.repeat(64)),
+            sourceVectorDigest: Effect2.pipe('3', EffectString.repeat(64)),
           },
         });
         const approved = record('approved', body, {
@@ -1358,7 +1440,7 @@ describe('automatic private preparation', () => {
         const selected = selectAutomaticMemorySourceReferences(approved);
         expect(selected).toEqual(selectAutomaticMemorySourceReferences(reversed));
         expect(selected.refs).toEqual([
-          ...descriptors.map(source => source.source.uri).sort(),
+          ...EffectArray.map(descriptors, source => source.source.uri).sort(),
           ...[sources[0].uri, record('unrelated').uri].sort(),
         ]);
         expect(new Set(selected.refs).size).toBe(selected.refs.length);
@@ -1377,8 +1459,8 @@ describe('automatic private preparation', () => {
           {minLength: 1, maxLength: 4},
         ),
         paragraphs => {
-          const target = record('target', paragraphs.join('\n\n'));
-          const source = record('source', paragraphs.join('\n\n'));
+          const target = record('target', EffectArray.join(paragraphs, '\n\n'));
+          const source = record('source', EffectArray.join(paragraphs, '\n\n'));
           const untouched = JSON.stringify([target, source]);
           const first = prepareAutomaticMemory(target, {sources: [source], scopeRevision});
           const timestampOnly = record('source', source.body, {
@@ -1387,7 +1469,9 @@ describe('automatic private preparation', () => {
           });
           const second = prepareAutomaticMemory(target, {sources: [timestampOnly], scopeRevision});
           expect(second.relevantRevision).toBe(first.relevantRevision);
-          expect(second.assessment.evidence.map(e => e.id)).not.toEqual(first.assessment.evidence.map(e => e.id));
+          expect(EffectArray.map(second.assessment.evidence, e => e.id)).not.toEqual(
+            EffectArray.map(first.assessment.evidence, e => e.id),
+          );
           expect(JSON.stringify([target, source])).toBe(untouched);
           expect(
             prepareAutomaticMemory(target, {
@@ -1407,18 +1491,23 @@ describe('automatic private preparation', () => {
         const body = 'First paragraph.\n\nSecond paragraph.';
         const target = record('target', body);
         const source = record('source', body);
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const shifted = record('source', `First paragraph.${'\n'.repeat(separators)}Second paragraph.`);
         const first = prepareAutomaticMemory(target, {sources: [source], scopeRevision});
         const second = prepareAutomaticMemory(target, {sources: [shifted], scopeRevision});
-        const oldFragments = first.assessment.evidence.flatMap(e =>
+        const oldFragments = EffectArray.flatMap(first.assessment.evidence, e =>
           e.source.kind === 'memory' ? [e.source.fragment] : [],
         );
-        const newFragments = second.assessment.evidence.flatMap(e =>
+        const newFragments = EffectArray.flatMap(second.assessment.evidence, e =>
           e.source.kind === 'memory' ? [e.source.fragment] : [],
         );
-        expect(newFragments.map(f => [f.ordinal, f.hash])).toEqual(oldFragments.map(f => [f.ordinal, f.hash]));
+        expect(EffectArray.map(newFragments, f => [f.ordinal, f.hash])).toEqual(
+          EffectArray.map(oldFragments, f => [f.ordinal, f.hash]),
+        );
         expect(newFragments[1].startOffset).not.toBe(oldFragments[1].startOffset);
-        expect(second.assessment.evidence.map(e => e.id)).not.toEqual(first.assessment.evidence.map(e => e.id));
+        expect(EffectArray.map(second.assessment.evidence, e => e.id)).not.toEqual(
+          EffectArray.map(first.assessment.evidence, e => e.id),
+        );
         expect(second.relevantRevision).toBe(first.relevantRevision);
       }),
       {numRuns: 12, seed: 75622},
@@ -1431,7 +1520,7 @@ describe('automatic private preparation', () => {
         fc.uniqueArray(fc.integer({min: 0, max: 30}), {minLength: 1, maxLength: 12}),
         fc.integer({min: 1, max: 4}),
         (ids, budget) => {
-          const uris = ids.map(id => `memory:${String(id).padStart(2, '0')}`);
+          const uris = EffectArray.map(ids, id => `memory:${Effect2.pipe(String(id), EffectString.padStart(2, '0'))}`);
           const expected = new Set(uris);
           const seen = new Set<string>();
           let cursor: string | undefined;
@@ -1459,16 +1548,18 @@ describe('automatic private preparation', () => {
     ({ids, budget}) =>
       Effect.gen(function* () {
         const f = yield* fixture();
-        const records = ids.map(id => record(`p${id}`));
+        const records = EffectArray.map(ids, id => record(`p${id}`));
         for (const r of records) yield* f.write(r);
         yield* settle(f, 25, budget);
         const before = yield* Effect.forEach(records, r => readPreparedMemory(f.config, r.uri));
-        expect(before.every(Boolean)).toBe(true);
+        expect(EffectArray.every(before, Boolean)).toBe(true);
         yield* f.fs.remove(f.path.join(f.home, 'context-maintenance', 'automatic'), {recursive: true});
         yield* f.fs.remove(f.path.join(f.home, 'context-maintenance', 'inventory'), {recursive: true});
         yield* settle(f, 25, budget);
         const after = yield* Effect.forEach(records, r => readPreparedMemory(f.config, r.uri));
-        expect(after.map(x => x?.relevantRevision)).toEqual(before.map(x => x?.relevantRevision));
+        expect(EffectArray.map(after, x => x?.relevantRevision)).toEqual(
+          EffectArray.map(before, x => x?.relevantRevision),
+        );
         for (const r of records) expect(yield* f.store.read(f.location, r.uri)).toBe(r.content);
       }).pipe(TestClock.withLive, provide),
     {fastCheck: {numRuns: 6, seed: 7562026}, timeout: 30000},

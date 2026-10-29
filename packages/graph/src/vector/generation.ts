@@ -1,11 +1,14 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, Schema} from 'effect';
 import type * as SqlClient from 'effect/sql/SqlClient';
 import {CODE_GRAPH_VECTOR_PROGRESS_TABLE_SQL, CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS} from './generation_schema.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class CodeGraphGenerationClaimError extends Schema.TaggedError<CodeGraphGenerationClaimError>()(
-  'CodeGraphGenerationClaimError',
-  {message: Schema.String},
-) {}
+export class CodeGraphGenerationClaimError extends Schema.TaggedError<
+  CodeGraphGenerationClaimError,
+  {readonly brand: unique symbol}
+>()('CodeGraphGenerationClaimError', {message: Schema.String}) {}
 
 export interface CodeGraphGenerationProgress {
   readonly generation: string;
@@ -27,7 +30,7 @@ export const requireCodeGraphGenerationSchema = Effect.fn('codeGraph.requireGene
 ) {
   const expected = [
     {name: 'vector_generation_progress', type: 'table', sql: CODE_GRAPH_VECTOR_PROGRESS_TABLE_SQL},
-    ...CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS.map(trigger => ({...trigger, type: 'trigger'})),
+    ...EffectArray.map(CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS, trigger => ({...trigger, type: 'trigger'})),
   ];
   for (const definition of expected) {
     const rows = yield* sql.unsafe<{readonly type: string; readonly sql: string}>(
@@ -56,7 +59,7 @@ export const requireCodeGraphGenerationSchema = Effect.fn('codeGraph.requireGene
 });
 
 function normalize(sql: string) {
-  return sql.replaceAll(/\s+/gu, ' ').trim().replace(/;$/u, '');
+  return Effect2.pipe(sql, EffectString.replaceAll(/\s+/gu, ' '), EffectString.trim, EffectString.replace(/;$/u, ''));
 }
 
 export const initializeCodeGraphGenerationSchema = Effect.fn('codeGraph.initializeGenerationSchema')(function* (
@@ -209,7 +212,7 @@ export const commitCodeGraphGenerationStep = Effect.fn('codeGraph.commitGenerati
         !Number.isSafeInteger(step.reused) ||
         step.embedded < 0 ||
         step.reused < 0 ||
-        step.rows.some(row => row[0] !== step.generation) ||
+        EffectArray.some(step.rows, row => row[0] !== step.generation) ||
         step.embedded + step.reused !== step.rows.length
       ) {
         return yield* CodeGraphGenerationClaimError.make({message: 'Code graph generation checkpoint is invalid.'});
@@ -223,7 +226,10 @@ export const commitCodeGraphGenerationStep = Effect.fn('codeGraph.commitGenerati
         const batch = step.rows.slice(offset, offset + 100);
         yield* sql.unsafe(
           `INSERT INTO vectors (generation, symbol_id, fingerprint, vector)
-        VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')} ON CONFLICT(generation, symbol_id) DO NOTHING`,
+        VALUES ${EffectArray.join(
+          EffectArray.map(batch, () => '(?, ?, ?, ?)'),
+          ', ',
+        )} ON CONFLICT(generation, symbol_id) DO NOTHING`,
           batch.flat(),
         );
       }

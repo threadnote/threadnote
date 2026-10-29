@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -12,19 +13,27 @@ import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/infe
 import {assertSufficientModelDiskSpace, LocalModelStore, modelDownloadUrl} from '@threadnote/inference/models/store';
 import type {LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const homes: string[] = [];
 const servers: Server[] = [];
 
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))));
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(
+    EffectArray.map(servers.splice(0), server => new Promise<void>(resolve => server.close(() => resolve()))),
+  );
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('LocalModelStore', () => {
   it('downloads the core embedding model from its immutable GitHub release asset', () => {
-    const coreModel = BUILTIN_MODEL_MANIFESTS.find(model => model.id === CORE_EMBEDDING_MODEL_ID);
-    const nonCoreModel = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-m3-q8');
+    const coreModel = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === CORE_EMBEDDING_MODEL_ID),
+    );
+    const nonCoreModel = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-m3-q8'),
+    );
 
     if (!coreModel || !nonCoreModel) throw TestError.make({message: 'Missing built-in model fixture.'});
     expect(modelDownloadUrl(coreModel)).toBe(
@@ -80,6 +89,7 @@ describe('LocalModelStore', () => {
 
   it('removes a checksum-invalid completed download instead of promoting it', async () => {
     const expected = Buffer.from('expected model bytes');
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     const actual = Buffer.from('x'.repeat(expected.length));
     expect(actual.length).toBe(expected.length);
     const manifest = fixtureManifest(expected);
@@ -118,6 +128,7 @@ describe('LocalModelStore', () => {
     const store = await runEffect(LocalModelStore);
     const installedPath = store.path(home, manifest);
     await runEffect(store.install(home, manifest, {sourceUrl}));
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     await writeFile(installedPath, Buffer.from('x'.repeat(bytes.length)));
 
     const repaired = await runEffect(store.install(home, manifest, {sourceUrl}));
@@ -150,7 +161,7 @@ describe('LocalModelStore', () => {
       }).pipe(provideTestLayer(layer)),
     );
 
-    expect(results.every(result => result.verified)).toBe(true);
+    expect(EffectArray.every(results, result => result.verified)).toBe(true);
     expect(verifyLocks).toBe(1);
   });
 
@@ -207,7 +218,7 @@ function fixtureManifest(bytes: Uint8Array): LocalModelManifest {
     promptPrefixes: {document: '', query: ''},
     quantization: 'F32',
     repository: 'threadnote/fixtures',
-    revision: 'a'.repeat(40),
+    revision: Effect2.pipe('a', EffectString.repeat(40)),
     role: 'embedding',
     runtime: {nodeLlamaCpp: '3.19.1'},
     sha256: createHash('sha256').update(bytes).digest('hex'),
@@ -221,7 +232,7 @@ async function serve(bytes: Buffer, ranges: Array<string | undefined>): Promise<
   const server = createServer((request, response) => {
     const range = request.headers.range;
     ranges.push(range);
-    const offset = range ? Number.parseInt(range.replace(/^bytes=(\d+)-.*$/, '$1'), 10) : 0;
+    const offset = range ? Number.parseInt(Effect2.pipe(range, EffectString.replace(/^bytes=(\d+)-.*$/, '$1')), 10) : 0;
     const body = bytes.subarray(Number.isFinite(offset) ? offset : 0);
     response.writeHead(range ? 206 : 200, {
       'Content-Length': body.length,

@@ -80,9 +80,12 @@ export type RemoteMutationDecisionV1 =
       readonly version: typeof REMOTE_MEMORY_REVISION_VERSION;
     };
 
-export class InvalidRemoteMutation extends Schema.TaggedError<InvalidRemoteMutation>()('InvalidRemoteMutation', {
-  message: Schema.String,
-}) {}
+export class InvalidRemoteMutation extends Schema.TaggedError<InvalidRemoteMutation, {readonly brand: unique symbol}>()(
+  'InvalidRemoteMutation',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export function formatRemoteMemoryLogicalKey(identity: RemoteMemoryLogicalIdentityV1): string {
   if (identity.version !== REMOTE_MEMORY_REVISION_VERSION) invalid('unsupported logical-identity version');

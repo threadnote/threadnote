@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Result} from 'effect';
 import {compileContextBriefRuntimeProjection} from '../context_brief/index.js';
 import {CODEX_RESUME_ADDITIONAL_CONTEXT_LIMIT} from './hooks.js';
@@ -32,6 +33,8 @@ import {
 } from '@threadnote/context/types';
 import {AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN, measureAgentToolResponse} from '@threadnote/protocol/agent-response';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CODEX_RESUME_HOOK_TIMEOUT = '10 seconds';
 const CODEX_RESUME_RECEIPT_VERSION = 1 as const;
@@ -123,12 +126,21 @@ export function parseCodexResumeHookEvent(value: unknown): CodexResumeHookEvent 
 }
 
 export function codexResumePreloadDisabled(environment: Readonly<Record<string, string | undefined>>): boolean {
-  const value = environment[THREADNOTE_CODEX_RESUME_PRELOAD_ENV]?.trim().toLowerCase();
+  const value = Effect2.pipe(
+    environment[THREADNOTE_CODEX_RESUME_PRELOAD_ENV],
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   return value === '0' || value === 'false' || value === 'off';
 }
 
 export function promptCarriesActiveHandoff(prompt: string): boolean {
-  return prompt.includes('threadnote://') && prompt.includes('/memories/handoffs/active/');
+  return (
+    Effect2.pipe(prompt, EffectString.includes('threadnote://')) &&
+    Effect2.pipe(prompt, EffectString.includes('/memories/handoffs/active/'))
+  );
 }
 
 export function contextBriefIsEligibleForCodexResume(projected: ProjectedContextBriefV1): boolean {
@@ -162,8 +174,11 @@ export function projectCodexResumePreload(
   const deliveryTokenLimit = Math.min(maximumEstimatedTokens, CODEX_RESUME_ADDITIONAL_CONTEXT_LIMIT);
   const ordinary = projectContextBrief(logical, CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS, 'agent');
   const selection = selectCodexResumeHandoff(logical);
-  const projectedHandoff = ordinary.structuredContent.activeHandoffs.find(
-    candidate => candidate.uri === selection.handoff?.uri,
+  const projectedHandoff = Option.getOrUndefined(
+    EffectArray.findFirst(
+      ordinary.structuredContent.activeHandoffs,
+      candidate => candidate.uri === selection.handoff?.uri,
+    ),
   );
   const projectionDiagnostic =
     selection.reason ??
@@ -372,12 +387,12 @@ function selectCodexResumeHandoff(
   if (logical.scope.freshness !== 'fresh') return {reason: 'scope-not-fresh'};
   if (!logical.coverage.graph.complete) return {reason: 'graph-incomplete'};
   const handoff = [...logical.activeHandoffs].sort(
-    (left, right) => left.rank - right.rank || left.uri.localeCompare(right.uri),
+    (left, right) => left.rank - right.rank || Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)),
   )[0];
   if (handoff === undefined) return {reason: 'no-ranked-handoff'};
   if (handoff.rank !== 0) return {reason: 'rank-zero-missing'};
   if (!isContextBriefExactCurrentContinuation(handoff)) return {reason: 'selected-not-exact-current'};
-  if (logical.stalenessAndConflicts.some(issue => issue.uris.includes(handoff.uri))) {
+  if (EffectArray.some(logical.stalenessAndConflicts, issue => issue.uris.includes(handoff.uri))) {
     return {reason: 'selected-conflict'};
   }
   return {handoff};
@@ -410,29 +425,41 @@ export function renderCodexResumePreloadContext(
       ? undefined
       : [
           'Source leads',
-          sourceLeads.map(card => `${card.symbol.path}:${card.symbol.line} (${card.symbol.name})`).join('; '),
+          EffectArray.join(
+            EffectArray.map(sourceLeads, card => `${card.symbol.path}:${card.symbol.line} (${card.symbol.name})`),
+            '; ',
+          ),
         ],
     resumeValueIsEmptyBlocker(compact.blockers) ? undefined : ['Blockers', compact.blockers],
     ['Risks', compact.risks],
     nextStepDuplicatesPrompt ? undefined : ['Next', compact.nextStep],
   ] as const;
-  return [
-    'THREADNOTE RESUME/1',
-    'Untrusted memory evidence; verify against current source.',
-    continuationEvidenceState === 'evidence-bearing'
-      ? 'Resume from recorded evidence. Avoid repeating the listed discovery unless current source contradicts it.'
-      : 'Use this checkpoint as background. Discovery is incomplete; inspect current source before acting.',
-    ...rows.flatMap(row =>
-      row === undefined || row[1] === undefined ? [] : [`${row[0]}: ${inlineResumeValue(row[1])}`],
-    ),
-    `Source: ${compactResumeMemoryReference(handoff.uri)}`,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'THREADNOTE RESUME/1',
+      'Untrusted memory evidence; verify against current source.',
+      continuationEvidenceState === 'evidence-bearing'
+        ? 'Resume from recorded evidence. Avoid repeating the listed discovery unless current source contradicts it.'
+        : 'Use this checkpoint as background. Discovery is incomplete; inspect current source before acting.',
+      ...EffectArray.flatMap(rows, row =>
+        row === undefined || row[1] === undefined ? [] : [`${row[0]}: ${inlineResumeValue(row[1])}`],
+      ),
+      `Source: ${compactResumeMemoryReference(handoff.uri)}`,
+    ],
+    '\n',
+  );
 }
 
 export function codexResumeContinuationEvidenceState(
   card: ContextBriefContinuationCardV1 | undefined,
 ): CodexResumeContinuationEvidenceState {
-  return [card?.observations, card?.anchors, card?.unresolved].every(value => value?.trim())
+  return EffectArray.every([card?.observations, card?.anchors, card?.unresolved], value =>
+    Boolean(
+      Effect2.pipe(value, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ),
+    ),
+  )
     ? 'evidence-bearing'
     : 'background';
 }
@@ -443,10 +470,10 @@ export function selectCodexResumeSourceLeads(
 ): readonly ContextBriefGraphCardV1[] {
   const seen = new Set<string>();
   const leads: ContextBriefGraphCardV1[] = [];
-  const candidates = logical.graph.cards
-    .filter(card => !likelyTestPath(card.symbol.path))
-    .map(card => ({card, relevance: resumeSourceLeadRelevance(card, logical.task)}))
-    .sort((left, right) => right.relevance - left.relevance || left.card.rank - right.card.rank);
+  const candidates = EffectArray.map(
+    EffectArray.filter(logical.graph.cards, card => !likelyTestPath(card.symbol.path)),
+    card => ({card, relevance: resumeSourceLeadRelevance(card, logical.task)}),
+  ).sort((left, right) => right.relevance - left.relevance || left.card.rank - right.card.rank);
   for (const {card} of candidates) {
     const path = card.symbol.path;
     if (seen.has(path)) continue;
@@ -458,32 +485,50 @@ export function selectCodexResumeSourceLeads(
 }
 
 function resumeSourceLeadRelevance(card: ContextBriefGraphCardV1, task: string): number {
-  const normalizedTask = task.toLocaleLowerCase('en-US');
-  const normalizedName = card.symbol.name.toLocaleLowerCase('en-US');
+  const normalizedTask = Effect2.pipe(task, EffectString.toLocaleLowerCase('en-US'));
+  const normalizedName = Effect2.pipe(card.symbol.name, EffectString.toLocaleLowerCase('en-US'));
   const terms = new Set(
-    normalizedTask
-      .split(/[^a-z0-9]+/gu)
-      .map(term => term.trim())
-      .filter(term => term.length >= 3),
+    EffectArray.filter(
+      EffectArray.map(Effect2.pipe(normalizedTask, EffectString.split(/[^a-z0-9]+/gu)), term =>
+        Effect2.pipe(term, EffectString.trim),
+      ),
+      term => term.length >= 3,
+    ),
   );
-  const symbolTerms = `${card.symbol.path} ${card.symbol.name} ${card.symbol.qualifiedName}`
-    .toLocaleLowerCase('en-US')
-    .split(/[^a-z0-9]+/gu)
-    .filter(term => term.length >= 3);
-  const overlap = symbolTerms.reduce((total, term) => total + (terms.has(term) ? 1 : 0), 0);
-  return overlap * 100 + (normalizedName.length >= 4 && normalizedTask.includes(normalizedName) ? 1_000 : 0);
+  const symbolTerms = EffectArray.filter(
+    Effect2.pipe(
+      `${card.symbol.path} ${card.symbol.name} ${card.symbol.qualifiedName}`,
+      EffectString.toLocaleLowerCase('en-US'),
+      EffectString.split(/[^a-z0-9]+/gu),
+    ),
+    term => term.length >= 3,
+  );
+  const overlap = EffectArray.reduce(symbolTerms, 0, (total, term) => total + (terms.has(term) ? 1 : 0));
+  return (
+    overlap * 100 +
+    (normalizedName.length >= 4 && Effect2.pipe(normalizedTask, EffectString.includes(normalizedName)) ? 1_000 : 0)
+  );
 }
 
 function likelyTestPath(path: string): boolean {
-  const normalized = `/${path.toLocaleLowerCase('en-US')}`;
-  const name = normalized.slice(normalized.lastIndexOf('/') + 1);
+  const normalized = `/${Effect2.pipe(path, EffectString.toLocaleLowerCase('en-US'))}`;
+  const name = Effect2.pipe(
+    normalized,
+    EffectString.slice(
+      Effect2.pipe(
+        normalized,
+        EffectString.lastIndexOf('/'),
+        Effect2.Option.getOrElse(() => -1),
+      ) + 1,
+    ),
+  );
   return (
-    normalized.includes('/test/') ||
-    normalized.includes('/tests/') ||
-    name.startsWith('test_') ||
-    name.includes('.test.') ||
-    name.includes('.spec.') ||
-    name.endsWith('_test.py')
+    Effect2.pipe(normalized, EffectString.includes('/test/')) ||
+    Effect2.pipe(normalized, EffectString.includes('/tests/')) ||
+    Effect2.pipe(name, EffectString.startsWith('test_')) ||
+    Effect2.pipe(name, EffectString.includes('.test.')) ||
+    Effect2.pipe(name, EffectString.includes('.spec.')) ||
+    Effect2.pipe(name, EffectString.endsWith('_test.py'))
   );
 }
 
@@ -499,28 +544,39 @@ function continuationFieldDuplicatesPrompt(value: string | undefined, prompt: st
 }
 
 function normalizeContinuationText(value: string): string {
-  return value.trim().replace(/\s+/gu, ' ').toLocaleLowerCase('en-US');
+  return Effect2.pipe(
+    value,
+    EffectString.trim,
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.toLocaleLowerCase('en-US'),
+  );
 }
 
 function truncatedContinuationPrefixMatches(candidate: string, complete: string): boolean {
-  if (!candidate.endsWith('…')) return false;
-  const prefix = candidate.slice(0, -1).trimEnd();
-  return prefix.length >= 64 && complete.startsWith(prefix);
+  if (!Effect2.pipe(candidate, EffectString.endsWith('…'))) return false;
+  const prefix = Effect2.pipe(candidate, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.trimEnd);
+    return __effectPipeStage1;
+  });
+  return prefix.length >= 64 && Effect2.pipe(complete, EffectString.startsWith(prefix));
 }
 
 function resumeValueIsEmptyBlocker(value: string | undefined): boolean {
-  return value === undefined || /^(?:none|n\/a|no blockers?)[.!]?$/iu.test(value.trim());
+  return value === undefined || /^(?:none|n\/a|no blockers?)[.!]?$/iu.test(Effect2.pipe(value, EffectString.trim));
 }
 
 function inlineResumeValue(value: string): string {
-  return value
-    .replace(/[\t\r\n]+/gu, ' ')
-    .replace(/\s{2,}/gu, ' ')
-    .trim();
+  return Effect2.pipe(
+    value,
+    EffectString.replace(/[\t\r\n]+/gu, ' '),
+    EffectString.replace(/\s{2,}/gu, ' '),
+    EffectString.trim,
+  );
 }
 
 function compactResumeMemoryReference(uri: string): string {
-  return uri.replace(/^threadnote:\/\/user\/[^/]+\//u, '');
+  return Effect2.pipe(uri, EffectString.replace(/^threadnote:\/\/user\/[^/]+\//u, ''));
 }
 
 function codexResumeReceiptPath(path: Path.Path, agentContextHome: string, receiptKey: string): string {
@@ -545,7 +601,11 @@ function readCodexResumeReceipt(
       /^[0-9a-f]{64}$/u.test(value.evidenceGeneration) &&
       typeof value.evidenceHash === 'string' &&
       /^[0-9a-f]{64}$/u.test(value.evidenceHash)
-      ? (value as unknown as CodexResumeReceiptV1)
+      ? {
+          evidenceGeneration: value.evidenceGeneration,
+          evidenceHash: value.evidenceHash,
+          version: CODEX_RESUME_RECEIPT_VERSION,
+        }
       : undefined;
   }).pipe(Effect.orElseSucceed(() => undefined));
 }
@@ -576,8 +636,8 @@ function emptyResult<Outcome extends Exclude<CodexResumePreloadOutcome, 'injecte
 function validBoundedText(value: unknown, maximumBytes: number): value is string {
   return (
     typeof value === 'string' &&
-    value.trim().length > 0 &&
-    !value.includes('\0') &&
+    Effect2.pipe(value, EffectString.trim).length > 0 &&
+    !Effect2.pipe(value, EffectString.includes('\0')) &&
     UTF8.encode(value).byteLength <= maximumBytes
   );
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import type {MemoryMetadata, MemoryRecord} from '@threadnote/memory/hygiene';
@@ -13,6 +14,8 @@ import {
   formatReferencedContextPointers,
   referencedUrisFromRecords,
 } from '@threadnote/memory/hygiene';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function record(
   overrides: Omit<Partial<MemoryRecord>, 'metadata'> & {
@@ -33,19 +36,23 @@ function record(
     body,
     content:
       overrides.content ??
-      [
-        metadata.kind === 'handoff' ? 'HANDOFF' : 'MEMORY',
-        `kind: ${metadata.kind}`,
-        `status: ${metadata.status}`,
-        `project: ${metadata.project}`,
-        metadata.topic ? `topic: ${metadata.topic}` : undefined,
-        `source_agent_client: ${metadata.sourceAgentClient}`,
-        `timestamp: ${metadata.timestamp}`,
-        '',
-        body,
-      ]
-        .filter((line): line is string => line !== undefined)
-        .join('\n'),
+      EffectArray.join(
+        EffectArray.filter(
+          [
+            metadata.kind === 'handoff' ? 'HANDOFF' : 'MEMORY',
+            `kind: ${metadata.kind}`,
+            `status: ${metadata.status}`,
+            `project: ${metadata.project}`,
+            metadata.topic ? `topic: ${metadata.topic}` : undefined,
+            `source_agent_client: ${metadata.sourceAgentClient}`,
+            `timestamp: ${metadata.timestamp}`,
+            '',
+            body,
+          ],
+          (line): line is string => line !== undefined,
+        ),
+        '\n',
+      ),
     headerTitle: overrides.headerTitle ?? (metadata.kind === 'handoff' ? 'HANDOFF' : 'MEMORY'),
     metadata,
     uri: overrides.uri,
@@ -69,8 +76,8 @@ describe('buildCompactPlan', () => {
 
     const plan = buildCompactPlan([duplicate, stable], {project: 'mobile-native'});
 
-    expect(plan.keepUpdates.map(action => action.uri)).toEqual([stable.uri]);
-    expect(plan.forgets.map(action => action.uri)).toEqual([duplicate.uri]);
+    expect(EffectArray.map(plan.keepUpdates, action => action.uri)).toEqual([stable.uri]);
+    expect(EffectArray.map(plan.forgets, action => action.uri)).toEqual([duplicate.uri]);
     expect(plan.archives).toEqual([]);
     expect(plan.keepUpdates[0]?.content).toContain(stable.uri);
     expect(plan.keepUpdates[0]?.content).toContain(duplicate.uri);
@@ -88,12 +95,15 @@ describe('buildCompactPlan', () => {
       uri: 'threadnote://user/me/memories/durable/projects/mobile-native/threadnote-copy.md',
       headerTitle: 'MEMORY',
       metadata: {kind: 'durable', topic: 'mobile-auth'},
-      body: ['Shared auth contract.', '', '## Threadnote Hygiene Sources', '', `- ${priorSource}`].join('\n'),
+      body: EffectArray.join(
+        ['Shared auth contract.', '', '## Threadnote Hygiene Sources', '', `- ${priorSource}`],
+        '\n',
+      ),
     });
 
     const plan = buildCompactPlan([stable, duplicate], {project: 'mobile-native'});
 
-    expect(plan.forgets.map(action => action.uri)).toEqual([duplicate.uri]);
+    expect(EffectArray.map(plan.forgets, action => action.uri)).toEqual([duplicate.uri]);
     expect(plan.keepUpdates[0]?.content).toContain(`- ${priorSource}`);
   });
 
@@ -134,9 +144,10 @@ describe('buildCompactPlan', () => {
     expect(plan.archives).toEqual([]);
     expect(plan.keepUpdates).toEqual([]);
     expect(plan.manualReview).toEqual(
-      [stable.uri, distinctProvenance.uri]
-        .sort()
-        .map(uri => ({reason: 'same body has distinct metadata or provenance; no automatic retirement', uri})),
+      EffectArray.map([stable.uri, distinctProvenance.uri].sort(), uri => ({
+        reason: 'same body has distinct metadata or provenance; no automatic retirement',
+        uri,
+      })),
     );
   });
 
@@ -158,7 +169,7 @@ describe('buildCompactPlan', () => {
 
     expect(plan.forgets).toEqual([]);
     expect(plan.archives).toEqual([]);
-    expect(plan.manualReview.map(item => item.uri)).toEqual([stable.uri, whitespaceChanged.uri].sort());
+    expect(EffectArray.map(plan.manualReview, item => item.uri)).toEqual([stable.uri, whitespaceChanged.uri].sort());
   });
 
   it('never strips user-authored content under a hygiene-sources heading', () => {
@@ -166,25 +177,19 @@ describe('buildCompactPlan', () => {
       uri: 'threadnote://user/me/memories/durable/projects/mobile-native/mobile-auth.md',
       headerTitle: 'MEMORY',
       metadata: {kind: 'durable', topic: 'mobile-auth'},
-      body: [
-        'Shared auth contract.',
-        '',
-        '## Threadnote Hygiene Sources',
-        '',
-        'This is a user-authored explanation.',
-      ].join('\n'),
+      body: EffectArray.join(
+        ['Shared auth contract.', '', '## Threadnote Hygiene Sources', '', 'This is a user-authored explanation.'],
+        '\n',
+      ),
     });
     const distinctTail = record({
       uri: 'threadnote://user/me/memories/durable/projects/mobile-native/threadnote-2026.md',
       headerTitle: 'MEMORY',
       metadata: {kind: 'durable', topic: 'mobile-auth'},
-      body: [
-        'Shared auth contract.',
-        '',
-        '## Threadnote Hygiene Sources',
-        '',
-        'Different legitimate Markdown content.',
-      ].join('\n'),
+      body: EffectArray.join(
+        ['Shared auth contract.', '', '## Threadnote Hygiene Sources', '', 'Different legitimate Markdown content.'],
+        '\n',
+      ),
     });
 
     const plan = buildCompactPlan([stable, distinctTail], {project: 'mobile-native'});
@@ -192,7 +197,7 @@ describe('buildCompactPlan', () => {
     expect(plan.forgets).toEqual([]);
     expect(plan.keepUpdates).toEqual([]);
     expect(plan.archives).toEqual([]);
-    expect(plan.manualReview.map(item => item.uri)).toEqual([stable.uri, distinctTail.uri].sort());
+    expect(EffectArray.map(plan.manualReview, item => item.uri)).toEqual([stable.uri, distinctTail.uri].sort());
   });
 
   it('archives older non-exact handoffs for the same group', () => {
@@ -212,8 +217,8 @@ describe('buildCompactPlan', () => {
       project: 'mobile-native',
     });
 
-    expect(plan.keepUpdates.map(action => action.uri)).toEqual([newHandoff.uri]);
-    expect(plan.archives.map(action => action.uri)).toEqual([oldHandoff.uri]);
+    expect(EffectArray.map(plan.keepUpdates, action => action.uri)).toEqual([newHandoff.uri]);
+    expect(EffectArray.map(plan.archives, action => action.uri)).toEqual([oldHandoff.uri]);
     expect(plan.forgets).toEqual([]);
     expect(plan.keepUpdates[0]?.content).toContain(oldHandoff.uri);
     expect(plan.keepUpdates[0]?.content).toContain(newHandoff.uri);
@@ -267,9 +272,9 @@ describe('buildCompactPlan', () => {
       project: 'mobile-native',
     });
 
-    expect(plan.keepUpdates.map(action => action.uri)).toEqual([latest.uri]);
-    expect(plan.forgets.map(action => action.uri)).toEqual([duplicateB.uri]);
-    expect(plan.archives.map(action => action.uri)).toEqual([duplicateA.uri]);
+    expect(EffectArray.map(plan.keepUpdates, action => action.uri)).toEqual([latest.uri]);
+    expect(EffectArray.map(plan.forgets, action => action.uri)).toEqual([duplicateB.uri]);
+    expect(EffectArray.map(plan.archives, action => action.uri)).toEqual([duplicateA.uri]);
     expect(plan.keepUpdates[0]?.content).toContain(duplicateA.uri);
     expect(plan.keepUpdates[0]?.content).toContain(duplicateB.uri);
     expect(plan.keepUpdates[0]?.content).toContain(latest.uri);
@@ -294,7 +299,7 @@ describe('buildCompactPlan', () => {
     expect(plan.keepUpdates).toEqual([]);
     expect(plan.archives).toEqual([]);
     expect(plan.forgets).toEqual([]);
-    expect(plan.manualReview.map(item => item.uri).sort()).toEqual([left.uri, right.uri].sort());
+    expect(EffectArray.map(plan.manualReview, item => item.uri).sort()).toEqual([left.uri, right.uri].sort());
   });
 
   it('keeps the newest handoff content even when an older record owns the stable URI', () => {
@@ -314,8 +319,8 @@ describe('buildCompactPlan', () => {
       project: 'mobile-native',
     });
 
-    expect(plan.keepUpdates.map(action => action.uri)).toEqual([newestTimestamped.uri]);
-    expect(plan.archives.map(action => action.uri)).toEqual([oldStable.uri]);
+    expect(EffectArray.map(plan.keepUpdates, action => action.uri)).toEqual([newestTimestamped.uri]);
+    expect(EffectArray.map(plan.archives, action => action.uri)).toEqual([oldStable.uri]);
   });
 
   it('defers old handoffs with explicit pending language to manual review', () => {
@@ -339,31 +344,34 @@ describe('buildCompactPlan', () => {
     const generated = record({
       uri: 'threadnote://user/me/memories/handoffs/active/mobile-native/generated-default.md',
       metadata: {timestamp: '2026-07-01T00:00:00.000Z', topic: 'generated-default'},
-      body: [
-        'repo: mobile-native',
-        'repo_path: /workspace/mobile-native',
-        'branch: feature/mobile-auth',
-        'commit: abc123',
-        'task: unspecified',
-        '',
-        'files_touched:',
-        '- none',
-        '',
-        'git_status:',
-        '- clean',
-        '',
-        'diff_stat:',
-        '- none',
-        '',
-        'tests:',
-        '- not recorded',
-        '',
-        'blockers:',
-        '- none recorded',
-        '',
-        'next_step:',
-        `- ${DEFAULT_HANDOFF_NEXT_STEP}`,
-      ].join('\n'),
+      body: EffectArray.join(
+        [
+          'repo: mobile-native',
+          'repo_path: /workspace/mobile-native',
+          'branch: feature/mobile-auth',
+          'commit: abc123',
+          'task: unspecified',
+          '',
+          'files_touched:',
+          '- none',
+          '',
+          'git_status:',
+          '- clean',
+          '',
+          'diff_stat:',
+          '- none',
+          '',
+          'tests:',
+          '- not recorded',
+          '',
+          'blockers:',
+          '- none recorded',
+          '',
+          'next_step:',
+          `- ${DEFAULT_HANDOFF_NEXT_STEP}`,
+        ],
+        '\n',
+      ),
     });
     const authored = record({
       uri: 'threadnote://user/me/memories/handoffs/active/mobile-native/authored-next-step.md',
@@ -376,7 +384,7 @@ describe('buildCompactPlan', () => {
       project: 'mobile-native',
     });
 
-    expect(plan.archives.map(action => action.uri)).toEqual([generated.uri]);
+    expect(EffectArray.map(plan.archives, action => action.uri)).toEqual([generated.uri]);
     expect(plan.manualReview).toEqual([
       {
         reason: '30-day handoff retention deferred by explicit pending/open/blocker language',
@@ -410,8 +418,8 @@ describe('buildCompactPlan', () => {
       project: 'mobile-native',
     });
 
-    expect(plan.archives.map(action => action.uri)).toEqual([durable.uri, incident.uri]);
-    expect(plan.archives.map(action => action.sourceUris)).toEqual([[durable.uri], [incident.uri]]);
+    expect(EffectArray.map(plan.archives, action => action.uri)).toEqual([durable.uri, incident.uri]);
+    expect(EffectArray.map(plan.archives, action => action.sourceUris)).toEqual([[durable.uri], [incident.uri]]);
     expect(plan.keepUpdates).toEqual([]);
     expect(plan.forgets).toEqual([]);
   });
@@ -476,7 +484,11 @@ describe('buildCompactPlan', () => {
       {now: new Date('2026-08-20T00:00:00.000Z'), project: 'mobile-native'},
     );
 
-    expect(plan.archives.map(action => action.uri)).toEqual([old.uri, terminalNextStep.uri, terminalStatus.uri]);
+    expect(EffectArray.map(plan.archives, action => action.uri)).toEqual([
+      old.uri,
+      terminalNextStep.uri,
+      terminalStatus.uri,
+    ]);
     expect(plan.manualReview).toEqual([
       {reason: 'nonterminal active handoff is between 14 and 30 days old', uri: nonterminal.uri},
       {
@@ -489,7 +501,8 @@ describe('buildCompactPlan', () => {
       },
     ]);
     expect(
-      [...plan.keepUpdates, ...plan.archives, ...plan.forgets, ...plan.manualReview].some(
+      EffectArray.some(
+        [...plan.keepUpdates, ...plan.archives, ...plan.forgets, ...plan.manualReview],
         action => action.uri === recentlyUpdated.uri || action.uri === recentlyReviewed.uri,
       ),
     ).toBe(false);
@@ -524,7 +537,10 @@ describe('buildCompactPlan', () => {
       project: 'mobile-native',
     });
 
-    const mutationUris = [...plan.keepUpdates, ...plan.archives, ...plan.forgets].map(action => action.uri);
+    const mutationUris = EffectArray.map(
+      [...plan.keepUpdates, ...plan.archives, ...plan.forgets],
+      action => action.uri,
+    );
     expect(mutationUris).not.toContain(sharedHandoff.uri);
     expect(mutationUris).not.toContain(otherTeam.uri);
     expect(plan.mergeReviewProposals).toEqual([
@@ -572,19 +588,13 @@ describe('buildCompactPlan', () => {
       {
         project: 'mobile-native',
         reason: 'divergent active durable memories',
-        sourceUris: records
-          .slice(0, 2)
-          .map(item => item.uri)
-          .sort(),
+        sourceUris: EffectArray.map(records.slice(0, 2), item => item.uri).sort(),
         topic: 'contract',
       },
       {
         project: 'mobile-native',
         reason: 'divergent active incident memories',
-        sourceUris: records
-          .slice(2)
-          .map(item => item.uri)
-          .sort(),
+        sourceUris: EffectArray.map(records.slice(2), item => item.uri).sort(),
         topic: 'outage',
       },
     ]);
@@ -629,7 +639,10 @@ describe('buildCompactPlan', () => {
       fc.property(fc.shuffledSubarray(records, {maxLength: records.length, minLength: records.length}), permutation => {
         const plan = buildCompactPlan(permutation, options);
         expect(plan).toEqual(expected);
-        const mutationUris = [...plan.keepUpdates, ...plan.archives, ...plan.forgets].map(action => action.uri);
+        const mutationUris = EffectArray.map(
+          [...plan.keepUpdates, ...plan.archives, ...plan.forgets],
+          action => action.uri,
+        );
         expect(new Set(mutationUris).size).toBe(mutationUris.length);
       }),
       {numRuns: 50},
@@ -641,18 +654,21 @@ describe('memoryContentWithHygieneSources', () => {
   it('strips self-supersedes while preserving source URIs', () => {
     const uri = 'threadnote://user/me/memories/handoffs/active/mobile-native/mobile-auth.md';
     const input = record({
-      content: [
-        'HANDOFF',
-        'kind: handoff',
-        'status: active',
-        'project: mobile-native',
-        'topic: mobile-auth',
-        'source_agent_client: codex',
-        'timestamp: 2026-05-20T00:00:00.000Z',
-        `supersedes: ${uri}`,
-        '',
-        'task: latest status',
-      ].join('\n'),
+      content: EffectArray.join(
+        [
+          'HANDOFF',
+          'kind: handoff',
+          'status: active',
+          'project: mobile-native',
+          'topic: mobile-auth',
+          'source_agent_client: codex',
+          'timestamp: 2026-05-20T00:00:00.000Z',
+          `supersedes: ${uri}`,
+          '',
+          'task: latest status',
+        ],
+        '\n',
+      ),
       uri,
     });
 
@@ -677,28 +693,45 @@ describe('memoryContentWithHygieneSources', () => {
 
     expect(secondContent).toContain(`- ${firstSource}`);
     expect(secondContent).toContain(`- ${secondSource}`);
-    expect(secondContent.match(/## Threadnote Hygiene Sources/g)).toHaveLength(1);
+    expect(
+      Effect.pipe(
+        secondContent,
+        EffectString.match(/## Threadnote Hygiene Sources/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(1);
   });
 });
 
 describe('recallHygieneNudges', () => {
   it('returns no hint below thresholds', () => {
-    const text = [
-      'threadnote://user/me/memories/handoffs/active/mobile-native/a.md',
-      'threadnote://user/me/memories/handoffs/active/mobile-native/b.md',
-    ].join('\n');
+    const text = EffectArray.join(
+      [
+        'threadnote://user/me/memories/handoffs/active/mobile-native/a.md',
+        'threadnote://user/me/memories/handoffs/active/mobile-native/b.md',
+      ],
+      '\n',
+    );
 
     expect(recallHygieneNudges(text, {user: 'me'})).toEqual([]);
   });
 
   it('nudges for overlapping active memories', () => {
-    const records = [1, 2, 3].map(index =>
+    const records = EffectArray.map([1, 2, 3], index =>
       record({
         uri: `threadnote://user/me/memories/handoffs/active/mobile-native/threadnote-${index}.md`,
       }),
     );
 
-    expect(recallHygieneNudges(records.map(item => item.uri).join('\n'), {records, user: 'me'})).toEqual([
+    expect(
+      recallHygieneNudges(
+        EffectArray.join(
+          EffectArray.map(records, item => item.uri),
+          '\n',
+        ),
+        {records, user: 'me'},
+      ),
+    ).toEqual([
       '3 active handoffs look overlapping for mobile-native/mobile-auth; run compact_context({"project":"mobile-native","topic":"mobile-auth","dryRun":true}).',
     ]);
   });
@@ -714,7 +747,7 @@ describe('recallHygieneNudges', () => {
       'threadnote://resources/repos/mobile-native/README.md',
     ];
 
-    expect(recallHygieneNudges([...active, ...ignored].join('\n'), {user: 'me'})).toEqual([
+    expect(recallHygieneNudges(EffectArray.join([...active, ...ignored], '\n'), {user: 'me'})).toEqual([
       'Many active handoffs surfaced for mobile-native; run compact_context({"project":"mobile-native","dryRun":true}).',
     ]);
   });
@@ -784,19 +817,22 @@ describe('formatCompactPlan', () => {
 
 describe('references relation', () => {
   it('parses multiple references: header lines into metadata.references', () => {
-    const content = [
-      'HANDOFF',
-      'kind: handoff',
-      'status: active',
-      'project: threadnote',
-      'topic: my-branch',
-      'source_agent_client: codex',
-      'timestamp: 2026-07-02T00:00:00.000Z',
-      'references: threadnote://user/me/memories/durable/projects/threadnote/design.md',
-      'references: threadnote://user/me/memories/handoffs/active/threadnote/prior.md',
-      '',
-      'task: keep going',
-    ].join('\n');
+    const content = EffectArray.join(
+      [
+        'HANDOFF',
+        'kind: handoff',
+        'status: active',
+        'project: threadnote',
+        'topic: my-branch',
+        'source_agent_client: codex',
+        'timestamp: 2026-07-02T00:00:00.000Z',
+        'references: threadnote://user/me/memories/durable/projects/threadnote/design.md',
+        'references: threadnote://user/me/memories/handoffs/active/threadnote/prior.md',
+        '',
+        'task: keep going',
+      ],
+      '\n',
+    );
     const parsed = parseMemoryDocument(
       'threadnote://user/me/memories/handoffs/active/threadnote/my-branch.md',
       content,
@@ -808,7 +844,7 @@ describe('references relation', () => {
   });
 
   it('leaves references undefined when absent', () => {
-    const content = ['MEMORY', 'kind: durable', 'status: active', 'project: x', '', 'body'].join('\n');
+    const content = EffectArray.join(['MEMORY', 'kind: durable', 'status: active', 'project: x', '', 'body'], '\n');
     const parsed = parseMemoryDocument('threadnote://user/me/memories/durable/projects/x/a.md', content);
     expect(parsed?.metadata.references).toBeUndefined();
   });
@@ -852,11 +888,14 @@ describe('references relation', () => {
         1,
       ),
     ).toBe(
-      [
-        'Referenced read-only context (one-way pointers from surfaced memories):',
-        '- threadnote://user/me/memories/durable/projects/threadnote/first.md',
-        '- … 1 more referenced memory omitted',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'Referenced read-only context (one-way pointers from surfaced memories):',
+          '- threadnote://user/me/memories/durable/projects/threadnote/first.md',
+          '- … 1 more referenced memory omitted',
+        ],
+        '\n',
+      ),
     );
   });
 });

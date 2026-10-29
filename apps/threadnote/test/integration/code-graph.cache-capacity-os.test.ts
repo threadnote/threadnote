@@ -1,6 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -20,11 +21,14 @@ import {
 } from '@threadnote/graph/disk/reservation';
 import {CodeGraphStore, materializedFileShardIdentity} from '@threadnote/graph/store';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '@threadnote/graph/types';
+import {parseCodeGraphFileFacts} from '@threadnote/graph/fact/validation';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const EXTRACTOR_SET = 'cache-os-extractor-v1';
 const DERIVATION_IDENTITY = 'cache-os-derivation-v1';
-const FILESYSTEM_KEY = 'e'.repeat(64);
+const FILESYSTEM_KEY = Effect2.pipe('e', EffectString.repeat(64));
 const CHILD_COUNT = 8;
 type CacheMode = 'facts' | 'shards';
 type CacheChildAction = 'concurrent' | 'crash' | 'retry';
@@ -102,24 +106,31 @@ describe('code graph cache capacity OS coordination', () => {
                 children =>
                   Effect.gen(function* () {
                     yield* waitForMarkers(
-                      options.map(option => path.join(readyRoot, `${option.childId}.ready`)),
+                      EffectArray.map(options, option => path.join(readyRoot, `${option.childId}.ready`)),
                       'initial',
                     );
                     yield* fs.writeFileString(startReleasePath, 'release', {flag: 'wx', mode: 0o600});
                     yield* waitForMarkers(
-                      options.map(option => path.join(receiptReadyRoot, `${option.childId}.receipt`)),
+                      EffectArray.map(options, option => path.join(receiptReadyRoot, `${option.childId}.receipt`)),
                       'receipt',
                     );
 
                     const heldReceipts = yield* readCacheReceipts(fs, ledgerRoot);
                     expect(heldReceipts).toHaveLength(CHILD_COUNT);
-                    expect(heldReceipts.every(receipt => receipt.operation === operationForMode(mode))).toBe(true);
-                    expect(heldReceipts.every(receipt => receipt.filesystems.length === 1)).toBe(true);
                     expect(
-                      Array.from(heldReceipts).reduce((sum, receipt) => sum + (receipt.filesystems[0]?.bytes ?? 0), 0),
+                      EffectArray.every(heldReceipts, receipt => receipt.operation === operationForMode(mode)),
+                    ).toBe(true);
+                    expect(EffectArray.every(heldReceipts, receipt => receipt.filesystems.length === 1)).toBe(true);
+                    expect(
+                      EffectArray.reduce(
+                        Array.from(heldReceipts),
+                        0,
+                        (sum, receipt) => sum + (receipt.filesystems[0]?.bytes ?? 0),
+                      ),
                     ).toBe(availableBytes);
                     expect(
-                      heldReceipts.every(
+                      EffectArray.every(
+                        heldReceipts,
                         receipt =>
                           receipt.filesystems[0]?.bytes === receiptBytes &&
                           receipt.filesystems[0]?.key === FILESYSTEM_KEY,
@@ -129,10 +140,10 @@ describe('code graph cache capacity OS coordination', () => {
 
                     yield* fs.writeFileString(transactionReleasePath, 'release', {flag: 'wx', mode: 0o600});
                     const results = yield* Effect.forEach(children, collectCacheChild, {concurrency: CHILD_COUNT});
-                    expect(results.map(result => result.exitCode)).toEqual(Array(CHILD_COUNT).fill(0));
-                    expect(results.every(result => result.stderr.length === 0)).toBe(true);
+                    expect(EffectArray.map(results, result => result.exitCode)).toEqual(Array(CHILD_COUNT).fill(0));
+                    expect(EffectArray.every(results, result => result.stderr.length === 0)).toBe(true);
                     expect(readCacheMapping(databasePath, mode)).toEqual(
-                      options.map(option => expectedCacheMapping(option.childId)),
+                      EffectArray.map(options, option => expectedCacheMapping(option.childId)),
                     );
                     expect(yield* readCacheReceipts(fs, ledgerRoot)).toEqual([]);
                   }),
@@ -255,7 +266,7 @@ function collectCacheChild(child: CacheChildProcess) {
       ] as const,
       {concurrency: 3},
     );
-    return {exitCode, stderr: stderr.trim(), stdout: stdout.trim()};
+    return {exitCode, stderr: Effect2.pipe(stderr, EffectString.trim), stdout: Effect2.pipe(stdout, EffectString.trim)};
   });
 }
 
@@ -272,7 +283,7 @@ function waitForMarkers(targets: readonly string[], label: string) {
     const deadline = (yield* Clock.currentTimeMillis) + 15_000;
     while (true) {
       const present = yield* Effect.forEach(targets, target => fs.exists(target), {concurrency: CHILD_COUNT});
-      if (present.every(Boolean)) return;
+      if (EffectArray.every(present, Boolean)) return;
       if ((yield* Clock.currentTimeMillis) >= deadline)
         return yield* TestError.make({message: `Cache child missed the ${label} barrier.`});
       yield* Effect.sleep(10);
@@ -284,7 +295,10 @@ function readCacheReceipts(fs: FileSystem.FileSystem, ledgerRoot: string) {
   return fs.readDirectory(ledgerRoot).pipe(
     Effect.flatMap(entries =>
       Effect.forEach(
-        entries.filter(name => name.endsWith('.json')).sort(),
+        EffectArray.filter(
+          entries,
+          (name, index) => index in entries && Effect2.pipe(name, EffectString.endsWith('.json')),
+        ).sort(),
         name =>
           fs.readFileString(`${ledgerRoot}/${name}`).pipe(
             Effect.flatMap(content => {
@@ -383,10 +397,10 @@ function operationForMode(mode: CacheMode) {
 }
 
 function cacheFile(index: number): CodeGraphInventoryFile {
-  const suffix = index.toString().padStart(6, '0');
+  const suffix = Effect2.pipe(index.toString(), EffectString.padStart(6, '0'));
   return {
-    blobId: (index + 1).toString(16).padStart(40, '0'),
-    contentHash: (index + 1).toString(16).padStart(64, '0'),
+    blobId: Effect2.pipe((index + 1).toString(16), EffectString.padStart(40, '0')),
+    contentHash: Effect2.pipe((index + 1).toString(16), EffectString.padStart(64, '0')),
     language: 'typescript',
     mode: '100644',
     path: `src/os-child/file-${suffix}.ts`,
@@ -408,12 +422,18 @@ function readCacheMapping(databasePath: string, mode: CacheMode) {
   const database = new Database(databasePath, {readonly: true, strict: true});
   const table = mode === 'facts' ? 'file_blobs' : 'materialized_file_shards';
   try {
-    return (
-      database.query(`SELECT path_hint, facts_json FROM ${table} ORDER BY path_hint`).all() as readonly {
-        readonly facts_json: string;
-        readonly path_hint: string;
-      }[]
-    ).map(row => ({facts: JSON.parse(row.facts_json) as CodeGraphFileFacts, pathHint: row.path_hint}));
+    return EffectArray.map(
+      database
+        .query<
+          {
+            readonly facts_json: string;
+            readonly path_hint: string;
+          },
+          SQLQueryBindings[]
+        >(`SELECT path_hint, facts_json FROM ${table} ORDER BY path_hint`)
+        .all(),
+      row => ({facts: parseCodeGraphFileFacts(JSON.parse(row.facts_json)), pathHint: row.path_hint}),
+    );
   } finally {
     database.close(false);
   }

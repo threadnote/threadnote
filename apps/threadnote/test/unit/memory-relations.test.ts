@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -282,7 +283,7 @@ const writeMemory = Effect.fn('test.writeRelationMemory')(function* (
   const target = memoryFilePath(path, config, topic, status);
   const root = path.dirname(target);
   yield* fs.makeDirectory(root, {recursive: true});
-  const uri = `threadnote://user/${config.user}/memories/${lifecycle.join('/')}/${topic}.md`;
+  const uri = `threadnote://user/${config.user}/memories/${EffectArray.join(lifecycle, '/')}/${topic}.md`;
   const metadata: MemoryMetadata = {
     kind: 'durable',
     memoryId,

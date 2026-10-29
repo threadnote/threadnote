@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {upsertLinearSource} from '../src/config.js';
@@ -6,6 +7,7 @@ import {makeSourceConfigurationRegistry} from '@threadnote/integration-runtime/c
 import {linearDocumentId, renderLinearIssue, scrubLinearMarkdown} from '../src/render.js';
 import {linearIssueInScope} from '../src/client.js';
 import {comment, issue, source, uuid} from './fixtures.js';
+
 const registry = makeSourceConfigurationRegistry({sources: [linearSourceCodec], projections: []});
 const parseSourceConfiguration = registry.parse;
 const renderSourceConfiguration = registry.render;
@@ -19,7 +21,7 @@ describe('Linear configuration and rendering invariants', () => {
     });
     const config = upsertLinearSource({version: 1, sources: [], projections: []}, source);
     expect(parseSourceConfiguration(renderSourceConfiguration(config))).toEqual(config);
-    expect(() => parseSourceConfiguration(renderSourceConfiguration({...config, version: 1} as never))).toThrow();
+    expect(() => parseSourceConfiguration(renderSourceConfiguration({...config, version: 1}))).toThrow();
   });
   it('rejects missing selections, duplicates and projectless bindings', () => {
     for (const delta of [
@@ -29,12 +31,13 @@ describe('Linear configuration and rendering invariants', () => {
       {organizationId: 'org-name'},
       {project: null},
     ])
-      expect(() => validateLinearSourceConfig({...source, ...delta} as never)).toThrow();
+      // @ts-expect-error -- Runtime validation must reject each deliberately malformed selection shape.
+      expect(() => validateLinearSourceConfig({...source, ...delta})).toThrow();
   });
   it('fingerprints are independent of selection order and change whenever permission scope changes', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 10, max: 100}), {minLength: 1, maxLength: 20}), values => {
-        const ids = values.map(uuid);
+        const ids = EffectArray.map(values, uuid);
         const selected = {...source, issueIds: ids};
         expect(sourceConfigurationFingerprint(selected)).toBe(
           sourceConfigurationFingerprint({...selected, issueIds: [...ids].reverse()}),
@@ -63,7 +66,7 @@ describe('Linear configuration and rendering invariants', () => {
   it('renders comments deterministically under enumeration permutations without mutating inputs', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 100, max: 500}), {maxLength: 20}), values => {
-        const comments = values.map(n => {
+        const comments = EffectArray.map(values, n => {
           const {children: _, ...c} = comment(n);
           return c;
         });

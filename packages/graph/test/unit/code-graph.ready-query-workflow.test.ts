@@ -1,53 +1,185 @@
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {JSON_SCHEMA, load} from 'js-yaml';
 import {describe, expect, it} from 'vitest';
+import {Schema} from 'effect';
 
-interface Workflow {
-  readonly concurrency: {readonly 'cancel-in-progress': boolean; readonly group: string};
-  readonly jobs: Readonly<
-    Record<
-      string,
-      {
-        readonly env?: Readonly<Record<string, string>>;
-        readonly environment?: string;
-        readonly if?: string;
-        readonly 'runs-on'?: readonly string[];
-        readonly steps?: readonly {
-          readonly env?: Readonly<Record<string, string>>;
-          readonly if?: string;
-          readonly name?: string;
-          readonly run?: string;
-          readonly uses?: string;
-          readonly with?: Readonly<Record<string, string | boolean>>;
-        }[];
-        readonly 'timeout-minutes'?: number;
-      }
-    >
-  >;
-  readonly on: {readonly workflow_dispatch?: unknown};
-}
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
-interface ActionlintConfiguration {
-  readonly 'self-hosted-runner'?: {readonly labels?: readonly string[]};
-}
+const stringRecordSchema = Schema.Record(Schema.String, Schema.String);
+const stepSchema = Schema.StructWithRest(
+  Schema.Struct({
+    env: Schema.optionalKey(stringRecordSchema),
+    if: Schema.optionalKey(Schema.String),
+    name: Schema.optionalKey(Schema.String),
+    run: Schema.optionalKey(Schema.String),
+    uses: Schema.optionalKey(Schema.String),
+    with: Schema.optionalKey(
+      Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Boolean, Schema.Finite])),
+    ),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const jobSchema = Schema.StructWithRest(
+  Schema.Struct({
+    env: Schema.optionalKey(stringRecordSchema),
+    environment: Schema.optionalKey(Schema.String),
+    if: Schema.optionalKey(Schema.String),
+    'runs-on': Schema.optionalKey(Schema.Array(Schema.String)),
+    steps: Schema.optionalKey(Schema.Array(stepSchema)),
+    'timeout-minutes': Schema.optionalKey(Schema.Finite),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const workflowSchema = Schema.StructWithRest(
+  Schema.Struct({
+    concurrency: Schema.Struct({
+      'cancel-in-progress': Schema.Boolean,
+      group: Schema.String,
+    }),
+    jobs: Schema.Record(Schema.String, jobSchema),
+    on: Schema.StructWithRest(Schema.Struct({workflow_dispatch: Schema.optionalKey(Schema.Unknown)}), [
+      Schema.Record(Schema.String, Schema.Unknown),
+    ]),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const actionlintSchema = Schema.StructWithRest(
+  Schema.Struct({
+    'self-hosted-runner': Schema.optionalKey(
+      Schema.StructWithRest(Schema.Struct({labels: Schema.optionalKey(Schema.Array(Schema.String))}), [
+        Schema.Record(Schema.String, Schema.Unknown),
+      ]),
+    ),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
 
 describe('governed large ready-query workflow', () => {
   it('is manual-only and requires the pinned preprovisioned dedicated runner', () => {
-    const workflow = load(readFileSync('.github/workflows/code-graph-ready-query-evidence.yml', 'utf8'), {
+    const parsedWorkflow: unknown = load(
+      readFileSync('.github/workflows/code-graph-ready-query-evidence.yml', 'utf8'),
+      {
+        schema: JSON_SCHEMA,
+      },
+    );
+    if (!Schema.is(workflowSchema)(parsedWorkflow))
+      throw new Error('The ready-query workflow fixture does not match the expected schema');
+    const workflow = parsedWorkflow;
+    const parsedActionlint: unknown = load(readFileSync('.github/actionlint.yml', 'utf8'), {
       schema: JSON_SCHEMA,
-    }) as Workflow;
-    const actionlint = load(readFileSync('.github/actionlint.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as ActionlintConfiguration;
+    });
+    const actionlint = Schema.decodeUnknownSync(actionlintSchema)(parsedActionlint);
     const job = workflow.jobs['ready-query-evidence'];
-    const command = job.steps?.flatMap(step => (step.run ? [step.run] : [])).join('\n') ?? '';
-    const upload = job.steps?.find(step => step.uses?.startsWith('actions/upload-artifact@'));
-    const checkout = job.steps?.find(step => step.uses?.startsWith('actions/checkout@'));
-    const setupBun = job.steps?.find(step => step.uses?.startsWith('oven-sh/setup-bun@'));
-    const guard = job.steps?.find(step => step.name?.startsWith('Require canonical'));
-    const preflight = job.steps?.find(step => step.name?.startsWith('Fail-closed preflight'));
-    const measurement = job.steps?.find(step => step.name?.startsWith('Capture fixed-rate'));
+    const steps = job.steps;
+    const command = EffectOption.getOrElse(
+      EffectOption.map(EffectOption.fromNullishOr(steps), values =>
+        EffectArray.join(
+          EffectArray.flatMap(values, (step, index) => (index in values && step.run ? [step.run] : [])),
+          '\n',
+        ),
+      ),
+      () => '',
+    );
+    const upload = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(job.steps), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(step =>
+                Effect.pipe(step.uses, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.startsWith('actions/upload-artifact@')),
+                ))(__effectArrayValue),
+          ),
+        ),
+      ),
+    );
+    const checkout = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(job.steps), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(step =>
+                Effect.pipe(step.uses, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.startsWith('actions/checkout@')),
+                ))(__effectArrayValue),
+          ),
+        ),
+      ),
+    );
+    const setupBun = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(job.steps), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(step =>
+                Effect.pipe(step.uses, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.startsWith('oven-sh/setup-bun@')),
+                ))(__effectArrayValue),
+          ),
+        ),
+      ),
+    );
+    const guard = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(job.steps), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(step =>
+                Effect.pipe(step.name, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.startsWith('Require canonical')),
+                ))(__effectArrayValue),
+          ),
+        ),
+      ),
+    );
+    const preflight = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(job.steps), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(step =>
+                Effect.pipe(step.name, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.startsWith('Fail-closed preflight')),
+                ))(__effectArrayValue),
+          ),
+        ),
+      ),
+    );
+    const measurement = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(job.steps), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(step =>
+                Effect.pipe(step.name, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.startsWith('Capture fixed-rate')),
+                ))(__effectArrayValue),
+          ),
+        ),
+      ),
+    );
 
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     expect(Object.keys(workflow.on)).toEqual(['workflow_dispatch']);
     expect(workflow.concurrency).toEqual({
       'cancel-in-progress': false,

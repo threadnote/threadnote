@@ -1,3 +1,5 @@
+import {createHash} from '@threadnote/testing/node-crypto';
+import {Array as EffectArray, Predicate} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Context, Deferred, Effect, Exit, Fiber, Option, Schema, Tracer} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
@@ -16,6 +18,9 @@ import {
   type NativeProgressBoundary,
 } from './native-authoring-progress-diagnostics.js';
 import {closeoutSpanDiagnostics} from './native-closeout-span-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const spanOptions = (name: string, parent: Option.Option<Tracer.AnySpan> = Option.none()) => ({
   name,
@@ -213,12 +218,28 @@ effectIt.effect('reports acquisition and cleanup failures after finalization and
     expect(cleanupExit).toEqual(nativeCleanupExit);
     if (Exit.isFailure(cleanupExit)) {
       expect(
-        cleanupExit.cause.reasons.some(reason => Cause.isDieReason(reason) && reason.defect === cleanupDefect),
+        EffectArray.some(
+          cleanupExit.cause.reasons,
+          reason => Cause.isDieReason(reason) && reason.defect === cleanupDefect,
+        ),
       ).toBe(true);
     } else throw new Error('Expected cleanup failure');
     expect(observer.snapshot()).toMatchObject({bodyEntered: true, bodyExited: true});
     expect(lines).toHaveLength(2);
-    expect(JSON.parse(lines[1].slice(lines[1].indexOf('{'))).outerFailure).toBe(true);
+    expect(
+      JSON.parse(
+        Effect2.pipe(
+          lines[1],
+          EffectString.slice(
+            Effect2.pipe(
+              lines[1],
+              EffectString.indexOf('{'),
+              Effect2.Option.getOrElse(() => -1),
+            ),
+          ),
+        ),
+      ).outerFailure,
+    ).toBe(true);
   }),
 );
 
@@ -227,7 +248,7 @@ effectIt.effect('conserves NativeSpan identity, delegation, context and both com
     const outer = closeoutSpanDiagnostics(() => 0);
     const created: Tracer.Span[] = [];
     const ends: [bigint, Exit.Exit<unknown, unknown>][] = [];
-    const contextResult = {private: true};
+    const contextResult = Context.empty();
     const contextCalls: unknown[][] = [];
     const delegate: Tracer.Tracer = Tracer.make({
       span(options) {
@@ -241,10 +262,11 @@ effectIt.effect('conserves NativeSpan identity, delegation, context and both com
         };
         return span;
       },
+      // @ts-expect-error This fixed-result tracer stub is intentionally narrower than the generic context contract.
       context(...args) {
         expect(this).toBe(delegate);
         contextCalls.push(args);
-        return contextResult as never;
+        return contextResult;
       },
     });
     const observer = makeNativeProgressDiagnostics(delegate, {now: () => 0});
@@ -279,7 +301,9 @@ effectIt.effect('conserves NativeSpan identity, delegation, context and both com
       inclusiveMs: 2,
     });
     expect(outer.snapshot().totals['workflowMemory.readJournalFile'].ended).toBe(1);
-    const primitive = {} as Tracer.EffectPrimitive<unknown>;
+    const primitive: Tracer.EffectPrimitive<Context.Context<never>> = {
+      ['~effect/Effect/evaluate']: () => contextResult,
+    };
     const fiber = yield* Effect.fiber;
     expect(observer.tracer.context!(primitive, fiber)).toBe(contextResult);
     expect(contextCalls[0][0]).toBe(primitive);
@@ -357,15 +381,18 @@ effectIt.effect.prop(
         if (event.label === 'fixture-state-read' && event.success) marker = true;
         const snapshot = observer.snapshot();
         for (const label of nativeProgressBoundaries) {
-          const matching = returned.filter(entry => entry.label === label);
+          const matching = EffectArray.filter(returned, entry => entry.label === label);
           expect(snapshot.counters[label]).toEqual({
             started: matching.length,
-            succeeded: matching.filter(entry => entry.success).length,
-            failed: matching.filter(entry => !entry.success).length,
+            succeeded: EffectArray.filter(matching, entry => entry.success).length,
+            failed: EffectArray.filter(matching, entry => !entry.success).length,
           });
         }
         expect(snapshot.saveSucceeded).toBe(
-          returned.filter(entry => entry.label === 'authoring-save' && entry.success).length,
+          EffectArray.filter(
+            returned,
+            __effectArrayValue => !!(entry => entry.label === 'authoring-save' && entry.success)(__effectArrayValue),
+          ).length,
         );
         expect(snapshot.historyReadsSucceeded).toBe(history);
       }
@@ -482,9 +509,9 @@ effectIt.effect('records database lifetime labels without retaining their privat
       ).pipe(Effect.withTracer(observer.tracer), Effect.exit);
       expect(Exit.isFailure(exit)).toBe(true);
       if (Exit.isFailure(exit))
-        expect(exit.cause.reasons.some(reason => Cause.isFailReason(reason) && reason.error === privateValue)).toBe(
-          true,
-        );
+        expect(
+          EffectArray.some(exit.cause.reasons, reason => Cause.isFailReason(reason) && reason.error === privateValue),
+        ).toBe(true);
       expect(observer.snapshot().totals[label]).toMatchObject({started: 1, ended: 1, failed: 1});
     }
     expect(released).toBe(2);
@@ -507,7 +534,7 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
       const boundary = observer.start(label);
       observer.end(boundary, 'Success');
     }
-    const spans = nativeProgressSpanLabels.flatMap(label =>
+    const spans = EffectArray.flatMap(nativeProgressSpanLabels, label =>
       Array.from({length: 2}, () => observer.tracer.span(spanOptions(label))),
     );
     expect(observer.snapshot().active).toHaveLength(8);
@@ -518,7 +545,9 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
     expect(snapshot.recent).toHaveLength(32);
     expect(snapshot.recentDropped).toBe(spans.length - 32);
     expect(snapshot.elapsedMs).toBe(20);
-    expect(Object.values(snapshot.totals).every(total => total.inclusiveMs === 2_147_483_647)).toBe(true);
+    expect(EffectArray.every(EffectRecord.values(snapshot.totals), total => total.inclusiveMs === 2_147_483_647)).toBe(
+      true,
+    );
     snapshot.counters.init.started = -1;
     snapshot.recent.length = 0;
     snapshot.bodyExitSnapshot!.counters.init.started = -1;
@@ -527,20 +556,39 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
     // Keep every label, eight live spans, the full recent ring and body-exit state in the largest shape.
     for (const label of nativeProgressSpanLabels) observer.tracer.span(spanOptions(label));
     const largest = observer.snapshot();
-    const saturate = (value: unknown): unknown =>
-      typeof value === 'number'
-        ? 2_147_483_647
-        : Array.isArray(value)
-          ? value.map(saturate)
-          : value && typeof value === 'object'
-            ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, saturate(child)]))
-            : value;
-    const saturated = saturate(largest) as typeof largest;
+    const saturate = (value: unknown): void => {
+      if (EffectArray.isArray(value)) {
+        for (let index = 0; index < value.length; index += 1) {
+          const child = value[index];
+          if (typeof child === 'number') value[index] = 2_147_483_647;
+          else saturate(child);
+        }
+      } else if (Predicate.isObject(value)) {
+        for (const key of EffectRecord.keys(value)) {
+          const child = value[key];
+          if (typeof child === 'number') value[key] = 2_147_483_647;
+          else saturate(child);
+        }
+      }
+    };
+    saturate(largest);
+    const saturated = largest;
     observer.snapshot = () => saturated;
     observer.reportFailure();
     expect(lines).toHaveLength(1);
     expect(lines[0].length).toBeLessThanOrEqual(16_384);
-    const packet = JSON.parse(lines[0].slice(lines[0].indexOf('{')));
+    const packet = JSON.parse(
+      Effect2.pipe(
+        lines[0],
+        EffectString.slice(
+          Effect2.pipe(
+            lines[0],
+            EffectString.indexOf('{'),
+            Effect2.Option.getOrElse(() => -1),
+          ),
+        ),
+      ),
+    );
     expect(packet).toMatchObject({
       outerFailure: true,
       clocks: {
@@ -601,9 +649,32 @@ effectIt.effect('broken clocks, sink, serialization, snapshots and bookkeeping c
 
 effectIt.effect('preserves existing layer ownership wiring', () =>
   Effect.sync(() => {
+    // This exact source receipt includes the repository lint migration and Windows-only stress quarantine; Git may use CRLF.
+    const lifecycle = Buffer.from(
+      Effect2.pipe(
+        readFileSync(new URL('./native-authoring-lifecycle.test.ts', import.meta.url), 'utf8'),
+        EffectString.replace(/\r\n/gu, '\n'),
+      ),
+    );
+    expect(lifecycle.byteLength).toBe(98423);
+    expect(createHash('sha256').update(lifecycle).digest('hex')).toBe(
+      'cf019c29d90759ea43e072c5e3e7545a9add9fcac0763c382e0917b6d2293ccf',
+    );
     const fixture = readFileSync(new URL('./native-automation-fixture.ts', import.meta.url), 'utf8');
-    expect(fixture.match(/provideTestLayer\(ApplicationLayer\)/gu)).toHaveLength(1);
-    expect(fixture.match(/observeNativeBody\(program, observer\)/gu)).toHaveLength(1);
+    expect(
+      Effect2.pipe(
+        fixture,
+        EffectString.match(/provideTestLayer\(ApplicationLayer\)/gu),
+        Effect2.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(1);
+    expect(
+      Effect2.pipe(
+        fixture,
+        EffectString.match(/observeNativeBody\(program, observer\)/gu),
+        Effect2.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(1);
     expect(fixture).toContain('makeNativeProgressDiagnostics(yield* Effect.tracer)');
     expect(fixture).toContain('nativeProgressFacades(store, fs, statePath(), observer)');
     expect(fixture).toContain('fs: returned.fs');

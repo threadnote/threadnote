@@ -24,6 +24,8 @@ import {
 import {makeGraphWorkerSigner} from '@threadnote/graph/sharing/worker/signing';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
@@ -37,30 +39,30 @@ const fixture = Effect.fn('test.workerRegistryUpload.fixture')(function* () {
   const signer = yield* makeGraphWorkerSigner(home, sha256Digest('upload fixture'));
   const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
   const action = {
-    contentHash: 'a'.repeat(64),
-    extractorSet: 'b'.repeat(64),
+    contentHash: Effect2.pipe('a', EffectString.repeat(64)),
+    extractorSet: Effect2.pipe('b', EffectString.repeat(64)),
     languageAndRole: 'typescript:source',
     normalizedPath: 'src/index.ts',
-    repositoryId: 'c'.repeat(64),
+    repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
   };
   const result = graphShareParseResultArtifact({
     ...action,
     actionKey: graphShareParseActionKey(action),
     facts: {path: action.normalizedPath, diagnostics: [], edges: [], symbols: []},
-    gitBlobId: 'd'.repeat(40),
+    gitBlobId: Effect2.pipe('d', EffectString.repeat(40)),
   });
   const authority = {
     expiresAt: now + 3600,
-    graphAbi: 'e'.repeat(64),
+    graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
     principalId: sha256Digest('principal'),
     profileDigest: sha256Digest('profile'),
     repositoryId: action.repositoryId,
     signingPublicKey: signer.publicKey,
-    workerId: 'gw_' + 'f'.repeat(32),
+    workerId: 'gw_' + Effect2.pipe('f', EffectString.repeat(32)),
   };
   const artifact = yield* createGraphWorkerResultArtifact({
     metadata: {
-      batchId: '1'.repeat(40),
+      batchId: Effect2.pipe('1', EffectString.repeat(40)),
       graphAbi: authority.graphAbi,
       identityClass: 'oauth-principal',
       issuedAt: now,
@@ -71,7 +73,7 @@ const fixture = Effect.fn('test.workerRegistryUpload.fixture')(function* () {
       releaseIdentity: '4.6.11-local.gfixture',
       repositoryId: authority.repositoryId,
       resourceLimits: [],
-      sourceCommit: '1'.repeat(40),
+      sourceCommit: Effect2.pipe('1', EffectString.repeat(40)),
       workerId: authority.workerId,
     },
     resultBytes: new TextEncoder().encode(canonicalJson(result)),

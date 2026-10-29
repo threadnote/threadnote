@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -20,8 +21,10 @@ import {
 } from '@threadnote/threadnote/activation/index';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const digest = (character: string) => character.repeat(64);
+const digest = (character: string) => Effect2.pipe(character, EffectString.repeat(64));
 const now = '2026-09-18T08:00:00.000Z';
 const later = '2026-09-18T08:01:00.000Z';
 
@@ -51,7 +54,7 @@ describe('activation core', () => {
     const second = createActivationPlanV1(structuredClone(planInput));
 
     expect(first).toEqual(second);
-    expect(first.operations.map(operation => operation.kind)).toEqual([
+    expect(EffectArray.map(first.operations, operation => operation.kind)).toEqual([
       'surface.primary.ensure',
       'surface.secondary.ensure',
       'team.ensure',
@@ -71,7 +74,7 @@ describe('activation core', () => {
 
   it('rejects self-hashed plans that weaken the canonical approval contract', () => {
     const plan = createActivationPlanV1(planInput);
-    const operations = plan.operations.map(operation => {
+    const operations = EffectArray.map(plan.operations, operation => {
       if (operation.id !== 'imports-review') return operation;
       const {approvalKind: _, ...withoutApproval} = operation;
       return withoutApproval;
@@ -230,7 +233,7 @@ describe('activation core', () => {
   it('rejects a self-hashed receipt that completes work beyond the dependency frontier', () => {
     const plan = createActivationPlanV1(planInput);
     const receipt = createActivationReceiptV1(plan, now);
-    const operations = receipt.operations.map(operation =>
+    const operations = EffectArray.map(receipt.operations, operation =>
       operation.id === 'surface-secondary'
         ? {
             ...operation,
@@ -291,7 +294,7 @@ describe('activation core', () => {
     }
 
     const undo = planActivationUndoV1(plan, receipt);
-    expect(undo.operations.map(operation => operation.operationId)).toEqual([
+    expect(EffectArray.map(undo.operations, operation => operation.operationId)).toEqual([
       'team-share',
       'surface-secondary',
       'surface-primary',

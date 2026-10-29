@@ -2,7 +2,7 @@ import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Deferred, Effect, Fiber, FileSystem, Layer, Path, Ref} from 'effect';
+import {Array as EffectArray, Clock, Deferred, Effect, Fiber, FileSystem, Layer, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterEach, beforeEach, describe, expect} from 'vitest';
 import {withCodeGraphBuilderAdmission} from '@threadnote/graph/builder/admission';
@@ -10,6 +10,8 @@ import {codeGraphBuilderAdmissionRoot, codeGraphBuilderAdmissionSlotPath} from '
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {mkdtemp, rm} from '../helpers/effect-filesystem.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const BUILDER_ADMISSION_TEST_LAYER = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 
@@ -113,27 +115,35 @@ describe('code graph home builder admission', () => {
             path.join(root, `v1-${token}.json`),
             JSON.stringify({admissionClass: 'current-required', createdAt: now - 1_000, processId, token, version: 1}),
           );
-        yield* legacy('a'.repeat(64), system.processId);
-        yield* legacy('b'.repeat(64), system.processId);
-        yield* legacy('c'.repeat(64), 2_147_483_647);
+        yield* legacy(Effect2.pipe('a', EffectString.repeat(64)), system.processId);
+        yield* legacy(Effect2.pipe('b', EffectString.repeat(64)), system.processId);
+        yield* legacy(Effect2.pipe('c', EffectString.repeat(64)), 2_147_483_647);
         const waiting = yield* Deferred.make<void>();
         const fiber = yield* withCodeGraphBuilderAdmission(
           {
             admissionClass: 'background',
-            identity: {checkoutId: 'd'.repeat(64), worktreeId: 'e'.repeat(64)},
+            identity: {
+              checkoutId: Effect2.pipe('d', EffectString.repeat(64)),
+              worktreeId: Effect2.pipe('e', EffectString.repeat(64)),
+            },
             onWaiting: Deferred.succeed(waiting, undefined).pipe(Effect.asVoid),
             threadnoteHome: home,
           },
           Effect.die('legacy tickets must remain ahead'),
         ).pipe(Effect.forkChild);
         yield* Deferred.await(waiting);
-        expect(yield* fs.exists(path.join(root, `v1-${'c'.repeat(64)}.json`))).toBe(false);
+        expect(yield* fs.exists(path.join(root, `v1-${Effect2.pipe('c', EffectString.repeat(64))}.json`))).toBe(false);
         const queued = yield* fs.readDirectory(root);
-        expect(queued.filter(name => name.startsWith('v2-'))).toHaveLength(1);
+        expect(
+          EffectArray.filter(
+            queued,
+            (name, index) => index in queued && Effect2.pipe(name, EffectString.startsWith('v2-')),
+          ),
+        ).toHaveLength(1);
         yield* Fiber.interrupt(fiber);
         expect((yield* fs.readDirectory(root)).sort()).toEqual([
-          `v1-${'a'.repeat(64)}.json`,
-          `v1-${'b'.repeat(64)}.json`,
+          `v1-${Effect2.pipe('a', EffectString.repeat(64))}.json`,
+          `v1-${Effect2.pipe('b', EffectString.repeat(64))}.json`,
         ]);
       }).pipe(provideTestLayer(BUILDER_ADMISSION_TEST_LAYER)),
     ),
@@ -182,8 +192,8 @@ describe('code graph home builder admission', () => {
             {
               admissionClass: 'current-required',
               identity: {
-                checkoutId: (index === 0 ? 'c' : 'd').repeat(64),
-                worktreeId: (index === 0 ? 'e' : 'f').repeat(64),
+                checkoutId: Effect2.pipe(index === 0 ? 'c' : 'd', EffectString.repeat(64)),
+                worktreeId: Effect2.pipe(index === 0 ? 'e' : 'f', EffectString.repeat(64)),
               },
               onQueue: queue =>
                 Ref.set(latestProgress, {admission: queue, phase: 'waiting', reason: 'home-builder-cap'}).pipe(
@@ -234,7 +244,10 @@ describe('code graph home builder admission', () => {
       const result = yield* withCodeGraphBuilderAdmission(
         {
           admissionClass: 'current-required',
-          identity: {checkoutId: 'a'.repeat(64), worktreeId: 'b'.repeat(64)},
+          identity: {
+            checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+          },
           onResumed: Ref.update(resumed, count => count + 1),
           onQueue: () => Ref.update(queued, count => count + 1),
           onWaiting: Ref.update(waited, count => count + 1),
@@ -258,7 +271,10 @@ describe('code graph home builder admission', () => {
         const started = yield* Deferred.make<void>();
         const options = {
           admissionClass: 'background' as const,
-          identity: {checkoutId: 'a'.repeat(64), worktreeId: 'b'.repeat(64)},
+          identity: {
+            checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+          },
           threadnoteHome: home,
         };
         const fiber = yield* withCodeGraphBuilderAdmission(

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it} from '@effect/vitest';
 import {Effect, Result} from 'effect';
 import {describe, expect} from 'vitest';
@@ -6,6 +7,8 @@ import type {NativeCloseoutAdmission} from '@threadnote/workflow-automations/clo
 import {createNativeDocument} from '@threadnote/workflow-automations/templates';
 import {encodeAuthoringDocument} from '../../src/workflow_automation/authoring_artifacts.js';
 import {planNativeCloseoutDocuments} from '../../src/workflow_automation/closeout_documents.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const admission = (
   count: number,
@@ -16,7 +19,7 @@ const admission = (
   version: 1,
   featureId: 'feature',
   project: 'project',
-  planDocumentHash: 'a'.repeat(64),
+  planDocumentHash: Effect2.pipe('a', EffectString.repeat(64)),
   architecture: {
     summary: 'Complete implementation.',
     components: ['Reader'],
@@ -69,7 +72,7 @@ const owned = (count: number, suffix = '') =>
   Array.from({length: count}, (_, index) => ({
     uri: 'threadnote://user/test/memories/drafts/' + index + suffix,
     memoryId: 'tn_source_' + index,
-    revision: 'b'.repeat(64),
+    revision: Effect2.pipe('b', EffectString.repeat(64)),
     destination: 'threadnote://user/test/memories/archive/' + index + suffix,
   }));
 const uri = (key: string) => 'threadnote://user/test/memories/knowledge/' + key;
@@ -84,8 +87,8 @@ describe('native closeout final document planning', () => {
         seen.push({key, body});
         return preflight(key, body);
       });
-      expect(seen).toEqual(plan.map(({key, body}) => ({key, body})));
-      expect(plan.map(p => p.key)).toEqual([
+      expect(seen).toEqual(EffectArray.map(plan, ({key, body}) => ({key, body})));
+      expect(EffectArray.map(plan, p => p.key)).toEqual([
         ...Array.from({length: 14}, (_, i) => 'decision-' + i),
         'decisions-2',
         'decisions-0',
@@ -95,9 +98,13 @@ describe('native closeout final document planning', () => {
         'architecture',
         'behavior',
       ]);
-      expect(plan.find(p => p.key === 'decision-0')?.body).toBe(encodeAuthoringDocument(input.documents.decisions[0]));
+      expect(EffectOption.getOrUndefined(EffectArray.findFirst(plan, p => p.key === 'decision-0'))?.body).toBe(
+        encodeAuthoringDocument(input.documents.decisions[0]),
+      );
       expect(plan.at(-1)?.relations).toEqual([{type: 'references', uri: uri('architecture')}]);
-      expect(plan.find(p => p.key === 'architecture')?.body).toContain('- [Knowledge](' + uri('decisions-0') + ')');
+      expect(EffectOption.getOrUndefined(EffectArray.findFirst(plan, p => p.key === 'architecture'))?.body).toContain(
+        '- [Knowledge](' + uri('decisions-0') + ')',
+      );
       const available = new Set<string>();
       for (const item of plan) {
         for (const relation of item.relations) expect(available.has(relation.uri)).toBe(true);
@@ -114,9 +121,9 @@ describe('native closeout final document planning', () => {
         fc.tuple(fc.integer({min: 0, max: 64}), fc.integer({min: 0, max: 55})),
         {seed: 714, numRuns: 24},
       )) {
-        const sources = owned(drafts, '界'.repeat(60));
+        const sources = owned(drafts, Effect2.pipe('界', EffectString.repeat(60)));
         const plan = yield* planNativeCloseoutDocuments(admission(decisions), sources, preflight);
-        const byUri = new Map(plan.map(item => [item.uri, item]));
+        const byUri = new Map(EffectArray.map(plan, item => [item.uri, item]));
         const visited = new Set<string>();
         const visit = (target: string): void => {
           if (visited.has(target)) return;
@@ -124,12 +131,17 @@ describe('native closeout final document planning', () => {
           for (const ref of byUri.get(target)?.relations ?? []) visit(ref.uri);
         };
         visit(uri('architecture'));
-        expect(plan.filter(item => item.key.startsWith('decision-'))).toHaveLength(decisions);
+        expect(
+          EffectArray.filter(plan, item => Effect2.pipe(item.key, EffectString.startsWith('decision-'))),
+        ).toHaveLength(decisions);
         for (let index = 0; index < decisions; index++) expect(visited.has(uri('decision-' + index))).toBe(true);
-        const history = plan
-          .filter(item => item.key.startsWith('history-'))
-          .map(item => item.body)
-          .join('\n');
+        const history = EffectArray.join(
+          EffectArray.map(
+            EffectArray.filter(plan, item => Effect2.pipe(item.key, EffectString.startsWith('history-'))),
+            item => item.body,
+          ),
+          '\n',
+        );
         for (const item of sources) {
           expect(history).toContain(item.uri);
           expect(history).toContain(item.destination);
@@ -144,7 +156,7 @@ describe('native closeout final document planning', () => {
       const calls: string[] = [];
       const result = yield* planNativeCloseoutDocuments(admission(1), owned(1), (key, _body) => {
         calls.push(key);
-        return Effect.succeed({uri: uri(key) + '界'.repeat(12_000)});
+        return Effect.succeed({uri: uri(key) + Effect2.pipe('界', EffectString.repeat(12_000))});
       }).pipe(Effect.result);
       expect(Result.isFailure(result)).toBe(true);
       expect(calls).toEqual(['decision-0']);
@@ -153,7 +165,7 @@ describe('native closeout final document planning', () => {
 
   it.effect('uses UTF8 byte bounds and preserves preflight domain failures', () =>
     Effect.gen(function* () {
-      const oversized = admission(0, false, '界'.repeat(12_000));
+      const oversized = admission(0, false, Effect2.pipe('界', EffectString.repeat(12_000)));
       let calls = 0;
       const result = yield* planNativeCloseoutDocuments(oversized, [], (key, body) => {
         calls++;

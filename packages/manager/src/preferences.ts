@@ -1,12 +1,21 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
+
 /** Loopback cookies survive Manager's changing ports; localStorage supports older sessions. */
 export function readManagerPreference(key: string): string | null {
   try {
     const prefix = `${encodeURIComponent(key)}=`;
-    const cookie = document.cookie
-      .split(';')
-      .map(value => value.trim())
-      .find(value => value.startsWith(prefix));
-    if (cookie) return decodeURIComponent(cookie.slice(prefix.length));
+    const cookie = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.map(Effect.pipe(document.cookie, EffectString.split(';')), value =>
+          Effect.pipe(value, EffectString.trim),
+        ),
+        __effectArrayValue => !!(value => Effect.pipe(value, EffectString.startsWith(prefix)))(__effectArrayValue),
+      ),
+    );
+    if (cookie) return decodeURIComponent(Effect.pipe(cookie, EffectString.slice(prefix.length)));
   } catch {
     /* Storage may be disabled by the browser. */
   }

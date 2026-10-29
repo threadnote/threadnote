@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, Option} from 'effect';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import {codeGraphScopeAuthorityInstalled} from './scope/schema.js';
@@ -72,6 +73,8 @@ import {
   codeGraphTraversalQueryStatement,
 } from './query/traversal.js';
 import {selectSnapshotPackProvenance} from './pack_provenance.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const selectReadySnapshot = Effect.fn('codeGraph.selectReadySnapshot')(function* (
   worktreeId: string,
@@ -192,7 +195,7 @@ const selectRecentReadySnapshotsForRepository = Effect.fn('codeGraph.selectRecen
     ORDER BY completed_at DESC, id
     LIMIT 8
   `;
-    return rows.map(snapshotFromRow);
+    return EffectArray.map(rows, snapshotFromRow);
   },
 );
 
@@ -243,14 +246,16 @@ const selectReusableCleanBase = Effect.fn('codeGraph.selectReusableCleanBase')(f
         snapshot.id
       LIMIT 8
     `;
-    const exact = yield* loadFirstReusableCleanBase(exactCandidates.filter(candidate => !excluded.has(candidate.id)));
+    const exact = yield* loadFirstReusableCleanBase(
+      EffectArray.filter(exactCandidates, candidate => !excluded.has(candidate.id)),
+    );
     if (exact !== undefined) return exact;
   }
 
   if (preferredCommitGroups !== undefined) {
     const seen = new Set<string>();
-    const normalizedGroups = preferredCommitGroups.slice(0, 512).map(group =>
-      group.filter(commit => {
+    const normalizedGroups = EffectArray.map(preferredCommitGroups.slice(0, 512), group =>
+      EffectArray.filter(group, commit => {
         if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(commit) || seen.has(commit)) return false;
         seen.add(commit);
         return true;
@@ -275,9 +280,12 @@ const selectReusableCleanBase = Effect.fn('codeGraph.selectReusableCleanBase')(f
         AND receipt.workspace_fingerprint = ${workspaceFingerprint}
         AND ${sql.in('commit_id', candidateCommits)}
     `;
-    const available = new Set(availableRows.map(row => row.commit_id));
+    const available = new Set(EffectArray.map(availableRows, row => row.commit_id));
     for (const group of normalizedGroups) {
-      const matches = group.filter(commit => available.has(commit));
+      const matches = EffectArray.filter(
+        group,
+        (commit, __effectArrayIndex) => __effectArrayIndex in group && available.has(commit),
+      );
       if (matches.length === 0) continue;
       // Equally near commits on different merge branches are not interchangeable evidence.
       if (matches.length !== 1) break;
@@ -302,7 +310,7 @@ const selectReusableCleanBase = Effect.fn('codeGraph.selectReusableCleanBase')(f
           snapshot.id
         LIMIT 8
       `;
-      const candidate = yield* loadFirstReusableCleanBase(candidates.filter(row => !excluded.has(row.id)));
+      const candidate = yield* loadFirstReusableCleanBase(EffectArray.filter(candidates, row => !excluded.has(row.id)));
       if (candidate !== undefined) return candidate;
     }
   }
@@ -332,7 +340,9 @@ const selectReusableCleanBase = Effect.fn('codeGraph.selectReusableCleanBase')(f
       snapshot.id
     LIMIT 8
   `;
-  return yield* loadFirstReusableCleanBase(legacyCandidates.filter(candidate => !excluded.has(candidate.id)));
+  return yield* loadFirstReusableCleanBase(
+    EffectArray.filter(legacyCandidates, candidate => !excluded.has(candidate.id)),
+  );
 });
 
 const selectReusableCleanBaseForCommit = Effect.fn('codeGraph.selectReusableCleanBaseForCommit')(function* (
@@ -368,15 +378,15 @@ export function reusableCleanBaseSlicePaths(paths: readonly string[]): readonly 
   if (
     paths.length === 0 ||
     paths.length > 200 ||
-    paths.some(path => {
-      const segments = path.split('/');
+    EffectArray.some(paths, path => {
+      const segments = Effect2.pipe(path, EffectString.split('/'));
       return (
         path.length === 0 ||
         path.length > 4_096 ||
-        path.includes('\0') ||
-        path.includes('\\') ||
-        path.startsWith('/') ||
-        segments.some(segment => segment.length === 0 || segment === '.' || segment === '..')
+        Effect2.pipe(path, EffectString.includes('\0')) ||
+        Effect2.pipe(path, EffectString.includes('\\')) ||
+        Effect2.pipe(path, EffectString.startsWith('/')) ||
+        EffectArray.some(segments, segment => segment.length === 0 || segment === '.' || segment === '..')
       );
     })
   ) {
@@ -434,7 +444,7 @@ const selectReusableCleanBaseForCommitPaths = Effect.fn('codeGraph.selectReusabl
          AND file.path = CAST(requested.value AS TEXT)
         ORDER BY file.path
       `;
-    const filesByPath = new Map(files.map(file => [file.path, file]));
+    const filesByPath = new Map(EffectArray.map(files, file => [file.path, file]));
     if (files.length !== requestedPaths.length || filesByPath.size !== requestedPaths.length) continue;
     const orderedFiles: Array<(typeof files)[number]> = [];
     for (const path of requestedPaths) {
@@ -442,9 +452,9 @@ const selectReusableCleanBaseForCommitPaths = Effect.fn('codeGraph.selectReusabl
       if (file !== undefined) orderedFiles.push(file);
     }
     if (orderedFiles.length !== requestedPaths.length) continue;
-    if (files.some(file => file.source !== 'commit')) continue;
+    if (EffectArray.some(files, file => file.source !== 'commit')) continue;
     return {
-      files: orderedFiles.map(file => ({
+      files: EffectArray.map(orderedFiles, file => ({
         blobId: `snapshot:${file.content_hash}`,
         contentHash: file.content_hash,
         language: file.language,
@@ -478,8 +488,11 @@ const selectExistingSnapshotFilePaths = Effect.fn('codeGraph.selectExistingSnaps
       ON file.snapshot_id = ${snapshotId}
      AND file.path = CAST(requested.value AS TEXT)
   `;
-  const found = new Set(rows.map(row => row.path));
-  return requestedPaths.filter(path => found.has(path));
+  const found = new Set(EffectArray.map(rows, row => row.path));
+  return EffectArray.filter(
+    requestedPaths,
+    (path, __effectArrayIndex) => __effectArrayIndex in requestedPaths && found.has(path),
+  );
 });
 
 const selectReusableOverlayBase = Effect.fn('codeGraph.selectReusableOverlayBase')(function* (
@@ -535,9 +548,9 @@ const loadFirstReusableCleanBase = Effect.fn('codeGraph.loadFirstReusableCleanBa
     WHERE snapshot_id = ${row.id}
     ORDER BY path
   `;
-    if (files.length !== Number(row.file_count) || files.some(file => file.source !== 'commit')) continue;
+    if (files.length !== Number(row.file_count) || EffectArray.some(files, file => file.source !== 'commit')) continue;
     return {
-      files: files.map(file => ({
+      files: EffectArray.map(files, file => ({
         blobId: `snapshot:${file.content_hash}`,
         contentHash: file.content_hash,
         language: file.language,
@@ -575,12 +588,12 @@ const loadFirstReusableOverlayBase = Effect.fn('codeGraph.loadFirstReusableOverl
     `;
     if (
       files.length !== Number(row.file_count) ||
-      files.some(file => file.source !== 'commit' && file.source !== 'worktree')
+      EffectArray.some(files, file => file.source !== 'commit' && file.source !== 'worktree')
     ) {
       continue;
     }
     return {
-      files: files.map(file => ({
+      files: EffectArray.map(files, file => ({
         blobId: `snapshot:${file.content_hash}`,
         contentHash: file.content_hash,
         language: file.language,
@@ -754,7 +767,11 @@ const selectReusableFoldForwardBase = Effect.fn('codeGraph.selectReusableFoldFor
     Number(proof.lookup_count),
     Number(proof.reexport_count),
   ];
-  if (counts.some(count => !Number.isSafeInteger(count) || count < 0) || counts[0] === 0 || counts[1] === 0) {
+  if (
+    EffectArray.some(counts, count => !Number.isSafeInteger(count) || count < 0) ||
+    counts[0] === 0 ||
+    counts[1] === 0
+  ) {
     return undefined;
   }
   const priorPaths = yield* sql<{readonly path: string}>`
@@ -836,12 +853,12 @@ const selectReusableFoldForwardBase = Effect.fn('codeGraph.selectReusableFoldFor
   if (
     logicalFiles.length !== Number(logicalRow.file_count) ||
     logicalFiles.length !== Number(rootRow.file_count) ||
-    logicalFiles.some(file => file.source !== 'commit')
+    EffectArray.some(logicalFiles, file => file.source !== 'commit')
   ) {
     return undefined;
   }
   return {
-    logicalFiles: logicalFiles.map(file => ({
+    logicalFiles: EffectArray.map(logicalFiles, file => ({
       blobId: `snapshot:${file.content_hash}`,
       contentHash: file.content_hash,
       language: file.language,
@@ -851,7 +868,7 @@ const selectReusableFoldForwardBase = Effect.fn('codeGraph.selectReusableFoldFor
       source: 'commit' as const,
     })),
     logicalSnapshot: snapshotFromRow(logicalRow),
-    priorDeltaPaths: priorPaths.map(row => row.path),
+    priorDeltaPaths: EffectArray.map(priorPaths, row => row.path),
     priorStagedPayloadBytes: counts[2],
     priorStagedRows: counts[1],
     rootReceipt,
@@ -882,7 +899,10 @@ const selectReusableReexports = Effect.fn('codeGraph.selectReusableReexports')(f
       readonly target_path: string;
     }>(
       `WITH RECURSIVE
-       requested(path, name) AS (VALUES ${batch.map(() => '(?, ?)').join(', ')}),
+       requested(path, name) AS (VALUES ${EffectArray.join(
+         EffectArray.map(batch, () => '(?, ?)'),
+         ', ',
+       )}),
        closure(source_path, local_name, target_path, imported_name) AS (
          SELECT provenance.source_path, provenance.local_name,
            provenance.target_path, provenance.imported_name
@@ -904,10 +924,10 @@ const selectReusableReexports = Effect.fn('codeGraph.selectReusableReexports')(f
        FROM closure
        ORDER BY source_path, local_name, target_path, imported_name
        LIMIT ?`,
-      [...batch.flatMap(seed => [seed.path, seed.name]), snapshotId, snapshotId, queryLimit, queryLimit],
+      [...EffectArray.flatMap(batch, seed => [seed.path, seed.name]), snapshotId, snapshotId, queryLimit, queryLimit],
     );
     if (rows.length > maxRows) {
-      return rows.map(row => ({
+      return EffectArray.map(rows, row => ({
         importedName: row.imported_name,
         localName: row.local_name,
         sourcePath: row.source_path,
@@ -953,7 +973,7 @@ const selectCachedFacts = Effect.fn('codeGraph.selectCachedFacts')(function* (
         bytes += factBytes;
         bytesByPath.set(row.path_hint, factBytes);
       }
-      const missing = batch.filter(file => !keys.has(file.path));
+      const missing = EffectArray.filter(batch, file => !keys.has(file.path));
       const reusableRows = yield* selectReusableFileBlobMetadataBatch(sql, missing, extractorSet);
       for (const row of reusableRows) {
         if (keys.has(row.target_path)) continue;
@@ -974,9 +994,9 @@ const selectCachedFacts = Effect.fn('codeGraph.selectCachedFacts')(function* (
       bytes += factBytes;
       bytesByPath.set(row.path_hint, factBytes);
     }
-    const missing = batch.filter(file => !keys.has(file.path));
+    const missing = EffectArray.filter(batch, file => !keys.has(file.path));
     const reusableRows = yield* selectReusableFileBlobBatch(sql, missing, extractorSet);
-    const filesByPath = new Map(reusableFileBlobTargets(missing).map(file => [file.path, file]));
+    const filesByPath = new Map(EffectArray.map(reusableFileBlobTargets(missing), file => [file.path, file]));
     for (const row of reusableRows) {
       if (keys.has(row.target_path)) continue;
       const file = filesByPath.get(row.target_path);
@@ -1005,7 +1025,7 @@ export function codeGraphCompleteMaterializedShardDonorStatement(
   derivationIdentity: string,
 ): CodeGraphSqlQueryStatement {
   const requested = JSON.stringify(
-    files.map(file => ({
+    EffectArray.map(files, file => ({
       contentHash: file.contentHash,
       id: materializedFileShardIdentity(file.contentHash, extractorSet, derivationIdentity, file.path),
       path: file.path,
@@ -1041,7 +1061,7 @@ const selectCompleteMaterializedShardDonor = Effect.fn('codeGraph.selectComplete
   currentGraphContentId: string,
   snapshotIds: readonly string[],
 ) {
-  if (files.length === 0 || new Set(files.map(file => file.path)).size !== files.length) return undefined;
+  if (files.length === 0 || new Set(EffectArray.map(files, file => file.path)).size !== files.length) return undefined;
   for (const snapshotId of [...new Set(snapshotIds)].slice(0, 2)) {
     const statement = codeGraphCompleteMaterializedShardDonorStatement(
       snapshotId,
@@ -1115,13 +1135,16 @@ const selectMaterializedFileShards = Effect.fn('codeGraph.selectMaterializedFile
                AND association.shard_id = shard.id`
        }
        WHERE shard.extractor_set = ? AND shard.derivation_identity = ?
-         AND (${batch.map(() => '(shard.content_hash = ? AND shard.path_hint = ?)').join(' OR ')})
+         AND (${EffectArray.join(
+           EffectArray.map(batch, () => '(shard.content_hash = ? AND shard.path_hint = ?)'),
+           ' OR ',
+         )})
          ${provenance !== undefined && donor === undefined ? 'AND 0' : ''}`,
       [
         ...(provenance === undefined ? [] : [donor?.snapshotId ?? '']),
         extractorSet,
         derivationIdentity,
-        ...batch.flatMap(file => [file.contentHash, file.path]),
+        ...EffectArray.flatMap(batch, file => [file.contentHash, file.path]),
       ],
     );
     for (const row of rows) {
@@ -1159,13 +1182,15 @@ const selectSnapshotMaterializedFileShards = Effect.fn('codeGraph.selectSnapshot
   const bytesByPath = new Map<string, number>();
   const keys = new Set<string>();
   let bytes = 0;
-  if (files.length === 0 || new Set(files.map(file => file.path)).size !== files.length) {
+  if (files.length === 0 || new Set(EffectArray.map(files, file => file.path)).size !== files.length) {
     return {bytes, bytesByPath, facts: output, keys} satisfies LoadedCodeGraphFacts;
   }
   const sql = yield* SqlClient.SqlClient;
   yield* configureConnection(sql);
   for (const batch of chunk(files, 200)) {
-    const requested = JSON.stringify(batch.map(file => ({contentHash: file.contentHash, path: file.path})));
+    const requested = JSON.stringify(
+      EffectArray.map(batch, file => ({contentHash: file.contentHash, path: file.path})),
+    );
     const rows = yield* sql<{
       readonly content_hash: string;
       readonly derivation_identity: string;
@@ -1244,8 +1269,11 @@ function selectFileBlobBatch(sql: SqlClient.SqlClient, files: readonly CodeGraph
             ${storedCodeGraphFactRawBytesSql('facts_json')} AS facts_bytes
      FROM file_blobs
      WHERE extractor_set = ?
-       AND (${files.map(() => '(content_hash = ? AND path_hint = ?)').join(' OR ')})`,
-    [extractorSet, ...files.flatMap(file => [file.contentHash, file.path])],
+       AND (${EffectArray.join(
+         EffectArray.map(files, () => '(content_hash = ? AND path_hint = ?)'),
+         ' OR ',
+       )})`,
+    [extractorSet, ...EffectArray.flatMap(files, file => [file.contentHash, file.path])],
   );
 }
 
@@ -1266,9 +1294,9 @@ const selectStoredGraph = Effect.fn('codeGraph.selectStoredGraph')(function* (sn
     {concurrency: 1},
   );
   return {
-    edges: edgeRows.map(edgeFromRow),
+    edges: EffectArray.map(edgeRows, edgeFromRow),
     snapshot: snapshotFromRow(snapshot),
-    symbols: symbolRows.map(symbolFromRow),
+    symbols: EffectArray.map(symbolRows, symbolFromRow),
   } satisfies StoredCodeGraph;
 });
 
@@ -1276,7 +1304,7 @@ const selectStoredSymbols = Effect.fn('codeGraph.selectStoredSymbols')(function*
   const sql = yield* SqlClient.SqlClient;
   yield* configureConnection(sql);
   const baseSnapshotId = yield* selectBaseSnapshotId(sql, snapshotId);
-  return (yield* selectAllEffectiveSymbols(sql, snapshotId, baseSnapshotId)).map(symbolFromRow);
+  return EffectArray.map(yield* selectAllEffectiveSymbols(sql, snapshotId, baseSnapshotId), symbolFromRow);
 });
 
 function selectAllEffectiveSymbols(sql: SqlClient.SqlClient, snapshotId: string, baseSnapshotId: string | undefined) {
@@ -1328,7 +1356,7 @@ const selectEdgePage = Effect.fn('codeGraph.selectEdgePage')(function* (
          LIMIT ?`,
         [...effectiveSnapshotParameters(snapshotId, baseSnapshotId), boundedPageLimit(limit)],
       );
-  return rows.map(edgeFromRow);
+  return EffectArray.map(rows, edgeFromRow);
 });
 
 const selectSearchSymbols = Effect.fn('codeGraph.selectSearchSymbols')(function* (
@@ -1409,7 +1437,10 @@ export function codeGraphTermCandidateQueryStatement(
   limit: number,
 ): CodeGraphSqlQueryStatement {
   const uniqueTerms = [...new Set(terms)].slice(0, 24);
-  const placeholders = uniqueTerms.map(() => '?').join(', ');
+  const placeholders = EffectArray.join(
+    EffectArray.map(uniqueTerms, () => '?'),
+    ', ',
+  );
   const baseId = baseSnapshotId ?? '';
   return {
     parameters: [
@@ -1503,9 +1534,17 @@ const selectSearchSymbolsWithSql = Effect.fn('codeGraph.selectSearchSymbolsWithS
   const exactRows = [...(yield* sql.unsafe<SearchSymbolRow>(exactStatement.text, exactStatement.parameters))];
   if (
     exactPath !== undefined &&
-    exactRows.some(row => normalizeExactSearchPath(row.path)?.toLocaleLowerCase() === exactPath.toLocaleLowerCase())
+    EffectArray.some(
+      exactRows,
+      row =>
+        Effect2.pipe(normalizeExactSearchPath(row.path), effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect2.pipe(effectOptionalString, EffectString.toLocaleLowerCase()),
+        ) === Effect2.pipe(exactPath, EffectString.toLocaleLowerCase()),
+    )
   ) {
-    return [...exactRows].sort(compareRows).slice(0, safeLimit).map(rankedNode);
+    return EffectArray.map([...exactRows].sort(compareRows).slice(0, safeLimit), rankedNode);
   }
   for (const selector of codeGraphIdentitySelectors(query)) {
     const statement = codeGraphExactSymbolQueryStatement(snapshotId, baseSnapshotId, selector, safeLimit);
@@ -1523,13 +1562,18 @@ const selectSearchSymbolsWithSql = Effect.fn('codeGraph.selectSearchSymbolsWithS
           termStatement.text,
           termStatement.parameters,
         );
-  const termScores = new Map(termCandidates.map(candidate => [candidate.symbol_id, Number(candidate.score)]));
-  const termRows = (yield* selectSymbolsByIdsWithSql(
-    sql,
-    snapshotId,
-    baseSnapshotId,
-    termCandidates.map(candidate => candidate.symbol_id),
-  )).map(row => ({...row, score: termScores.get(row.id) ?? 0}));
+  const termScores = new Map(
+    EffectArray.map(termCandidates, candidate => [candidate.symbol_id, Number(candidate.score)]),
+  );
+  const termRows = EffectArray.map(
+    yield* selectSymbolsByIdsWithSql(
+      sql,
+      snapshotId,
+      baseSnapshotId,
+      EffectArray.map(termCandidates, candidate => candidate.symbol_id),
+    ),
+    row => ({...row, score: termScores.get(row.id) ?? 0}),
+  );
   const exactEvidence = new Map<string, Pick<SearchSymbolRow, 'exact_rank' | 'score'>>();
   for (const row of exactRows) {
     const current = exactEvidence.get(row.id);
@@ -1539,30 +1583,31 @@ const selectSearchSymbolsWithSql = Effect.fn('codeGraph.selectSearchSymbolsWithS
     });
   }
   const byId = new Map<string, SearchSymbolRow>();
-  for (const row of [...termRows.map(row => ({...row, exact_rank: 0})), ...exactRows]) {
+  for (const row of [...EffectArray.map(termRows, row => ({...row, exact_rank: 0})), ...exactRows]) {
     const current = byId.get(row.id);
     if (!current || compareRows(row, current) < 0) byId.set(row.id, row);
   }
-  const ranked = [...byId.values()]
-    .map(row => {
-      const exact = exactEvidence.get(row.id);
-      return {
-        ...row,
-        exact_rank: exact?.exact_rank ?? 0,
-        rankingScore: termScores.get(row.id) ?? exact?.score ?? row.score,
-        score: exact?.score ?? termScores.get(row.id) ?? row.score,
-      };
-    })
-    .sort(compareRows);
+  const ranked = EffectArray.map([...byId.values()], row => {
+    const exact = exactEvidence.get(row.id);
+    return {
+      ...row,
+      exact_rank: exact?.exact_rank ?? 0,
+      rankingScore: termScores.get(row.id) ?? exact?.score ?? row.score,
+      score: exact?.score ?? termScores.get(row.id) ?? row.score,
+    };
+  }).sort(compareRows);
   const exactIds = new Set(exactEvidence.keys());
   // Admit exact identities before the bounded page is truncated, then retain
   // the established path and side-effect-owner ordering within that page.
-  const reservedExact = ranked.filter(row => exactIds.has(row.id)).slice(0, safeLimit);
+  const reservedExact = EffectArray.filter(
+    ranked,
+    (row, __effectArrayIndex) => __effectArrayIndex in ranked && exactIds.has(row.id),
+  ).slice(0, safeLimit);
   const selected = [
     ...reservedExact,
-    ...ranked.filter(row => !exactIds.has(row.id)).slice(0, safeLimit - reservedExact.length),
+    ...EffectArray.filter(ranked, row => !exactIds.has(row.id)).slice(0, safeLimit - reservedExact.length),
   ].sort(compareRows);
-  return selected.map(rankedNode);
+  return EffectArray.map(selected, rankedNode);
 });
 
 const selectSearchSymbolsMany = Effect.fn('codeGraph.selectSearchSymbolsMany')(function* (
@@ -1588,7 +1633,7 @@ const selectSymbolsByIds = Effect.fn('codeGraph.selectSymbolsByIds')(function* (
   const sql = yield* SqlClient.SqlClient;
   yield* configureConnection(sql);
   const baseSnapshotId = yield* selectBaseSnapshotId(sql, snapshotId);
-  return (yield* selectSymbolsByIdsWithSql(sql, snapshotId, baseSnapshotId, ids)).map(symbolFromRow);
+  return EffectArray.map(yield* selectSymbolsByIdsWithSql(sql, snapshotId, baseSnapshotId, ids), symbolFromRow);
 });
 
 /** Build bounded adjacency SQL whose branches seek the directional indexes. */
@@ -1614,7 +1659,7 @@ const selectEdgesForNodes = Effect.fn('codeGraph.selectEdgesForNodes')(function*
     allowedProvenances,
   );
   const rows = yield* sql.unsafe<EdgeRow>(statement.text, statement.parameters);
-  return rows.map(edgeFromRow);
+  return EffectArray.map(rows, edgeFromRow);
 });
 
 const selectTraversalEdgesForNodes = Effect.fn('codeGraph.selectTraversalEdgesForNodes')(function* (
@@ -1639,7 +1684,7 @@ const selectTraversalEdgesForNodes = Effect.fn('codeGraph.selectTraversalEdgesFo
   const rows = yield* sql.unsafe<
     Pick<EdgeRow, 'id' | 'source_id' | 'target_id' | 'relation' | 'provenance' | 'confidence'>
   >(statement.text, statement.parameters);
-  return rows.map((row): CodeGraphTraversalEdge => ({
+  return EffectArray.map(rows, (row): CodeGraphTraversalEdge => ({
     id: row.id,
     sourceId: Option.getOrUndefined(sqlTextOption(row.source_id)),
     targetId: Option.getOrUndefined(sqlTextOption(row.target_id)),
@@ -1662,7 +1707,7 @@ const selectEdgesByIds = Effect.fn('codeGraph.selectEdgesByIds')(function* (
   for (const batch of chunk(ids, CODE_GRAPH_EDGE_HYDRATION_BATCH_SIZE)) {
     const statement = codeGraphEdgesByIdsQueryStatement(snapshotId, baseSnapshotId, batch);
     const rows = yield* sql.unsafe<EdgeRow>(statement.text, statement.parameters);
-    const byId = new Map(rows.map(row => [row.id, row]));
+    const byId = new Map(EffectArray.map(rows, row => [row.id, row]));
     for (const id of batch) {
       const row = byId.get(id);
       if (!row) {
@@ -1708,9 +1753,9 @@ function representativeEdgeRows(
     if (!output.has(representative.id) && output.size < limit) output.set(representative.id, representative);
   }
   if (output.size >= limit) return [...output.values()];
-  const remaining = pages
-    .flatMap(page => page.rows.slice(coveredNodes.has(page.nodeId) ? 1 : 0))
-    .sort(compareEdgeRowsByPriority);
+  const remaining = EffectArray.flatMap(pages, page => page.rows.slice(coveredNodes.has(page.nodeId) ? 1 : 0)).sort(
+    compareEdgeRowsByPriority,
+  );
   for (const row of remaining) {
     if (!output.has(row.id)) output.set(row.id, row);
     if (output.size >= limit) break;

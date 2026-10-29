@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -10,6 +11,8 @@ import {
   normalizeCodeGraphWorksetRoutingExactKey,
   normalizeCodeGraphWorksetRoutingTerms,
 } from '../workset_catalog/routing_normalization.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_WORKSET_ROUTER_VERSION = 1 as const;
 
@@ -51,14 +54,14 @@ export const CODE_GRAPH_WORKSET_ROUTER_SCORE_WEIGHTS = {
 
 export type CodeGraphWorksetRouterErrorReason = 'invalid-input' | 'missing' | 'source-contract' | 'stale-cursor';
 
-export class CodeGraphWorksetRouterError extends Schema.TaggedError<CodeGraphWorksetRouterError>()(
-  'CodeGraphWorksetRouterError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-    reason: Schema.Literals(['invalid-input', 'missing', 'source-contract', 'stale-cursor']),
-  },
-) {
+export class CodeGraphWorksetRouterError extends Schema.TaggedError<
+  CodeGraphWorksetRouterError,
+  {readonly brand: unique symbol}
+>()('CodeGraphWorksetRouterError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+  reason: Schema.Literals(['invalid-input', 'missing', 'source-contract', 'stale-cursor']),
+}) {
   static of(
     reason: CodeGraphWorksetRouterErrorReason,
     message: string,
@@ -338,7 +341,7 @@ export function codeGraphWorksetRouterExactMatches(
 ): readonly CodeGraphWorksetRouterExactMatchV1[] {
   const matches: CodeGraphWorksetRouterExactMatchV1[] = [];
   const canonical = query.canonical;
-  if (symbol.lookupKeys.some(value => normalizeCodeGraphWorksetRoutingExactKey(value) === canonical))
+  if (EffectArray.some(symbol.lookupKeys, value => normalizeCodeGraphWorksetRoutingExactKey(value) === canonical))
     matches.push('lookup-key');
   if (normalizeCodeGraphWorksetRoutingExactKey(symbol.qualifiedName) === canonical) matches.push('qualified-name');
   if (normalizeCodeGraphWorksetRoutingExactKey(symbol.name) === canonical) matches.push('name');
@@ -346,7 +349,7 @@ export function codeGraphWorksetRouterExactMatches(
     matches.push('package');
   const path = normalizeCodeGraphWorksetRoutingExactKey(symbol.path);
   if (path === canonical) matches.push('path');
-  else if (path.endsWith(`/${canonical}`)) matches.push('path-suffix');
+  else if (Effect2.pipe(path, EffectString.endsWith(`/${canonical}`))) matches.push('path-suffix');
   return matches;
 }
 
@@ -367,11 +370,16 @@ export function rankCodeGraphWorksetRouterCandidates(input: {
   assertHitsBounded(input.exactHits, limits.candidateLimitPerLane, 'exact');
   assertHitsBounded(input.lexicalHits, limits.candidateLimitPerLane, 'lexical');
   const merged = mergeCandidateHits(input.exactHits, input.lexicalHits);
-  const scored = merged.map(candidate => scoreCandidate(input.query, candidate)).sort(compareScoredCandidate);
-  const globallyRanked = scored.map((candidate, index) => ({...candidate, globalRank: index + 1}));
+  const scored = EffectArray.map(merged, candidate => scoreCandidate(input.query, candidate)).sort(
+    compareScoredCandidate,
+  );
+  const globallyRanked = EffectArray.map(scored, (candidate, index) => ({...candidate, globalRank: index + 1}));
   const repositories = aggregateCodeGraphWorksetRepositoryCandidates(globallyRanked).slice(0, limits.repositoryLimit);
-  const admittedMembers = new Set(repositories.map(candidate => memberKey(candidate)));
-  const admittedSymbols = globallyRanked.filter(candidate => admittedMembers.has(candidate.memberKey));
+  const admittedMembers = new Set(EffectArray.map(repositories, candidate => memberKey(candidate)));
+  const admittedSymbols = EffectArray.filter(
+    globallyRanked,
+    (candidate, __effectArrayIndex) => __effectArrayIndex in globallyRanked && admittedMembers.has(candidate.memberKey),
+  );
   const symbols = selectDiverseSymbols(admittedSymbols, repositories, limits);
   const uncertainty = classifyCodeGraphWorksetRouterUncertainty({
     hasMoreCandidates: input.hasMoreCandidates ?? false,
@@ -394,11 +402,11 @@ export function aggregateCodeGraphWorksetRepositoryCandidates(
     entries.push(symbol);
     groups.set(symbol.memberKey, entries);
   }
-  const candidates = [...groups.values()].map(entries => {
+  const candidates = EffectArray.map([...groups.values()], entries => {
     entries.sort(compareScoredCandidate);
     const best = entries[0];
     const supportingSymbolContribution = Math.floor((entries[1]?.score ?? 0) * 0.2);
-    const exactSymbolCount = entries.filter(entry => entry.exactMatches.length > 0).length;
+    const exactSymbolCount = EffectArray.filter(entries, entry => entry.exactMatches.length > 0).length;
     const exactMatchContribution = Math.min(exactSymbolCount, 3) * 100;
     const score = best.score + supportingSymbolContribution + exactMatchContribution;
     return {
@@ -420,7 +428,10 @@ export function aggregateCodeGraphWorksetRepositoryCandidates(
       snapshotId: best.symbol.snapshotId,
     } satisfies CodeGraphWorksetRouterRepositoryCandidateV1;
   });
-  return candidates.sort(compareRepositoryCandidate).map((candidate, index) => ({...candidate, rank: index + 1}));
+  return EffectArray.map(candidates.sort(compareRepositoryCandidate), (candidate, index) => ({
+    ...candidate,
+    rank: index + 1,
+  }));
 }
 
 export function classifyCodeGraphWorksetRouterUncertainty(input: {
@@ -437,7 +448,10 @@ export function classifyCodeGraphWorksetRouterUncertainty(input: {
     return {reasons: ['no-candidates'], shouldExpand: input.hasMoreCandidates, state: 'empty'};
   }
   const exactRepositories = new Set(
-    input.repositories.filter(repository => repository.exactSymbolCount > 0).map(repository => memberKey(repository)),
+    EffectArray.map(
+      EffectArray.filter(input.repositories, repository => repository.exactSymbolCount > 0),
+      repository => memberKey(repository),
+    ),
   );
   if (exactRepositories.size > 1) {
     return {
@@ -473,7 +487,7 @@ export function selectCodeGraphWorksetRouterExpansionBatch(
     CODE_GRAPH_WORKSET_ROUTER_LIMITS.expansionBatchMaximum,
   );
   const selected = input.alreadySelectedRepositoryKeys ?? new Set<string>();
-  const remaining = repositories.filter(candidate => !selected.has(candidate.repositoryKey));
+  const remaining = EffectArray.filter(repositories, candidate => !selected.has(candidate.repositoryKey));
   return {
     exhausted: remaining.length <= batchSize,
     repositories: remaining.slice(0, batchSize),
@@ -653,7 +667,7 @@ function scoreCandidate(
       CODE_GRAPH_WORKSET_ROUTER_SCORE_WEIGHTS.lexicalLaneRank,
     );
   }
-  const score = signals.reduce((total, signal) => total + signal.contribution, 0);
+  const score = EffectArray.reduce(signals, 0, (total, signal) => total + signal.contribution);
   const symbolKey = candidateKey(symbol);
   return {
     exactMatches,
@@ -698,11 +712,11 @@ function selectDiverseSymbols(
   };
   for (const repository of repositories.slice(0, limits.diversityRepositoryLimit)) {
     const key = memberKey(repository);
-    const candidate = candidates.find(entry => entry.memberKey === key);
+    const candidate = EffectOption.getOrUndefined(EffectArray.findFirst(candidates, entry => entry.memberKey === key));
     if (candidate !== undefined) select(candidate, 'repository-diversity');
   }
   for (const candidate of candidates) select(candidate, 'global-score');
-  return selected.map(({candidate, reason}, index) => ({
+  return EffectArray.map(selected, ({candidate, reason}, index) => ({
     exactMatches: candidate.exactMatches,
     globalRank: candidate.globalRank,
     provenance: candidate.provenance,
@@ -754,9 +768,10 @@ function lexicalCoverage(queryTerms: readonly string[], symbol: CodeGraphWorkset
     termWeights.set(entry.term, Math.max(termWeights.get(entry.term) ?? 0, entry.weight));
   }
   if (maximumWeight <= 0) return 0;
-  const value = queryTerms.reduce(
-    (total, term) => total + Math.min(1, (termWeights.get(term) ?? 0) / maximumWeight),
+  const value = EffectArray.reduce(
+    queryTerms,
     0,
+    (total, term) => total + Math.min(1, (termWeights.get(term) ?? 0) / maximumWeight),
   );
   return Math.round((value / queryTerms.length) * 1_000);
 }
@@ -791,7 +806,7 @@ function validateCandidatePage(
     boundedText(page.next, `${lane} source cursor`, CODE_GRAPH_WORKSET_ROUTER_LIMITS.sourceCursorBytesMaximum);
     if (page.hits.length === 0) throw sourceContract(`Catalog ${lane} candidate continuation made no progress.`);
   }
-  const members = new Map(generation.members.map(member => [member.repositoryKey, member]));
+  const members = new Map(EffectArray.map(generation.members, member => [member.repositoryKey, member]));
   const ranks = new Set<number>();
   for (const hit of page.hits) {
     validateCatalogRank(hit.catalogRank);
@@ -1012,12 +1027,13 @@ function encodeRouterCursor(payload: RouterCursorPayloadV1): string {
 
 function decodeRouterCursor(cursor: string): RouterCursorPayloadV1 {
   boundedText(cursor, 'router cursor', CODE_GRAPH_WORKSET_ROUTER_LIMITS.routerCursorBytesMaximum);
-  if (!cursor.startsWith(ROUTER_CURSOR_PREFIX)) throw invalid('Workset router cursor is invalid.');
+  if (!Effect2.pipe(cursor, EffectString.startsWith(ROUTER_CURSOR_PREFIX)))
+    throw invalid('Workset router cursor is invalid.');
   try {
-    const encoded = cursor.slice(ROUTER_CURSOR_PREFIX.length);
+    const encoded = Effect2.pipe(cursor, EffectString.slice(ROUTER_CURSOR_PREFIX.length));
     const decoded = Buffer.from(encoded, 'base64url').toString('utf8');
     const value: unknown = JSON.parse(decoded);
-    if (!Array.isArray(value) || value.length !== 12 || value[0] !== CODE_GRAPH_WORKSET_ROUTER_VERSION) {
+    if (!EffectArray.isArray(value) || value.length !== 12 || value[0] !== CODE_GRAPH_WORKSET_ROUTER_VERSION) {
       throw invalid('Workset router cursor version is incompatible.');
     }
     const worksetName = boundedText(value[1], 'cursor workset name', 256);
@@ -1121,7 +1137,11 @@ function validateCatalogRank(rank: number): void {
 
 function containsUnsupportedControlCharacter(value: string): boolean {
   for (const character of value) {
-    const code = character.codePointAt(0)!;
+    const code = Effect2.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect2.Option.getOrElse(() => undefined),
+    )!;
     if (code <= 0x1f && code !== 0x09 && code !== 0x0a && code !== 0x0d) return true;
     if (code === 0x7f) return true;
   }
@@ -1130,7 +1150,11 @@ function containsUnsupportedControlCharacter(value: string): boolean {
 
 function containsControlCharacter(value: string): boolean {
   for (const character of value) {
-    const code = character.codePointAt(0)!;
+    const code = Effect2.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect2.Option.getOrElse(() => undefined),
+    )!;
     if (code <= 0x1f || code === 0x7f) return true;
   }
   return false;

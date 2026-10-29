@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {runMcpInstall} from '../../mcp/install.js';
 import type {AgentClient} from '../../types.js';
 import {readAgentIntegrationRegistry} from '../registry.js';
 import {AgentAdapterActionError, type AgentAdapterActionOptions, type AgentAdapterDefinition} from './contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {LEGACY_ARTIFACT_TARGETS} from './legacy_targets.js';
 
@@ -94,7 +97,12 @@ function defineLegacyAgentAdapter(id: string, legacyClient: AgentClient): AgentA
         return Effect.succeed({
           state:
             current.status === 'current' &&
-            checks.filter(check => check.name.startsWith(`${legacyClient} `)).every(check => check.status === 'ok')
+            EffectArray.every(
+              EffectArray.filter(checks, check =>
+                Effect2.pipe(check.name, EffectString.startsWith(`${legacyClient} `)),
+              ),
+              check => check.status === 'ok',
+            )
               ? ('current' as const)
               : ('stale' as const),
           detail: 'Compatibility adapter; see threadnote doctor for detailed checks.',

@@ -9,6 +9,9 @@ import {
   readNativeCycleTreeEntry,
 } from '../../src/workflow_automation/cycle_git.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const run = <A, E, R>(program: Effect.Effect<A, E, R>) => program.pipe(TestClock.withLive, provideNative);
 const git = (repo: string, ...args: string[]) =>
@@ -39,7 +42,7 @@ describe('native cycle Git snapshots', () => {
       const snapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
         Effect.provideService(FileSystem.FileSystem, aliasFs),
       );
-      const gitRoot = (yield* git(f.repo, 'rev-parse', '--show-toplevel')).trim();
+      const gitRoot = Effect2.pipe(yield* git(f.repo, 'rev-parse', '--show-toplevel'), EffectString.trim);
       expect(snapshot.repo).toBe(yield* f.fs.realPath(gitRoot));
       expect(yield* f.fs.readFile(index)).toEqual(beforeIndex);
     }).pipe(run),
@@ -75,28 +78,54 @@ describe('native cycle Git snapshots', () => {
       const beforeIndex = yield* f.fs.readFile(indexPath);
       const beforeStatus = yield* git(f.repo, 'status', '--porcelain=v2', '-z');
       const snapshot = yield* captureNativeCycleSource(f.repo, 'HEAD');
-      expect(Object.keys(snapshot.files).sort()).toEqual(['new.bin', 'source.ts']);
+      expect(EffectRecord.keys(snapshot.files).sort()).toEqual(['new.bin', 'source.ts']);
       expect(yield* git(f.repo, 'show', `${snapshot.tree}:source.ts`)).toBe('working\n');
       expect(yield* f.fs.readFile(indexPath)).toEqual(beforeIndex);
       expect(yield* git(f.repo, 'status', '--porcelain=v2', '-z')).toBe(beforeStatus);
       expect(Array.from(yield* f.fs.readFile(f.path.join(f.repo, 'new.bin')))).toEqual(Array.from(binary));
-      const ref = yield* pinNativeCycleTree(f.repo, 'a'.repeat(64), 'phase-review-1', snapshot.tree);
+      const ref = yield* pinNativeCycleTree(
+        f.repo,
+        Effect2.pipe('a', EffectString.repeat(64)),
+        'phase-review-1',
+        snapshot.tree,
+      );
       expect(ref.length).toBeLessThanOrEqual(100);
-      expect(ref.slice(ref.lastIndexOf('/') + 1)).toMatch(/^[a-f0-9]{64}$/u);
-      const otherBinding = yield* pinNativeCycleTree(f.repo, 'b'.repeat(64), 'phase-review-1', snapshot.tree);
+      expect(
+        Effect2.pipe(
+          ref,
+          EffectString.slice(
+            Effect2.pipe(
+              ref,
+              EffectString.lastIndexOf('/'),
+              Effect2.Option.getOrElse(() => -1),
+            ) + 1,
+          ),
+        ),
+      ).toMatch(/^[a-f0-9]{64}$/u);
+      const otherBinding = yield* pinNativeCycleTree(
+        f.repo,
+        Effect2.pipe('b', EffectString.repeat(64)),
+        'phase-review-1',
+        snapshot.tree,
+      );
       const otherPurpose = yield* pinNativeCycleTree(
         f.repo,
-        'a'.repeat(64),
+        Effect2.pipe('a', EffectString.repeat(64)),
         'phase-review-1',
         snapshot.tree,
         'baseline',
       );
       expect(new Set([ref, otherBinding, otherPurpose]).size).toBe(3);
       expect(yield* git(f.repo, 'rev-parse', ref)).toBe(snapshot.tree + '\n');
-      expect(yield* pinNativeCycleTree(f.repo, 'a'.repeat(64), 'phase-review-1', snapshot.tree)).toBe(ref);
-      const conflict = yield* pinNativeCycleTree(f.repo, 'a'.repeat(64), 'phase-review-1', snapshot.baseTree).pipe(
-        Effect.result,
-      );
+      expect(
+        yield* pinNativeCycleTree(f.repo, Effect2.pipe('a', EffectString.repeat(64)), 'phase-review-1', snapshot.tree),
+      ).toBe(ref);
+      const conflict = yield* pinNativeCycleTree(
+        f.repo,
+        Effect2.pipe('a', EffectString.repeat(64)),
+        'phase-review-1',
+        snapshot.baseTree,
+      ).pipe(Effect.result);
       expect(Result.isFailure(conflict)).toBe(true);
       expect(yield* git(f.repo, 'rev-parse', ref)).toBe(snapshot.tree + '\n');
     }).pipe(run),
@@ -129,8 +158,8 @@ describe('native cycle Git snapshots', () => {
       yield* f.fs.writeFileString(f.path.join(f.repo, 'script.sh'), '#!/bin/sh\necho ok\n');
       yield* git(f.repo, 'add', '--all');
       yield* commit(f.repo);
-      const baseline = (yield* git(f.repo, 'rev-parse', 'HEAD')).trim();
-      const originalBlob = (yield* git(f.repo, 'rev-parse', `${baseline}:script.sh`)).trim();
+      const baseline = Effect2.pipe(yield* git(f.repo, 'rev-parse', 'HEAD'), EffectString.trim);
+      const originalBlob = Effect2.pipe(yield* git(f.repo, 'rev-parse', `${baseline}:script.sh`), EffectString.trim);
       yield* git(f.repo, 'update-index', '--chmod=+x', '--', 'script.sh');
       yield* commit(f.repo);
       yield* f.fs.remove(f.path.join(f.repo, 'source.ts'));
@@ -139,6 +168,7 @@ describe('native cycle Git snapshots', () => {
       const snapshot = yield* captureNativeCycleSource(f.repo, baseline);
       expect(snapshot.entries).toMatchObject({
         'script.sh': {mode: '100755', blob: originalBlob},
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         'source.ts': {mode: '000000', blob: '0'.repeat(snapshot.head.length)},
         'new.txt': {mode: '100644'},
       });
@@ -147,6 +177,7 @@ describe('native cycle Git snapshots', () => {
       );
       expect(yield* readNativeCycleTreeEntry(f.repo, snapshot.tree, 'source.ts')).toEqual({
         mode: '000000',
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         blob: '0'.repeat(snapshot.head.length),
       });
     }).pipe(run),

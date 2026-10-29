@@ -1,13 +1,19 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import {getJsonEffect} from '@threadnote/platform/http';
 import {GITHUB_RELEASES_URL, githubReleaseHeaders} from './github_auth.js';
 import {compareVersions, isJsonObject} from '../utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class ReleaseNotesError extends Schema.TaggedError<ReleaseNotesError>()('ReleaseNotesError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class ReleaseNotesError extends Schema.TaggedError<ReleaseNotesError, {readonly brand: unique symbol}>()(
+  'ReleaseNotesError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const RELEASE_FETCH_TIMEOUT_MS = 3500;
 
@@ -31,10 +37,10 @@ export const fetchThreadnoteReleaseNotes = Effect.fn('fetchThreadnoteReleaseNote
     headers,
     timeoutMs: RELEASE_FETCH_TIMEOUT_MS,
   });
-  if (!Array.isArray(response.body)) {
+  if (!EffectArray.isArray(response.body)) {
     return yield* ReleaseNotesError.make({message: 'GitHub releases response was not an array.'});
   }
-  return response.body.flatMap(value => parseGithubRelease(value, options.includePrereleases === true));
+  return EffectArray.flatMap(response.body, value => parseGithubRelease(value, options.includePrereleases === true));
 });
 
 export function releasesBetween(
@@ -42,16 +48,15 @@ export function releasesBetween(
   currentVersion: string,
   latestVersion: string,
 ): readonly ReleaseNote[] {
-  return releases
-    .filter(
-      release =>
-        compareVersions(release.version, currentVersion) > 0 && compareVersions(release.version, latestVersion) <= 0,
-    )
-    .sort((left, right) => compareVersions(left.version, right.version));
+  return EffectArray.filter(
+    releases,
+    release =>
+      compareVersions(release.version, currentVersion) > 0 && compareVersions(release.version, latestVersion) <= 0,
+  ).sort((left, right) => compareVersions(left.version, right.version));
 }
 
 export function releaseForVersion(releases: readonly ReleaseNote[], version: string): readonly ReleaseNote[] {
-  return releases.filter(release => compareVersions(release.version, version) === 0).slice(0, 1);
+  return EffectArray.filter(releases, release => compareVersions(release.version, version) === 0).slice(0, 1);
 }
 
 export function formatWhatsNew(releases: readonly ReleaseNote[]): readonly string[] {
@@ -98,7 +103,7 @@ function parseGithubRelease(value: unknown, includePrereleases: boolean): readon
     return [];
   }
   const tagName = typeof value.tag_name === 'string' ? value.tag_name : '';
-  const version = tagName.trim().replace(/^v/, '');
+  const version = Effect2.pipe(tagName, EffectString.trim, EffectString.replace(/^v/, ''));
   if (!/^\d+\.\d+\.\d+(?:[-.A-Za-z0-9]+)?$/.test(version)) {
     return [];
   }
@@ -109,20 +114,23 @@ function parseGithubRelease(value: unknown, includePrereleases: boolean): readon
 }
 
 function titleFromReleaseName(name: string, version: string): string {
-  const trimmed = name.trim();
-  const withoutPrefix = trimmed.replace(new RegExp(`^v?${escapeRegExp(version)}:\\s*`, 'i'), '');
+  const trimmed = Effect2.pipe(name, EffectString.trim);
+  const withoutPrefix = Effect2.pipe(
+    trimmed,
+    EffectString.replace(new RegExp(`^v?${escapeRegExp(version)}:\\s*`, 'i'), ''),
+  );
   return withoutPrefix || trimmed || 'Release notes';
 }
 
 function bodyLines(body: string): readonly string[] {
   const out: string[] = [];
-  for (const rawLine of body.split('\n')) {
-    const line = rawLine.trim();
+  for (const rawLine of Effect2.pipe(body, EffectString.split('\n'))) {
+    const line = Effect2.pipe(rawLine, EffectString.trim);
     if (!line || /^#{1,6}\s+/.test(line)) {
       continue;
     }
     if (/^[-*]\s+/.test(line)) {
-      out.push(`- ${line.replace(/^[-*]\s+/, '')}`);
+      out.push(`- ${Effect2.pipe(line, EffectString.replace(/^[-*]\s+/, ''))}`);
     } else {
       out.push(line);
     }
@@ -131,5 +139,5 @@ function bodyLines(body: string): readonly string[] {
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[\\^$+?.()|[\]{}]/g, '\\$&');
+  return Effect2.pipe(value, EffectString.replace(/[\\^$+?.()|[\]{}]/g, '\\$&'));
 }

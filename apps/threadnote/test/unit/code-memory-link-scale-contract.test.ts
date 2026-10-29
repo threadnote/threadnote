@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -23,6 +24,9 @@ import {
   parseCodeMemoryLinkScaleBudgetV1,
   type CodeMemoryLinkScaleIdentityV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-scale-contract';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const BUDGET_FILE = 'apps/threadnote/test/evaluation/baselines/code-memory-link-scale-v1/budget.json';
 const budget = parseCodeMemoryLinkScaleBudgetV1(JSON.parse(await Bun.file(BUDGET_FILE).text()) as unknown);
@@ -32,7 +36,7 @@ describe('code-memory-link inverse-selector scale contract', () => {
     expect(() =>
       parseCodeMemoryLinkScaleTargetArguments([
         '--candidate-commit',
-        '1'.repeat(40),
+        Effect.pipe('1', EffectString.repeat(40)),
         '--runner-binding',
         '/tmp/forged.json',
       ]),
@@ -59,9 +63,9 @@ describe('code-memory-link inverse-selector scale contract', () => {
     });
     expect(selfAttested.evidenceClass).toBe('development-smoke');
     expect(selfAttested.gate.passed).toBe(false);
-    for (const key of Object.keys(releaseRunnerBinding().github)) {
+    for (const key of EffectRecord.keys(releaseRunnerBinding().github)) {
       const expected = releaseRunnerBinding();
-      const value = expected.github[key as keyof typeof expected.github];
+      const value = expected.github[key];
       const changed = {
         ...expected,
         github: {
@@ -111,19 +115,19 @@ describe('code-memory-link inverse-selector scale contract', () => {
         const environment = {
           GITHUB_RUN_ID: '123',
           GITHUB_RUN_ATTEMPT: '1',
-          GITHUB_SHA: '1'.repeat(40),
-          GITHUB_WORKFLOW_SHA: '1'.repeat(40),
+          GITHUB_SHA: Effect.pipe('1', EffectString.repeat(40)),
+          GITHUB_WORKFLOW_SHA: Effect.pipe('1', EffectString.repeat(40)),
           [key]: bad,
         };
         const input = {
-          builtArtifactSha256: '2'.repeat(64),
+          builtArtifactSha256: Effect.pipe('2', EffectString.repeat(64)),
           candidateBinding: releaseBinding(),
-          candidateCommit: '1'.repeat(40),
+          candidateCommit: Effect.pipe('1', EffectString.repeat(40)),
           dirty: false,
           gitStatusObserved: true,
           hardware: {cpuModel: 'Apple M1', memoryBytes: 1024, operatingSystem: 'macOS 15'},
           invocationMode: 'release-scale' as const,
-          observedCommit: '1'.repeat(40),
+          observedCommit: Effect.pipe('1', EffectString.repeat(40)),
           sourceVersion: '4.6.0',
           system: {architecture: 'arm64', environment: () => environment, platform: 'darwin', runtimeVersion: '1.3.9'},
         };
@@ -141,7 +145,7 @@ describe('code-memory-link inverse-selector scale contract', () => {
       expect(() =>
         parseCodeMemoryLinkScaleTargetArguments([
           '--candidate-commit',
-          '1'.repeat(40),
+          Effect.pipe('1', EffectString.repeat(40)),
           '--development-smoke',
           option,
           value,
@@ -155,19 +159,24 @@ describe('code-memory-link inverse-selector scale contract', () => {
     expect(
       parseCodeMemoryLinkScaleTargetArguments([
         '--candidate-commit',
-        '1'.repeat(40),
+        Effect.pipe('1', EffectString.repeat(40)),
         '--built-artifact-sha256',
-        '2'.repeat(64),
+        Effect.pipe('2', EffectString.repeat(64)),
       ]),
     ).toMatchObject({
-      candidateCommit: '1'.repeat(40),
+      candidateCommit: Effect.pipe('1', EffectString.repeat(40)),
       developmentSmoke: false,
       memoryCandidates: 100_000,
       samples: 25,
       warmups: 5,
     });
     expect(() =>
-      parseCodeMemoryLinkScaleTargetArguments(['--candidate-commit', '1'.repeat(40), '--memory-candidates', '99999']),
+      parseCodeMemoryLinkScaleTargetArguments([
+        '--candidate-commit',
+        Effect.pipe('1', EffectString.repeat(40)),
+        '--memory-candidates',
+        '99999',
+      ]),
     ).toThrow('require --development-smoke');
   });
 
@@ -389,12 +398,13 @@ describe('code-memory-link inverse-selector scale contract', () => {
         ),
         key => {
           const identity = releaseIdentity();
-          const tampered = key.startsWith('github.')
+          const tampered = Effect.pipe(key, EffectString.startsWith('github.'))
             ? {
                 ...identity,
                 github: {
                   ...identity.github,
-                  [key.slice('github.'.length)]: key === 'github.actions' ? false : 'tampered',
+                  [Effect.pipe(key, EffectString.slice('github.'.length))]:
+                    key === 'github.actions' ? false : 'tampered',
                 },
               }
             : ({
@@ -412,9 +422,13 @@ describe('code-memory-link inverse-selector scale contract', () => {
 
   it('fails on a no-answer leak, repository-isolation decoy, duplicate, or canonical mismatch', () => {
     const capture = releaseCapture();
-    const noAnswer = capture.scenarios.find(scenario => scenario.id === 'no-answer')!;
+    const noAnswer = EffectOption.getOrUndefined(
+      EffectArray.findFirst(capture.scenarios, scenario => scenario.id === 'no-answer'),
+    )!;
     noAnswer.samples[0] = observation(['threadnote://user/inverse-scale/memories/leaked.md'], 10, 1);
-    const file = capture.scenarios.find(scenario => scenario.id === 'file-backlinks')!;
+    const file = EffectOption.getOrUndefined(
+      EffectArray.findFirst(capture.scenarios, scenario => scenario.id === 'file-backlinks'),
+    )!;
     file.samples[0] = observation([file.expectedUris[0], file.expectedUris[0], 'threadnote://foreign/decoy.md']);
     const artifact = evaluateCodeMemoryLinkScaleCapture({
       budget,
@@ -459,7 +473,9 @@ describe('code-memory-link inverse-selector scale contract', () => {
 
   it('requires the frozen dense scenario to observe bounded shadow-search abstention', () => {
     const capture = releaseCapture();
-    const dense = capture.scenarios.find(scenario => scenario.id === 'dense-shared-selector')!;
+    const dense = EffectOption.getOrUndefined(
+      EffectArray.findFirst(capture.scenarios, scenario => scenario.id === 'dense-shared-selector'),
+    )!;
     dense.samples[0].truncatedSelectorCount = 0;
     const artifact = evaluateCodeMemoryLinkScaleCapture({
       budget,
@@ -489,7 +505,7 @@ describe('code-memory-link inverse-selector scale contract', () => {
       fc.property(fc.shuffledSubarray([...Array(25).keys()], {maxLength: 25, minLength: 25}), order => {
         const permuted = releaseCapture();
         for (const scenario of permuted.scenarios) {
-          scenario.samples = order.map(index => scenario.samples[index]);
+          scenario.samples = EffectArray.map(order, index => scenario.samples[index]);
         }
         const actual = evaluateCodeMemoryLinkScaleCapture({
           budget,
@@ -533,8 +549,8 @@ function releaseRunnerBinding() {
 function releaseIdentity(): CodeMemoryLinkScaleIdentityV1 {
   return {
     architecture: 'arm64',
-    builtArtifactSha256: '2'.repeat(64),
-    candidateCommit: '1'.repeat(40),
+    builtArtifactSha256: Effect.pipe('2', EffectString.repeat(64)),
+    candidateCommit: Effect.pipe('1', EffectString.repeat(40)),
     candidateVersion: '5.0.0',
     cpu: 'Apple M1',
     dirty: false,
@@ -548,13 +564,13 @@ function releaseIdentity(): CodeMemoryLinkScaleIdentityV1 {
       repositoryId: CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORY_ID,
       runAttempt: 1,
       runId: 1,
-      sha: '1'.repeat(40),
+      sha: Effect.pipe('1', EffectString.repeat(40)),
       workflowRef: `${CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORY}/.github/workflows/benchmarks.yml@refs/heads/release/5.0.0`,
-      workflowSha: '1'.repeat(40),
+      workflowSha: Effect.pipe('1', EffectString.repeat(40)),
     },
     invocationMode: 'release-scale',
     memoryBytes: 64 * 1024 * 1024 * 1024,
-    observedCommit: '1'.repeat(40),
+    observedCommit: Effect.pipe('1', EffectString.repeat(40)),
     operatingSystem: 'macOS 15.0',
     packageManager: 'bun@1.4.2',
     runnerClass: CODE_MEMORY_LINK_SCALE_RELEASE_RUNNER_CLASS,
@@ -567,7 +583,10 @@ function releaseIdentity(): CodeMemoryLinkScaleIdentityV1 {
 }
 
 function releaseBinding() {
-  return codeMemoryLinkScaleCandidateBindingV1('1'.repeat(40), {packageManager: 'bun@1.4.2', version: '5.0.0'});
+  return codeMemoryLinkScaleCandidateBindingV1(Effect.pipe('1', EffectString.repeat(40)), {
+    packageManager: 'bun@1.4.2',
+    version: '5.0.0',
+  });
 }
 
 function releaseCapture() {

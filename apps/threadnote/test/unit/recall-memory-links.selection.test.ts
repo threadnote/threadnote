@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {Database} from 'bun:sqlite';
@@ -12,6 +13,9 @@ import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {buildBoundedRecallMemoryLinkRawQuery} from '@threadnote/recall/memory/links';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const RecallIndexTestLayer = Layer.merge(BunServices.layer, TestSystemInfoLayer);
 const user = 'ordered-memory-selector';
@@ -67,15 +71,32 @@ describe('bounded memory-link selector order', () => {
             const plan = database
               .query<PlanRow, Array<number | string>>(`EXPLAIN QUERY PLAN ${query.sql}`)
               .all(...query.params);
-            const selector = plan.find(row =>
-              row.detail.includes(`INDEX memory_links_${direction === 'incoming' ? 'target' : 'source'}`),
+            const selector = EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                plan,
+                __effectArrayValue =>
+                  !!(row =>
+                    Effect2.pipe(
+                      row.detail,
+                      EffectString.includes(`INDEX memory_links_${direction === 'incoming' ? 'target' : 'source'}`),
+                    ))(__effectArrayValue),
+              ),
             );
             expect(selector).toBeDefined();
-            expect(plan.filter(row => row.detail.includes('TEMP B-TREE')).every(row => row.parent === 0)).toBe(true);
-            expect(plan.some(row => row.detail.startsWith('SCAN memory_link'))).toBe(false);
+            expect(
+              EffectArray.every(
+                EffectArray.filter(plan, row => Effect2.pipe(row.detail, EffectString.includes('TEMP B-TREE'))),
+                row => row.parent === 0,
+              ),
+            ).toBe(true);
+            expect(
+              EffectArray.some(plan, row => Effect2.pipe(row.detail, EffectString.startsWith('SCAN memory_link'))),
+            ).toBe(false);
             const rows = database.query<SelectedRow, Array<number | string>>(query.sql).all(...query.params);
             expect(rows).toHaveLength(257);
-            expect(rows.map(row => row.source_uri)).toEqual(sources.slice(0, 257).map((_, index) => uri(index)));
+            expect(EffectArray.map(rows, row => row.source_uri)).toEqual(
+              EffectArray.map(sources.slice(0, 257), (_, index) => uri(index)),
+            );
           }
         });
       }).pipe(provideTestLayer(RecallIndexTestLayer)),
@@ -97,7 +118,7 @@ describe('bounded memory-link selector order', () => {
         yield* withDatabase(home, database => {
           const allowedUriScopes = [
             `${prefix}/missing.md`,
-            ...sources.flatMap((entry, index) => (entry.allowed ? [uri(index)] : [])),
+            ...EffectArray.flatMap(sources, (entry, index) => (entry.allowed ? [uri(index)] : [])),
           ];
           for (const direction of ['incoming', 'outgoing'] as const) {
             const query = buildBoundedRecallMemoryLinkRawQuery(
@@ -106,26 +127,25 @@ describe('bounded memory-link selector order', () => {
               {allowedUriScopes, includeInactive, relationTypes},
               limit,
             )!;
-            const actual = database
-              .query<SelectedRow, Array<number | string>>(query.sql)
-              .all(...query.params)
-              .map(projectRow);
-            const expected = sources
-              .flatMap((entry, index) =>
-                entry.allowed &&
-                (includeInactive || entry.active) &&
-                (relationTypes.length === 0 || relationTypes.includes(entry.relation))
-                  ? [
-                      {
-                        relation_ordinal: 0,
-                        relation_origin: 'relation',
-                        relation_type: entry.relation,
-                        source_uri: uri(index),
-                        target_memory_id: 'tn_hub',
-                      },
-                    ]
-                  : [],
-              )
+            const actual = EffectArray.map(
+              database.query<SelectedRow, Array<number | string>>(query.sql).all(...query.params),
+              projectRow,
+            );
+            const expected = EffectArray.flatMap(sources, (entry, index) =>
+              entry.allowed &&
+              (includeInactive || entry.active) &&
+              (relationTypes.length === 0 || relationTypes.includes(entry.relation))
+                ? [
+                    {
+                      relation_ordinal: 0,
+                      relation_origin: 'relation',
+                      relation_type: entry.relation,
+                      source_uri: uri(index),
+                      target_memory_id: 'tn_hub',
+                    },
+                  ]
+                : [],
+            )
               .sort(
                 (a, b) => compareBinary(a.relation_type, b.relation_type) || compareBinary(a.source_uri, b.source_uri),
               )
@@ -153,7 +173,7 @@ function projectRow(row: SelectedRow): SelectedRow {
 }
 
 function uri(index: number): string {
-  return `${prefix}/source-${String(index).padStart(4, '0')}.md`;
+  return `${prefix}/source-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}.md`;
 }
 
 const createFixture = Effect.fn('test.createOrderedMemoryLinkFixture')(function* (sources: readonly Source[]) {
@@ -163,7 +183,7 @@ const createFixture = Effect.fn('test.createOrderedMemoryLinkFixture')(function*
   const directory = path.join(home, 'data', 'local', 'user', user, 'memories', 'durable', 'projects', 'threadnote');
   yield* fs.makeDirectory(directory, {recursive: true});
   for (const [index, entry] of sources.entries()) {
-    const topic = `source-${String(index).padStart(4, '0')}`;
+    const topic = `source-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`;
     yield* fs.writeFileString(
       path.join(directory, `${topic}.md`),
       formatMemoryDocument(

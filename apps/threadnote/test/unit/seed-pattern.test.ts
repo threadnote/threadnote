@@ -6,6 +6,9 @@ import {
   validateProjectSeedPattern,
   validateProjectSeedPatterns,
 } from '@threadnote/threadnote/seed_pattern';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const segment = FC.stringMatching(/^[a-z][a-z0-9._-]{0,20}$/u).filter(value => value !== '..');
 
@@ -18,7 +21,7 @@ describe('project seed pattern safety', () => {
       segments: FC.array(segment, {maxLength: 8, minLength: 1}),
     },
     ({glob, segments}) => {
-      const pattern = `${segments.join('/')}${glob}`;
+      const pattern = `${EffectArray.join(segments, '/')}${glob}`;
       expect(validateProjectSeedPattern(pattern)).toBe(pattern);
     },
     {fastCheck: {numRuns: 200}},
@@ -32,9 +35,11 @@ describe('project seed pattern safety', () => {
       suffix: FC.array(segment, {maxLength: 5}),
     },
     ({prefix, suffix}) => {
-      const pattern = [...prefix, '..', ...suffix].join('/');
+      const pattern = EffectArray.join([...prefix, '..', ...suffix], '/');
       expect(() => validateProjectSeedPattern(pattern)).toThrow(InvalidProjectSeedPattern);
-      expect(() => validateProjectSeedPattern(pattern.replaceAll('/', '\\'))).toThrow(InvalidProjectSeedPattern);
+      expect(() => validateProjectSeedPattern(Effect.pipe(pattern, EffectString.replaceAll('/', '\\')))).toThrow(
+        InvalidProjectSeedPattern,
+      );
     },
     {fastCheck: {numRuns: 200}},
   );

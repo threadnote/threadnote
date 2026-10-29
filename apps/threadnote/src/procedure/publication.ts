@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -22,16 +23,18 @@ import {
   type ProcedureManifestV2,
 } from '@threadnote/context/procedure/contract';
 import {decodeExactProcedureText} from '@threadnote/context/procedure/exact_text';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAXIMUM_PROCEDURE_ARTIFACT_BYTES = 1024 * 1024;
 const MAXIMUM_PROCEDURE_JSON_BYTES = 256 * 1024;
 const PROCEDURE_PROPOSAL_PREFIX = 'procedure-v1';
 const GIT_OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 
-export class ProcedurePublicationError extends Schema.TaggedError<ProcedurePublicationError>()(
-  'ProcedurePublicationError',
-  {message: Schema.String},
-) {}
+export class ProcedurePublicationError extends Schema.TaggedError<
+  ProcedurePublicationError,
+  {readonly brand: unique symbol}
+>()('ProcedurePublicationError', {message: Schema.String}) {}
 
 export interface ProcedurePublishOptions {
   readonly apply?: boolean;
@@ -95,6 +98,7 @@ export const publishVerifiedProcedure = Effect.fn('procedure.publish')(function*
       }),
     );
   }
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing for the proposal identifier.
   if (options.approved !== true || !options.proposalId?.trim()) {
     return yield* publicationFailure('Procedure publication requires --approved and the exact preview --proposal-id.');
   }
@@ -133,7 +137,7 @@ const preparePublicationInputs = Effect.fn('procedure.publish.prepareInputs')(fu
   }
   const rawReceipt =
     typeof receiptValue === 'object' && receiptValue !== null && 'receipt' in receiptValue
-      ? (receiptValue as {readonly receipt: unknown}).receipt
+      ? receiptValue.receipt
       : receiptValue;
   const receipt = yield* parseContract(
     () => parseProcedureVerificationReceipt(rawReceipt),
@@ -198,9 +202,11 @@ const preparePublicationPlan = Effect.fn('procedure.publish.preparePlan')(functi
   if (baseExists.exitCode !== 0) {
     return yield* publicationFailure('Procedure publication base commit is no longer available.');
   }
-  const expectedBlobIds = yield* Effect.forEach(inputs.contents, content =>
-    gitObjectId(git, worktree, ['hash-object', '--stdin'], new TextEncoder().encode(content)),
-  );
+  const expectedBlobIds: [string, string, string] = [
+    yield* gitObjectId(git, worktree, ['hash-object', '--stdin'], new TextEncoder().encode(inputs.contents[0])),
+    yield* gitObjectId(git, worktree, ['hash-object', '--stdin'], new TextEncoder().encode(inputs.contents[1])),
+    yield* gitObjectId(git, worktree, ['hash-object', '--stdin'], new TextEncoder().encode(inputs.contents[2])),
+  ];
   const targets = yield* Effect.forEach(inputs.paths, (path, index) =>
     observeTarget(git, worktree, baseCommit, path, expectedBlobIds[index]),
   );
@@ -227,7 +233,7 @@ const preparePublicationPlan = Effect.fn('procedure.publish.preparePlan')(functi
     team: inputs.team.name,
     version: 1 as const,
   } satisfies ProcedurePublicationPlan;
-  return {expectedBlobIds: expectedBlobIds as [string, string, string], plan, worktree};
+  return {expectedBlobIds, plan, worktree};
 });
 
 const applyPreparedPublication = Effect.fn('procedure.publish.apply')(function* (
@@ -253,7 +259,7 @@ const applyPreparedPublication = Effect.fn('procedure.publish.apply')(function* 
           Effect.flatMap(result => requireObjectId(result.stdout)),
         ),
       );
-      if (blobIds.some((blob, index) => blob !== prepared.expectedBlobIds[index])) {
+      if (EffectArray.some(blobIds, (blob, index) => blob !== prepared.expectedBlobIds[index])) {
         return yield* publicationFailure('Procedure publication blob identity changed after preview.');
       }
       for (const [index, relativePath] of inputs.paths.entries()) {
@@ -303,7 +309,10 @@ const applyPreparedPublication = Effect.fn('procedure.publish.apply')(function* 
       }
       if (commit !== baseCommit) {
         const indexInput = new TextEncoder().encode(
-          inputs.paths.map((relativePath, index) => `100644 ${blobIds[index]}\t${relativePath}\u0000`).join(''),
+          EffectArray.join(
+            EffectArray.map(inputs.paths, (relativePath, index) => `100644 ${blobIds[index]}\t${relativePath}\u0000`),
+            '',
+          ),
         );
         yield* runCommand(git, ['-C', prepared.worktree, 'update-index', '-z', '--index-info'], {input: indexInput});
       }
@@ -333,7 +342,7 @@ const observeTarget = Effect.fn('procedure.publish.observeTarget')(function* (
   if (result.stdout.length === 0) {
     return {expectedBlobId, path: relativePath, state: 'absent'} satisfies ProcedurePublicationTargetObservation;
   }
-  const records = result.stdout.split('\u0000').filter(Boolean);
+  const records = EffectArray.filter(Effect2.pipe(result.stdout, EffectString.split('\u0000')), Boolean);
   if (records.length !== 1) return yield* publicationFailure('Procedure publication target is ambiguous.');
   const match = /^(\d{6}) blob ([a-f0-9]{40}|[a-f0-9]{64})\t/u.exec(records[0]);
   if (!match || match[1] !== '100644' || match[2] !== expectedBlobId) {
@@ -374,8 +383,12 @@ const isExactPublicationRetry = Effect.fn('procedure.publish.isExactRetry')(func
     ],
     {concurrency: 2},
   );
-  const parentFields = parents.stdout.trim().split(/\s+/u);
-  return parentFields.length === 2 && parentFields[1] === baseCommit && tree.stdout.trim() === expectedTree;
+  const parentFields = Effect2.pipe(parents.stdout, EffectString.trim, EffectString.split(/\s+/u));
+  return (
+    parentFields.length === 2 &&
+    parentFields[1] === baseCommit &&
+    Effect2.pipe(tree.stdout, EffectString.trim) === expectedTree
+  );
 });
 
 const gitObjectId = Effect.fn('procedure.publish.gitObjectId')(function* (
@@ -389,7 +402,7 @@ const gitObjectId = Effect.fn('procedure.publish.gitObjectId')(function* (
 });
 
 function requireObjectId(value: string): Effect.Effect<string, ProcedurePublicationError> {
-  const objectId = value.trim();
+  const objectId = Effect2.pipe(value, EffectString.trim);
   return GIT_OBJECT_ID_PATTERN.test(objectId)
     ? Effect.succeed(objectId)
     : Effect.fail(publicationFailure('Git returned an invalid procedure publication object ID.'));
@@ -397,14 +410,15 @@ function requireObjectId(value: string): Effect.Effect<string, ProcedurePublicat
 
 const proposalBaseCommit = Effect.fn('procedure.publish.proposalBase')(function* (proposalId: string) {
   const match = new RegExp(`^${PROCEDURE_PROPOSAL_PREFIX}\\.([a-f0-9]{40}|[a-f0-9]{64})\\.[a-f0-9]{64}$`, 'u').exec(
-    proposalId.trim(),
+    Effect2.pipe(proposalId, EffectString.trim),
   );
   if (!match) return yield* publicationFailure('Procedure proposal ID is invalid; review a new proposal.');
   return match[1];
 });
 
 const explicitLocalPath = Effect.fn('procedure.publish.localPath')(function* (value: string) {
-  if (!value.trim() || value.includes('://')) return yield* publicationFailure('Select an explicit local file path.');
+  if (!Effect2.pipe(value, EffectString.trim) || Effect2.pipe(value, EffectString.includes('://')))
+    return yield* publicationFailure('Select an explicit local file path.');
   const path = yield* Path.Path;
   return path.resolve(value);
 });

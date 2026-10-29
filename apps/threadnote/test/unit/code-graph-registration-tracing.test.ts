@@ -1,5 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Clock, Context, Deferred, Effect, Exit, Fiber, Option, String as EffectString, Tracer} from 'effect';
+import {Cause, Clock, Context, Deferred, Effect, Exit, Fiber, Option, Schema, Tracer} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -13,11 +14,13 @@ import {
   serializeBenchmarkRegistrationTracing,
   enforceCodeGraphBenchmarkRatchet,
   PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS,
-  type CodeGraphBenchmarkRatchetV1,
   type BenchmarkRegistrationTracing,
   withBenchmarkRegistrationTracing,
   measureBenchmarkIndex,
 } from '../../../../scripts/benchmark-code-graph.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 effectIt.effect('registration tracing keeps the disabled original Effect and execution identity', () =>
   Effect.gen(function* () {
@@ -148,12 +151,24 @@ it('registration tracing reads no new span fields or exits after closure and ret
   tracing.close(1n);
   const before = tracing.snapshot();
   let reads = 0;
-  const poison = new Proxy({} as Parameters<Tracer.Tracer['span']>[0], {
-    get() {
-      reads++;
-      throw new Error('/private/body/token');
+  const poison = new Proxy(
+    {
+      name: 'poison',
+      parent: Option.none(),
+      annotations: Context.empty(),
+      links: [],
+      startTime: 0n,
+      kind: 'internal',
+      root: false,
+      sampled: true,
+    } satisfies Parameters<Tracer.Tracer['span']>[0],
+    {
+      get() {
+        reads++;
+        throw new Error('/private/body/token');
+      },
     },
-  });
+  );
   const exit = new Proxy(Exit.void, {
     get() {
       reads++;
@@ -366,7 +381,7 @@ fcEffectProp(
       const tracing = createBenchmarkRegistrationTracing();
       tracing.begin(0n);
       const initial = tracing.snapshot();
-      const pending = input.events.map(event => ({
+      const pending = EffectArray.map(input.events, event => ({
         event,
         measured: span(tracing, event.name, BigInt(event.start) * 1_000_000n),
       }));
@@ -389,7 +404,8 @@ fcEffectProp(
           event.success ? Exit.void : Exit.fail('/private/body'),
         );
         measured.end(1_000_000_000n, Exit.void);
-        if (!BENCHMARK_REGISTRATION_SPAN_NAMES.some(name => name === event.name) || event.start < 0) continue;
+        if (!EffectArray.some(BENCHMARK_REGISTRATION_SPAN_NAMES, name => name === event.name) || event.start < 0)
+          continue;
         if (event.duration < 0) {
           invalidSpans++;
           continue;
@@ -424,6 +440,7 @@ fcEffectProp(
       expect(initial.spans).toEqual({});
       expect(input).toEqual(before);
       const copied = tracing.snapshot();
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
       const first = Object.values(copied.spans)[0];
       if (first) Object.assign(first, {count: -1});
       expect(tracing.snapshot().spans).toEqual(model);
@@ -434,39 +451,64 @@ fcEffectProp(
   {fastCheck: {numRuns: 20}},
 );
 
+const RatchetPrimitiveSchema = Schema.Union([Schema.Boolean, Schema.Finite, Schema.String]);
+const RatchetUnitSchema = Schema.Literals(['bytes', 'count', 'milliseconds', 'operations_per_second', 'percent']);
+const CodeGraphBenchmarkRatchetSchema = Schema.Struct({
+  environment: Schema.Record(Schema.String, RatchetPrimitiveSchema),
+  measurements: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      maximum: Schema.optionalKey(Schema.Finite),
+      meanMaximum: Schema.optionalKey(Schema.Finite),
+      minimum: Schema.optionalKey(Schema.Finite),
+      p50Maximum: Schema.optionalKey(Schema.Finite),
+      p95Maximum: Schema.optionalKey(Schema.Finite),
+      p99Maximum: Schema.optionalKey(Schema.Finite),
+      samplesMinimum: Schema.optionalKey(Schema.Finite),
+      unit: RatchetUnitSchema,
+    }),
+  ),
+  metadata: Schema.Record(Schema.String, RatchetPrimitiveSchema),
+  suite: Schema.String,
+  version: Schema.Literal(1),
+});
+
 it('registration diagnostic metadata preserves artifact fields and the original hard objective and closed assessment', () => {
-  const ratchet = JSON.parse(
+  const ratchetValue: unknown = JSON.parse(
     readFileSync(
       'apps/threadnote/test/evaluation/baselines/code-graph-v1/production-ratchet-github-linux-x64.json',
       'utf8',
     ),
-  ) as CodeGraphBenchmarkRatchetV1;
+  );
+  if (!Schema.is(CodeGraphBenchmarkRatchetSchema)(ratchetValue)) throw new Error('Invalid benchmark ratchet fixture.');
+  const ratchet = ratchetValue;
   const name = 'cold-registration-lock-and-database-setup';
   const required = new Map<string, BenchmarkArtifactV1['measurements'][number]['unit']>(
-    PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS.map(item => [item.name, item.unit]),
+    EffectArray.map(PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS, item => [item.name, item.unit]),
   );
-  for (const [key, limit] of Object.entries(ratchet.measurements)) required.set(key, limit.unit);
-  const candidateCommit = 'b'.repeat(40);
-  const controlCommit = 'a'.repeat(40);
+  for (const [key, limit] of EffectRecord.toEntries(ratchet.measurements)) required.set(key, limit.unit);
+  const candidateCommit = Effect2.pipe('b', EffectString.repeat(40));
+  const controlCommit = Effect2.pipe('a', EffectString.repeat(40));
   const evidenceValue = (key: string) => {
     if (key === 'cold-activation-observed-stages-n1') return 3;
-    if (key.endsWith('-materialization-cached-fact-replay-bytes-n1'))
+    if (Effect2.pipe(key, EffectString.endsWith('-materialization-cached-fact-replay-bytes-n1')))
       return CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 2;
     if (
-      key.endsWith('-materialization-cached-fact-bytes-total-n1') ||
-      key.endsWith('-materialization-raw-fact-replay-bytes-n1') ||
-      key.endsWith('-materialized-shard-cache-deferred-raw-fact-bytes-n1')
+      Effect2.pipe(key, EffectString.endsWith('-materialization-cached-fact-bytes-total-n1')) ||
+      Effect2.pipe(key, EffectString.endsWith('-materialization-raw-fact-replay-bytes-n1')) ||
+      Effect2.pipe(key, EffectString.endsWith('-materialized-shard-cache-deferred-raw-fact-bytes-n1'))
     )
       return CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 1;
     if (
       /-materialization-subphase-shard-(?:association|persistence|serialization)-n1$/u.test(key) ||
-      key.endsWith('-materialization-sidecar-wal-high-water-n1') ||
-      key.includes('failures-n1') ||
-      (key.startsWith('cold-activation-copying-') && key.endsWith('-observed-n1')) ||
+      Effect2.pipe(key, EffectString.endsWith('-materialization-sidecar-wal-high-water-n1')) ||
+      Effect2.pipe(key, EffectString.includes('failures-n1')) ||
+      (Effect2.pipe(key, EffectString.startsWith('cold-activation-copying-')) &&
+        Effect2.pipe(key, EffectString.endsWith('-observed-n1'))) ||
       key === 'one-file-reindex-materialization-stage-restoring-indexes-n1'
     )
       return 0;
-    if (key.endsWith('sampler-version-n1')) return 4;
+    if (EffectString.endsWith('sampler-version-n1')(key)) return 4;
     if (EffectString.startsWith('production-shape-')(key))
       return Math.max(100, ratchet.measurements[key]?.minimum ?? 0);
     if (EffectString.endsWith('activation-observed-stages-n1')(key))
@@ -477,7 +519,7 @@ it('registration diagnostic metadata preserves artifact fields and the original 
     version: 1,
     suite: ratchet.suite,
     warmups: 0,
-    createdAt: `2026-10-01T00:${String(minute).padStart(2, '0')}:00.000Z`,
+    createdAt: `2026-10-01T00:${Effect2.pipe(String(minute), EffectString.padStart(2, '0'))}:00.000Z`,
     environment: {
       architecture: 'x64',
       commit,
@@ -497,15 +539,15 @@ it('registration diagnostic metadata preserves artifact fields and the original 
       benchmarkReferenceDiskMedium: 'virtual-or-network',
       benchmarkMeasuredExecutionMode: 'local-source-application-layer',
       benchmarkMeasuredSourceCommit: commit,
-      benchmarkMeasuredSourceLockfileSha256: 'a'.repeat(64),
-      benchmarkMeasuredSourcePackageManifestSha256: 'b'.repeat(64),
+      benchmarkMeasuredSourceLockfileSha256: Effect2.pipe('a', EffectString.repeat(64)),
+      benchmarkMeasuredSourcePackageManifestSha256: Effect2.pipe('b', EffectString.repeat(64)),
       benchmarkValidatedManagedPayload: 'not-applicable-github-actions-clean-source',
       benchmarkPrimaryAvailableBytesAtStart: 100_000_000_000,
       benchmarkReferenceAvailableBytesAtStart: 100_000_000_000,
       runnerIdentity: 'synthetic-runner',
       sameRunnerComparisonKey: 'synthetic-same-runner',
     },
-    measurements: [...required].map(([key, unit]) =>
+    measurements: EffectArray.map([...required], ([key, unit]) =>
       benchmarkMeasurement(key, unit, [key === name ? registration : evidenceValue(key)]),
     ),
   });

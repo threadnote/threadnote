@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import {it as effectIt} from '@effect/vitest';
 import {Context, Effect, Layer, Path, Schema} from 'effect';
@@ -16,8 +17,16 @@ import {resolveJsonAgentSkillPaths} from '../../src/agent_integration/surface_pl
 import type {DevSkillsSelector, DevSkillsTarget} from '../../src/dev_skills/contract.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type Platform = 'darwin' | 'linux' | 'win32';
+
+const selectorWithInvalidProfile = (agent: string, profile: string): DevSkillsSelector =>
+  Object.defineProperty({agent}, 'profile', {
+    value: profile,
+    enumerable: true,
+  });
 const config = {
   account: 'local',
   user: 'fixture',
@@ -67,7 +76,10 @@ const context = Effect.fn('test.skillTargets.context')(function* (
   const native = Context.get(pathContext, Path.Path);
   const home = platform === 'win32' ? 'C:\\Users\\Fixture' : '/home/fixture';
   const cwd = native.join(home, 'work', 'project');
-  const path = Path.Path.of({...native, resolve: (...parts) => native.resolve(cwd, ...parts)});
+  const path = Path.Path.of({
+    ...native,
+    resolve: (...parts) => native.resolve(cwd, ...parts),
+  });
   return {
     path,
     home,
@@ -126,11 +138,14 @@ describe('development native skill targets', () => {
               profile: capability.profile,
               scope,
               layout: entry.id === 'antigravity-cli' ? 'flat' : 'directory',
-              skillRoot: f.path.join(scope === 'user' ? f.home : f.cwd, ...expected.split('/')),
+              skillRoot: f.path.join(
+                scope === 'user' ? f.home : f.cwd,
+                ...Effect2.pipe(expected, EffectString.split('/')),
+              ),
             });
             expect(target.cwd).toBe(scope === 'user' ? undefined : f.cwd);
             expect(target.discoveryRoots).toContain(target.skillRoot);
-            expect(target.discoveryRoots.every(root => f.path.isAbsolute(root))).toBe(true);
+            expect(EffectArray.every(target.discoveryRoots, root => f.path.isAbsolute(root))).toBe(true);
           }).pipe(provide),
         );
     }
@@ -138,7 +153,9 @@ describe('development native skill targets', () => {
   it('projects capability status independently from readiness and without mutable catalog references', () => {
     const catalog = listDevSkillsTargets();
     expect(catalog).toHaveLength(AGENT_CATALOG.length);
-    expect(catalog.find(entry => entry.surfaceId === 'cursor-cloud-personal')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(catalog, entry => entry.surfaceId === 'cursor-cloud-personal')),
+    ).toMatchObject({
       status: 'managed',
       scopes: ['user'],
     });
@@ -166,21 +183,32 @@ describe('development native skill targets', () => {
           agentId: 'codex',
           profile: 'desktop',
         });
-        expect(yield* resolveDevSkillsIdentity({agent: 'codex', profile: 'codex-cloud-personal'})).toEqual({
+        expect(
+          yield* resolveDevSkillsIdentity({
+            agent: 'codex',
+            profile: 'codex-cloud-personal',
+          }),
+        ).toEqual({
           surfaceId: 'codex-cloud',
           agentId: 'codex',
           profile: 'codex-cloud-personal',
         });
-        expect(yield* resolveDevSkillsIdentity({agent: 'cursor', profile: 'cursor-cloud-personal'})).toMatchObject({
+        expect(
+          yield* resolveDevSkillsIdentity({
+            agent: 'cursor',
+            profile: 'cursor-cloud-personal',
+          }),
+        ).toMatchObject({
           surfaceId: 'cursor-cloud-personal',
         });
-        for (const selector of [
-          {agent: 'codex-cloud', profile: 'desktop'},
-          {agent: 'claude', profile: 'codex-cloud-personal'},
-          {agent: 'cursor', profile: 'org'},
+        const invalidSelectors: readonly DevSkillsSelector[] = [
+          selectorWithInvalidProfile('codex-cloud', 'desktop'),
+          selectorWithInvalidProfile('claude', 'codex-cloud-personal'),
+          selectorWithInvalidProfile('cursor', 'org'),
           {agent: 'unknown'},
-        ])
-          expect(yield* resolveDevSkillsIdentity(selector as DevSkillsSelector).pipe(Effect.result)).toMatchObject({
+        ];
+        for (const selector of invalidSelectors)
+          expect(yield* resolveDevSkillsIdentity(selector).pipe(Effect.result)).toMatchObject({
             _tag: 'Failure',
           });
       }),
@@ -233,7 +261,11 @@ describe('development native skill targets', () => {
         ).toEqual(initial);
         expect(yield* run('linux', {agent: 'codex'}, {}, initial).pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
       }
-      const initial = yield* run('linux', {agent: 'devin', scope: 'project', cwd: '/first/project'});
+      const initial = yield* run('linux', {
+        agent: 'devin',
+        scope: 'project',
+        cwd: '/first/project',
+      });
       expect(yield* run('linux', {agent: 'devin', scope: 'local'}, {}, initial).pipe(Effect.result)).toMatchObject({
         _tag: 'Failure',
       });
@@ -242,7 +274,11 @@ describe('development native skill targets', () => {
           Effect.result,
         ),
       ).toMatchObject({_tag: 'Failure'});
-      const windows = yield* run('win32', {agent: 'devin', scope: 'project', cwd: 'C:\\Work\\Project'});
+      const windows = yield* run('win32', {
+        agent: 'devin',
+        scope: 'project',
+        cwd: 'C:\\Work\\Project',
+      });
       expect(yield* run('win32', {agent: 'devin', scope: 'project', cwd: 'c:\\work\\project'}, {}, windows)).toEqual(
         windows,
       );
@@ -321,9 +357,12 @@ describe('development native skill targets', () => {
       Effect.gen(function* () {
         for (const platform of platforms) {
           const f = yield* context(platform);
-          const cwd = f.path.join(f.home, ...names.map(value => `part-${value}`));
+          const cwd = f.path.join(f.home, ...EffectArray.map(names, value => `part-${value}`));
           const first = yield* run(platform, {agent: 'roo', cwd});
-          const second = yield* run(platform, {agent: 'roo', cwd: f.path.join(cwd, 'ignored', '..')});
+          const second = yield* run(platform, {
+            agent: 'roo',
+            cwd: f.path.join(cwd, 'ignored', '..'),
+          });
           expect(first).toEqual(second);
           expect(yield* run(platform, {agent: 'roo', cwd}, {}, first)).toEqual(first);
         }
@@ -333,8 +372,13 @@ describe('development native skill targets', () => {
 
   effectIt.effect('extracts JSON roots without an MCP document/template filesystem dependency', () =>
     Effect.gen(function* () {
-      const adapter = getAgentAdapter('opencode')!;
-      expect(yield* resolveJsonAgentSkillPaths(adapter.json!, 'project', {cwd: '/repo'})).toMatchObject({
+      const adapter = getAgentAdapter('opencode');
+      if (adapter === undefined || adapter.json === undefined) throw new Error('Expected the JSON agent adapter');
+      expect(
+        yield* resolveJsonAgentSkillPaths(adapter.json, 'project', {
+          cwd: '/repo',
+        }),
+      ).toMatchObject({
         root: '/repo',
         skillRoot: '/repo/.opencode/skills',
         cwd: '/repo',

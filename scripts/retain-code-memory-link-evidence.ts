@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Console, Effect, FileSystem, Option, Path} from 'effect';
@@ -30,6 +31,8 @@ import {
 } from '@threadnote/threadnote/evaluation/code-memory-link-retained-bundle';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const program = Effect.gen(function* () {
   const options = parseArguments(yield* scriptArguments());
@@ -75,7 +78,9 @@ const program = Effect.gen(function* () {
   const dogfoodResult = evaluateCodeMemoryLinkDogfood(json(dogfood, 'dogfood'));
   const retentionBlockers = codeMemoryLinkRetentionBlockers({agentAb, dogfood: dogfoodResult});
   if (retentionBlockers.length > 0) {
-    return yield* ScriptError.make({message: `Evidence is not ready for retention:\n${retentionBlockers.join('\n')}`});
+    return yield* ScriptError.make({
+      message: `Evidence is not ready for retention:\n${EffectArray.join(retentionBlockers, '\n')}`,
+    });
   }
   if (
     agentAb.candidate.commit !== options.candidateCommit ||
@@ -89,7 +94,7 @@ const program = Effect.gen(function* () {
     return yield* ScriptError.make({message: 'Retained sealed suite differs from the manifest bindings.'});
   }
   const layoutHash = sha256HexSync(sealedLayout);
-  if (!suite.judge.artifacts.some(artifact => artifact.sha256 === layoutHash)) {
+  if (!EffectArray.some(suite.judge.artifacts, artifact => artifact.sha256 === layoutHash)) {
     return yield* ScriptError.make({message: 'Retained sealed layout is not one of the suite judge artifacts.'});
   }
   const clients = yield* Effect.forEach(
@@ -105,11 +110,12 @@ const program = Effect.gen(function* () {
         const descriptorInput = json(descriptor, `${client.clientId} descriptor`);
         const parsedDescriptor = parseCodeMemoryLinkClientImplementationDescriptorV1(descriptorInput);
         const configurationProjectionHash = sha256HexSync(configProjection);
-        const clientEvidence = parsedEvidence.filter(
-          receipt => receipt.rawEvidence.bindings.clientId === client.clientId,
+        const clientEvidence = EffectArray.filter(
+          parsedEvidence,
+          (receipt, index) => index in parsedEvidence && receipt.rawEvidence.bindings.clientId === client.clientId,
         );
         const expectedProjectionHashes = new Set(
-          clientEvidence.map(receipt => {
+          EffectArray.map(clientEvidence, receipt => {
             const protocol = receipt.rawEvidence.clientProtocol;
             if (JSON.stringify(protocol.expectedClient) !== JSON.stringify(client.expectedClient)) {
               throw ScriptError.make({
@@ -209,8 +215,12 @@ function assertRetainedResponseBindings(
 ): void {
   for (const receipt of evidence) {
     const raw = receipt.rawEvidence;
-    const task = manifest.tasks.find(candidate => candidate.taskId === raw.bindings.taskId)!;
-    const observedResponseHashes = raw.appServer.checkpoints.flatMap(checkpoint => {
+    const task = Option.getOrUndefined(
+      EffectArray.findFirst(manifest.tasks, candidate => candidate.taskId === raw.bindings.taskId),
+    )!;
+    const checkpoints = raw.appServer.checkpoints;
+    const observedResponseHashes = EffectArray.flatMap(checkpoints, (checkpoint, index) => {
+      if (!(index in checkpoints)) return [];
       if (
         checkpoint.method !== 'item/completed' ||
         checkpoint.itemType !== 'mcpToolCall' ||
@@ -258,7 +268,7 @@ const collectPreparedSealedFiles = Effect.fn('codeMemoryLinkRetain.collectSealed
       else return yield* ScriptError.make({message: `Prepared sealed path has unsupported type: ${relativePath}`});
     }
   }
-  return files.sort((left, right) => left.path.localeCompare(right.path));
+  return files.sort((left, right) => Effect2.pipe(left.path, EffectString.localeCompare(right.path)));
 });
 
 function parseArguments(args: readonly string[]): {
@@ -307,7 +317,12 @@ function json(source: string, label: string): unknown {
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }
 

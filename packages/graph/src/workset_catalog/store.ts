@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -107,6 +108,9 @@ import {
   codeGraphWorksetCatalogWriteRequiredFreeBytes,
   verifyCodeGraphWorksetCatalogDiskCapacity,
 } from './storage_capacity.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 export {withCodeGraphWorksetCatalogReader, withCodeGraphWorksetCatalogWriter} from './store_support.js';
 
 const CATALOG_LOCK_OPTIONS = {
@@ -548,7 +552,7 @@ export const stageCodeGraphWorksetCatalogGenerationFromReceipts = Effect.fn(
         const stagedMembers = yield* loadGenerationMembers(sql, identity.id);
         const matches =
           stagedMembers.length === identity.members.length &&
-          stagedMembers.every((member, ordinal) => {
+          EffectArray.every(stagedMembers, (member, ordinal) => {
             const expected = identity.members[ordinal];
             return (
               expected !== undefined &&
@@ -642,7 +646,7 @@ export const retireCodeGraphWorksetCatalogPreparation = Effect.fn('codeGraphWork
       const unique = new Set(input.projectionDigests);
       if (
         unique.size !== input.projectionDigests.length ||
-        input.projectionDigests.some(digest => !SHA256_HEX.test(digest))
+        EffectArray.some(input.projectionDigests, digest => !SHA256_HEX.test(digest))
       ) {
         throw invalid('Workset catalog projection retirement identity is invalid.');
       }
@@ -728,7 +732,10 @@ export const publishCodeGraphWorksetCatalogGeneration = Effect.fn('codeGraphWork
         const digest = yield* validateInput(() =>
           codeGraphWorksetCatalogGenerationDigest(generation.workset_name, generation.manifest_digest, digestMembers),
         );
-        if (digest !== generation.generation_digest || `cgwg_${digest.slice(0, 40)}` !== generation.id) {
+        if (
+          digest !== generation.generation_digest ||
+          `cgwg_${Effect2.pipe(digest, EffectString.slice(0, 40))}` !== generation.id
+        ) {
           return yield* corrupt('Staged workset generation digest validation failed.');
         }
         if (input.beforePointerSwap !== undefined) yield* input.beforePointerSwap();
@@ -1857,7 +1864,7 @@ function deleteRoutingChildPage(
     yield* sql.unsafe(
       `DELETE FROM ${table}
        WHERE ${tuple} IN (
-         SELECT ${tuple.slice(1, -1)} FROM ${table}
+         SELECT ${Effect2.pipe(tuple, EffectString.slice(1, -1))} FROM ${table}
          WHERE projection_digest = ?
          ORDER BY ${orderBy}
          LIMIT ?

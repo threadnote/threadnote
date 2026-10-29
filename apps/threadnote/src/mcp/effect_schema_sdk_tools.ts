@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   CallToolRequestSchema,
@@ -8,6 +9,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import {Schema} from 'effect';
 import {flattenJsonSchemaConstraints} from './json_schema_constraints.js';
+import * as EffectRecord from 'effect/Record';
 
 interface ToolRegistration {
   readonly name: string;
@@ -34,7 +36,8 @@ export class EffectSchemaSdkTools {
     },
     handler: (input: S['Type']) => Promise<CallToolResult>,
   ): void {
-    if (this.#tools.some(tool => tool.name === name)) throw new Error(`Tool ${name} is already registered.`);
+    if (EffectArray.some(this.#tools, tool => tool.name === name))
+      throw new Error(`Tool ${name} is already registered.`);
     const decode = Schema.decodeUnknownSync(config.inputSchema, {errors: 'all', onExcessProperty: 'error'});
     let advertisedSchema: Record<string, unknown> | undefined;
     this.#tools.push({
@@ -43,10 +46,7 @@ export class EffectSchemaSdkTools {
       annotations: config.annotations,
       inputSchema: () =>
         (advertisedSchema ??= strictObjectSchemas(
-          flattenJsonSchemaConstraints(Schema.toJsonSchemaDocument(config.inputSchema).schema) as Record<
-            string,
-            unknown
-          >,
+          flattenJsonSchemaConstraints(Schema.toJsonSchemaDocument(config.inputSchema).schema),
         )),
       invoke: input => {
         let parsed: S['Type'];
@@ -61,9 +61,9 @@ export class EffectSchemaSdkTools {
   }
 
   install(server: McpServer): void {
-    const tools = new Map(this.#tools.map(tool => [tool.name, tool]));
+    const tools = new Map(EffectArray.map(this.#tools, tool => [tool.name, tool]));
     server.server.setRequestHandler(ListToolsRequestSchema, () => ({
-      tools: this.#tools.map(({annotations, description, inputSchema, name}) => ({
+      tools: EffectArray.map(this.#tools, ({annotations, description, inputSchema, name}) => ({
         annotations,
         description,
         inputSchema: inputSchema(),
@@ -87,15 +87,24 @@ function toolError(message: string): CallToolResult {
   return {content: [{type: 'text', text: message}], isError: true};
 }
 
-function strictObjectSchemas(schema: Record<string, unknown>): Record<string, unknown> {
-  const fields = Object.fromEntries(Object.entries(schema).map(([key, value]) => [key, strictNestedSchema(value)]));
-  return schema.type === 'object' && schema.properties !== undefined
+function strictObjectSchemas(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value))
+    throw new TypeError('Expected a JSON Schema object.');
+  const schema = value;
+  const keys = EffectArray.filter(
+    Reflect.ownKeys(schema),
+    (key): key is string => typeof key === 'string' && Object.prototype.propertyIsEnumerable.call(schema, key),
+  );
+  const fields = EffectRecord.fromEntries(
+    EffectArray.map(keys, key => [key, strictNestedSchema(Reflect.get(schema, key))] as const),
+  );
+  return Reflect.get(schema, 'type') === 'object' && Reflect.get(schema, 'properties') !== undefined
     ? {...fields, additionalProperties: false}
     : fields;
 }
 
 function strictNestedSchema(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(strictNestedSchema);
-  if (typeof value === 'object' && value !== null) return strictObjectSchemas(value as Record<string, unknown>);
+  if (EffectArray.isArray(value)) return EffectArray.map(value, strictNestedSchema);
+  if (typeof value === 'object' && value !== null) return strictObjectSchemas(value);
   return value;
 }

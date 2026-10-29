@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import fc from 'fast-check';
@@ -5,6 +6,7 @@ import {describe, expect, it} from 'vitest';
 import {AGENT_ADAPTERS, getAgentAdapter} from '@threadnote/threadnote/agent_integration/adapters';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {isJsonObject} from '@threadnote/platform/json';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -33,18 +35,38 @@ import {localMemoryPathForUri} from '@threadnote/threadnote/memory/migrations';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runCommand} from '@threadnote/threadnote/utils';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const first = {contentHash: 'a'.repeat(64), text: 'Use reviewed context.', uri: 'threadnote://memory/a'};
-const second = {contentHash: 'b'.repeat(64), text: 'Keep evidence current.', uri: 'threadnote://memory/b'};
+const first = {
+  contentHash: Effect2.pipe('a', EffectString.repeat(64)),
+  text: 'Use reviewed context.',
+  uri: 'threadnote://memory/a',
+};
+const second = {
+  contentHash: Effect2.pipe('b', EffectString.repeat(64)),
+  text: 'Keep evidence current.',
+  uri: 'threadnote://memory/b',
+};
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 describe('project guidance blocks', () => {
   it('declares every safe verified project-guidance target explicitly', () => {
     expect(
-      Object.fromEntries(
-        AGENT_ADAPTERS.filter(adapter => adapter.guidance).map(adapter => [
-          adapter.catalog.id,
-          adapter.guidance?.projection.relativePath,
-        ]),
+      EffectRecord.fromEntries(
+        EffectArray.map(
+          EffectArray.filter(
+            AGENT_ADAPTERS,
+            (adapter: (typeof AGENT_ADAPTERS)[number], __effectArrayIndex) =>
+              __effectArrayIndex in AGENT_ADAPTERS && Boolean(adapter.guidance),
+          ),
+          adapter => [adapter.catalog.id, adapter.guidance?.projection.relativePath],
+        ),
       ),
     ).toEqual({
       'amp-cli': 'AGENTS.md',
@@ -140,7 +162,7 @@ describe('project guidance blocks', () => {
   it('is idempotent and round-trips arbitrary unmanaged content byte-for-byte', () => {
     fc.assert(
       fc.property(
-        fc.string().filter(value => !value.includes('threadnote:project-guidance:')),
+        fc.string().filter(value => !Effect2.pipe(value, EffectString.includes('threadnote:project-guidance:'))),
         text => {
           const block = renderManagedGuidanceBlock([first]);
           const projected = upsertGuidanceBlock(text, block);
@@ -156,16 +178,16 @@ describe('project guidance blocks', () => {
     const expected = {
       project: 'threadnote',
       repositoryId: 'repo',
-      targetIdentity: 'c'.repeat(64),
+      targetIdentity: Effect2.pipe('c', EffectString.repeat(64)),
       targetPath: 'AGENTS.md',
     };
     const receipt = {
-      expectedManagedBlockHash: 'a'.repeat(64),
+      expectedManagedBlockHash: Effect2.pipe('a', EffectString.repeat(64)),
       previousManagedBlockHash: null,
       project: expected.project,
       removeTargetWhenEmpty: true,
       repositoryId: expected.repositoryId,
-      sources: [{contentHash: 'b'.repeat(64), uri: 'threadnote://memory/tn_guidance'}],
+      sources: [{contentHash: Effect2.pipe('b', EffectString.repeat(64)), uri: 'threadnote://memory/tn_guidance'}],
       state: 'current',
       targetIdentity: expected.targetIdentity,
       targetPath: expected.targetPath,
@@ -212,7 +234,7 @@ describe('project guidance blocks', () => {
         ).toMatchObject({mode: 'created'});
         const reviews = yield* listCandidateReviews(fixture.home);
         expect(reviews).toHaveLength(1);
-        expect(reviews[0]?.candidates[0]?.proposedText).toBe(source.trim());
+        expect(reviews[0]?.candidates[0]?.proposedText).toBe(Effect2.pipe(source, EffectString.trim));
         expect(
           yield* runGuidanceImport(fixture.config, adapter, {
             apply: true,
@@ -297,7 +319,17 @@ describe('project guidance blocks', () => {
         });
         const [review] = yield* listCandidateReviews(fixture.home);
         expect(review?.candidates[0]?.proposedText).toBe('Second.\n\nFirst.\n\nDedicated.');
-        expect(review?.candidates[0]?.proposedText.match(/Dedicated\./gu)).toHaveLength(1);
+        expect(
+          Effect2.pipe(review?.candidates[0]?.proposedText, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(
+                  effectOptionalString,
+                  EffectString.match(/Dedicated\./gu),
+                  Effect2.Option.getOrElse(() => null),
+                ),
+          ),
+        ).toHaveLength(1);
         expect(review?.candidates[0]?.proposedText).not.toContain('Dormant legacy.');
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -483,7 +515,10 @@ describe('project guidance blocks', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const factory = yield* makeGuidanceFixture('Small projected guidance.');
-        yield* factory.fs.writeFileString(factory.path.join(factory.repository, 'AGENTS.md'), 'x'.repeat(70_000));
+        yield* factory.fs.writeFileString(
+          factory.path.join(factory.repository, 'AGENTS.md'),
+          Effect2.pipe('x', EffectString.repeat(70_000)),
+        );
         expect(
           yield* runGuidanceProject(factory.config, getAgentAdapter('factory-droid')!, {
             apply: false,
@@ -497,7 +532,10 @@ describe('project guidance blocks', () => {
         const roo = yield* makeGuidanceFixture('Small Roo projection.');
         const rules = roo.path.join(roo.repository, '.roo/rules');
         yield* roo.fs.makeDirectory(rules, {recursive: true});
-        yield* roo.fs.writeFileString(roo.path.join(rules, 'existing.md'), 'x'.repeat(70_000));
+        yield* roo.fs.writeFileString(
+          roo.path.join(rules, 'existing.md'),
+          Effect2.pipe('x', EffectString.repeat(70_000)),
+        );
         yield* roo.fs.writeFileString(roo.path.join(roo.repository, '.roorules'), 'Dormant fallback.\n');
         expect(
           yield* runGuidanceProject(roo.config, getAgentAdapter('roo-project')!, {
@@ -644,12 +682,21 @@ describe('project guidance blocks', () => {
           project: 'threadnote',
         });
         const projected = yield* fixture.fs.readFileString(target);
-        expect(projected.startsWith(`${original}${GUIDANCE_BLOCK_START}`)).toBe(true);
-        expect(projected.match(/^---/g)).toHaveLength(1);
+        expect(Effect2.pipe(projected, EffectString.startsWith(`${original}${GUIDANCE_BLOCK_START}`))).toBe(true);
+        expect(
+          Effect2.pipe(
+            projected,
+            EffectString.match(/^---/g),
+            Effect2.Option.getOrElse(() => null),
+          ),
+        ).toHaveLength(1);
         expect(yield* runGuidanceStatus(fixture.config, adapter, 'threadnote', fixture.repository)).toMatchObject({
           state: 'current',
         });
-        yield* fixture.fs.writeFileString(target, projected.replace('Keep project memory.', 'Locally changed.'));
+        yield* fixture.fs.writeFileString(
+          target,
+          Effect2.pipe(projected, EffectString.replace('Keep project memory.', 'Locally changed.')),
+        );
         expect(yield* runGuidanceStatus(fixture.config, adapter, 'threadnote', fixture.repository)).toMatchObject({
           state: 'locally-modified',
         });
@@ -695,7 +742,7 @@ describe('project guidance blocks', () => {
   effectIt.effect('imports the primary declared source for every project-guidance adapter', () =>
     Effect.scoped(
       Effect.gen(function* () {
-        for (const adapter of AGENT_ADAPTERS.filter(candidate => candidate.guidance !== undefined)) {
+        for (const adapter of EffectArray.filter(AGENT_ADAPTERS, candidate => candidate.guidance !== undefined)) {
           const fixture = yield* makeGuidanceFixture();
           const source = adapter.guidance!.importPaths[0];
           const target = fixture.path.join(fixture.repository, source);
@@ -716,7 +763,7 @@ describe('project guidance blocks', () => {
   effectIt.effect('round-trips every catalog-declared guidance adapter through its native target', () =>
     Effect.scoped(
       Effect.gen(function* () {
-        for (const adapter of AGENT_ADAPTERS.filter(candidate => candidate.guidance !== undefined)) {
+        for (const adapter of EffectArray.filter(AGENT_ADAPTERS, candidate => candidate.guidance !== undefined)) {
           const fixture = yield* makeGuidanceFixture(`Round trip ${adapter.catalog.id}.`);
           const target = fixture.path.join(fixture.repository, adapter.guidance!.projection.relativePath);
           yield* runGuidanceProject(fixture.config, adapter, {
@@ -728,7 +775,8 @@ describe('project guidance blocks', () => {
           });
           const projected = yield* fixture.fs.readFileString(target);
           const wrapper = adapter.guidance!.projection.wrapper;
-          if (wrapper?.required === true) expect(projected.startsWith(wrapper.prefix)).toBe(true);
+          if (wrapper?.required === true)
+            expect(Effect2.pipe(projected, EffectString.startsWith(wrapper.prefix))).toBe(true);
           expect(yield* runGuidanceStatus(fixture.config, adapter, 'threadnote', fixture.repository)).toMatchObject({
             state: 'current',
           });
@@ -835,7 +883,7 @@ describe('project guidance blocks', () => {
         const receiptDirectory = fixture.path.join(fixture.home, 'guidance/v2/receipts');
         const [receiptName] = yield* fixture.fs.readDirectory(receiptDirectory);
         const receiptPath = fixture.path.join(receiptDirectory, receiptName);
-        const receipt = JSON.parse(yield* fixture.fs.readFileString(receiptPath)) as Record<string, unknown>;
+        const receipt = requireJsonObject(JSON.parse(yield* fixture.fs.readFileString(receiptPath)));
         yield* fixture.fs.writeFileString(
           receiptPath,
           `${JSON.stringify({...receipt, state: 'pending'}, undefined, 2)}\n`,
@@ -889,7 +937,7 @@ describe('project guidance blocks', () => {
           const legacyDirectory = fixture.path.join(fixture.home, 'guidance/v1/receipts');
           const legacyPath = fixture.path.join(
             legacyDirectory,
-            `${sha256HexSync([repository.repositoryId, 'threadnote', id].join('\n'))}.json`,
+            `${sha256HexSync(EffectArray.join([repository.repositoryId, 'threadnote', id], '\n'))}.json`,
           );
           const {targetIdentity: _targetIdentity, ...withoutTargetIdentity} = preview.receipt;
           const legacy = {
@@ -907,7 +955,10 @@ describe('project guidance blocks', () => {
           });
           if (adapter.guidance!.projection.wrapper?.required === true)
             expect(
-              (yield* fixture.fs.readFileString(target)).startsWith(adapter.guidance!.projection.wrapper.prefix),
+              Effect2.pipe(
+                yield* fixture.fs.readFileString(target),
+                EffectString.startsWith(adapter.guidance!.projection.wrapper.prefix),
+              ),
             ).toBe(true);
           expect(yield* fixture.fs.readDirectory(fixture.path.join(fixture.home, 'guidance/v2/receipts'))).toHaveLength(
             1,
@@ -969,7 +1020,7 @@ describe('project guidance blocks', () => {
   effectIt.effect('enforces a host project-guidance file limit before writing', () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const fixture = yield* makeGuidanceFixture('x'.repeat(12_000));
+        const fixture = yield* makeGuidanceFixture(Effect2.pipe('x', EffectString.repeat(12_000)));
         const failure = yield* runGuidanceProject(fixture.config, getAgentAdapter('windsurf-legacy')!, {
           apply: false,
           cwd: fixture.repository,
@@ -988,7 +1039,7 @@ describe('project guidance blocks', () => {
   effectIt.effect('counts host limits in Unicode characters', () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const unicodeFixture = yield* makeGuidanceFixture('é'.repeat(10_000));
+        const unicodeFixture = yield* makeGuidanceFixture(Effect2.pipe('é', EffectString.repeat(10_000)));
         expect(
           yield* runGuidanceProject(unicodeFixture.config, getAgentAdapter('windsurf-legacy')!, {
             apply: false,
@@ -1005,7 +1056,7 @@ describe('project guidance blocks', () => {
   effectIt.effect('applies the strictest shared-target limit', () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const sharedFixture = yield* makeGuidanceFixture('x'.repeat(80_000));
+        const sharedFixture = yield* makeGuidanceFixture(Effect2.pipe('x', EffectString.repeat(80_000)));
         const failure = yield* runGuidanceProject(sharedFixture.config, getAgentAdapter('codex-cli')!, {
           apply: false,
           cwd: sharedFixture.repository,
@@ -1032,7 +1083,7 @@ describe('project guidance blocks', () => {
         const target = statusFixture.path.join(statusFixture.repository, 'AGENTS.md');
         yield* statusFixture.fs.writeFileString(
           target,
-          `${yield* statusFixture.fs.readFileString(target)}${'x'.repeat(80_000)}`,
+          `${yield* statusFixture.fs.readFileString(target)}${Effect2.pipe('x', EffectString.repeat(80_000))}`,
         );
         expect(
           yield* runGuidanceStatus(
@@ -1115,7 +1166,10 @@ describe('project guidance blocks', () => {
           project: 'threadnote',
         });
         expect(
-          (yield* fixture.fs.readFileString(target)).startsWith(adapter.guidance!.projection.wrapper!.prefix),
+          Effect2.pipe(
+            yield* fixture.fs.readFileString(target),
+            EffectString.startsWith(adapter.guidance!.projection.wrapper!.prefix),
+          ),
         ).toBe(true);
         yield* runGuidanceRemove(fixture.config, adapter, {
           apply: true,
@@ -1144,9 +1198,9 @@ describe('project guidance blocks', () => {
         const receiptDirectory = fixture.path.join(fixture.home, 'guidance/v2/receipts');
         const [receiptName] = yield* fixture.fs.readDirectory(receiptDirectory);
         const receiptPath = fixture.path.join(receiptDirectory, receiptName);
-        const oldReceipt = JSON.parse(yield* fixture.fs.readFileString(receiptPath)) as {
-          readonly expectedManagedBlockHash: string;
-        };
+        const oldReceipt = requireJsonObject(JSON.parse(yield* fixture.fs.readFileString(receiptPath)));
+        if (typeof oldReceipt.expectedManagedBlockHash !== 'string')
+          throw new Error('Expected the stored guidance block hash.');
         const system = yield* SystemInfo;
         yield* runRemember(fixture.config, {
           kind: 'durable',

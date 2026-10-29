@@ -16,6 +16,8 @@ import {ensureCodeGraphFileBlobAuthority} from '../cache/authority.js';
 import {assertCodeGraphSnapshotFileCitationSchemaMigratable} from '../file_alias_schema.js';
 import {codeGraphSchemaInitializationReceiptCurrent, recordCodeGraphSchemaInitializationReceipt} from './receipt.js';
 import {ensureCodeGraphQueryIndexes} from '../query/indexes.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Exact read-only admission shared by cleanup writers and both health paths. */
 
@@ -142,7 +144,10 @@ const initializeSchemaFully = Effect.fn('codeGraph.initializeSchemaFully')(funct
   // a removed view by republishing its legacy active pointer.
   yield* sql.unsafe(REMOVED_VIEWS_TABLE_SQL);
   yield* sql.unsafe(
-    CODE_GRAPH_ACTIVE_SNAPSHOT_EXTRACTOR_TRIGGER_SQL.replace('CREATE TRIGGER', 'CREATE TRIGGER IF NOT EXISTS'),
+    Effect2.pipe(
+      CODE_GRAPH_ACTIVE_SNAPSHOT_EXTRACTOR_TRIGGER_SQL,
+      EffectString.replace('CREATE TRIGGER', 'CREATE TRIGGER IF NOT EXISTS'),
+    ),
   );
   yield* ensureSnapshotLeaseSchema(sql);
   yield* ensureInitialReconciliationIndexes(sql);

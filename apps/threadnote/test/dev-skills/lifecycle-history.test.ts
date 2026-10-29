@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -14,6 +15,20 @@ import {homeIndexPath, journalPath, parseReceipt, receiptPath} from '../../src/d
 import {devSkillsTestLayer, fixture, snapshot} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import type {DevSkillMember} from '../../src/dev_skills/contract.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function parseChangedJournal(value: unknown): {changes: {path: string}[]} {
+  if (typeof value !== 'object' || value === null || !('changes' in value) || !EffectArray.isArray(value.changes))
+    throw new Error('Expected a workflow journal with changes');
+  const changes = EffectArray.map(value.changes, change => {
+    if (typeof change !== 'object' || change === null || !('path' in change) || typeof change.path !== 'string')
+      throw new Error('Expected a workflow journal change path');
+    return {path: change.path};
+  });
+  return {...value, changes};
+}
 
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer));
@@ -25,16 +40,21 @@ const historical = Effect.fn(function* (
   const f = yield* fixture();
   const selector = {agent: flat ? 'antigravity-cli' : 'codex'};
   const installed = yield* f.run(applyDevSkills(f.config, 'install', selector));
-  const other = {...f.config, agentContextHome: f.path.join(f.root, 'other-home')};
+  const other = {
+    ...f.config,
+    agentContextHome: f.path.join(f.root, 'other-home'),
+  };
   yield* f.run(applyDevSkills(other, 'install', selector));
   const current = yield* loadDevSkillsBundleAt(f.source, '5.3.0-beta.4');
-  const support = current.manifest.skills.find(skill => skill.id === 'watch-pr')!;
+  const support = EffectOption.getOrUndefined(
+    EffectArray.findFirst(current.manifest.skills, skill => skill.id === 'watch-pr'),
+  )!;
   const retiredSupport = retiredSupportFiles === 'entrypoint-only' ? {...support, files: ['SKILL.md']} : support;
   const retiredIds = Array.from({length: count}, (_, index) => `dev-retired-${String.fromCharCode(97 + index)}`);
   const skills = [
-    ...current.manifest.skills.filter(skill => skill.role === 'primary'),
-    ...retiredIds.map(id => ({...retiredSupport, id})),
-  ].sort((a, b) => a.id.localeCompare(b.id));
+    ...EffectArray.filter(current.manifest.skills, skill => skill.role === 'primary'),
+    ...EffectArray.map(retiredIds, id => ({...retiredSupport, id})),
+  ].sort((a, b) => Effect2.pipe(a.id, EffectString.localeCompare(b.id)));
   const files: Record<string, string> = {};
   const hashes: Record<string, string> = {};
   for (const skill of skills)
@@ -42,27 +62,35 @@ const historical = Effect.fn(function* (
       const original = current.files[`${skill.role === 'support' ? 'watch-pr' : skill.id}/${file}`];
       const content =
         file === 'SKILL.md' && skill.role === 'support'
-          ? Buffer.from(Buffer.from(original, 'base64').toString().replaceAll('watch-pr', skill.id)).toString('base64')
+          ? Buffer.from(
+              Effect2.pipe(Buffer.from(original, 'base64').toString(), EffectString.replaceAll('watch-pr', skill.id)),
+            ).toString('base64')
           : original;
       files[`${skill.id}/${file}`] = content;
       hashes[`${skill.id}/${file}`] = hash(Buffer.from(content, 'base64'));
     }
   const {digest: _digest, ...base} = current.manifest;
   const candidate = {...base, skills, hashes};
-  const manifest = parseHistoricalDevSkillsManifest({...candidate, digest: hash(JSON.stringify(candidate))});
+  const manifest = parseHistoricalDevSkillsManifest({
+    ...candidate,
+    digest: hash(JSON.stringify(candidate)),
+  });
   expect(() => parseDevSkillsManifest(manifest)).toThrow();
   const generation = generationRoot(f.path, installed.target.skillRoot, manifest.digest);
-  for (const [relative, content] of Object.entries(files)) {
+  for (const [relative, content] of EffectRecord.toEntries(files)) {
     const file = f.path.join(generation, relative);
     yield* f.fs.makeDirectory(f.path.dirname(file), {recursive: true});
     yield* f.fs.writeFile(file, Buffer.from(content, 'base64'));
   }
   const receiptFile = receiptPath(f.path, installed.target.skillRoot);
   const originalReceipt = parseReceipt(JSON.parse(yield* f.fs.readFileString(receiptFile)));
-  for (const relative of Object.keys(originalReceipt.entrypoints))
+  for (const relative of EffectRecord.keys(originalReceipt.entrypoints))
     yield* f.fs.remove(f.path.join(installed.target.skillRoot, relative));
-  const entrypoints = renderEntrypoints(f.path, installed.target, {manifest, files});
-  for (const [relative, content] of Object.entries(entrypoints)) {
+  const entrypoints = renderEntrypoints(f.path, installed.target, {
+    manifest,
+    files,
+  });
+  for (const [relative, content] of EffectRecord.toEntries(entrypoints)) {
     const file = f.path.join(installed.target.skillRoot, relative);
     yield* f.fs.makeDirectory(f.path.dirname(file), {recursive: true});
     yield* f.fs.writeFileString(file, content);
@@ -70,11 +98,24 @@ const historical = Effect.fn(function* (
   const receipt = {
     ...originalReceipt,
     manifest,
-    generations: {...originalReceipt.generations, [manifest.digest]: manifest},
+    generations: {
+      ...originalReceipt.generations,
+      [manifest.digest]: manifest,
+    },
     entrypoints,
   };
   yield* f.fs.writeFileString(receiptFile, json(receipt));
-  return {...f, selector, other, installed, manifest, receipt, receiptFile, generation, retiredIds};
+  return {
+    ...f,
+    selector,
+    other,
+    installed,
+    manifest,
+    receipt,
+    receiptFile,
+    generation,
+    retiredIds,
+  };
 });
 
 describe('bounded historical support retirement', () => {
@@ -95,7 +136,9 @@ describe('bounded historical support retirement', () => {
             const preview = yield* f.run(previewDevSkills(f.config, 'update', f.selector));
             expect(preview.canApply).toBe(true);
             const result = yield* f.run(
-              applyDevSkills(f.config, 'update', f.selector, {expectedDigest: preview.previewDigest}),
+              applyDevSkills(f.config, 'update', f.selector, {
+                expectedDigest: preview.previewDigest,
+              }),
             );
             for (const id of f.retiredIds) {
               const file = f.path.join(f.installed.target.skillRoot, flat ? `${id}.md` : `${id}/SKILL.md`);
@@ -109,8 +152,8 @@ describe('bounded historical support retirement', () => {
             expect(yield* f.fs.readFileString(unrelated)).toBe('unmanaged');
             expect(yield* f.fs.readFileString(homeIndexPath(f.path, f.other.agentContextHome))).toBe(otherIndex);
             const receipt = parseReceipt(JSON.parse(yield* f.fs.readFileString(f.receiptFile)));
-            expect(Object.keys(receipt.consumers)).toHaveLength(2);
-            expect(Object.keys(receipt.entrypoints)).toHaveLength(4);
+            expect(EffectRecord.keys(receipt.consumers)).toHaveLength(2);
+            expect(EffectRecord.keys(receipt.entrypoints)).toHaveLength(4);
             expect(
               yield* f.fs.exists(f.path.join(f.installed.target.skillRoot, flat ? 'watch-pr.md' : 'watch-pr/SKILL.md')),
             ).toBe(true);
@@ -127,7 +170,10 @@ describe('bounded historical support retirement', () => {
           yield* f.fs.writeFileString(f.path.join(f.generation, f.retiredIds[0], 'scripts/helper.py'), 'corrupt');
         else {
           const relative = `${f.retiredIds[0]}/SKILL.md`;
-          const entrypoints = {...f.receipt.entrypoints, [relative]: 'fabricated owner text'};
+          const entrypoints = {
+            ...f.receipt.entrypoints,
+            [relative]: 'fabricated owner text',
+          };
           yield* f.fs.writeFileString(f.receiptFile, json({...f.receipt, entrypoints}));
           yield* f.fs.writeFileString(f.path.join(f.installed.target.skillRoot, relative), entrypoints[relative]);
         }
@@ -161,8 +207,9 @@ describe('bounded historical support retirement', () => {
           .pipe(Effect.provideService(FileSystem.FileSystem, failing), Effect.result),
       ).toMatchObject({_tag: 'Failure'});
       const file = journalPath(f.path, f.installed.target.skillRoot);
-      const journal = JSON.parse(yield* f.fs.readFileString(file)) as {changes: {path: string}[]};
-      journal.changes = journal.changes.filter(
+      const journal = parseChangedJournal(JSON.parse(yield* f.fs.readFileString(file)));
+      journal.changes = EffectArray.filter(
+        journal.changes,
         change => change.path !== f.path.join(f.installed.target.skillRoot, f.retiredIds[0], 'SKILL.md'),
       );
       yield* f.fs.writeFileString(file, JSON.stringify(journal));
@@ -206,12 +253,14 @@ describe('bounded historical support retirement', () => {
   effectIt.effect('rejects core names, arbitrary aliases, paths, reserved names and duplicate support identities', () =>
     Effect.gen(function* () {
       const f = yield* historical();
-      const member = f.manifest.skills.find(skill => skill.role === 'support')!;
+      const member = EffectOption.getOrUndefined(
+        EffectArray.findFirst(f.manifest.skills, skill => skill.role === 'support'),
+      )!;
       const withSkills = (members: readonly DevSkillMember[]) => {
-        const skills = [...members].sort((a, b) => a.id.localeCompare(b.id));
-        const hashes = Object.fromEntries(
-          skills.flatMap(skill =>
-            skill.files.map(file => [
+        const skills = [...members].sort((a, b) => Effect2.pipe(a.id, EffectString.localeCompare(b.id)));
+        const hashes = EffectRecord.fromEntries(
+          EffectArray.flatMap(skills, skill =>
+            EffectArray.map(skill.files, (file): readonly [string, string | undefined] => [
               `${skill.id}/${file}`,
               f.manifest.hashes[`${skill.role === 'support' ? member.id : skill.id}/${file}`],
             ]),
@@ -235,18 +284,37 @@ describe('bounded historical support retirement', () => {
       ]) {
         expect(() =>
           parseHistoricalDevSkillsManifest(
-            withSkills([...f.manifest.skills.filter(skill => skill.role === 'primary'), {...member, id}]),
+            withSkills([...EffectArray.filter(f.manifest.skills, skill => skill.role === 'primary'), {...member, id}]),
           ),
         ).toThrow();
       }
       expect(() => parseHistoricalDevSkillsManifest(withSkills([...f.manifest.skills, member]))).toThrow();
       expect(() =>
-        parseHistoricalDevSkillsManifest(withSkills([...f.manifest.skills, {...member, id: member.id.toUpperCase()}])),
+        parseHistoricalDevSkillsManifest(
+          withSkills([
+            ...f.manifest.skills,
+            {
+              ...member,
+              id: Effect2.pipe(member.id, EffectString.toUpperCase),
+            },
+          ]),
+        ),
       ).toThrow();
       expect(() =>
-        parseReceipt({...f.receipt, entrypoints: {...f.receipt.entrypoints, 'threadnote-context/SKILL.md': 'unowned'}}),
+        parseReceipt({
+          ...f.receipt,
+          entrypoints: {
+            ...f.receipt.entrypoints,
+            'threadnote-context/SKILL.md': 'unowned',
+          },
+        }),
       ).toThrow();
-      expect(() => parseHistoricalDevSkillsManifest({...f.manifest, digest: '0'.repeat(64)})).toThrow();
+      expect(() =>
+        parseHistoricalDevSkillsManifest({
+          ...f.manifest,
+          digest: Effect2.pipe('0', EffectString.repeat(64)),
+        }),
+      ).toThrow();
     }).pipe(provide),
   );
 });

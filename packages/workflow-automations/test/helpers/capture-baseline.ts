@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import {pipe as EffectArrayPipe, Schema} from 'effect';
+import {Array as EffectArray} from 'effect';
 /** Test-only reproducible source and workflow baseline capture. */
 import {spawnSync} from '@threadnote/testing/node-child-process';
 import {createHash} from '@threadnote/testing/node-crypto';
@@ -6,15 +8,21 @@ import {chmod, readFile, writeFile} from '@threadnote/testing/node-fs-promises';
 import {isAbsolute, join, resolve} from '@threadnote/testing/node-path';
 import {fileURLToPath} from '@threadnote/testing/node-url';
 import {workflowScenarios, workflowScenarioCatalogVersion} from '../../src/scenarios.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 type Json = Record<string, unknown>;
 const captureFormatVersion = 2;
 const utf8Bytes = (value: string) => Buffer.byteLength(value, 'utf8');
 
 function gitHead(repo: string): string {
-  const result = spawnSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {encoding: 'utf8', timeout: 2_000});
-  if (result.status !== 0 || !result.stdout.trim()) throw new Error('Unable to identify source revision');
-  return result.stdout.trim();
+  const result = spawnSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+    timeout: 2_000,
+  });
+  if (result.status !== 0 || !Effect.pipe(result.stdout, EffectString.trim))
+    throw new Error('Unable to identify source revision');
+  return Effect.pipe(result.stdout, EffectString.trim);
 }
 
 async function runtimeBaseline(executable: string): Promise<Json> {
@@ -24,11 +32,20 @@ async function runtimeBaseline(executable: string): Promise<Json> {
   let successfulSamples = 0;
   for (let index = 0; index < 3; index++) {
     const started = performance.now();
-    const result = spawnSync(executable, ['--version'], {encoding: 'utf8', timeout: 2_000, maxBuffer: 4_096});
+    const result = spawnSync(executable, ['--version'], {
+      encoding: 'utf8',
+      timeout: 2_000,
+      maxBuffer: 4_096,
+    });
     timingsMilliseconds.push(Number((performance.now() - started).toFixed(3)));
     if (result.status === 0) {
       successfulSamples++;
-      if (version === null) version = result.stdout.trim().split(/\r?\n/, 1)[0]?.slice(0, 120) ?? '';
+      if (version === null)
+        version =
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+          Effect.pipe(Effect.pipe(result.stdout, EffectString.trim).split(/\r?\n/, 1)[0], effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.slice(0, 120)),
+          ) ?? '';
     }
   }
   const bytes = await readFile(executable);
@@ -63,13 +80,16 @@ function isExecutableBinary(bytes: Uint8Array): boolean {
   const pe = b.length >= 2 && b[0] === 0x4d && b[1] === 0x5a;
   const macho =
     b.length >= 4 &&
-    [
-      [0xfe, 0xed, 0xfa, 0xce],
-      [0xce, 0xfa, 0xed, 0xfe],
-      [0xfe, 0xed, 0xfa, 0xcf],
-      [0xcf, 0xfa, 0xed, 0xfe],
-      [0xca, 0xfe, 0xba, 0xbe],
-    ].some(magic => magic.every((byte, i) => b[i] === byte));
+    EffectArray.some(
+      [
+        [0xfe, 0xed, 0xfa, 0xce],
+        [0xce, 0xfa, 0xed, 0xfe],
+        [0xfe, 0xed, 0xfa, 0xcf],
+        [0xcf, 0xfa, 0xed, 0xfe],
+        [0xca, 0xfe, 0xba, 0xbe],
+      ],
+      magic => EffectArray.every(magic, (byte, i) => b[i] === byte),
+    );
   return elf || pe || macho;
 }
 
@@ -81,13 +101,16 @@ export interface CaptureBaselineOptions {
 export async function captureBaseline({repo: repoArg, runtime}: CaptureBaselineOptions): Promise<Json> {
   const repo = resolve(repoArg);
   const head = gitHead(repo);
-  const manifest = JSON.parse(await readFile(join(repo, 'config/dev-skills.json'), 'utf8')) as {
-    schemaVersion: number;
-    nativeRequirements: Record<string, number>;
-    workflowProtocol: number;
-    stateSchema: number;
-    skills: {id: string; files: string[]}[];
-  };
+  const manifestValue: unknown = JSON.parse(await readFile(join(repo, 'config/dev-skills.json'), 'utf8'));
+  const manifestSchema = Schema.Struct({
+    schemaVersion: Schema.Int,
+    nativeRequirements: Schema.Record(Schema.String, Schema.Int),
+    workflowProtocol: Schema.Int,
+    stateSchema: Schema.Int,
+    skills: Schema.Array(Schema.Struct({id: Schema.String, files: Schema.Array(Schema.String)})),
+  });
+  if (!Schema.is(manifestSchema)(manifestValue)) throw new Error('Expected a current native skill manifest');
+  const manifest = manifestValue;
   const sourceIdentity = {
     captureFormatVersion,
     repositoryHead: head,
@@ -97,20 +120,32 @@ export async function captureBaseline({repo: repoArg, runtime}: CaptureBaselineO
     stateSchema: manifest.stateSchema,
     scenarioCatalogVersion: workflowScenarioCatalogVersion,
   };
-  const skillFiles = manifest.skills
-    .flatMap(skill =>
-      skill.files
-        .filter(file => file === 'SKILL.md' || (file.startsWith('references/') && file.endsWith('.md')))
-        .map(file => `config/agent-skills/${skill.id}/${file}`),
-    )
-    .sort();
+  const skillFiles = EffectArray.flatMap(manifest.skills, skill =>
+    EffectArray.map(
+      EffectArrayPipe(skill.files, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (file, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues &&
+            (file === 'SKILL.md' ||
+              (Effect.pipe(file, EffectString.startsWith('references/')) &&
+                Effect.pipe(file, EffectString.endsWith('.md')))),
+        ),
+      ),
+      file => `config/agent-skills/${skill.id}/${file}`,
+    ),
+  ).sort();
   const skillDocuments = await Promise.all(
-    skillFiles.map(async path => {
+    EffectArray.map(skillFiles, async path => {
       const content = await readFile(join(repo, path), 'utf8');
-      return {path, bytes: utf8Bytes(content), method: 'UTF-8 encoded file content byte length'};
+      return {
+        path,
+        bytes: utf8Bytes(content),
+        method: 'UTF-8 encoded file content byte length',
+      };
     }),
   );
-  const scenarioRecords = workflowScenarios.map(item => ({
+  const scenarioRecords = EffectArray.map(workflowScenarios, item => ({
     id: item.id,
     category: item.category,
     expectedInvariants: [...item.expectedInvariants],
@@ -125,7 +160,7 @@ export async function captureBaseline({repo: repoArg, runtime}: CaptureBaselineO
         sourceIdentity,
         method: 'manifest-declared SKILL.md and references/*.md files; UTF-8 bytes; sorted by relative path',
         files: skillDocuments,
-        totalBytes: skillDocuments.reduce((sum, file) => sum + file.bytes, 0),
+        totalBytes: EffectArray.reduce(skillDocuments, 0, (sum, file) => sum + file.bytes),
       },
       scenarios: {
         sourceIdentity,
@@ -200,7 +235,7 @@ async function main(argv: string[]) {
     const name = argv[index];
     if (!['--repo', '--out', '--runtime'].includes(name)) throw new Error('Unsupported argument');
     const value = argv[++index];
-    if (!value || value.startsWith('--')) throw new Error(`Missing value for ${name}`);
+    if (!value || Effect.pipe(value, EffectString.startsWith('--'))) throw new Error(`Missing value for ${name}`);
     args.set(name, value);
   }
   const repo = args.get('--repo');
@@ -209,9 +244,14 @@ async function main(argv: string[]) {
     throw new Error(
       'Usage: bun capture-baseline.ts --repo <root> --out <private-file> [--runtime <absolute-executable>]',
     );
-  const baseline = await captureBaseline({repo, runtime: args.get('--runtime')});
+  const baseline = await captureBaseline({
+    repo,
+    runtime: args.get('--runtime'),
+  });
   const output = resolve(out);
-  await writeFile(output, `${JSON.stringify(baseline, null, 2)}\n`, {mode: 0o600});
+  await writeFile(output, `${JSON.stringify(baseline, null, 2)}\n`, {
+    mode: 0o600,
+  });
   await chmod(output, 0o600);
 }
 

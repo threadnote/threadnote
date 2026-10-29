@@ -1,4 +1,7 @@
 import {parseResourceId} from '@threadnote/store/resource-id';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export const MEMORY_HYGIENE_SOURCES_HEADING = '## Threadnote Hygiene Sources';
 export const MEMORY_HYGIENE_SOURCES_MARKER = '<!-- threadnote:hygiene-sources:v1 -->';
@@ -15,18 +18,36 @@ export interface ParsedMemoryHygieneSources {
  * of canonical URI bullets, so ordinary user-authored Markdown is preserved.
  */
 export function parseMemoryHygieneSources(content: string): ParsedMemoryHygieneSources | undefined {
-  const lines = content.split(/\r?\n/);
+  const lines = Effect.pipe(content, EffectString.split(/\r?\n/));
   const markerIndex = lines.lastIndexOf(MEMORY_HYGIENE_SOURCES_MARKER);
   const headingIndex = lines.lastIndexOf(MEMORY_HYGIENE_SOURCES_HEADING);
   const versioned = markerIndex !== -1 && headingIndex === markerIndex + 1;
   const trailerStart = versioned ? markerIndex : headingIndex;
-  if (trailerStart === -1 || (!versioned && trailerStart > 0 && lines[trailerStart - 1]?.trim() !== '')) {
+  if (
+    trailerStart === -1 ||
+    (!versioned &&
+      trailerStart > 0 &&
+      Effect.pipe(lines[trailerStart - 1], effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) !== '')
+  ) {
     return undefined;
   }
   let bulletStart = headingIndex + 1;
-  while (lines[bulletStart]?.trim() === '') bulletStart += 1;
+  while (
+    Effect.pipe(lines[bulletStart], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) === ''
+  )
+    bulletStart += 1;
   let trailerEnd = lines.length;
-  while (trailerEnd > bulletStart && lines[trailerEnd - 1]?.trim() === '') trailerEnd -= 1;
+  while (
+    trailerEnd > bulletStart &&
+    Effect.pipe(lines[trailerEnd - 1], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) === ''
+  )
+    trailerEnd -= 1;
   if (bulletStart >= trailerEnd) return undefined;
   const uris: string[] = [];
   for (const line of lines.slice(bulletStart, trailerEnd)) {
@@ -36,7 +57,7 @@ export function parseMemoryHygieneSources(content: string): ParsedMemoryHygieneS
     uris.push(uri);
   }
   return {
-    body: lines.slice(0, trailerStart).join('\n').replace(/\s+$/u, ''),
+    body: Effect.pipe(EffectArray.join(lines.slice(0, trailerStart), '\n'), EffectString.replace(/\s+$/u, '')),
     uris: [...new Set(uris)].sort(),
     versioned,
   };

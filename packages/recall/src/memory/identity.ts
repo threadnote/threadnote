@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {isMemoryId, memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
@@ -12,14 +13,14 @@ interface MemoryIdentityRuntime {
   readonly user: string;
 }
 
-export class MemoryIdentityResolutionError extends Schema.TaggedError<MemoryIdentityResolutionError>()(
-  'MemoryIdentityResolutionError',
-  {
-    message: Schema.String,
-    memoryId: Schema.String,
-    reason: Schema.Literals(['ambiguous', 'live-mismatch', 'not-found', 'scope-required']),
-  },
-) {}
+export class MemoryIdentityResolutionError extends Schema.TaggedError<
+  MemoryIdentityResolutionError,
+  {readonly brand: unique symbol}
+>()('MemoryIdentityResolutionError', {
+  message: Schema.String,
+  memoryId: Schema.String,
+  reason: Schema.Literals(['ambiguous', 'live-mismatch', 'not-found', 'scope-required']),
+}) {}
 
 export interface ResolvedMemoryIdentityAlias {
   readonly canonicalUri: string;
@@ -45,12 +46,15 @@ export function classifyMemoryIdentityCandidates(
   allowedUriScopes: readonly string[],
 ): MemoryIdentityCandidateResolution {
   if (allowedUriScopes.length === 0) return {state: 'not-found'};
-  const matches = candidates.filter(
-    candidate =>
-      candidate.memoryId === memoryId && allowedUriScopes.some(scope => resourceIdIsWithin(candidate.uri, scope)),
+  const matches = EffectArray.filter(
+    candidates,
+    (candidate, __effectArrayIndex) =>
+      __effectArrayIndex in candidates &&
+      candidate.memoryId === memoryId &&
+      EffectArray.some(allowedUriScopes, scope => resourceIdIsWithin(candidate.uri, scope)),
   );
-  const activeMatches = matches.filter(candidate => candidate.status === 'active');
-  const identityConflict = matches.some(candidate => candidate.identityConflict === true);
+  const activeMatches = EffectArray.filter(matches, candidate => candidate.status === 'active');
+  const identityConflict = EffectArray.some(matches, candidate => candidate.identityConflict === true);
   if (activeMatches.length === 1 && !identityConflict) return {state: 'resolved', uri: activeMatches[0].uri};
   return activeMatches.length === 0 && !identityConflict ? {state: 'not-found'} : {state: 'ambiguous'};
 }
@@ -62,9 +66,20 @@ export const resolveMemoryIdentityAliases = Effect.fn('recall.resolveMemoryIdent
   allowedUriScopes: readonly string[],
   options: {readonly validateNow?: boolean} = {},
 ) {
-  const memoryIds = [...new Set(inputs.flatMap(input => memoryIdFromIdentityAlias(input) ?? []).filter(isMemoryId))];
+  const memoryIds = [
+    ...new Set(
+      EffectArray.filter(
+        EffectArray.flatMap(inputs, (input, __effectArrayIndex) => {
+          if (!(__effectArrayIndex in inputs)) return [];
+          const memoryId = memoryIdFromIdentityAlias(input);
+          return memoryId === undefined ? [] : [memoryId];
+        }),
+        isMemoryId,
+      ),
+    ),
+  ];
   if (memoryIds.length === 0) {
-    return inputs.map(input => ({canonicalUri: input, expectedMemoryId: undefined, requestedUri: input}));
+    return EffectArray.map(inputs, input => ({canonicalUri: input, expectedMemoryId: undefined, requestedUri: input}));
   }
   if (allowedUriScopes.length === 0) {
     return yield* MemoryIdentityResolutionError.make({
@@ -79,14 +94,18 @@ export const resolveMemoryIdentityAliases = Effect.fn('recall.resolveMemoryIdent
     validateNow: options.validateNow,
   });
   const indexedResolutions = new Map(
-    memoryIds.map(
+    EffectArray.map(
+      memoryIds,
       memoryId => [memoryId, classifyMemoryIdentityCandidates(candidates, memoryId, allowedUriScopes)] as const,
     ),
   );
   // A receipt is a bounded disaster-recovery witness for an identity that the
   // active index cannot find. A live indexed memory_id is stronger evidence and
   // must not pay an O(lifetime relocations) filesystem scan on every read.
-  const fallbackMemoryIds = memoryIds.filter(memoryId => indexedResolutions.get(memoryId)?.state === 'not-found');
+  const fallbackMemoryIds = EffectArray.filter(
+    memoryIds,
+    memoryId => indexedResolutions.get(memoryId)?.state === 'not-found',
+  );
   const relocationWitnesses =
     fallbackMemoryIds.length === 0
       ? []

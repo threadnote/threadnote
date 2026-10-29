@@ -1,9 +1,16 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Exit, FileSystem, Path, Scope, Stream, Schema} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class ArchiveOperationError extends Schema.TaggedError<ArchiveOperationError>()('ArchiveOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class ArchiveOperationError extends Schema.TaggedError<ArchiveOperationError, {readonly brand: unique symbol}>()(
+  'ArchiveOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const TAR_BLOCK_BYTES = 512;
 const MAX_COMPRESSED_ARCHIVE_BYTES = 1024 * 1024 * 1024;
@@ -227,7 +234,7 @@ function createTarStreamParser(
       const entryPath = rootEntry
         ? path.resolve(destination)
         : yield* attemptArchiveParse(() => safeArchivePath(path, destination, effectivePath));
-      const destinationKey = path.sep === '\\' ? entryPath.toLowerCase() : entryPath;
+      const destinationKey = path.sep === '\\' ? Effect2.pipe(entryPath, EffectString.toLowerCase) : entryPath;
       if (destinations.has(destinationKey)) {
         return yield* ArchiveOperationError.make({
           message: `Release archive contains a duplicate path: ${effectivePath}`,
@@ -282,7 +289,7 @@ function createTarStreamParser(
 }
 
 function validateExtractionLimits(limits: Required<ArchiveExtractionLimits>) {
-  return Effect.forEach(Object.entries(limits), ([name, value]) =>
+  return Effect.forEach(EffectRecord.toEntries(limits), ([name, value]) =>
     Number.isSafeInteger(value) && value > 0
       ? Effect.void
       : Effect.fail(
@@ -352,9 +359,16 @@ function parsePaxMetadata(bytes: Uint8Array<ArrayBufferLike>): Readonly<Record<s
       throw ArchiveOperationError.make({message: 'Release archive contains a truncated PAX metadata record.'});
     }
     const record = new TextDecoder().decode(bytes.slice(separator + 1, end - 1));
-    const equals = record.indexOf('=');
+    const equals = Effect2.pipe(
+      record,
+      EffectString.indexOf('='),
+      Effect2.Option.getOrElse(() => -1),
+    );
     if (equals <= 0) throw ArchiveOperationError.make({message: 'Release archive contains malformed PAX metadata.'});
-    metadata[record.slice(0, equals)] = record.slice(equals + 1);
+    metadata[Effect2.pipe(record, EffectString.slice(0, equals))] = Effect2.pipe(
+      record,
+      EffectString.slice(equals + 1),
+    );
     offset = end;
   }
   return metadata;
@@ -365,7 +379,7 @@ function mergePaxMetadata(
   incoming: Readonly<Record<string, string>>,
 ): Readonly<Record<string, string>> {
   const merged: Record<string, string> = {...current};
-  for (const [key, value] of Object.entries(incoming)) {
+  for (const [key, value] of EffectRecord.toEntries(incoming)) {
     if (value.length === 0) delete merged[key];
     else merged[key] = value;
   }
@@ -383,36 +397,54 @@ function parsePaxSize(value: string): number {
 
 function tarMetadataText(bytes: Uint8Array<ArrayBufferLike>): string {
   const decoded = new TextDecoder().decode(bytes);
-  const nullTerminator = decoded.indexOf(String.fromCharCode(0));
-  return decoded.slice(0, nullTerminator < 0 ? undefined : nullTerminator).replace(/\n$/, '');
+  const nullTerminator = Effect2.pipe(
+    decoded,
+    EffectString.indexOf(String.fromCharCode(0)),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  return Effect2.pipe(decoded, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(
+      __effectPipeInput,
+      EffectString.slice(0, nullTerminator < 0 ? undefined : nullTerminator),
+    );
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\n$/, ''));
+    return __effectPipeStage1;
+  });
 }
 
 function safeArchivePath(path: Path.Path, destination: string, entry: string): string {
-  const normalized = entry
-    .replaceAll('\\', '/')
-    .replace(/^\.\/+/, '')
-    .replace(/\/+$/, '');
-  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized)) {
+  const normalized = Effect2.pipe(
+    entry,
+    EffectString.replaceAll('\\', '/'),
+    EffectString.replace(/^\.\/+/, ''),
+    EffectString.replace(/\/+$/, ''),
+  );
+  if (!normalized || Effect2.pipe(normalized, EffectString.startsWith('/')) || /^[A-Za-z]:\//.test(normalized)) {
     throw ArchiveOperationError.make({message: `Release archive contains an unsafe path: ${entry}`});
   }
-  const segments = normalized.split('/');
-  if (segments.some(segment => !segment || segment === '.' || segment === '..')) {
+  const segments = Effect2.pipe(normalized, EffectString.split('/'));
+  if (
+    Effect2.pipe(
+      segments,
+      EffectArray.some(segment => !segment || segment === '.' || segment === '..'),
+    )
+  ) {
     throw ArchiveOperationError.make({message: `Release archive contains an unsafe path: ${entry}`});
   }
   const root = path.resolve(destination);
   const resolved = path.resolve(root, ...segments);
-  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+  if (resolved !== root && !Effect2.pipe(resolved, EffectString.startsWith(`${root}${path.sep}`))) {
     throw ArchiveOperationError.make({message: `Release archive path escapes its destination: ${entry}`});
   }
   return resolved;
 }
 
 function isArchiveRootPath(entry: string): boolean {
-  return /^\.\/*$/.test(entry.replaceAll('\\', '/'));
+  return /^\.\/*$/.test(Effect2.pipe(entry, EffectString.replaceAll('\\', '/')));
 }
 
 function parseTarNumber(bytes: Uint8Array<ArrayBufferLike>, field: string): number {
-  const text = tarText(bytes).trim();
+  const text = Effect2.pipe(tarText(bytes), EffectString.trim);
   if (!/^[0-7]+$/.test(text))
     throw ArchiveOperationError.make({message: `Release archive has an invalid tar ${field}.`});
   const value = Number.parseInt(text, 8);
@@ -442,7 +474,7 @@ function concatenate(
 }
 
 function concatenateAll(chunks: readonly Uint8Array<ArrayBufferLike>[]): Uint8Array<ArrayBufferLike> {
-  const output = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
+  const output = new Uint8Array(EffectArray.reduce(chunks, 0, (total, chunk) => total + chunk.length));
   let offset = 0;
   for (const chunk of chunks) {
     output.set(chunk, offset);

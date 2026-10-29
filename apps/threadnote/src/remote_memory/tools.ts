@@ -46,6 +46,8 @@ import {
   normalizeRemoteContextBriefAnchors,
   type RemoteContextBriefAnchorV1,
 } from '@threadnote/remote-memory/context/brief';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const REMOTE_MEMORY_TOOL_NAMES = [
   'context_brief',
@@ -89,7 +91,8 @@ const IsoUtcInstant = Schema.String.check(
     const milliseconds = Date.parse(value);
     const precision = value[16] === ':' ? 19 : 16;
     return Number.isFinite(milliseconds) &&
-      new Date(milliseconds).toISOString().slice(0, precision) === value.slice(0, precision)
+      Effect.pipe(new Date(milliseconds).toISOString(), EffectString.slice(0, precision)) ===
+        Effect.pipe(value, EffectString.slice(0, precision))
       ? undefined
       : 'Expected a valid UTC instant.';
   }),
@@ -104,7 +107,9 @@ const RemoteReadToolInput = Schema.Struct({
     Schema.Trim.check(
       Schema.isMinLength(1),
       Schema.makeFilter(value =>
-        Buffer.byteLength(value.trim(), 'utf8') <= 256 ? undefined : 'Section exceeds 256 UTF-8 bytes.',
+        Buffer.byteLength(Effect.pipe(value, EffectString.trim), 'utf8') <= 256
+          ? undefined
+          : 'Section exceeds 256 UTF-8 bytes.',
       ),
     ),
   ),
@@ -438,8 +443,8 @@ export function createRemoteMemoryMcpServer(options: RemoteMemoryMcpServerOption
           Schema.String.check(
             Schema.isMinLength(1),
             Schema.makeFilter(value => {
-              if (!value.trim()) return 'Review reason must contain non-whitespace text.';
-              return Buffer.byteLength(value.trim(), 'utf8') <= 1_024
+              if (!Effect.pipe(value, EffectString.trim)) return 'Review reason must contain non-whitespace text.';
+              return Buffer.byteLength(Effect.pipe(value, EffectString.trim), 'utf8') <= 1_024
                 ? undefined
                 : 'Review reason exceeds 1024 UTF-8 bytes.';
             }),
@@ -904,7 +909,7 @@ function remoteToolError(error: RemoteMemoryError, requestId: string): CallToolR
 function safeToolText(value: unknown): string {
   const serialized = JSON.stringify(value);
   if (serialized === undefined) return 'Remote memory request completed.';
-  const digest = sha256HexSync(serialized).slice(0, 12);
+  const digest = Effect.pipe(sha256HexSync(serialized), EffectString.slice(0, 12));
   return `UNTRUSTED REMOTE MEMORY EVIDENCE (${digest})\n${serialized}`;
 }
 

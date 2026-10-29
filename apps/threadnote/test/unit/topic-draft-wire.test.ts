@@ -1,3 +1,6 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {Schema} from 'effect';
@@ -25,6 +28,23 @@ import {
   makeTopicDraftWireFixture as wireFor,
   makeTopicDraftWireEvidence as evidenceFor,
 } from '../helpers/topic-draft-wire.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+function isSchemaObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !EffectArray.isArray(value);
+}
+
+function schemaObject(value: unknown): Record<string, unknown> {
+  if (!isSchemaObject(value)) throw new Error('Expected an object in the generated native schema.');
+  return value;
+}
+
+function schemaArray(value: unknown): readonly unknown[] {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array in the generated native schema.');
+  return value;
+}
 
 function decodeTopicDraftModelOutput(
   basis: TopicMaintenanceDraftBasisV1,
@@ -41,13 +61,19 @@ function canonical(basis: TopicMaintenanceDraftBasisV1, wire: unknown, evidence 
 }
 
 function promptSources(basis: TopicMaintenanceDraftBasisV1) {
-  return basis.handles
-    .filter(h => h.variant === 'current')
-    .map(h => ({
+  return EffectArray.map(
+    EffectArrayPipe(basis.handles, __effectFilterValues =>
+      EffectArray.filter(
+        __effectFilterValues,
+        (h, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && h.variant === 'current',
+      ),
+    ),
+    h => ({
       citationId: h.citationId,
       oldExcerpt: {source: {path: 'source.ts'}, content: 'Historical source.'},
       newExcerpt: {source: {path: 'source.ts'}, content: 'Current source.'},
-    }));
+    }),
+  );
 }
 
 describe('single-decision compact topic wire', () => {
@@ -60,9 +86,17 @@ describe('single-decision compact topic wire', () => {
         (decisions, seed, reverse) => {
           const protectedOrdinal = seed % (decisions.length + 1);
           const basis = basisFor(decisions.length + 1, {protectedOrdinal});
-          const factualOrdinals = basis.paragraphs.filter(p => p.role === 'descriptive').map(p => p.ordinal);
+          const factualOrdinals = EffectArray.map(
+            EffectArrayPipe(basis.paragraphs, __effectFilterValues =>
+              EffectArray.filter(
+                __effectFilterValues,
+                (p, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && p.role === 'descriptive',
+              ),
+            ),
+            p => p.ordinal,
+          );
           const wire = wireFor(basis);
-          wire.facts.entries = factualOrdinals.map((ordinal, index) => ({
+          wire.facts.entries = EffectArray.map(factualOrdinals, (ordinal, index) => ({
             ordinal,
             currentBehavior: decisions[index] === 'unresolved' ? null : 'Supported behavior.',
             rationale: `Evidence ${ordinal}.`,
@@ -75,11 +109,11 @@ describe('single-decision compact topic wire', () => {
           const before = JSON.stringify({basis, wire});
           const result = canonical(basis, wire);
           expect(result).toEqual(expected);
-          expect(result.draft.paragraphDispositions!.entries.map(e => [e.ordinal, e.rationale])).toEqual(
-            factualOrdinals.map(ordinal => [ordinal, `Evidence ${ordinal}.`]),
+          expect(EffectArray.map(result.draft.paragraphDispositions!.entries, e => [e.ordinal, e.rationale])).toEqual(
+            EffectArray.map(factualOrdinals, ordinal => [ordinal, `Evidence ${ordinal}.`]),
           );
-          expect(result.draft.operations.map(e => e.ordinal)).toEqual(
-            factualOrdinals.filter((_, index) => decisions[index] === 'update'),
+          expect(EffectArray.map(result.draft.operations, e => e.ordinal)).toEqual(
+            EffectArray.filter(factualOrdinals, (_, index) => decisions[index] === 'update'),
           );
           for (const kind of ['missing', 'duplicate', 'wrong-role', 'action-protected'] as const) {
             const invalid = structuredClone(wire);
@@ -99,9 +133,11 @@ describe('single-decision compact topic wire', () => {
   it('keeps comparison rationale scalar and UTF-8 bounds at application validation', () => {
     const basis = basisFor(1);
     const wire = wireFor(basis);
-    wire.facts.entries[0].rationale = 'é'.repeat(512);
-    expect(canonical(basis, wire).draft.paragraphDispositions!.entries[0].rationale).toBe('é'.repeat(512));
-    for (const rationale of ['é'.repeat(513), '\ud83d', '\ude42']) {
+    wire.facts.entries[0].rationale = Effect.pipe('é', EffectString.repeat(512));
+    expect(canonical(basis, wire).draft.paragraphDispositions!.entries[0].rationale).toBe(
+      Effect.pipe('é', EffectString.repeat(512)),
+    );
+    for (const rationale of [Effect.pipe('é', EffectString.repeat(513)), '\ud83d', '\ude42']) {
       wire.facts.entries[0].rationale = rationale;
       expect(() => decodeTopicDraftWire(basis, wire)).not.toThrow();
       expect(() => canonical(basis, wire)).toThrow(TopicDraftApplicationValidationError);
@@ -118,21 +154,32 @@ describe('single-decision compact topic wire', () => {
               const original = basisFor(count, {sourceCount});
               const basis = {
                 ...original,
-                paragraphs: original.paragraphs.map((paragraph, ordinal) => ({
+                paragraphs: EffectArray.map(original.paragraphs, (paragraph, ordinal) => ({
                   ...paragraph,
                   role: roles[ordinal] === 'normative' ? ('normative' as const) : ('descriptive' as const),
                   support: roles[ordinal] === 'contextual' ? ('contextual' as const) : ('direct' as const),
                 })),
               };
-              const expectedComparisons = roles.flatMap((role, ordinal) => (role === 'normative' ? [ordinal] : []));
-              const expectedActions = roles.flatMap((role, ordinal) => (role === 'eligible' ? [ordinal] : []));
+              const expectedComparisons = EffectArray.flatMap(roles, (role, ordinal) =>
+                ordinal in roles ? (role === 'normative' ? [ordinal] : []) : [],
+              );
+              const expectedActions = EffectArray.flatMap(roles, (role, ordinal) =>
+                ordinal in roles ? (role === 'eligible' ? [ordinal] : []) : [],
+              );
               const wire = wireFor(basis);
               const before = JSON.stringify({basis, wire});
-              expect(wire.normativeComparisons.map(entry => entry.ordinal)).toEqual(expectedComparisons);
-              expect(wire.facts.entries.map(entry => entry.ordinal)).toEqual(expectedActions);
+              expect(EffectArray.map(wire.normativeComparisons, entry => entry.ordinal)).toEqual(expectedComparisons);
+              expect(EffectArray.map(wire.facts.entries, entry => entry.ordinal)).toEqual(expectedActions);
               expect(topicDraftNativeJsonSchema(topicDraftModelSchema(basis)).properties).toHaveProperty('decision');
               const result = canonical(basis, wire);
-              expect(result.draft.paragraphDispositions?.entries.map(entry => entry.ordinal)).toEqual(expectedActions);
+              expect(
+                EffectOption.getOrUndefined(
+                  EffectOption.map(
+                    EffectOption.fromNullishOr(result.draft.paragraphDispositions?.entries),
+                    __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, entry => entry.ordinal),
+                  ),
+                ),
+              ).toEqual(expectedActions);
               expect(result.body).toBe(basis.body);
               expect(JSON.stringify({basis, wire})).toBe(before);
             },
@@ -147,13 +194,13 @@ describe('single-decision compact topic wire', () => {
     const basis = {
       ...original,
       body: `The limit is 32.\n\n${requirement}`,
-      paragraphs: original.paragraphs.map(paragraph =>
+      paragraphs: EffectArray.map(original.paragraphs, paragraph =>
         paragraph.ordinal === 1 ? {...paragraph, hash: sha256HexSync(requirement)} : paragraph,
       ),
     };
     const evidence = topicDraftCurrentEvidence(
       basis,
-      topicDraftCurrentSourceHandles(basis).map(handleId => ({
+      EffectArray.map(topicDraftCurrentSourceHandles(basis), handleId => ({
         handleId,
         content: 'export const limit = 48; // Publication approval is outside this batching source.',
       })),
@@ -170,7 +217,7 @@ describe('single-decision compact topic wire', () => {
     // The final gate suppresses a valid provisional update after the protected comparison.
     const conflictEvidence = topicDraftCurrentEvidence(
       basis,
-      topicDraftCurrentSourceHandles(basis).map(handleId => ({
+      EffectArray.map(topicDraftCurrentSourceHandles(basis), handleId => ({
         handleId,
         content: 'export const limit = 48; export const publicationRequiresApproval = false;',
       })),
@@ -274,17 +321,21 @@ describe('single-decision compact topic wire', () => {
   it('requires every current evidence binding even when the model selects one source', () => {
     const basis = basisFor(2);
     const wire = wireFor(basis);
-    const entries = Object.entries(evidenceFor(basis));
-    expect(() => canonical(basis, wire, Object.fromEntries(entries.slice(1)))).toThrow(
+    const entries = EffectRecord.toEntries(evidenceFor(basis));
+    expect(() => canonical(basis, wire, EffectRecord.fromEntries(entries.slice(1)))).toThrow(
       'Verified current topic evidence is unavailable.',
     );
     expect(() =>
       topicDraftCurrentEvidence(
         basis,
-        entries.flatMap(([handleId, content]) => [
-          {handleId, content},
-          {handleId, content},
-        ]),
+        EffectArray.flatMap(entries, ([handleId, content], effectFlatMapIndex) =>
+          effectFlatMapIndex in entries
+            ? [
+                {handleId, content},
+                {handleId, content},
+              ]
+            : [],
+        ),
       ),
     ).toThrow('missing or ambiguous');
     expect(() => canonical(basis, wire, evidenceFor(basis))).not.toThrow();
@@ -293,7 +344,8 @@ describe('single-decision compact topic wire', () => {
   it('compares protected policy without copying every model rationale into canonical text', () => {
     const basis = basisFor(3, {protectedOrdinal: 2});
     const wire = wireFor(basis, 'unresolved');
-    wire.normativeComparisons.find(e => e.ordinal === 2)!.rationale = 'Selected policy comparison.';
+    EffectOption.getOrUndefined(EffectArray.findFirst(wire.normativeComparisons, e => e.ordinal === 2))!.rationale =
+      'Selected policy comparison.';
     const result = canonical(basis, wire);
     expect(result.draft.rationale).toContain('Selected comparison: Selected policy comparison.');
     expect(result.draft.rationale).not.toContain(basis.paragraphs[2].hash);
@@ -337,17 +389,14 @@ describe('single-decision compact topic wire', () => {
       error = cause instanceof Error ? cause.message : '';
     }
     expect(error).toContain('paragraph 1 replacement repeats accepted text');
-    const prompt = topicMaintenanceDraftPrompt(
-      {
-        coverage: 'declared-only',
-        targetUri: basis.targetUri,
-        additionalDependencies: [],
-        sources: promptSources(basis),
-      } as never,
-      basis,
-      error,
-      invalid,
-    );
+    const partialPacket = {
+      coverage: 'declared-only',
+      targetUri: basis.targetUri,
+      additionalDependencies: [],
+      sources: promptSources(basis),
+    };
+    // @ts-expect-error This prompt test supplies only the legacy source projection consumed by the renderer.
+    const prompt = topicMaintenanceDraftPrompt(partialPacket, basis, error, invalid);
     expect(prompt).toContain(
       'use unchanged with current sourceIndices and no text only if the claim is still supported',
     );
@@ -371,28 +420,36 @@ describe('single-decision compact topic wire', () => {
     }
     expect(error).toContain('paragraph 0 replacement repeats accepted text');
     for (const currentValue of [32, 48]) {
+      const partialPacket = {
+        coverage: 'declared-only',
+        targetUri: basis.targetUri,
+        additionalDependencies: [],
+        sources: [
+          {
+            citationId: basis.paragraphs[0].citationIds[0],
+            oldExcerpt: {source: {path: 'src/limit.ts'}, content: 'export const limit = 32;'},
+            newExcerpt: {source: {path: 'src/limit.ts'}, content: `export const limit = ${currentValue};`},
+          },
+        ],
+      };
       const prompt = topicMaintenanceDraftPrompt(
-        {
-          coverage: 'declared-only',
-          targetUri: basis.targetUri,
-          additionalDependencies: [],
-          sources: [
-            {
-              citationId: basis.paragraphs[0].citationIds[0],
-              oldExcerpt: {source: {path: 'src/limit.ts'}, content: 'export const limit = 32;'},
-              newExcerpt: {source: {path: 'src/limit.ts'}, content: `export const limit = ${currentValue};`},
-            },
-          ],
-        } as never,
+        // @ts-expect-error This prompt test supplies only the legacy source projection consumed by the renderer.
+        partialPacket,
         basis,
         error,
         JSON.stringify(decodeTopicDraftModelOutput(basis, wire)),
       );
       const packet = JSON.parse(
-        prompt
-          .split('\n')
-          .find(line => line.startsWith('Packet: '))!
-          .slice(8),
+        Effect.pipe(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              Effect.pipe(prompt, EffectString.split('\n')),
+              __effectArrayValue =>
+                !!(line => Effect.pipe(line, EffectString.startsWith('Packet: ')))(__effectArrayValue),
+            ),
+          )!,
+          EffectString.slice(8),
+        ),
       );
       expect(packet.sources[0].current.excerpt).toBe(`export const limit = ${currentValue};`);
       expect(prompt).toContain('if stale, supply a corrected supported replacement; otherwise mark it unresolved');
@@ -409,15 +466,21 @@ describe('single-decision compact topic wire', () => {
         fc.boolean(),
         (count, indices, reverse) => {
           const original = basisFor(count);
-          const current = original.handles.filter(handle => handle.variant === 'current');
+          const current = EffectArrayPipe(original.handles, __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (handle, __effectFilterIndex) =>
+                __effectFilterIndex in __effectFilterValues && handle.variant === 'current',
+            ),
+          );
           const basis = {
             ...original,
-            handles: [...current]
-              .reverse()
-              .flatMap(handle => [
-                handle,
-                original.handles.find(item => item.id === `historical:${handle.citationId}`)!,
-              ]),
+            handles: EffectArray.flatMap([...current].reverse(), handle => [
+              handle,
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(original.handles, item => item.id === `historical:${handle.citationId}`),
+              )!,
+            ]),
           };
           const wire = wireFor(basis);
           for (const entry of wire.facts.entries) entry.sourceIndices = [...indices];
@@ -425,11 +488,11 @@ describe('single-decision compact topic wire', () => {
           const before = JSON.stringify({basis, wire});
           const result = canonical(basis, wire);
           expect(result.draft.paragraphDispositions?.entries).toEqual(
-            wire.facts.entries.map(entry => ({
+            EffectArray.map(wire.facts.entries, entry => ({
               ordinal: entry.ordinal,
               beforeHash: basis.paragraphs[entry.ordinal].hash,
               disposition: entry.disposition === 'unchanged' ? 'revalidate' : entry.disposition,
-              supportHandles: indices.map(index => topicDraftCurrentSourceHandles(basis)[index]),
+              supportHandles: EffectArray.map(indices, index => topicDraftCurrentSourceHandles(basis)[index]),
               rationale: 'Checked.',
             })),
           );
@@ -451,7 +514,10 @@ describe('single-decision compact topic wire', () => {
   it('keeps the native model schema closed and operations fully bound', () => {
     const basis = basisFor(2);
     const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
-    const variant = schema.properties.facts.properties.entries.items.oneOf[0];
+    const schemaProperties = schemaObject(schema.properties);
+    const facts = schemaObject(schemaProperties.facts);
+    const entries = schemaObject(schemaObject(facts.properties).entries);
+    const variant = schemaObject(schemaArray(schemaObject(entries.items).oneOf)[0]);
     expect(variant.required).toEqual([
       'ordinal',
       'currentBehavior',
@@ -482,8 +548,10 @@ describe('single-decision compact topic wire', () => {
         rationale: 'Changed.',
       },
     ]);
-    expect(schema.properties.decision.oneOf[0].properties).not.toHaveProperty('operations');
-    expect(schema.properties.decision.oneOf[0].properties).not.toHaveProperty('reviewedHandles');
+    const decision = schemaObject(schemaObject(schema.properties).decision);
+    const decisionVariant = schemaObject(schemaArray(decision.oneOf)[0]);
+    expect(decisionVariant.properties).not.toHaveProperty('operations');
+    expect(decisionVariant.properties).not.toHaveProperty('reviewedHandles');
     for (const policyAssessment of ['conflict', 'undetermined', 'source-review'])
       expect(() =>
         decodeTopicDraftModelOutput(basis, {...wire, decision: {...wire.decision, policyAssessment}}),
@@ -499,7 +567,7 @@ describe('single-decision compact topic wire', () => {
         (decisions, sourceCount) => {
           const basis = basisFor(decisions.length, {sourceCount});
           const wire = wireFor(basis);
-          wire.facts.entries = decisions.map((disposition, ordinal) => ({
+          wire.facts.entries = EffectArray.map(decisions, (disposition, ordinal) => ({
             ordinal,
             currentBehavior: disposition === 'unresolved' ? null : 'Supported behavior.',
             rationale: `Decision ${ordinal}.`,
@@ -517,13 +585,23 @@ describe('single-decision compact topic wire', () => {
                 : 'insufficient-evidence',
           );
           expect(result.draft.version).toBe(1);
-          expect(result.draft.operations).toHaveLength(decisions.filter(value => value === 'update').length);
-          expect(result.body.split('\n\n')).toEqual(
-            decisions.map((value, ordinal) => (value === 'update' ? `Updated claim ${ordinal}.` : `Claim ${ordinal}.`)),
+          expect(result.draft.operations).toHaveLength(
+            EffectArray.filter(
+              decisions,
+              (value, __effectArrayIndex) => __effectArrayIndex in decisions && value === 'update',
+            ).length,
+          );
+          expect(Effect.pipe(result.body, EffectString.split('\n\n'))).toEqual(
+            EffectArray.map(decisions, (value, ordinal) =>
+              value === 'update' ? `Updated claim ${ordinal}.` : `Claim ${ordinal}.`,
+            ),
           );
           for (const operation of result.draft.operations) {
-            const entry = result.draft.paragraphDispositions!.entries.find(
-              value => value.ordinal === operation.ordinal,
+            const entry = EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                result.draft.paragraphDispositions!.entries,
+                value => value.ordinal === operation.ordinal,
+              ),
             )!;
             expect(entry.disposition).toBe('update');
             expect(operation.beforeHash).toBe(entry.beforeHash);
@@ -547,7 +625,8 @@ describe('single-decision compact topic wire', () => {
         wire.decision.currentBehaviorSourceIndex = 0;
         delete wire.decision.missingFact;
       }
-      wire.normativeComparisons.find(e => e.ordinal === 2)!.rationale = 'Applicable protected comparison.';
+      EffectOption.getOrUndefined(EffectArray.findFirst(wire.normativeComparisons, e => e.ordinal === 2))!.rationale =
+        'Applicable protected comparison.';
       const before = JSON.stringify({basis, wire});
       const result = canonical(basis, wire);
       expect(result.draft.outcome).toBe(policyAssessment === 'conflict' ? 'policy-conflict' : 'insufficient-evidence');
@@ -568,10 +647,18 @@ describe('single-decision compact topic wire', () => {
 
   it('limits conflict behavior indices to descriptive citations and explicit dependencies', () => {
     const original = basisFor(2, {protectedOrdinal: 1});
-    const ids = original.handles.filter(handle => handle.variant === 'current').map(handle => handle.citationId);
+    const ids = EffectArray.map(
+      EffectArrayPipe(original.handles, __effectFilterValues =>
+        EffectArray.filter(
+          __effectFilterValues,
+          (handle, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && handle.variant === 'current',
+        ),
+      ),
+      handle => handle.citationId,
+    );
     const basis = {
       ...original,
-      paragraphs: original.paragraphs.map(p => ({...p, citationIds: [ids[p.ordinal]]})),
+      paragraphs: EffectArray.map(original.paragraphs, p => ({...p, citationIds: [ids[p.ordinal]]})),
       additionalDependencies: [{kind: 'dependency' as const, citationId: ids[2]}],
     };
     expect(topicDraftPolicyScope(basis)).toEqual({normativeOrdinals: [1], behaviorSourceIndices: [0, 2]});
@@ -612,21 +699,28 @@ describe('single-decision compact topic wire', () => {
     const protected64 = basisFor(64);
     const normativeBasis = {
       ...protected64,
-      paragraphs: protected64.paragraphs.map(p => ({...p, role: 'normative' as const})),
+      paragraphs: EffectArray.map(protected64.paragraphs, p => ({...p, role: 'normative' as const})),
     };
     const unknown = wireFor(normativeBasis, 'unresolved');
-    unknown.decision.missingFact = 'é'.repeat(128);
-    for (const entry of unknown.normativeComparisons) entry.rationale = 'é'.repeat(512);
+    unknown.decision.missingFact = Effect.pipe('é', EffectString.repeat(128));
+    for (const entry of unknown.normativeComparisons) entry.rationale = Effect.pipe('é', EffectString.repeat(512));
     unknown.normativeComparisons[1].rationale = 'UNSELECTED NORMATIVE COMPARISON';
     const accepted = canonical(normativeBasis, unknown);
     expect(new TextEncoder().encode(accepted.draft.rationale).byteLength).toBeLessThanOrEqual(1633);
     expect(accepted.draft.rationale).toContain(
-      'Normative compared: ' + Array.from({length: 64}, (_, i) => i).join(','),
+      'Normative compared: ' +
+        EffectArray.join(
+          EffectArray.map(
+            Array.from({length: 64}, (_, i) => i),
+            item => (item === null || item === undefined ? '' : String(item)),
+          ),
+          ',',
+        ),
     );
     expect(accepted.draft.rationale).not.toContain('UNSELECTED NORMATIVE COMPARISON');
     unknown.normativeComparisons[0].rationale += 'é';
     expect(() => canonical(normativeBasis, unknown)).toThrow(TopicDraftApplicationValidationError);
-    unknown.normativeComparisons[0].rationale = 'é'.repeat(512);
+    unknown.normativeComparisons[0].rationale = Effect.pipe('é', EffectString.repeat(512));
     unknown.decision.missingFact += 'é';
     expect(() => canonical(normativeBasis, unknown)).toThrow(TopicDraftApplicationValidationError);
     for (const malformed of ['\ud83d', '\ude42']) {
@@ -643,12 +737,18 @@ describe('single-decision compact topic wire', () => {
       fc.property(fc.array(fc.integer({min: 0, max: 7}), {minLength: 63, maxLength: 63}), selections => {
         const basis = basisFor(64, {sourceCount: 8, protectedOrdinal: 63});
         const wire = wireFor(basis);
-        wire.facts.entries.forEach((entry, ordinal) => {
+        EffectArray.forEach(wire.facts.entries, (entry, ordinal) => {
           entry.sourceIndices = [selections[ordinal]];
         });
         const before = JSON.stringify({basis, wire});
         const result = canonical(basis, wire);
-        const expected = [...new Set(selections)].sort((left, right) => left - right).join(',');
+        const expected = EffectArray.join(
+          EffectArray.map(
+            [...new Set(selections)].sort((left, right) => left - right),
+            item => (item === null || item === undefined ? '' : String(item)),
+          ),
+          ',',
+        );
         expect(result.draft.rationale).toContain(`Current source indices: ${expected}`);
         expect(result.draft.rationale).toContain('Normative compared: 63');
         expect(result.draft.rationale).not.toContain('Claim 63.');
@@ -697,7 +797,7 @@ describe('single-decision compact topic wire', () => {
       const original = basisFor(1);
       const basis = {
         ...original,
-        paragraphs: original.paragraphs.map(paragraph => ({
+        paragraphs: EffectArray.map(original.paragraphs, paragraph => ({
           ...paragraph,
           ...(role === 'historical' ? {role: 'historical' as const} : {support: 'contextual' as const}),
         })),
@@ -710,7 +810,10 @@ describe('single-decision compact topic wire', () => {
       expect(result.draft.reviewedHandles).toEqual(topicDraftCurrentSourceHandles(basis));
     }
     const original = basisFor(1, {protectedOrdinal: 0});
-    const dependencyId = topicDraftCurrentSourceHandles(original)[0].slice('current:'.length);
+    const dependencyId = Effect.pipe(
+      topicDraftCurrentSourceHandles(original)[0],
+      EffectString.slice('current:'.length),
+    );
     const basis = {...original, additionalDependencies: [{kind: 'dependency' as const, citationId: dependencyId}]};
     const wire = wireFor(basis, 'unresolved');
     wire.decision.policyAssessment = 'conflict';
@@ -725,7 +828,11 @@ describe('single-decision compact topic wire', () => {
   it('presents comparisons before assessment without requiring JSON key order on decode', () => {
     for (const basis of [basisFor(1), basisFor(1, {protectedOrdinal: 0})]) {
       const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
-      expect(Object.keys(schema.properties)).toEqual([
+      const decisionVariants = EffectArray.map(
+        schemaArray(schemaObject(schemaObject(schema.properties).decision).oneOf),
+        schemaObject,
+      );
+      expect(EffectRecord.keys(schema.properties)).toEqual([
         'version',
         'targetHash',
         'observationRevision',
@@ -734,17 +841,18 @@ describe('single-decision compact topic wire', () => {
         'normativeComparisons',
         'decision',
       ]);
-      for (const variant of schema.properties.decision.oneOf) expect(variant.properties).not.toHaveProperty('facts');
-      for (const variant of schema.properties.decision.oneOf)
-        expect(Object.keys(variant.properties)[0]).toBe('policyAssessment');
+      for (const variant of decisionVariants) expect(variant.properties).not.toHaveProperty('facts');
+      for (const variant of decisionVariants)
+        expect(EffectRecord.keys(schemaObject(variant.properties))[0]).toBe('policyAssessment');
     }
     const basis = basisFor(2);
     const wire = wireFor(basis);
     const expected = canonical(basis, wire);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     const entries = Object.entries(wire.decision);
     fc.assert(
       fc.property(fc.shuffledSubarray(entries, {minLength: entries.length, maxLength: entries.length}), ordered => {
-        expect(canonical(basis, {...wire, decision: Object.fromEntries(ordered)})).toEqual(expected);
+        expect(canonical(basis, {...wire, decision: EffectRecord.fromEntries(ordered)})).toEqual(expected);
       }),
       {numRuns: 32},
     );
@@ -803,10 +911,21 @@ describe('single-decision compact topic wire', () => {
     const repeated = wireFor(basis);
     repeated.facts.entries[0].sourceIndices = [0, 0];
     expect(() => canonical(basis, repeated)).toThrow();
-    const ids = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.citationId);
+    const ids = EffectArray.map(
+      EffectArrayPipe(basis.handles, __effectFilterValues =>
+        EffectArray.filter(
+          __effectFilterValues,
+          (handle, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && handle.variant === 'current',
+        ),
+      ),
+      handle => handle.citationId,
+    );
     const unrelatedBasis = {
       ...basis,
-      paragraphs: basis.paragraphs.map(paragraph => ({...paragraph, citationIds: [ids[paragraph.ordinal]]})),
+      paragraphs: EffectArray.map(basis.paragraphs, paragraph => ({
+        ...paragraph,
+        citationIds: [ids[paragraph.ordinal]],
+      })),
       additionalDependencies: [{kind: 'dependency' as const, citationId: ids[2]}],
     };
     const unrelated = wireFor(unrelatedBasis);
@@ -848,23 +967,31 @@ describe('single-decision compact topic wire', () => {
   });
 
   it('describes stable source indices near the input boundary without duplicating accepted prose', () => {
-    const prose = 'Unique accepted claim. ' + 'x'.repeat(27 * 1024);
+    const prose = 'Unique accepted claim. ' + Effect.pipe('x', EffectString.repeat(27 * 1024));
     const basis = basisFor(64, {firstParagraph: prose});
-    const sources = basis.handles
-      .filter(handle => handle.variant === 'current')
-      .map(({citationId}, index) => ({
+    const sources = EffectArray.map(
+      EffectArrayPipe(basis.handles, __effectFilterValues =>
+        EffectArray.filter(
+          __effectFilterValues,
+          (handle, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && handle.variant === 'current',
+        ),
+      ),
+      ({citationId}, index) => ({
         citationId,
-        oldExcerpt: {source: {path: `source-${index}.ts`}, content: 's'.repeat(900)},
-        newExcerpt: {source: {path: `source-${index}.ts`}, content: 's'.repeat(900)},
-      }));
+        oldExcerpt: {source: {path: `source-${index}.ts`}, content: Effect.pipe('s', EffectString.repeat(900))},
+        newExcerpt: {source: {path: `source-${index}.ts`}, content: Effect.pipe('s', EffectString.repeat(900))},
+      }),
+    );
     const packet = {
       coverage: 'declared-only',
       targetUri: basis.targetUri,
       additionalDependencies: [],
       sources: [...sources].reverse(),
-    } as never;
+    };
     for (const error of [undefined, 'Invalid prior decision.']) {
+      // @ts-expect-error The size test needs only the legacy source projection consumed by the renderer.
       const prompt = topicMaintenanceDraftPrompt(packet, basis, error, '{invalid');
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
       expect(prompt.split(prose)).toHaveLength(2);
       expect(new TextEncoder().encode(prompt).byteLength).toBeLessThanOrEqual(80 * 1024);
       expect(prompt).toContain('sourceIndices');
@@ -894,11 +1021,15 @@ describe('single-decision compact topic wire', () => {
         const basis = basisFor(1, {sourceCount});
         const schema = topicDraftModelSchema(basis);
         const native = topicDraftNativeJsonSchema(schema);
-        const variants = native.properties.facts.properties.entries.items.oneOf;
+        const nativeProperties = schemaObject(native.properties);
+        const facts = schemaObject(nativeProperties.facts);
+        const entries = schemaObject(schemaObject(facts.properties).entries);
+        const variants = EffectArray.map(schemaArray(schemaObject(entries.items).oneOf), schemaObject);
         expect(
-          variants.map(
-            (variant: {properties: {disposition: {enum: string[]}}}) => variant.properties.disposition.enum[0],
-          ),
+          EffectArray.map(variants, variant => {
+            const disposition = schemaObject(schemaObject(variant.properties).disposition);
+            return schemaArray(disposition.enum)[0];
+          }),
         ).toEqual(['update', 'unchanged', 'unresolved']);
         for (const disposition of ['update', 'unchanged', 'unresolved'] as const) {
           const wire = wireFor(basis, disposition === 'unresolved' ? 'unresolved' : 'unchanged');
@@ -910,7 +1041,9 @@ describe('single-decision compact topic wire', () => {
           wire.facts.entries[0].sourceIndices = disposition === 'unresolved' ? [0] : [];
           expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
         }
-        expect(native.properties.decision.oneOf[0].properties).not.toHaveProperty('reviewedHandles');
+        const decision = schemaObject(nativeProperties.decision);
+        const decisionVariant = schemaObject(schemaArray(decision.oneOf)[0]);
+        expect(decisionVariant.properties).not.toHaveProperty('reviewedHandles');
       }),
       {numRuns: 24},
     );
@@ -925,15 +1058,16 @@ describe('single-decision compact topic wire', () => {
           coverage: 'declared-only',
           targetUri: basis.targetUri,
           sources: promptSources(basis),
-        } as never;
+        };
         const before = JSON.stringify({basis, packet});
+        // @ts-expect-error The property test needs only the legacy source projection consumed by the renderer.
         const prompt = topicMaintenanceDraftPrompt(packet, basis);
         const candidates = JSON.parse(/^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1]);
         const current = topicDraftCurrentSourceHandles(basis);
         for (const candidate of candidates) {
           expect(candidate).not.toHaveProperty('currentHandles');
           expect(candidate.sourceIndices.map((index: number) => current[index])).toEqual(
-            basis.paragraphs[candidate.ordinal].citationIds.map(id => `current:${id}`),
+            EffectArray.map(basis.paragraphs[candidate.ordinal].citationIds, id => `current:${id}`),
           );
         }
         const paragraphs = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]).paragraphs;
@@ -957,14 +1091,14 @@ describe('single-decision compact topic wire', () => {
           const original = basisFor(decisions.length + 2, {sourceCount: 8});
           const basis = {
             ...original,
-            paragraphs: original.paragraphs.map(p => ({
+            paragraphs: EffectArray.map(original.paragraphs, p => ({
               ...p,
               role: p.ordinal >= decisions.length ? ('normative' as const) : ('descriptive' as const),
             })),
             additionalDependencies: [{kind: 'dependency' as const, citationId: original.paragraphs[0].citationIds[0]}],
           };
           const wire = wireFor(basis);
-          wire.facts.entries = decisions.map((disposition, ordinal) => ({
+          wire.facts.entries = EffectArray.map(decisions, (disposition, ordinal) => ({
             ordinal,
             disposition,
             currentBehavior: disposition === 'unresolved' ? null : `Current behavior ${ordinal}.`,
@@ -986,7 +1120,7 @@ describe('single-decision compact topic wire', () => {
           expect(result.draft.operations).toEqual([]);
           expect(result.draft.reviewedHandles).toEqual([]);
           expect(result.draft.paragraphDispositions!.entries).toEqual(
-            wire.facts.entries.map(entry => ({
+            EffectArray.map(wire.facts.entries, entry => ({
               ordinal: entry.ordinal,
               beforeHash: basis.paragraphs[entry.ordinal].hash,
               disposition: 'unresolved',
@@ -1025,7 +1159,7 @@ describe('single-decision compact topic wire', () => {
                   sourceIndices: [0],
                   text: 'First.\n\nSecond.',
                 });
-              if (alteration === 'summary') fact.currentBehavior = 'é'.repeat(257);
+              if (alteration === 'summary') fact.currentBehavior = Effect.pipe('é', EffectString.repeat(257));
               expect(() => canonical(basis, bad)).toThrow();
             }
           }
@@ -1050,7 +1184,7 @@ describe('single-decision compact topic wire', () => {
           const ids = original.paragraphs[0].citationIds;
           const basis = {
             ...original,
-            paragraphs: original.paragraphs.map(p => ({
+            paragraphs: EffectArray.map(original.paragraphs, p => ({
               ...p,
               citationIds: p.role === 'normative' ? ids : [ids[(p.ordinal + 3) % 7], ids[p.ordinal % 7]],
             })),
@@ -1059,29 +1193,40 @@ describe('single-decision compact topic wire', () => {
           const renamed = (id: string) => ids[rename[ids.indexOf(id)]];
           const other = {
             ...basis,
-            packetDigest: 'd'.repeat(64),
-            paragraphs: basis.paragraphs.map(p => ({...p, citationIds: p.citationIds.map(renamed)})),
-            additionalDependencies: basis.additionalDependencies.map(d => ({...d, citationId: renamed(d.citationId)})),
-            handles: permutation
-              .map(index => basis.handles[index])
-              .map(h => ({...h, citationId: renamed(h.citationId), id: `${h.variant}:${renamed(h.citationId)}`})),
+            packetDigest: Effect.pipe('d', EffectString.repeat(64)),
+            paragraphs: EffectArray.map(basis.paragraphs, p => ({
+              ...p,
+              citationIds: EffectArray.map(p.citationIds, renamed),
+            })),
+            additionalDependencies: EffectArray.map(basis.additionalDependencies, d => ({
+              ...d,
+              citationId: renamed(d.citationId),
+            })),
+            handles: EffectArray.map(
+              EffectArray.map(permutation, index => basis.handles[index]),
+              h => ({...h, citationId: renamed(h.citationId), id: `${h.variant}:${renamed(h.citationId)}`}),
+            ),
           };
           const semantic = (b: typeof basis, handle: string) => {
-            const id = b.handles.find(h => h.id === handle)!.citationId;
+            const id = EffectOption.getOrUndefined(EffectArray.findFirst(b.handles, h => h.id === handle))!.citationId;
             return b === basis ? ids.indexOf(id) : rename.indexOf(ids.indexOf(id));
           };
           const project = (b: typeof basis) => {
             // Independent declaration-order model: no production selector computes expected aliases.
             const declared = [
               ...new Set([
-                ...b.paragraphs.flatMap(p => p.citationIds),
-                ...b.additionalDependencies.map(d => d.citationId),
+                ...EffectArray.flatMap(b.paragraphs, (paragraph, index) => {
+                  if (!(index in b.paragraphs)) return [];
+                  const citationIds = paragraph.citationIds;
+                  return EffectArray.filter(citationIds, (_id, citationIndex) => citationIndex in citationIds);
+                }),
+                ...EffectArray.map(b.additionalDependencies, d => d.citationId),
               ]),
             ];
-            const handles = declared.map(id => `current:${id}`);
+            const handles = EffectArray.map(declared, id => `current:${id}`);
             expect(topicDraftCurrentSourceHandles(b)).toEqual(handles);
             const wire = wireFor(b);
-            wire.facts.entries.forEach((entry, index) => {
+            EffectArray.forEach(wire.facts.entries, (entry, index) => {
               entry.disposition = decisions[index];
               entry.currentBehavior = decisions[index] === 'unresolved' ? null : `Current ${index}.`;
               entry.sourceIndices =
@@ -1092,31 +1237,35 @@ describe('single-decision compact topic wire', () => {
             });
             const evidence = topicDraftCurrentEvidence(
               b,
-              handles.map(handleId => ({handleId, content: `Source ${semantic(b, handleId)}.`})),
+              EffectArray.map(handles, handleId => ({handleId, content: `Source ${semantic(b, handleId)}.`})),
             );
             const result = canonical(b, wire, evidence);
-            const sources = handles.map(handle => ({
-              citationId: b.handles.find(h => h.id === handle)!.citationId,
+            const sources = EffectArray.map(handles, handle => ({
+              citationId: EffectOption.getOrUndefined(EffectArray.findFirst(b.handles, h => h.id === handle))!
+                .citationId,
               oldExcerpt: {source: {path: `source-${semantic(b, handle)}.ts`}, content: 'Historical.'},
               newExcerpt: {source: {path: `source-${semantic(b, handle)}.ts`}, content: evidence[handle]},
             }));
-            const packet = JSON.parse(
-              /^Packet: (.+)$/mu.exec(
-                topicMaintenanceDraftPrompt({coverage: 'declared-only', sources} as never, b),
-              )![1],
-            );
+            // @ts-expect-error This property test supplies the legacy source projection consumed by the renderer.
+            const prompt = topicMaintenanceDraftPrompt({coverage: 'declared-only', sources} as const, b);
+            const packet = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
             for (const paragraph of packet.paragraphs)
               expect(paragraph.sourceIndices.map((index: number) => packet.sources[index].current.path)).toEqual(
-                b.paragraphs[paragraph.ordinal].citationIds.map(id => `source-${semantic(b, `current:${id}`)}.ts`),
+                EffectArray.map(
+                  b.paragraphs[paragraph.ordinal].citationIds,
+                  id => `source-${semantic(b, `current:${id}`)}.ts`,
+                ),
               );
             return {
               body: result.body,
               outcome: result.draft.outcome,
-              entries: result.draft.paragraphDispositions!.entries.map(e => ({
+              entries: EffectArray.map(result.draft.paragraphDispositions!.entries, e => ({
                 ...e,
-                supportHandles: e.supportHandles.map(h => semantic(b, h)),
+                supportHandles: EffectArray.map(e.supportHandles, h => semantic(b, h)),
               })),
-              scopeSources: topicDraftPolicyScope(b).behaviorSourceIndices.map(index => semantic(b, handles[index])),
+              scopeSources: EffectArray.map(topicDraftPolicyScope(b).behaviorSourceIndices, index =>
+                semantic(b, handles[index]),
+              ),
             };
           };
           const before = JSON.stringify({basis, other});
@@ -1131,10 +1280,12 @@ describe('single-decision compact topic wire', () => {
   it('keeps 512-byte summaries independent of 1024-byte rationales and full replacement capacity', () => {
     const basis = basisFor(1);
     const wire = wireFor(basis);
-    wire.facts.entries[0].currentBehavior = 'é'.repeat(256);
-    wire.facts.entries[0].rationale = 'é'.repeat(512);
-    expect(canonical(basis, wire).draft.paragraphDispositions!.entries[0].rationale).toBe('é'.repeat(512));
-    for (const summary of ['é'.repeat(257), '\ud83d', '\ude42', '']) {
+    wire.facts.entries[0].currentBehavior = Effect.pipe('é', EffectString.repeat(256));
+    wire.facts.entries[0].rationale = Effect.pipe('é', EffectString.repeat(512));
+    expect(canonical(basis, wire).draft.paragraphDispositions!.entries[0].rationale).toBe(
+      Effect.pipe('é', EffectString.repeat(512)),
+    );
+    for (const summary of [Effect.pipe('é', EffectString.repeat(257)), '\ud83d', '\ude42', '']) {
       wire.facts.entries[0].currentBehavior = summary;
       expect(() => canonical(basis, wire)).toThrow();
     }
@@ -1146,7 +1297,7 @@ describe('single-decision compact topic wire', () => {
       disposition: 'update',
       sourceIndices: [0],
       currentBehavior: 'Current.',
-      text: 'Updated ' + 'x'.repeat(27 * 1024),
+      text: 'Updated ' + Effect.pipe('x', EffectString.repeat(27 * 1024)),
     });
     expect(canonical(basis, wire).draft.operations[0].text).toBe(wire.facts.entries[0].text);
   });
@@ -1158,7 +1309,7 @@ describe('single-decision compact topic wire', () => {
       targetUri: basis.targetUri,
       additionalDependencies: [],
       sources: promptSources(basis),
-    } as never;
+    };
     fc.assert(
       fc.property(
         fc.oneof(
@@ -1167,16 +1318,35 @@ describe('single-decision compact topic wire', () => {
         ),
         value => {
           const before = JSON.stringify({basis, packet});
+          // @ts-expect-error The prompt property test supplies only the legacy source projection consumed by the renderer.
           const prompt = topicMaintenanceDraftPrompt(packet, basis, value, value);
-          const packets = prompt.split('\n').filter(line => line.startsWith('Packet: '));
-          const errors = prompt.split('\n').filter(line => line.startsWith('Previous validation error data: '));
-          const priors = prompt.split('\n').filter(line => line.startsWith('Prior invalid JSON data: '));
+          const packets = EffectArray.filter(
+            Effect.pipe(prompt, EffectString.split('\n')),
+            __effectArrayValue2 =>
+              !!(line => Effect.pipe(line, EffectString.startsWith('Packet: ')))(__effectArrayValue2),
+          );
+          const errors = EffectArray.filter(
+            Effect.pipe(prompt, EffectString.split('\n')),
+            __effectArrayValue2 =>
+              !!(line => Effect.pipe(line, EffectString.startsWith('Previous validation error data: ')))(
+                __effectArrayValue2,
+              ),
+          );
+          const priors = EffectArray.filter(
+            Effect.pipe(prompt, EffectString.split('\n')),
+            __effectArrayValue2 =>
+              !!(line => Effect.pipe(line, EffectString.startsWith('Prior invalid JSON data: ')))(__effectArrayValue2),
+          );
           expect(packets).toHaveLength(1);
           expect(errors).toHaveLength(value ? 1 : 0);
           expect(priors).toHaveLength(value ? 1 : 0);
           if (value) {
-            expect(JSON.parse(errors[0].slice('Previous validation error data: '.length))).toBe(value.slice(0, 512));
-            expect(JSON.parse(priors[0].slice('Prior invalid JSON data: '.length))).toBe(value.slice(0, 2048));
+            expect(
+              JSON.parse(Effect.pipe(errors[0], EffectString.slice('Previous validation error data: '.length))),
+            ).toBe(Effect.pipe(value, EffectString.slice(0, 512)));
+            expect(JSON.parse(Effect.pipe(priors[0], EffectString.slice('Prior invalid JSON data: '.length)))).toBe(
+              Effect.pipe(value, EffectString.slice(0, 2048)),
+            );
           }
           expect(JSON.stringify({basis, packet})).toBe(before);
         },

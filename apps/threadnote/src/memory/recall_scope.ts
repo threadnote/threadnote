@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {inferProjectFromManifest, readSeedManifest, requireManifestWorkset} from '@threadnote/workspace/manifest';
 import type {ProjectManifest, SeedManifest} from '@threadnote/workspace/config';
@@ -11,11 +12,16 @@ import {
 } from '@threadnote/recall/eligibility';
 import {resolveWorkspaceRepoName} from '../utils.js';
 import {expandPath} from '@threadnote/platform/paths';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class RecallScopeError extends Schema.TaggedError<RecallScopeError>()('RecallScopeError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class RecallScopeError extends Schema.TaggedError<RecallScopeError, {readonly brand: unique symbol}>()(
+  'RecallScopeError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export interface RecallScopeInput {
   readonly callerCwd?: string;
@@ -33,7 +39,10 @@ export const resolveRecallScope = Effect.fn('memory.resolveRecallScope')(functio
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const infer = input.inferScope !== false && input.pinnedUri === undefined && input.query.trim().length > 0;
+  const infer =
+    input.inferScope !== false &&
+    input.pinnedUri === undefined &&
+    Effect2.pipe(input.query, EffectString.trim).length > 0;
   const explicitProject = normalizeRecallProject(input.project);
   const manifest =
     (infer || input.workset !== undefined) && (yield* fs.exists(config.manifestPath))
@@ -69,7 +78,14 @@ export const resolveRecallScope = Effect.fn('memory.resolveRecallScope')(functio
     input.pinnedUri !== undefined
       ? undefined
       : explicitProject !== undefined
-        ? manifest?.projects.find(project => normalizeRecallProject(project.name) === explicitProject)
+        ? manifest == null
+          ? undefined
+          : EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                manifest.projects,
+                project => normalizeRecallProject(project.name) === explicitProject,
+              ),
+            )
         : infer && manifest !== undefined
           ? inferProjectFromManifest(manifest, input.query)
           : undefined;
@@ -80,7 +96,11 @@ export const resolveRecallScope = Effect.fn('memory.resolveRecallScope')(functio
     originalQuery: input.query,
     pinnedHardUri: input.pinnedUri !== undefined,
     workspaceProjects,
-    worksetProjectNames: workset?.projects.map(project => project.name),
+    worksetProjectNames: Effect2.Option.getOrUndefined(
+      Effect2.Option.map(Effect2.Option.fromNullishOr(workset?.projects), projects =>
+        EffectArray.map(projects, project => project.name),
+      ),
+    ),
   });
   const reason =
     input.pinnedUri !== undefined
@@ -115,7 +135,9 @@ const resolveCheckoutProjects = Effect.fn('memory.resolveCheckoutProjects')(func
   const byRoot = new Map<string, ProjectManifest[]>();
   for (const project of manifest?.projects ?? []) {
     // Relative manifest roots belong to the caller checkout.
-    const expanded = project.path.startsWith('~') ? yield* expandPath(project.path) : project.path;
+    const expanded = Effect2.pipe(project.path, EffectString.startsWith('~'))
+      ? yield* expandPath(project.path)
+      : project.path;
     const root = yield* fs.realPath(path.resolve(caller.repoRoot, expanded)).pipe(Effect.option);
     if (root._tag === 'None') continue;
     const projects = byRoot.get(root.value) ?? [];
@@ -129,7 +151,7 @@ const resolveCheckoutProjects = Effect.fn('memory.resolveCheckoutProjects')(func
     ([root, entries]) =>
       (root === caller.repoRoot ? Effect.succeed(caller) : resolveRepositoryCheckoutIdentity(root)).pipe(
         Effect.map(identity =>
-          identity?.checkoutId === caller.checkoutId ? entries.map(project => project.name) : [],
+          identity?.checkoutId === caller.checkoutId ? EffectArray.map(entries, project => project.name) : [],
         ),
       ),
     {concurrency: 4},
@@ -149,8 +171,8 @@ function recallScopeProvenance(
     ...(projects.length === 0
       ? {}
       : {
-          projects: projects.slice(0, 4).map(boundedProjectName),
-          ...(projects.slice(0, 4).some(project => new TextEncoder().encode(project).byteLength > 48)
+          projects: EffectArray.map(projects.slice(0, 4), boundedProjectName),
+          ...(EffectArray.some(projects.slice(0, 4), project => new TextEncoder().encode(project).byteLength > 48)
             ? {truncatedProjectNames: true as const}
             : {}),
           omittedProjects: Math.max(0, projects.length - 4),

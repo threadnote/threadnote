@@ -1,4 +1,6 @@
-import {Data, Redacted} from 'effect';
+import {isJsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray, Schema} from 'effect';
+import {Redacted} from 'effect';
 import {applyScrubber} from '@threadnote/platform/scrubber';
 import {
   MAX_SUPERHUMAN_MANAGER_LINKS,
@@ -10,21 +12,23 @@ import {validateSuperhumanDocumentId, validateSuperhumanPageId, type SuperhumanD
 import {createSuperhumanRestSession, SUPERHUMAN_API_ORIGIN, type SuperhumanClientOptions} from './client.js';
 import {normalizeSuperhumanTitle} from './render.js';
 import {validSuperhumanApiToken} from './credentials.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const API_ROOT = `${SUPERHUMAN_API_ORIGIN}/apis/v1`;
 const DOC_HREF = /^\/apis\/v1\/docs\/([A-Za-z0-9_-]{1,128})$/;
 const PAGE_HREF = /^\/apis\/v1\/docs\/([A-Za-z0-9_-]{1,128})\/pages\/([A-Za-z0-9_-]{1,128})$/;
 
-export class ManagerSuperhumanError extends Data.TaggedError('ManagerSuperhumanError')<{
-  readonly status: number;
-  readonly message: string;
-}> {}
+export class ManagerSuperhumanError extends Schema.TaggedError<
+  ManagerSuperhumanError,
+  {readonly brand: unique symbol}
+>()('ManagerSuperhumanError', {status: Schema.Int, message: Schema.String}) {}
 
 function invalid(message: string): never {
-  throw new ManagerSuperhumanError({status: 400, message});
+  throw ManagerSuperhumanError.make({status: 400, message});
 }
 function conflict(message: string): never {
-  throw new ManagerSuperhumanError({status: 409, message});
+  throw ManagerSuperhumanError.make({status: 409, message});
 }
 function browserLink(value: unknown): string {
   if (typeof value !== 'string' || value.length < 1 || value.length > 2048)
@@ -50,17 +54,20 @@ function browserLink(value: unknown): string {
 function safeName(value: unknown, secret: string, fallback: string): string {
   if (value === undefined || value === null) return fallback;
   if (typeof value !== 'string' || value.length > 2048) invalid('Superhuman returned an invalid link.');
-  if (value.includes(secret) || normalizeSuperhumanTitle(value).includes(secret))
+  if (
+    Effect.pipe(value, EffectString.includes(secret)) ||
+    Effect.pipe(normalizeSuperhumanTitle(value), EffectString.includes(secret))
+  )
     conflict('Superhuman returned sensitive link metadata.');
   const cleaned = normalizeSuperhumanTitle(applyScrubber(value, {redact: true}).cleaned);
-  if (cleaned.includes(secret)) conflict('Superhuman returned sensitive link metadata.');
-  return cleaned.slice(0, 256) || fallback;
+  if (Effect.pipe(cleaned, EffectString.includes(secret))) conflict('Superhuman returned sensitive link metadata.');
+  return Effect.pipe(cleaned, EffectString.slice(0, 256)) || fallback;
 }
 
 /** Optional artwork uses the provider's public asset origins, never the API credential. */
 function iconUrl(value: unknown, secret: string): string | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const icon = value as Record<string, unknown>;
+  if (!isJsonObject(value)) return undefined;
+  const icon = value;
   if (
     typeof icon.type !== 'string' ||
     !/^image\/[a-z0-9.+-]{1,64}$/i.test(icon.type) ||
@@ -76,7 +83,10 @@ function iconUrl(value: unknown, secret: string): string | undefined {
   } catch {
     return undefined;
   }
-  if (icon.browserLink.includes(secret) || decoded.includes(secret))
+  if (
+    Effect.pipe(icon.browserLink, EffectString.includes(secret)) ||
+    Effect.pipe(decoded, EffectString.includes(secret))
+  )
     conflict('Superhuman returned sensitive link metadata.');
   if (
     !['https://cdn.coda.io', 'https://codahosted.io'].includes(url.origin) ||
@@ -89,17 +99,11 @@ function iconUrl(value: unknown, secret: string): string | undefined {
 }
 
 function resolvedResource(response: unknown, token: Redacted.Redacted<string>) {
-  if (!response || typeof response !== 'object' || Array.isArray(response))
-    invalid('Superhuman returned an invalid link.');
-  const wrapper = response as Record<string, unknown>;
-  if (
-    wrapper.type !== 'apiLink' ||
-    !wrapper.resource ||
-    typeof wrapper.resource !== 'object' ||
-    Array.isArray(wrapper.resource)
-  )
+  if (!isJsonObject(response)) invalid('Superhuman returned an invalid link.');
+  const wrapper = response;
+  if (wrapper.type !== 'apiLink' || !wrapper.resource || !isJsonObject(wrapper.resource))
     invalid('Superhuman returned an unsupported link.');
-  const resource = wrapper.resource as Record<string, unknown>;
+  const resource = wrapper.resource;
   if (resource.type !== 'doc' && resource.type !== 'page') invalid('Superhuman returned an unsupported link.');
   if (typeof resource.href !== 'string' || resource.href.length > 2048) invalid('Superhuman returned an invalid link.');
   let href: URL;
@@ -121,7 +125,10 @@ function resolvedResource(response: unknown, token: Redacted.Redacted<string>) {
   const match = resource.type === 'doc' ? DOC_HREF.exec(href.pathname) : PAGE_HREF.exec(href.pathname);
   if (!match || resource.id !== match[match.length - 1]) invalid('Superhuman returned an invalid link.');
   const secret = Redacted.value(token);
-  if (match.some(part => part.includes(secret)) || String(resource.id).includes(secret))
+  if (
+    EffectArray.some(match, part => Effect.pipe(part, EffectString.includes(secret))) ||
+    Effect.pipe(String(resource.id), EffectString.includes(secret))
+  )
     conflict('Superhuman returned sensitive link metadata.');
   return {
     documentId: match[1],
@@ -139,9 +146,16 @@ export async function resolveSuperhumanBrowserLinks(
   if (links.length < 1 || links.length > MAX_SUPERHUMAN_MANAGER_LINKS)
     invalid(`Choose 1 to ${MAX_SUPERHUMAN_MANAGER_LINKS} Superhuman Docs links.`);
   if (!validSuperhumanApiToken(token)) invalid('Provide a valid Superhuman Docs API token.');
-  const urls = links.map(browserLink);
+  const urls = EffectArray.map(links, browserLink);
   const secret = Redacted.value(token);
-  if (urls.some(url => url.includes(secret) || decodeURIComponent(url).includes(secret)))
+  if (
+    EffectArray.some(
+      urls,
+      url =>
+        Effect.pipe(url, EffectString.includes(secret)) ||
+        Effect.pipe(decodeURIComponent(url), EffectString.includes(secret)),
+    )
+  )
     conflict('Superhuman returned sensitive link metadata.');
   const deadlineAt = Date.now() + Math.min(options.totalTimeoutMilliseconds ?? 30_000, 30_000);
   const session = createSuperhumanRestSession(token, {
@@ -186,9 +200,8 @@ async function readSelectionMetadata(
       const documentId = validateSuperhumanDocumentId(item.documentId);
       const pageId = item.pageId === undefined ? undefined : validateSuperhumanPageId(item.pageId);
       const response = await session.get(`${API_ROOT}/docs/${documentId}${pageId ? `/pages/${pageId}` : ''}`);
-      if (!response || typeof response !== 'object' || Array.isArray(response))
-        invalid('Superhuman returned invalid selection metadata.');
-      const resource = response as Record<string, unknown>;
+      if (!isJsonObject(response)) invalid('Superhuman returned invalid selection metadata.');
+      const resource = response;
       if (resource.type !== (pageId === undefined ? 'doc' : 'page') || resource.id !== (pageId ?? documentId))
         invalid('Superhuman returned invalid selection metadata.');
       const secret = Redacted.value(token);
@@ -204,7 +217,10 @@ async function readSelectionMetadata(
         // The official schema still includes legacy coda.io browser links.
         if (url.origin === 'https://coda.io') url.hostname = 'docs.superhuman.com';
         link = browserLink(url.href);
-        if (link.includes(secret) || decodeURIComponent(link).includes(secret))
+        if (
+          Effect.pipe(link, EffectString.includes(secret)) ||
+          Effect.pipe(decodeURIComponent(link), EffectString.includes(secret))
+        )
           conflict('Superhuman returned sensitive link metadata.');
       }
       const artwork = iconUrl(resource.icon, secret);

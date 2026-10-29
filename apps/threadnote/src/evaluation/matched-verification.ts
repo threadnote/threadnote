@@ -1,4 +1,8 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MATCHED_EVALUATION_VERIFICATION_PLAN_VERSION = 1 as const;
 export const MATCHED_EVALUATION_VERIFICATION_STATUSES = ['passed', 'task-failed'] as const;
@@ -118,7 +122,7 @@ const SELECTOR = /^[a-z][a-z0-9-]{0,63}$/u;
 export function createMatchedEvaluationVerificationCalibrationV1(
   input: Omit<MatchedEvaluationVerificationCalibrationV1, 'receiptHash'>,
 ): MatchedEvaluationVerificationCalibrationV1 {
-  const canonical = parseCalibration({...input, receiptHash: '0'.repeat(64)}, false);
+  const canonical = parseCalibration({...input, receiptHash: Effect.pipe('0', EffectString.repeat(64))}, false);
   return {...canonical, receiptHash: matchedEvaluationVerificationCalibrationHashV1(canonical)};
 }
 
@@ -128,8 +132,8 @@ export function createMatchedEvaluationVerificationPlanV1(
   const canonical = parsePlan(
     {
       ...input,
-      planHash: '0'.repeat(64),
-      tasks: [...input.tasks].sort((left, right) => left.taskId.localeCompare(right.taskId)),
+      planHash: Effect.pipe('0', EffectString.repeat(64)),
+      tasks: [...input.tasks].sort((left, right) => Effect.pipe(left.taskId, EffectString.localeCompare(right.taskId))),
       version: MATCHED_EVALUATION_VERIFICATION_PLAN_VERSION,
     },
     false,
@@ -145,7 +149,11 @@ export function createMatchedEvaluationVerificationReceiptV1(
   input: Omit<MatchedEvaluationVerificationReceiptV1, 'receiptHash' | 'version'>,
 ): MatchedEvaluationVerificationReceiptV1 {
   const canonical = parseReceipt(
-    {...input, receiptHash: '0'.repeat(64), version: MATCHED_EVALUATION_VERIFICATION_PLAN_VERSION},
+    {
+      ...input,
+      receiptHash: Effect.pipe('0', EffectString.repeat(64)),
+      version: MATCHED_EVALUATION_VERIFICATION_PLAN_VERSION,
+    },
     false,
   );
   return {...canonical, receiptHash: matchedEvaluationVerificationReceiptHashV1(canonical)};
@@ -161,16 +169,14 @@ export function createMatchedContinuationPhaseTwoVerificationPlanV1(input: {
   readonly taskId: string;
 }): MatchedContinuationPhaseTwoVerificationPlanV1 {
   const taskId = matching(input.taskId, TASK_ID, 'continuation verification task id');
-  const checks = input.checks
-    .map(check => {
-      const canonical = parseContinuationCheck({...check, checkId: '0'.repeat(64)}, false);
-      return {...canonical, checkId: matchedContinuationPhaseTwoVerificationCheckIdV1(taskId, canonical)};
-    })
-    .sort((left, right) => left.checkId.localeCompare(right.checkId));
+  const checks = EffectArray.map(input.checks, check => {
+    const canonical = parseContinuationCheck({...check, checkId: Effect.pipe('0', EffectString.repeat(64))}, false);
+    return {...canonical, checkId: matchedContinuationPhaseTwoVerificationCheckIdV1(taskId, canonical)};
+  }).sort((left, right) => Effect.pipe(left.checkId, EffectString.localeCompare(right.checkId)));
   const canonical = parseContinuationPlan(
     {
       checks,
-      planHash: '0'.repeat(64),
+      planHash: Effect.pipe('0', EffectString.repeat(64)),
       protectedPaths: input.protectedPaths,
       taskId,
       version: MATCHED_CONTINUATION_PHASE_TWO_VERIFICATION_VERSION,
@@ -207,7 +213,7 @@ export function createMatchedContinuationPhaseTwoVerificationCheckReceiptV1(inpu
       exitCode: input.exitCode,
       failureIds,
       planHash: input.planHash,
-      receiptHash: '0'.repeat(64),
+      receiptHash: Effect.pipe('0', EffectString.repeat(64)),
       status,
       version: MATCHED_CONTINUATION_PHASE_TWO_VERIFICATION_VERSION,
     },
@@ -231,9 +237,9 @@ export function createMatchedContinuationPhaseTwoVerificationReceiptV1(input: {
 }): MatchedContinuationPhaseTwoVerificationReceiptV1 {
   const plan = parseMatchedContinuationPhaseTwoVerificationPlanV1(input.plan);
   const artifactHash = matching(input.artifactHash, HASH, 'continuation verification artifact hash');
-  const checks = input.checks
-    .map(parseMatchedContinuationPhaseTwoVerificationCheckReceiptV1)
-    .sort((left, right) => left.checkId.localeCompare(right.checkId));
+  const checks = EffectArray.map(input.checks, parseMatchedContinuationPhaseTwoVerificationCheckReceiptV1).sort(
+    (left, right) => Effect.pipe(left.checkId, EffectString.localeCompare(right.checkId)),
+  );
   assertContinuationReceiptCoverage(plan, checks, artifactHash);
   const protectedPathViolations = canonicalRepositoryPaths(
     input.protectedPathViolations,
@@ -241,13 +247,14 @@ export function createMatchedContinuationPhaseTwoVerificationReceiptV1(input: {
     true,
   );
   if (
-    protectedPathViolations.some(
-      path => !plan.protectedPaths.some(protectedPath => isProtectedRepositoryPath(protectedPath, path)),
+    EffectArray.some(
+      protectedPathViolations,
+      path => !EffectArray.some(plan.protectedPaths, protectedPath => isProtectedRepositoryPath(protectedPath, path)),
     )
   ) {
     invalid('continuation verification reports a path outside the sealed protected paths');
   }
-  const checkDurationMilliseconds = checks.reduce((sum, check) => sum + check.durationMilliseconds, 0);
+  const checkDurationMilliseconds = EffectArray.reduce(checks, 0, (sum, check) => sum + check.durationMilliseconds);
   const canonical = parseContinuationAggregateReceipt(
     {
       artifactHash,
@@ -255,9 +262,9 @@ export function createMatchedContinuationPhaseTwoVerificationReceiptV1(input: {
       durationMilliseconds: input.durationMilliseconds ?? checkDurationMilliseconds,
       planHash: plan.planHash,
       protectedPathViolations,
-      receiptHash: '0'.repeat(64),
+      receiptHash: Effect.pipe('0', EffectString.repeat(64)),
       status:
-        protectedPathViolations.length === 0 && checks.every(check => check.status === 'passed')
+        protectedPathViolations.length === 0 && EffectArray.every(checks, check => check.status === 'passed')
           ? 'passed'
           : 'task-failed',
       taskId: plan.taskId,
@@ -281,8 +288,9 @@ export function parseMatchedContinuationPhaseTwoVerificationReceiptV1(input: {
   }
   assertContinuationReceiptCoverage(plan, receipt.checks, artifactHash);
   if (
-    receipt.protectedPathViolations.some(
-      path => !plan.protectedPaths.some(protectedPath => isProtectedRepositoryPath(protectedPath, path)),
+    EffectArray.some(
+      receipt.protectedPathViolations,
+      path => !EffectArray.some(plan.protectedPaths, protectedPath => isProtectedRepositoryPath(protectedPath, path)),
     )
   ) {
     invalid('continuation verification protected path violations differ from its sealed plan');
@@ -291,35 +299,35 @@ export function parseMatchedContinuationPhaseTwoVerificationReceiptV1(input: {
 }
 
 function isProtectedRepositoryPath(protectedPath: string, changedPath: string): boolean {
-  return changedPath === protectedPath || changedPath.startsWith(`${protectedPath}/`);
+  return changedPath === protectedPath || Effect.pipe(changedPath, EffectString.startsWith(`${protectedPath}/`));
 }
 
 export function parseMatchedContinuationPytestFailureIdsV1(stdout: string, stderr: string): readonly string[] {
   const failures: string[] = [];
-  for (const line of `${stdout}\n${stderr}`.split(/\r?\n/u)) {
-    const trimmed = line.trim();
+  for (const line of Effect.pipe(`${stdout}\n${stderr}`, EffectString.split(/\r?\n/u))) {
+    const trimmed = Effect.pipe(line, EffectString.trim);
     const payload = diagnosticPayload(trimmed, 'FAILED') ?? diagnosticPayload(trimmed, 'ERROR');
     if (payload === undefined) continue;
     const separator = firstAsciiWhitespaceIndex(payload);
-    failures.push(separator === -1 ? payload : payload.slice(0, separator));
+    failures.push(separator === -1 ? payload : Effect.pipe(payload, EffectString.slice(0, separator)));
   }
   return canonicalFailureIds(failures, 'pytest failure ids');
 }
 
 export function parseMatchedContinuationVitestFailureIdsV1(stdout: string, stderr: string): readonly string[] {
   const failures = new Set<string>();
-  for (const line of `${stdout}\n${stderr}`.split(/\r?\n/u)) {
-    const payload = diagnosticPayload(stripAnsiControlSequencesV1(line).trim(), 'FAIL');
+  for (const line of Effect.pipe(`${stdout}\n${stderr}`, EffectString.split(/\r?\n/u))) {
+    const payload = diagnosticPayload(Effect.pipe(stripAnsiControlSequencesV1(line), EffectString.trim), 'FAIL');
     if (payload !== undefined) failures.add(payload);
   }
   return canonicalFailureIds([...failures], 'vitest failure ids');
 }
 
 function diagnosticPayload(line: string, marker: string): string | undefined {
-  if (!line.startsWith(marker) || !isAsciiWhitespace(line[marker.length])) return undefined;
+  if (!Effect.pipe(line, EffectString.startsWith(marker)) || !isAsciiWhitespace(line[marker.length])) return undefined;
   let start = marker.length + 1;
   while (start < line.length && isAsciiWhitespace(line[start])) start += 1;
-  return start === line.length ? undefined : line.slice(start);
+  return start === line.length ? undefined : Effect.pipe(line, EffectString.slice(start));
 }
 
 function firstAsciiWhitespaceIndex(value: string): number {
@@ -337,13 +345,13 @@ export function parseMatchedContinuationThreadnoteVerifierFailureIdsV1(
   stdout: string,
   stderr: string,
 ): readonly string[] {
-  if (stdout.trim() !== '') return [];
-  for (const line of stderr.split(/\r?\n/u)) {
-    const match = /^[a-z][a-z0-9-]* verifier failed:\s*(\{.*\})$/u.exec(line.trim());
+  if (Effect.pipe(stdout, EffectString.trim) !== '') return [];
+  for (const line of Effect.pipe(stderr, EffectString.split(/\r?\n/u))) {
+    const match = /^[a-z][a-z0-9-]* verifier failed:\s*(\{.*\})$/u.exec(Effect.pipe(line, EffectString.trim));
     if (match?.[1] === undefined) continue;
     try {
-      const diagnostic = JSON.parse(match[1]) as {readonly completed?: unknown; readonly failures?: unknown};
-      if (diagnostic.completed === true && Array.isArray(diagnostic.failures) && diagnostic.failures.length > 0) {
+      const diagnostic = object(JSON.parse(match[1]), 'verifier diagnostic');
+      if (diagnostic.completed === true && EffectArray.isArray(diagnostic.failures) && diagnostic.failures.length > 0) {
         return ['sealed-verifier-failure'];
       }
     } catch {
@@ -371,14 +379,25 @@ export function parseMatchedContinuationFailureIdsV1(
 function stripAnsiControlSequencesV1(value: string): string {
   let stripped = '';
   for (let index = 0; index < value.length;) {
-    if (value.charCodeAt(index) !== 0x1b || value[index + 1] !== '[') {
+    if (
+      Effect.pipe(
+        value,
+        EffectString.charCodeAt(index),
+        Effect.Option.getOrElse(() => NaN),
+      ) !== 0x1b ||
+      value[index + 1] !== '['
+    ) {
       stripped += value[index];
       index += 1;
       continue;
     }
     index += 2;
     while (index < value.length) {
-      const codePoint = value.charCodeAt(index);
+      const codePoint = Effect.pipe(
+        value,
+        EffectString.charCodeAt(index),
+        Effect.Option.getOrElse(() => NaN),
+      );
       index += 1;
       if (codePoint >= 0x40 && codePoint <= 0x7e) break;
     }
@@ -396,21 +415,21 @@ export function matchedEvaluationVerificationIdV1(taskId: string, selector: stri
 export function matchedEvaluationVerificationCalibrationHashV1(
   input: Omit<MatchedEvaluationVerificationCalibrationV1, 'receiptHash'>,
 ): string {
-  const {receiptHash: _receiptHash, ...withoutHash} = input as MatchedEvaluationVerificationCalibrationV1;
+  const withoutHash = {...input, receiptHash: undefined};
   return digest('matched-evaluation-verification-calibration-v1', withoutHash);
 }
 
 export function matchedEvaluationVerificationPlanHashV1(
   input: Omit<MatchedEvaluationVerificationPlanV1, 'planHash'>,
 ): string {
-  const {planHash: _planHash, ...withoutHash} = input as MatchedEvaluationVerificationPlanV1;
+  const withoutHash = {...input, planHash: undefined};
   return digest('matched-evaluation-verification-plan-v1', withoutHash);
 }
 
 export function matchedEvaluationVerificationReceiptHashV1(
   input: Omit<MatchedEvaluationVerificationReceiptV1, 'receiptHash'>,
 ): string {
-  const {receiptHash: _receiptHash, ...withoutHash} = input as MatchedEvaluationVerificationReceiptV1;
+  const withoutHash = {...input, receiptHash: undefined};
   return digest('matched-evaluation-verification-receipt-v1', withoutHash);
 }
 
@@ -418,7 +437,10 @@ export function matchedContinuationPhaseTwoVerificationCheckIdV1(
   taskId: string,
   input: Omit<MatchedContinuationPhaseTwoVerificationCheckV1, 'checkId'>,
 ): string {
-  const {checkId: _checkId, ...check} = parseContinuationCheck({...input, checkId: '0'.repeat(64)}, false);
+  const {checkId: _checkId, ...check} = parseContinuationCheck(
+    {...input, checkId: Effect.pipe('0', EffectString.repeat(64))},
+    false,
+  );
   return digest('matched-continuation-phase-two-check-id-v1', {
     ...check,
     taskId: matching(taskId, TASK_ID, 'continuation verification task id'),
@@ -428,21 +450,21 @@ export function matchedContinuationPhaseTwoVerificationCheckIdV1(
 export function matchedContinuationPhaseTwoVerificationPlanHashV1(
   input: Omit<MatchedContinuationPhaseTwoVerificationPlanV1, 'planHash'>,
 ): string {
-  const {planHash: _planHash, ...withoutHash} = input as MatchedContinuationPhaseTwoVerificationPlanV1;
+  const withoutHash = {...input, planHash: undefined};
   return digest('matched-continuation-phase-two-plan-v1', withoutHash);
 }
 
 export function matchedContinuationPhaseTwoVerificationCheckReceiptHashV1(
   input: Omit<MatchedContinuationPhaseTwoVerificationCheckReceiptV1, 'receiptHash'>,
 ): string {
-  const {receiptHash: _receiptHash, ...withoutHash} = input as MatchedContinuationPhaseTwoVerificationCheckReceiptV1;
+  const withoutHash = {...input, receiptHash: undefined};
   return digest('matched-continuation-phase-two-check-receipt-v1', withoutHash);
 }
 
 export function matchedContinuationPhaseTwoVerificationReceiptHashV1(
   input: Omit<MatchedContinuationPhaseTwoVerificationReceiptV1, 'receiptHash'>,
 ): string {
-  const {receiptHash: _receiptHash, ...withoutHash} = input as MatchedContinuationPhaseTwoVerificationReceiptV1;
+  const withoutHash = {...input, receiptHash: undefined};
   return digest('matched-continuation-phase-two-receipt-v1', withoutHash);
 }
 
@@ -465,16 +487,16 @@ function parsePlan(value: unknown, verifyHash: boolean): MatchedEvaluationVerifi
   const sandbox = object(plan.sandbox, 'verification sandbox');
   exactKeys(sandbox, ['executable', 'executableHash', 'policy']);
   if (sandbox.policy !== 'darwin-seatbelt-v1') invalid('verification sandbox policy is unsupported');
-  const tasks = array(plan.tasks, 'verification tasks')
-    .map((task, index) => parseTask(task, index))
-    .sort((left, right) => left.taskId.localeCompare(right.taskId));
+  const tasks = EffectArray.map(array(plan.tasks, 'verification tasks'), (task, index) => parseTask(task, index)).sort(
+    (left, right) => Effect.pipe(left.taskId, EffectString.localeCompare(right.taskId)),
+  );
   if (tasks.length === 0 || tasks.length > 64) invalid('verification plan must contain 1-64 tasks');
   unique(
-    tasks.map(task => task.taskId),
+    EffectArray.map(tasks, task => task.taskId),
     'verification task ids',
   );
   unique(
-    tasks.map(task => task.verificationId),
+    EffectArray.map(tasks, task => task.verificationId),
     'verification ids',
   );
   const withoutHash = {
@@ -607,14 +629,14 @@ function parseContinuationPlan(value: unknown, verifyHash: boolean): MatchedCont
     invalid('continuation verification plan version must be 1');
   }
   const taskId = matching(plan.taskId, TASK_ID, 'continuation verification task id');
-  const checks = array(plan.checks, 'continuation verification checks')
-    .map((check, index) => parseContinuationCheck(check, true, `continuation verification check ${index}`))
-    .sort((left, right) => left.checkId.localeCompare(right.checkId));
+  const checks = EffectArray.map(array(plan.checks, 'continuation verification checks'), (check, index) =>
+    parseContinuationCheck(check, true, `continuation verification check ${index}`),
+  ).sort((left, right) => Effect.pipe(left.checkId, EffectString.localeCompare(right.checkId)));
   if (checks.length === 0 || checks.length > 8) {
     invalid('continuation verification plan must contain 1-8 checks');
   }
   unique(
-    checks.map(check => check.checkId),
+    EffectArray.map(checks, check => check.checkId),
     'continuation verification check ids',
   );
   for (const check of checks) {
@@ -625,7 +647,7 @@ function parseContinuationPlan(value: unknown, verifyHash: boolean): MatchedCont
   const withoutHash = {
     checks,
     protectedPaths: canonicalRepositoryPaths(
-      array(plan.protectedPaths, 'continuation verification protected paths').map((entry, index) =>
+      EffectArray.map(array(plan.protectedPaths, 'continuation verification protected paths'), (entry, index) =>
         boundedText(entry, 1, 4_096, `continuation verification protected path ${index}`),
       ),
       'continuation verification protected paths',
@@ -649,7 +671,7 @@ function parseContinuationCheck(
   exactKeys(check, ['allowedBaselineFailureIds', 'checkId', 'commandTokens', 'diagnosticParser', 'policy']);
   const policy = literal(check.policy, MATCHED_CONTINUATION_PHASE_TWO_CHECK_POLICIES, `${label} policy`);
   const allowedBaselineFailureIds = canonicalFailureIds(
-    array(check.allowedBaselineFailureIds, `${label} allowed baseline failures`).map((entry, index) =>
+    EffectArray.map(array(check.allowedBaselineFailureIds, `${label} allowed baseline failures`), (entry, index) =>
       boundedText(entry, 1, 1_024, `${label} allowed baseline failure ${index}`),
     ),
     `${label} allowed baseline failures`,
@@ -657,13 +679,14 @@ function parseContinuationCheck(
   if (policy === 'must-pass' && allowedBaselineFailureIds.length !== 0) {
     invalid(`${label} must-pass policy cannot allow baseline failures`);
   }
-  const commandTokens = array(check.commandTokens, `${label} command tokens`).map((entry, index) =>
+  const commandTokens = EffectArray.map(array(check.commandTokens, `${label} command tokens`), (entry, index) =>
     boundedText(entry, 1, 4_096, `${label} command token ${index}`),
   );
   if (commandTokens.length === 0 || commandTokens.length > 64) {
     invalid(`${label} must contain 1-64 command tokens`);
   }
-  if (commandTokens.some(token => token.includes('\0'))) invalid(`${label} command tokens cannot contain null bytes`);
+  if (EffectArray.some(commandTokens, token => Effect.pipe(token, EffectString.includes('\0'))))
+    invalid(`${label} command tokens cannot contain null bytes`);
   const parsed = {
     allowedBaselineFailureIds,
     checkId: matching(check.checkId, HASH, `${label} id`),
@@ -675,7 +698,7 @@ function parseContinuationCheck(
     ),
     policy,
   };
-  if (verifyShape && parsed.checkId === '0'.repeat(64)) invalid(`${label} id is not sealed`);
+  if (verifyShape && parsed.checkId === Effect.pipe('0', EffectString.repeat(64))) invalid(`${label} id is not sealed`);
   return parsed;
 }
 
@@ -716,7 +739,7 @@ function parseContinuationCheckReceipt(
           ? (1 as const)
           : invalid('continuation verification check exit code is invalid'),
     failureIds: canonicalFailureIds(
-      array(receipt.failureIds, 'continuation verification check failures').map((entry, index) =>
+      EffectArray.map(array(receipt.failureIds, 'continuation verification check failures'), (entry, index) =>
         boundedText(entry, 1, 1_024, `continuation verification check failure ${index}`),
       ),
       'continuation verification check failures',
@@ -751,14 +774,15 @@ function parseContinuationAggregateReceipt(
   if (receipt.version !== MATCHED_CONTINUATION_PHASE_TWO_VERIFICATION_VERSION) {
     invalid('continuation verification aggregate receipt version must be 1');
   }
-  const checks = array(receipt.checks, 'continuation verification aggregate checks')
-    .map(parseMatchedContinuationPhaseTwoVerificationCheckReceiptV1)
-    .sort((left, right) => left.checkId.localeCompare(right.checkId));
+  const checks = EffectArray.map(
+    array(receipt.checks, 'continuation verification aggregate checks'),
+    parseMatchedContinuationPhaseTwoVerificationCheckReceiptV1,
+  ).sort((left, right) => Effect.pipe(left.checkId, EffectString.localeCompare(right.checkId)));
   if (checks.length === 0 || checks.length > 8) {
     invalid('continuation verification aggregate must contain 1-8 checks');
   }
   unique(
-    checks.map(check => check.checkId),
+    EffectArray.map(checks, check => check.checkId),
     'continuation verification aggregate check ids',
   );
   const durationMilliseconds = integer(
@@ -767,7 +791,7 @@ function parseContinuationAggregateReceipt(
     8 * 3_600_000,
     'continuation verification aggregate duration',
   );
-  if (durationMilliseconds < checks.reduce((sum, check) => sum + check.durationMilliseconds, 0)) {
+  if (durationMilliseconds < EffectArray.reduce(checks, 0, (sum, check) => sum + check.durationMilliseconds)) {
     invalid('continuation verification aggregate duration is shorter than its checks');
   }
   const status = literal(
@@ -776,15 +800,16 @@ function parseContinuationAggregateReceipt(
     'continuation verification aggregate status',
   );
   const protectedPathViolations = canonicalRepositoryPaths(
-    array(receipt.protectedPathViolations, 'continuation verification protected path violations').map((entry, index) =>
-      boundedText(entry, 1, 4_096, `continuation verification protected path violation ${index}`),
+    EffectArray.map(
+      array(receipt.protectedPathViolations, 'continuation verification protected path violations'),
+      (entry, index) => boundedText(entry, 1, 4_096, `continuation verification protected path violation ${index}`),
     ),
     'continuation verification protected path violations',
     true,
   );
   if (
     (status === 'passed') !==
-    (protectedPathViolations.length === 0 && checks.every(check => check.status === 'passed'))
+    (protectedPathViolations.length === 0 && EffectArray.every(checks, check => check.status === 'passed'))
   ) {
     invalid('continuation verification aggregate status differs from its checks');
   }
@@ -811,7 +836,7 @@ function assertContinuationReceiptCoverage(
   artifactHash: string,
 ): void {
   if (receipts.length !== plan.checks.length) invalid('continuation verification receipt coverage is incomplete');
-  const receiptByCheck = new Map(receipts.map(receipt => [receipt.checkId, receipt]));
+  const receiptByCheck = new Map(EffectArray.map(receipts, receipt => [receipt.checkId, receipt]));
   if (receiptByCheck.size !== receipts.length) invalid('continuation verification receipt contains duplicate checks');
   for (const check of plan.checks) {
     const receipt = receiptByCheck.get(check.checkId);
@@ -835,23 +860,31 @@ function continuationCheckPassed(
 ): boolean {
   if (check.policy === 'must-pass') return exitCode === 0 && failureIds.length === 0;
   if (exitCode === 0) return failureIds.length === 0;
-  return failureIds.length > 0 && failureIds.every(failure => check.allowedBaselineFailureIds.includes(failure));
+  return (
+    failureIds.length > 0 && EffectArray.every(failureIds, failure => check.allowedBaselineFailureIds.includes(failure))
+  );
 }
 
 function canonicalFailureIds(values: readonly string[], label: string): readonly string[] {
-  const canonical = values.map(value => boundedText(value, 1, 1_024, label)).sort();
+  const canonical = EffectArray.map(values, value => boundedText(value, 1, 1_024, label)).sort();
   unique(canonical, label);
   if (canonical.length > 256) invalid(`${label} must contain at most 256 entries`);
   return canonical;
 }
 
 function canonicalRepositoryPaths(values: readonly string[], label: string, allowEmpty = false): readonly string[] {
-  const canonical = values.map(value => boundedText(value, 1, 4_096, label)).sort();
+  const canonical = EffectArray.map(values, value => boundedText(value, 1, 4_096, label)).sort();
   unique(canonical, label);
   if (
     (!allowEmpty && canonical.length === 0) ||
     canonical.length > 64 ||
-    canonical.some(path => path.startsWith('/') || path.startsWith('.') || path.split('/').some(part => part === '..'))
+    EffectArray.some(
+      canonical,
+      path =>
+        Effect.pipe(path, EffectString.startsWith('/')) ||
+        Effect.pipe(path, EffectString.startsWith('.')) ||
+        EffectArray.some(Effect.pipe(path, EffectString.split('/')), part => part === '..'),
+    )
   ) {
     invalid(`${label} must contain 1-64 safe repository-relative paths`);
   }
@@ -863,18 +896,18 @@ function digest(domain: string, value: unknown): string {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
   const expected = [...keys].sort();
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected))
     invalid('verification object has unsupported or missing fields');
 }
@@ -892,7 +925,7 @@ function boundedText(value: unknown, minimum: number, maximum: number, label: st
 
 function absolutePath(value: unknown, label: string): string {
   const path = boundedText(value, 1, 4_096, label);
-  if (!path.startsWith('/')) invalid(`${label} must be absolute`);
+  if (!Effect.pipe(path, EffectString.startsWith('/'))) invalid(`${label} must be absolute`);
   return path;
 }
 
@@ -903,8 +936,9 @@ function integer(value: unknown, minimum: number, maximum: number, label: string
 }
 
 function literal<const T extends readonly string[]>(value: unknown, values: T, label: string): T[number] {
-  if (!values.includes(value as T[number])) invalid(`${label} is invalid`);
-  return value as T[number];
+  const matched = EffectArray.findFirst(values, candidate => candidate === value);
+  if (EffectOption.isSome(matched)) return matched.value;
+  invalid(`${label} is invalid`);
 }
 
 function unique(values: readonly string[], label: string): void {

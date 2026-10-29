@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
@@ -82,7 +83,7 @@ const strict = {onExcessProperty: 'error' as const};
 
 export function validateTopicGenerationSummary(input: unknown): TopicGenerationSummaryV1 {
   const result = Schema.decodeUnknownSync(TopicGenerationSummary, strict)(input);
-  if (result.attempts.some((attempt, index) => attempt.ordinal !== index + 1))
+  if (EffectArray.some(result.attempts, (attempt, index) => attempt.ordinal !== index + 1))
     throw new Error('Invalid generation attempt order.');
   if (result.attempts.length === 2 && result.attempts[0].status !== 'draft-invalid')
     throw new Error('Only invalid draft output permits a repair attempt.');
@@ -99,8 +100,11 @@ export function validateTopicGenerationReceipt(input: unknown): TopicGenerationR
   const output = result.firstFailedOutput;
   if (output) {
     const attempt = result.attempts[output.attempt - 1];
-    const firstFailure = result.attempts.find(
-      entry => entry.status !== 'accepted' && entry.status !== 'started' && entry.output.status === 'observed',
+    const firstFailure = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        result.attempts,
+        entry => entry.status !== 'accepted' && entry.status !== 'started' && entry.output.status === 'observed',
+      ),
     );
     if (
       !attempt ||
@@ -155,7 +159,11 @@ export function projectTopicGenerationSummary(receipt: TopicGenerationReceiptV1)
     phase,
     elapsedMilliseconds,
     promptScope,
-    attempts: attempts.map(attempt => ({...attempt, usage: {...attempt.usage}, output: {...attempt.output}})),
+    attempts: EffectArray.map(attempts, attempt => ({
+      ...attempt,
+      usage: {...attempt.usage},
+      output: {...attempt.output},
+    })),
   };
 }
 

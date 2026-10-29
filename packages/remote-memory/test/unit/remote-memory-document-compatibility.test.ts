@@ -4,6 +4,8 @@ import {assertRemoteBodyReplacementSupported} from '@threadnote/remote-memory/do
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {richRemoteMemoryMetadata} from '@threadnote/memory/test/helpers/remote-memory-document';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('remote body replacement compatibility', () => {
   it('rejects unknown header fields without consuming or rewriting them', () => {
@@ -31,7 +33,9 @@ describe('remote body replacement compatibility', () => {
     const before = structuredClone(metadata);
     const document = formatMemoryDocument('MEMORY', metadata, 'Original body');
     for (const newline of ['\n', '\r\n', '\r']) {
-      expect(() => assertRemoteBodyReplacementSupported(document.replaceAll('\n', newline))).not.toThrow();
+      expect(() =>
+        assertRemoteBodyReplacementSupported(Effect.pipe(document, EffectString.replaceAll('\n', newline))),
+      ).not.toThrow();
     }
     expect(metadata).toEqual(before);
   });

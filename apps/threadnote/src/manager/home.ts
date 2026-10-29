@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {isManagerProjectName} from './project/name.js';
 import {Clock, Effect, Fiber, Result} from 'effect';
 import {managerHomeLanes, type ManagerHomeLane} from '@threadnote/manager/home';
@@ -8,6 +9,8 @@ import {readContextMaintenanceStatus} from '../memory/context/maintenance.js';
 import {buildLocalValueReport} from '../value_report/commands.js';
 import {managerAttentionProjectRoot} from './attention.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 import {readManagerReviewEligibility} from './review_actionability.js';
 
 export interface ManagerHomeHandoffV1 {
@@ -74,7 +77,10 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
 ): Effect.fn.Return<ManagerHomeApiResponse | undefined, never, R> {
   if (request.url.pathname !== '/api/home') return undefined;
   if (request.method !== 'GET') return undefined;
-  const project = request.url.searchParams.get('project')?.trim() ?? '';
+  const project =
+    Effect2.pipe(request.url.searchParams.get('project'), effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) ?? '';
   if (project && !isManagerProjectName(project)) {
     return {
       body: {
@@ -109,7 +115,7 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
           Effect.flatMap(reviews =>
             sources.eligibility(
               request.config,
-              reviews.filter(review => review.project === project),
+              EffectArray.filter(reviews, review => review.project === project),
             ),
           ),
         ),
@@ -122,18 +128,20 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
   );
   const recordsResult = Result.map(corpusResult, records => activeProjectRecords(records, project));
   const handoffs = Result.isSuccess(recordsResult)
-    ? recordsResult.success
-        .filter(record => record.metadata.kind === 'handoff')
-        .sort(
-          (left, right) =>
-            right.metadata.timestamp.localeCompare(left.metadata.timestamp) || left.uri.localeCompare(right.uri),
-        )
-        .slice(0, 5)
-        .map(record => ({
+    ? EffectArray.map(
+        EffectArray.filter(recordsResult.success, record => record.metadata.kind === 'handoff')
+          .sort(
+            (left, right) =>
+              Effect2.pipe(right.metadata.timestamp, EffectString.localeCompare(left.metadata.timestamp)) ||
+              Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)),
+          )
+          .slice(0, 5),
+        record => ({
           timestamp: record.metadata.timestamp,
           ...(record.metadata.topic ? {topic: record.metadata.topic} : {}),
           uri: record.uri,
-        }))
+        }),
+      )
     : [];
   const pendingCount = Result.isSuccess(reviewsResult) ? reviewsResult.success.pendingCount : undefined;
   const healthReport = healthResult && Result.isSuccess(healthResult) ? healthResult.success : undefined;
@@ -212,24 +220,26 @@ const collectAllProjectsHome = Effect.fn('managerHome.collectAllProjects')(funct
     {concurrency: 2},
   );
   const records = Result.isSuccess(corpus)
-    ? corpus.success.filter(record => record.metadata.status === 'active')
+    ? EffectArray.filter(corpus.success, record => record.metadata.status === 'active')
     : undefined;
   const pendingCount = Result.isSuccess(reviews) ? reviews.success.pendingCount : undefined;
   return {
     body: {
-      handoffs: (records ?? [])
-        .filter(record => record.metadata.kind === 'handoff')
-        .sort(
-          (left, right) =>
-            right.metadata.timestamp.localeCompare(left.metadata.timestamp) || left.uri.localeCompare(right.uri),
-        )
-        .slice(0, 5)
-        .map(record => ({
+      handoffs: EffectArray.map(
+        EffectArray.filter(records ?? [], record => record.metadata.kind === 'handoff')
+          .sort(
+            (left, right) =>
+              Effect2.pipe(right.metadata.timestamp, EffectString.localeCompare(left.metadata.timestamp)) ||
+              Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)),
+          )
+          .slice(0, 5),
+        record => ({
           timestamp: record.metadata.timestamp,
           ...(record.metadata.project ? {project: record.metadata.project} : {}),
           ...(record.metadata.topic ? {topic: record.metadata.topic} : {}),
           uri: record.uri,
-        })),
+        }),
+      ),
       stats: {
         ...(records === undefined ? {} : {memories: records.length}),
         ...(pendingCount === undefined ? {} : {pending: pendingCount}),
@@ -254,7 +264,10 @@ function observeHomeSource<A, E, R>(
 }
 
 function activeProjectRecords(records: Effect.Success<ReturnType<typeof homeSources.records>>, project: string) {
-  return records.filter(record => record.metadata.status === 'active' && record.metadata.project === project);
+  return EffectArray.filter(
+    records,
+    record => record.metadata.status === 'active' && record.metadata.project === project,
+  );
 }
 
 export function managerRecentOutcomeCount(value: {

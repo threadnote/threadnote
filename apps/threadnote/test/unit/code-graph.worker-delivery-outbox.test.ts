@@ -21,6 +21,8 @@ import {makeGraphWorkerSigner} from '@threadnote/graph/sharing/worker/signing';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 const encode = (value: unknown) => new TextEncoder().encode(canonicalJson(value));
@@ -41,28 +43,28 @@ const fixture = Effect.fn('test.workerOutbox.fixture')(function* (
   const signer = yield* makeGraphWorkerSigner(home, sha256Digest('outbox fixture'));
   const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
   const action = {
-    contentHash: 'a'.repeat(64),
-    extractorSet: 'b'.repeat(64),
+    contentHash: Effect2.pipe('a', EffectString.repeat(64)),
+    extractorSet: Effect2.pipe('b', EffectString.repeat(64)),
     languageAndRole: 'typescript:source',
     normalizedPath: 'src/index.ts',
-    repositoryId: 'c'.repeat(64),
+    repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
   };
   const result = graphShareParseResultArtifact({
     ...action,
     actionKey: graphShareParseActionKey(action),
-    gitBlobId: 'd'.repeat(40),
+    gitBlobId: Effect2.pipe('d', EffectString.repeat(40)),
     facts: {path: action.normalizedPath, diagnostics: diagnostic ? [diagnostic] : [], edges: [], symbols: []},
   });
   const authority = {
     expiresAt: now + 3600,
-    graphAbi: 'e'.repeat(64),
+    graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
     principalId: sha256Digest(principal),
     profileDigest: sha256Digest(`profile:${principal}`),
     repositoryId: action.repositoryId,
     signingPublicKey: signer.publicKey,
-    workerId: 'gw_' + 'f'.repeat(32),
+    workerId: 'gw_' + Effect2.pipe('f', EffectString.repeat(32)),
   };
-  const sourceCommit = '1'.repeat(40);
+  const sourceCommit = Effect2.pipe('1', EffectString.repeat(40));
   const candidate = {
     actionKey: result.actionKey,
     batchId: sourceCommit,
@@ -79,7 +81,7 @@ const fixture = Effect.fn('test.workerOutbox.fixture')(function* (
     resultDigest: sha256Digest(encode(result)),
     resultSize: encode(result).byteLength,
     semanticDigest: result.semanticDigest,
-    snapshotId: `cgsn_${'2'.repeat(40)}`,
+    snapshotId: `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`,
     sourceCommit,
   };
   const artifact = yield* createGraphWorkerResultArtifact({
@@ -107,7 +109,7 @@ const fixture = Effect.fn('test.workerOutbox.fixture')(function* (
     artifact,
     authority,
     candidate,
-    candidatePageId: '3'.repeat(64),
+    candidatePageId: Effect2.pipe('3', EffectString.repeat(64)),
     repositoryId: authority.repositoryId,
     threadnoteHome: home,
   };
@@ -124,9 +126,12 @@ describe('private signed worker delivery outbox', () => {
       expect(replay).toHaveLength(1);
       expect(replay[0].artifact).toEqual(input.artifact);
       expect((yield* prepareGraphWorkerDeliveryOutbox(input)).prepared).toBe(false);
-      const anotherPage = yield* prepareGraphWorkerDeliveryOutbox({...input, candidatePageId: '8'.repeat(64)});
+      const anotherPage = yield* prepareGraphWorkerDeliveryOutbox({
+        ...input,
+        candidatePageId: Effect2.pipe('8', EffectString.repeat(64)),
+      });
       expect(anotherPage.prepared).toBe(false);
-      expect(anotherPage.sourcePageId).toBe('8'.repeat(64));
+      expect(anotherPage.sourcePageId).toBe(Effect2.pipe('8', EffectString.repeat(64)));
       const response = {idempotencyKey: first.operation.operationId, status: 'accepted' as const};
       const ackInput = {
         scope: scopeFor(input),
@@ -190,8 +195,12 @@ describe('private signed worker delivery outbox', () => {
       const second = yield* fixture('another result', input.threadnoteHome);
       const directory = path.join(scopeRoot(input.threadnoteHome, scopeFor(input)), 'sha256');
       const payload = new Uint8Array(32 * 1_048_576);
-      for (const char of ['4', '5', '6', '7']) yield* fs.writeFile(path.join(directory, char.repeat(64)), payload);
-      const temporary = path.join(directory, `${'9'.repeat(64)}.12345678-1234-1234-1234-123456789abc.tmp`);
+      for (const char of ['4', '5', '6', '7'])
+        yield* fs.writeFile(path.join(directory, Effect2.pipe(char, EffectString.repeat(64))), payload);
+      const temporary = path.join(
+        directory,
+        `${Effect2.pipe('9', EffectString.repeat(64))}.12345678-1234-1234-1234-123456789abc.tmp`,
+      );
       yield* fs.writeFile(temporary, payload);
       const metadataTemporary = path.join(
         scopeRoot(input.threadnoteHome, scopeFor(input)),
@@ -214,7 +223,7 @@ describe('private signed worker delivery outbox', () => {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const oldScope = scopeFor(input);
-      const currentScope = {...oldScope, workerId: `gw_${'9'.repeat(32)}`};
+      const currentScope = {...oldScope, workerId: `gw_${Effect2.pipe('9', EffectString.repeat(32))}`};
       yield* prepareGraphWorkerDeliveryOutbox(input);
       const root = scopeRoot(input.threadnoteHome, oldScope);
       const blobs = path.join(root, 'sha256');

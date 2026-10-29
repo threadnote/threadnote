@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -347,17 +348,23 @@ const pruneRetiredSnapshotRowsPage = Effect.fn('codeGraph.pruneRetiredSnapshotRo
     if (!(yield* tableExists(sql, spec.table))) continue;
     const deleted = yield* sql.withTransaction(
       Effect.gen(function* () {
-        const key = `(${spec.keyColumns.join(', ')})`;
+        const key = `(${EffectArray.join(spec.keyColumns, ', ')})`;
         yield* sql.unsafe(
           `DELETE FROM ${spec.table}
            WHERE ${key} IN (
-             SELECT ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
+             SELECT ${EffectArray.join(
+               EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+               ', ',
+             )}
              FROM ${spec.table} AS candidate
              WHERE candidate.snapshot_id IN (
                SELECT id FROM snapshots
                WHERE state = 'retired' AND (? IS NULL OR id = ?)
              )
-             ORDER BY ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
+             ORDER BY ${EffectArray.join(
+               EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+               ', ',
+             )}
              LIMIT ?
            )`,
           [targetSnapshotId, targetSnapshotId, spec.batchRows],

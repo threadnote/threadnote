@@ -1,4 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Predicate} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const removeLegacyRecallIndexArtifacts = Effect.fn('recall.removeLegacyIndexArtifacts')(function* (
   fs: FileSystem.FileSystem,
@@ -21,9 +24,13 @@ export const removeLegacyRecallIndexArtifacts = Effect.fn('recall.removeLegacyIn
   const entries = yield* fs.readDirectory(lexicalRoot);
   const retainedGenerationPaths = new Set<string>();
   const currentPointerPattern = new RegExp(`^(?:active|with-inactive)-v${currentVersion}\\.pointer\\.json$`);
-  for (const entry of entries.filter(name => currentPointerPattern.test(name))) {
+  for (const entry of EffectArray.filter(
+    entries,
+    __effectArrayValue => !!(name => currentPointerPattern.test(name))(__effectArrayValue),
+  )) {
     const relative = yield* recallPointerDatabaseRelativePath(fs, path.join(lexicalRoot, entry));
-    if (relative) retainedGenerationPaths.add(path.join(lexicalRoot, ...relative.split('/')));
+    if (relative)
+      retainedGenerationPaths.add(path.join(lexicalRoot, ...Effect2.pipe(relative, EffectString.split('/'))));
   }
   for (const entry of entries) {
     const version = /^(?:active|with-inactive)-v([0-9]+)(?:\.sqlite(?:-(?:shm|wal)|\.stale)?|\.pointer\.json)$/.exec(
@@ -31,10 +38,10 @@ export const removeLegacyRecallIndexArtifacts = Effect.fn('recall.removeLegacyIn
     )?.[1];
     if (!version || Number(version) >= currentVersion) continue;
     const target = path.join(lexicalRoot, entry);
-    if (entry.endsWith('.pointer.json')) {
+    if (Effect2.pipe(entry, EffectString.endsWith('.pointer.json'))) {
       const relative = yield* recallPointerDatabaseRelativePath(fs, target);
       if (relative) {
-        const generationPath = path.join(lexicalRoot, ...relative.split('/'));
+        const generationPath = path.join(lexicalRoot, ...Effect2.pipe(relative, EffectString.split('/')));
         if (!retainedGenerationPaths.has(generationPath)) {
           yield* removeDatabaseFiles(fs, generationPath);
         }
@@ -50,11 +57,14 @@ function recallPointerDatabaseRelativePath(fs: FileSystem.FileSystem, pointerPat
       try {
         const pointer: unknown = JSON.parse(raw);
         if (!Predicate.isObject(pointer) || typeof pointer.database !== 'string') return undefined;
-        const relative = pointer.database.replaceAll('\\', '/');
+        const relative = Effect2.pipe(pointer.database, EffectString.replaceAll('\\', '/'));
         return relative &&
-          relative.startsWith('generations/') &&
-          relative.endsWith('.sqlite') &&
-          !relative.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+          Effect2.pipe(relative, EffectString.startsWith('generations/')) &&
+          Effect2.pipe(relative, EffectString.endsWith('.sqlite')) &&
+          !EffectArray.some(
+            Effect2.pipe(relative, EffectString.split('/')),
+            segment => segment === '' || segment === '.' || segment === '..',
+          )
           ? relative
           : undefined;
       } catch {

@@ -1,22 +1,25 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {Effect} from 'effect';
 import {afterEach, describe, expect, it} from 'vitest';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {join, mkdir, mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const temporaryHomes: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryHomes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryHomes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('code graph snapshot retention store', () => {
   it('finds and retires a repository beyond the cap after many already-bounded repositories', async () => {
     const home = await mkdtemp('threadnote-snapshot-retention-store-');
     temporaryHomes.push(home);
-    const checkoutId = 'a'.repeat(64);
-    const repositoryId = 'f'.repeat(64);
+    const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
+    const repositoryId = Effect2.pipe('f', EffectString.repeat(64));
     const root = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
     const databasePath = join(root, 'graph-v3.sqlite');
     const writerLockPath = join(home, 'locks', 'indexes', 'code-graph', 'database-writes', `${checkoutId}.lock`);
@@ -35,7 +38,7 @@ describe('code graph snapshot retention store', () => {
       );
       const createdAt = '2026-08-01T00:00:00.000Z';
       for (let index = 0; index < 9; index += 1) {
-        insertRepository.run(index.toString(16).repeat(64), createdAt, createdAt);
+        insertRepository.run(Effect2.pipe(index.toString(16), EffectString.repeat(64)), createdAt, createdAt);
       }
       insertRepository.run(repositoryId, createdAt, createdAt);
       const insert = database.query(
@@ -50,11 +53,11 @@ describe('code graph snapshot retention store', () => {
         for (let index = 0; index < 2; index += 1) {
           const timestamp = `2026-08-0${index + 1}T00:00:00.000Z`;
           insert.run(
-            `cgsn_${ordinal.toString(16).padStart(40, '0')}`,
-            repository.toString(16).repeat(64),
-            ordinal.toString(16).padStart(64, '0'),
-            ordinal.toString(16).padStart(40, '0'),
-            `cgc_${ordinal.toString(16).padStart(40, '0')}`,
+            `cgsn_${Effect2.pipe(ordinal.toString(16), EffectString.padStart(40, '0'))}`,
+            Effect2.pipe(repository.toString(16), EffectString.repeat(64)),
+            Effect2.pipe(ordinal.toString(16), EffectString.padStart(64, '0')),
+            Effect2.pipe(ordinal.toString(16), EffectString.padStart(40, '0')),
+            `cgc_${Effect2.pipe(ordinal.toString(16), EffectString.padStart(40, '0'))}`,
             timestamp,
             timestamp,
           );
@@ -64,11 +67,11 @@ describe('code graph snapshot retention store', () => {
       for (let index = 0; index < 5; index += 1) {
         const timestamp = `2026-08-0${index + 1}T00:00:00.000Z`;
         insert.run(
-          `cgsn_${ordinal.toString(16).padStart(40, '0')}`,
+          `cgsn_${Effect2.pipe(ordinal.toString(16), EffectString.padStart(40, '0'))}`,
           repositoryId,
-          ordinal.toString(16).padStart(64, '0'),
-          ordinal.toString(16).padStart(40, '0'),
-          `cgc_${ordinal.toString(16).padStart(40, '0')}`,
+          Effect2.pipe(ordinal.toString(16), EffectString.padStart(64, '0')),
+          Effect2.pipe(ordinal.toString(16), EffectString.padStart(40, '0')),
+          `cgc_${Effect2.pipe(ordinal.toString(16), EffectString.padStart(40, '0'))}`,
           timestamp,
           timestamp,
         );
@@ -80,7 +83,7 @@ describe('code graph snapshot retention store', () => {
             (snapshot_id, completed_batch_count, posting_count, symbol_count, term_count)
            VALUES (?, 1, 1, 1, 1)`,
         )
-        .run(`cgsn_${(ordinal - 1).toString(16).padStart(40, '0')}`);
+        .run(`cgsn_${Effect2.pipe((ordinal - 1).toString(16), EffectString.padStart(40, '0'))}`);
     } finally {
       database.close(false);
     }

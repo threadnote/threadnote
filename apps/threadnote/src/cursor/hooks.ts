@@ -1,16 +1,21 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {THREADNOTE_HOOK_MARKER, THREADNOTE_HOOK_MARKER_VALUE} from '../constants.js';
 import {expandPath, getInvocationCwd} from '@threadnote/platform/paths';
 import {isJsonObject, parseJsonConfigObject} from '../utils.js';
 import type {HooksInstallOptions} from '../types.js';
 import type {JsonObject} from '@threadnote/platform/json';
+import * as EffectRecord from 'effect/Record';
 
 export type CursorHookTarget = 'desktop' | 'cloud';
 export type CursorHookEvent = 'sessionStart' | 'preCompact';
 
-class CursorHooksConfigError extends Schema.TaggedError<CursorHooksConfigError>()('CursorHooksConfigError', {
-  message: Schema.String,
-}) {}
+class CursorHooksConfigError extends Schema.TaggedError<CursorHooksConfigError, {readonly brand: unique symbol}>()(
+  'CursorHooksConfigError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 // Cursor uses flat command entries, unlike Claude's nested matcher/hook groups.
 // https://cursor.com/docs/hooks (verified 2026-09-08).
@@ -24,14 +29,14 @@ function isManaged(value: unknown): boolean {
 /** Preserve unrelated entries and config fields, including empty user event arrays. */
 export function withCursorHooks(input: JsonObject, target: CursorHookTarget, remove = false): JsonObject {
   const hooks = isJsonObject(input.hooks) ? {...input.hooks} : {};
-  for (const [event, entries] of Object.entries(hooks)) {
-    if (!Array.isArray(entries) || !entries.some(isManaged)) continue;
-    const remaining = entries.filter(entry => !isManaged(entry));
+  for (const [event, entries] of EffectRecord.toEntries(hooks)) {
+    if (!EffectArray.isArray(entries) || !EffectArray.some(entries, isManaged)) continue;
+    const remaining = EffectArray.filter(entries, entry => !isManaged(entry));
     hooks[event] = remaining;
   }
   if (!remove) {
     for (const event of managedEvents(target)) {
-      const entries = Array.isArray(hooks[event]) ? hooks[event] : [];
+      const entries = EffectArray.isArray(hooks[event]) ? hooks[event] : [];
       hooks[event] = [
         ...entries,
         {
@@ -44,7 +49,7 @@ export function withCursorHooks(input: JsonObject, target: CursorHookTarget, rem
     }
   }
   const next = {...input};
-  if (Object.keys(hooks).length || isJsonObject(input.hooks)) next.hooks = hooks;
+  if (EffectRecord.keys(hooks).length || isJsonObject(input.hooks)) next.hooks = hooks;
   if (!remove) {
     next.version = input.version ?? 1;
     next.hooks = hooks;
@@ -76,7 +81,8 @@ export const runCursorHooksInstall = Effect.fn('hooks.installCursor')(function* 
     !parsed ||
     (parsed.version !== undefined && parsed.version !== 1) ||
     (parsed.hooks !== undefined && !isJsonObject(parsed.hooks)) ||
-    (isJsonObject(parsed.hooks) && Object.values(parsed.hooks).some(entries => !Array.isArray(entries)))
+    (isJsonObject(parsed.hooks) &&
+      EffectArray.some(EffectRecord.values(parsed.hooks), entries => !EffectArray.isArray(entries)))
   ) {
     return yield* CursorHooksConfigError.make({
       message: `Refusing to modify invalid or unsupported Cursor hooks config at ${configPath}. Expected version 1 with event arrays.`,
@@ -116,7 +122,10 @@ export const hasManagedCursorHooks = Effect.fn('hooks.hasManagedCursorHooks')(fu
   return (
     !!parsed &&
     isJsonObject(parsed.hooks) &&
-    Object.values(parsed.hooks).some(entries => Array.isArray(entries) && entries.some(isManaged))
+    EffectArray.some(
+      EffectRecord.values(parsed.hooks),
+      entries => EffectArray.isArray(entries) && EffectArray.some(entries, isManaged),
+    )
   );
 });
 

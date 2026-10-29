@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Clock, Console, Crypto, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -25,6 +26,9 @@ import {
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {withStandaloneProcessLease} from '../process/standalone_lease.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const MODEL_SETUP_WORKER_ARGUMENT = 'model-setup-worker';
 const RESERVATION_MILLISECONDS = 30_000;
@@ -53,9 +57,12 @@ const PUBLIC_REASONS = new Set([
   'model-busy',
 ]);
 
-export class ModelSetupError extends Schema.TaggedError<ModelSetupError>()('ModelSetupError', {
-  message: Schema.String,
-}) {}
+export class ModelSetupError extends Schema.TaggedError<ModelSetupError, {readonly brand: unique symbol}>()(
+  'ModelSetupError',
+  {
+    message: Schema.String,
+  },
+) {}
 export function modelSetupPublicError(cause: unknown): ModelSetupError | ModelSetupConflict {
   return Schema.is(ModelSetupError)(cause) || Schema.is(ModelSetupConflict)(cause)
     ? cause
@@ -64,7 +71,10 @@ export function modelSetupPublicError(cause: unknown): ModelSetupError | ModelSe
       });
 }
 
-class SetupCancelled extends Schema.TaggedError<SetupCancelled>()('SetupCancelled', {}) {}
+class SetupCancelled extends Schema.TaggedError<SetupCancelled, {readonly brand: unique symbol}>()(
+  'SetupCancelled',
+  {},
+) {}
 
 export interface ModelSetupStatus {
   readonly version: 1;
@@ -181,7 +191,8 @@ export const modelProviderObservationPaths = Effect.fn('models.provider.observat
   const selection = yield* inspectBoundedObservationSelection(home);
   const selectedIds =
     selection.status === 'valid'
-      ? Object.values(selection.selection.roles).filter((id): id is string => typeof id === 'string')
+      ? // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+        EffectArray.filter(Object.values(selection.selection.roles), (id): id is string => typeof id === 'string')
       : [];
   const artifacts = yield* Effect.forEach([...new Set(selectedIds)].slice(0, 8), id =>
     Effect.map(catalog.get(id), manifest => store.path(home, manifest)),
@@ -253,48 +264,56 @@ export function modelSetupRetryDelay(attempt: number, jitter: number): number {
 }
 
 const MODEL_SETUP_WORKER_ENVIRONMENT = new Set(
-  [
-    'PATH',
-    'SystemRoot',
-    'WINDIR',
-    'ComSpec',
-    'PATHEXT',
-    'TEMP',
-    'TMP',
-    'TMPDIR',
-    'HOME',
-    'USERPROFILE',
-    'LOCALAPPDATA',
-    'APPDATA',
-    'HOMEDRIVE',
-    'HOMEPATH',
-    'USER',
-    'USERNAME',
-    'LANG',
-    'LC_ALL',
-    'LC_CTYPE',
-    'HTTP_PROXY',
-    'HTTPS_PROXY',
-    'ALL_PROXY',
-    'NO_PROXY',
-    'SSL_CERT_FILE',
-    'SSL_CERT_DIR',
-    'NODE_EXTRA_CA_CERTS',
-    'THREADNOTE_INSTALL_ROOT',
-    'THREADNOTE_MODEL_SETUP',
-  ].map(key => key.toLowerCase()),
+  EffectArray.map(
+    [
+      'PATH',
+      'SystemRoot',
+      'WINDIR',
+      'ComSpec',
+      'PATHEXT',
+      'TEMP',
+      'TMP',
+      'TMPDIR',
+      'HOME',
+      'USERPROFILE',
+      'LOCALAPPDATA',
+      'APPDATA',
+      'HOMEDRIVE',
+      'HOMEPATH',
+      'USER',
+      'USERNAME',
+      'LANG',
+      'LC_ALL',
+      'LC_CTYPE',
+      'HTTP_PROXY',
+      'HTTPS_PROXY',
+      'ALL_PROXY',
+      'NO_PROXY',
+      'SSL_CERT_FILE',
+      'SSL_CERT_DIR',
+      'NODE_EXTRA_CA_CERTS',
+      'THREADNOTE_INSTALL_ROOT',
+      'THREADNOTE_MODEL_SETUP',
+    ],
+    key => Effect2.pipe(key, EffectString.toLowerCase),
+  ),
 );
 
 export function modelSetupWorkerEnvironment(environment: NodeJS.ProcessEnv, home: string): NodeJS.ProcessEnv {
   return {
-    ...Object.fromEntries(
-      Object.entries(environment).filter(([key]) => MODEL_SETUP_WORKER_ENVIRONMENT.has(key.toLowerCase())),
+    ...EffectRecord.fromEntries(
+      EffectArray.filter(EffectRecord.toEntries(environment), ([key]) =>
+        MODEL_SETUP_WORKER_ENVIRONMENT.has(Effect2.pipe(key, EffectString.toLowerCase)),
+      ),
     ),
     THREADNOTE_HOME: home,
   };
 }
 
-export function automaticModelSetupRuntimeAllowed(system: SystemInfoShape, version: string): boolean {
+export function automaticModelSetupRuntimeAllowed(
+  system: Pick<SystemInfoShape, 'environment' | 'executablePath'>,
+  version: string,
+): boolean {
   const environment = system.environment();
   return (
     /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) &&
@@ -304,9 +323,17 @@ export function automaticModelSetupRuntimeAllowed(system: SystemInfoShape, versi
     !environment.VITEST &&
     environment.NODE_ENV !== 'test' &&
     environment.THREADNOTE_TOOLSET !== 'cloud' &&
-    !environment.THREADNOTE_MCP_TOOLSET?.startsWith('cursor-cloud') &&
+    !Effect2.pipe(environment.THREADNOTE_MCP_TOOLSET, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.startsWith('cursor-cloud')),
+    ) &&
     !['bun', 'bun.exe', 'node', 'node.exe'].includes(
-      system.executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase() ?? '',
+      Effect2.pipe(
+        Effect2.pipe(system.executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+        effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+      ) ?? '',
     )
   );
 }
@@ -468,7 +495,11 @@ export const requestModelSetup = Effect.fn('models.setup.request')(function* (
   );
   if (reservation?.status !== 'valid' || reservation.state.reservation?.nonce !== nonce)
     return yield* readModelSetupStatus(canonicalHome);
-  const executableName = system.executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  const executableName = Effect2.pipe(
+    Effect2.pipe(system.executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   const args = [
     ...(executableName === 'bun' || executableName === 'bun.exe' ? [system.developmentEntrypoint] : []),
     MODEL_SETUP_WORKER_ARGUMENT,
@@ -697,7 +728,7 @@ export function isModelSetupCommand(arguments_: readonly string[]): boolean {
       index += 1;
       continue;
     }
-    if (!argument.startsWith('-')) positionals.push(argument);
+    if (!Effect2.pipe(argument, EffectString.startsWith('-'))) positionals.push(argument);
   }
   return positionals[0] === 'models' && positionals[1] === 'setup';
 }

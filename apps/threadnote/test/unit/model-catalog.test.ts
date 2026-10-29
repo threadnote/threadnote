@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it} from '@effect/vitest';
 import {Effect, Exit} from 'effect';
@@ -8,6 +9,8 @@ import {
   parseLocalModelManifest,
 } from '@threadnote/inference/models/catalog';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const embedding = {
   architecture: 'bert',
@@ -21,10 +24,10 @@ const embedding = {
   promptPrefixes: {document: 'passage: ', query: 'query: '},
   quantization: 'Q8_0',
   repository: 'threadnote/fixture',
-  revision: '1'.repeat(40),
+  revision: Effect2.pipe('1', EffectString.repeat(40)),
   role: 'embedding',
   runtime: {nodeLlamaCpp: '3.19.1'},
-  sha256: 'a'.repeat(64),
+  sha256: Effect2.pipe('a', EffectString.repeat(64)),
   size: 200_000_000,
   task: 'retrieval',
   version: LOCAL_MODEL_MANIFEST_VERSION,
@@ -51,7 +54,9 @@ describe('local model catalog', () => {
       }),
     ).toThrow('invalid macOS arm64 embedding GPU-layer policy');
 
-    const reranker = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'reranker')!;
+    const reranker = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'reranker'),
+    )!;
     expect(() =>
       parseLocalModelManifest({
         ...reranker,
@@ -61,9 +66,9 @@ describe('local model catalog', () => {
   });
 
   it('keeps every measured candidate pinned and valid without selecting a default', () => {
-    expect(BUILTIN_MODEL_MANIFESTS.map(parseLocalModelManifest)).toEqual(BUILTIN_MODEL_MANIFESTS);
-    expect(BUILTIN_MODEL_MANIFESTS.some(model => model.role === 'embedding')).toBe(true);
-    expect(BUILTIN_MODEL_MANIFESTS.some(model => model.role === 'reranker')).toBe(true);
+    expect(EffectArray.map(BUILTIN_MODEL_MANIFESTS, parseLocalModelManifest)).toEqual(BUILTIN_MODEL_MANIFESTS);
+    expect(EffectArray.some(BUILTIN_MODEL_MANIFESTS, model => model.role === 'embedding')).toBe(true);
+    expect(EffectArray.some(BUILTIN_MODEL_MANIFESTS, model => model.role === 'reranker')).toBe(true);
   });
 
   it.effect('resolves role-aware selections and keeps unmeasured defaults explicit', () =>

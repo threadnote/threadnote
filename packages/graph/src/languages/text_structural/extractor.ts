@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {CodeGraphExtractionContext} from '../types.js';
@@ -11,6 +12,8 @@ import type {
   CodeGraphSymbol,
 } from '../../types.js';
 import {createSourceLineIndex, sourceSpan, type SourceLineIndex} from '../source_line_index.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface MutableTextFacts {
   readonly diagnostics: string[];
@@ -56,7 +59,7 @@ function extractFortran(facts: MutableTextFacts): void {
   }
   for (const line of linesWithOffsets(content)) {
     if (/^[cC*!]/.test(line.text)) continue;
-    const source = stripLineComment(line.text, '!').trim();
+    const source = Effect.pipe(stripLineComment(line.text, '!'), EffectString.trim);
     if (!source || /^#/.test(source)) continue;
     if (
       /^end\s*$/i.test(source) ||
@@ -72,7 +75,7 @@ function extractFortran(facts: MutableTextFacts): void {
         facts,
         parent,
         declaration.kind,
-        declaration.name.toLowerCase(),
+        Effect.pipe(declaration.name, EffectString.toLowerCase),
         line.start,
         line.end,
         !/^\s*private\b/i.test(source),
@@ -81,11 +84,28 @@ function extractFortran(facts: MutableTextFacts): void {
     }
     const owner = scopes.at(-1)!;
     const used = /^use(?:\s*,[^:]*)?\s*(?:::\s*)?([A-Za-z_]\w*)/i.exec(source);
-    if (used) addReference(facts, owner, used[1].toLowerCase(), 'imports', 'declared', line.start, line.end);
+    if (used)
+      addReference(
+        facts,
+        owner,
+        Effect.pipe(used[1], EffectString.toLowerCase),
+        'imports',
+        'declared',
+        line.start,
+        line.end,
+      );
     const included = /^include\s*["']([^"']+)["']/i.exec(source);
     if (included) addReference(facts, owner, included[1], 'imports', 'declared', line.start, line.end);
-    for (const call of source.matchAll(/\bcall\s+([A-Za-z_]\w*)/gi)) {
-      addReference(facts, owner, call[1].toLowerCase(), 'calls', 'syntactic', line.start, line.end);
+    for (const call of Effect.pipe(source, EffectString.matchAll(/\bcall\s+([A-Za-z_]\w*)/gi))) {
+      addReference(
+        facts,
+        owner,
+        Effect.pipe(call[1], EffectString.toLowerCase),
+        'calls',
+        'syntactic',
+        line.start,
+        line.end,
+      );
     }
   }
   addBoundDiagnostic(facts);
@@ -120,7 +140,7 @@ function extractApex(facts: MutableTextFacts): void {
   let braceDepth = 0;
   for (const line of linesWithOffsets(content)) {
     while (scopes.length > 0 && braceDepth < scopes.at(-1)!.bodyDepth) scopes.pop();
-    const source = line.text.trim();
+    const source = Effect.pipe(line.text, EffectString.trim);
     const parent = scopes.at(-1)?.symbol ?? facts.module;
     let declaredScope: CodeGraphSymbol | undefined;
     const trigger = /^trigger\s+([A-Za-z_]\w*)\s+on\s+([A-Za-z_]\w*)\s*\(/i.exec(source);
@@ -135,17 +155,19 @@ function extractApex(facts: MutableTextFacts): void {
       declaredScope = addDeclaration(
         facts,
         parent,
-        type[1].toLowerCase(),
+        Effect.pipe(type[1], EffectString.toLowerCase),
         type[2],
         line.start,
         line.end,
         !/\bprivate\b/i.test(source),
       );
       if (type[3]) addReference(facts, declaredScope, type[3], 'extends', 'syntactic', line.start, line.end);
-      for (const implemented of (type[4] ?? '')
-        .split(',')
-        .map(value => value.trim())
-        .filter(Boolean)) {
+      for (const implemented of EffectArray.filter(
+        EffectArray.map(Effect.pipe(type[4] ?? '', EffectString.split(',')), value =>
+          Effect.pipe(value, EffectString.trim),
+        ),
+        Boolean,
+      )) {
         addReference(facts, declaredScope, implemented, 'implements', 'syntactic', line.start, line.end);
       }
     } else if (scopes.length > 0) {
@@ -153,12 +175,12 @@ function extractApex(facts: MutableTextFacts): void {
         /^(?:(?:@[A-Za-z_]\w*(?:\([^)]*\))?\s*)*)(?:(?:public|private|protected|global|webservice|static|abstract|virtual|override|final|testmethod)\s+)+[A-Za-z_][\w<>[\],.]*\s+([A-Za-z_]\w*)\s*\([^)]*\)/i.exec(
           source,
         );
-      if (method && !APEX_CONTROL_WORDS.has(method[1].toLowerCase())) {
+      if (method && !APEX_CONTROL_WORDS.has(Effect.pipe(method[1], EffectString.toLowerCase))) {
         addDeclaration(facts, parent, 'method', method[1], line.start, line.end, !/\bprivate\b/i.test(source));
       }
     }
     const owner = declaredScope ?? parent;
-    for (const query of source.matchAll(/\[\s*select\b[^\]]*?\bfrom\s+([A-Za-z_]\w*)/gi)) {
+    for (const query of Effect.pipe(source, EffectString.matchAll(/\[\s*select\b[^\]]*?\bfrom\s+([A-Za-z_]\w*)/gi))) {
       addReference(facts, owner, query[1], 'references', 'syntactic', line.start, line.end);
     }
     const opens = countCharacterOutsideStrings(source, '{');
@@ -184,7 +206,7 @@ function extractRazor(facts: MutableTextFacts): void {
     if (page) addDeclaration(facts, facts.module, 'route', page[1], line.start, line.end, true);
   }
   const component = /<([A-Z][A-Za-z0-9_.]*)(?=[\s/>])/g;
-  for (const match of content.matchAll(component)) {
+  for (const match of Effect.pipe(content, EffectString.matchAll(component))) {
     if (RAZOR_HTML_TAGS.has(match[1])) continue;
     const start = match.index ?? 0;
     addReference(facts, facts.module, match[1], 'constructs', 'syntactic', start, start + match[0].length);
@@ -192,7 +214,7 @@ function extractRazor(facts: MutableTextFacts): void {
   for (const block of razorCodeBlocks(content)) {
     const method =
       /\b(?:(?:public|private|protected|internal|static|async|override|virtual|abstract|sealed|partial)\s+)+[A-Za-z_][\w<>[\],.?\s]*?\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:=>|\{)/g;
-    for (const match of block.content.matchAll(method)) {
+    for (const match of Effect.pipe(block.content, EffectString.matchAll(method))) {
       const start = block.start + (match.index ?? 0);
       addDeclaration(
         facts,
@@ -234,7 +256,7 @@ const RAZOR_HTML_TAGS = new Set([
 
 function razorCodeBlocks(content: string): readonly {readonly content: string; readonly start: number}[] {
   const output: Array<{content: string; start: number}> = [];
-  for (const match of content.matchAll(/@code\s*\{/g)) {
+  for (const match of Effect.pipe(content, EffectString.matchAll(/@code\s*\{/g))) {
     const start = (match.index ?? 0) + match[0].length;
     let depth = 1;
     let quote = '';
@@ -250,7 +272,7 @@ function razorCodeBlocks(content: string): readonly {readonly content: string; r
       else if (character === '{') depth += 1;
       else if (character === '}') depth -= 1;
     }
-    if (depth === 0) output.push({content: content.slice(start, position - 1), start});
+    if (depth === 0) output.push({content: Effect.pipe(content, EffectString.slice(start, position - 1)), start});
   }
   return output;
 }
@@ -333,16 +355,20 @@ function textSymbol(
   lineIndex: SourceLineIndex,
 ): CodeGraphSymbol {
   const normalizedQualifiedName = normalizeLookupName(qualifiedName);
-  const normalizedName = normalizeLookupName(name).split('.').at(-1) ?? normalizeLookupName(name);
+  const normalizedName =
+    Effect.pipe(normalizeLookupName(name), EffectString.split('.')).at(-1) ?? normalizeLookupName(name);
   const identityKey = `${kind}\n${qualifiedName}`;
   const occurrence = identityOccurrences.get(identityKey) ?? 0;
   identityOccurrences.set(identityKey, occurrence + 1);
   return {
     contentHash: file.contentHash,
     exported,
-    id: `cgs_${sha256HexSync(
-      `text-structural-symbol-v2\n${file.path}\n${file.language}\n${kind}\n${qualifiedName}\n${occurrence}`,
-    ).slice(0, 32)}`,
+    id: `cgs_${Effect.pipe(
+      sha256HexSync(
+        `text-structural-symbol-v2\n${file.path}\n${file.language}\n${kind}\n${qualifiedName}\n${occurrence}`,
+      ),
+      EffectString.slice(0, 32),
+    )}`,
     kind,
     language: file.language,
     lookupKeys: [`${domain}:q:${normalizedQualifiedName}`, `${domain}:name:${normalizedName}`],
@@ -401,7 +427,7 @@ function addReference(
     sourceName: source.name,
     targetName,
   };
-  if (facts.edges.some(candidate => candidate.id === edge.id)) return;
+  if (EffectArray.some(facts.edges, candidate => candidate.id === edge.id)) return;
   facts.edges.push(edge);
   facts.references.push({
     edgeId: edge.id,
@@ -409,7 +435,7 @@ function addReference(
     evidenceSpan: edge.evidenceSpan,
     lookupTiers: [
       [`${facts.domain}:q:${normalized}`],
-      [`${facts.domain}:name:${normalized.split('.').at(-1) ?? normalized}`],
+      [`${facts.domain}:name:${Effect.pipe(normalized, EffectString.split('.')).at(-1) ?? normalized}`],
     ],
     provenance,
     relation,
@@ -427,7 +453,7 @@ function addBoundDiagnostic(facts: MutableTextFacts): void {
 }
 
 function textEdgeId(path: string, source: string, relation: string, target: string, provenance: string): string {
-  return `cge_${sha256HexSync(`text-structural-edge-v1\n${path}\n${source}\n${relation}\n${target}\n${provenance}`).slice(0, 32)}`;
+  return `cge_${Effect.pipe(sha256HexSync(`text-structural-edge-v1\n${path}\n${source}\n${relation}\n${target}\n${provenance}`), EffectString.slice(0, 32))}`;
 }
 
 function linesWithOffsets(
@@ -442,11 +468,11 @@ function linesWithOffsets(
       cursor += 1;
       continue;
     }
-    output.push({end: cursor, start, text: content.slice(start, cursor)});
+    output.push({end: cursor, start, text: Effect.pipe(content, EffectString.slice(start, cursor))});
     cursor += width;
     start = cursor;
   }
-  output.push({end: content.length, start, text: content.slice(start)});
+  output.push({end: content.length, start, text: Effect.pipe(content, EffectString.slice(start))});
   return output;
 }
 
@@ -464,7 +490,7 @@ function stripLineComment(value: string, marker: string): string {
       if (character === quote && value[index + 1] === quote) index += 1;
       else if (character === quote) quote = '';
     } else if (character === '"' || character === "'") quote = character;
-    else if (character === marker) return value.slice(0, index);
+    else if (character === marker) return Effect.pipe(value, EffectString.slice(0, index));
   }
   return value;
 }
@@ -515,11 +541,13 @@ function countCharacterOutsideStrings(value: string, expected: string): number {
 }
 
 function normalizeLookupName(value: string): string {
-  return value
-    .trim()
-    .replace(/^(?:&|\*|::)+/, '')
-    .replace(/(?:->|::|\\|\/)+/g, '.')
-    .replace(/^\.+|\.+$/g, '')
-    .replace(/\.+/g, '.')
-    .toLowerCase();
+  return Effect.pipe(
+    value,
+    EffectString.trim,
+    EffectString.replace(/^(?:&|\*|::)+/, ''),
+    EffectString.replace(/(?:->|::|\\|\/)+/g, '.'),
+    EffectString.replace(/^\.+|\.+$/g, ''),
+    EffectString.replace(/\.+/g, '.'),
+    EffectString.toLowerCase,
+  );
 }

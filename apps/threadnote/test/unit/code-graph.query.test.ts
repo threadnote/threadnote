@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
@@ -12,7 +14,7 @@ import {Effect, FileSystem, Fiber, Layer, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {describe} from 'vitest';
-import type {CodeGraphEmbeddingIndexShape} from '@threadnote/graph/embedding';
+
 import {CodeGraphEmbeddingIndex} from '@threadnote/graph/embedding';
 import {CommandExecutor} from '@threadnote/platform/command';
 
@@ -30,8 +32,10 @@ import {
   CodeGraphQueryService,
   exactNodeQuery,
   neighborQuery,
-  observationFromCodeGraphStatus,
   traversalQuery,
+  type CodeGraphTraversalQueryEmbedding,
+  type CodeGraphTraversalQueryStore,
+  observationFromCodeGraphStatus,
   type CodeGraphQueryTelemetryObserver,
 } from '@threadnote/graph/query';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
@@ -42,6 +46,8 @@ import {
   type CodeGraphQueryNode,
   type CodeGraphSnapshot,
 } from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const seed: CodeGraphQueryNode = {
   contentHash: 'seed-hash',
@@ -90,12 +96,12 @@ const edge: CodeGraphEdge = {
 
 const stableSeed: CodeGraphQueryNode = {
   ...seed,
-  id: `cgs_${'a'.repeat(32)}`,
+  id: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
 };
 
 const stableDependent: CodeGraphQueryNode = {
   ...dependent,
-  id: `cgs_${'b'.repeat(32)}`,
+  id: `cgs_${Effect2.pipe('b', EffectString.repeat(32))}`,
 };
 
 const stableEdge: CodeGraphEdge = {
@@ -104,6 +110,19 @@ const stableEdge: CodeGraphEdge = {
   sourceId: stableDependent.id,
   targetId: stableSeed.id,
 };
+
+const unavailableTraversalMethod = () =>
+  Effect.die(TestError.make({message: 'Unexpected graph query fixture method call.'}));
+
+const traversalStore = (overrides: Partial<CodeGraphTraversalQueryStore>): CodeGraphTraversalQueryStore => ({
+  edgesForNodes: unavailableTraversalMethod,
+  findSymbolsByPathAndName: unavailableTraversalMethod,
+  searchSymbolsByPaths: unavailableTraversalMethod,
+  searchSymbolsMany: unavailableTraversalMethod,
+  symbolsByIds: unavailableTraversalMethod,
+  traversalEdgesForNodes: unavailableTraversalMethod,
+  ...overrides,
+});
 
 const layout: CodeGraphLayout = {
   checkoutId: 'fixture-checkout',
@@ -117,9 +136,9 @@ const layout: CodeGraphLayout = {
   worktreeId: 'fixture-worktree',
 };
 
-const embedding = {
+const embedding: CodeGraphTraversalQueryEmbedding = {
   search: () => Effect.succeed(new Map<string, number>()),
-} as unknown as CodeGraphEmbeddingIndexShape;
+};
 
 describe('code graph query budgets', () => {
   it.effect('avoids duplicate refresh:false snapshot reads and requests one path-free maintenance opportunity', () =>
@@ -204,7 +223,7 @@ describe('code graph query budgets', () => {
         const searchedSnapshotIds = yield* Ref.make<readonly string[]>([]);
         const failPathSearch = yield* Ref.make(false);
         const ensureCommitCalls = yield* Ref.make(0);
-        const readyBaseSnapshotId = `cgsn_${'2'.repeat(40)}`;
+        const readyBaseSnapshotId = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
         const emptyStoreReads = () => ({
           leasesAcquired: 0,
           leasesReleased: 0,
@@ -214,73 +233,81 @@ describe('code graph query budgets', () => {
         });
         const storeReads = yield* Ref.make(emptyStoreReads());
         const sessionCalls = yield* Ref.make(0);
-        const readSql = {
-          withTransaction: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
-        } as unknown as SqlClient.SqlClient;
         const recordStoreRead = (
           field: 'leasesAcquired' | 'leasesReleased' | 'provenance' | 'readyById' | 'readyByWorktree',
         ) => Ref.update(storeReads, current => ({...current, [field]: current[field] + 1}));
-        const storeLayer = Layer.succeed(
+        const storeRuntimeLayer = CodeGraphStore.layer.pipe(Layer.provide(Layer.merge(BunServices.layer, systemLayer)));
+        const storeLayer = Layer.effect(
           CodeGraphStore,
-          CodeGraphStore.of({
-            acquireSnapshotLease: (_databasePath: string, snapshotId: string) =>
-              recordStoreRead('leasesAcquired').pipe(
-                Effect.andThen(Ref.update(leaseEvents, current => [...current, `acquire:${snapshotId}`])),
-                Effect.as(`lease:${snapshotId}`),
-              ),
-            edgesForNodes: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
-              Effect.succeed(snapshotId === readyBaseSnapshotId && ids.includes(stableSeed.id) ? [stableEdge] : []),
-            traversalEdgesForNodes: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
-              Effect.succeed(snapshotId === readyBaseSnapshotId && ids.includes(stableSeed.id) ? [stableEdge] : []),
-            readySnapshot: () =>
-              recordStoreRead('readyByWorktree').pipe(
-                Effect.andThen(Ref.get(readySnapshotFailure)),
-                Effect.flatMap(failure =>
-                  failure === 'worktree'
-                    ? Effect.fail(CodeGraphStoreTransientIoError.of('transient worktree ready snapshot read'))
-                    : Ref.get(snapshotRef),
+          Effect.gen(function* () {
+            const baseStore = yield* CodeGraphStore;
+            return CodeGraphStore.of({
+              ...baseStore,
+              acquireSnapshotLease: (_databasePath: string, snapshotId: string) =>
+                recordStoreRead('leasesAcquired').pipe(
+                  Effect.andThen(Ref.update(leaseEvents, current => [...current, `acquire:${snapshotId}`])),
+                  Effect.as(`lease:${snapshotId}`),
                 ),
-              ),
-            readySnapshotById: () => recordStoreRead('readyById').pipe(Effect.andThen(Ref.get(snapshotRef))),
-            readySnapshotForCommit: (databasePath: string, repositoryId: string, commit: string) =>
-              Ref.update(baseLookups, current => [...current, {commit, databasePath, repositoryId}]).pipe(
-                Effect.andThen(Ref.get(readySnapshotFailure)),
-                Effect.flatMap(failure =>
-                  failure === 'commit'
-                    ? Effect.fail(CodeGraphStoreTransientIoError.of('transient commit ready snapshot read'))
-                    : Ref.get(readyBaseRef),
+              edgesForNodes: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
+                Effect.succeed(snapshotId === readyBaseSnapshotId && ids.includes(stableSeed.id) ? [stableEdge] : []),
+              traversalEdgesForNodes: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
+                Effect.succeed(snapshotId === readyBaseSnapshotId && ids.includes(stableSeed.id) ? [stableEdge] : []),
+              readySnapshot: () =>
+                recordStoreRead('readyByWorktree').pipe(
+                  Effect.andThen(Ref.get(readySnapshotFailure)),
+                  Effect.flatMap(failure =>
+                    failure === 'worktree'
+                      ? Effect.fail(CodeGraphStoreTransientIoError.of('transient worktree ready snapshot read'))
+                      : Ref.get(snapshotRef),
+                  ),
                 ),
-              ),
-            recentReadySnapshotsForRepository: () =>
-              Ref.get(readySnapshotFailure).pipe(
-                Effect.flatMap(failure =>
-                  failure === 'recent'
-                    ? Effect.fail(CodeGraphStoreTransientIoError.of('transient recent ready snapshot read'))
-                    : Effect.succeed([]),
+              readySnapshotById: () => recordStoreRead('readyById').pipe(Effect.andThen(Ref.get(snapshotRef))),
+              readySnapshotForCommit: (databasePath: string, repositoryId: string, commit: string) =>
+                Ref.update(baseLookups, current => [...current, {commit, databasePath, repositoryId}]).pipe(
+                  Effect.andThen(Ref.get(readySnapshotFailure)),
+                  Effect.flatMap(failure =>
+                    failure === 'commit'
+                      ? Effect.fail(CodeGraphStoreTransientIoError.of('transient commit ready snapshot read'))
+                      : Ref.get(readyBaseRef),
+                  ),
                 ),
-              ),
-            releaseSnapshotLease: (_databasePath: string, leaseToken: string) =>
-              recordStoreRead('leasesReleased').pipe(
-                Effect.andThen(Ref.update(leaseEvents, current => [...current, `release:${leaseToken}`])),
-              ),
-            searchSymbolsByPaths: (_databasePath: string, snapshotId: string, queries: readonly string[]) =>
-              Ref.update(searchedSnapshotIds, current => [...current, snapshotId]).pipe(
-                Effect.andThen(Ref.get(failPathSearch)),
-                Effect.flatMap(fail =>
-                  fail
-                    ? Effect.fail(TestError.make({message: 'bounded impact read failed'}))
-                    : Effect.succeed(queries.map(() => (snapshotId === readyBaseSnapshotId ? [stableSeed] : []))),
+              recentReadySnapshotsForRepository: () =>
+                Ref.get(readySnapshotFailure).pipe(
+                  Effect.flatMap(failure =>
+                    failure === 'recent'
+                      ? Effect.fail(CodeGraphStoreTransientIoError.of('transient recent ready snapshot read'))
+                      : Effect.succeed([]),
+                  ),
                 ),
-              ),
-            snapshotPackProvenance: () => recordStoreRead('provenance').pipe(Effect.as([])),
-            symbolsByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
-              Effect.succeed([stableSeed, stableDependent].filter(node => ids.includes(node.id))),
-            withSession: (_databasePath: string, effect: Effect.Effect<unknown, unknown, unknown>) =>
-              Ref.update(sessionCalls, value => value + 1).pipe(
-                Effect.andThen(effect.pipe(Effect.provideService(SqlClient.SqlClient, readSql))),
-              ),
-          } as unknown as CodeGraphStoreShape),
-        );
+              releaseSnapshotLease: (_databasePath: string, leaseToken: string) =>
+                recordStoreRead('leasesReleased').pipe(
+                  Effect.andThen(Ref.update(leaseEvents, current => [...current, `release:${leaseToken}`])),
+                ),
+              searchSymbolsByPaths: (_databasePath: string, snapshotId: string, queries: readonly string[]) =>
+                Ref.update(searchedSnapshotIds, current => [...current, snapshotId]).pipe(
+                  Effect.andThen(Ref.get(failPathSearch)),
+                  Effect.flatMap(fail =>
+                    fail
+                      ? Effect.fail(CodeGraphStoreTransientIoError.of('bounded impact read failed'))
+                      : Effect.succeed(
+                          EffectArray.map(queries, () => (snapshotId === readyBaseSnapshotId ? [stableSeed] : [])),
+                        ),
+                  ),
+                ),
+              snapshotPackProvenance: () => recordStoreRead('provenance').pipe(Effect.as([])),
+              symbolsByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
+                Effect.succeed(EffectArray.filter([stableSeed, stableDependent], node => ids.includes(node.id))),
+              withSession: <A, E, R>(
+                databasePath: string,
+                effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
+                options?: Parameters<CodeGraphStoreShape['withSession']>[2],
+              ) =>
+                Ref.update(sessionCalls, value => value + 1).pipe(
+                  Effect.andThen(baseStore.withSession(databasePath, effect, options)),
+                ),
+            });
+          }),
+        ).pipe(Layer.provide(storeRuntimeLayer));
         const dependencies = Layer.mergeAll(
           BunServices.layer,
           systemLayer,
@@ -319,15 +346,17 @@ describe('code graph query budgets', () => {
             edgeCount: 0,
             extractorSet: extractorSetIdentityFromPackProvenance([]),
             fileCount: 1,
-            id: `cgsn_${'1'.repeat(40)}`,
+            id: `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`,
             repositoryId: identity.repositoryId,
             state: 'ready',
             symbolCount: 0,
             worktreeId: identity.worktreeId,
           } satisfies CodeGraphSnapshot;
           yield* Ref.set(snapshotRef, snapshot);
+          const layout = codeGraphLayout(yield* Path.Path, fixtureRoot.home, identity.checkoutId, identity.worktreeId);
+          yield* (yield* CodeGraphStore).initialize(layout.databasePath);
           yield* recordCodeGraphSnapshotAdmission(
-            codeGraphLayout(yield* Path.Path, fixtureRoot.home, identity.checkoutId, identity.worktreeId),
+            layout,
             snapshot,
             yield* observeCodeGraphAdmissionEnvironment(identity),
             yield* CodeGraphLanguagePackRegistry,
@@ -369,10 +398,18 @@ describe('code graph query budgets', () => {
           );
           expect(cleanPublished.freshness).toBe('current');
           expect(
-            (yield* Ref.get(commandCalls)).filter(call => call.executable === 'git' && call.args.includes('status')),
+            EffectArrayPipe(yield* Ref.get(commandCalls), __effectArrayValues =>
+              EffectArray.filter(
+                __effectArrayValues,
+                (call, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues &&
+                  call.executable === 'git' &&
+                  call.args.includes('status'),
+              ),
+            ),
           ).toHaveLength(1);
 
-          yield* Ref.set(snapshotRef, {...snapshot, repositoryId: 'f'.repeat(64)});
+          yield* Ref.set(snapshotRef, {...snapshot, repositoryId: Effect2.pipe('f', EffectString.repeat(64))});
           const changedRemoteStatus = yield* query.statusForIdentity(fixtureRoot.home, identity, {
             observeWorktree: true,
             requestMaintenance: false,
@@ -511,13 +548,13 @@ describe('code graph query budgets', () => {
           });
           const statusCommandCalls = yield* Ref.get(commandCalls);
           expect(statusCommandCalls.length).toBeGreaterThan(0);
-          expect(statusCommandCalls.some(call => call.executable === 'git')).toBe(true);
+          expect(EffectArray.some(statusCommandCalls, call => call.executable === 'git')).toBe(true);
           expect(JSON.stringify(deferredHotStatus)).not.toContain('statusObservation');
           yield* Ref.set(commandCalls, []);
           yield* Ref.set(storeReads, emptyStoreReads());
           const deferredHotInspection = yield* query.inspect({
             cwd: fixtureRoot.repository,
-            nodeId: `cgs_${'a'.repeat(32)}`,
+            nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
             operation: 'node',
             refresh: false,
             requestMaintenance: false,
@@ -538,7 +575,7 @@ describe('code graph query budgets', () => {
             yield* Ref.set(storeReads, emptyStoreReads());
             const refreshedInspection = yield* query.inspect({
               cwd: fixtureRoot.repository,
-              nodeId: `cgs_${'a'.repeat(32)}`,
+              nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
               operation: 'node',
               ...(refresh === undefined ? {} : {refresh}),
               requestMaintenance: false,
@@ -575,7 +612,7 @@ describe('code graph query budgets', () => {
           yield* Ref.set(storeReads, emptyStoreReads());
           const strictInspection = yield* query.inspect({
             cwd: fixtureRoot.repository,
-            nodeId: `cgs_${'a'.repeat(32)}`,
+            nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
             operation: 'node',
             refresh: false,
             requestMaintenance: false,
@@ -597,7 +634,7 @@ describe('code graph query budgets', () => {
           });
 
           const boundedImpact = yield* query.inspect({
-            baseCommit: 'f'.repeat(40),
+            baseCommit: Effect2.pipe('f', EffectString.repeat(40)),
             baseCommitPolicy: 'ready-only',
             cwd: fixtureRoot.repository,
             operation: 'impact',
@@ -615,7 +652,7 @@ describe('code graph query budgets', () => {
 
           const readyBase = {
             ...snapshot,
-            commit: 'f'.repeat(40),
+            commit: Effect2.pipe('f', EffectString.repeat(40)),
             dirty: false,
             id: readyBaseSnapshotId,
             worktreeId: 'base-worktree',
@@ -638,9 +675,9 @@ describe('code graph query budgets', () => {
             strictFreshness: true,
             threadnoteHome: fixtureRoot.home,
           });
-          expect(readyBaseImpact.nodes.map(node => node.id)).toContain(stableDependent.id);
-          expect(readyBaseImpact.warnings.join('\n')).toContain(`base snapshot ${readyBaseSnapshotId}`);
-          expect(readyBaseImpact.warnings.join('\n')).not.toContain('deleted-path recovery was skipped');
+          expect(EffectArray.map(readyBaseImpact.nodes, node => node.id)).toContain(stableDependent.id);
+          expect(EffectArray.join(readyBaseImpact.warnings, '\n')).toContain(`base snapshot ${readyBaseSnapshotId}`);
+          expect(EffectArray.join(readyBaseImpact.warnings, '\n')).not.toContain('deleted-path recovery was skipped');
           expect(yield* Ref.get(baseLookups)).toEqual([
             {
               commit: readyBase.commit,
@@ -685,7 +722,7 @@ describe('code graph query budgets', () => {
               threadnoteHome: fixtureRoot.home,
             })
             .pipe(Effect.flip);
-          expect(failedReadyBaseImpact).toEqual(TestError.make({message: 'bounded impact read failed'}));
+          expect(failedReadyBaseImpact).toEqual(CodeGraphStoreTransientIoError.of('bounded impact read failed'));
           expect(yield* Ref.get(leaseEvents)).toEqual([
             `acquire:${readyBaseSnapshotId}`,
             `release:lease:${readyBaseSnapshotId}`,
@@ -697,7 +734,7 @@ describe('code graph query budgets', () => {
           yield* Ref.set(storeReads, emptyStoreReads());
           const fallbackInspection = yield* query.inspect({
             cwd: fixtureRoot.repository,
-            nodeId: `cgs_${'a'.repeat(32)}`,
+            nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
             operation: 'node',
             refresh: false,
             requestMaintenance: false,
@@ -739,7 +776,7 @@ describe('code graph query budgets', () => {
           yield* assertOneRequest(
             query.inspect({
               cwd: fixtureRoot.repository,
-              nodeId: `cgs_${'a'.repeat(32)}`,
+              nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
               operation: 'node',
               refresh: false,
               threadnoteHome: fixtureRoot.home,
@@ -748,7 +785,7 @@ describe('code graph query budgets', () => {
           yield* Ref.set(requests, []);
           yield* query.inspect({
             cwd: fixtureRoot.repository,
-            nodeId: `cgs_${'a'.repeat(32)}`,
+            nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
             operation: 'node',
             refresh: false,
             requestMaintenance: false,
@@ -776,15 +813,20 @@ describe('code graph query budgets', () => {
             requestedIds.push([...ids]);
             return ids.includes(stableSeed.id) ? [stableSeed] : [];
           }),
-      } as unknown as CodeGraphStoreShape;
+      };
 
       const found = yield* exactNodeQuery(store, layout.databasePath, 'snapshot', stableSeed.id);
-      const missing = yield* exactNodeQuery(store, layout.databasePath, 'snapshot', `cgs_${'f'.repeat(32)}`);
+      const missing = yield* exactNodeQuery(
+        store,
+        layout.databasePath,
+        'snapshot',
+        `cgs_${Effect2.pipe('f', EffectString.repeat(32))}`,
+      );
 
       expect(found).toMatchObject({edges: [], nodes: [{id: stableSeed.id, score: 1}], warnings: []});
       expect(missing.nodes).toEqual([]);
       expect(missing.warnings).toEqual([expect.stringContaining('was not found in the selected snapshot')]);
-      expect(requestedIds).toEqual([[stableSeed.id], [`cgs_${'f'.repeat(32)}`]]);
+      expect(requestedIds).toEqual([[stableSeed.id], [`cgs_${Effect2.pipe('f', EffectString.repeat(32))}`]]);
     }),
   );
 
@@ -810,15 +852,15 @@ describe('code graph query budgets', () => {
             return ids.includes(stableSeed.id) ? [stableEdge] : [];
           }),
         symbolsByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
-          Effect.succeed([stableSeed, stableDependent].filter(symbol => ids.includes(symbol.id))),
-      } as unknown as CodeGraphStoreShape;
+          Effect.succeed(EffectArray.filter([stableSeed, stableDependent], symbol => ids.includes(symbol.id))),
+      };
 
       const result = yield* neighborQuery(store, layout.databasePath, 'snapshot', stableSeed.id, 'incoming', 2, 10, 1, [
         'declared',
         'resolved',
       ]);
 
-      expect(result.nodes.map(node => node.id)).toEqual([stableSeed.id, stableDependent.id]);
+      expect(EffectArray.map(result.nodes, node => node.id)).toEqual([stableSeed.id, stableDependent.id]);
       expect(result.edges).toEqual([expect.objectContaining({id: stableEdge.id, provenance: 'resolved'})]);
       expect(calls).toEqual([
         {
@@ -833,7 +875,7 @@ describe('code graph query budgets', () => {
 
   it.effect('reports bounded exact-ID neighborhoods instead of silently truncating them', () =>
     Effect.gen(function* () {
-      const extra = {...stableDependent, id: `cgs_${'c'.repeat(32)}`, name: 'extra'};
+      const extra = {...stableDependent, id: `cgs_${Effect2.pipe('c', EffectString.repeat(32))}`, name: 'extra'};
       const store = {
         edgesForNodes: () =>
           Effect.succeed([
@@ -841,14 +883,14 @@ describe('code graph query budgets', () => {
             {...stableEdge, id: 'extra-calls-seed', sourceId: extra.id, sourceName: extra.name},
           ]),
         symbolsByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
-          Effect.succeed([stableSeed, stableDependent, extra].filter(symbol => ids.includes(symbol.id))),
-      } as unknown as CodeGraphStoreShape;
+          Effect.succeed(EffectArray.filter([stableSeed, stableDependent, extra], symbol => ids.includes(symbol.id))),
+      };
 
       const result = yield* neighborQuery(store, layout.databasePath, 'snapshot', stableSeed.id, 'incoming', 2, 10, 1, [
         'resolved',
       ]);
 
-      expect(result.nodes.map(node => node.id)).toEqual([stableSeed.id, stableDependent.id]);
+      expect(EffectArray.map(result.nodes, node => node.id)).toEqual([stableSeed.id, stableDependent.id]);
       expect(result.warnings).toContain('Neighbor traversal reached a configured result limit.');
     }),
   );
@@ -856,7 +898,7 @@ describe('code graph query budgets', () => {
   it.effect('returns lexical evidence when semantic search exceeds a surface-specific deadline', () =>
     Effect.gen(function* () {
       const calls: string[] = [];
-      const store = {
+      const store = traversalStore({
         edgesForNodes: () =>
           Effect.sync(() => {
             calls.push('adjacency');
@@ -872,13 +914,13 @@ describe('code graph query budgets', () => {
             calls.push('hydration');
             return [];
           }),
-      } as unknown as CodeGraphStoreShape;
+      });
       const delayedEmbedding = {
         search: () =>
           Effect.sync(() => {
             calls.push('semantic');
           }).pipe(Effect.andThen(Effect.never)),
-      } as unknown as CodeGraphEmbeddingIndexShape;
+      };
 
       const fiber = yield* traversalQuery(
         store,
@@ -919,18 +961,18 @@ describe('code graph query budgets', () => {
         qualifiedName: `lexical${index}`,
       }));
       let semanticCalls = 0;
-      const store = {
+      const store = traversalStore({
         edgesForNodes: () => Effect.succeed([]),
         searchSymbolsMany: () => Effect.succeed([lexicalMatches]),
         symbolsByIds: () => Effect.succeed([]),
-      } as unknown as CodeGraphStoreShape;
+      });
       const unnecessaryEmbedding = {
         search: () =>
           Effect.sync(() => {
             semanticCalls += 1;
             return new Map<string, number>();
           }),
-      } as unknown as CodeGraphEmbeddingIndexShape;
+      };
 
       const result = yield* traversalQuery(
         store,
@@ -966,7 +1008,7 @@ describe('code graph query budgets', () => {
         qualifiedName: `lexical${index}`,
       }));
       const calls: string[] = [];
-      const store = {
+      const store = traversalStore({
         edgesForNodes: () =>
           Effect.sync(() => {
             calls.push('adjacency');
@@ -983,7 +1025,7 @@ describe('code graph query budgets', () => {
             calls.push('hydration');
             return [];
           }),
-      } as unknown as CodeGraphStoreShape;
+      });
 
       const result = yield* traversalQuery(
         store,
@@ -1012,7 +1054,7 @@ describe('code graph query budgets', () => {
       const mobile = {...seed, id: 'mobile', packageName: 'MobileApp'};
       const web = {...seed, id: 'web', packageName: 'WebApp'};
       const requestedLimits: number[] = [];
-      const store = {
+      const store = traversalStore({
         edgesForNodes: () => Effect.succeed([]),
         searchSymbolsMany: (_databasePath: string, _snapshotId: string, _queries: readonly string[], limit: number) =>
           Effect.sync(() => {
@@ -1020,7 +1062,7 @@ describe('code graph query budgets', () => {
             return [[web, mobile]];
           }),
         symbolsByIds: () => Effect.succeed([]),
-      } as unknown as CodeGraphStoreShape;
+      });
 
       const inspect = (packageName: string) =>
         traversalQuery(
@@ -1045,7 +1087,7 @@ describe('code graph query budgets', () => {
       const found = yield* inspect('MobileApp');
       const absent = yield* inspect('DesktopApp');
 
-      expect(found.nodes.map(node => node.id)).toEqual(['mobile']);
+      expect(EffectArray.map(found.nodes, node => node.id)).toEqual(['mobile']);
       expect(found.scope).toEqual({
         evidence: 'bounded-lexical-observation',
         lexicalCandidatesExamined: 2,
@@ -1055,7 +1097,7 @@ describe('code graph query budgets', () => {
       });
       expect(absent.nodes).toEqual([]);
       expect(absent.scope).toMatchObject({lexicalCandidatesExamined: 2, lexicalMatches: 0});
-      expect(absent.warnings.join('\n')).toContain('package-local absence hint, not proof');
+      expect(EffectArray.join(absent.warnings, '\n')).toContain('package-local absence hint, not proof');
       expect(requestedLimits).toEqual([240, 240]);
     }),
   );
@@ -1063,7 +1105,7 @@ describe('code graph query budgets', () => {
   it.effect('accepts semantic evidence that takes longer than the traversal budget', () =>
     Effect.gen(function* () {
       const calls: string[] = [];
-      const store = {
+      const store = traversalStore({
         edgesForNodes: () =>
           Effect.sync(() => {
             calls.push('adjacency');
@@ -1079,13 +1121,13 @@ describe('code graph query budgets', () => {
             if (ids.length > 0) calls.push('hydration');
             return ids.includes(semanticMatch.id) ? [semanticMatch] : [];
           }),
-      } as unknown as CodeGraphStoreShape;
+      });
       const delayedEmbedding = {
         search: () =>
           Effect.sync(() => {
             calls.push('semantic');
           }).pipe(Effect.andThen(Effect.sleep(5_000)), Effect.as(new Map([[semanticMatch.id, 0.9]]))),
-      } as unknown as CodeGraphEmbeddingIndexShape;
+      };
 
       const fiber = yield* traversalQuery(
         store,
@@ -1139,26 +1181,29 @@ describe('code graph query budgets', () => {
       const fuzzyDependent = {...dependent, id: 'fuzzy-impact-dependent'};
       const inspectedSeeds: string[][] = [];
       let semanticSearches = 0;
-      const store = {
+      const store = traversalStore({
         edgesForNodes: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
           Effect.sync(() => {
             inspectedSeeds.push([...ids]);
-            return [
-              {...edge, id: 'exact-edge', sourceId: exactDependent.id, targetId: exact.id},
-              {...edge, id: 'fuzzy-edge', sourceId: fuzzyDependent.id, targetId: fuzzy.id},
-            ].filter(candidate => candidate.targetId !== undefined && ids.includes(candidate.targetId));
+            return EffectArray.filter(
+              [
+                {...edge, id: 'exact-edge', sourceId: exactDependent.id, targetId: exact.id},
+                {...edge, id: 'fuzzy-edge', sourceId: fuzzyDependent.id, targetId: fuzzy.id},
+              ],
+              candidate => candidate.targetId !== undefined && ids.includes(candidate.targetId),
+            );
           }),
         searchSymbolsMany: () => Effect.succeed([[fuzzy, exact]]),
         symbolsByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
-          Effect.succeed([exactDependent, fuzzyDependent].filter(node => ids.includes(node.id))),
-      } as unknown as CodeGraphStoreShape;
+          Effect.succeed(EffectArray.filter([exactDependent, fuzzyDependent], node => ids.includes(node.id))),
+      });
       const unusedEmbedding = {
         search: () =>
           Effect.sync(() => {
             semanticSearches += 1;
             return new Map<string, number>();
           }),
-      } as unknown as CodeGraphEmbeddingIndexShape;
+      };
 
       const result = yield* traversalQuery(
         store,
@@ -1177,8 +1222,8 @@ describe('code graph query budgets', () => {
       );
 
       expect(inspectedSeeds).toEqual([[exact.id]]);
-      expect(result.nodes.map(node => node.id)).toEqual([exactDependent.id, exact.id]);
-      expect(result.edges.map(candidate => candidate.id)).toEqual(['exact-edge']);
+      expect(EffectArray.map(result.nodes, node => node.id)).toEqual([exactDependent.id, exact.id]);
+      expect(EffectArray.map(result.edges, candidate => candidate.id)).toEqual(['exact-edge']);
       expect(semanticSearches).toBe(0);
     }),
   );
@@ -1187,7 +1232,7 @@ describe('code graph query budgets', () => {
     Effect.gen(function* () {
       let lexicalSearches = 0;
       let semanticSearches = 0;
-      const store = {
+      const store = traversalStore({
         edgesForNodes: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
           Effect.succeed(ids.includes(stableSeed.id) ? [stableEdge] : []),
         searchSymbolsMany: () =>
@@ -1196,15 +1241,15 @@ describe('code graph query budgets', () => {
             return [[stableSeed]];
           }),
         symbolsByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
-          Effect.succeed([stableSeed, stableDependent].filter(node => ids.includes(node.id))),
-      } as unknown as CodeGraphStoreShape;
+          Effect.succeed(EffectArray.filter([stableSeed, stableDependent], node => ids.includes(node.id))),
+      });
       const unusedEmbedding = {
         search: () =>
           Effect.sync(() => {
             semanticSearches += 1;
             return new Map<string, number>();
           }),
-      } as unknown as CodeGraphEmbeddingIndexShape;
+      };
       const impact = (query: string) =>
         traversalQuery(
           store,
@@ -1224,10 +1269,10 @@ describe('code graph query budgets', () => {
 
       const byName = yield* impact(stableSeed.name);
       const byId = yield* impact(stableSeed.id);
-      const missing = yield* impact(`cgs_${'f'.repeat(32)}`);
+      const missing = yield* impact(`cgs_${Effect2.pipe('f', EffectString.repeat(32))}`);
 
-      expect(byName.nodes.map(node => node.id)).toEqual([stableDependent.id, stableSeed.id]);
-      expect(byName.edges.map(candidate => candidate.id)).toEqual([stableEdge.id]);
+      expect(EffectArray.map(byName.nodes, node => node.id)).toEqual([stableDependent.id, stableSeed.id]);
+      expect(EffectArray.map(byName.edges, candidate => candidate.id)).toEqual([stableEdge.id]);
       expect(byId).toEqual(byName);
       expect(missing.nodes).toEqual([]);
       expect(missing.warnings).toContain('Impact selector did not resolve to indexed code symbols.');
@@ -1240,7 +1285,7 @@ describe('code graph query budgets', () => {
     it.effect(`enforces the absolute deadline after ${phase}`, () =>
       Effect.gen(function* () {
         const calls: string[] = [];
-        const store = {
+        const store = traversalStore({
           edgesForNodes: () =>
             Effect.gen(function* () {
               calls.push('adjacency');
@@ -1259,7 +1304,7 @@ describe('code graph query budgets', () => {
               if (phase === 'hydration') yield* TestClock.adjust(2_001);
               return [dependent];
             }),
-        } as unknown as CodeGraphStoreShape;
+        });
 
         const result = yield* traversalQuery(
           store,
@@ -1292,8 +1337,11 @@ describe('code graph query budgets', () => {
 
   it.effect('fairly batches deleted-path recovery frontiers above the store node-ID limit', () =>
     Effect.gen(function* () {
-      const changedPaths = Array.from({length: 200}, (_, index) => `src/deleted-${String(index).padStart(3, '0')}.ts`);
-      const baseGroups = changedPaths.map((path, pathIndex) =>
+      const changedPaths = Array.from(
+        {length: 200},
+        (_, index) => `src/deleted-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`,
+      );
+      const baseGroups = EffectArray.map(changedPaths, (path, pathIndex) =>
         Array.from({length: 20}, (_, symbolIndex) => ({
           ...seed,
           contentHash: `base-${pathIndex}-${symbolIndex}-hash`,
@@ -1304,7 +1352,7 @@ describe('code graph query budgets', () => {
         })),
       );
       const currentNodes = new Map(
-        changedPaths.map((_, index) => {
+        EffectArray.map(changedPaths, (_, index) => {
           const id = `current-${index}`;
           return [
             id,
@@ -1313,7 +1361,7 @@ describe('code graph query budgets', () => {
               contentHash: `${id}-hash`,
               id,
               name: `survivor${index}`,
-              path: `src/survivor-${String(index).padStart(3, '0')}.ts`,
+              path: `src/survivor-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`,
               qualifiedName: `survivor${index}`,
             },
           ] as const;
@@ -1321,14 +1369,14 @@ describe('code graph query budgets', () => {
       );
       const baseFrontierSizes: number[] = [];
       const baseFrontiers: string[][] = [];
-      const store = {
+      const store = traversalStore({
         traversalEdgesForNodes: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
           Effect.sync(() => {
             if (snapshotId !== 'base') return [];
             baseFrontierSizes.push(ids.length);
             baseFrontiers.push([...ids]);
-            return ids.map((id, index) => {
-              const pathIndex = Number(id.split('-')[1]);
+            return EffectArray.map(ids, (id, index) => {
+              const pathIndex = Number(Effect2.pipe(id, EffectString.split('-'))[1]);
               const current = currentNodes.get(`current-${pathIndex}`);
               if (!current) throw TestError.make({message: `Missing current recovery fixture for ${id}.`});
               return {
@@ -1342,17 +1390,17 @@ describe('code graph query budgets', () => {
             });
           }),
         searchSymbolsByPaths: (_databasePath: string, snapshotId: string) =>
-          Effect.succeed(snapshotId === 'base' ? baseGroups : changedPaths.map(() => [])),
+          Effect.succeed(snapshotId === 'base' ? baseGroups : EffectArray.map(changedPaths, () => [])),
         symbolsByIds: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
           Effect.succeed(
             snapshotId === 'snapshot'
-              ? ids.flatMap(id => {
+              ? EffectArray.flatMap(ids, id => {
                   const node = currentNodes.get(id);
                   return node ? [node] : [];
                 })
               : [],
           ),
-      } as unknown as CodeGraphStoreShape;
+      });
 
       const result = yield* traversalQuery(
         store,
@@ -1373,10 +1421,18 @@ describe('code graph query budgets', () => {
       );
 
       expect(baseFrontierSizes).toEqual(Array.from({length: 8}, () => 500));
-      expect(new Set(baseFrontiers[0].slice(0, 200).map(id => Number(id.split('-')[1]))).size).toBe(200);
+      expect(
+        new Set(
+          EffectArray.map(baseFrontiers[0].slice(0, 200), id => Number(Effect2.pipe(id, EffectString.split('-'))[1])),
+        ).size,
+      ).toBe(200);
       expect(result.nodes).toHaveLength(200);
-      expect(result.nodes.map(node => node.id)).toContain('current-199');
-      expect(result.warnings.some(warning => warning.includes('recovered 200 deleted path(s)'))).toBe(true);
+      expect(EffectArray.map(result.nodes, node => node.id)).toContain('current-199');
+      expect(
+        EffectArray.some(result.warnings, warning =>
+          Effect2.pipe(warning, EffectString.includes('recovered 200 deleted path(s)')),
+        ),
+      ).toBe(true);
     }),
   );
 });

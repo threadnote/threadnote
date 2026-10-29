@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {DateTime, Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -42,6 +43,8 @@ import {reconcileActivationValueEventsV1} from '@threadnote/threadnote/activatio
 import {captureThreadnote5ActivationTrialV1} from '@threadnote/threadnote/evaluation/threadnote-5-release-readiness-receipts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('transport-attested second-surface proof', () => {
   it('keeps the challenge identity stable across only the start timestamp', () => {
@@ -62,20 +65,20 @@ describe('transport-attested second-surface proof', () => {
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-activation-hmac-capture-'});
         const config = {agentContextHome: home};
         const plan = createActivationPlanV1({
-          catalogSnapshotHash: 'a'.repeat(64),
+          catalogSnapshotHash: Effect2.pipe('a', EffectString.repeat(64)),
           primarySurfaceId: 'gemini-cli',
           publicationMode: 'direct',
-          repositoryIdentityHash: 'b'.repeat(64),
+          repositoryIdentityHash: Effect2.pipe('b', EffectString.repeat(64)),
           secondarySurfaceId: 'qwen-code',
-          selectedSourceSetHash: 'c'.repeat(64),
-          taskHash: 'd'.repeat(64),
+          selectedSourceSetHash: Effect2.pipe('c', EffectString.repeat(64)),
+          taskHash: Effect2.pipe('d', EffectString.repeat(64)),
           teamId: 'default',
-          teamShareStateHash: 'e'.repeat(64),
+          teamShareStateHash: Effect2.pipe('e', EffectString.repeat(64)),
           threadnoteVersion: '5.0.0-test',
         });
         const activation = activationBeforeSecondSurface(plan);
-        const publicationReceiptHash = activation.receipt.operations.find(
-          operation => operation.kind === 'decision.publish',
+        const publicationReceiptHash = EffectOption.getOrUndefined(
+          EffectArray.findFirst(activation.receipt.operations, operation => operation.kind === 'decision.publish'),
         )!.subsystemReceiptHash!;
         const context = proofContext(surface(plan.primarySurfaceId), surface(plan.secondarySurfaceId), {
           activationId: plan.activationId,
@@ -221,8 +224,8 @@ describe('transport-attested second-surface proof', () => {
         );
         const unrelatedContext = {
           ...context,
-          activationId: '8'.repeat(64),
-          activationReceiptRevision: '7'.repeat(64),
+          activationId: Effect2.pipe('8', EffectString.repeat(64)),
+          activationReceiptRevision: Effect2.pipe('7', EffectString.repeat(64)),
           queryFingerprint: sha256HexSync(
             canonicalJson({
               project: 'threadnote',
@@ -253,10 +256,14 @@ describe('transport-attested second-surface proof', () => {
         expect(
           (yield* verifySecondSurfaceProofAttestationV1(config, challenge, {
             ...receipt,
-            attestationHash: 'f'.repeat(64),
+            attestationHash: Effect2.pipe('f', EffectString.repeat(64)),
           }).pipe(Effect.exit))._tag,
         ).toBe('Failure');
-        const replayContext = {...context, activationId: 'f'.repeat(64), activationReceiptRevision: 'e'.repeat(64)};
+        const replayContext = {
+          ...context,
+          activationId: Effect2.pipe('f', EffectString.repeat(64)),
+          activationReceiptRevision: Effect2.pipe('e', EffectString.repeat(64)),
+        };
         const replayChallenge = yield* issueSecondSurfaceProofChallengeV1(config, replayContext);
         expect(
           (yield* verifySecondSurfaceProofAttestationV1(config, replayChallenge, receipt).pipe(Effect.exit))._tag,
@@ -281,26 +288,26 @@ function proofContext(
     > = {},
 ): SecondSurfaceProofContextV1 {
   return {
-    activationId: overrides.activationId ?? 'a'.repeat(64),
-    activationReceiptRevision: overrides.activationReceiptRevision ?? 'b'.repeat(64),
+    activationId: overrides.activationId ?? Effect2.pipe('a', EffectString.repeat(64)),
+    activationReceiptRevision: overrides.activationReceiptRevision ?? Effect2.pipe('b', EffectString.repeat(64)),
     catalogRevision: 'agent-catalog-v1-test',
-    catalogSnapshotHash: 'c'.repeat(64),
+    catalogSnapshotHash: Effect2.pipe('c', EffectString.repeat(64)),
     decision: {
       canonicalUri: 'threadnote://user/tester/memories/shared/default/durable/projects/threadnote/activation.md',
-      contentHash: overrides.contentHash ?? 'd'.repeat(64),
+      contentHash: overrides.contentHash ?? Effect2.pipe('d', EffectString.repeat(64)),
       memoryId: 'tn_activation_attested',
-      publicationReceiptHash: overrides.publicationReceiptHash ?? 'e'.repeat(64),
+      publicationReceiptHash: overrides.publicationReceiptHash ?? Effect2.pipe('e', EffectString.repeat(64)),
     },
     primary: primary.snapshot,
     queryFingerprint: sha256HexSync(
       canonicalJson({project: 'threadnote', task: 'Prove the activation decision.', topic: 'activation-decision'}),
     ),
-    repositoryIdentityHash: overrides.repositoryIdentityHash ?? '1'.repeat(64),
+    repositoryIdentityHash: overrides.repositoryIdentityHash ?? Effect2.pipe('1', EffectString.repeat(64)),
     repositoryState: 'clean',
     secondary: secondary.snapshot,
     startedAt: overrides.startedAt ?? '2026-09-18T08:00:00.000Z',
     teamId: 'default',
-    teamShareStateHash: '2'.repeat(64),
+    teamShareStateHash: Effect2.pipe('2', EffectString.repeat(64)),
   };
 }
 
@@ -312,7 +319,7 @@ function activationBeforeSecondSurface(plan: ReturnType<typeof createActivationP
     const approval =
       operation.approvalKind === undefined
         ? undefined
-        : bindActivationApprovalV1(plan, receipt, operation.id, 'f'.repeat(64));
+        : bindActivationApprovalV1(plan, receipt, operation.id, Effect2.pipe('f', EffectString.repeat(64)));
     if (approval !== undefined) approvals.push(approval);
     const transition = recordActivationOutcomeV1({
       approval,
@@ -321,7 +328,7 @@ function activationBeforeSecondSurface(plan: ReturnType<typeof createActivationP
       outcome: {
         ownership: operation.reversible ? 'activation-created' : 'preexisting',
         status: operation.expectedOutcome,
-        subsystemReceiptHash: (index + 1).toString(16).padStart(64, '0'),
+        subsystemReceiptHash: Effect2.pipe((index + 1).toString(16), EffectString.padStart(64, '0')),
         undoEligible: operation.reversible,
       },
       plan,
@@ -353,10 +360,10 @@ function proofObservations(context: SecondSurfaceProofContextV1): {
   const recall: SecondSurfaceRecallObservationV1 = {
     ...common,
     complete: true,
-    invocationId: '1'.repeat(64),
+    invocationId: Effect2.pipe('1', EffectString.repeat(64)),
     observedAt: isoAfter(context.startedAt, 1_000),
     queryFingerprint: context.queryFingerprint,
-    responseFingerprint: '2'.repeat(64),
+    responseFingerprint: Effect2.pipe('2', EffectString.repeat(64)),
     results: [
       {
         canonicalUri: context.decision.canonicalUri,
@@ -374,7 +381,7 @@ function proofObservations(context: SecondSurfaceProofContextV1): {
       canonicalUri: context.decision.canonicalUri,
       complete: true,
       contentHash: context.decision.contentHash,
-      invocationId: '3'.repeat(64),
+      invocationId: Effect2.pipe('3', EffectString.repeat(64)),
       memoryId: context.decision.memoryId,
       observedAt: isoAfter(context.startedAt, 2_000),
       readable: true,
@@ -382,7 +389,7 @@ function proofObservations(context: SecondSurfaceProofContextV1): {
       requestedMemoryId: context.decision.memoryId,
       requestedUri: context.decision.canonicalUri,
       resourceCount: 1,
-      responseFingerprint: '4'.repeat(64),
+      responseFingerprint: Effect2.pipe('4', EffectString.repeat(64)),
     },
     recall,
   };
@@ -397,14 +404,14 @@ function surface(id: string): CurrentActivationSurfaceV1 {
     canonicalJson({installedVersion: '5.0.0', protocol: 'threadnote-mcp-stdio-v1', toolset: 'core'}),
   );
   return {
-    evidenceHash: '9'.repeat(64),
+    evidenceHash: Effect2.pipe('9', EffectString.repeat(64)),
     snapshot: {
       access: 'local-stdio',
-      capabilitiesFingerprint: '3'.repeat(64),
+      capabilitiesFingerprint: Effect2.pipe('3', EffectString.repeat(64)),
       configurationState: 'current',
       mcpCapability: 'managed',
-      mcpConfigFingerprint: '4'.repeat(64),
-      mcpReceiptFingerprint: '5'.repeat(64),
+      mcpConfigFingerprint: Effect2.pipe('4', EffectString.repeat(64)),
+      mcpReceiptFingerprint: Effect2.pipe('5', EffectString.repeat(64)),
       mcpServerFingerprint: fingerprint,
       surfaceId: id,
     },
@@ -412,22 +419,25 @@ function surface(id: string): CurrentActivationSurfaceV1 {
 }
 
 function sharedMemory() {
-  const content = [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    'topic: activation-decision',
-    'source_agent_client: codex',
-    'timestamp: 2026-09-18T08:00:00.000Z',
-    'memory_id: tn_activation_attested',
-    'visibility: shared',
-    'authority: user_approved',
-    'trust: approved',
-    '',
-    '# Decision',
-    'Use the reviewed activation path.',
-  ].join('\n');
+  const content = EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      'topic: activation-decision',
+      'source_agent_client: codex',
+      'timestamp: 2026-09-18T08:00:00.000Z',
+      'memory_id: tn_activation_attested',
+      'visibility: shared',
+      'authority: user_approved',
+      'trust: approved',
+      '',
+      '# Decision',
+      'Use the reviewed activation path.',
+    ],
+    '\n',
+  );
   const record = parseMemoryDocument(
     'threadnote://user/tester/memories/shared/default/durable/projects/threadnote/activation.md',
     content,

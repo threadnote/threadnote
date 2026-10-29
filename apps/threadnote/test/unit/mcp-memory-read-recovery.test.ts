@@ -9,7 +9,7 @@ describe('MCP memory-read recovery', () => {
     const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/moved-contract.md';
     const result = memoryReadErrorResult(
       {user: 'test-user'},
-      new MemoryPointerNotFound({message: `Memory resource does not exist: ${uri}`, uri}),
+      MemoryPointerNotFound.make({message: `Memory resource does not exist: ${uri}`, uri}),
     );
     const text = result.content[0]?.type === 'text' ? result.content[0].text : undefined;
 

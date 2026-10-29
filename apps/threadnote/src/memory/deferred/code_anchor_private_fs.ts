@@ -1,4 +1,5 @@
-import {Data, Effect, FileSystem, Option, Path, PlatformError} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, PlatformError} from 'effect';
 import {
   fileSystemModeIsPrivate,
   readPathFileSystemAuthority,
@@ -7,6 +8,8 @@ import {
   sameFileSystemIdentity,
   type FileSystemIdentity,
 } from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const DEFERRED_CODE_ANCHOR_URI_ADDRESS_HEX_LENGTH = 32;
 export const DEFERRED_CODE_ANCHOR_ITEM_ROOT_NAME = 'i';
@@ -14,11 +17,12 @@ export const DEFERRED_CODE_ANCHOR_ROUTE_ROOT_NAME = 'r';
 export const DEFERRED_CODE_ANCHOR_ROUTE_QUARANTINE_NAME = '.quarantine-v1';
 export const DEFERRED_CODE_ANCHOR_LEGACY_QUARANTINE_NAME = '.legacy-quarantine-v1';
 
-export class DeferredCodeAnchorError extends Data.TaggedError('DeferredCodeAnchorError')<{
-  readonly message: string;
-}> {}
+export class DeferredCodeAnchorError extends Schema.TaggedError<
+  DeferredCodeAnchorError,
+  {readonly brand: unique symbol}
+>()('DeferredCodeAnchorError', {message: Schema.String}) {}
 
-export const deferredCodeAnchorError = (message: string) => new DeferredCodeAnchorError({message});
+export const deferredCodeAnchorError = (message: string) => DeferredCodeAnchorError.make({message});
 
 export type DeferredCodeAnchorPathEntryKind = 'directory' | 'file' | 'missing' | 'other' | 'symlink';
 
@@ -104,7 +108,8 @@ export function samePrivateDeferredCodeAnchorDirectories(
 ): boolean {
   return (
     left.length === right.length &&
-    left.every(
+    EffectArray.every(
+      left,
       (authority, index) =>
         authority.birthtimeNs === right[index]?.birthtimeNs &&
         authority.dev === right[index]?.dev &&
@@ -348,7 +353,11 @@ const quarantinePrivateDeferredCodeAnchorEntry = Effect.fn('memoryCodeAnchor.qua
     renameAuthority === undefined ||
     !samePrivateDeferredCodeAnchorDirectories(
       sourceAuthority,
-      renameAuthority.filter(authority => sourceAncestors.includes(authority.directory)),
+      EffectArray.filter(
+        renameAuthority,
+        (authority, __effectArrayIndex) =>
+          __effectArrayIndex in renameAuthority && sourceAncestors.includes(authority.directory),
+      ),
     )
   ) {
     return yield* deferredCodeAnchorError(`Deferred code-anchor ${label} changed before quarantine.`);
@@ -371,7 +380,10 @@ const quarantinePrivateDeferredCodeAnchorEntry = Effect.fn('memoryCodeAnchor.qua
 
 export function randomDeferredCodeAnchorTemporarySuffix(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
-  return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
+  return EffectArray.join(
+    EffectArray.map([...bytes], value => Effect2.pipe(value.toString(16), EffectString.padStart(2, '0'))),
+    '',
+  );
 }
 
 export const writePrivateDeferredCodeAnchorFile = Effect.fn('memoryCodeAnchor.writePrivateFile')(function* (
@@ -444,7 +456,14 @@ export function sameDeferredCodeAnchorFile(
 
 export function deferredCodeAnchorItemAncestors(path: Path.Path, root: string, uriDigest: string): readonly string[] {
   const itemRoot = path.join(root, DEFERRED_CODE_ANCHOR_ITEM_ROOT_NAME);
-  return [root, itemRoot, path.join(itemRoot, `u${uriDigest.slice(0, DEFERRED_CODE_ANCHOR_URI_ADDRESS_HEX_LENGTH)}`)];
+  return [
+    root,
+    itemRoot,
+    path.join(
+      itemRoot,
+      `u${Effect2.pipe(uriDigest, EffectString.slice(0, DEFERRED_CODE_ANCHOR_URI_ADDRESS_HEX_LENGTH))}`,
+    ),
+  ];
 }
 
 export function deferredCodeAnchorIntentAncestorsForPath(path: Path.Path, root: string, intentPath: string) {

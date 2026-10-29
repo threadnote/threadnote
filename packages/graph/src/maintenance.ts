@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import type {DoctorCheck} from '@threadnote/protocol/doctor';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -26,10 +27,15 @@ import {diagnoseCodeGraphDatabaseReadOnly} from './store/health.js';
 import {diagnoseCodeGraphDatabase} from './deep_diagnostics.js';
 import {CODE_GRAPH_EXPLICIT_SCHEMA_PREPARATION_STEP_LIMIT} from './store/reconciliation/preparation.js';
 import {codeGraphSchemaMigrationPreservesIncompleteSnapshots} from './store/schema/migration.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {diagnoseCodeGraphDatabaseReadOnly} from './store/health.js';
 
-class CodeGraphMaintenanceError extends Schema.TaggedError<CodeGraphMaintenanceError>()('CodeGraphMaintenanceError', {
+class CodeGraphMaintenanceError extends Schema.TaggedError<
+  CodeGraphMaintenanceError,
+  {readonly brand: unique symbol}
+>()('CodeGraphMaintenanceError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
@@ -159,7 +165,10 @@ export const inspectObsoleteCodeGraphStores = Effect.fn('codeGraph.inspectObsole
   const repositoriesRoot = yield* fs.realPath(repositories);
   const checkoutIds =
     checkoutId === undefined
-      ? (yield* fs.readDirectory(repositories)).filter(value => /^[0-9a-f]{64}$/.test(value)).sort()
+      ? EffectArray.filter(
+          yield* fs.readDirectory(repositories),
+          __effectArrayValue => !!(value => /^[0-9a-f]{64}$/.test(value))(__effectArrayValue),
+        ).sort()
       : [checkoutId];
   const checkouts: ObsoleteCodeGraphStoreCheckout[] = [];
   let unsafeEntryCount = 0;
@@ -219,17 +228,17 @@ export const inspectObsoleteCodeGraphStores = Effect.fn('codeGraph.inspectObsole
     }
     if (files.length > 0) {
       checkouts.push({
-        bytes: files.reduce((total, file) => total + file.bytes, 0),
+        bytes: EffectArray.reduce(files, 0, (total, file) => total + file.bytes),
         checkoutId: candidateCheckoutId,
         files,
-        versions: [...new Set(files.map(file => file.schemaVersion))].sort((left, right) => left - right),
+        versions: [...new Set(EffectArray.map(files, file => file.schemaVersion))].sort((left, right) => left - right),
       });
     }
   }
   return {
-    bytes: checkouts.reduce((total, entry) => total + entry.bytes, 0),
+    bytes: EffectArray.reduce(checkouts, 0, (total, entry) => total + entry.bytes),
     checkouts,
-    fileCount: checkouts.reduce((total, entry) => total + entry.files.length, 0),
+    fileCount: EffectArray.reduce(checkouts, 0, (total, entry) => total + entry.files.length),
     unsafeEntryCount,
   } satisfies ObsoleteCodeGraphStoreInventory;
 });
@@ -314,11 +323,14 @@ export const repairCodeGraphIndexes = Effect.fn('codeGraph.repairIndexes')(funct
       const repositoryCheckoutIds =
         options.targetCheckoutId === undefined
           ? allRepositoryCheckoutIds
-          : allRepositoryCheckoutIds.filter(checkoutId => checkoutId === options.targetCheckoutId);
+          : EffectArray.filter(allRepositoryCheckoutIds, checkoutId => checkoutId === options.targetCheckoutId);
       const databases =
         options.targetCheckoutId === undefined
           ? allDatabases
-          : allDatabases.filter(database => path.basename(path.dirname(database)) === options.targetCheckoutId);
+          : EffectArray.filter(
+              allDatabases,
+              database => path.basename(path.dirname(database)) === options.targetCheckoutId,
+            );
       const obsoleteBefore =
         options.targetCheckoutId === undefined
           ? yield* inspectObsoleteCodeGraphStores(threadnoteHome)
@@ -535,9 +547,11 @@ export const repairCodeGraphIndexes = Effect.fn('codeGraph.repairIndexes')(funct
           });
         }
       }
-      const databaseCheckoutIds = new Set(databases.map(database => path.basename(path.dirname(database))));
+      const databaseCheckoutIds = new Set(
+        EffectArray.map(databases, database => path.basename(path.dirname(database))),
+      );
       const spoolOnlyCheckoutIds = deep
-        ? repositoryCheckoutIds.filter(checkoutId => !databaseCheckoutIds.has(checkoutId))
+        ? EffectArray.filter(repositoryCheckoutIds, checkoutId => !databaseCheckoutIds.has(checkoutId))
         : [];
       for (const checkoutId of spoolOnlyCheckoutIds) {
         const repositoryRoot = codeGraphRepositoryRoot(path, threadnoteHome, checkoutId);
@@ -581,7 +595,8 @@ export const repairCodeGraphIndexes = Effect.fn('codeGraph.repairIndexes')(funct
       const currentDatabases =
         options.targetCheckoutId === undefined
           ? yield* codeGraphDatabasePaths(threadnoteHome)
-          : (yield* codeGraphDatabasePaths(threadnoteHome)).filter(
+          : EffectArray.filter(
+              yield* codeGraphDatabasePaths(threadnoteHome),
               database => path.basename(path.dirname(database)) === options.targetCheckoutId,
             );
       const obsolete =
@@ -703,7 +718,10 @@ function codeGraphRepositoryCheckoutIds(threadnoteHome: string) {
     if (Option.isSome(yield* fs.readLink(repositories).pipe(Effect.option))) return [];
     const info = yield* fs.stat(repositories).pipe(Effect.option);
     if (Option.isNone(info) || info.value.type !== 'Directory') return [];
-    return (yield* fs.readDirectory(repositories)).filter(name => /^[0-9a-f]{64}$/u.test(name)).sort();
+    return EffectArray.filter(
+      yield* fs.readDirectory(repositories),
+      __effectArrayValue => !!(name => /^[0-9a-f]{64}$/u.test(name))(__effectArrayValue),
+    ).sort();
   });
 }
 
@@ -807,7 +825,9 @@ export const purgeObsoleteCodeGraphStores = Effect.fn('codeGraph.purgeObsoleteSt
                 yield* options.interlock?.beforeVerification?.(initial) ?? Effect.void;
                 const verified = yield* inspectObsoleteCodeGraphStores(threadnoteHome, checkoutId);
                 yield* refuseUnsafeObsoleteInventory(verified);
-                const checkout = verified.checkouts.find(entry => entry.checkoutId === checkoutId);
+                const checkout = Option.getOrUndefined(
+                  EffectArray.findFirst(verified.checkouts, entry => entry.checkoutId === checkoutId),
+                );
                 const files = checkout?.files ?? [];
                 yield* publishPurgeProgress(reporter, options.onProgress, options.dryRun, {
                   completed: 3,
@@ -1060,9 +1080,10 @@ export const purgeAllCodeGraphIndexes = Effect.fn('codeGraph.purgeAllIndexes')(f
             yield* fs.remove(repositories, {force: true});
             return path.dirname(repositories);
           }
-          const repositoryIds = (yield* fs.readDirectory(repositories))
-            .filter(name => /^[0-9a-f]{64}$/.test(name))
-            .sort();
+          const repositoryIds = EffectArray.filter(
+            yield* fs.readDirectory(repositories),
+            __effectArrayValue => !!(name => /^[0-9a-f]{64}$/.test(name))(__effectArrayValue),
+          ).sort();
           const total = Math.max(1, repositoryIds.length);
           yield* reporter.progress({completed: 0, phase: 'waiting-builders', total});
           for (const [index, repositoryId] of repositoryIds.entries()) {
@@ -1337,7 +1358,10 @@ function cleanTemporaryVectorFilesContained(
           dryRun,
           interlock,
         );
-      } else if (info.type === 'File' && (name.endsWith('.tmp') || name.endsWith('.staging'))) {
+      } else if (
+        info.type === 'File' &&
+        (Effect2.pipe(name, EffectString.endsWith('.tmp')) || Effect2.pipe(name, EffectString.endsWith('.staging')))
+      ) {
         removed += yield* cleanTemporaryMaterializationSpoolFile(
           fs,
           path,
@@ -1599,7 +1623,9 @@ function verifyObsoletePurgeTarget(
 
 function isContained(path: Path.Path, root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
-  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  return (
+    relative !== '..' && !Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)) && !path.isAbsolute(relative)
+  );
 }
 
 const CODE_GRAPH_LOCK_OPTIONS = {

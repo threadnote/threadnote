@@ -1,10 +1,14 @@
 import {execFile} from '@threadnote/testing/node-child-process';
 import {existsSync} from '@threadnote/testing/node-fs';
+import {isJsonObject} from '@threadnote/platform/json';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {describe, expect, it} from 'vitest';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execFilePromise = promisify(execFile);
 const cliTimeoutMs = 15_000;
@@ -35,9 +39,9 @@ describe('native workflow automation CLI exit boundary', () => {
         expect(result.exitCode, testCase.name).not.toBe(0);
         const response = expectSingleJsonLine(result.stdout);
         expect(response).toMatchObject({status: 'error', code: testCase.code, protocolVersion: 1, executorVersion: 1});
-        expect(typeof response.message).toBe('string');
-        expect((response.message as string).length).toBeGreaterThan(0);
-        expect((response.message as string).length).toBeLessThanOrEqual(512);
+        if (typeof response.message !== 'string') throw new Error('Expected an error message.');
+        expect(response.message.length).toBeGreaterThan(0);
+        expect(response.message.length).toBeLessThanOrEqual(512);
         expect(result.stdout.length).toBeLessThanOrEqual(1024);
         expect(result.stderr).toBe('');
         expect(result.stdout).not.toContain('unsupportedSentinel');
@@ -80,7 +84,7 @@ async function createFixture(): Promise<Fixture> {
   await execFilePromise('git', ['init', '--quiet', '--initial-branch=main', repository], {cwd: root});
 
   const environment = {...process.env};
-  for (const key of Object.keys(environment))
+  for (const key of EffectRecord.keys(environment))
     if (/^(?:THREADNOTE_|CODEX_|CURSOR_|BUN_)/u.test(key) || /^(?:https?|all)_proxy$/iu.test(key))
       delete environment[key];
   Object.assign(environment, {
@@ -138,11 +142,13 @@ async function runCli(fixture: Fixture, input: Uint8Array) {
 }
 
 function expectSingleJsonLine(stdout: string): Record<string, unknown> {
-  expect(stdout.endsWith('\n')).toBe(true);
-  const lines = stdout.trimEnd().split(/\r?\n/u);
+  expect(Effect.pipe(stdout, EffectString.endsWith('\n'))).toBe(true);
+  const lines = Effect.pipe(stdout, EffectString.trimEnd, EffectString.split(/\r?\n/u));
   expect(lines).toHaveLength(1);
   expect(lines[0]?.length).toBeLessThanOrEqual(1024);
-  return JSON.parse(lines[0]) as Record<string, unknown>;
+  const value: unknown = JSON.parse(lines[0] ?? '');
+  if (!isJsonObject(value)) throw new Error('Expected a JSON response object.');
+  return value;
 }
 
 function expectNativeStateAbsent(home: string): void {

@@ -2,10 +2,15 @@ import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {runtimeTextDirectoryNames} from '@threadnote/platform/system';
 import type {SafeScannedFile} from '@threadnote/platform/safe_scan';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class ObsidianScanError extends Schema.TaggedError<ObsidianScanError>()('ObsidianScanError', {
-  message: Schema.String,
-}) {}
+class ObsidianScanError extends Schema.TaggedError<ObsidianScanError, {readonly brand: unique symbol}>()(
+  'ObsidianScanError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 /** Only the selected page receives filesystem inspection; earlier names are streamed past. */
 export const scanObsidianDirectoryPage = Effect.fn('obsidian.directoryPage')(function* (
@@ -46,7 +51,14 @@ export const scanObsidianDirectoryPage = Effect.fn('obsidian.directoryPage')(fun
           if (inspected === 64) return {files, directories, nextOffset: offset + inspected};
           inspected++;
           const name = entry.value;
-          if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) continue;
+          if (
+            !name ||
+            name === '.' ||
+            name === '..' ||
+            Effect2.pipe(name, EffectString.includes('/')) ||
+            Effect2.pipe(name, EffectString.includes('\\'))
+          )
+            continue;
           const filename = path.join(directory, name);
           if (Option.isSome(yield* fs.readLink(filename).pipe(Effect.option))) continue;
           const info = yield* fs.stat(filename).pipe(Effect.option);

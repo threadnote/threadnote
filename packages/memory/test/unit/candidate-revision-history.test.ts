@@ -4,9 +4,10 @@ import {Effect, FileSystem, Layer, Path, Result} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
-import {describe, expect} from 'vitest';
+import {describe, expect, it} from 'vitest';
 import {
   loadCandidateReview,
+  parseCandidateReview,
   preserveCandidateReviewRevision,
   withCandidateReviewLock,
 } from '@threadnote/memory/candidate';
@@ -23,7 +24,9 @@ function provideBun<A, E, R>(effect: Effect.Effect<A, E, R>) {
                 preserveIntendedChild: environment => environment,
                 sanitizeExternal: environment => environment,
               }),
-              Layer.succeed(RuntimeEntrypoint, {developmentEntrypoint: '/fixture/entrypoint'}),
+              Layer.succeed(RuntimeEntrypoint, {
+                developmentEntrypoint: '/fixture/entrypoint',
+              }),
             ),
           ),
         ),
@@ -34,7 +37,9 @@ function provideBun<A, E, R>(effect: Effect.Effect<A, E, R>) {
 const fixture = Effect.fn('candidateRevision.fixture')(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const home = yield* fs.makeTempDirectoryScoped({prefix: 'candidate-history-'});
+  const home = yield* fs.makeTempDirectoryScoped({
+    prefix: 'candidate-history-',
+  });
   const file = path.join(home, 'threadnote/candidates/v1/reviews/review-history.json');
   const raw =
     JSON.stringify(
@@ -45,6 +50,8 @@ const fixture = Effect.fn('candidateRevision.fixture')(function* () {
         project: 'fixture',
         topic: 'History',
         task: 'Full previous revision',
+        outcome: 'Retain an immutable previous candidate review.',
+        sourceAgentClient: 'legacy-fixture',
         createdAt: '2026-10-25T00:00:00.000Z',
         codeCitations: [],
         auditEvents: [],
@@ -55,6 +62,9 @@ const fixture = Effect.fn('candidateRevision.fixture')(function* () {
             categories: ['decision'],
             comparison: 'new',
             confidence: 1,
+            evidence: ['legacy-review-fixture'],
+            project: 'fixture',
+            topic: 'History',
             proposedText: 'Exact fictional previous proposal.',
             reason: 'Preserve its complete private payload.',
             recommendation: 'create',
@@ -74,9 +84,10 @@ describe('immutable candidate revision preimages', () => {
   effectIt.effect('refuses unsafe identities and linked history before any immutable payload can be replaced', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const unsafe = yield* preserveCandidateReviewRevision(f.home, {...f.review, reviewId: '../outside'}).pipe(
-        Effect.result,
-      );
+      const unsafe = yield* preserveCandidateReviewRevision(f.home, {
+        ...f.review,
+        reviewId: '../outside',
+      }).pipe(Effect.result);
       expect(Result.isFailure(unsafe)).toBe(true);
       const directory = f.path.join(f.home, 'threadnote/candidates/v1/revision-history');
       const outside = f.path.join(f.home, 'outside');
@@ -140,4 +151,49 @@ describe('immutable candidate revision preimages', () => {
       expect(yield* f.fs.readFileString(f.file)).toBe(f.raw);
     }).pipe(provideBun),
   );
+});
+
+describe('legacy candidate review parsing', () => {
+  it('accepts absent v2 metadata without inventing values and rejects absent v3 metadata', () => {
+    const candidate = {
+      candidateId: 'legacy-candidate',
+      state: 'pending',
+      categories: ['decision'],
+      comparison: 'new',
+      confidence: 1,
+      proposedText: 'Legacy proposal.',
+      reason: 'Persisted before candidate metadata became required.',
+      recommendation: 'create',
+    };
+    const legacy = parseCandidateReview({
+      version: 2,
+      reviewId: 'legacy-review',
+      revision: 1,
+      project: 'fixture',
+      topic: 'History',
+      task: 'Read legacy review',
+      createdAt: '2026-10-25T00:00:00.000Z',
+      codeCitations: [],
+      candidates: [candidate],
+    });
+    expect(legacy.outcome).toBeUndefined();
+    expect(legacy.sourceAgentClient).toBeUndefined();
+    expect(legacy.candidates[0]?.evidence).toBeUndefined();
+    expect(() =>
+      parseCandidateReview({
+        ...legacy,
+        version: 3,
+        codeCitations: [],
+        candidates: [
+          {
+            ...candidate,
+            evidence: [],
+            kind: 'durable',
+            project: 'fixture',
+            topic: 'History',
+          },
+        ],
+      }),
+    ).toThrow('unsupported review document');
+  });
 });

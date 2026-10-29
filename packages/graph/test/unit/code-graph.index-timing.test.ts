@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
+import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect, it} from '@effect/vitest';
-import {Cause, Context, Deferred, Effect, Exit, Fiber, Option} from 'effect';
+import {Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Option} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import type {CodeGraphStoreShape} from '@threadnote/graph/store';
 import {
@@ -70,6 +73,8 @@ describe('code graph optional index timing', () => {
 
   it.effect('observes both early and scoped lease release without changing session context or ownership', () =>
     Effect.gen(function* () {
+      const databaseContext = yield* Layer.build(SqliteClient.layer({filename: ':memory:'}));
+      const sql = Context.get(databaseContext, SqlClient.SqlClient);
       const events: string[] = [];
       const observed: string[] = [];
       const options = {readOnly: false};
@@ -84,11 +89,15 @@ describe('code graph optional index timing', () => {
           expect(suppliedOptions).toBe(options);
           return Effect.acquireUseRelease(
             Effect.sync(() => events.push('open')),
-            () => effect.pipe(Effect.provideService(TimingSession, 'inside')),
+            () =>
+              effect.pipe(
+                Effect.provideService(TimingSession, 'inside'),
+                Effect.provideService(SqlClient.SqlClient, sql),
+              ),
             () => Effect.sync(() => events.push('close')),
           );
         },
-      } as CodeGraphStoreShape;
+      } satisfies Pick<CodeGraphStoreShape, 'releaseSnapshotLease' | 'withSession'>;
       const store = codeGraphIndexTimingStore(base, stage =>
         Effect.sync(() => {
           observed.push(`start:${stage}`);
@@ -106,8 +115,8 @@ describe('code graph optional index timing', () => {
         }),
       );
       expect(events).toEqual(['open', 'release:lease:inside', 'close', 'release:lease:outside']);
-      expect(observed.filter(event => event === 'start:snapshot-lease-release')).toHaveLength(2);
-      expect(observed.filter(event => event === 'end:snapshot-lease-release')).toHaveLength(2);
+      expect(EffectArray.filter(observed, event => event === 'start:snapshot-lease-release')).toHaveLength(2);
+      expect(EffectArray.filter(observed, event => event === 'end:snapshot-lease-release')).toHaveLength(2);
       expect(observed.indexOf('end:database-session-body')).toBeLessThan(observed.indexOf('end:database-session'));
     }),
   );

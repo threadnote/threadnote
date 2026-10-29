@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {DateTime, Effect, FileSystem, Path} from 'effect';
@@ -27,6 +28,8 @@ import {rankRecallCandidates} from '@threadnote/recall/rank';
 import {normalizeRecallRerankerScore} from '@threadnote/recall/reranker-score';
 import {normalizeVector} from '@threadnote/inference/vector-search';
 import {atomicWrite, fixtureHash, markFailure, printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const evaluateModels = Effect.gen(function* () {
   const path = yield* Path.Path;
@@ -48,7 +51,8 @@ const evaluateModels = Effect.gen(function* () {
   }
   const rerankerManifest =
     localRerankerManifest ?? (options.reranker ? builtinManifest(options.reranker, 'reranker') : undefined);
-  const manifests = [embeddingManifest, rerankerManifest].filter(
+  const manifests = EffectArray.filter(
+    [embeddingManifest, rerankerManifest],
     (value): value is LocalModelManifest => value !== undefined,
   );
   if (manifests.length === 0) {
@@ -77,14 +81,19 @@ const evaluateModels = Effect.gen(function* () {
 
       const documentVectors = options.embedding
         ? yield* runtime.embedMany({
-            inputs: fixture.documents.map(
+            inputs: EffectArray.map(
+              fixture.documents,
               document => `${embeddingManifest!.promptPrefixes?.document ?? ''}${document.text}`,
             ),
             manifest: embeddingManifest!,
             modelPath: paths.get(options.embedding)!,
           })
         : undefined;
-      const normalizedDocuments = documentVectors?.map(normalizeVector);
+      const normalizedDocuments = EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(documentVectors), documents =>
+          EffectArray.map(documents, normalizeVector),
+        ),
+      );
       const scoresByQuery = new Map<string, RecallEvaluationQueryScores>();
       for (const query of fixture.queries) {
         let semantic: Map<string, number> | undefined;
@@ -97,7 +106,7 @@ const evaluateModels = Effect.gen(function* () {
           });
           const normalizedQuery = normalizeVector(queryVector);
           semantic = new Map(
-            fixture.documents.map((document, index) => [
+            EffectArray.map(fixture.documents, (document, index) => [
               document.uri,
               Math.max(0, dot(normalizedQuery, normalizedDocuments[index])),
             ]),
@@ -108,7 +117,7 @@ const evaluateModels = Effect.gen(function* () {
         if (rerankerManifest) {
           const shortlist = rankRecallCandidates(
             query.query,
-            fixture.documents.map(document => ({
+            EffectArray.map(fixture.documents, document => ({
               ...document,
               semantic: semantic?.get(document.uri) ?? 0,
             })),
@@ -124,13 +133,15 @@ const evaluateModels = Effect.gen(function* () {
           ).results.slice(0, 32);
           const reranking = rerankerManifest;
           const rawScores = yield* runtime.rerank({
-            documents: shortlist.map(result => result.candidate.text.slice(0, 4_000)),
+            documents: EffectArray.map(shortlist, result =>
+              Effect2.pipe(result.candidate.text, EffectString.slice(0, 4_000)),
+            ),
             manifest: reranking,
             modelPath: paths.get(reranking.id)!,
             query: query.query,
           });
           reranker = new Map(
-            shortlist.map((result, index) => [
+            EffectArray.map(shortlist, (result, index) => [
               result.candidate.uri,
               normalizeRecallRerankerScore(rawScores[index] ?? 0),
             ]),
@@ -139,12 +150,18 @@ const evaluateModels = Effect.gen(function* () {
         scoresByQuery.set(query.id, {reranker, semantic});
       }
 
-      const modelIds = manifests.map(candidate => candidate.id).join('+');
+      const modelIds = EffectArray.join(
+        EffectArray.map(manifests, candidate => candidate.id),
+        '+',
+      );
       const run = runScoredRecallEvaluationV2(fixture, scoresByQuery, {
         fixtureHash: hash,
         model: modelIds,
         pipelineName: rerankerManifest ? 'threadnote-4-native-hybrid-reranked' : 'threadnote-4-native-hybrid',
-        revision: manifests.map(candidate => candidate.revision).join('+'),
+        revision: EffectArray.join(
+          EffectArray.map(manifests, candidate => candidate.revision),
+          '+',
+        ),
       });
       return {
         fixture: {
@@ -172,7 +189,7 @@ const evaluateModels = Effect.gen(function* () {
     },
     fixture: artifact.fixture,
     gate,
-    models: artifact.models.map(candidate => ({
+    models: EffectArray.map(artifact.models, candidate => ({
       id: candidate.id,
       revision: candidate.revision,
       role: candidate.role,
@@ -194,7 +211,9 @@ const evaluateModels = Effect.gen(function* () {
 });
 
 function builtinManifest(id: string, role: 'embedding' | 'reranker'): LocalModelManifest {
-  const candidate = BUILTIN_MODEL_MANIFESTS.find(value => value.id === id);
+  const candidate = EffectOption.getOrUndefined(
+    EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, value => value.id === id),
+  );
   if (!candidate || candidate.role !== role) throw ScriptError.make({message: `Unknown ${role} model: ${id}`});
   return candidate;
 }
@@ -285,7 +304,12 @@ const verifyLocalModelArtifact = Effect.fn('evaluateRecallModels.verifyLocalMode
 });
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
 

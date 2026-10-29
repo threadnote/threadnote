@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
@@ -10,6 +11,8 @@ import {
   type ContextHealthSemanticCompletenessV2,
   type ContextHealthSemanticUnknownReasonV2,
 } from './health_semantic.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CONTEXT_HEALTH_AGGREGATE_VERSION = 1 as const;
 export const CONTEXT_HEALTH_SCHEDULE_VERSION = 1 as const;
@@ -23,10 +26,10 @@ const MAXIMUM_TEAM_BYTES = 128;
 const MAXIMUM_FINDING_ID_BYTES = 8_192;
 const MAXIMUM_REPORT_RECORDS = 1_000_000;
 
-export class ContextHealthScheduleError extends Schema.TaggedError<ContextHealthScheduleError>()(
-  'ContextHealthScheduleError',
-  {message: Schema.String},
-) {}
+export class ContextHealthScheduleError extends Schema.TaggedError<
+  ContextHealthScheduleError,
+  {readonly brand: unique symbol}
+>()('ContextHealthScheduleError', {message: Schema.String}) {}
 
 export type ContextHealthAggregateUnknownReasonV1 =
   | 'citation-evidence-unavailable'
@@ -126,22 +129,22 @@ export function aggregateContextHealthReportsV1(input: {
   if (input.teams.length > MAXIMUM_TEAM_SOURCES) {
     fail(`Context health aggregation supports at most ${MAXIMUM_TEAM_SOURCES} team sources.`);
   }
-  const teams = input.teams.map(source => {
+  const teams = EffectArray.map(input.teams, source => {
     if (source.scope !== 'team' && source.scope !== 'team-selection') {
       fail('Every team aggregate source must use team or team-selection scope.');
     }
     return canonicalSource(source, project);
   });
-  const teamKeys = teams.map(source => source.sourceKey);
+  const teamKeys = EffectArray.map(teams, source => source.sourceKey);
   if (new Set(teamKeys).size !== teamKeys.length) fail('Context health aggregate contains a duplicate team source.');
   const sources = [...(input.personal === undefined ? [] : [canonicalSource(input.personal, project)]), ...teams].sort(
     compareSource,
   );
   if (sources.length === 0) fail('Context health aggregation requires at least one evidence source.');
-  const findings = sources
-    .flatMap(source => (source.findingIds ?? []).map(findingId => ({findingId, sourceKey: source.sourceKey})))
-    .sort(compareFinding);
-  const sourceSummaries: ContextHealthAggregateSourceSummaryV1[] = sources.map(source =>
+  const findings = EffectArray.flatMap(sources, source =>
+    EffectArray.map(source.findingIds ?? [], findingId => ({findingId, sourceKey: source.sourceKey})),
+  ).sort(compareFinding);
+  const sourceSummaries: ContextHealthAggregateSourceSummaryV1[] = EffectArray.map(sources, source =>
     source.state === 'complete'
       ? {
           evidenceRevision: source.evidenceRevision,
@@ -160,8 +163,8 @@ export function aggregateContextHealthReportsV1(input: {
           state: 'unknown',
         },
   );
-  const unknownSources = sourceSummaries.filter(source => source.state === 'unknown').length;
-  const knownFindings = sources.reduce((count, source) => count + (source.findingCount ?? 0), 0);
+  const unknownSources = EffectArray.filter(sourceSummaries, source => source.state === 'unknown').length;
+  const knownFindings = EffectArray.reduce(sources, 0, (count, source) => count + (source.findingCount ?? 0));
   const status = unknownSources > 0 ? 'unknown' : knownFindings > 0 ? 'findings' : 'clean';
   const exitCode = status === 'unknown' ? 2 : status === 'findings' ? 1 : 0;
   const unsigned = {
@@ -175,7 +178,10 @@ export function aggregateContextHealthReportsV1(input: {
     unknownSources,
     version: CONTEXT_HEALTH_AGGREGATE_VERSION,
   } as const;
-  return {...unsigned, aggregateId: `context-health-${sha256HexSync(canonicalJson(unsigned)).slice(0, 40)}`};
+  return {
+    ...unsigned,
+    aggregateId: `context-health-${Effect.pipe(sha256HexSync(canonicalJson(unsigned)), EffectString.slice(0, 40))}`,
+  };
 }
 
 export function buildContextHealthSchedulePlanV1(input: {
@@ -201,7 +207,7 @@ export function buildContextHealthSchedulePlanV1(input: {
     '--project',
     project,
     '--json',
-    ...teams.flatMap(team => ['--team', team]),
+    ...EffectArray.flatMap(teams, team => ['--team', team]),
   ];
   const unsigned = {
     argv,
@@ -212,33 +218,42 @@ export function buildContextHealthSchedulePlanV1(input: {
     teams,
     version: CONTEXT_HEALTH_SCHEDULE_VERSION,
   };
-  return {...unsigned, scheduleId: `context-health-${sha256HexSync(canonicalJson(unsigned)).slice(0, 40)}`};
+  return {
+    ...unsigned,
+    scheduleId: `context-health-${Effect.pipe(sha256HexSync(canonicalJson(unsigned)), EffectString.slice(0, 40))}`,
+  };
 }
 
 export function canonicalContextHealthTeamsV1(input: readonly string[]): readonly string[] {
   if (input.length > MAXIMUM_TEAM_SOURCES) {
     fail(`Context health schedules support at most ${MAXIMUM_TEAM_SOURCES} teams.`);
   }
-  return [...new Set(input.map(canonicalTeam))].sort(compareText);
+  return [...new Set(EffectArray.map(input, canonicalTeam))].sort(compareText);
 }
 
 export function renderContextHealthAggregate(aggregate: ContextHealthAggregateV1): string {
-  return [
-    `Context health aggregate for ${aggregate.project}: ${aggregate.status}; ${aggregate.completeSources} complete source(s), ${aggregate.unknownSources} unknown source(s), ${aggregate.knownFindings} known finding(s).`,
-    ...aggregate.sources.map(source =>
-      source.state === 'complete'
-        ? `- ${source.sourceKey}: complete; ${source.recordsScanned} record(s), ${source.findingCount} finding(s), revision ${source.evidenceRevision}.`
-        : `- ${source.sourceKey}: unknown (${source.reason})${source.evidenceRevision === undefined ? '.' : `, revision ${source.evidenceRevision}.`}`,
-    ),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `Context health aggregate for ${aggregate.project}: ${aggregate.status}; ${aggregate.completeSources} complete source(s), ${aggregate.unknownSources} unknown source(s), ${aggregate.knownFindings} known finding(s).`,
+      ...EffectArray.map(aggregate.sources, source =>
+        source.state === 'complete'
+          ? `- ${source.sourceKey}: complete; ${source.recordsScanned} record(s), ${source.findingCount} finding(s), revision ${source.evidenceRevision}.`
+          : `- ${source.sourceKey}: unknown (${source.reason})${source.evidenceRevision === undefined ? '.' : `, revision ${source.evidenceRevision}.`}`,
+      ),
+    ],
+    '\n',
+  );
 }
 
 export function renderContextHealthSchedulePlan(plan: ContextHealthSchedulePlanV1): string {
-  return [
-    `Context health schedule for ${plan.project}: every ${plan.cadenceMinutes} minute(s); read-only, network disabled.`,
-    `Command argv: ${JSON.stringify(['threadnote', ...plan.argv])}`,
-    `Exit policy: clean=${plan.resultPolicy.clean}, findings=${plan.resultPolicy.findings}, unknown=${plan.resultPolicy.unknown}.`,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `Context health schedule for ${plan.project}: every ${plan.cadenceMinutes} minute(s); read-only, network disabled.`,
+      `Command argv: ${JSON.stringify(['threadnote', ...plan.argv])}`,
+      `Exit policy: clean=${plan.resultPolicy.clean}, findings=${plan.resultPolicy.findings}, unknown=${plan.resultPolicy.unknown}.`,
+    ],
+    '\n',
+  );
 }
 
 type CanonicalSource =
@@ -301,7 +316,7 @@ function canonicalSource(source: ContextHealthAggregateSourceV1, project: string
 
 function canonicalKnownFindings(report: ContextHealthReportV1, project: string, sourceKey: string) {
   validateReport(report, project, sourceKey);
-  const findingIds = report.findings.map(finding => finding.id).sort(compareText);
+  const findingIds = EffectArray.map(report.findings, finding => finding.id).sort(compareText);
   if (new Set(findingIds).size !== findingIds.length) {
     fail(`Context health source ${sourceKey} contains a duplicate finding ID.`);
   }
@@ -313,10 +328,10 @@ function canonicalKnownFindings(report: ContextHealthReportV1, project: string, 
 }
 
 export function canonicalContextHealthProjectV1(input: string): string {
-  const project = input.trim();
+  const project = Effect.pipe(input, EffectString.trim);
   if (
     !project ||
-    project.startsWith('-') ||
+    Effect.pipe(project, EffectString.startsWith('-')) ||
     new TextEncoder().encode(project).byteLength > 256 ||
     hasControlCharacter(project)
   ) {
@@ -330,21 +345,25 @@ export function canonicalContextHealthProjectV1(input: string): string {
 }
 
 function hasControlCharacter(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0);
+  return EffectArray.some([...value], character => {
+    const code = Effect.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect.Option.getOrElse(() => undefined),
+    );
     return code !== undefined && (code <= 0x1f || code === 0x7f);
   });
 }
 
 function hasUnexpectedFindingIdControlCharacter(value: string): boolean {
   return (
-    ![...value].some(character => character !== '\0') ||
-    [...value].some(character => character !== '\0' && hasControlCharacter(character))
+    !EffectArray.some([...value], character => character !== '\0') ||
+    EffectArray.some([...value], character => character !== '\0' && hasControlCharacter(character))
   );
 }
 
 function canonicalTeam(input: string): string {
-  const team = input.trim();
+  const team = Effect.pipe(input, EffectString.trim);
   if (new TextEncoder().encode(team).byteLength > MAXIMUM_TEAM_BYTES || !TEAM.test(team) || /^\.+$/u.test(team)) {
     fail(`Invalid context health team ${JSON.stringify(input)}.`);
   }
@@ -372,7 +391,7 @@ function validateReport(report: ContextHealthReportV1, project: string, sourceKe
     fail(`Context health source ${sourceKey} has an invalid scanned-record count.`);
   }
   if (
-    !Array.isArray(report.findings) ||
+    !EffectArray.isArray(report.findings) ||
     report.findings.length > report.limit ||
     report.findings.length > MAXIMUM_CONTEXT_HEALTH_FINDING_LIMIT
   ) {
@@ -438,7 +457,12 @@ function validateSemanticCompleteness(
     completeness.pairsCompared,
     completeness.unknownRecords,
   ];
-  if (boundedCounts.some(count => !Number.isSafeInteger(count) || count < 0 || count > MAXIMUM_REPORT_RECORDS)) {
+  if (
+    EffectArray.some(
+      boundedCounts,
+      count => !Number.isSafeInteger(count) || count < 0 || count > MAXIMUM_REPORT_RECORDS,
+    )
+  ) {
     fail(`Context health source ${sourceKey} has invalid semantic completeness counts.`);
   }
   const maximumPairs = (completeness.claimsAnalyzed * (completeness.claimsAnalyzed - 1)) / 2;
@@ -452,7 +476,7 @@ function validateSemanticCompleteness(
     completeness.pairsCompared > maximumPairs ||
     completeness.contradictionCount > completeness.pairsCompared ||
     completeness.omittedContradictions > completeness.contradictionCount ||
-    !Array.isArray(completeness.unknownReasons) ||
+    !EffectArray.isArray(completeness.unknownReasons) ||
     completeness.unknownReasons.length > SEMANTIC_UNKNOWN_REASONS.size
   ) {
     fail(`Context health source ${sourceKey} has invalid semantic completeness.`);

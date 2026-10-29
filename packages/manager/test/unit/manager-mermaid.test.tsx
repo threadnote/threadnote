@@ -1,11 +1,15 @@
 // @vitest-environment happy-dom
 // @vitest-environment-options {"settings":{"disableIframePageLoading":true}}
+import {Array as EffectArray, Predicate} from 'effect';
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
+import {Window as HappyWindow} from 'happy-dom';
 import {MemoryBody} from '../../src/detail_modal.js';
 import {MemoryExcerpt} from '../../src/review_presentation.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 let root: Root;
 let host: HTMLDivElement;
@@ -50,7 +54,14 @@ it('dispatches Mermaid fences to isolated diagrams while leaving ordinary code a
 it('preserves arbitrary ordinary code text and never mounts a renderer for it', async () => {
   await fc.assert(
     fc.asyncProperty(
-      fc.string().filter(value => !value.includes('~~~') && !value.includes('\r') && !value.includes('\u0000')),
+      fc
+        .string()
+        .filter(
+          value =>
+            !Effect.pipe(value, EffectString.includes('~~~')) &&
+            !Effect.pipe(value, EffectString.includes('\r')) &&
+            !Effect.pipe(value, EffectString.includes('\u0000')),
+        ),
       async value => {
         await show('~~~text\nprefix:' + value + '\n~~~');
         expect(host.querySelector('code')?.textContent).toBe('prefix:' + value + '\n');
@@ -71,15 +82,19 @@ it('retains readable source when a diagram frame cannot load', async () => {
 });
 
 async function loadFrame() {
-  const frame = host.querySelector('iframe')!;
-  Object.defineProperty(frame, 'contentWindow', {value: {postMessage: vi.fn()}, configurable: true});
-  const post = vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(() => undefined);
+  const frame = host.querySelector('iframe');
+  if (!frame) throw new Error('Mermaid frame was not rendered.');
+  const frameWindow = new HappyWindow();
+  Object.defineProperty(frame, 'contentWindow', {value: frameWindow, configurable: true});
+  const post = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
   await act(async () => frame.dispatchEvent(new Event('load')));
-  const request = post.mock.calls[0][0] as {id: string};
+  const request = post.mock.calls[0]?.[0];
+  if (!Predicate.isObject(request) || typeof request.id !== 'string')
+    throw new Error('Mermaid iframe did not receive a request with an ID.');
   return {frame, post, id: request.id};
 }
 
-async function result(source: Window | null, id: string, height: unknown = 200) {
+async function result(source: MessageEventSource | null, id: string, height: unknown = 200) {
   await act(async () =>
     window.dispatchEvent(
       new MessageEvent('message', {
@@ -140,7 +155,9 @@ it('enforces renderer and sanitizer policies and cleans up failed renders', asyn
     }),
   );
   await expect(renderMermaid('', 'mermaid-empty', 'light', host)).rejects.toThrow();
-  await expect(renderMermaid('x'.repeat(50_001), 'mermaid-large', 'light', host)).rejects.toThrow();
+  await expect(
+    renderMermaid(Effect.pipe('x', EffectString.repeat(50_001)), 'mermaid-large', 'light', host),
+  ).rejects.toThrow();
   render.mockImplementationOnce(async () => {
     host.innerHTML = '<svg><text>Temporary</text></svg>';
     throw new Error('parse failed');
@@ -162,14 +179,27 @@ it('bounds real parsed flowchart, sequence, state and ER graphs before layout', 
   const render = vi.spyOn(mermaid, 'render').mockRejectedValue(reachedLayout);
   const {renderMermaid} = await import('../../src/mermaid_renderer.js');
   const diagrams = [
-    (count: number) => 'flowchart LR\n' + Array.from({length: count}, (_, i) => `A${i} --> A${i + 1}`).join('\n'),
+    (count: number) =>
+      'flowchart LR\n' +
+      EffectArray.join(
+        Array.from({length: count}, (_, i) => `A${i} --> A${i + 1}`),
+        '\n',
+      ),
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     (count: number) => 'sequenceDiagram\n' + 'A->>B: Hello\n'.repeat(count),
     (count: number) =>
       'stateDiagram-v2\nstate Group {\n' +
-      Array.from({length: count}, (_, i) => `A${i} --> A${i + 1}`).join('\n') +
+      EffectArray.join(
+        Array.from({length: count}, (_, i) => `A${i} --> A${i + 1}`),
+        '\n',
+      ) +
       '\n}',
     (count: number) =>
-      'erDiagram\n' + Array.from({length: count}, (_, i) => `A${i} ||--o{ A${i + 1} : contains`).join('\n'),
+      'erDiagram\n' +
+      EffectArray.join(
+        Array.from({length: count}, (_, i) => `A${i} ||--o{ A${i + 1} : contains`),
+        '\n',
+      ),
   ];
   for (const source of diagrams) {
     render.mockClear();
@@ -189,7 +219,8 @@ it('rejects foreign, standalone, unsandboxed and malformed frame requests and ac
   host.id = 'diagram';
   const parentDescriptor = Object.getOwnPropertyDescriptor(window, 'parent');
   const originDescriptor = Object.getOwnPropertyDescriptor(window, 'origin');
-  const parent = {postMessage: vi.fn()};
+  const parent = new HappyWindow();
+  const post = vi.spyOn(parent, 'postMessage').mockImplementation(() => undefined);
   let resized: (() => void) | undefined;
   const observe = vi.fn();
   vi.stubGlobal(
@@ -203,7 +234,9 @@ it('rejects foreign, standalone, unsandboxed and malformed frame requests and ac
   );
   const request = {type: 'render-mermaid', id: 'mermaid-test', source: 'flowchart LR\n A-->B', theme: 'dark'};
   const send = async (source: unknown, origin: string, data: unknown = request) => {
-    window.dispatchEvent(new MessageEvent('message', {source: source as Window, origin, data}));
+    const event = new MessageEvent('message', {origin, data});
+    Object.defineProperty(event, 'source', {value: source});
+    window.dispatchEvent(event);
     await Promise.resolve();
     await Promise.resolve();
   };
@@ -219,11 +252,11 @@ it('rejects foreign, standalone, unsandboxed and malformed frame requests and ac
     expect(render).not.toHaveBeenCalled();
     await send(parent, window.location.origin);
     expect(render).toHaveBeenCalledTimes(1);
-    expect(parent.postMessage).toHaveBeenCalledWith(expect.objectContaining({ok: true, id: request.id}), '*');
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ok: true, id: request.id}), '*');
     expect(observe).toHaveBeenCalledWith(host);
     Object.defineProperty(host, 'scrollHeight', {value: 325, configurable: true});
     resized?.();
-    expect(parent.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({height: 325}), '*');
+    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({height: 325}), '*');
     await send(parent, window.location.origin);
     expect(render).toHaveBeenCalledTimes(1);
   } finally {

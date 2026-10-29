@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -6,6 +7,8 @@ import {
   CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES,
 } from '@threadnote/graph/materialization/spool/apply_surfaces';
 import {CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES} from '@threadnote/graph/materialization/spool/surfaces';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 fcProp(
   it,
@@ -18,20 +21,20 @@ fcProp(
     }),
   },
   ({lexicalTermCount, rowCounts}) => {
-    const surfaces = CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES.map((surface, index) => ({
+    const surfaces = EffectArray.map(CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES, (surface, index) => ({
       name: surface.name,
       rowCount: rowCounts[index],
     }));
     const plan = codeGraphMaterializationSpoolApplyPlan({
       batches: [],
       lexicalTermCount,
-      spoolIdentity: 'a'.repeat(64),
+      spoolIdentity: Effect.pipe('a', EffectString.repeat(64)),
       surfaces,
     });
-    expect(plan.map(surface => surface.name)).toEqual(
-      CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES.map(surface => surface.name),
+    expect(EffectArray.map(plan, surface => surface.name)).toEqual(
+      EffectArray.map(CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES, surface => surface.name),
     );
-    expect(plan.map(surface => surface.rowCount)).toEqual([
+    expect(EffectArray.map(plan, surface => surface.rowCount)).toEqual([
       rowCounts[0],
       rowCounts[1],
       rowCounts[2],
@@ -43,7 +46,7 @@ fcProp(
       lexicalTermCount,
       rowCounts[6],
     ]);
-    expect(surfaces.map(surface => surface.rowCount)).toEqual(rowCounts);
+    expect(EffectArray.map(surfaces, surface => surface.rowCount)).toEqual(rowCounts);
   },
   {fastCheck: {numRuns: 100}},
 );

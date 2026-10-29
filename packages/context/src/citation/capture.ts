@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {
   CODE_GRAPH_SOURCE_SPAN_CANONICALIZATION_V1,
@@ -31,6 +32,8 @@ import {
   type MemoryCodeCitationV1,
 } from '@threadnote/memory/code/citation';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const LOCAL_SYMBOL_REF = /^cgs_(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const QUALIFIED_SYMBOL_REF = /^cgr_[0-9a-f]{40}$/u;
@@ -139,15 +142,15 @@ const resolveCodeGraphProjectForCaller = Effect.fn('memoryCodeCitation.resolveGr
   return Option.isSome(route) && route.value.state === 'selected' ? route.value.project.name : requestedProject;
 });
 
-export class MemoryCodeCitationCaptureError extends Schema.TaggedError<MemoryCodeCitationCaptureError>()(
-  'MemoryCodeCitationCaptureError',
-  {
-    failureCode: Schema.optionalKey(Schema.Literals(['code-reference-unresolved', 'outside-project-graph'])),
-    message: Schema.String,
-    recovery: Schema.optionalKey(Schema.Any),
-    retryable: Schema.Boolean,
-  },
-) {
+export class MemoryCodeCitationCaptureError extends Schema.TaggedError<
+  MemoryCodeCitationCaptureError,
+  {readonly brand: unique symbol}
+>()('MemoryCodeCitationCaptureError', {
+  failureCode: Schema.optionalKey(Schema.Literals(['code-reference-unresolved', 'outside-project-graph'])),
+  message: Schema.String,
+  recovery: Schema.optionalKey(Schema.Any),
+  retryable: Schema.Boolean,
+}) {
   static of(
     message: string,
     recovery?: MemoryCodeCitationCaptureRecoveryV1,
@@ -210,11 +213,22 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     return yield* MemoryCodeCitationCaptureError.of('Code citation callerCwd must be absolute.');
   }
 
-  const invalidQualifiedRef = refs.find(ref => ref.startsWith('cgr_') && !QUALIFIED_SYMBOL_REF.test(ref));
+  const invalidQualifiedRef = Option.getOrUndefined(
+    EffectArray.findFirst(
+      refs,
+      __effectArrayValue =>
+        !!(ref => Effect2.pipe(ref, EffectString.startsWith('cgr_')) && !QUALIFIED_SYMBOL_REF.test(ref))(
+          __effectArrayValue,
+        ),
+    ),
+  );
   if (invalidQualifiedRef !== undefined) {
     return yield* MemoryCodeCitationCaptureError.of(`Invalid qualified code graph reference: ${invalidQualifiedRef}.`);
   }
-  const qualifiedRefs = refs.filter(ref => QUALIFIED_SYMBOL_REF.test(ref));
+  const qualifiedRefs = EffectArray.filter(
+    refs,
+    (ref, __effectArrayIndex) => __effectArrayIndex in refs && QUALIFIED_SYMBOL_REF.test(ref),
+  );
   // Local groups already fence the caller before and after capture. Qualified
   // references can target another checkout, so they need a separate caller fence.
   const fenceCallerSeparately =
@@ -240,7 +254,7 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     input.callerCwd,
     project,
   ).pipe(Effect.mapError(error => captureError('qualified code references', error)));
-  const qualifiedByRef = new Map(qualifiedTargets.map(target => [target.ref, target]));
+  const qualifiedByRef = new Map(EffectArray.map(qualifiedTargets, target => [target.ref, target]));
   const targets = yield* Effect.forEach(refs, (ref, index) =>
     resolveCaptureTarget(input.callerCwd, ref, index, qualifiedByRef, project),
   );
@@ -328,7 +342,7 @@ function resolveCaptureTarget(
         target: {kind: 'symbol', nodeId: ref},
       } satisfies CaptureTarget;
     }
-    if (ref.startsWith('cgs_')) {
+    if (Effect2.pipe(ref, EffectString.startsWith('cgs_'))) {
       return yield* MemoryCodeCitationCaptureError.of(`Invalid local code graph reference: ${ref}.`);
     }
     return {
@@ -398,38 +412,40 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
         .realPath(before.identity.repoRoot)
         .pipe(Effect.mapError(error => captureError(before.identity.repoRoot, error)));
 
-      const fileTargets = targets.filter(
+      const fileTargets = EffectArray.filter(
+        targets,
         (target): target is CaptureTarget & {readonly target: {readonly kind: 'file'; readonly path: string}} =>
           target.target.kind === 'file',
       );
-      const symbolTargets = targets.filter(
+      const symbolTargets = EffectArray.filter(
+        targets,
         (target): target is CaptureTarget & {readonly target: {readonly kind: 'symbol'; readonly nodeId: string}} =>
           target.target.kind === 'symbol',
       );
       const evidence = yield* store
         .effectiveSnapshotCitationEvidence(before.databasePath, snapshot.id, {
-          paths: fileTargets.map(target => target.target.path),
-          symbolIds: symbolTargets.map(target => target.target.nodeId),
+          paths: EffectArray.map(fileTargets, target => target.target.path),
+          symbolIds: EffectArray.map(symbolTargets, target => target.target.nodeId),
         })
         .pipe(Effect.mapError(error => captureError(cwd, error)));
       const files = evidence.filesByPaths;
       const symbols = evidence.symbolsByIds;
       const fileByPath = new Map(
-        files.flatMap(observation => (observation.file ? [[observation.path, observation.file]] : [])),
+        EffectArray.flatMap(files, observation => (observation.file ? [[observation.path, observation.file]] : [])),
       );
-      const symbolById = new Map(symbols.map(symbol => [symbol.id, symbol]));
+      const symbolById = new Map(EffectArray.map(symbols, symbol => [symbol.id, symbol]));
       const sourceBytes = yield* readCodeGraphCitationSources({
         objectFormat: before.identity.objectFormat,
         repositoryRoot,
         sourceCommit: snapshot.commit,
         sources: [
-          ...fileTargets.flatMap(target => {
+          ...EffectArray.flatMap(fileTargets, target => {
             const file = fileByPath.get(target.target.path);
             return file === undefined
               ? []
               : [{expectedContentHash: file.contentHash, repositoryPath: file.path, requireBytes: true}];
           }),
-          ...symbolTargets.flatMap(target => {
+          ...EffectArray.flatMap(symbolTargets, target => {
             const symbol = symbolById.get(target.target.nodeId);
             return symbol === undefined
               ? []
@@ -537,7 +553,8 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
           }).pipe(Effect.mapError(error => captureError(target.ref, error))),
         {concurrency: 4},
       );
-      const capturedTargets = results.filter(
+      const capturedTargets = EffectArray.filter(
+        results,
         (result): result is NonNullable<(typeof results)[number]> => result !== undefined,
       );
 
@@ -684,14 +701,17 @@ export function normalizeMemoryCodeRefs(refs: readonly string[]): readonly strin
   const seen = new Set<string>();
   const normalized: string[] = [];
   for (const raw of refs) {
-    const ref = raw.trim();
+    const ref = Effect2.pipe(raw, EffectString.trim);
     if (!ref) throw MemoryCodeCitationCaptureError.of('Code references must not be empty.');
     if (
       !LOCAL_SYMBOL_REF.test(ref) &&
       !QUALIFIED_SYMBOL_REF.test(ref) &&
-      (ref.startsWith('/') ||
-        ref.includes('\\') ||
-        ref.split('/').some(segment => !segment || segment === '.' || segment === '..'))
+      (Effect2.pipe(ref, EffectString.startsWith('/')) ||
+        Effect2.pipe(ref, EffectString.includes('\\')) ||
+        EffectArray.some(
+          Effect2.pipe(ref, EffectString.split('/')),
+          segment => !segment || segment === '.' || segment === '..',
+        ))
     ) {
       throw MemoryCodeCitationCaptureError.of(`Code reference must be a safe repository-relative path: ${ref}.`);
     }
@@ -790,7 +810,10 @@ function worksetGraphPreparation(worksetName: string): MemoryCodeCitationGraphPr
 }
 
 function captureGroupPreparation(targets: readonly CaptureTarget[]): MemoryCodeCitationGraphPreparationV1 {
-  return targets.find(target => target.preparation.target === 'callerCwd')?.preparation ?? targets[0].preparation;
+  return (
+    Option.getOrUndefined(EffectArray.findFirst(targets, target => target.preparation.target === 'callerCwd'))
+      ?.preparation ?? targets[0].preparation
+  );
 }
 
 function captureRecoveryMessage(preparation: MemoryCodeCitationGraphPreparationV1): string {

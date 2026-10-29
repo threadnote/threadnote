@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {existsSync} from '@threadnote/testing/node-fs';
@@ -50,7 +51,7 @@ effectIt.effect('serves parallel ready-snapshot reads while another process hold
       expect(writer.child.exitCode).toBeNull();
       expect(writer.child.signalCode).toBeNull();
       expect(snapshots).toHaveLength(8);
-      expect(snapshots.every(snapshot => snapshot?.id === indexed.snapshot.id)).toBe(true);
+      expect(EffectArray.every(snapshots, snapshot => snapshot?.id === indexed.snapshot.id)).toBe(true);
     }),
   ).pipe(provideTestLayer(ApplicationLayer)),
 );

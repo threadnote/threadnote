@@ -3,6 +3,8 @@ import {BunRuntime} from '@effect/platform-bun';
 import {Effect, FileSystem, Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const MIXED_NX_BAZEL_FIXTURE_SOURCES = [
   {
@@ -37,6 +39,7 @@ export function parseMixedNxBazelFixtureArguments(args: readonly string[]): Mixe
     if (argument === '--output') output = args[++index];
     else throw ScriptError.make({message: `Unknown mixed-monorepo fixture option: ${argument}`});
   }
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!output?.trim()) throw ScriptError.make({message: '--output requires a path.'});
   return {output};
 }
@@ -107,7 +110,7 @@ const cloneExact = Effect.fn('mixedNxBazelFixture.cloneExact')(function* (
   );
   if (sparsePaths) yield* runGit(target, ['sparse-checkout', 'set', '--no-cone', ...sparsePaths]);
   yield* runGit(target, ['checkout', '--quiet', commit], 10 * 60_000);
-  const resolved = (yield* runGit(target, ['rev-parse', 'HEAD'])).stdout.trim();
+  const resolved = Effect2.pipe((yield* runGit(target, ['rev-parse', 'HEAD'])).stdout, EffectString.trim);
   if (resolved !== commit)
     throw ScriptError.make({message: `Fixture source resolved ${resolved} instead of ${commit}.`});
 });

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -20,6 +21,8 @@ import {
   remoteMemoryProvisioningPolicy,
   remoteMemoryProvisioningSharePolicy,
 } from '@threadnote/remote-memory/postgres/control_plane';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const plannedAt = '2026-09-18T00:00:00.000Z';
 const emptyState: RemoteMemoryProvisioningStateV1 = {version: 1};
@@ -122,7 +125,7 @@ describe('preview-first pilot provisioning', () => {
     const existingRequest = {...request, sharePolicyVersion: undefined};
     const state: RemoteMemoryProvisioningStateV1 = {
       grant: {
-        policyDigest: 'a'.repeat(64),
+        policyDigest: Effect.pipe('a', EffectString.repeat(64)),
         policyVersion: 'reader-v0',
         status: 'active',
       },
@@ -131,7 +134,7 @@ describe('preview-first pilot provisioning', () => {
       principalStatus: 'active',
       share: {
         featureFlags: ['remote_memory_ga', 'remote_memory_read'],
-        policyDigest: 'b'.repeat(64),
+        policyDigest: Effect.pipe('b', EffectString.repeat(64)),
         policyVersion: 'share-v1',
         status: 'active',
       },
@@ -148,9 +151,9 @@ describe('preview-first pilot provisioning', () => {
         grant: {...state.grant!, policyVersion: 'reader-v0-rotated'},
       }),
     ).toBe(false);
-    expect(() => verifyRemoteMemoryProvisioningPlan({...plan, planDigest: '0'.repeat(64)})).toThrow(
-      'digest or canonical contents',
-    );
+    expect(() =>
+      verifyRemoteMemoryProvisioningPlan({...plan, planDigest: Effect.pipe('0', EffectString.repeat(64))}),
+    ).toThrow('digest or canonical contents');
   });
 
   it('binds the explicit organization Cloud admission profile into grant policy', () => {
@@ -207,7 +210,7 @@ describe('preview-first pilot provisioning', () => {
           minLength: 1,
         }),
         capabilities => {
-          const writes = capabilities.some(capability => capability !== 'memory:read');
+          const writes = EffectArray.some(capabilities, capability => capability !== 'memory:read');
           const candidate: RemoteMemoryProvisioningRequestV1 = {
             ...request,
             allowedProjects: writes ? ['threadnote'] : undefined,
@@ -255,7 +258,7 @@ describe('preview-first pilot provisioning', () => {
     state = {
       share: {
         featureFlags: ['remote_memory_ga', 'remote_memory_read'],
-        policyDigest: 'a'.repeat(64),
+        policyDigest: Effect.pipe('a', EffectString.repeat(64)),
         policyVersion: 'another-share-policy',
         status: 'active',
       },

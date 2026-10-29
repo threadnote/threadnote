@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {requestFingerprint} from '../remember/fingerprint.js';
 import {resolveRemoteCitationSources} from '../citation_sources.js';
 import {ingestGitShare} from '../git/ingest.js';
@@ -10,7 +11,7 @@ import {
   type ShareStateRow,
 } from '../repository_policy.js';
 import {Schema} from 'effect';
-import type {ReservedSql, Sql, TransactionSql} from 'postgres';
+import type {ReservedSql, Sql, ISql} from 'postgres';
 import {randomUuidV4} from '@threadnote/platform/uuid';
 import {parseMemoryDocument, type MemoryRelation} from '@threadnote/memory/document';
 import {formatRemoteMemoryUri, parseRemoteShareAddress} from '@threadnote/memory/remote/address';
@@ -30,10 +31,15 @@ import type {RemoteMemoryReceiptV1} from '@threadnote/memory/remote/receipts';
 import {
   assertRemoteRememberReplacementTarget,
   authorizeRemoteRememberRelations,
+  REMOTE_MEMORY_FEATURE_FLAGS,
+  REMOTE_MEMORY_SCOPES,
   type AuthorizedRemotePrincipal,
   type RemoteMemoryFeatureFlag,
   type RemoteMemoryScope,
 } from '../authorization.js';
+
+const remoteMemoryScopeSet: ReadonlySet<string> = new Set(REMOTE_MEMORY_SCOPES);
+const remoteMemoryFeatureFlagSet: ReadonlySet<string> = new Set(REMOTE_MEMORY_FEATURE_FLAGS);
 import type {CursorWorkloadAttestation} from '../cursor_oidc.js';
 import {RemoteMemoryError, remoteMemoryError} from '../errors.js';
 import {
@@ -99,7 +105,11 @@ import {
   mutationAuthorityValidThrough,
   numeric,
   receipt,
+  resolveCanonicalUri,
 } from './repository_support.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 interface HeadRow {
   readonly canonical_uri: string;
   readonly content_hash: string;
@@ -132,7 +142,7 @@ type OperationReservation =
   {readonly kind: 'execute'; readonly publicationPlan?: StoredRememberPublicationPlanV1} | OperationReplay;
 type TenantTransactionRunner = <A>(
   tenantId: string,
-  use: (transaction: TransactionSql) => Promise<A>,
+  use: (transaction: ISql) => Promise<A>,
   execution?: RemoteMemoryRequestExecution,
 ) => Promise<A>;
 
@@ -483,7 +493,7 @@ export class PostgresRemoteMemoryRepository {
       `;
         const page = rows.slice(0, input.limit);
         return {
-          entries: page.map(head => ({
+          entries: EffectArray.map(page, head => ({
             kind: head.kind,
             modifiedAt: head.updated_at.toISOString(),
             project: head.project,
@@ -563,7 +573,8 @@ export class PostgresRemoteMemoryRepository {
       `;
         const ranked = rows.sort(
           (left, right) =>
-            numeric(right.score) - numeric(left.score) || left.canonical_uri.localeCompare(right.canonical_uri),
+            numeric(right.score) - numeric(left.score) ||
+            Effect.pipe(left.canonical_uri, EffectString.localeCompare(right.canonical_uri)),
         );
         return {authorizedState, limit, ranked};
       },
@@ -710,8 +721,8 @@ export class PostgresRemoteMemoryRepository {
       const memoryId =
         reservation.publicationPlan?.memoryId ??
         (proposalApproval
-          ? `tn_${proposalApproval.proposal.id.replaceAll('-', '')}`
-          : `tn_${randomUuidV4().replaceAll('-', '')}`);
+          ? `tn_${Effect.pipe(proposalApproval.proposal.id, EffectString.replaceAll('-', ''))}`
+          : `tn_${Effect.pipe(randomUuidV4(), EffectString.replaceAll('-', ''))}`);
       const sourceAgentClient =
         proposalApproval?.proposal.approval_source_agent_client ?? (attestation ? 'cursor' : 'remote');
       let document = makeRemoteDocument(
@@ -1120,7 +1131,7 @@ export class PostgresRemoteMemoryRepository {
   }
 
   private async loadTopicHead(
-    transaction: TransactionSql,
+    transaction: ISql,
     principal: AuthorizedRemotePrincipal,
     kind: 'durable' | 'handoff',
     project: string,
@@ -1141,7 +1152,7 @@ export class PostgresRemoteMemoryRepository {
   }
 
   private async loadHeadByUri(
-    transaction: TransactionSql,
+    transaction: ISql,
     principal: AuthorizedRemotePrincipal,
     canonicalUri: string,
     kind: 'durable' | 'handoff',
@@ -1161,14 +1172,14 @@ export class PostgresRemoteMemoryRepository {
   }
 
   private async requireActiveRelationTargets(
-    transaction: TransactionSql,
+    transaction: ISql,
     principal: AuthorizedRemotePrincipal,
     relations: readonly MemoryRelation[] | undefined,
   ): Promise<void> {
     if (!relations?.length) return;
-    const targetUris = [...new Set(relations.map(relation => relation.uri))];
-    const addresses = targetUris.map(uri => parseRemoteShareAddress(uri));
-    const projects = [...new Set(addresses.map(address => address.project))];
+    const targetUris = [...new Set(EffectArray.map(relations, relation => relation.uri))];
+    const addresses = EffectArray.map(targetUris, uri => parseRemoteShareAddress(uri));
+    const projects = [...new Set(EffectArray.map(addresses, address => address.project))];
     await requireShareState(transaction, principal);
     for (const project of projects) requirePrincipalProject(principal, project);
     const activeProjects = await transaction<{name: string}[]>`
@@ -1176,7 +1187,7 @@ export class PostgresRemoteMemoryRepository {
       WHERE tenant_id = ${principal.tenantId} AND share_id = ${principal.shareId}
         AND name = ANY(${transaction.array(projects)}) AND status = 'active'
     `;
-    if (new Set(activeProjects.map(project => project.name)).size !== projects.length) {
+    if (new Set(EffectArray.map(activeProjects, project => project.name)).size !== projects.length) {
       throw remoteMemoryError('forbidden', 'A relation target project is not active in the authorized memory share.');
     }
     const rows = await transaction<{canonical_uri: string}[]>`
@@ -1184,7 +1195,7 @@ export class PostgresRemoteMemoryRepository {
       WHERE tenant_id = ${principal.tenantId} AND share_id = ${principal.shareId}
         AND canonical_uri = ANY(${transaction.array(targetUris)}) AND status = 'active'
     `;
-    if (new Set(rows.map(row => row.canonical_uri)).size !== targetUris.length) {
+    if (new Set(EffectArray.map(rows, row => row.canonical_uri)).size !== targetUris.length) {
       throw remoteMemoryError('invalid_request', 'Relation targets must resolve to active remote memories.');
     }
   }
@@ -1332,7 +1343,7 @@ export class PostgresRemoteMemoryRepository {
   }
 
   private async recordExistingRememberOutcome(
-    transaction: TransactionSql,
+    transaction: ISql,
     input: {
       readonly attestation?: CursorWorkloadAttestation;
       readonly canonicalUri: string;
@@ -1372,7 +1383,7 @@ export class PostgresRemoteMemoryRepository {
   }
 
   private async finishRememberRevision(
-    transaction: TransactionSql,
+    transaction: ISql,
     input: {
       readonly attestation?: CursorWorkloadAttestation;
       readonly authorityValidThrough: number;
@@ -1635,7 +1646,7 @@ export class PostgresRemoteMemoryRepository {
   }
 
   private async recordIdempotentOutcome(
-    transaction: TransactionSql,
+    transaction: ISql,
     principal: AuthorizedRemotePrincipal,
     operationId: string,
     fingerprint: string,
@@ -1685,7 +1696,13 @@ export class PostgresRemoteMemoryRepository {
       `;
       const row = rows[0];
       if (!row) return undefined;
-      const capabilities = new Set(row.capabilities as RemoteMemoryScope[]);
+      const capabilityValues = EffectArray.filter(row.capabilities, (capability): capability is RemoteMemoryScope =>
+        remoteMemoryScopeSet.has(capability),
+      );
+      if (capabilityValues.length !== row.capabilities.length) {
+        throw remoteMemoryError('service_unavailable', 'The Git ingestion grant contains an unsupported capability.');
+      }
+      const capabilities = new Set(capabilityValues);
       return {
         allowedProjects: row.allowed_projects === null ? 'all' : new Set(row.allowed_projects),
         attestationRequiredForWrites: false,
@@ -1693,7 +1710,11 @@ export class PostgresRemoteMemoryRepository {
         cloudAdmissionRequired: false,
         cursorOwnerIds: new Set(),
         cursorSubjects: new Set(),
-        featureFlags: new Set(row.feature_flags as RemoteMemoryFeatureFlag[]),
+        featureFlags: new Set(
+          EffectArray.filter(row.feature_flags, (feature): feature is RemoteMemoryFeatureFlag =>
+            remoteMemoryFeatureFlagSet.has(feature),
+          ),
+        ),
         OAuth: {
           issuer: 'threadnote:git-ingest',
           scopes: capabilities,
@@ -1863,7 +1884,7 @@ export class PostgresRemoteMemoryRepository {
 
   private async withTenant<A>(
     tenantId: string,
-    use: (transaction: TransactionSql) => Promise<A>,
+    use: (transaction: ISql) => Promise<A>,
     execution?: RemoteMemoryRequestExecution,
   ): Promise<A> {
     requireActiveRemoteMemoryRequest(execution);
@@ -1913,24 +1934,20 @@ export class PostgresRemoteMemoryRepository {
   private async withReservedTenant<A>(
     connection: ReservedSql,
     tenantId: string,
-    use: (transaction: TransactionSql) => Promise<A>,
+    use: (transaction: ISql) => Promise<A>,
     execution?: RemoteMemoryRequestExecution,
   ): Promise<A> {
     requireActiveRemoteMemoryRequest(execution);
     await connection.unsafe('BEGIN');
     try {
-      const result = await withRemoteMemoryRequestCancellation(
-        connection as unknown as TransactionSql,
-        execution,
-        async transaction => {
-          const timeout = remoteMemoryDatabaseTimeoutMilliseconds(this.statementTimeoutMilliseconds, execution);
-          await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
-          await transaction`SELECT set_config('statement_timeout', ${String(timeout)}, true)`;
-          await transaction`SELECT set_config('lock_timeout', ${String(timeout)}, true)`;
-          await transaction`SELECT set_config('transaction_timeout', ${String(timeout)}, true)`;
-          return use(transaction);
-        },
-      );
+      const result = await withRemoteMemoryRequestCancellation(connection, execution, async transaction => {
+        const timeout = remoteMemoryDatabaseTimeoutMilliseconds(this.statementTimeoutMilliseconds, execution);
+        await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
+        await transaction`SELECT set_config('statement_timeout', ${String(timeout)}, true)`;
+        await transaction`SELECT set_config('lock_timeout', ${String(timeout)}, true)`;
+        await transaction`SELECT set_config('transaction_timeout', ${String(timeout)}, true)`;
+        return use(transaction);
+      });
       await connection.unsafe('COMMIT');
       return result;
     } catch (cause) {
@@ -1971,29 +1988,4 @@ function operationReservationFromRecord(
   throw remoteMemoryError('service_unavailable', 'The operation outcome is unavailable and will not be re-executed.', {
     reason: 'outcome_ambiguous',
   });
-}
-
-async function resolveCanonicalUri(
-  transaction: TransactionSql,
-  principal: AuthorizedRemotePrincipal,
-  inputUri: string,
-): Promise<string> {
-  try {
-    const address = parseRemoteShareAddress(inputUri);
-    if (address.shareId !== principal.shareId)
-      throw remoteMemoryError('forbidden', 'The URI belongs to another share.');
-    return address.canonicalUri;
-  } catch (cause) {
-    if (cause instanceof Error && cause.name === 'RemoteMemoryError') throw cause;
-  }
-  const aliases = await transaction<{canonical_uri: string}[]>`
-    SELECT canonical_uri FROM remote_memory.uri_aliases
-    WHERE tenant_id = ${principal.tenantId} AND share_id = ${principal.shareId} AND alias_uri = ${inputUri}
-      AND (expires_at IS NULL OR expires_at > now())
-  `;
-  const canonicalUri = aliases[0]?.canonical_uri;
-  if (!canonicalUri || parseRemoteShareAddress(canonicalUri).shareId !== principal.shareId) {
-    throw remoteMemoryError('not_found', 'The remote memory was not found.');
-  }
-  return canonicalUri;
 }

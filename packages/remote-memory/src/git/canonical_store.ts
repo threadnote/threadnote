@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import type {GitWorktreeLock} from './worktree_lock.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {assertSafeRelativePath} from '@threadnote/platform/paths';
@@ -6,6 +8,9 @@ import {remoteMemoryError} from '../errors.js';
 import {randomUuidV4} from '@threadnote/platform/uuid';
 import {trimTrailingCharacters} from '@threadnote/platform/string-boundaries';
 import {requireGitMemoryBinding, type GitMemoryBinding} from './binding.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const GIT_REF_UPDATE_TIMEOUT_MILLISECONDS = 30_000;
 const GIT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -77,9 +82,15 @@ export function gitCanonicalSharePath(kind: 'durable' | 'handoff', project: stri
 export function parseGitCanonicalSharePath(
   relativePath: string,
 ): {readonly kind: 'durable' | 'handoff'; readonly project: string; readonly topic: string} | undefined {
-  const segments = relativePath.split('/');
-  if (segments.length !== 4 || !segments[3]?.endsWith('.md')) return undefined;
-  const topic = segments[3].slice(0, -'.md'.length);
+  const segments = Effect.pipe(relativePath, EffectString.split('/'));
+  if (
+    segments.length !== 4 ||
+    !Effect.pipe(segments[3], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.endsWith('.md')),
+    )
+  )
+    return undefined;
+  const topic = Effect.pipe(segments[3], EffectString.slice(0, -'.md'.length));
   try {
     const project = validatePortableSegment(segments[2]);
     const parsedTopic = validatePortableSegment(topic);
@@ -110,7 +121,7 @@ export function gitIngestProjectsToEnsure(input: {
 }
 
 export function isAbsoluteGitWorktree(path: string): boolean {
-  return path.startsWith('/') || /^[A-Za-z]:[\\/]/u.test(path);
+  return Effect.pipe(path, EffectString.startsWith('/')) || /^[A-Za-z]:[\\/]/u.test(path);
 }
 
 export class GitCanonicalMemoryStore {
@@ -126,13 +137,23 @@ export class GitCanonicalMemoryStore {
   constructor(options: GitCanonicalMemoryStoreOptions) {
     this.expectedRemoteUrl = options.expectedRemoteUrl;
     if (options.binding) this.binding = requireGitMemoryBinding(options.binding);
-    const worktree = options.worktree.trim();
+    const worktree = Effect.pipe(options.worktree, EffectString.trim);
     if (!worktree || !isAbsoluteGitWorktree(worktree)) {
       throw remoteMemoryError('invalid_request', 'THREADNOTE_REMOTE_MEMORY_GIT_WORKTREE must be an absolute path.');
     }
     this.worktree = trimTrailingCharacters(worktree, '/\\');
-    this.branch = requireGitRefName(options.branch?.trim() || 'main', 'THREADNOTE_REMOTE_MEMORY_GIT_BRANCH');
-    this.remote = requireGitRefName(options.remote?.trim() || 'origin', 'THREADNOTE_REMOTE_MEMORY_GIT_REMOTE');
+    this.branch = requireGitRefName(
+      Effect.pipe(options.branch, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) || 'main',
+      'THREADNOTE_REMOTE_MEMORY_GIT_BRANCH',
+    );
+    this.remote = requireGitRefName(
+      Effect.pipe(options.remote, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) || 'origin',
+      'THREADNOTE_REMOTE_MEMORY_GIT_REMOTE',
+    );
     this.push = options.push !== false;
     this.worktreeLock = options.worktreeLock;
   }
@@ -218,7 +239,7 @@ export class GitCanonicalMemoryStore {
       throw remoteMemoryError('service_unavailable', 'git is not available on the composer.');
     }
     const inside = await this.git(['rev-parse', '--is-inside-work-tree'], true);
-    if (inside.exitCode !== 0 || inside.stdout.trim() !== 'true') {
+    if (inside.exitCode !== 0 || Effect.pipe(inside.stdout, EffectString.trim) !== 'true') {
       throw remoteMemoryError('service_unavailable', 'THREADNOTE_REMOTE_MEMORY_GIT_WORKTREE is not a git worktree.');
     }
     const writable = await runProcess(['test', '-w', this.worktree], true);
@@ -231,7 +252,7 @@ export class GitCanonicalMemoryStore {
   async assertLiveShare(): Promise<void> {
     await this.assertReady();
     const head = await this.git(['rev-parse', '--verify', 'HEAD'], true);
-    if (head.exitCode !== 0 || !head.stdout.trim()) {
+    if (head.exitCode !== 0 || !Effect.pipe(head.stdout, EffectString.trim)) {
       throw remoteMemoryError(
         'service_unavailable',
         'THREADNOTE_REMOTE_MEMORY_GIT_WORKTREE has no commits; clone the live team share.',
@@ -303,7 +324,15 @@ export class GitCanonicalMemoryStore {
 
   private async listCanonicalPathsExclusive(): Promise<readonly GitCanonicalListedPath[]> {
     const snapshot = await this.snapshotExclusive();
-    return snapshot.paths.filter(path => path.readable).map(({readable: _readable, ...path}) => path);
+    return EffectArray.map(
+      EffectArrayPipe(snapshot.paths, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (path, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && path.readable,
+        ),
+      ),
+      ({readable: _readable, ...path}) => path,
+    );
   }
 
   private async snapshotExclusive(): Promise<GitCanonicalSnapshot> {
@@ -325,7 +354,7 @@ export class GitCanonicalMemoryStore {
     if (listed.exitCode !== 0) {
       throw remoteMemoryError(
         'service_unavailable',
-        `git ls-tree failed: ${listed.stderr.trim() || listed.stdout.trim() || 'unknown error'}`,
+        `git ls-tree failed: ${Effect.pipe(listed.stderr, EffectString.trim) || Effect.pipe(listed.stdout, EffectString.trim) || 'unknown error'}`,
       );
     }
     return parseLsTreeBlobs(listed.stdout);
@@ -338,9 +367,9 @@ export class GitCanonicalMemoryStore {
       const environment = {GIT_INDEX_FILE: joinAbsolute(temporary, 'index')};
       const run = (args: readonly string[], stdin?: string) => runGit(this.worktree, args, false, {environment, stdin});
       await run(['read-tree', base]);
-      const blob = (await run(['hash-object', '-w', '--stdin'], input.content)).stdout.trim();
+      const blob = Effect.pipe((await run(['hash-object', '-w', '--stdin'], input.content)).stdout, EffectString.trim);
       await run(['update-index', '--add', '--cacheinfo', '100644', blob, gitPath]);
-      const tree = (await run(['write-tree'])).stdout.trim();
+      const tree = Effect.pipe((await run(['write-tree'])).stdout, EffectString.trim);
       return requireGitCommit(
         (
           await run(
@@ -356,7 +385,7 @@ export class GitCanonicalMemoryStore {
 
   private async assertCleanBranch(): Promise<void> {
     const branch = await this.git(['symbolic-ref', '--quiet', 'HEAD'], true);
-    if (branch.exitCode !== 0 || branch.stdout.trim() !== `refs/heads/${this.branch}`) {
+    if (branch.exitCode !== 0 || Effect.pipe(branch.stdout, EffectString.trim) !== `refs/heads/${this.branch}`) {
       throw remoteMemoryError('conflict', 'The composer git worktree is not on its configured branch.', {
         reason: 'git_wrong_branch',
       });
@@ -418,7 +447,7 @@ export class GitCanonicalMemoryStore {
     if (!this.expectedRemoteUrl) return;
     for (const direction of [[], ['--push']]) {
       const result = await this.git(['remote', 'get-url', '--all', ...direction, this.remote], true);
-      const endpoints = result.stdout.trim().split('\n');
+      const endpoints = Effect.pipe(result.stdout, EffectString.trim, EffectString.split('\n'));
       if (result.exitCode !== 0 || endpoints.length !== 1 || endpoints[0] !== this.expectedRemoteUrl) {
         throw remoteMemoryError(
           'service_unavailable',
@@ -447,7 +476,7 @@ export class GitCanonicalMemoryStore {
 
   private async headCommit(): Promise<string> {
     const parsed = await this.git(['rev-parse', 'HEAD'], true);
-    const commit = parsed.stdout.trim();
+    const commit = Effect.pipe(parsed.stdout, EffectString.trim);
     if (parsed.exitCode !== 0 || !/^[0-9a-f]{40,64}$/u.test(commit)) {
       throw remoteMemoryError('service_unavailable', 'The composer git HEAD could not be resolved.');
     }
@@ -468,7 +497,7 @@ export class GitCanonicalMemoryStore {
 
   private async absoluteGitDir(): Promise<string> {
     const parsed = await this.git(['rev-parse', '--absolute-git-dir'], true);
-    const gitDir = parsed.stdout.trim();
+    const gitDir = Effect.pipe(parsed.stdout, EffectString.trim);
     if (parsed.exitCode !== 0 || !gitDir || !isAbsoluteGitWorktree(gitDir)) {
       throw remoteMemoryError('service_unavailable', 'The composer git directory could not be resolved.');
     }
@@ -484,7 +513,7 @@ export class GitCanonicalMemoryStore {
 }
 
 async function assertContainedWorktreePath(worktree: string, relativePath: string): Promise<void> {
-  const segments = requireSafeGitPath(relativePath).split('/');
+  const segments = Effect.pipe(requireSafeGitPath(relativePath), EffectString.split('/'));
   let current = worktree;
   for (const segment of segments) {
     current = joinAbsolute(current, segment);
@@ -501,11 +530,15 @@ async function isSymlink(path: string): Promise<boolean> {
 
 function parseLsTreeBlobs(stdout: string, includeUnsupported = false): Map<string, string> {
   const blobs = new Map<string, string>();
-  for (const record of stdout.split('\0').filter(Boolean)) {
-    const tab = record.indexOf('\t');
+  for (const record of EffectArray.filter(Effect.pipe(stdout, EffectString.split('\0')), Boolean)) {
+    const tab = Effect.pipe(
+      record,
+      EffectString.indexOf('\t'),
+      Effect.Option.getOrElse(() => -1),
+    );
     if (tab < 0) continue;
-    const meta = record.slice(0, tab).split(' ');
-    const gitPath = record.slice(tab + 1);
+    const meta = Effect.pipe(record, EffectString.slice(0, tab), EffectString.split(' '));
+    const gitPath = Effect.pipe(record, EffectString.slice(tab + 1));
     const blobId = meta[2];
     if (
       (!includeUnsupported && (!['100644', '100755'].includes(meta[0] ?? '') || meta[1] !== 'blob')) ||
@@ -521,9 +554,9 @@ function parseLsTreeBlobs(stdout: string, includeUnsupported = false): Map<strin
 function requireGitRefName(value: string, name: string): string {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(value) ||
-    value.startsWith('-') ||
-    value.includes(':') ||
-    value.includes('..')
+    Effect.pipe(value, EffectString.startsWith('-')) ||
+    Effect.pipe(value, EffectString.includes(':')) ||
+    Effect.pipe(value, EffectString.includes('..'))
   ) {
     throw remoteMemoryError('invalid_request', `${name} must be a safe git refname.`);
   }
@@ -539,7 +572,7 @@ function requireSafeGitPath(path: string): string {
 }
 
 function requireGitCommit(commit: string): string {
-  const value = commit.trim();
+  const value = Effect.pipe(commit, EffectString.trim);
   if (!/^[0-9a-f]{40,64}$/u.test(value)) {
     throw remoteMemoryError('invalid_request', 'The git commit pointer is malformed.');
   }
@@ -547,9 +580,10 @@ function requireGitCommit(commit: string): string {
 }
 
 function joinAbsolute(root: string, ...segments: string[]): string {
-  const trimmed = root.replace(/[\\/]+$/u, '');
-  const separator = trimmed.includes('\\') && !trimmed.includes('/') ? '\\' : '/';
-  return [trimmed, ...segments].join(separator);
+  const trimmed = Effect.pipe(root, EffectString.replace(/[\\/]+$/u, ''));
+  const separator =
+    Effect.pipe(trimmed, EffectString.includes('\\')) && !Effect.pipe(trimmed, EffectString.includes('/')) ? '\\' : '/';
+  return EffectArray.join([trimmed, ...segments], separator);
 }
 
 export interface LiveGitShareWorktreeOptions {
@@ -561,13 +595,23 @@ export interface LiveGitShareWorktreeOptions {
 }
 
 export async function ensureLiveGitShareWorktree(options: LiveGitShareWorktreeOptions): Promise<string> {
-  const worktree = trimTrailingCharacters(options.worktree.trim(), '/\\');
+  const worktree = trimTrailingCharacters(Effect.pipe(options.worktree, EffectString.trim), '/\\');
   if (!worktree || !isAbsoluteGitWorktree(worktree)) {
     throw remoteMemoryError('invalid_request', 'THREADNOTE_REMOTE_MEMORY_GIT_WORKTREE must be an absolute path.');
   }
-  const branch = requireGitRefName(options.branch?.trim() || 'main', 'THREADNOTE_REMOTE_MEMORY_GIT_BRANCH');
-  const remoteName = requireGitRefName(options.remoteName?.trim() || 'origin', 'THREADNOTE_REMOTE_MEMORY_GIT_REMOTE');
-  const cloneUrl = options.cloneUrl.trim();
+  const branch = requireGitRefName(
+    Effect.pipe(options.branch, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) || 'main',
+    'THREADNOTE_REMOTE_MEMORY_GIT_BRANCH',
+  );
+  const remoteName = requireGitRefName(
+    Effect.pipe(options.remoteName, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) || 'origin',
+    'THREADNOTE_REMOTE_MEMORY_GIT_REMOTE',
+  );
+  const cloneUrl = Effect.pipe(options.cloneUrl, EffectString.trim);
   if (!cloneUrl) {
     throw remoteMemoryError('invalid_request', 'The live team git remote is required.');
   }
@@ -592,35 +636,41 @@ export function gitRemoteUrlsMatch(left: string, right: string): boolean {
 }
 
 export function normalizeGitRemoteUrl(value: string): string {
-  const trimmed = value.trim().replaceAll('\\', '/');
+  const trimmed = Effect.pipe(value, EffectString.trim, EffectString.replaceAll('\\', '/'));
   if (!trimmed) return '';
-  const stripped = trimmed.replace(/\.git$/u, '').replace(/\/+$/u, '');
-  if (stripped.startsWith('/') || /^[A-Za-z]:\//u.test(stripped)) {
-    return stripped.toLowerCase();
+  const stripped = Effect.pipe(trimmed, EffectString.replace(/\.git$/u, ''), EffectString.replace(/\/+$/u, ''));
+  if (Effect.pipe(stripped, EffectString.startsWith('/')) || /^[A-Za-z]:\//u.test(stripped)) {
+    return Effect.pipe(stripped, EffectString.toLowerCase);
   }
   const scp = /^[^:/]+@([^:]+):(.+)$/u.exec(stripped);
-  if (scp && !stripped.includes('://')) {
-    return `${scp[1].toLowerCase()}/${scp[2].replace(/^\/+/u, '')}`;
+  if (scp && !Effect.pipe(stripped, EffectString.includes('://'))) {
+    return `${Effect.pipe(scp[1], EffectString.toLowerCase)}/${Effect.pipe(scp[2], EffectString.replace(/^\/+/u, ''))}`;
   }
   try {
     const parsed = new URL(stripped);
     if (parsed.protocol === 'file:') {
-      return decodeURIComponent(parsed.pathname).replace(/\/+$/u, '').toLowerCase();
+      return Effect.pipe(
+        decodeURIComponent(parsed.pathname),
+        EffectString.replace(/\/+$/u, ''),
+        EffectString.toLowerCase,
+      );
     }
-    const host = parsed.hostname.toLowerCase();
-    const path = parsed.pathname
-      .replace(/^\/+/u, '')
-      .replace(/\/+$/u, '')
-      .replace(/\.git$/u, '');
+    const host = Effect.pipe(parsed.hostname, EffectString.toLowerCase);
+    const path = Effect.pipe(
+      parsed.pathname,
+      EffectString.replace(/^\/+/u, ''),
+      EffectString.replace(/\/+$/u, ''),
+      EffectString.replace(/\.git$/u, ''),
+    );
     return path ? `${host}/${path}` : host;
   } catch {
-    return stripped.toLowerCase();
+    return Effect.pipe(stripped, EffectString.toLowerCase);
   }
 }
 
 async function assertWorktreeRemoteMatches(worktree: string, remoteName: string, cloneUrl: string): Promise<void> {
   const result = await runGit(worktree, ['remote', 'get-url', remoteName], true);
-  if (result.exitCode !== 0 || !gitRemoteUrlsMatch(result.stdout.trim(), cloneUrl)) {
+  if (result.exitCode !== 0 || !gitRemoteUrlsMatch(Effect.pipe(result.stdout, EffectString.trim), cloneUrl)) {
     throw remoteMemoryError('invalid_request', 'The existing git worktree remote does not match the live team share.');
   }
 }
@@ -643,12 +693,23 @@ async function cloneLiveShare(cloneUrl: string, worktree: string, branch: string
 
 async function isEmptyDirectory(path: string): Promise<boolean> {
   const listing = await runProcess(['ls', '-A', path], true, 'ls');
-  return listing.exitCode === 0 && listing.stdout.trim().length === 0;
+  return listing.exitCode === 0 && Effect.pipe(listing.stdout, EffectString.trim).length === 0;
 }
 
 function parentDirectory(path: string): string {
-  const index = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-  return index <= 0 ? path : path.slice(0, index);
+  const index = Math.max(
+    Effect.pipe(
+      path,
+      EffectString.lastIndexOf('/'),
+      Effect.Option.getOrElse(() => -1),
+    ),
+    Effect.pipe(
+      path,
+      EffectString.lastIndexOf('\\'),
+      Effect.Option.getOrElse(() => -1),
+    ),
+  );
+  return index <= 0 ? path : Effect.pipe(path, EffectString.slice(0, index));
 }
 
 function runGit(
@@ -675,7 +736,11 @@ async function runProcess(
   try {
     child = Bun.spawn({
       cmd: options?.environment
-        ? ['env', ...Object.entries(options.environment).map(([key, value]) => `${key}=${value}`), ...command]
+        ? [
+            'env',
+            ...EffectArray.map(EffectRecord.toEntries(options.environment), ([key, value]) => `${key}=${value}`),
+            ...command,
+          ]
         : [...command],
       stderr: 'pipe',
       stdin: options?.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
@@ -708,7 +773,7 @@ async function runProcess(
     if (!allowFailure && exitCode !== 0) {
       throw remoteMemoryError(
         'service_unavailable',
-        `${label} failed: ${(stderr || stdout).trim() || 'unknown error'}`,
+        `${label} failed: ${Effect.pipe(stderr || stdout, EffectString.trim) || 'unknown error'}`,
       );
     }
     return {exitCode, stderr, stdout};

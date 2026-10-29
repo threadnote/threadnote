@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_INVENTORY_ADMISSION_POLICY_VERSION} from '../inventory/policy.js';
 import {codeGraphLanguagePackProvenance, type CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
 import {compareCodeUnits} from '../ordering.js';
@@ -38,15 +39,16 @@ export function codeGraphCheckpointAbiInputV1(
     checkpointSemanticVersion: CODE_GRAPH_CHECKPOINT_SEMANTIC_VERSION,
     graphSchemaVersion: CODE_GRAPH_SCHEMA_VERSION,
     inventoryPolicyVersion: CODE_GRAPH_INVENTORY_ADMISSION_POLICY_VERSION,
-    languagePacks: [...languagePacks]
-      .sort((left, right) => compareCodeUnits(left.id, right.id))
-      .map(pack => ({
+    languagePacks: EffectArray.map(
+      [...languagePacks].sort((left, right) => compareCodeUnits(left.id, right.id)),
+      pack => ({
         cacheIdentity: pack.cacheIdentity,
         derivationIdentity: pack.derivationIdentity,
         id: pack.id,
         resolutionDomain: pack.resolutionDomain,
         resolutionVersion: pack.resolutionVersion,
-      })),
+      }),
+    ),
     lexicalLogicalFormatVersion: CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION,
     pathPolicy: CODE_GRAPH_CHECKPOINT_PATH_POLICY,
     referenceResolutionVersion: CODE_GRAPH_CHECKPOINT_REFERENCE_RESOLUTION_VERSION,
@@ -63,15 +65,17 @@ export function inspectCodeGraphCheckpointCompatibilityV1(
   actual: CodeGraphCheckpointAbiInputV1,
   registry: CodeGraphLanguagePackRegistryShape,
 ): CodeGraphCheckpointCompatibilityV1 {
-  const available = new Map(registry.packs.map(pack => [pack.id, codeGraphLanguagePackProvenance(pack)]));
-  const unavailablePackIds = actual.languagePacks
-    .map(pack => pack.id)
-    .filter(id => !available.has(id))
-    .sort(compareCodeUnits);
+  const available = new Map(EffectArray.map(registry.packs, pack => [pack.id, codeGraphLanguagePackProvenance(pack)]));
+  const unavailablePackIds = EffectArray.filter(
+    EffectArray.map(actual.languagePacks, pack => pack.id),
+    id => !available.has(id),
+  ).sort(compareCodeUnits);
   if (unavailablePackIds.length > 0) {
     return {code: 'language-pack-unavailable', compatible: false, unavailablePackIds};
   }
-  const expected = codeGraphCheckpointAbiInputV1(actual.languagePacks.map(pack => available.get(pack.id)!));
+  const expected = codeGraphCheckpointAbiInputV1(
+    EffectArray.map(actual.languagePacks, pack => available.get(pack.id)!),
+  );
   return canonicalJson(actual) === canonicalJson(expected)
     ? {compatible: true, expected}
     : {code: 'abi-mismatch', compatible: false, expected};

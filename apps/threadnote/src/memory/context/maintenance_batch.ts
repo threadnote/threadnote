@@ -1,3 +1,6 @@
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {Clock, DateTime, Effect, FileSystem, Option, Path, Result} from 'effect';
 import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
@@ -22,6 +25,9 @@ import {
 import type {ContextMaintenanceCaseV2} from './maintenance.js';
 import {maintenanceCitationAdmissionCurrent, recordSourceRevision} from './maintenance_source.js';
 import {readContextMaintenanceCanonicalRecord} from './maintenance_inventory.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Inventory records omit bodies; reviewed authority is selected only after its exact canonical reread. */
 export const readMaintenanceInventorySubjects = Effect.fn('contextMaintenance.inventorySubjects')(function* (
@@ -62,7 +68,8 @@ export const MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT = 8;
 export function planMaintenanceWorkerBatches<T extends MaintenanceWorkerTask>(tasks: readonly T[]) {
   const groups: (T & MaintenanceWorkerTask)[][] = [];
   const current = new Map<string, (T & MaintenanceWorkerTask)[]>();
-  const slices = tasks.flatMap(task => {
+  const slices = EffectArray.flatMap(tasks, (task, __effectFlatMapIndex) => {
+    if (!(__effectFlatMapIndex in tasks)) return [];
     const citations = maintenanceTaskCitations(task, task.record);
     const parts: (typeof citations)[number][][] = [];
     for (const citation of citations) {
@@ -70,24 +77,26 @@ export function planMaintenanceWorkerBatches<T extends MaintenanceWorkerTask>(ta
       if (
         part === undefined ||
         part.length >= MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT ||
-        new Set([...part, citation].map(item => `${item.repositoryId}:${item.sourceCommit}`)).size >
+        new Set(EffectArray.map([...part, citation], item => `${item.repositoryId}:${item.sourceCommit}`)).size >
           MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT
       )
         parts.push([citation]);
       else part.push(citation);
     }
-    return parts.map(part => (parts.length === 1 ? task : {...task, citationIds: part.map(citation => citation.id)}));
+    return EffectArray.map(parts, part =>
+      parts.length === 1 ? task : {...task, citationIds: EffectArray.map(part, citation => citation.id)},
+    );
   });
   for (const task of slices) {
     const citations = maintenanceTaskCitations(task, task.record);
     if (citations.length === 0) continue;
     const previous = current.get(task.project);
     const together = previous === undefined ? [] : [...previous, task];
-    const anchors = together.flatMap(item => maintenanceTaskCitations(item, item.record));
+    const anchors = EffectArray.flatMap(together, item => maintenanceTaskCitations(item, item.record));
     if (
       previous === undefined ||
       anchors.length > MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT ||
-      new Set(anchors.map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size >
+      new Set(EffectArray.map(anchors, citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size >
         MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT
     ) {
       const group = [task];
@@ -102,32 +111,38 @@ function maintenanceTaskCitations(task: MaintenanceWorkerTask, record: MemoryRec
   const citations = currentMemoryCodeCitations(record).slice(task.chunk * 64, (task.chunk + 1) * 64);
   return task.citationIds === undefined
     ? citations
-    : citations.filter(citation => task.citationIds!.includes(citation.id));
+    : EffectArray.filter(
+        citations,
+        (citation, __effectArrayIndex2) => __effectArrayIndex2 in citations && task.citationIds!.includes(citation.id),
+      );
 }
 
 export function mergeMaintenanceWorkerEvidence(
   left: MaintenanceWorkerEvidence,
   right: MaintenanceWorkerEvidence,
 ): MaintenanceWorkerEvidence {
-  const records = [...new Set([...left.records, ...right.records].map(record => record.uri))].map(uri => {
-    const first = left.records.find(record => record.uri === uri);
-    const second = right.records.find(record => record.uri === uri);
-    const record = second ?? first!;
-    return {
-      ...record,
-      metadata: {
-        ...record.metadata,
-        codeCitations: [
-          ...new Map(
-            [...(first?.metadata.codeCitations ?? []), ...(second?.metadata.codeCitations ?? [])].map(citation => [
-              citation.id,
-              citation,
-            ]),
-          ).values(),
-        ],
-      },
-    };
-  });
+  const records = EffectArray.map(
+    [...new Set(EffectArray.map([...left.records, ...right.records], record => record.uri))],
+    uri => {
+      const first = Option.getOrUndefined(EffectArray.findFirst(left.records, record => record.uri === uri));
+      const second = Option.getOrUndefined(EffectArray.findFirst(right.records, record => record.uri === uri));
+      const record = second ?? first!;
+      return {
+        ...record,
+        metadata: {
+          ...record.metadata,
+          codeCitations: [
+            ...new Map(
+              EffectArray.map(
+                [...(first?.metadata.codeCitations ?? []), ...(second?.metadata.codeCitations ?? [])],
+                citation => [citation.id, citation],
+              ),
+            ).values(),
+          ],
+        },
+      };
+    },
+  );
   const before = left.observation,
     after = right.observation;
   const compatible =
@@ -136,20 +151,22 @@ export function mergeMaintenanceWorkerEvidence(
     before.sourceEpoch === after.sourceEpoch &&
     before.memoryGeneration !== undefined &&
     after.memoryGeneration !== undefined &&
-    Object.entries(before.association.bySelector).every(
+    EffectArray.every(
+      EffectRecord.toEntries(before.association.bySelector),
       ([selector, epoch]) =>
         after.association.bySelector[selector] === undefined || after.association.bySelector[selector] === epoch,
     ) &&
-    Object.entries(before.association.sourceEpochs).every(
+    EffectArray.every(
+      EffectRecord.toEntries(before.association.sourceEpochs),
       ([root, epoch]) =>
         after.association.sourceEpochs[root] === undefined || after.association.sourceEpochs[root] === epoch,
     ) &&
-    left.records.every(record =>
-      right.records.every(next => next.uri !== record.uri || next.content === record.content),
+    EffectArray.every(left.records, record =>
+      EffectArray.every(right.records, next => next.uri !== record.uri || next.content === record.content),
     );
-  const bySelector = Object.fromEntries(
-    Object.entries({...before?.association.bySelector, ...after?.association.bySelector}).sort(([a], [b]) =>
-      a.localeCompare(b),
+  const bySelector = EffectRecord.fromEntries(
+    EffectRecord.toEntries({...before?.association.bySelector, ...after?.association.bySelector}).sort(([a], [b]) =>
+      Effect2.pipe(a, EffectString.localeCompare(b)),
     ),
   );
   const observation = !compatible
@@ -157,21 +174,28 @@ export function mergeMaintenanceWorkerEvidence(
     : {
         ...after,
         association: {
-          epoch: sha256HexSync(JSON.stringify([Object.keys(bySelector).length, bySelector])),
+          epoch: sha256HexSync(JSON.stringify([EffectRecord.keys(bySelector).length, bySelector])),
           bySelector,
           roots: [...new Set([...before.association.roots, ...after.association.roots])],
           sourceEpochs: {...before.association.sourceEpochs, ...after.association.sourceEpochs},
         },
       };
-  const validations = [...new Set([...left.validations, ...right.validations].map(validation => validation.uri))].map(
+  const validations = EffectArray.map(
+    [...new Set(EffectArray.map([...left.validations, ...right.validations], validation => validation.uri))],
     uri => ({
       uri,
       receipts: [
         ...new Map(
-          [...left.validations, ...right.validations]
-            .filter(validation => validation.uri === uri)
-            .flatMap(validation => validation.receipts)
-            .map(receipt => [receipt.citationId, receipt]),
+          EffectArray.map(
+            EffectArray.flatMap(
+              EffectArray.filter<ContextBriefMemoryCitationValidationV2>(
+                [...left.validations, ...right.validations],
+                validation => validation.uri === uri,
+              ),
+              validation => validation.receipts,
+            ),
+            receipt => [receipt.citationId, receipt],
+          ),
         ).values(),
       ],
     }),
@@ -188,12 +212,13 @@ export const readMaintenanceWorkerSubjectGeneration = Effect.fn('contextMaintena
   const before = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
   const current = yield* readMemoryRecordsByUri(
     config,
-    records.map(record => record.uri),
+    EffectArray.map(records, record => record.uri),
   );
   const after = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
   return before === after &&
-    records.every(record =>
-      current.some(
+    EffectArray.every(records, record =>
+      EffectArray.some(
+        current,
         next => next.uri === record.uri && next.metadata.status === 'active' && next.content === record.content,
       ),
     )
@@ -208,24 +233,25 @@ export const collectMaintenanceWorkerBatch = Effect.fn('contextMaintenance.worke
   skip?: (record: MemoryRecord, observation: ContextMaintenanceWorkerObservation) => Effect.Effect<boolean, unknown, R>,
 ) {
   const project = tasks[0].project;
-  const current = yield* readMemoryRecordsByUri(config, [...new Set(tasks.map(task => task.record.uri))]);
-  const records = current.map(record => ({
+  const current = yield* readMemoryRecordsByUri(config, [...new Set(EffectArray.map(tasks, task => task.record.uri))]);
+  const records = EffectArray.map(current, record => ({
     ...record,
     metadata: {
       ...record.metadata,
-      codeCitations: tasks
-        .filter(task => task.record.uri === record.uri)
-        .flatMap(task => maintenanceTaskCitations(task, record)),
+      codeCitations: EffectArray.flatMap(
+        EffectArray.filter<MaintenanceWorkerTask>(tasks, task => task.record.uri === record.uri),
+        task => maintenanceTaskCitations(task, record),
+      ),
     },
   }));
-  const candidates = records.map(record => ({
+  const candidates = EffectArray.map(records, record => ({
     codeCitations: record.metadata.codeCitations ?? [],
     uri: record.uri,
   }));
-  const citations = records.flatMap(record => record.metadata.codeCitations ?? []);
+  const citations = EffectArray.flatMap(records, record => record.metadata.codeCitations ?? []);
   if (
     citations.length > MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT ||
-    new Set(citations.map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size >
+    new Set(EffectArray.map(citations, citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size >
       MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT
   )
     return {project, cwd, records, validations: [], observation: undefined} satisfies MaintenanceWorkerEvidence;
@@ -233,7 +259,7 @@ export const collectMaintenanceWorkerBatch = Effect.fn('contextMaintenance.worke
     const association = yield* readContextMaintenanceCitationAssociation(
       config,
       cwd,
-      records.flatMap(record => record.metadata.codeCitations ?? []),
+      EffectArray.flatMap(records, record => record.metadata.codeCitations ?? []),
     );
     const sourceEpoch = association.sourceEpochs[cwd] ?? (yield* readContextMaintenanceSourceEpoch(config, cwd));
     const memoryGeneration = yield* readCanonicalMutationGeneration(
@@ -301,10 +327,14 @@ export const prepareMaintenanceWorkerBatches = Effect.fn('contextMaintenance.pre
     const root = roots.get(group[0].project) ?? cwd;
     const batch = yield* collectMaintenanceWorkerBatch(config, group, root, (record, observation) =>
       Effect.gen(function* () {
-        const checks = group.filter(task => task.record.uri === record.uri).map(task => checkpoints[task.key]);
-        if (checks.some(check => !maintenanceCitationAdmissionCurrent(record, check))) return false;
+        const checks = EffectArray.map(
+          EffectArray.filter(group, task => task.record.uri === record.uri),
+          task => checkpoints[task.key],
+        );
+        if (EffectArray.some(checks, check => !maintenanceCitationAdmissionCurrent(record, check))) return false;
         if (
-          !checks.every(
+          !EffectArray.every(
+            checks,
             check =>
               check?.memoryHash === sha256HexSync(canonicalMemoryDocumentContent(record.content)) &&
               check.sourceEpoch === observation.sourceEpoch &&
@@ -313,18 +343,19 @@ export const prepareMaintenanceWorkerBatches = Effect.fn('contextMaintenance.pre
         )
           return false;
         if (
-          ![...cases.values()].some(
+          !EffectArray.some(
+            [...cases.values()],
             item =>
               item.project === group[0].project &&
               item.disposition === 'waiting-evidence' &&
               item.memoryId === (record.metadata.memoryId ?? record.uri) &&
               ((item.nextAttemptAt !== undefined && item.nextAttemptAt > now) ||
-                checks.some(check => item.wake?.revision === check.revision)),
+                EffectArray.some(checks, check => item.wake?.revision === check.revision)),
           )
         )
           return false;
         const revision = yield* recordSourceRevision(config, record, root, observation.association);
-        return checks.every(check => check.sourceRevision === revision);
+        return EffectArray.every(checks, check => check.sourceRevision === revision);
       }),
     );
     batches.push(batch);
@@ -339,17 +370,34 @@ export const prepareMaintenanceWorkerBatches = Effect.fn('contextMaintenance.pre
 });
 
 export function maintenanceWorkerRecordValidations(evidence: MaintenanceWorkerEvidence, record: MemoryRecord) {
-  const original = evidence.records.find(original => original.uri === record.uri);
+  const original = Option.getOrUndefined(
+    EffectArray.findFirst(evidence.records, original => original.uri === record.uri),
+  );
   if (
     evidence.observation === undefined ||
     original?.content !== record.content ||
     (record.metadata.project ?? 'unscoped') !== evidence.project
   )
     return [];
-  const ids = new Set(currentMemoryCodeCitations(record).map(citation => citation.id));
-  return evidence.validations
-    .filter(validation => validation.uri === record.uri)
-    .map(validation => ({...validation, receipts: validation.receipts.filter(receipt => ids.has(receipt.citationId))}));
+  const ids = new Set(EffectArray.map(currentMemoryCodeCitations(record), citation => citation.id));
+  return EffectArray.map(
+    EffectArrayPipe(evidence.validations, __effectFilterValues =>
+      EffectArray.filter(
+        __effectFilterValues,
+        (validation, __effectFilterIndex) =>
+          __effectFilterIndex in __effectFilterValues && validation.uri === record.uri,
+      ),
+    ),
+    validation => ({
+      ...validation,
+      receipts: EffectArrayPipe(validation.receipts, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (receipt, __effectArrayIndex3) => __effectArrayIndex3 in __effectArrayValues && ids.has(receipt.citationId),
+        ),
+      ),
+    }),
+  );
 }
 
 export function maintenanceWorkerCheckpointReusable(
@@ -371,9 +419,14 @@ export function maintenanceWorkerCheckpointReusable(
   const observedCitations =
     evidence === undefined
       ? 0
-      : maintenanceWorkerRecordValidations(evidence, record)
-          .flatMap(validation => validation.receipts)
-          .filter(receipt => receipt.status !== 'unknown' || receipt.provenance === 'historical-verified').length;
+      : EffectArray.filter(
+          EffectArrayPipe(maintenanceWorkerRecordValidations(evidence, record), __effectArrayValues2 =>
+            EffectArray.flatMap(__effectArrayValues2, (validation, __effectArrayIndex4) =>
+              __effectArrayIndex4 in __effectArrayValues2 ? validation.receipts : [],
+            ),
+          ),
+          receipt => receipt.status !== 'unknown' || receipt.provenance === 'historical-verified',
+        ).length;
   return (
     check?.revision === revision &&
     observedCitations <= (check.checkedCitations ?? 0) &&
@@ -390,7 +443,11 @@ export const maintenanceWorkerBatchCurrent = Effect.fn('contextMaintenance.worke
   const association = yield* readContextMaintenanceCitationAssociation(
     config,
     evidence.cwd,
-    evidence.records.flatMap(record => record.metadata.codeCitations ?? []),
+    EffectArrayPipe(evidence.records, __effectArrayValues2 =>
+      EffectArray.flatMap(__effectArrayValues2, (record, __effectArrayIndex4) =>
+        __effectArrayIndex4 in __effectArrayValues2 ? (record.metadata.codeCitations ?? []) : [],
+      ),
+    ),
   );
   const source =
     association.sourceEpochs[evidence.cwd] ?? (yield* readContextMaintenanceSourceEpoch(config, evidence.cwd));
@@ -404,7 +461,13 @@ export const maintenanceWorkerBatchCurrent = Effect.fn('contextMaintenance.worke
 
 export function selectRequestedMaintenanceUris(uris: readonly string[], cursor: string | undefined, limit: number) {
   const ordered = [...new Set(uris)].sort();
-  const following = cursor === undefined ? -1 : ordered.findIndex(uri => uri > cursor);
+  const following =
+    cursor === undefined
+      ? -1
+      : Option.getOrElse(
+          EffectArray.findFirstIndex(ordered, uri => uri > cursor),
+          () => -1,
+        );
   const after = following < 0 ? 0 : following;
   return [...ordered.slice(after), ...ordered.slice(0, after)].slice(0, limit);
 }
@@ -412,7 +475,10 @@ export function selectRequestedMaintenanceUris(uris: readonly string[], cursor: 
 export function selectRelationBoundedMaintenanceWindow<T extends {readonly record: MemoryRecord}>(
   candidates: readonly T[],
 ): readonly T[] {
-  const relation = candidates.findIndex(task => (task.record.metadata.relations?.length ?? 0) > 0);
+  const relation = Option.getOrElse(
+    EffectArray.findFirstIndex(candidates, task => (task.record.metadata.relations?.length ?? 0) > 0),
+    () => -1,
+  );
   return relation < 0 ? candidates : candidates.slice(0, Math.max(1, relation));
 }
 
@@ -423,9 +489,15 @@ export const runRequestedMaintenanceProjection = Effect.fn('contextMaintenance.r
   inventory: readonly MemoryRecord[],
   inventoryComplete: boolean,
 ) {
-  const byUri = new Map(active.map(record => [record.uri, record]));
+  const byUri = new Map(EffectArray.map(active, record => [record.uri, record]));
   const now = yield* Clock.currentTimeMillis;
-  const eligible = request.uris.filter(uri => !(Date.parse(request.deferredUntil?.[uri] ?? '') > now));
+  const eligible = EffectArrayPipe(request.uris, __effectArrayValues2 =>
+    EffectArray.filter(
+      __effectArrayValues2,
+      (uri, __effectArrayIndex4) =>
+        __effectArrayIndex4 in __effectArrayValues2 && !(Date.parse(request.deferredUntil?.[uri] ?? '') > now),
+    ),
+  );
   const selected = selectRequestedMaintenanceUris(eligible, request.cursor, 4);
   if (selected.length > 0)
     yield* advanceContextMaintenanceEvidenceRequest(
@@ -452,7 +524,8 @@ export const runRequestedMaintenanceProjection = Effect.fn('contextMaintenance.r
       completed.add(uri);
     }
   }
-  const tasks = selected.flatMap(uri => {
+  const tasks = EffectArray.flatMap(selected, (uri, __effectFlatMapIndex) => {
+    if (!(__effectFlatMapIndex in selected)) return [];
     const record = byUri.get(uri);
     return record === undefined ||
       record.metadata.status !== 'active' ||
@@ -466,17 +539,31 @@ export const runRequestedMaintenanceProjection = Effect.fn('contextMaintenance.r
     const evidence = yield* collectMaintenanceWorkerBatch(config, group, request.cwd);
     if (evidence.observation === undefined || !(yield* maintenanceWorkerBatchCurrent(config, evidence))) continue;
     for (const task of group) {
-      const current = evidence.records.find(record => record.uri === task.record.uri);
+      const current = Option.getOrUndefined(
+        EffectArray.findFirst(evidence.records, record => record.uri === task.record.uri),
+      );
       if (current === undefined || sha256HexSync(current.content) !== task.record.content) continue;
-      const expected = new Set((current.metadata.codeCitations ?? []).map(citation => citation.id));
+      const expected = new Set(EffectArray.map(current.metadata.codeCitations ?? [], citation => citation.id));
       const validated = new Set(
-        evidence.validations
-          .filter(validation => validation.uri === current.uri)
-          .flatMap(validation => validation.receipts.map(receipt => receipt.citationId)),
+        EffectArrayPipe(
+          evidence.validations,
+          __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (validation, __effectFilterIndex) =>
+                __effectFilterIndex in __effectFilterValues && validation.uri === current.uri,
+            ),
+          __effectArrayValues2 =>
+            EffectArray.flatMap(__effectArrayValues2, (validation, __effectArrayIndex4) =>
+              __effectArrayIndex4 in __effectArrayValues2
+                ? EffectArray.map(validation.receipts, receipt => receipt.citationId)
+                : [],
+            ),
+        ),
       );
       if (
         expected.size !== validated.size ||
-        [...expected].some(id => !validated.has(id)) ||
+        EffectArray.some([...expected], id => !validated.has(id)) ||
         !(yield* requestedRootProjectionComplete(config, request.project, request.cwd, current, evidence.observation))
       )
         continue;
@@ -491,7 +578,10 @@ export const runRequestedMaintenanceProjection = Effect.fn('contextMaintenance.r
       completed.add(current.uri);
     }
   }
-  const failed = selected.filter(uri => !completed.has(uri));
+  const failed = EffectArray.filter(
+    selected,
+    (uri, __effectArrayIndex) => __effectArrayIndex in selected && !completed.has(uri),
+  );
   if (failed.length > 0)
     yield* deferContextMaintenanceEvidenceRequest(
       config,
@@ -512,9 +602,15 @@ const requestedSubjectObsolete = Effect.fn('contextMaintenance.requestedSubjectO
 ) {
   if (!complete) return false;
   const prefix = `threadnote://user/${uriSegment(config.user)}/memories/`;
-  if (!uri.startsWith(prefix)) return false;
-  const relative = uri.slice(prefix.length);
-  if (relative.startsWith('/') || relative.split('/').some(segment => segment === '..' || segment.length === 0))
+  if (!Effect2.pipe(uri, EffectString.startsWith(prefix))) return false;
+  const relative = Effect2.pipe(uri, EffectString.slice(prefix.length));
+  if (
+    Effect2.pipe(relative, EffectString.startsWith('/')) ||
+    EffectArray.some(
+      Effect2.pipe(relative, EffectString.split('/')),
+      segment => segment === '..' || segment.length === 0,
+    )
+  )
     return false;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -530,7 +626,8 @@ const requestedSubjectObsolete = Effect.fn('contextMaintenance.requestedSubjectO
   const before = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
   const first = yield* fs.stat(file).pipe(Effect.result);
   if (Result.isFailure(first)) {
-    if (first.failure.reason._tag !== 'NotFound' || inventory.some(record => record.uri === uri)) return false;
+    if (first.failure.reason._tag !== 'NotFound' || EffectArray.some(inventory, record => record.uri === uri))
+      return false;
     return before === (yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account));
   }
   if (first.success.type !== 'File' || Option.isSome(yield* fs.readLink(file).pipe(Effect.option))) return false;
@@ -554,12 +651,12 @@ export function invalidateMaintenanceWorkerBatch(
   previous: ReadonlyMap<string, ContextMaintenanceCaseV2>,
   checkpoints: Record<string, unknown>,
 ) {
-  const subjects = new Set(evidence.records.map(record => record.metadata.memoryId ?? record.uri));
+  const subjects = new Set(EffectArray.map(evidence.records, record => record.metadata.memoryId ?? record.uri));
   for (const [id, item] of cases)
     if (
       item.project === evidence.project &&
       subjects.has(item.memoryId) &&
-      (item.family.startsWith('citation') || item.family === 'current-support')
+      (Effect2.pipe(item.family, EffectString.startsWith('citation')) || item.family === 'current-support')
     ) {
       const original = previous.get(id);
       cases.set(
@@ -573,6 +670,7 @@ export function invalidateMaintenanceWorkerBatch(
         },
       );
     }
-  for (const key of Object.keys(checkpoints))
-    if ([...subjects].some(subject => key.startsWith(`${subject}:`))) delete checkpoints[key];
+  for (const key of EffectRecord.keys(checkpoints))
+    if (EffectArray.some([...subjects], subject => Effect2.pipe(key, EffectString.startsWith(`${subject}:`))))
+      delete checkpoints[key];
 }

@@ -1,5 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptError} from '../effect/errors.js';
 import {Schema} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const STAGE3_PHASES = [
   'linked-worktrees',
@@ -28,14 +32,17 @@ export interface Stage3ExecuteOptions {
 export type Stage3Options = Stage3PlanOptions | Stage3ExecuteOptions;
 
 export function stage3Usage(): string {
-  return [
-    'Usage: bun run gate:code-graph:stage3 -- [options]',
-    '',
-    'Runs the live Stage 3 code-graph release gate or prints its non-executing plan.',
-    'Plan: --mode plan',
-    'Execute: --mode execute --candidate-commit <40-hex> --candidate-ref <ref>',
-    '  --candidate-executable <absolute-path> --candidate-executable-sha256 <64-hex> --output <absolute-path>',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Usage: bun run gate:code-graph:stage3 -- [options]',
+      '',
+      'Runs the live Stage 3 code-graph release gate or prints its non-executing plan.',
+      'Plan: --mode plan',
+      'Execute: --mode execute --candidate-commit <40-hex> --candidate-ref <ref>',
+      '  --candidate-executable <absolute-path> --candidate-executable-sha256 <64-hex> --output <absolute-path>',
+    ],
+    '\n',
+  );
 }
 
 /** There is deliberately no observation-file, evidence-input, or replay mode. */
@@ -52,13 +59,26 @@ export function parseStage3Arguments(arguments_: readonly string[]): Stage3Optio
   for (let index = 0; index < arguments_.length; index += 2) {
     const key = arguments_[index];
     const value = arguments_[index + 1];
-    assertStage3(allowed.has(key) && !values.has(key) && value !== undefined && !value.startsWith('--'), 'arguments');
+    assertStage3(
+      allowed.has(key) && !values.has(key) && value !== undefined && !Effect.pipe(value, EffectString.startsWith('--')),
+      'arguments',
+    );
     values.set(key, value);
   }
   const value = (key: string) => {
     const result = values.get(key);
     assertStage3(
-      result !== undefined && result.length > 0 && [...result].every(character => character.charCodeAt(0) >= 32),
+      result !== undefined &&
+        result.length > 0 &&
+        EffectArray.every(
+          [...result],
+          character =>
+            Effect.pipe(
+              character,
+              EffectString.charCodeAt(0),
+              Effect.Option.getOrElse(() => NaN),
+            ) >= 32,
+        ),
       'arguments',
     );
     return result;
@@ -74,10 +94,13 @@ export function parseStage3Arguments(arguments_: readonly string[]): Stage3Optio
   assertStage3(/^[0-9a-f]{40}$/u.test(candidateCommit), 'candidate-identity');
   assertStage3(/^[0-9a-f]{64}$/u.test(candidateExecutableSha256), 'candidate-identity');
   const candidateRef = value('--candidate-ref');
-  assertStage3(!candidateRef.startsWith('-'), 'candidate-identity');
+  assertStage3(!Effect.pipe(candidateRef, EffectString.startsWith('-')), 'candidate-identity');
   const candidateExecutable = value('--candidate-executable');
   const output = value('--output');
-  assertStage3(candidateExecutable.startsWith('/') && output.startsWith('/'), 'absolute-path-required');
+  assertStage3(
+    Effect.pipe(candidateExecutable, EffectString.startsWith('/')) && Effect.pipe(output, EffectString.startsWith('/')),
+    'absolute-path-required',
+  );
   return {mode, candidateCommit, candidateRef, candidateExecutable, candidateExecutableSha256, output};
 }
 
@@ -126,7 +149,7 @@ export function stage3Refresh(value: unknown): Stage3Refresh {
     'retryAfterMilliseconds',
   ]);
   assertStage3(
-    Object.keys(record).every(key => allowed.has(key)),
+    EffectArray.every(EffectRecord.keys(record), key => allowed.has(key)),
     'refresh-private-field',
   );
   assertStage3(record.type === 'code-graph-refresh-continuity' && record.version === 1, 'refresh-version');
@@ -168,13 +191,16 @@ export function scanStage3Observations(observations: readonly Stage3Observation[
   assertStage3(encoded.length <= 64 * 1024, 'privacy-size');
   // Numeric identifiers are excluded structurally; substring matching them would collide with opaque tokens.
   assertStage3(
-    !forbidden.some(value => value.length > 0 && !/^\d+$/u.test(value) && encoded.includes(value)),
+    !EffectArray.some(
+      forbidden,
+      value => value.length > 0 && !/^\d+$/u.test(value) && Effect.pipe(encoded, EffectString.includes(value)),
+    ),
     'privacy-literal',
   );
   for (const observation of observations) {
     const record = stage3Record(observation);
     assertStage3(
-      Object.keys(record).every(key =>
+      EffectArray.every(EffectRecord.keys(record), key =>
         ['phase', 'state', 'operation', 'host', 'target', 'refresh', 'retryAfterMilliseconds'].includes(key),
       ),
       'privacy-field',

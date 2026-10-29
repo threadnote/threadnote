@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {ExternalResourceMetadata} from '@threadnote/store/external-resource';
 import type {MemoryAuthority, MemoryRelation, MemoryTrust} from '@threadnote/memory/document';
 import {stripGeneratedMemoryHygieneSources} from '@threadnote/memory/hygiene/provenance';
@@ -6,6 +7,10 @@ import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import {hasExactCasedCodeIdentifierMatch} from './identifier.js';
 import {recallRankCandidateIsEligible, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallLexicalTerms} from './tokenize.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export const RECALL_RANKER_VERSION = 'hybrid-v8';
 
@@ -174,7 +179,7 @@ const RECENCY_INTENT_HALF_LIFE_DAYS = 14;
 const RECENCY_INTENT_MINIMUM_MULTIPLIER = 0.25;
 const UNKNOWN_RECENCY_INTENT_SCORE = 0;
 
-const intentTerms = (terms: string): ReadonlySet<string> => new Set(terms.split(' '));
+const intentTerms = (terms: string): ReadonlySet<string> => new Set(Effect.pipe(terms, EffectString.split(' ')));
 
 const MEMORY_KIND_INTENT_TERMS: Readonly<Record<MemoryKind, ReadonlySet<string>>> = {
   durable: intentTerms('contract decision invariant policy unsupported'),
@@ -280,21 +285,43 @@ export function rankRecallCandidates(
 ): RankedRecallSet {
   const eligibility = context.eligibility;
   const eligibleCandidates = eligibility
-    ? candidates.filter(candidate => recallRankCandidateIsEligible(eligibility, candidate))
+    ? EffectArray.filter(
+        candidates,
+        (candidate, __effectArrayIndex) =>
+          __effectArrayIndex in candidates && recallRankCandidateIsEligible(eligibility, candidate),
+      )
     : candidates;
   const logicalCandidates = deduplicateLogicalRecallCandidates(eligibleCandidates);
   const queryTermVariants = [
     tokenize(query),
-    ...[...new Set(context.queryVariants?.map(variant => variant.trim()).filter(Boolean) ?? [])].map(tokenize),
+    ...EffectOption.getOrElse(
+      EffectOption.map(EffectOption.fromNullishOr(context.queryVariants), variants =>
+        EffectArray.map(
+          [
+            ...new Set(
+              EffectArray.filter(
+                EffectArray.map(variants, variant => Effect.pipe(variant, EffectString.trim)),
+                Boolean,
+              ),
+            ),
+          ],
+          tokenize,
+        ),
+      ),
+      () => [],
+    ),
   ];
-  const corpusStatistics = context.workspaceScope?.trim()
+  const corpusStatistics = Effect.pipe(context.workspaceScope, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  )
     ? buildRecallTopicalCorpusStatistics(logicalCandidates)
     : (context.corpusStatistics ?? buildRecallCorpusStatistics(logicalCandidates));
-  const semanticAnchors = logicalCandidates
-    .filter(candidate => (candidate.semantic ?? 0) >= GRAPH_SEMANTIC_ANCHOR_MINIMUM)
-    .sort((left, right) => (right.semantic ?? 0) - (left.semantic ?? 0) || compareCodeUnits(left.uri, right.uri))
-    .slice(0, MAX_GRAPH_SEMANTIC_ANCHORS)
-    .map(candidate => candidate.uri);
+  const semanticAnchors = EffectArray.map(
+    EffectArray.filter(logicalCandidates, candidate => (candidate.semantic ?? 0) >= GRAPH_SEMANTIC_ANCHOR_MINIMUM)
+      .sort((left, right) => (right.semantic ?? 0) - (left.semantic ?? 0) || compareCodeUnits(left.uri, right.uri))
+      .slice(0, MAX_GRAPH_SEMANTIC_ANCHORS),
+    candidate => candidate.uri,
+  );
   const explicitSeedUris = [...new Set(context.seedUris ?? [])];
   const graphDistances = mergeGraphDistances(
     typedGraphDistances(logicalCandidates, explicitSeedUris),
@@ -303,50 +330,49 @@ export function rankRecallCandidates(
   );
   const now = context.now ?? DETERMINISTIC_DEFAULT_NOW;
   const protectedOrdinalByUri = new Map(
-    [...new Set(context.protectedUris ?? [])].map((uri, ordinal) => [uri, ordinal] as const),
+    EffectArray.map([...new Set(context.protectedUris ?? [])], (uri, ordinal) => [uri, ordinal] as const),
   );
   const recencyIntent = originalQueryRequestsRecency(query);
-  const ranked = logicalCandidates
-    .map(candidate =>
-      scoreCandidate(candidate, queryTermVariants, corpusStatistics, graphDistances, {
-        ...context,
-        now,
-        recencyIntent,
-      }),
-    )
-    .filter(result => {
-      const protectedResult = protectedRecallOrdinal(result.candidate, protectedOrdinalByUri) !== undefined;
-      const semanticRescue =
-        context.allowSemanticRescue === true &&
-        result.signals.semantic >= CORROBORATING_SIGNAL_MINIMUM &&
-        result.relevanceScore >= SEMANTIC_ONLY_ANSWER_MINIMUM;
-      return (
-        (protectedResult ||
-          (result.passedRelevanceGate &&
-            (context.minimumScore === undefined ||
-              result.relevanceScore >= context.minimumScore ||
-              semanticRescue ||
-              (context.allowExactRescue === true &&
-                result.signals.exact >= EXACT_TERM_RESCUE_MINIMUM &&
-                (result.signals.kindIntent === 1 ||
-                  result.signals.field >= EXACT_TERM_RESCUE_FIELD_MINIMUM ||
-                  qualifyingExactTerms(result.candidate).some(term => /[\p{N}_.-]/u.test(term))))))) &&
-        (context.includeInactive === true || result.signals.lifecycle === LIFECYCLE_SCORES.active) &&
-        (context.includeTemporallyInvalid === true || result.signals.temporal === 1)
-      );
-    })
-    .sort((left, right) => {
-      const leftProtected = protectedRecallOrdinal(left.candidate, protectedOrdinalByUri);
-      const rightProtected = protectedRecallOrdinal(right.candidate, protectedOrdinalByUri);
-      return (
-        (leftProtected === undefined ? 1 : 0) - (rightProtected === undefined ? 1 : 0) ||
-        (leftProtected ?? 0) - (rightProtected ?? 0) ||
-        right.finalScore - left.finalScore ||
-        right.signals.reranker - left.signals.reranker ||
-        right.signals.semantic - left.signals.semantic ||
-        compareCodeUnits(left.candidate.uri, right.candidate.uri)
-      );
-    });
+  const scoredCandidates = EffectArray.map(logicalCandidates, candidate =>
+    scoreCandidate(candidate, queryTermVariants, corpusStatistics, graphDistances, {
+      ...context,
+      now,
+      recencyIntent,
+    }),
+  );
+  const ranked = EffectArray.filter(scoredCandidates, (result, index) => {
+    if (!(index in scoredCandidates)) return false;
+    const protectedResult = protectedRecallOrdinal(result.candidate, protectedOrdinalByUri) !== undefined;
+    const semanticRescue =
+      context.allowSemanticRescue === true &&
+      result.signals.semantic >= CORROBORATING_SIGNAL_MINIMUM &&
+      result.relevanceScore >= SEMANTIC_ONLY_ANSWER_MINIMUM;
+    return (
+      (protectedResult ||
+        (result.passedRelevanceGate &&
+          (context.minimumScore === undefined ||
+            result.relevanceScore >= context.minimumScore ||
+            semanticRescue ||
+            (context.allowExactRescue === true &&
+              result.signals.exact >= EXACT_TERM_RESCUE_MINIMUM &&
+              (result.signals.kindIntent === 1 ||
+                result.signals.field >= EXACT_TERM_RESCUE_FIELD_MINIMUM ||
+                EffectArray.some(qualifyingExactTerms(result.candidate), term => /[\p{N}_.-]/u.test(term))))))) &&
+      (context.includeInactive === true || result.signals.lifecycle === LIFECYCLE_SCORES.active) &&
+      (context.includeTemporallyInvalid === true || result.signals.temporal === 1)
+    );
+  }).sort((left, right) => {
+    const leftProtected = protectedRecallOrdinal(left.candidate, protectedOrdinalByUri);
+    const rightProtected = protectedRecallOrdinal(right.candidate, protectedOrdinalByUri);
+    return (
+      (leftProtected === undefined ? 1 : 0) - (rightProtected === undefined ? 1 : 0) ||
+      (leftProtected ?? 0) - (rightProtected ?? 0) ||
+      right.finalScore - left.finalScore ||
+      right.signals.reranker - left.signals.reranker ||
+      right.signals.semantic - left.signals.semantic ||
+      compareCodeUnits(left.candidate.uri, right.candidate.uri)
+    );
+  });
   return {
     confidence: assessConfidence(ranked, query, queryTermVariants[0] ?? []),
     rankerVersion: RECALL_RANKER_VERSION,
@@ -374,19 +400,28 @@ function protectedRecallOrdinal(
  * request to prefer the newest timestamp.
  */
 export function originalQueryRequestsRecency(originalQuery: string): boolean {
-  return originalQuery
-    .normalize('NFC')
-    .toLowerCase()
-    .split(RECENCY_INTENT_CLAUSE_BOUNDARY)
-    .some(clause => {
-      const terms = clause.match(RECENCY_INTENT_WORD) ?? [];
-      return terms.some((term, index) => {
+  return EffectArray.some(
+    Effect.pipe(
+      originalQuery,
+      EffectString.normalize('NFC'),
+      EffectString.toLowerCase,
+      EffectString.split(RECENCY_INTENT_CLAUSE_BOUNDARY),
+    ),
+    clause => {
+      const terms =
+        Effect.pipe(
+          clause,
+          EffectString.match(RECENCY_INTENT_WORD),
+          Effect.Option.getOrElse(() => null),
+        ) ?? [];
+      return EffectArray.some(terms, (term, index) => {
         if (!RECENCY_INTENT_TERMS.has(term)) return false;
         if (terms[index - 1] === 'least') return false;
         const precedingTerms = terms.slice(Math.max(0, index - RECENCY_INTENT_NEGATION_DISTANCE), index);
-        return !precedingTerms.some(preceding => RECENCY_INTENT_NEGATION_TERMS.has(preceding));
+        return !EffectArray.some(precedingTerms, preceding => RECENCY_INTENT_NEGATION_TERMS.has(preceding));
       });
-    });
+    },
+  );
 }
 
 /**
@@ -407,10 +442,13 @@ export function deduplicateLogicalRecallCandidates(candidates: readonly RecallCa
     contentHashesByMemoryId.set(candidate.memoryId, hashes);
   }
   const conflictingMemoryIds = new Set(
-    [...contentHashesByMemoryId].filter(([, hashes]) => hashes.size > 1).map(([memoryId]) => memoryId),
+    EffectArray.map(
+      EffectArray.filter([...contentHashesByMemoryId], ([, hashes]) => hashes.size > 1),
+      ([memoryId]) => memoryId,
+    ),
   );
 
-  const parents = candidates.map((_, index) => index);
+  const parents = EffectArray.map(candidates, (_, index) => index);
   const find = (index: number): number => {
     let root = index;
     while (parents[root] !== root) root = parents[root]!;
@@ -429,7 +467,7 @@ export function deduplicateLogicalRecallCandidates(candidates: readonly RecallCa
 
   const firstIndexByMemoryIdKey = new Map<string, number>();
   const indicesByLegacyKey = new Map<string, number[]>();
-  candidates.forEach((candidate, index) => {
+  EffectArray.forEach(candidates, (candidate, index) => {
     const memoryIdKey = logicalRecallMemoryIdKey(candidate);
     if (memoryIdKey) {
       const previous = firstIndexByMemoryIdKey.get(memoryIdKey);
@@ -441,7 +479,7 @@ export function deduplicateLogicalRecallCandidates(candidates: readonly RecallCa
   });
   for (const indices of indicesByLegacyKey.values()) {
     const memoryIds = new Set(
-      indices.flatMap(index => (candidates[index]?.memoryId ? [candidates[index].memoryId] : [])),
+      EffectArray.flatMap(indices, index => (candidates[index]?.memoryId ? [candidates[index].memoryId] : [])),
     );
     if (memoryIds.size > 1) continue;
     const first = indices[0];
@@ -450,27 +488,38 @@ export function deduplicateLogicalRecallCandidates(candidates: readonly RecallCa
   }
 
   const membersByRoot = new Map<number, RecallCandidate[]>();
-  candidates.forEach((candidate, index) => {
+  EffectArray.forEach(candidates, (candidate, index) => {
     const root = find(index);
     const members = membersByRoot.get(root) ?? [];
     members.push(candidate);
     membersByRoot.set(root, members);
   });
-  return [...membersByRoot.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([, members]) => members.reduce(mergeEquivalentRecallCandidates))
-    .map(candidate =>
+  return EffectArray.map(
+    EffectArray.map(
+      [...membersByRoot.entries()].sort(([left], [right]) => left - right),
+      ([, members]) =>
+        Effect.pipe(members, __effectReduceValues =>
+          EffectArray.reduce(
+            EffectArray.drop(__effectReduceValues, 1),
+            Effect.Option.getOrElse(EffectArray.head(__effectReduceValues), () => {
+              throw new TypeError('Reduce of empty array with no initial value');
+            }),
+            mergeEquivalentRecallCandidates,
+          ),
+        ),
+    ),
+    candidate =>
       candidate.memoryId && conflictingMemoryIds.has(candidate.memoryId)
         ? {...candidate, identityConflict: true}
         : candidate,
-    );
+  );
 }
 
 export function recallMemoryContentHash(body: string): string {
   // Line endings and Threadnote's generated local-only hygiene trailer are
   // transport/provenance details. Every other byte belongs to the memory body;
   // Markdown/code indentation and trailing spaces remain identity-bearing.
-  return sha256HexSync(stripGeneratedMemoryHygieneSources(body).replace(/\r\n?/g, '\n'));
+  return sha256HexSync(Effect.pipe(stripGeneratedMemoryHygieneSources(body), EffectString.replace(/\r\n?/g, '\n')));
 }
 
 /** Stable physical-index grouping key used to keep share aliases from inflating corpus statistics. */
@@ -485,8 +534,20 @@ function logicalRecallMemoryIdKey(candidate: RecallCandidate): string | undefine
 
 function logicalRecallLegacyKey(candidate: RecallCandidate): string | undefined {
   if (!candidate.contentHash || !candidate.kind) return undefined;
-  const project = candidate.fields?.project?.trim().toLowerCase();
-  const topic = candidate.fields?.topic?.trim().toLowerCase();
+  const project = Effect.pipe(
+    candidate.fields?.project,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
+  const topic = Effect.pipe(
+    candidate.fields?.topic,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   if (!project || !topic) return undefined;
   return `legacy-memory\u0000${candidate.kind}\u0000${project}\u0000${topic}\u0000${candidate.contentHash}\u0000${logicalRecallInvariantKey(candidate)}`;
 }
@@ -494,9 +555,23 @@ function logicalRecallLegacyKey(candidate: RecallCandidate): string | undefined 
 function logicalRecallInvariantKey(candidate: RecallCandidate): string {
   return JSON.stringify([
     candidate.kind,
-    candidate.fields?.project?.trim().toLowerCase(),
-    candidate.fields?.topic?.trim().toLowerCase(),
-    candidate.fields?.workspaceScope?.trim(),
+    Effect.pipe(
+      candidate.fields?.project,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+    ),
+    Effect.pipe(
+      candidate.fields?.topic,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+    ),
+    Effect.pipe(candidate.fields?.workspaceScope, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ),
     candidate.status,
     candidate.timestamp,
     candidate.validFrom,
@@ -507,26 +582,29 @@ function logicalRecallInvariantKey(candidate: RecallCandidate): string {
 function mergeEquivalentRecallCandidates(left: RecallCandidate, right: RecallCandidate): RecallCandidate {
   const representative = compareRecallAliasAuthority(left, right) <= 0 ? left : right;
   const other = representative === left ? right : left;
-  const equivalentUris = [
-    ...new Set([
-      representative.uri,
-      ...(representative.equivalentUris ?? []),
-      other.uri,
-      ...(other.equivalentUris ?? []),
-    ]),
-  ]
-    .filter(uri => uri !== representative.uri)
-    .sort(compareCodeUnits);
+  const equivalentUris = EffectArray.filter(
+    [
+      ...new Set([
+        representative.uri,
+        ...(representative.equivalentUris ?? []),
+        other.uri,
+        ...(other.equivalentUris ?? []),
+      ]),
+    ],
+    uri => uri !== representative.uri,
+  ).sort(compareCodeUnits);
   const relations = [
     ...new Map(
-      [...(left.relations ?? []), ...(right.relations ?? [])].map(relation => [
+      EffectArray.map([...(left.relations ?? []), ...(right.relations ?? [])], relation => [
         `${relation.type}\u0000${relation.uri}`,
         relation,
       ]),
     ).values(),
   ].sort((a, b) => compareCodeUnits(a.type, b.type) || compareCodeUnits(a.uri, b.uri));
   const exactTerms = [...new Set([...(left.exactTerms ?? []), ...(right.exactTerms ?? [])])].sort(compareCodeUnits);
-  const memoryIds = [...new Set([left.memoryId, right.memoryId].filter((value): value is string => Boolean(value)))];
+  const memoryIds = [
+    ...new Set(EffectArray.filter([left.memoryId, right.memoryId], (value): value is string => Boolean(value))),
+  ];
   return {
     ...representative,
     contentHash: representative.contentHash ?? other.contentHash,
@@ -579,11 +657,15 @@ function scoreCandidate(
 ): RankedRecallCandidate {
   const originalQueryTerms = queryTermVariants[0] ?? [];
   const strongestVariant = (score: (queryTerms: readonly string[]) => number): number =>
-    Math.max(0, ...queryTermVariants.map(score));
+    Math.max(0, ...EffectArray.map(queryTermVariants, score));
   const semantic = clamp(candidate.semantic ?? 0);
   const reranker = clamp(candidate.reranker ?? 0);
   const topicalDocumentTerms = recallTopicalDocumentTerms(candidate);
-  const bm25DocumentTerms = context.workspaceScope?.trim() ? topicalDocumentTerms : recallDocumentTerms(candidate);
+  const bm25DocumentTerms = Effect.pipe(context.workspaceScope, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  )
+    ? topicalDocumentTerms
+    : recallDocumentTerms(candidate);
   const bm25 = strongestVariant(queryTerms => normalizedBm25(queryTerms, bm25DocumentTerms, corpusStatistics));
   const topicalBm25 = strongestVariant(queryTerms =>
     normalizedBm25(queryTerms, topicalDocumentTerms, corpusStatistics),
@@ -627,7 +709,8 @@ function scoreCandidate(
     workspace,
   };
   const focusedLexicalEvidence =
-    topicalField >= LEXICAL_ONLY_FOCUSED_FIELD_MINIMUM || exactTerms.some(term => /[\p{N}_.-]/u.test(term));
+    topicalField >= LEXICAL_ONLY_FOCUSED_FIELD_MINIMUM ||
+    EffectArray.some(exactTerms, term => /[\p{N}_.-]/u.test(term));
   const passedRelevanceGate =
     Math.max(semantic, reranker, topicalBm25, exact, topicalField) >= RELEVANCE_GATE_MINIMUM &&
     (semantic > SIGNAL_ABSENCE_MAXIMUM ||
@@ -757,15 +840,21 @@ function exactTermScore(
   }
   const uniqueQuery = new Set(queryTerms);
   const uniqueExactTerms = [
-    ...new Set(exactTerms.map(term => tokenize(term)[0]).filter((term): term is string => term !== undefined)),
+    ...new Set(
+      EffectArray.filter(
+        EffectArray.map(exactTerms, term => tokenize(term)[0]),
+        (term): term is string => term !== undefined,
+      ),
+    ),
   ];
   const declaredIdentifiers = new Set(
-    (fields?.identifiers ?? [])
-      .map(identifier => tokenize(identifier)[0])
-      .filter((identifier): identifier is string => identifier !== undefined),
+    EffectArray.filter(
+      EffectArray.map(fields?.identifiers ?? [], identifier => tokenize(identifier)[0]),
+      (identifier): identifier is string => identifier !== undefined,
+    ),
   );
-  const matchedTerms = uniqueExactTerms.filter(term => {
-    const termMatchesQuery = tokenize(term).some(token => uniqueQuery.has(token));
+  const matchedTerms = EffectArray.filter(uniqueExactTerms, term => {
+    const termMatchesQuery = EffectArray.some(tokenize(term), token => uniqueQuery.has(token));
     return /[\p{N}_.-]/u.test(term)
       ? uniqueQuery.has(term) || (declaredIdentifiers.has(term) && termMatchesQuery)
       : termMatchesQuery;
@@ -777,14 +866,18 @@ function exactTermScore(
   const queryCoverage = matches / uniqueQuery.size;
   const exactPrecision = matches / uniqueExactTerms.length;
   if (matches >= EXACT_MULTI_TERM_MINIMUM && exactPrecision === 1) {
-    const matchedQueryTerms = new Set(matchedTerms.flatMap(tokenize).filter(term => uniqueQuery.has(term)));
-    const totalQueryWeight = [...uniqueQuery].reduce(
-      (total, term) => total + inverseDocumentFrequency(term, corpusStatistics),
-      0,
+    const matchedQueryTerms = new Set(
+      EffectArray.filter(EffectArray.flatMap(matchedTerms, tokenize), term => uniqueQuery.has(term)),
     );
-    const matchedQueryWeight = [...matchedQueryTerms].reduce(
-      (total, term) => total + inverseDocumentFrequency(term, corpusStatistics),
+    const totalQueryWeight = EffectArray.reduce(
+      [...uniqueQuery],
       0,
+      (total, term) => total + inverseDocumentFrequency(term, corpusStatistics),
+    );
+    const matchedQueryWeight = EffectArray.reduce(
+      [...matchedQueryTerms],
+      0,
+      (total, term) => total + inverseDocumentFrequency(term, corpusStatistics),
     );
     const idfWeightedCoverage = totalQueryWeight === 0 ? queryCoverage : matchedQueryWeight / totalQueryWeight;
     return clamp(
@@ -813,19 +906,23 @@ function focusedFieldContainsTerm(fields: RecallFields | undefined, term: string
     return false;
   }
   const focusedTerms = new Set(
-    [fields.title, fields.topic, ...(fields.keywords ?? []), ...(fields.identifiers ?? [])]
-      .filter((value): value is string => typeof value === 'string')
-      .flatMap(tokenize),
+    EffectArray.flatMap(
+      EffectArray.filter(
+        [fields.title, fields.topic, ...(fields.keywords ?? []), ...(fields.identifiers ?? [])],
+        (value): value is string => typeof value === 'string',
+      ),
+      tokenize,
+    ),
   );
-  return tokenize(term).some(token => focusedTerms.has(token));
+  return EffectArray.some(tokenize(term), token => focusedTerms.has(token));
 }
 
 function metaTopicMismatch(queryTerms: readonly string[], fields: RecallFields | undefined): boolean {
-  if (!fields || queryTerms.some(term => META_QUERY_INTENT_TERMS.has(term))) {
+  if (!fields || EffectArray.some(queryTerms, term => META_QUERY_INTENT_TERMS.has(term))) {
     return false;
   }
   const topicTerms = tokenize([fields.title ?? '', fields.topic ?? '']);
-  return topicTerms.some(term => META_TOPIC_TERMS.has(term));
+  return EffectArray.some(topicTerms, term => META_TOPIC_TERMS.has(term));
 }
 
 function normalizedBm25(
@@ -862,7 +959,7 @@ function normalizedBm25(
 
 function inverseDocumentFrequency(term: string, corpusStatistics: RecallCorpusStatistics): number {
   const documentCount = Math.max(1, corpusStatistics.documentCount);
-  const documentsWithTerm = Object.hasOwn(corpusStatistics.documentFrequency, term)
+  const documentsWithTerm = EffectRecord.has(corpusStatistics.documentFrequency, term)
     ? (corpusStatistics.documentFrequency[term] ?? 0)
     : 0;
   return Math.log(
@@ -883,11 +980,11 @@ function fieldScore(
     value: string | readonly string[] | undefined,
     options: {readonly rewardExactSubset: boolean},
   ): number => {
-    const terms = new Set(Array.isArray(value) ? value.flatMap(tokenize) : tokenize(value ?? ''));
+    const terms = new Set(tokenize(value ?? ''));
     if (terms.size === 0) {
       return 0;
     }
-    const matches = [...uniqueQuery].filter(term => terms.has(term)).length;
+    const matches = EffectArray.filter([...uniqueQuery], term => terms.has(term)).length;
     const queryCoverage = matches / uniqueQuery.size;
     const valuePrecision = matches / terms.size;
     const exactSubsetBonus =
@@ -898,7 +995,7 @@ function fieldScore(
   };
   const keywordCoverage = Math.max(
     0,
-    ...(fields.keywords ?? []).map(keyword => coverage(keyword, {rewardExactSubset: true})),
+    ...EffectArray.map(fields.keywords ?? [], keyword => coverage(keyword, {rewardExactSubset: true})),
   );
   return clamp(
     coverage(fields.title, {rewardExactSubset: true}) * FIELD_WEIGHTS.title +
@@ -910,8 +1007,9 @@ function fieldScore(
 }
 
 function kindIntentScore(queryTerms: readonly string[], kind: MemoryKind | undefined): number {
-  const requestedKinds = (['durable', 'handoff', 'incident', 'preference', 'smoke'] as const).filter(candidateKind =>
-    queryTerms.some(term => MEMORY_KIND_INTENT_TERMS[candidateKind].has(term)),
+  const requestedKinds = EffectArray.filter(
+    ['durable', 'handoff', 'incident', 'preference', 'smoke'] as const,
+    candidateKind => EffectArray.some(queryTerms, term => MEMORY_KIND_INTENT_TERMS[candidateKind].has(term)),
   );
   if (requestedKinds.length === 0) {
     return 0;
@@ -944,8 +1042,20 @@ function typedGraphDistances(
   }
   const sameIdentity = new Map<string, RecallCandidate[]>();
   for (const candidate of candidates) {
-    const project = candidate.fields?.project?.trim().toLowerCase();
-    const topic = candidate.fields?.topic?.trim().toLowerCase();
+    const project = Effect.pipe(
+      candidate.fields?.project,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+    );
+    const topic = Effect.pipe(
+      candidate.fields?.topic,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+    );
     if (!project || !topic) {
       continue;
     }
@@ -965,7 +1075,7 @@ function typedGraphDistances(
     }
   }
   const distances = new Map<string, {distance: number; weight: number}>();
-  const queue = seeds.map(uri => ({distance: 0, uri, weight: 1}));
+  const queue = EffectArray.map(seeds, uri => ({distance: 0, uri, weight: 1}));
   for (let head = 0; head < queue.length; head += 1) {
     const current = queue[head];
     if (!current || current.distance > MAX_GRAPH_DISTANCE) {
@@ -1049,7 +1159,9 @@ function scopeScore(currentProject: string | undefined, project: string | undefi
   if (!currentProject || !project) {
     return UNKNOWN_SCOPE_SCORE;
   }
-  return currentProject.toLowerCase() === project.toLowerCase() ? 1 : 0;
+  return Effect.pipe(currentProject, EffectString.toLowerCase) === Effect.pipe(project, EffectString.toLowerCase)
+    ? 1
+    : 0;
 }
 
 type WorkspaceScopeRelationship = 'ancestor' | 'exact' | 'repo-wide' | 'sibling' | 'unavailable';
@@ -1062,10 +1174,28 @@ function workspaceBranchRelationship(
 ): {readonly relationship: WorkspaceBranchRelationship; readonly score: number} {
   const current = normalizeWorkspaceBranch(currentWorkspaceBranch);
   if (!current || candidate.kind !== 'handoff') return {relationship: 'unavailable', score: 0};
-  const branchLine = candidate.text
-    .split(/\r?\n/u)
-    .find(line => line.slice(0, 'branch:'.length).toLowerCase() === 'branch:');
-  const recorded = normalizeWorkspaceBranch(branchLine?.slice('branch:'.length).trim());
+  const branchLine = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      Effect.pipe(candidate.text, EffectString.split(/\r?\n/u)),
+      line =>
+        Effect.pipe(line, __effectPipeInput => {
+          const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.slice(0, 'branch:'.length));
+          const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.toLowerCase);
+          return __effectPipeStage1;
+        }) === 'branch:',
+    ),
+  );
+  const recorded = normalizeWorkspaceBranch(
+    Effect.pipe(
+      branchLine,
+      effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect.pipe(effectOptionalString, EffectString.slice('branch:'.length)),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ),
+  );
   if (!recorded || recorded === 'current' || recorded === 'unknown') {
     return {relationship: 'neutral', score: 0.5};
   }
@@ -1080,7 +1210,19 @@ export function recallCandidateMatchesWorkspaceBranch(
 }
 
 function normalizeWorkspaceBranch(branch: string | undefined): string | undefined {
-  return branch?.trim().replaceAll('\\', '/').toLowerCase() || undefined;
+  return (
+    Effect.pipe(
+      branch,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect.pipe(effectOptionalString, EffectString.replaceAll('\\', '/')),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+    ) || undefined
+  );
 }
 
 function workspaceScopeRelationship(
@@ -1092,7 +1234,7 @@ function workspaceScopeRelationship(
   const candidate = normalizeWorkspaceScope(candidateWorkspaceScope);
   if (!candidate) return {relationship: 'repo-wide', score: 0.5};
   if (candidate === current) return {relationship: 'exact', score: 1};
-  if (current.startsWith(`${candidate}/`)) return {relationship: 'ancestor', score: 0.75};
+  if (Effect.pipe(current, EffectString.startsWith(`${candidate}/`))) return {relationship: 'ancestor', score: 0.75};
   return {relationship: 'sibling', score: 0.25};
 }
 
@@ -1101,13 +1243,20 @@ function workspaceScopeScore(currentWorkspaceScope: string | undefined, candidat
 }
 
 function normalizeWorkspaceScope(scope: string | undefined): string | undefined {
-  const normalized = scope
-    ?.trim()
-    .replaceAll('\\', '/')
-    .split('/')
-    .filter(segment => segment.length > 0 && segment !== '.')
-    .join('/')
-    .toLowerCase();
+  const normalized = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(scope), value =>
+      Effect.pipe(
+        EffectArray.join(
+          EffectArray.filter(
+            Effect.pipe(value, EffectString.trim, EffectString.replaceAll('\\', '/'), EffectString.split('/')),
+            segment => segment.length > 0 && segment !== '.',
+          ),
+          '/',
+        ),
+        EffectString.toLowerCase,
+      ),
+    ),
+  );
   return normalized || undefined;
 }
 
@@ -1195,9 +1344,9 @@ function explainSignals(
       ),
     );
   }
-  return reasons
-    .filter(item => Math.abs(item.contribution) >= EXPLANATION_CONTRIBUTION_MINIMUM)
-    .sort((left, right) => right.contribution - left.contribution);
+  return EffectArray.filter(reasons, item => Math.abs(item.contribution) >= EXPLANATION_CONTRIBUTION_MINIMUM).sort(
+    (left, right) => right.contribution - left.contribution,
+  );
 }
 
 function reason(code: string, contribution: number, detail: string): RecallReason {
@@ -1217,13 +1366,16 @@ function assessConfidence(
     ? hasExactDistinctiveIdentifierMatch(originalQuery, originalQueryTerms, results[0].candidate.fields)
     : false;
   const corroboratingSignals = results[0]
-    ? [
-        results[0].signals.semantic,
-        results[0].signals.bm25,
-        results[0].signals.exact,
-        results[0].signals.field,
-        results[0].signals.graph,
-      ].filter(signal => signal >= CORROBORATING_SIGNAL_MINIMUM).length
+    ? EffectArray.filter(
+        [
+          results[0].signals.semantic,
+          results[0].signals.bm25,
+          results[0].signals.exact,
+          results[0].signals.field,
+          results[0].signals.graph,
+        ],
+        signal => signal >= CORROBORATING_SIGNAL_MINIMUM,
+      ).length
     : 0;
   const weakLexicalOnly =
     topSignals !== undefined &&
@@ -1266,43 +1418,52 @@ function hasExactDistinctiveIdentifierMatch(
     return false;
   }
   const identifiers = new Set(
-    fields.identifiers
-      .map(identifier => tokenize(identifier)[0])
-      .filter((identifier): identifier is string => identifier !== undefined),
+    EffectArray.filter(
+      EffectArray.map(fields.identifiers, identifier => tokenize(identifier)[0]),
+      (identifier): identifier is string => identifier !== undefined,
+    ),
   );
   return (
-    queryTerms.some(term => /[\p{N}_.-]/u.test(term) && identifiers.has(term)) ||
+    EffectArray.some(queryTerms, term => /[\p{N}_.-]/u.test(term) && identifiers.has(term)) ||
     hasExactCasedCodeIdentifierMatch(originalQuery, fields.identifiers)
   );
 }
 
 export function recallDocumentTerms(candidate: RecallCandidate): readonly string[] {
   return tokenize(
-    [
-      candidate.text,
-      candidate.fields?.title,
-      candidate.fields?.topic,
-      candidate.fields?.project,
-      candidate.fields?.workspaceScope,
-      ...(candidate.fields?.keywords ?? []),
-      ...(candidate.fields?.identifiers ?? []),
-    ]
-      .filter((value): value is string => typeof value === 'string')
-      .join(' '),
+    EffectArray.join(
+      EffectArray.filter(
+        [
+          candidate.text,
+          candidate.fields?.title,
+          candidate.fields?.topic,
+          candidate.fields?.project,
+          candidate.fields?.workspaceScope,
+          ...(candidate.fields?.keywords ?? []),
+          ...(candidate.fields?.identifiers ?? []),
+        ],
+        (value): value is string => typeof value === 'string',
+      ),
+      ' ',
+    ),
   );
 }
 
 function recallTopicalDocumentTerms(candidate: RecallCandidate): readonly string[] {
   return tokenize(
-    [
-      candidate.text,
-      candidate.fields?.title,
-      candidate.fields?.topic,
-      ...(candidate.fields?.keywords ?? []),
-      ...(candidate.fields?.identifiers ?? []),
-    ]
-      .filter((value): value is string => typeof value === 'string')
-      .join(' '),
+    EffectArray.join(
+      EffectArray.filter(
+        [
+          candidate.text,
+          candidate.fields?.title,
+          candidate.fields?.topic,
+          ...(candidate.fields?.keywords ?? []),
+          ...(candidate.fields?.identifiers ?? []),
+        ],
+        (value): value is string => typeof value === 'string',
+      ),
+      ' ',
+    ),
   );
 }
 
@@ -1310,7 +1471,9 @@ function qualifyingExactTerms(candidate: RecallCandidate): readonly string[] {
   const topicalTerms = new Set(recallTopicalDocumentTerms(candidate));
   const projectTerms = new Set(tokenize(candidate.fields?.project ?? ''));
   const kindIntentTerms = candidate.kind ? MEMORY_KIND_INTENT_TERMS[candidate.kind] : undefined;
-  return (candidate.exactTerms ?? []).filter(term => {
+  const exactTerms = candidate.exactTerms ?? [];
+  return EffectArray.filter(exactTerms, (term, __effectArrayIndex) => {
+    if (!(__effectArrayIndex in exactTerms)) return false;
     const normalized = tokenize(term)[0];
     return (
       normalized !== undefined &&
@@ -1322,13 +1485,13 @@ function qualifyingExactTerms(candidate: RecallCandidate): readonly string[] {
 }
 
 export function buildRecallCorpusStatistics(candidates: readonly RecallCandidate[]): RecallCorpusStatistics {
-  return recallCorpusStatistics(candidates.map(candidate => recallDocumentTerms(candidate)));
+  return recallCorpusStatistics(EffectArray.map(candidates, candidate => recallDocumentTerms(candidate)));
 }
 
 /** Ranking-only corpus statistics exclude structural project/workspace postings. */
 export function buildRecallTopicalCorpusStatistics(candidates: readonly RecallCandidate[]): RecallCorpusStatistics {
   const logicalCandidates = deduplicateLogicalRecallCandidates(candidates);
-  return recallCorpusStatistics(logicalCandidates.map(candidate => recallTopicalDocumentTerms(candidate)));
+  return recallCorpusStatistics(EffectArray.map(logicalCandidates, candidate => recallTopicalDocumentTerms(candidate)));
 }
 
 function recallCorpusStatistics(corpus: readonly (readonly string[])[]): RecallCorpusStatistics {
@@ -1338,17 +1501,17 @@ function recallCorpusStatistics(corpus: readonly (readonly string[])[]): RecallC
       frequencies.set(term, (frequencies.get(term) ?? 0) + 1);
     }
   }
-  const totalDocumentLength = corpus.reduce((sum, terms) => sum + terms.length, 0);
+  const totalDocumentLength = EffectArray.reduce(corpus, 0, (sum, terms) => sum + terms.length);
   return {
     averageDocumentLength: corpus.length === 0 ? 1 : totalDocumentLength / corpus.length,
     documentCount: corpus.length,
-    documentFrequency: Object.fromEntries(frequencies),
+    documentFrequency: EffectRecord.fromEntries(frequencies),
     totalDocumentLength,
   };
 }
 
 function tokenize(value: string | readonly string[]): readonly string[] {
-  const text = typeof value === 'string' ? value : value.join(' ');
+  const text = typeof value === 'string' ? value : EffectArray.join(value, ' ');
   return recallLexicalTerms(text);
 }
 

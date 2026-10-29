@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {afterEach, describe, expect, it} from 'vitest';
 import {mkdtemp, mkdir, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -7,7 +8,7 @@ describe('multi-checkout indexer process coordination', () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('prepares two checkouts concurrently and publishes the same snapshots as serial builds', async () => {
@@ -17,9 +18,9 @@ describe('multi-checkout indexer process coordination', () => {
     const serialHome = join(root, 'serial-home');
     const start = join(root, 'start');
     const repositories = [join(root, 'repository-a'), join(root, 'repository-b')];
-    await Promise.all(repositories.map((repository, index) => createRepository(repository, index)));
+    await Promise.all(EffectArray.map(repositories, (repository, index) => createRepository(repository, index)));
 
-    const concurrent = repositories.map((repository, index) =>
+    const concurrent = EffectArray.map(repositories, (repository, index) =>
       spawnIndexer({
         cwd: repository,
         home: concurrentHome,
@@ -29,17 +30,20 @@ describe('multi-checkout indexer process coordination', () => {
         start,
       }),
     );
-    await Promise.all(concurrent.map(child => child.ready));
+    await Promise.all(EffectArray.map(concurrent, child => child.ready));
     await writeFile(start, '');
     try {
       await waitFor(
         async () =>
-          (await Promise.all([0, 1].map(index => fileExists(join(root, `concurrent-${index}.preparing`))))).every(
+          EffectArray.every(
+            await Promise.all(
+              EffectArray.map([0, 1], index => fileExists(join(root, `concurrent-${index}.preparing`))),
+            ),
             Boolean,
           ),
         30_000,
       );
-      await Promise.all(concurrent.map(child => child.completed));
+      await Promise.all(EffectArray.map(concurrent, child => child.completed));
     } finally {
       for (const child of concurrent) if (child.process.exitCode === null) child.process.kill('SIGKILL');
     }
@@ -53,11 +57,11 @@ describe('multi-checkout indexer process coordination', () => {
     }
 
     const concurrentSummaries = await Promise.all(
-      [0, 1].map(index => readSummary(join(root, `concurrent-${index}.json`))),
+      EffectArray.map([0, 1], index => readSummary(join(root, `concurrent-${index}.json`))),
     );
-    const serialSummaries = await Promise.all(serialOutputs.map(readSummary));
+    const serialSummaries = await Promise.all(EffectArray.map(serialOutputs, readSummary));
     expect(concurrentSummaries).toEqual(serialSummaries);
-    expect(concurrentSummaries.every(summary => summary.state === 'ready')).toBe(true);
+    expect(EffectArray.every(concurrentSummaries, summary => summary.state === 'ready')).toBe(true);
   }, 120_000);
 });
 

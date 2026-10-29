@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 
@@ -14,10 +15,13 @@ import {createMemoryCodeCitation, formatMemoryCodeCitationLines} from '@threadno
 import {canonicalMemoryDocumentContent} from '@threadnote/memory/document';
 import type {KnowledgeDeltaItemV1, KnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
 import {enrolledGitTarget} from '../helpers/enrolled-git-target.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const REVIEW_ID = 'review-0123456789abcdef';
-const BASE_COMMIT = 'a'.repeat(40);
-const TARGET = {repositoryId: '1'.repeat(64), team: 'default'} as const;
+const BASE_COMMIT = Effect.pipe('a', EffectString.repeat(40));
+const TARGET = {repositoryId: Effect.pipe('1', EffectString.repeat(64)), team: 'default'} as const;
 
 describe('Knowledge Delta Git proposals', () => {
   it('builds a canonical non-mutating shared-memory proposal with exact preconditions', () => {
@@ -36,7 +40,7 @@ describe('Knowledge Delta Git proposals', () => {
 
     expect(JSON.stringify(input)).toBe(before);
     expect(built.artifact).toBe(knowledgeDeltaGitProposalArtifactV1(built.proposal));
-    expect(built.artifact.endsWith('\n')).toBe(true);
+    expect(Effect.pipe(built.artifact, EffectString.endsWith('\n'))).toBe(true);
     expect(built.proposal.base.expectedCommit).toBe(BASE_COMMIT);
     expect(built.proposal.target).toEqual(TARGET);
     expect(built.proposal.branch.name).toMatch(/^threadnote\/knowledge-delta\/review-0123456789abcdef-[0-9a-f]{12}$/u);
@@ -66,9 +70,9 @@ describe('Knowledge Delta Git proposals', () => {
     expect(
       buildKnowledgeDeltaGitProposalV1({
         ...input,
-        mutations: input.mutations.map(mutation => ({
+        mutations: EffectArray.map(input.mutations, mutation => ({
           ...mutation,
-          sourceUri: mutation.sourceUri.replace('/alice/', '/bob/'),
+          sourceUri: Effect.pipe(mutation.sourceUri, EffectString.replace('/alice/', '/bob/')),
         })),
       }).artifact,
     ).toBe(built.artifact);
@@ -150,7 +154,7 @@ describe('Knowledge Delta Git proposals', () => {
             ...mutation,
             expectedTarget: {
               content: targetContent,
-              contentHash: 'b'.repeat(64),
+              contentHash: Effect.pipe('b', EffectString.repeat(64)),
               state: 'present',
             },
           },
@@ -166,8 +170,8 @@ describe('Knowledge Delta Git proposals', () => {
     const target = enrolledGitTarget('tn_architecture');
     for (const content of [
       target,
-      target.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:'),
-      target.replace(/^topic_maintenance: .+$/mu, ' topic_maintenance : {broken'),
+      Effect.pipe(target, EffectString.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:')),
+      Effect.pipe(target, EffectString.replace(/^topic_maintenance: .+$/mu, ' topic_maintenance : {broken')),
     ]) {
       const mutation: ReviewedSharedMemoryMutationV1 = {
         ...createMutation(1, 'architecture', sourceContent),
@@ -208,16 +212,22 @@ describe('Knowledge Delta Git proposals', () => {
           createMutation(
             1,
             'architecture',
-            approvedSource(1, 'architecture').replace('project: threadnote', 'project: other'),
+            Effect.pipe(
+              approvedSource(1, 'architecture'),
+              EffectString.replace('project: threadnote', 'project: other'),
+            ),
           ),
         ],
         project: 'threadnote',
         target: TARGET,
       }),
     ).toThrow(/outside its reviewed project\/topic/u);
-    const localRelation = approvedSource(1, 'architecture').replace(
-      'threadnote://memory/tn_platform_contract',
-      'threadnote://user/alice/memories/durable/projects/threadnote/platform-contract.md',
+    const localRelation = Effect.pipe(
+      approvedSource(1, 'architecture'),
+      EffectString.replace(
+        'threadnote://memory/tn_platform_contract',
+        'threadnote://user/alice/memories/durable/projects/threadnote/platform-contract.md',
+      ),
     );
     expect(() =>
       buildKnowledgeDeltaGitProposalV1({
@@ -235,9 +245,9 @@ describe('Knowledge Delta Git proposals', () => {
     ['local', citedSource(false, 'local'), /portable remote repository identity/u],
     [
       'malformed',
-      approvedSource(1, 'architecture').replace(
-        'relation: references',
-        'code_citation: {not-json}\nrelation: references',
+      Effect.pipe(
+        approvedSource(1, 'architecture'),
+        EffectString.replace('relation: references', 'code_citation: {not-json}\nrelation: references'),
       ),
       /malformed code citation metadata/u,
     ],
@@ -286,9 +296,9 @@ describe('Knowledge Delta Git proposals', () => {
     const delta = knowledgeDelta([item(1, 'architecture')]);
 
     for (const memoryId of ['tn_personal_source', 'tn_shared_target']) {
-      const selfRelated = sourceContent.replace(
-        'threadnote://memory/tn_platform_contract',
-        `threadnote://memory/${memoryId}`,
+      const selfRelated = Effect.pipe(
+        sourceContent,
+        EffectString.replace('threadnote://memory/tn_platform_contract', `threadnote://memory/${memoryId}`),
       );
       expect(() =>
         buildKnowledgeDeltaGitProposalV1({
@@ -321,7 +331,7 @@ describe('Knowledge Delta Git proposals', () => {
     });
     const tampered = {
       ...built.proposal,
-      files: built.proposal.files.map(file => ({...file, content: `${file.content}\nchanged`})),
+      files: EffectArray.map(built.proposal.files, file => ({...file, content: `${file.content}\nchanged`})),
     };
 
     expect(() => verifyKnowledgeDeltaGitProposalV1(tampered)).toThrow(KnowledgeDeltaGitProposalError);
@@ -338,7 +348,7 @@ describe('Knowledge Delta Git proposals', () => {
     const first = buildKnowledgeDeltaGitProposalV1({...common, target: TARGET}).proposal;
     const second = buildKnowledgeDeltaGitProposalV1({
       ...common,
-      target: {repositoryId: '2'.repeat(64), team: 'other'},
+      target: {repositoryId: Effect.pipe('2', EffectString.repeat(64)), team: 'other'},
     }).proposal;
 
     expect(first.base).toEqual(second.base);
@@ -351,7 +361,7 @@ describe('Knowledge Delta Git proposals', () => {
   it('rejects an unborn all-zero Git base', () => {
     expect(() =>
       buildKnowledgeDeltaGitProposalV1({
-        baseCommit: '0'.repeat(40),
+        baseCommit: Effect.pipe('0', EffectString.repeat(40)),
         delta: knowledgeDelta([item(1, 'architecture')]),
         mutations: [createMutation(1, 'architecture', approvedSource(1, 'architecture'))],
         project: 'threadnote',
@@ -412,69 +422,87 @@ function approvedSource(
   index: number,
   topic: string,
   body = `Approved ${topic} body.`,
-  memoryId = `tn_${topic.replaceAll('-', '_')}`,
+  memoryId = `tn_${Effect.pipe(topic, EffectString.replaceAll('-', '_'))}`,
 ): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    `topic: ${topic}`,
-    'source_agent_client: codex',
-    'timestamp: 2026-09-17T00:00:00.000Z',
-    'schema_version: 5',
-    `memory_id: ${memoryId}`,
-    'visibility: personal',
-    'authority: user_approved',
-    'trust: approved',
-    `candidate_id: ${REVIEW_ID}-${index}`,
-    'source_session_id: private-session',
-    'relation: references threadnote://memory/tn_platform_contract',
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      `topic: ${topic}`,
+      'source_agent_client: codex',
+      'timestamp: 2026-09-17T00:00:00.000Z',
+      'schema_version: 5',
+      `memory_id: ${memoryId}`,
+      'visibility: personal',
+      'authority: user_approved',
+      'trust: approved',
+      `candidate_id: ${REVIEW_ID}-${index}`,
+      'source_session_id: private-session',
+      'relation: references threadnote://memory/tn_platform_contract',
+      '',
+      body,
+    ],
+    '\n',
+  );
 }
 
-function sharedTarget(topic: string, body: string, memoryId = `tn_${topic.replaceAll('-', '_')}`): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    `topic: ${topic}`,
-    'source_agent_client: codex',
-    'timestamp: 2026-09-16T00:00:00.000Z',
-    `memory_id: ${memoryId}`,
-    'visibility: shared',
-    'authority: user_approved',
-    'trust: approved',
-    '',
-    body,
-  ].join('\n');
+function sharedTarget(
+  topic: string,
+  body: string,
+  memoryId = `tn_${Effect.pipe(topic, EffectString.replaceAll('-', '_'))}`,
+): string {
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      `topic: ${topic}`,
+      'source_agent_client: codex',
+      'timestamp: 2026-09-16T00:00:00.000Z',
+      `memory_id: ${memoryId}`,
+      'visibility: shared',
+      'authority: user_approved',
+      'trust: approved',
+      '',
+      body,
+    ],
+    '\n',
+  );
 }
 
 function citedSource(sourceDirty: boolean, repositoryIdentityKind: 'local' | 'remote'): string {
   const citation = createMemoryCodeCitation({
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
     path: 'apps/threadnote/src/git_proposal/knowledge_delta.ts',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind,
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
     sourceDirty,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });
   const citationLine = formatMemoryCodeCitationLines([citation])[0];
   if (!citationLine) throw new Error('Expected citation line.');
-  return approvedSource(1, 'architecture').replace('relation: references', `${citationLine}\nrelation: references`);
+  return Effect.pipe(
+    approvedSource(1, 'architecture'),
+    EffectString.replace('relation: references', `${citationLine}\nrelation: references`),
+  );
 }
 
 function setCitationHeader(content: string, citedContent: string): string {
-  const citationLine = citedContent.split('\n').find(line => /^\s*code_citation\s*:/u.test(line));
+  const citationLine = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      Effect.pipe(citedContent, EffectString.split('\n')),
+      __effectArrayValue => !!(line => /^\s*code_citation\s*:/u.test(line))(__effectArrayValue),
+    ),
+  );
   if (!citationLine) throw new Error('Expected citation header.');
-  return content.replace('relation: references', `${citationLine}\nrelation: references`);
+  return Effect.pipe(content, EffectString.replace('relation: references', `${citationLine}\nrelation: references`));
 }
 
 function resignProposal(
@@ -493,7 +521,9 @@ function resignProposal(
   );
   const {proposalHash: _proposalHash, ...unsigned} = {
     ...proposal,
-    branch: {name: `threadnote/knowledge-delta/${proposal.knowledgeDelta.reviewId}-${contentSetHash.slice(0, 12)}`},
+    branch: {
+      name: `threadnote/knowledge-delta/${proposal.knowledgeDelta.reviewId}-${Effect.pipe(contentSetHash, EffectString.slice(0, 12))}`,
+    },
   };
   return {...unsigned, proposalHash: sha256HexSync(canonicalJson(unsigned))};
 }

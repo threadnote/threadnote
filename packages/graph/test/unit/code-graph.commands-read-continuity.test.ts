@@ -9,6 +9,8 @@ import {attachCodeGraphStatusObservation} from '@threadnote/graph/query/contract
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphSnapshotUnavailable, type CodeGraphQueryResult, type CodeGraphStatus} from '@threadnote/graph/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph CLI shared-read continuity', () => {
   effectIt.effect('keeps clean same-commit borrowed evidence on the strict bounded current path', () =>
@@ -61,10 +63,13 @@ describe('code graph CLI shared-read continuity', () => {
   effectIt.effect('keeps an older borrowed snapshot on the strict current refresh path', () =>
     Effect.gen(function* () {
       const initial = attachCodeGraphStatusObservation(scopedStatus(false), statusObservation(false));
-      const borrowed = attachCodeGraphStatusObservation(scopedStatus(true, 'a'.repeat(40)), {
-        ...statusObservation(false),
-        borrowedSnapshotId: 'scope-snapshot',
-      });
+      const borrowed = attachCodeGraphStatusObservation(
+        scopedStatus(true, Effect2.pipe('a', EffectString.repeat(40))),
+        {
+          ...statusObservation(false),
+          borrowedSnapshotId: 'scope-snapshot',
+        },
+      );
       const service = CodeGraphQueryService.of({
         attachSharedReadySnapshot: () => Effect.succeed(borrowed),
         inspect: () => Effect.die('Unexpected graph inspection.'),
@@ -153,9 +158,9 @@ function queryResult(freshness: CodeGraphQueryResult['freshness']): CodeGraphQue
     freshness,
     nodes: [],
     operation: 'query',
-    repository: {displayName: 'fixture', repositoryId: 'a'.repeat(64)},
+    repository: {displayName: 'fixture', repositoryId: Effect2.pipe('a', EffectString.repeat(64))},
     snapshot: {
-      commit: 'b'.repeat(40),
+      commit: Effect2.pipe('b', EffectString.repeat(40)),
       dirty: false,
       id: 'scope-snapshot',
       worktreeId: 'fresh-worktree',
@@ -166,7 +171,7 @@ function queryResult(freshness: CodeGraphQueryResult['freshness']): CodeGraphQue
   };
 }
 
-function scopedStatus(ready: boolean, snapshotCommit = 'b'.repeat(40)): CodeGraphStatus {
+function scopedStatus(ready: boolean, snapshotCommit = Effect2.pipe('b', EffectString.repeat(40))): CodeGraphStatus {
   const status: CodeGraphStatus = {
     databasePath: '/threadnote/code-graph.sqlite',
     freshness: 'stale',
@@ -175,10 +180,10 @@ function scopedStatus(ready: boolean, snapshotCommit = 'b'.repeat(40)): CodeGrap
       checkoutId: 'checkout',
       displayName: 'fixture',
       gitCommonDirectory: '/workspace/repository/.git',
-      headCommit: 'b'.repeat(40),
+      headCommit: Effect2.pipe('b', EffectString.repeat(40)),
       objectFormat: 'sha1',
       repoRoot: '/workspace/fresh',
-      repositoryId: 'a'.repeat(64),
+      repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
       worktreeId: 'fresh-worktree',
     },
     languagePacks: [],
@@ -188,7 +193,7 @@ function scopedStatus(ready: boolean, snapshotCommit = 'b'.repeat(40)): CodeGrap
       dependencyComponents: 0,
       kind: 'project',
       negativeProof: 'selected-graph-only',
-      observedWorktreeCommit: 'b'.repeat(40),
+      observedWorktreeCommit: Effect2.pipe('b', EffectString.repeat(40)),
       project: 'docs',
       reusedEquivalentSnapshot: false,
       rootComponents: 1,
@@ -202,8 +207,8 @@ function scopedStatus(ready: boolean, snapshotCommit = 'b'.repeat(40)): CodeGrap
             extractorSet: 'extractor',
             fileCount: 1,
             id: 'scope-snapshot',
-            repositoryId: 'a'.repeat(64),
-            scopeId: `code-graph-scope:${'c'.repeat(64)}`,
+            repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+            scopeId: `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`,
             state: 'ready' as const,
             symbolCount: 1,
             worktreeId: 'source-worktree',
@@ -228,14 +233,14 @@ function statusObservation(dirty: boolean) {
       },
       scope: {
         admittedPrefixes: ['apps/docs'],
-        closureDigest: 'd'.repeat(64),
+        closureDigest: Effect2.pipe('d', EffectString.repeat(64)),
         completeness: 'complete' as const,
         controlPaths: ['package.json'],
-        definitionDigest: 'e'.repeat(64),
+        definitionDigest: Effect2.pipe('e', EffectString.repeat(64)),
         diagnostics: [],
         includedProjectIds: ['@fixture/docs'],
         rootProjectIds: ['@fixture/docs'],
-        scopeKey: `code-graph-scope:${'c'.repeat(64)}`,
+        scopeKey: `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`,
       },
     },
   };
@@ -247,10 +252,10 @@ function scopedStatusIdentity() {
     checkoutId: 'checkout',
     displayName: 'fixture',
     gitCommonDirectory: '/workspace/repository/.git',
-    headCommit: 'b'.repeat(40),
+    headCommit: Effect2.pipe('b', EffectString.repeat(40)),
     objectFormat: 'sha1' as const,
     repoRoot: '/workspace/fresh',
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
     worktreeId: 'fresh-worktree',
   };
 }

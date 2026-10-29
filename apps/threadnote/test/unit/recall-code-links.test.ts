@@ -1,5 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import fc from 'fast-check';
@@ -18,6 +19,8 @@ import {
 } from '@threadnote/recall/code_links';
 import {loadRecallCodeLinks, loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('recall code links', () => {
   effectIt.effect('queries opaque selectors with deterministic bounds and document authorization', () =>
@@ -26,10 +29,10 @@ describe('recall code links', () => {
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-code-links-'});
       const user = 'link-user';
-      const repositoryId = 'a'.repeat(64);
+      const repositoryId = Effect2.pipe('a', EffectString.repeat(64));
       const symbol = citation({repositoryId, symbolSeed: '1'});
       const file = citation({repositoryId, symbolSeed: undefined});
-      const foreignRepository = citation({repositoryId: 'b'.repeat(64), symbolSeed: '1'});
+      const foreignRepository = citation({repositoryId: Effect2.pipe('b', EffectString.repeat(64)), symbolSeed: '1'});
 
       yield* writeMemory(fs, path, home, user, 'threadnote', 'symbol-memory', [symbol]);
       yield* writeMemory(fs, path, home, user, 'threadnote', 'file-memory', [file]);
@@ -53,7 +56,7 @@ describe('recall code links', () => {
       });
 
       expect(second).toEqual(first);
-      expect(first.map(match => [match.matchKind, match.uri])).toEqual([
+      expect(EffectArray.map(first, match => [match.matchKind, match.uri])).toEqual([
         ['symbol-node', `threadnote://user/${user}/memories/durable/projects/threadnote/symbol-memory.md`],
         ['file-path', `threadnote://user/${user}/memories/durable/projects/threadnote/file-memory.md`],
       ]);
@@ -72,14 +75,16 @@ describe('recall code links', () => {
         });
         try {
           return database
-            .query('SELECT selector_kind, selector_digest FROM code_links ORDER BY selector_kind, selector_digest')
-            .all() as readonly {readonly selector_digest: string; readonly selector_kind: string}[];
+            .query<{readonly selector_digest: string; readonly selector_kind: string}, SQLQueryBindings[]>(
+              'SELECT selector_kind, selector_digest FROM code_links ORDER BY selector_kind, selector_digest',
+            )
+            .all();
         } finally {
           database.close();
         }
       });
       expect(rows.length).toBeGreaterThan(0);
-      expect(rows.every(row => /^[0-9a-f]{64}$/u.test(row.selector_digest))).toBe(true);
+      expect(EffectArray.every(rows, row => /^[0-9a-f]{64}$/u.test(row.selector_digest))).toBe(true);
       expect(JSON.stringify(rows)).not.toContain(symbol.repositoryId);
       expect(JSON.stringify(rows)).not.toContain(symbol.path);
       expect(JSON.stringify(rows)).not.toContain(symbol.target.kind === 'symbol' ? symbol.target.nodeId : '');
@@ -89,10 +94,10 @@ describe('recall code links', () => {
             readonly: true,
           });
           try {
-            return database
-              .query('PRAGMA index_info(code_links_selector_uri)')
-              .all()
-              .map(row => (row as {readonly name: string}).name);
+            return EffectArray.map(
+              database.query<{readonly name: string}, []>('PRAGMA index_info(code_links_selector_uri)').all(),
+              row => row.name,
+            );
           } finally {
             database.close();
           }
@@ -107,7 +112,7 @@ describe('recall code links', () => {
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-code-links-refresh-'});
       const user = 'refresh-user';
-      const repositoryId = 'c'.repeat(64);
+      const repositoryId = Effect2.pipe('c', EffectString.repeat(64));
       const original = citation({repositoryId, symbolSeed: '2'});
       const replacement = citation({repositoryId, path: 'src/replacement.ts', symbolSeed: '3'});
       const memoryPath = yield* writeMemory(fs, path, home, user, 'threadnote', 'replace-me', [original]);
@@ -164,14 +169,22 @@ describe('recall code links', () => {
         {concurrency: 2},
       );
       const user = 'generation-user';
-      const anchor = citation({repositoryId: '1'.repeat(64), symbolSeed: 'a'});
+      const anchor = citation({repositoryId: Effect2.pipe('1', EffectString.repeat(64)), symbolSeed: 'a'});
       const documentIndexes = Array.from({length: 70}, (_, index) => index);
       for (const [rootIndex, home] of roots.entries()) {
         const order = rootIndex === 0 ? documentIndexes : [...documentIndexes].reverse();
         yield* Effect.forEach(
           order,
           index =>
-            writeMemory(fs, path, home, user, 'threadnote', `generation-${String(index).padStart(3, '0')}`, [anchor]),
+            writeMemory(
+              fs,
+              path,
+              home,
+              user,
+              'threadnote',
+              `generation-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}`,
+              [anchor],
+            ),
           {concurrency: 8, discard: true},
         );
       }
@@ -195,7 +208,7 @@ describe('recall code links', () => {
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-code-links-scope-'});
       const user = 'scope-user';
-      const anchor = citation({repositoryId: '4'.repeat(64), symbolSeed: '4'});
+      const anchor = citation({repositoryId: Effect2.pipe('4', EffectString.repeat(64)), symbolSeed: '4'});
       for (let index = 0; index < 8; index += 1) {
         yield* writeResourceMemory(fs, path, home, `resource-${index}`, anchor);
       }
@@ -231,12 +244,16 @@ describe('recall code links', () => {
           readonly: true,
         });
         try {
-          return queries.map(query =>
-            database
-              .query(`EXPLAIN QUERY PLAN ${query.sql}`)
-              .all(...query.params)
-              .map(row => (row as {readonly detail: string}).detail)
-              .join('\n'),
+          return EffectArray.map(queries, query =>
+            EffectArray.join(
+              EffectArray.map(
+                database
+                  .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${query.sql}`)
+                  .all(...query.params),
+                row => row.detail,
+              ),
+              '\n',
+            ),
           );
         } finally {
           database.close();
@@ -254,7 +271,7 @@ describe('recall code links', () => {
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-code-links-race-'});
       const user = 'race-user';
-      const repositoryId = '9'.repeat(64);
+      const repositoryId = Effect2.pipe('9', EffectString.repeat(64));
       const firstCitation = citation({repositoryId, path: 'src/first.ts', symbolSeed: '5'});
       const secondCitation = citation({repositoryId, path: 'src/second.ts', symbolSeed: '6'});
       yield* writeMemory(fs, path, home, user, 'threadnote', 'reordered', [firstCitation, secondCitation]);
@@ -284,9 +301,9 @@ describe('recall code links', () => {
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-code-links-fairness-'});
       const user = 'fairness-user';
-      const repositoryId = '8'.repeat(64);
+      const repositoryId = Effect2.pipe('8', EffectString.repeat(64));
       const anchors = Array.from({length: 8}, (_, index) =>
-        citation({repositoryId, symbolSeed: (index + 1).toString(16).padStart(2, '0')}),
+        citation({repositoryId, symbolSeed: Effect2.pipe((index + 1).toString(16), EffectString.padStart(2, '0'))}),
       );
       for (let index = 0; index < 8; index += 1) {
         yield* writeMemory(fs, path, home, user, 'threadnote', `anchor-zero-${index}`, [anchors[0]]);
@@ -305,7 +322,9 @@ describe('recall code links', () => {
       });
 
       expect(matches).toHaveLength(8);
-      expect(new Set(matches.map(match => match.anchorOrdinal))).toEqual(new Set([0, 1, 2, 3, 4, 5, 6, 7]));
+      expect(new Set(EffectArray.map(matches, match => match.anchorOrdinal))).toEqual(
+        new Set([0, 1, 2, 3, 4, 5, 6, 7]),
+      );
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
@@ -315,13 +334,19 @@ describe('recall code links', () => {
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-code-links-shadow-'});
       const user = 'shadow-user';
-      const repositoryId = '3'.repeat(64);
+      const repositoryId = Effect2.pipe('3', EffectString.repeat(64));
       const fileAnchor = citation({repositoryId, symbolSeed: undefined});
       const symbolAnchor = citation({repositoryId, symbolSeed: 'e'});
       for (let index = 0; index < 12; index += 1) {
-        yield* writeMemory(fs, path, home, user, 'threadnote', `aaa-symbol-shadow-${String(index).padStart(2, '0')}`, [
-          symbolAnchor,
-        ]);
+        yield* writeMemory(
+          fs,
+          path,
+          home,
+          user,
+          'threadnote',
+          `aaa-symbol-shadow-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+          [symbolAnchor],
+        );
       }
       yield* writeMemory(fs, path, home, user, 'threadnote', 'zzz-file-only', [fileAnchor]);
 
@@ -344,7 +369,9 @@ describe('recall code links', () => {
         expect.objectContaining({anchorOrdinal: 1, matchKind: 'symbol-node'}),
         expect.objectContaining({anchorOrdinal: 1, matchKind: 'symbol-node'}),
       ]);
-      expect(bounded.some(match => match.uri.endsWith('/zzz-file-only.md'))).toBe(false);
+      expect(
+        EffectArray.some(bounded, match => Effect2.pipe(match.uri, EffectString.endsWith('/zzz-file-only.md'))),
+      ).toBe(false);
       expect(truncatedSelectorCount).toBe(2);
 
       let expandedTruncatedSelectorCount = 0;
@@ -377,7 +404,7 @@ describe('recall code links', () => {
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-code-links-backfill-'});
       const user = 'backfill-user';
-      const repositoryId = '7'.repeat(64);
+      const repositoryId = Effect2.pipe('7', EffectString.repeat(64));
       const anchor = citation({repositoryId, symbolSeed: '7'});
       const replacement = citation({repositoryId, path: 'src/replacement.ts', symbolSeed: '8'});
       yield* writeMemory(fs, path, home, user, 'threadnote', 'aaa-stale', [anchor]);
@@ -416,7 +443,7 @@ describe('recall code links', () => {
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-code-links-deep-backfill-'});
       const user = 'deep-backfill-user';
-      const repositoryId = '6'.repeat(64);
+      const repositoryId = Effect2.pipe('6', EffectString.repeat(64));
       const anchor = citation({repositoryId, symbolSeed: '6'});
       const replacement = citation({repositoryId, path: 'src/replacement.ts', symbolSeed: '5'});
       for (let index = 0; index < 5; index += 1) {
@@ -458,7 +485,7 @@ describe('recall code links', () => {
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-code-links-lifecycle-race-'});
       const user = 'lifecycle-race-user';
-      const repositoryId = '5'.repeat(64);
+      const repositoryId = Effect2.pipe('5', EffectString.repeat(64));
       const anchor = citation({repositoryId, symbolSeed: '4'});
       const stalePaths = yield* Effect.forEach(
         Array.from({length: 5}),
@@ -484,7 +511,10 @@ describe('recall code links', () => {
             .readFileString(stalePath)
             .pipe(
               Effect.flatMap(content =>
-                fs.writeFileString(stalePath, content.replace('status: active', 'status: archived')),
+                fs.writeFileString(
+                  stalePath,
+                  Effect2.pipe(content, EffectString.replace('status: active', 'status: archived')),
+                ),
               ),
             ),
         {concurrency: 1, discard: true},
@@ -526,8 +556,11 @@ describe('recall code links', () => {
   it('derives an order-invariant selector set and repository-isolated digests (properties)', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({max: 31, min: 0}), {maxLength: 8, minLength: 1}), seeds => {
-        const anchors = seeds.map(seed =>
-          citation({repositoryId: 'd'.repeat(64), symbolSeed: seed.toString(16).padStart(2, '0')}),
+        const anchors = EffectArray.map(seeds, seed =>
+          citation({
+            repositoryId: Effect2.pipe('d', EffectString.repeat(64)),
+            symbolSeed: Effect2.pipe(seed.toString(16), EffectString.padStart(2, '0')),
+          }),
         );
         expect(selectorProjection(deriveRecallCodeLinkQuerySelectors(anchors))).toEqual(
           selectorProjection(deriveRecallCodeLinkQuerySelectors([...anchors].reverse())),
@@ -540,14 +573,18 @@ describe('recall code links', () => {
         fc.tuple(hexCharacter, hexCharacter).filter(([left, right]) => left !== right),
         ([left, right]) => {
           const leftSelectors = selectorProjection(
-            deriveRecallCodeLinkQuerySelectors([citation({repositoryId: left.repeat(64), symbolSeed: '4'})]),
+            deriveRecallCodeLinkQuerySelectors([
+              citation({repositoryId: Effect2.pipe(left, EffectString.repeat(64)), symbolSeed: '4'}),
+            ]),
           );
           const rightSelectors = new Set(
             selectorProjection(
-              deriveRecallCodeLinkQuerySelectors([citation({repositoryId: right.repeat(64), symbolSeed: '4'})]),
+              deriveRecallCodeLinkQuerySelectors([
+                citation({repositoryId: Effect2.pipe(right, EffectString.repeat(64)), symbolSeed: '4'}),
+              ]),
             ),
           );
-          expect(leftSelectors.every(selector => !rightSelectors.has(selector))).toBe(true);
+          expect(EffectArray.every(leftSelectors, selector => !rightSelectors.has(selector))).toBe(true);
         },
       ),
       {numRuns: 48},
@@ -570,13 +607,13 @@ describe('recall code links', () => {
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-code-links-model-'});
         const user = 'model-user';
-        const repositoryId = '2'.repeat(64);
+        const repositoryId = Effect2.pipe('2', EffectString.repeat(64));
         const anchors = Array.from({length: 3}, (_, index) =>
           citation({path: `src/target-${index}.ts`, repositoryId, symbolSeed: String(index + 1)}),
         );
         const modeled: Array<RecallCodeLinkReferenceRow & {readonly assignments: readonly number[]}> = [];
         for (const [documentIndex, assignments] of documents.entries()) {
-          const topic = `document-${String(documentIndex).padStart(2, '0')}`;
+          const topic = `document-${Effect2.pipe(String(documentIndex), EffectString.padStart(2, '0'))}`;
           yield* writeMemory(
             fs,
             path,
@@ -584,7 +621,7 @@ describe('recall code links', () => {
             user,
             'threadnote',
             topic,
-            assignments.map(anchorOrdinal => anchors[anchorOrdinal]),
+            EffectArray.map(assignments, anchorOrdinal => anchors[anchorOrdinal]),
           );
           modeled.push({
             anchorOrdinal: assignments[0],
@@ -596,28 +633,33 @@ describe('recall code links', () => {
           });
         }
         const scanLimit = limit * 4;
-        const boundedModeled = anchors.flatMap((_, anchorOrdinal) =>
-          modeled
-            .filter(row => row.assignments.includes(anchorOrdinal))
-            .slice(0, scanLimit)
-            .filter(row => row.anchorOrdinal === anchorOrdinal),
+        const boundedModeled = EffectArray.flatMap(anchors, (_, anchorOrdinal) =>
+          EffectArray.filter(
+            EffectArray.filter(modeled, row => row.assignments.includes(anchorOrdinal)).slice(0, scanLimit),
+            row => row.anchorOrdinal === anchorOrdinal,
+          ),
         );
         const anchorRanks = new Map<number, number>();
-        const expected = boundedModeled
-          .sort((left, right) => left.anchorOrdinal - right.anchorOrdinal || compareReferenceText(left.uri, right.uri))
-          .map(row => {
-            const anchorRank = (anchorRanks.get(row.anchorOrdinal) ?? 0) + 1;
-            anchorRanks.set(row.anchorOrdinal, anchorRank);
-            return {...row, anchorRank};
-          })
-          .sort(
-            (left, right) =>
-              left.anchorRank - right.anchorRank ||
-              left.anchorOrdinal - right.anchorOrdinal ||
-              compareReferenceText(left.uri, right.uri),
+        const expected = EffectArray.map(
+          EffectArray.map(
+            boundedModeled.sort(
+              (left, right) => left.anchorOrdinal - right.anchorOrdinal || compareReferenceText(left.uri, right.uri),
+            ),
+            row => {
+              const anchorRank = (anchorRanks.get(row.anchorOrdinal) ?? 0) + 1;
+              anchorRanks.set(row.anchorOrdinal, anchorRank);
+              return {...row, anchorRank};
+            },
           )
-          .slice(0, limit)
-          .map(({anchorRank: _anchorRank, assignments: _assignments, ...row}) => row);
+            .sort(
+              (left, right) =>
+                left.anchorRank - right.anchorRank ||
+                left.anchorOrdinal - right.anchorOrdinal ||
+                compareReferenceText(left.uri, right.uri),
+            )
+            .slice(0, limit),
+          ({anchorRank: _anchorRank, assignments: _assignments, ...row}) => row,
+        );
         const actual = yield* loadRecallCodeLinks(
           {account: 'local', agentContextHome: home, user},
           {anchors, forceRefresh: true, includeInactive: false, limit, project: 'threadnote'},
@@ -648,26 +690,35 @@ function citation(input: {
   readonly symbolSeed: string | undefined;
 }): MemoryCodeCitationV1 {
   const path = input.path ?? 'src/target.ts';
-  const contentHashSeed = input.symbolSeed?.at(-1) ?? 'e';
+  const contentHashSeed =
+    Effect2.pipe(input.symbolSeed, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(
+            effectOptionalString,
+            EffectString.at(-1),
+            Effect2.Option.getOrElse(() => undefined),
+          ),
+    ) ?? 'e';
   return createMemoryCodeCitation({
     extractorSet: 'native-code-graph-test',
-    fileContentHash: {algorithm: 'sha256', value: contentHashSeed.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe(contentHashSeed, EffectString.repeat(64))},
     path,
     repositoryId: input.repositoryId,
     repositoryIdentityKind: 'remote',
-    sourceCommit: 'f'.repeat(40),
+    sourceCommit: Effect2.pipe('f', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'0'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`,
     target:
       input.symbolSeed === undefined
         ? {kind: 'file'}
         : {
             fragmentCanonicalization: 'utf8-source-span-v1',
-            fragmentHash: {algorithm: 'sha256', value: input.symbolSeed.padEnd(64, '0')},
+            fragmentHash: {algorithm: 'sha256', value: Effect2.pipe(input.symbolSeed, EffectString.padEnd(64, '0'))},
             kind: 'symbol',
             language: 'typescript',
             name: `target${input.symbolSeed}`,
-            nodeId: `cgs_${input.symbolSeed.padEnd(32, '0')}`,
+            nodeId: `cgs_${Effect2.pipe(input.symbolSeed, EffectString.padEnd(32, '0'))}`,
             qualifiedName: `target${input.symbolSeed}`,
             span: {column: 1, endColumn: 2, endLine: 1, line: 1},
             symbolKind: 'function',
@@ -677,7 +728,7 @@ function citation(input: {
 }
 
 function selectorProjection(selectors: readonly RecallCodeLinkQuerySelector[]): readonly string[] {
-  return selectors.map(selector => `${selector.selectorKind}:${selector.selectorDigest}`).sort();
+  return EffectArray.map(selectors, selector => `${selector.selectorKind}:${selector.selectorDigest}`).sort();
 }
 
 function writeMemory(

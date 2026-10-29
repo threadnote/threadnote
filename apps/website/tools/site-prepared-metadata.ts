@@ -1,9 +1,14 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptError} from './effect/errors.js';
 import {loadWebsiteArticles} from './site-articles.js';
 import {loadRetainedPerformanceEvidence, performanceArtifactRelativePath} from './site-performance-evidence.js';
 import {loadLatestMajorWebsiteReleases, type WebsiteRelease} from './site-release-notes.js';
-import type {PerformanceEvidence} from '@threadnote/evidence/performance';
+import {assertRetainedPerformanceArtifact, type PerformanceEvidence} from '@threadnote/evidence/performance';
+import {isJsonObject} from '@threadnote/platform/json';
 import type {WebsiteArticle} from '../src/content/websiteArticles.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const preparedWebsiteMetadataSchemaVersion = 1;
 export const preparedWebsiteMetadataEnvironment = 'THREADNOTE_SITE_PREPARED_METADATA';
@@ -20,34 +25,32 @@ export interface PreparedWebsiteMetadata {
 }
 
 function exactRecord(value: unknown, path: string, keys: readonly string[]): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw ScriptError.make({message: `Prepared website metadata ${path} must be an object.`});
-  const record = value as Record<string, unknown>;
-  const actual = Object.keys(record).sort();
+  if (!isJsonObject(value)) throw ScriptError.make({message: `Prepared website metadata ${path} must be an object.`});
+  const record = value;
+  const actual = EffectRecord.keys(record).sort();
   const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  if (actual.length !== expected.length || EffectArray.some(actual, (key, index) => key !== expected[index])) {
     throw ScriptError.make({message: `Prepared website metadata ${path} has unexpected or missing fields.`});
   }
   return record;
 }
 
 function boundedRecord(value: unknown, path: string, keys: readonly string[]): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw ScriptError.make({message: `Prepared website metadata ${path} must be an object.`});
-  const record = value as Record<string, unknown>;
-  if (Object.keys(record).some(key => !keys.includes(key))) {
+  if (!isJsonObject(value)) throw ScriptError.make({message: `Prepared website metadata ${path} must be an object.`});
+  const record = value;
+  if (EffectArray.some(EffectRecord.keys(record), key => !keys.includes(key))) {
     throw ScriptError.make({message: `Prepared website metadata ${path} has an unexpected field.`});
   }
   return record;
 }
 
 function assertSiteBase(siteBase: string): void {
-  const segments = siteBase.split('/').filter(Boolean);
+  const segments = EffectArray.filter(Effect.pipe(siteBase, EffectString.split('/')), Boolean);
   if (
-    !siteBase.startsWith('/') ||
-    !siteBase.endsWith('/') ||
-    siteBase.includes('//') ||
-    segments.some(segment => segment === '.' || segment === '..' || !/^[A-Za-z0-9._~-]+$/.test(segment))
+    !Effect.pipe(siteBase, EffectString.startsWith('/')) ||
+    !Effect.pipe(siteBase, EffectString.endsWith('/')) ||
+    Effect.pipe(siteBase, EffectString.includes('//')) ||
+    EffectArray.some(segments, segment => segment === '.' || segment === '..' || !/^[A-Za-z0-9._~-]+$/.test(segment))
   ) {
     throw ScriptError.make({
       message: 'Prepared website metadata siteBase must be a root-relative directory path ending in /.',
@@ -55,13 +58,15 @@ function assertSiteBase(siteBase: string): void {
   }
 }
 
-function assertStringArray(value: unknown, path: string): void {
-  if (!Array.isArray(value) || value.some(entry => typeof entry !== 'string')) {
+function assertStringArray(value: unknown, path: string): asserts value is readonly string[] {
+  if (!EffectArray.isArray(value) || EffectArray.some(value, entry => typeof entry !== 'string')) {
     throw ScriptError.make({message: `Prepared website metadata ${path} must be a string array.`});
   }
 }
 
-function assertArticles(value: readonly unknown[]): void {
+function assertArticles(value: unknown): asserts value is readonly WebsiteArticle[] {
+  if (!EffectArray.isArray(value))
+    throw ScriptError.make({message: 'Prepared website metadata articles must be an array.'});
   for (const [index, entry] of value.entries()) {
     const article = boundedRecord(entry, `articles[${index}]`, [
       'author',
@@ -93,7 +98,9 @@ function assertArticles(value: readonly unknown[]): void {
   }
 }
 
-function assertReleases(value: readonly unknown[]): void {
+function assertReleases(value: unknown): asserts value is readonly WebsiteRelease[] {
+  if (!EffectArray.isArray(value))
+    throw ScriptError.make({message: 'Prepared website metadata releases must be an array.'});
   for (const [index, entry] of value.entries()) {
     const release = exactRecord(entry, `releases[${index}]`, [
       'body',
@@ -123,7 +130,7 @@ function assertReleases(value: readonly unknown[]): void {
         throw ScriptError.make({message: `Prepared website metadata releases[${index}].${key} must be a string.`});
     }
     for (const key of ['major', 'minor', 'patch'] as const) {
-      if (!Number.isSafeInteger(release[key]))
+      if (typeof release[key] !== 'number' || !Number.isSafeInteger(release[key]))
         throw ScriptError.make({message: `Prepared website metadata releases[${index}].${key} must be an integer.`});
     }
     assertStringArray(release.highlights, `releases[${index}].highlights`);
@@ -155,40 +162,44 @@ export function parsePreparedWebsiteMetadata(value: unknown): PreparedWebsiteMet
   if (record.releaseMode !== 'local' && record.releaseMode !== 'public') {
     throw ScriptError.make({message: 'Prepared website metadata releaseMode must be local or public.'});
   }
-  if (!Array.isArray(record.articles) || !Array.isArray(record.releases)) {
+  if (!EffectArray.isArray(record.articles) || !EffectArray.isArray(record.releases)) {
     throw ScriptError.make({message: 'Prepared website metadata articles and releases must be arrays.'});
   }
   assertArticles(record.articles);
   assertReleases(record.releases);
-  if (
-    !record.performanceEvidence ||
-    typeof record.performanceEvidence !== 'object' ||
-    Array.isArray(record.performanceEvidence)
-  ) {
+  const rawPerformanceEvidence = record.performanceEvidence;
+  if (!isJsonObject(rawPerformanceEvidence))
     throw ScriptError.make({message: 'Prepared website metadata performance evidence must be an object.'});
-  }
-  const performanceEvidence = record.performanceEvidence as Record<string, unknown>;
-  if (performanceEvidence.state !== 'pending' && performanceEvidence.state !== 'verified') {
+  const performanceState = rawPerformanceEvidence.state;
+  let validatedPerformanceEvidence: PerformanceEvidence;
+  if (performanceState === 'pending') {
+    const reason = rawPerformanceEvidence.reason;
+    if (typeof reason !== 'string')
+      throw ScriptError.make({message: 'Prepared website metadata pending performance evidence needs a reason.'});
+    validatedPerformanceEvidence = {state: 'pending', reason};
+  } else if (performanceState === 'verified') {
+    const artifact = rawPerformanceEvidence.artifact;
+    try {
+      assertRetainedPerformanceArtifact(artifact);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'unknown validation error';
+      throw ScriptError.make({
+        message: `Prepared website metadata verified performance evidence is invalid: ${reason}`,
+      });
+    }
+    validatedPerformanceEvidence = {state: 'verified', artifact};
+  } else {
     throw ScriptError.make({message: 'Prepared website metadata performance evidence state is invalid.'});
-  }
-  if (performanceEvidence.state === 'pending' && typeof performanceEvidence.reason !== 'string') {
-    throw ScriptError.make({message: 'Prepared website metadata pending performance evidence needs a reason.'});
-  }
-  if (
-    performanceEvidence.state === 'verified' &&
-    (!performanceEvidence.artifact || typeof performanceEvidence.artifact !== 'object')
-  ) {
-    throw ScriptError.make({message: 'Prepared website metadata verified performance evidence needs an artifact.'});
   }
   if (record.performanceArtifactText !== null && typeof record.performanceArtifactText !== 'string') {
     throw ScriptError.make({message: 'Prepared website metadata performanceArtifactText must be a string or null.'});
   }
-  if (performanceEvidence.state === 'verified' && !record.performanceArtifactText) {
+  if (validatedPerformanceEvidence.state === 'verified' && !record.performanceArtifactText) {
     throw ScriptError.make({
       message: 'Prepared website metadata verified performance evidence needs its artifact text.',
     });
   }
-  if (performanceEvidence.state === 'pending' && record.performanceArtifactText !== null) {
+  if (validatedPerformanceEvidence.state === 'pending' && record.performanceArtifactText !== null) {
     throw ScriptError.make({
       message: 'Prepared website metadata pending performance evidence cannot include artifact text.',
     });
@@ -197,9 +208,9 @@ export function parsePreparedWebsiteMetadata(value: unknown): PreparedWebsiteMet
     schemaVersion: preparedWebsiteMetadataSchemaVersion,
     siteBase: record.siteBase,
     releaseMode: record.releaseMode,
-    articles: record.articles as readonly WebsiteArticle[],
-    releases: record.releases as readonly WebsiteRelease[],
-    performanceEvidence: record.performanceEvidence as PerformanceEvidence,
+    articles: record.articles,
+    releases: record.releases,
+    performanceEvidence: validatedPerformanceEvidence,
     performanceArtifactText: record.performanceArtifactText,
   };
 }
@@ -224,7 +235,7 @@ export async function prepareWebsiteMetadata(input: {
     siteBase: input.siteBase,
     releaseMode: input.releaseMode,
     articles,
-    releases: releases.map(release => ({
+    releases: EffectArray.map(releases, release => ({
       body: release.body,
       headline: release.headline,
       highlights: release.highlights,

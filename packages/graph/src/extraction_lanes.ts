@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {compareCodeUnits} from './ordering.js';
 import {codeGraphExtractionWorkUnits, codeGraphSourceSizeBucket} from './progress/telemetry.js';
 
@@ -98,7 +99,7 @@ export function planCodeGraphExtractionLanes<Group extends CodeGraphExtractionCo
 ): readonly CodeGraphExtractionLane<Group>[] {
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Error('Code graph parser capacity is invalid.');
   if (groups.length === 0) return [];
-  const planned = groups.map((group, inputIndex) => ({
+  const planned = EffectArray.map(groups, (group, inputIndex) => ({
     estimate: model.estimate(group),
     group,
     inputIndex,
@@ -112,7 +113,7 @@ export function planCodeGraphExtractionLanes<Group extends CodeGraphExtractionCo
       compareCodeUnits(left.key, right.key) ||
       left.inputIndex - right.inputIndex,
   );
-  return [{concurrency: capacity, groups: planned.map(item => item.group), kind: 'cost-ordered'}];
+  return [{concurrency: capacity, groups: EffectArray.map(planned, item => item.group), kind: 'cost-ordered'}];
 }
 
 /**
@@ -127,7 +128,7 @@ export function takeCodeGraphExtractionWindow<Group extends CodeGraphExtractionC
   if (!Number.isSafeInteger(maximumFiles) || maximumFiles < 1) {
     throw new Error('Code graph extraction window is invalid.');
   }
-  const totalFiles = groups.reduce((total, group) => total + group.files.length, 0);
+  const totalFiles = EffectArray.reduce(groups, 0, (total, group) => total + group.files.length);
   const windowCount = Math.ceil(totalFiles / maximumFiles);
   const targetFiles = windowCount === 0 ? 0 : Math.ceil(totalFiles / windowCount);
   const selected: Group[] = [];
@@ -206,7 +207,7 @@ function fileWorkUnits(file: CodeGraphExtractionCostFile): number {
 }
 
 function groupKey(group: CodeGraphExtractionCostGroup): string {
-  return [...group.files].map(file => file.path).sort(compareCodeUnits)[0] ?? '';
+  return EffectArray.map([...group.files], file => file.path).sort(compareCodeUnits)[0] ?? '';
 }
 
 function scaledRatio(value: number, numerator: number, denominator: number): number {

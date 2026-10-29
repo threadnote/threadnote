@@ -1,4 +1,3 @@
-import {Effect} from 'effect';
 import * as core from '@threadnote/integration-core/config';
 import {
   makeSourceConfigurationRegistry,
@@ -72,39 +71,40 @@ export const sourceConfigurationRegistry = makeSourceConfigurationRegistry<
   projections: [obsidian.obsidianProjectionCodec],
 });
 export const sourceConfigurationLayer = sourceConfigurationStoreLayer(sourceConfigurationRegistry);
-const store = makeSourceConfigurationStore(sourceConfigurationRegistry);
+const store = makeSourceConfigurationStore<SourceConfig, obsidian.ObsidianProjectionConfig>(
+  sourceConfigurationRegistry,
+);
 export const emptyObsidianConfiguration = sourceConfigurationRegistry.empty;
 export const parseSourceConfiguration = sourceConfigurationRegistry.parse;
 export const parseObsidianConfiguration = parseSourceConfiguration;
 export const renderSourceConfiguration = sourceConfigurationRegistry.render;
 export const renderObsidianConfiguration = renderSourceConfiguration;
-export const readSourceConfiguration = (config: core.ConfigurationHome) =>
-  store.read(config).pipe(Effect.map(value => value as SourceConfiguration));
+export const readSourceConfiguration = (config: core.ConfigurationHome) => store.read(config);
 export const readObsidianConfiguration = readSourceConfiguration;
 export const writeSourceConfiguration = store.write;
 export const writeObsidianConfiguration = writeSourceConfiguration;
 export const mutateSourceConfiguration = (
   config: core.ConfigurationHome,
   update: (current: SourceConfiguration) => SourceConfiguration,
-) => store.mutate(config, current => update(current as SourceConfiguration));
+) => store.mutate(config, current => update(current));
 export const upsertObsidianSource = (configuration: SourceConfiguration, source: obsidian.ObsidianSourceConfig) =>
-  obsidian.upsertObsidianSource(configuration, source) as SourceConfiguration;
+  obsidian.upsertObsidianSource(configuration, source);
 export const upsertObsidianProjection = (
   configuration: SourceConfiguration,
   projection: obsidian.ObsidianProjectionConfig,
-) => obsidian.upsertObsidianProjection(configuration, projection) as SourceConfiguration;
+) => obsidian.upsertObsidianProjection(configuration, projection);
 export const removeObsidianSource = (configuration: SourceConfiguration, id: string) =>
-  obsidian.removeObsidianSource(configuration, id) as SourceConfiguration;
+  obsidian.removeObsidianSource(configuration, id);
 export const removeObsidianProjection = (configuration: SourceConfiguration, id: string) =>
-  obsidian.removeObsidianProjection(configuration, id) as SourceConfiguration;
+  obsidian.removeObsidianProjection(configuration, id);
 export const upsertSuperhumanSource = (configuration: SourceConfiguration, source: superhuman.SuperhumanSourceConfig) =>
-  superhuman.upsertSuperhumanSource(configuration, source) as SourceConfiguration;
+  superhuman.upsertSuperhumanSource(configuration, source);
 export const upsertPocketSource = (configuration: SourceConfiguration, source: pocket.PocketSourceConfig) =>
-  pocket.upsertPocketSource(configuration, source) as SourceConfiguration;
+  pocket.upsertPocketSource(configuration, source);
 export const upsertGitHubSource = (configuration: SourceConfiguration, source: github.GitHubSourceConfig) =>
-  github.upsertGitHubSource(configuration, source) as SourceConfiguration;
+  github.upsertGitHubSource(configuration, source);
 export const upsertLinearSource = (configuration: SourceConfiguration, source: linear.LinearSourceConfig) =>
-  linear.upsertLinearSource(configuration, source) as SourceConfiguration;
+  linear.upsertLinearSource(configuration, source);
 export function sourceConfigurationFingerprint(source: Exclude<SourceConfig, obsidian.ObsidianSourceConfig>): string {
   switch (source.type) {
     case 'linear':

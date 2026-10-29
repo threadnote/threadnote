@@ -1,6 +1,11 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Predicate} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseThreadnote5TrustedSourceV1, type Threadnote5SourceV1} from './threadnote-5-release-readiness-contract.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const THREADNOTE_5_LOCAL_AUTHORITY_MANIFEST_VERSION = 1 as const;
 const MAX_AUTHORITY_ENTRIES = 64;
@@ -154,13 +159,13 @@ export function threadnote5ValueReportOfflineObservationDigest(value: unknown): 
 
 export function parseThreadnote5LocalAuthorityManifestV1(value: unknown): Threadnote5LocalAuthorityManifestV1 {
   const source = exactObject(value, ['candidate', 'entries', 'version'], 'local authority manifest');
-  if (source.version !== 1 || !Array.isArray(source.entries) || source.entries.length > MAX_AUTHORITY_ENTRIES) {
+  if (source.version !== 1 || !EffectArray.isArray(source.entries) || source.entries.length > MAX_AUTHORITY_ENTRIES) {
     throw new Error('Local authority manifest version or entry count is invalid.');
   }
-  const entries = source.entries
-    .map(parseEntry)
-    .sort((left, right) => left.recordDigest.localeCompare(right.recordDigest));
-  if (new Set(entries.map(entry => entry.recordDigest)).size !== entries.length) {
+  const entries = EffectArray.map(source.entries, parseEntry).sort((left, right) =>
+    Effect.pipe(left.recordDigest, EffectString.localeCompare(right.recordDigest)),
+  );
+  if (new Set(EffectArray.map(entries, entry => entry.recordDigest)).size !== entries.length) {
     throw new Error('Local authority manifest record digests must be unique.');
   }
   return {
@@ -183,14 +188,18 @@ function parseEntry(value: unknown): Threadnote5LocalAuthorityEntryV1 {
   }
   if (source.type === 'activation-verification') {
     exactKeys(source, ['recordDigest', 'trials', 'type'], 'activation verification authority');
-    if (!Array.isArray(source.trials) || source.trials.length < 1 || source.trials.length > MAX_AUTHORITY_ENTRIES) {
+    if (
+      !EffectArray.isArray(source.trials) ||
+      source.trials.length < 1 ||
+      source.trials.length > MAX_AUTHORITY_ENTRIES
+    ) {
       throw new Error('Activation verification authority trials are out of bounds.');
     }
-    const trials = source.trials
-      .map(parseActivationVerificationTrial)
-      .sort((left, right) => left.activationId.localeCompare(right.activationId));
+    const trials = EffectArray.map(source.trials, parseActivationVerificationTrial).sort((left, right) =>
+      Effect.pipe(left.activationId, EffectString.localeCompare(right.activationId)),
+    );
     unique(
-      trials.map(trial => trial.activationId),
+      EffectArray.map(trials, trial => trial.activationId),
       'activation verification authority activation IDs',
     );
     return {
@@ -201,14 +210,18 @@ function parseEntry(value: unknown): Threadnote5LocalAuthorityEntryV1 {
   }
   if (source.type === 'context-brief-plan-citation') {
     exactKeys(source, ['recordDigest', 'trials', 'type'], 'Context Brief plan authority');
-    if (!Array.isArray(source.trials) || source.trials.length < 1 || source.trials.length > MAX_AUTHORITY_ENTRIES) {
+    if (
+      !EffectArray.isArray(source.trials) ||
+      source.trials.length < 1 ||
+      source.trials.length > MAX_AUTHORITY_ENTRIES
+    ) {
       throw new Error('Context Brief plan authority trials are out of bounds.');
     }
-    const trials = source.trials
-      .map(parseContextBriefTrial)
-      .sort((left, right) => left.attemptDigest.localeCompare(right.attemptDigest));
+    const trials = EffectArray.map(source.trials, parseContextBriefTrial).sort((left, right) =>
+      Effect.pipe(left.attemptDigest, EffectString.localeCompare(right.attemptDigest)),
+    );
     unique(
-      trials.map(trial => trial.attemptDigest),
+      EffectArray.map(trials, trial => trial.attemptDigest),
       'Context Brief authority attempt digests',
     );
     return {
@@ -219,14 +232,18 @@ function parseEntry(value: unknown): Threadnote5LocalAuthorityEntryV1 {
   }
   if (source.type === 'git-proposal-review') {
     exactKeys(source, ['recordDigest', 'trials', 'type'], 'Git proposal authority');
-    if (!Array.isArray(source.trials) || source.trials.length < 1 || source.trials.length > MAX_AUTHORITY_ENTRIES) {
+    if (
+      !EffectArray.isArray(source.trials) ||
+      source.trials.length < 1 ||
+      source.trials.length > MAX_AUTHORITY_ENTRIES
+    ) {
       throw new Error('Git proposal authority trials are out of bounds.');
     }
-    const trials = source.trials
-      .map(parseGitProposalTrial)
-      .sort((left, right) => left.proposalHash.localeCompare(right.proposalHash));
+    const trials = EffectArray.map(source.trials, parseGitProposalTrial).sort((left, right) =>
+      Effect.pipe(left.proposalHash, EffectString.localeCompare(right.proposalHash)),
+    );
     unique(
-      trials.map(trial => trial.proposalHash),
+      EffectArray.map(trials, trial => trial.proposalHash),
       'Git proposal authority proposal hashes',
     );
     return {
@@ -249,12 +266,12 @@ function parseEntry(value: unknown): Threadnote5LocalAuthorityEntryV1 {
       ],
       'procedure authority',
     );
-    if (!Array.isArray(source.commandResults) || source.commandResults.length > MAX_COMMAND_RESULTS) {
+    if (!EffectArray.isArray(source.commandResults) || source.commandResults.length > MAX_COMMAND_RESULTS) {
       throw new Error('Procedure authority command results are out of bounds.');
     }
-    const commandResults = source.commandResults.map(parseCommandResult);
+    const commandResults = EffectArray.map(source.commandResults, parseCommandResult);
     unique(
-      commandResults.map(result => result.commandId),
+      EffectArray.map(commandResults, result => result.commandId),
       'procedure authority command IDs',
     );
     return {
@@ -274,18 +291,22 @@ function parseEntry(value: unknown): Threadnote5LocalAuthorityEntryV1 {
   }
   if (source.type === 'value-report-verification') {
     exactKeys(source, ['recordDigest', 'trials', 'type'], 'Value Report authority');
-    if (!Array.isArray(source.trials) || source.trials.length < 1 || source.trials.length > MAX_AUTHORITY_ENTRIES) {
+    if (
+      !EffectArray.isArray(source.trials) ||
+      source.trials.length < 1 ||
+      source.trials.length > MAX_AUTHORITY_ENTRIES
+    ) {
       throw new Error('Value Report authority trials are out of bounds.');
     }
-    const trials = source.trials
-      .map(parseValueReportTrial)
-      .sort((left, right) => left.feedbackEventDigest.localeCompare(right.feedbackEventDigest));
+    const trials = EffectArray.map(source.trials, parseValueReportTrial).sort((left, right) =>
+      Effect.pipe(left.feedbackEventDigest, EffectString.localeCompare(right.feedbackEventDigest)),
+    );
     unique(
-      trials.map(trial => trial.feedbackEventDigest),
+      EffectArray.map(trials, trial => trial.feedbackEventDigest),
       'Value Report authority feedback-event digests',
     );
     unique(
-      trials.map(trial => trial.laneId),
+      EffectArray.map(trials, trial => trial.laneId),
       'Value Report authority lane IDs',
     );
     return {
@@ -300,10 +321,10 @@ function parseEntry(value: unknown): Threadnote5LocalAuthorityEntryV1 {
     source.type === 'migration-execution'
   ) {
     exactKeys(source, ['assertions', 'recordDigest', 'type'], 'external receipt authority');
-    if (!Array.isArray(source.assertions) || source.assertions.length < 1 || source.assertions.length > 8) {
+    if (!EffectArray.isArray(source.assertions) || source.assertions.length < 1 || source.assertions.length > 8) {
       throw new Error('External receipt authority assertions are out of bounds.');
     }
-    const assertions = source.assertions.map(value =>
+    const assertions = EffectArray.map(source.assertions, value =>
       matching(value, /^[a-z0-9][a-z0-9-]{0,95}$/u, 'authority assertion'),
     );
     unique(assertions, 'external receipt authority assertions');
@@ -330,14 +351,14 @@ function parseHealthAggregateAuthority(value: unknown): Threadnote5ContextHealth
     ['networkActivityCount', 'teamSnapshots', 'writeActivityCount'],
     'context health aggregate authority',
   );
-  if (!Array.isArray(source.teamSnapshots) || source.teamSnapshots.length > MAX_AUTHORITY_ENTRIES) {
+  if (!EffectArray.isArray(source.teamSnapshots) || source.teamSnapshots.length > MAX_AUTHORITY_ENTRIES) {
     throw new Error('Context health aggregate authority team snapshots are out of bounds.');
   }
-  const teamSnapshots = source.teamSnapshots
-    .map(parseHealthTeamSnapshot)
-    .sort((left, right) => left.team.localeCompare(right.team));
+  const teamSnapshots = EffectArray.map(source.teamSnapshots, parseHealthTeamSnapshot).sort((left, right) =>
+    Effect.pipe(left.team, EffectString.localeCompare(right.team)),
+  );
   unique(
-    teamSnapshots.map(snapshot => snapshot.team),
+    EffectArray.map(teamSnapshots, snapshot => snapshot.team),
     'context health authority teams',
   );
   return {
@@ -439,14 +460,18 @@ function parseGitProposalTrial(value: unknown): Threadnote5GitProposalAuthorityV
     ['approvals', 'proposalHash', 'providerApiCallCount', 'reviewId', 'revision'],
     'Git proposal authority trial',
   );
-  if (!Array.isArray(source.approvals) || source.approvals.length < 1 || source.approvals.length > MAX_APPROVALS) {
+  if (
+    !EffectArray.isArray(source.approvals) ||
+    source.approvals.length < 1 ||
+    source.approvals.length > MAX_APPROVALS
+  ) {
     throw new Error('Git proposal authority approvals are out of bounds.');
   }
-  const approvals = source.approvals
-    .map(parseApproval)
-    .sort((left, right) => left.candidateId.localeCompare(right.candidateId));
+  const approvals = EffectArray.map(source.approvals, parseApproval).sort((left, right) =>
+    Effect.pipe(left.candidateId, EffectString.localeCompare(right.candidateId)),
+  );
   unique(
-    approvals.map(approval => approval.candidateId),
+    EffectArray.map(approvals, approval => approval.candidateId),
     'Git proposal authority candidate IDs',
   );
   return {
@@ -482,9 +507,8 @@ function parseCommandResult(value: unknown): Threadnote5ProcedureAuthorityV1['co
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object.`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error(`${label} must be an object.`);
+  return value;
 }
 
 function exactObject(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
@@ -494,20 +518,25 @@ function exactObject(value: unknown, keys: readonly string[], label: string): Re
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  if (canonicalJson(Object.keys(value).sort()) !== canonicalJson([...keys].sort())) {
+  if (canonicalJson(EffectRecord.keys(value).sort()) !== canonicalJson([...keys].sort())) {
     throw new Error(`${label} has unsupported or missing fields.`);
   }
 }
 
 function boundedInteger(value: unknown, label: string, minimum: number, maximum: number): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+  if (!checkedIsSafeInteger(value) || value < minimum || value > maximum) {
     throw new Error(`${label} is out of bounds.`);
   }
-  return value as number;
+  return value;
 }
 
 function boundedText(value: unknown, label: string, maximum: number): string {
-  if (typeof value !== 'string' || value.trim() !== value || value.length < 1 || value.length > maximum) {
+  if (
+    typeof value !== 'string' ||
+    Effect.pipe(value, EffectString.trim) !== value ||
+    value.length < 1 ||
+    value.length > maximum
+  ) {
     throw new Error(`${label} is invalid.`);
   }
   return value;

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {mkdir, mkdtemp, readFile, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -33,7 +34,10 @@ import {
   parseCodeMemoryLinkCalibrationResultsJsonl,
   releaseInvocationArguments,
   resolveCodeMemoryLinkAgentTrialRunner,
+  type CodeMemoryLinkCalibrationResultV1,
 } from '../../../../scripts/run-code-memory-link-agent-matrix.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('Code Memory Link sequential matrix', () => {
   it('accepts only the canonical complete calibration schedule regardless of the chosen swapped positions', () => {
@@ -60,33 +64,36 @@ describe('Code Memory Link sequential matrix', () => {
     fc.assert(
       fc.property(fc.array(fc.stringMatching(/^[0-9a-f]{64}$/u), {minLength: 0, maxLength: 12}), diagnostics => {
         const bounded = diagnostics.slice(0, plan.runs.length);
-        const results = bounded.reduce<ReturnType<typeof createCalibrationResult>[]>(
-          (prior, diagnosticsHash, index) => {
-            const previousResultDigest = index === 0 ? null : calibrationResultDigest(prior[index - 1]);
-            const run = plan.runs[index];
-            prior.push(
-              createCalibrationResult(
-                plan,
-                run,
-                {
-                  arm: run.arm,
-                  clientId: run.clientId,
-                  diagnosticsHash,
-                  kind: 'non-evidence-calibration',
-                  planHash: plan.planHash,
-                  runOrder: run.runOrder,
-                  taskId: run.taskId,
-                  version: 1,
-                },
-                previousResultDigest,
-              ),
-            );
-            return prior;
-          },
-          [],
-        );
+        const initialResults: CodeMemoryLinkCalibrationResultV1[] = [];
+        const results = EffectArray.reduce(bounded, initialResults, (prior, diagnosticsHash, index) => {
+          const previousResultDigest = index === 0 ? null : calibrationResultDigest(prior[index - 1]);
+          const run = plan.runs[index];
+          prior.push(
+            createCalibrationResult(
+              plan,
+              run,
+              {
+                arm: run.arm,
+                clientId: run.clientId,
+                diagnosticsHash,
+                kind: 'non-evidence-calibration',
+                planHash: plan.planHash,
+                runOrder: run.runOrder,
+                taskId: run.taskId,
+                version: 1,
+              },
+              previousResultDigest,
+            ),
+          );
+          return prior;
+        });
         const parsed = parseCodeMemoryLinkCalibrationResultsJsonl(
-          results.length === 0 ? '' : `${results.map(result => JSON.stringify(result)).join('\n')}\n`,
+          results.length === 0
+            ? ''
+            : `${EffectArray.join(
+                EffectArray.map(results, result => JSON.stringify(result)),
+                '\n',
+              )}\n`,
         );
         expect(parsed).toEqual(results);
         expect(() => assertCodeMemoryLinkCalibrationPrefixV1(plan, parsed)).not.toThrow();
@@ -103,11 +110,11 @@ describe('Code Memory Link sequential matrix', () => {
     const arguments_ = releaseInvocationArguments({
       client: preparedClient(),
       options: {
-        approvalCommit: '7'.repeat(40),
+        approvalCommit: Effect.pipe('7', EffectString.repeat(40)),
         attemptsPath: `${trials}.attempts.jsonl`,
-        candidateCommit: '8'.repeat(40),
+        candidateCommit: Effect.pipe('8', EffectString.repeat(40)),
         candidateExecutable: '/opt/threadnote/4.6.0/threadnote',
-        candidateExecutableSha256: '9'.repeat(64),
+        candidateExecutableSha256: Effect.pipe('9', EffectString.repeat(64)),
         evidencePath: evidence,
         mode: 'release',
         pacingMilliseconds: 0,
@@ -121,13 +128,13 @@ describe('Code Memory Link sequential matrix', () => {
     const evidenceIndex = arguments_.indexOf('--evidence');
     expect(evidenceIndex).toBeGreaterThan(0);
     expect(arguments_[evidenceIndex + 1]).toBe(evidence);
-    expect(arguments_.filter(argument => argument === '--evidence')).toHaveLength(1);
+    expect(EffectArray.filter(arguments_, argument => argument === '--evidence')).toHaveLength(1);
   });
 
   it('projects arbitrary verified install roots into the exact trusted runner environment', () => {
     fc.assert(
       fc.property(fc.array(fc.stringMatching(/^[a-z][a-z0-9-]{0,12}$/u), {minLength: 1, maxLength: 5}), segments => {
-        const installRoot = `/private/${segments.join('/')}`;
+        const installRoot = `/private/${EffectArray.join(segments, '/')}`;
 
         expect(codeMemoryLinkReleaseRunnerEnvironment(installRoot)).toEqual({
           HOME: '/nonexistent',
@@ -221,8 +228,8 @@ describe('Code Memory Link sequential matrix', () => {
   it('materializes calibration into a workspace with no release suite or rubric bytes', async () => {
     const corpus = createCodeMemoryLinkAgentSuiteCorpusV1();
     const assembly = assembleCalibrationPlanV1({
-      clients: [`cli_${'1'.repeat(32)}`, `cli_${'2'.repeat(32)}`],
-      tasks: corpus.calibrationTasks.map(preparedTask),
+      clients: [`cli_${Effect.pipe('1', EffectString.repeat(32))}`, `cli_${Effect.pipe('2', EffectString.repeat(32))}`],
+      tasks: EffectArray.map(corpus.calibrationTasks, preparedTask),
     });
     const preparedRoot = await realpath(await mkdtemp(join(tmpdir(), 'threadnote-calibration-prepared-')));
     let sandbox: string | null = null;
@@ -256,22 +263,22 @@ describe('Code Memory Link sequential matrix', () => {
 function calibrationPlan() {
   const corpus = createCodeMemoryLinkAgentSuiteCorpusV1();
   return assembleCalibrationPlanV1({
-    clients: [`cli_${'1'.repeat(32)}`, `cli_${'2'.repeat(32)}`],
-    tasks: corpus.calibrationTasks.map(preparedTask),
+    clients: [`cli_${Effect.pipe('1', EffectString.repeat(32))}`, `cli_${Effect.pipe('2', EffectString.repeat(32))}`],
+    tasks: EffectArray.map(corpus.calibrationTasks, preparedTask),
   }).plan;
 }
 
 function preparedTask(
   definition: ReturnType<typeof createCodeMemoryLinkAgentSuiteCorpusV1>['calibrationTasks'][number],
 ): CodeMemoryLinkPreparedTaskV1 {
-  const citationDigests = definition.memorySeeds
-    .filter(seed => seed.citationPath !== null)
-    .map((_, index) => digest(`${definition.taskId}:citation:${index}`))
-    .sort();
+  const citationDigests = EffectArray.map(
+    EffectArray.filter(definition.memorySeeds, seed => seed.citationPath !== null),
+    (_, index) => digest(`${definition.taskId}:citation:${index}`),
+  ).sort();
   return {
     citationDigests,
     definition,
-    homeFiles: definition.memorySeeds.map((seed, index) => ({
+    homeFiles: EffectArray.map(definition.memorySeeds, (seed, index) => ({
       content: `task=${definition.taskId}_${index}\n`,
       destination: `${codeMemoryLinkAgentPreparedMemoryDirectory(seed.status)}/${definition.taskId}-${index}.md`,
     })),
@@ -313,27 +320,27 @@ function preparedClient(): CodeMemoryLinkPreparedClientV1 {
     {path: '/bin/codex', role: 'codex-app-server'},
     {path: '/bin/git', role: 'git'},
   ];
-  const artifactBindings = clientArtifactBindings.map((binding, index) => ({
+  const artifactBindings = EffectArray.map(clientArtifactBindings, (binding, index) => ({
     pathDigest: codeMemoryLinkClientPathDigest(binding.path),
     role: binding.role,
-    sha256: (index + 1).toString(16).repeat(64),
+    sha256: Effect.pipe((index + 1).toString(16), EffectString.repeat(64)),
   }));
-  const binaryBindings = clientBinaryBindings.map((binding, index) => ({
+  const binaryBindings = EffectArray.map(clientBinaryBindings, (binding, index) => ({
     pathDigest: codeMemoryLinkClientPathDigest(binding.path),
     role: binding.role,
-    sha256: (index + 4).toString(16).repeat(64),
+    sha256: Effect.pipe((index + 4).toString(16), EffectString.repeat(64)),
   }));
   const descriptor = {
     argumentVectorHash: codeMemoryLinkClientArgumentVectorHash(clientArguments),
     artifactBindings,
     binaryBindings,
-    configurationHash: '7'.repeat(64),
-    configurationProjectionHash: '8'.repeat(64),
-    dependenciesLockHash: '9'.repeat(64),
+    configurationHash: Effect.pipe('7', EffectString.repeat(64)),
+    configurationProjectionHash: Effect.pipe('8', EffectString.repeat(64)),
+    dependenciesLockHash: Effect.pipe('9', EffectString.repeat(64)),
     entrypointHash: artifactBindings[1].sha256,
-    environmentPolicyHash: 'a'.repeat(64),
+    environmentPolicyHash: Effect.pipe('a', EffectString.repeat(64)),
     executionBundleHash: artifactBindings[0].sha256,
-    expectedClientProjectionHash: 'b'.repeat(64),
+    expectedClientProjectionHash: Effect.pipe('b', EffectString.repeat(64)),
     version: 2 as const,
   };
   return {
@@ -345,7 +352,7 @@ function preparedClient(): CodeMemoryLinkPreparedClientV1 {
     clientConfigurationPath: '/tmp/client.config.json',
     clientDependenciesLockPath: '/tmp/client.lock',
     clientDescriptorPath: '/tmp/client.descriptor.json',
-    clientId: `cli_${'1'.repeat(32)}`,
+    clientId: `cli_${Effect.pipe('1', EffectString.repeat(32))}`,
     descriptor,
     implementationDescriptorHash: codeMemoryLinkClientImplementationDescriptorHash(descriptor),
     model: 'gpt-5.6-luna',

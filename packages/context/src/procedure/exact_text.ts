@@ -1,3 +1,5 @@
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 export type ExactProcedureTextResult =
   {readonly ok: true; readonly text: string} | {readonly ok: false; readonly reason: 'encoding' | 'noncanonical'};
 
@@ -12,7 +14,7 @@ export function decodeExactProcedureText(bytes: Uint8Array): ExactProcedureTextR
   } catch {
     return {ok: false, reason: 'encoding'};
   }
-  if (text.includes('\u0000') || !bytesEqual(bytes, new TextEncoder().encode(text))) {
+  if (Effect.pipe(text, EffectString.includes('\u0000')) || !bytesEqual(bytes, new TextEncoder().encode(text))) {
     return {ok: false, reason: 'noncanonical'};
   }
   return {ok: true, text};

@@ -2,6 +2,8 @@ import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {type CodeGraphBuildStatus, parseCodeGraphBuildStatus} from '@threadnote/graph/build_status';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const resolutionCase = FC.record({
   aliasesDiscovered: FC.integer({max: 1_000_000, min: 0}),
@@ -28,7 +30,7 @@ describe('code graph reference-resolution status properties', () => {
       const resolved = Math.min(sample.resolved, referencesExamined);
       const pageTotal = sample.pageCompleted + sample.pageRemainder;
       const status: CodeGraphBuildStatus = {
-        buildId: 'a'.repeat(32),
+        buildId: Effect.pipe('a', EffectString.repeat(32)),
         counters: {
           completed: sample.referencesCompleted,
           resolved,
@@ -36,10 +38,10 @@ describe('code graph reference-resolution status properties', () => {
           unit: 'references',
         },
         identity: {
-          checkoutId: 'b'.repeat(64),
-          commit: 'c'.repeat(40),
-          repositoryId: 'd'.repeat(64),
-          worktreeId: 'e'.repeat(64),
+          checkoutId: Effect.pipe('b', EffectString.repeat(64)),
+          commit: Effect.pipe('c', EffectString.repeat(40)),
+          repositoryId: Effect.pipe('d', EffectString.repeat(64)),
+          worktreeId: Effect.pipe('e', EffectString.repeat(64)),
         },
         owner: {processId: 42, runtime: 'bun', runtimeVersion: '1.3.14'},
         phase: 'resolving',

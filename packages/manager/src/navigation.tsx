@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import React, {useState} from 'react';
 import {PanelLeftClose, PanelLeftOpen, ShieldCheck} from 'lucide-react';
 import {navigationAttentionLabel, useNavigationAttention} from './navigation_attention.js';
@@ -66,42 +67,43 @@ export function ManagerNavigation(props: {
           </div>
         </div>
         <nav className="primary-nav" aria-label="Manager sections">
-          {(
+          {EffectArray.map(
             [
               {label: 'Knowledge', items: ['home', 'memory', 'context', 'reviews', 'context-health', 'graph']},
               {label: 'Workspace', items: ['worksets', 'dev-skills', 'shares', 'integrations']},
               {label: 'System', items: ['processes', 'doctor']},
-            ] as const
-          ).map(group => (
-            <div className="nav-group" key={group.label}>
-              <p className="sidebar-label">{group.label}</p>
-              {group.items.map(name => (
-                <button
-                  aria-current={props.panel === name ? 'page' : undefined}
-                  className={props.panel === name ? 'is-active' : undefined}
-                  disabled={props.disabled}
-                  key={name}
-                  onClick={() => props.onSelect(name)}
-                  title={panelNavDescription(name)}
-                  type="button"
-                >
-                  <span aria-hidden="true" className="nav-icon">
-                    {panelIcon(name)}
-                  </span>
-                  <strong>{tabTitle(name)}</strong>
-                  {(name === 'shares' || name === 'context-health') && (attention[name] ?? 0) > 0 ? (
-                    <span
-                      className="nav-attention-badge"
-                      aria-label={navigationAttentionLabel(name, attention[name]!, props.project)}
-                      title={navigationAttentionLabel(name, attention[name]!, props.project)}
-                    >
-                      {attention[name]!.toLocaleString()}
+            ] as const,
+            group => (
+              <div className="nav-group" key={group.label}>
+                <p className="sidebar-label">{group.label}</p>
+                {EffectArray.map(group.items, name => (
+                  <button
+                    aria-current={props.panel === name ? 'page' : undefined}
+                    className={props.panel === name ? 'is-active' : undefined}
+                    disabled={props.disabled}
+                    key={name}
+                    onClick={() => props.onSelect(name)}
+                    title={panelNavDescription(name)}
+                    type="button"
+                  >
+                    <span aria-hidden="true" className="nav-icon">
+                      {panelIcon(name)}
                     </span>
-                  ) : null}
-                </button>
-              ))}
-            </div>
-          ))}
+                    <strong>{tabTitle(name)}</strong>
+                    {(name === 'shares' || name === 'context-health') && (attention[name] ?? 0) > 0 ? (
+                      <span
+                        className="nav-attention-badge"
+                        aria-label={navigationAttentionLabel(name, attention[name]!, props.project)}
+                        title={navigationAttentionLabel(name, attention[name]!, props.project)}
+                      >
+                        {attention[name]!.toLocaleString()}
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ),
+          )}
         </nav>
         <ThemeSwitch />
 

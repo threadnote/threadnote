@@ -1,7 +1,8 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {join} from '@threadnote/testing/node-path';
 import {describe, expect, it} from '@effect/vitest';
@@ -22,6 +23,8 @@ import {
 } from '@threadnote/recall/vector-index';
 import {mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface VectorCorpusMutation {
   readonly id: number;
@@ -41,7 +44,9 @@ interface VectorDocumentState {
   readonly betaVariant: number;
 }
 
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+const manifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
 const vectorCorpusMutation = (kind: VectorCorpusMutation['kind']) =>
   FC.record({
     id: FC.integer({max: 3, min: 0}),
@@ -254,9 +259,9 @@ function applyOperation(model: Map<number, VectorDocumentState>, operation: Vect
 }
 
 function candidatesFor(model: ReadonlyMap<number, VectorDocumentState>) {
-  return [...model]
-    .map(([id, state]) => ({
-      text: [
+  return EffectArray.map([...model], ([id, state]) => ({
+    text: EffectArray.join(
+      [
         '# Shared contract',
         'Shared vector-index content retained by every generated document.',
         `# Stable document ${id}`,
@@ -265,14 +270,15 @@ function candidatesFor(model: ReadonlyMap<number, VectorDocumentState>) {
         `Document ${id} alpha variant ${state.alphaVariant}.`,
         '# Beta revision',
         `Document ${id} beta variant ${state.betaVariant}.`,
-      ].join('\n\n'),
-      uri: uriFor(id),
-    }))
-    .sort((left, right) => left.uri.localeCompare(right.uri));
+      ],
+      '\n\n',
+    ),
+    uri: uriFor(id),
+  })).sort((left, right) => Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)));
 }
 
 function chunksFor(candidates: ReturnType<typeof candidatesFor>): readonly RecallChunk[] {
-  return candidates.flatMap(candidate => {
+  return EffectArray.flatMap(candidates, candidate => {
     const chunks = chunkRecallDocument(candidate.uri, candidate.text);
     expect(chunks).toHaveLength(4);
     return chunks;
@@ -337,13 +343,13 @@ async function assertVectorIndexMatchesModel(
         .get(),
     ).toEqual({count: 0});
 
-    const uniqueFingerprints = new Set(expectedChunks.map(chunk => chunk.fingerprint));
+    const uniqueFingerprints = new Set(EffectArray.map(expectedChunks, chunk => chunk.fingerprint));
     expect(database.query('SELECT COUNT(*) AS count FROM vector_values').get()).toEqual({
       count: uniqueFingerprints.size,
     });
     const rows = storedVectorRows(database);
     expect(rows).toHaveLength(expectedChunks.length);
-    const byChunkId = new Map(rows.map(row => [row.chunk_id, row]));
+    const byChunkId = new Map(EffectArray.map(rows, row => [row.chunk_id, row]));
     expect(byChunkId.size).toBe(expectedChunks.length);
     for (const chunk of expectedChunks) {
       const row = byChunkId.get(chunk.id);
@@ -355,7 +361,7 @@ async function assertVectorIndexMatchesModel(
       });
       expect(decodeVector(row!.vector)).toEqual(expectedStoredVector(embeddingInput(chunk)));
     }
-    expect(new Set(rows.map(row => row.vector_id)).size).toBe(uniqueFingerprints.size);
+    expect(new Set(EffectArray.map(rows, row => row.vector_id)).size).toBe(uniqueFingerprints.size);
   } finally {
     database.close();
   }
@@ -363,7 +369,16 @@ async function assertVectorIndexMatchesModel(
 
 function storedVectorRows(database: Database) {
   return database
-    .query(
+    .query<
+      {
+        readonly chunk_id: string;
+        readonly fingerprint: string;
+        readonly uri: string;
+        readonly vector: unknown;
+        readonly vector_id: number;
+      },
+      SQLQueryBindings[]
+    >(
       `SELECT
          chunk.uri,
          chunk.chunk_id,
@@ -376,13 +391,7 @@ function storedVectorRows(database: Database) {
        WHERE pointer.singleton = 1
        ORDER BY chunk.uri, chunk.chunk_id`,
     )
-    .all() as readonly {
-    readonly chunk_id: string;
-    readonly fingerprint: string;
-    readonly uri: string;
-    readonly vector: unknown;
-    readonly vector_id: number;
-  }[];
+    .all();
 }
 
 function deterministicRuntimeLayer(onEmbed: (inputs: readonly string[]) => void) {
@@ -392,7 +401,7 @@ function deterministicRuntimeLayer(onEmbed: (inputs: readonly string[]) => void)
       diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
       embedMany: ({inputs, manifest: requested}) => {
         onEmbed(inputs);
-        return Effect.succeed(inputs.map(input => deterministicVector(requested.dimensions ?? 0, input)));
+        return Effect.succeed(EffectArray.map(inputs, input => deterministicVector(requested.dimensions ?? 0, input)));
       },
       generate: () => Effect.die(TestError.make({message: 'Unexpected generation'})),
       rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking'})),
@@ -409,8 +418,8 @@ function deterministicVector(dimensions: number, input: string): readonly number
 
 function expectedStoredVector(input: string): readonly number[] {
   const vector = deterministicVector(manifest.dimensions, input);
-  const magnitude = Math.sqrt(vector.reduce((total, component) => total + component * component, 0));
-  return vector.map(component => Math.fround(component / magnitude));
+  const magnitude = Math.sqrt(EffectArray.reduce(vector, 0, (total, component) => total + component * component));
+  return EffectArray.map(vector, component => Math.fround(component / magnitude));
 }
 
 function decodeVector(value: unknown): readonly number[] {
@@ -433,8 +442,11 @@ function assertBuildResult(
   previousChunks: readonly RecallChunk[],
   chunks: readonly RecallChunk[],
 ): void {
-  const reusableFingerprints = new Set(previousChunks.map(chunk => chunk.fingerprint));
-  const reusedChunkCount = chunks.filter(chunk => reusableFingerprints.has(chunk.fingerprint)).length;
+  const reusableFingerprints = new Set(EffectArray.map(previousChunks, chunk => chunk.fingerprint));
+  const reusedChunkCount = EffectArray.filter(
+    chunks,
+    (chunk, __effectArrayIndex) => __effectArrayIndex in chunks && reusableFingerprints.has(chunk.fingerprint),
+  ).length;
   expect(result).toMatchObject({
     chunkCount: chunks.length,
     embeddedChunkCount: chunks.length - reusedChunkCount,
@@ -447,11 +459,11 @@ function expectedEmbeddingInputs(
   previousChunks: readonly RecallChunk[],
   chunks: readonly RecallChunk[],
 ): readonly string[] {
-  const reusableFingerprints = new Set(previousChunks.map(chunk => chunk.fingerprint));
-  return chunks
-    .filter(chunk => !reusableFingerprints.has(chunk.fingerprint))
-    .map(embeddingInput)
-    .sort();
+  const reusableFingerprints = new Set(EffectArray.map(previousChunks, chunk => chunk.fingerprint));
+  return EffectArray.map(
+    EffectArray.filter(chunks, chunk => !reusableFingerprints.has(chunk.fingerprint)),
+    embeddingInput,
+  ).sort();
 }
 
 function embeddingInput(chunk: RecallChunk): string {

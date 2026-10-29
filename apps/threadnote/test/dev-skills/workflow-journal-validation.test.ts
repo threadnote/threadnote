@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {gzipSync} from 'fflate';
 import {gunzipSync} from 'node:zlib';
 import {createHash} from '@threadnote/testing/node-crypto';
@@ -16,6 +17,7 @@ import {
 } from '@threadnote/memory/document';
 import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {isJsonObject} from '@threadnote/platform/json';
 import {assertWorkflowJournalIntegrity, workflowOwnedArtifacts} from '../../src/workflow_memory/journal_validation.js';
 import {assertWorkflowJournalCapacity, serializeWorkflowJournal} from '../../src/workflow_memory/journal.js';
 import {
@@ -32,6 +34,9 @@ import {
   type WorkflowOperation,
   type WorkflowRequest,
 } from '../../src/workflow_memory/protocol.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const timestamp = '2026-10-20T12:00:00.000Z';
 const identity = {
@@ -60,7 +65,7 @@ function manifest(artifacts: WorkflowJournal['artifacts'], stamp = timestamp): s
       status: 'active',
       project: binding.project,
       topic: `${prefix}manifest`,
-      memoryId: `tn_${binding.bindingId.slice(0, 20)}`,
+      memoryId: `tn_${Effect.pipe(binding.bindingId, EffectString.slice(0, 20))}`,
       timestamp: stamp,
       sourceAgentClient: 'threadnote',
       sourceSessionId: binding.workflowRunId,
@@ -96,7 +101,7 @@ function create(key = 'draft'): WorkflowOperation {
     bodySha256: sha256HexSync(body),
     expectedRevision: null,
   };
-  const memoryId = `tn_${sha256HexSync(`${binding.bindingId}\nwriter\n${key}`).slice(0, 20)}`;
+  const memoryId = `tn_${Effect.pipe(sha256HexSync(`${binding.bindingId}\nwriter\n${key}`), EffectString.slice(0, 20))}`;
   const canonicalUri = `${activeRoot}/${prefix}${key}.md`;
   const desired = formatMemoryDocument(
     'MEMORY',
@@ -173,7 +178,7 @@ function archive(source: WorkflowOperation): WorkflowOperation {
 }
 const map = (artifact: WorkflowArtifact) => ({[artifact.canonicalUri]: artifact});
 const operations = (...values: WorkflowOperation[]) =>
-  Object.fromEntries(values.map(value => [value.request.operationId!, value]));
+  EffectRecord.fromEntries(EffectArray.map(values, value => [value.request.operationId!, value]));
 
 describe('workflow journal ownership validation', () => {
   it('rejects map edits while the saved native manifest still agrees with the original bytes', () => {
@@ -197,7 +202,10 @@ describe('workflow journal ownership validation', () => {
       {...prepared, artifact: {...prepared.artifact, canonicalUri: `${activeRoot}/private.md`}},
       {...prepared, artifact: {...prepared.artifact, memoryId: 'tn_00000000000000000000'}},
       {...prepared, request: {...prepared.request, artifactKey: 'different'}},
-      {...prepared, desired: prepared.desired.replace('Private workflow', 'Changed workflow')},
+      {
+        ...prepared,
+        desired: Effect.pipe(prepared.desired, EffectString.replace('Private workflow', 'Changed workflow')),
+      },
     ]) {
       const edited = state({}, operations(change));
       expect(() => assertWorkflowJournalIntegrity(edited, edited.manifestContent)).toThrow();
@@ -211,9 +219,15 @@ describe('workflow journal ownership validation', () => {
     expect(() => assertWorkflowJournalIntegrity(valid, valid.manifestContent)).not.toThrow();
     const missing = state({}, operations(created, retired));
     expect(() => assertWorkflowJournalIntegrity(missing, missing.manifestContent)).toThrow();
-    const altered = state(map({...created.artifact, revision: 'a'.repeat(64)}), operations(created, retired));
+    const altered = state(
+      map({...created.artifact, revision: Effect.pipe('a', EffectString.repeat(64))}),
+      operations(created, retired),
+    );
     expect(() => assertWorkflowJournalIntegrity(altered, altered.manifestContent)).not.toThrow();
-    const badRevision = {...retired, request: {...retired.request, expectedRevision: 'b'.repeat(64)}};
+    const badRevision = {
+      ...retired,
+      request: {...retired.request, expectedRevision: Effect.pipe('b', EffectString.repeat(64))},
+    };
     const inconsistent = {...badRevision, intentDigest: sha256HexSync(stableJson(badRevision.request))};
     const badState = state(map(created.artifact), operations(created, inconsistent));
     expect(() => assertWorkflowJournalIntegrity(badState, badState.manifestContent)).toThrow();
@@ -304,9 +318,9 @@ describe('workflow journal ownership validation', () => {
         assertWorkflowJournalIntegrity(closed, closed.manifestContent);
         expect(workflowOwnedArtifacts(closed)).toEqual([final.artifact]);
         for (const old of history)
-          expect(workflowOwnedArtifacts(closed).some(item => item.canonicalUri === old.artifact.canonicalUri)).toBe(
-            false,
-          );
+          expect(
+            EffectArray.some(workflowOwnedArtifacts(closed), item => item.canonicalUri === old.artifact.canonicalUri),
+          ).toBe(false);
       }),
       {numRuns: 20},
     );
@@ -318,13 +332,13 @@ describe('workflow journal ownership validation', () => {
     const record = parseMemoryDocument(original.artifact.canonicalUri, original.desired)!;
     const citation = createMemoryCodeCitation({
       extractorSet: 'test',
-      fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+      fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
       path: 'src/value.ts',
-      repositoryId: 'b'.repeat(64),
+      repositoryId: Effect.pipe('b', EffectString.repeat(64)),
       repositoryIdentityKind: 'remote',
-      sourceCommit: 'c'.repeat(40),
+      sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
       sourceDirty: false,
-      sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+      sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
       target: {kind: 'file'},
       version: 1,
     });
@@ -365,7 +379,7 @@ describe('workflow journal ownership validation', () => {
       previousManifestContent: originalState.manifestContent,
     });
     expect(() => assertWorkflowJournalIntegrity(transition(enriched), originalState.manifestContent)).not.toThrow();
-    const changed = desired.replace(timestamp, '2026-10-19T12:00:00.000Z');
+    const changed = Effect.pipe(desired, EffectString.replace(timestamp, '2026-10-19T12:00:00.000Z'));
     const forged = {...enriched, desired: changed, artifact: {...enriched.artifact, revision: sha256HexSync(changed)}};
     expect(() => assertWorkflowJournalIntegrity(transition(forged), originalState.manifestContent)).toThrow();
   });
@@ -373,22 +387,38 @@ describe('workflow journal ownership validation', () => {
   it('keeps plain journals compatible and rejects logical journals beyond the expanded limit', () => {
     const original = state();
     expect(serializeWorkflowJournal(original)).toContain('"protocolVersion":1');
-    expect(() => serializeWorkflowJournal({...original, manifestContent: 'x'.repeat(64 * 1024 * 1024)})).toThrow(
-      expect.objectContaining({code: 'journal-capacity'}),
-    );
+    expect(() =>
+      serializeWorkflowJournal({...original, manifestContent: Effect.pipe('x', EffectString.repeat(64 * 1024 * 1024))}),
+    ).toThrow(expect.objectContaining({code: 'journal-capacity'}));
   });
 });
+
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Expected a string value.');
+  return value;
+}
 
 const digest = (value: Uint8Array) => createHash('sha256').update(value).digest('hex');
 const format = 'threadnote-workflow-journal-gzip-v1';
 describe('workflow journal codec', async () => {
   it('emits deterministic native gzip readable by independent zlib and journal readers', async () => {
-    const logical = `${JSON.stringify({payload: 'UTF-8 journal — 雪 and 🌊. '.repeat(90_000)})}\n`;
+    const logical = `${JSON.stringify({payload: Effect.pipe('UTF-8 journal — 雪 and 🌊. ', EffectString.repeat(90_000))})}\n`;
     const encoded = encodeWorkflowJournal(logical);
     expect(encodeWorkflowJournal(logical)).toBe(encoded);
-    const envelope = JSON.parse(encoded) as {format: string; payload: string};
+    const envelope = requireRecord(JSON.parse(encoded));
     expect(envelope.format).toBe(format);
-    const compressed = Uint8Array.from(atob(envelope.payload), character => character.charCodeAt(0));
+    const compressed = Uint8Array.from(atob(requireString(envelope.payload)), character =>
+      Effect.pipe(
+        character,
+        EffectString.charCodeAt(0),
+        Effect.Option.getOrElse(() => NaN),
+      ),
+    );
     expect(compressed.slice(4, 8)).toEqual(new Uint8Array(4));
     expect(compressed[9]).toBe(255);
     expect(new TextDecoder().decode(gunzipSync(compressed))).toBe(logical);
@@ -399,6 +429,7 @@ describe('workflow journal codec', async () => {
     const atPlainBytes = (targetBytes: number) => {
       const empty = state();
       const fixedBytes = new TextEncoder().encode(`${stableJson({...empty, manifestContent: ''})}\n`).byteLength;
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       const value = {...empty, manifestContent: 'x'.repeat(targetBytes - fixedBytes)};
       const logical = `${stableJson(value)}\n`;
       expect(new TextEncoder().encode(logical).byteLength).toBe(targetBytes);
@@ -434,7 +465,7 @@ describe('workflow journal codec', async () => {
   it('round trips unicode JSON losslessly and emits deterministic bytes', async () => {
     await fc.assert(
       fc.asyncProperty(fc.array(fc.string(), {minLength: 64, maxLength: 128}), async values => {
-        const varied = `🧭雪é${values.join(' | ')}`;
+        const varied = `🧭雪é${EffectArray.join(values, ' | ')}`;
         const logical = `${JSON.stringify({values: Array.from({length: Math.ceil(1_100_000 / varied.length)}, () => varied), sentinel: '🧭'})}\n`;
         const encoded = encodeWorkflowJournal(logical);
         expect(encoded).not.toBe(logical);
@@ -446,9 +477,9 @@ describe('workflow journal codec', async () => {
   });
 
   it('compresses a large legitimate shaped history while preserving every receipt byte', async () => {
-    const operations = Object.fromEntries(
+    const operations = EffectRecord.fromEntries(
       Array.from({length: 91}, (_, index) => {
-        const content = `relation-document-${index}\n${'shared relation content '.repeat(3_000)}`;
+        const content = `relation-document-${index}\n${Effect.pipe('shared relation content ', EffectString.repeat(3_000))}`;
         return [
           `operation-${index}`,
           {
@@ -471,14 +502,15 @@ describe('workflow journal codec', async () => {
   it('reads existing plain JSON and rejects malformed envelopes, gzip integrity failures and expansion limits', async () => {
     expect(await decodeWorkflowJournal('{"protocolVersion":1}\n')).toBe('{"protocolVersion":1}\n');
     const plain = new TextEncoder().encode('{"ok":true}\n');
-    const good = JSON.parse(
+    const goodValue: unknown = JSON.parse(
       JSON.stringify({
         format,
         expandedBytes: plain.byteLength,
         sha256: digest(plain),
         payload: btoa(String.fromCharCode(...gzipSync(plain, {mtime: 0}))),
       }),
-    ) as Record<string, unknown>;
+    );
+    const good = requireRecord(goodValue);
     expect(await decodeWorkflowJournal(JSON.stringify(good))).toBe('{"ok":true}\n');
     // Readers must not depend on the writer's compressor version or options.
     expect(
@@ -490,13 +522,19 @@ describe('workflow journal codec', async () => {
       ),
     ).toBe('{"ok":true}\n');
     for (const bad of [
-      {...good, payload: `${String(good.payload).slice(0, -4)}!!!!`},
+      {...good, payload: `${Effect.pipe(String(good.payload), EffectString.slice(0, -4))}!!!!`},
       {...good, payload: ` ${String(good.payload)}`},
       {...good, payload: `${String(good.payload)}\n`},
-      {...good, payload: String(good.payload).slice(0, 4) + '!' + String(good.payload).slice(4)},
+      {
+        ...good,
+        payload:
+          Effect.pipe(String(good.payload), EffectString.slice(0, 4)) +
+          '!' +
+          Effect.pipe(String(good.payload), EffectString.slice(4)),
+      },
       {...good, expandedBytes: workflowJournalLimits.logicalBytes + 1},
       {...good, extra: true},
-      {...good, sha256: '0'.repeat(64)},
+      {...good, sha256: Effect.pipe('0', EffectString.repeat(64))},
     ])
       await expect(decodeWorkflowJournal(JSON.stringify(bad))).rejects.toThrow();
     const truncated = {
@@ -558,7 +596,7 @@ describe('manifest transition witness support', () => {
     current: WorkflowJournal['artifacts'],
     receipts: readonly WorkflowOperation[],
   ) =>
-    receipts.some(operation => {
+    EffectArray.some(receipts, operation => {
       if (operation.status !== 'verified' || !equal(current[operation.artifact.canonicalUri], operation.artifact))
         return false;
       if (operation.request.action === 'create') {
@@ -616,8 +654,8 @@ describe('manifest transition witness support', () => {
               : action === 'replace'
                 ? replacement(source!)
                 : verified(archive(source!));
-          let previous: WorkflowJournal['artifacts'] = Object.fromEntries(
-            history.map(item => [item.artifact.canonicalUri, item.artifact]),
+          let previous: WorkflowJournal['artifacts'] = EffectRecord.fromEntries(
+            EffectArray.map(history, item => [item.artifact.canonicalUri, item.artifact]),
           );
           if (source) previous = {...previous, ...map(source.artifact)};
           if (action === 'archive-source-only') previous = {...previous, ...map(relevant.artifact)};
@@ -626,14 +664,13 @@ describe('manifest transition witness support', () => {
               ? {...previous, ...map(relevant.artifact)}
               : apply(previous, relevant);
           if (alteration === 'extra-change') current = {...current, ...map(create('unwitnessed').artifact)};
-          const receipts = [
-            ...history,
-            ...(source ? [source] : []),
-            ...(alteration === 'missing-witness' ? [] : [relevant]),
-          ]
-            .map((operation, index) => ({operation, index, order: order[index] ?? index}))
-            .sort((left, right) => left.order - right.order || left.index - right.index)
-            .map(item => item.operation);
+          const receipts = EffectArray.map(
+            EffectArray.map(
+              [...history, ...(source ? [source] : []), ...(alteration === 'missing-witness' ? [] : [relevant])],
+              (operation, index) => ({operation, index, order: order[index] ?? index}),
+            ).sort((left, right) => left.order - right.order || left.index - right.index),
+            item => item.operation,
+          );
           const expected = normalWitness(previous, current, receipts);
           const next = transition(previous, current, receipts);
           if (expected) expect(() => assertWorkflowJournalIntegrity(next, next.previousManifestContent)).not.toThrow();
@@ -650,16 +687,19 @@ describe('manifest transition witness support', () => {
     const previous = map(old.artifact);
     const current = {...previous, ...map(relevant.artifact)};
     const mutations: readonly ((operation: WorkflowOperation) => WorkflowOperation)[] = [
-      operation => ({...operation, intentDigest: 'a'.repeat(64)}),
+      operation => ({...operation, intentDigest: Effect.pipe('a', EffectString.repeat(64))}),
       operation => ({...operation, desired: operation.desired + 'edited'}),
-      operation => ({...operation, artifact: {...operation.artifact, revision: 'b'.repeat(64)}}),
+      operation => ({
+        ...operation,
+        artifact: {...operation.artifact, revision: Effect.pipe('b', EffectString.repeat(64))},
+      }),
       operation => ({...operation, artifact: {...operation.artifact, memoryId: 'tn_00000000000000000000'}}),
       operation => ({
         ...operation,
         artifact: {...operation.artifact, canonicalUri: `threadnote://memory/${operation.artifact.memoryId}`},
       }),
       operation => {
-        const request = {...operation.request, bindingId: 'c'.repeat(64)};
+        const request = {...operation.request, bindingId: Effect.pipe('c', EffectString.repeat(64))};
         return {...operation, request, intentDigest: sha256HexSync(stableJson(request))};
       },
     ];
@@ -706,7 +746,7 @@ describe('manifest transition witness support', () => {
     const original = verified(create('versioned'));
     const naming = {role: 'root', version: 2};
     const request = {...original.request, bindingId: namedBinding.bindingId, nameHint: naming.role};
-    const memoryId = `tn_${sha256HexSync(`${namedBinding.bindingId}\nwriter\nversioned`).slice(0, 20)}`;
+    const memoryId = `tn_${Effect.pipe(sha256HexSync(`${namedBinding.bindingId}\nwriter\nversioned`), EffectString.slice(0, 20))}`;
     const record = parseMemoryDocument(original.artifact.canonicalUri, original.desired)!;
     const desired = formatMemoryDocument(
       record.headerTitle,
@@ -756,7 +796,7 @@ describe('manifest transition witness support', () => {
             status: 'active',
             project: namedBinding.project,
             topic,
-            memoryId: `tn_${namedBinding.bindingId.slice(0, 20)}`,
+            memoryId: `tn_${Effect.pipe(namedBinding.bindingId, EffectString.slice(0, 20))}`,
             timestamp,
             sourceAgentClient: 'threadnote',
             sourceSessionId: namedBinding.workflowRunId,

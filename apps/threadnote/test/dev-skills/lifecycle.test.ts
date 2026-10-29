@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, PlatformError, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -19,6 +20,9 @@ import {homeIndexPath, receiptPath} from '../../src/dev_skills/registry.js';
 import {devSkillsTestLayer, fixture, snapshot} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {withSetupMutationLock} from '../../src/setup/lock.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const selector = {agent: 'codex'};
 const testLayer = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -172,7 +176,7 @@ describe('development skills lifecycle', () => {
       expect(result.applied).toBe(true);
       const bundle = yield* loadDevSkillsBundleAt(f.source, '5.3.0-beta.4');
       const root = generationRoot(f.path, result.target.skillRoot, bundle.manifest.digest);
-      for (const [file, content] of Object.entries(bundle.files))
+      for (const [file, content] of EffectRecord.toEntries(bundle.files))
         expect(Buffer.from(yield* f.fs.readFile(f.path.join(root, file))).toString('base64')).toBe(content);
       expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, 'dev-plan/SKILL.md'))).toContain(root);
       const before = yield* snapshot(f.root);
@@ -261,17 +265,21 @@ describe('development skills lifecycle', () => {
         const brokenFs = FileSystem.FileSystem.of({
           ...f.fs,
           rename: (from, to) => {
-            const portable = to.replaceAll('\\', '/');
+            const portable = Effect2.pipe(to, EffectString.replaceAll('\\', '/'));
             const matches =
               point === 'generation'
                 ? /generations\/[a-f0-9]{64}$/u.test(portable)
                 : point === 'entrypoint'
-                  ? to.replaceAll('\\', '/').endsWith('/dev-spec/SKILL.md')
+                  ? Effect2.pipe(to, EffectString.replaceAll('\\', '/'), EffectString.endsWith('/dev-spec/SKILL.md'))
                   : point === 'receipt'
-                    ? to.replaceAll('\\', '/').endsWith('/receipt.json')
+                    ? Effect2.pipe(to, EffectString.replaceAll('\\', '/'), EffectString.endsWith('/receipt.json'))
                     : point === 'home-index'
                       ? to === homeIndexPath(f.path, f.home)
-                      : to.replaceAll('\\', '/').endsWith('/dev-skills-enrollment.json');
+                      : Effect2.pipe(
+                          to,
+                          EffectString.replaceAll('\\', '/'),
+                          EffectString.endsWith('/dev-skills-enrollment.json'),
+                        );
             if (!injected && matches) {
               injected = true;
               return f.fs.rename(from, to).pipe(Effect.andThen(f.fs.rename(f.path.join(f.root, 'missing'), to)));
@@ -301,7 +309,7 @@ describe('development skills lifecycle', () => {
       const pruningFs = FileSystem.FileSystem.of({
         ...f.fs,
         rename: (from, to) => {
-          if (!pruned && to.replaceAll('\\', '/').endsWith('/journal.json')) {
+          if (!pruned && Effect2.pipe(to, EffectString.replaceAll('\\', '/'), EffectString.endsWith('/journal.json'))) {
             pruned = true;
             return f.fs.rename(from, to).pipe(Effect.andThen(f.fs.remove(f.source, {recursive: true})));
           }
@@ -317,7 +325,7 @@ describe('development skills lifecycle', () => {
       const receipt = JSON.parse(
         yield* f.fs.readFileString(receiptPath(f.path, f.path.join(f.host, '.agents/skills'))),
       );
-      expect(Object.keys(receipt.consumers)).toHaveLength(1);
+      expect(EffectRecord.keys(receipt.consumers)).toHaveLength(1);
     }).pipe(testLayer),
   );
   effectIt.effect('validates opaque active leases and nests full uninstall without taking the home lock again', () =>
@@ -386,10 +394,10 @@ describe('development skills lifecycle', () => {
       const preview = yield* f.run(previewDevSkills(f.config, 'install', selector));
       expect(preview.canApply).toBe(false);
       expect(
-        preview.issues
-          .filter(issue => issue.code === 'duplicate')
-          .map(issue => issue.path)
-          .sort(),
+        EffectArray.map(
+          EffectArray.filter(preview.issues, issue => issue.code === 'duplicate'),
+          issue => issue.path,
+        ).sort(),
       ).toEqual([direct, nested].sort());
       expect(yield* f.run(applyDevSkills(f.config, 'install', selector)).pipe(Effect.result)).toMatchObject({
         _tag: 'Failure',
@@ -507,7 +515,10 @@ describe('development skills lifecycle', () => {
       const failing = FileSystem.FileSystem.of({
         ...f.fs,
         rename: (from, to) => {
-          if (!failed && to.replaceAll('\\', '/').endsWith('/dev-spec/SKILL.md')) {
+          if (
+            !failed &&
+            Effect2.pipe(to, EffectString.replaceAll('\\', '/'), EffectString.endsWith('/dev-spec/SKILL.md'))
+          ) {
             failed = true;
             return f.fs.rename(f.path.join(f.root, 'missing'), to);
           }

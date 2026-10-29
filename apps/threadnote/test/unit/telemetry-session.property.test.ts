@@ -212,6 +212,7 @@ describe('anonymous telemetry agent sessions', () => {
       const resolved = resolveAgentSession({configuration: first, environment, randomBytes});
       expect(resolved.id).toBe(anonymousAgentSessionId(randomBytes));
       expect(resolved.id).not.toBe(inheritedId);
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
       expect(Object.keys(environment)).toHaveLength(0);
     }
 

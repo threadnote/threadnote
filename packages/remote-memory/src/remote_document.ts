@@ -11,6 +11,8 @@ import {inspectRemoteMemoryContent} from '@threadnote/memory/remote/content';
 import type {RemoteRememberInputV1} from '@threadnote/memory/remote/contracts';
 import {assertRemoteBodyReplacementSupported} from './document_compatibility.js';
 import {remoteMemoryError} from './errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function makeRemoteDocument(
   input: RemoteRememberInputV1,
@@ -30,7 +32,8 @@ export function makeRemoteDocument(
     codeCitations: codeCitations === undefined ? prior?.metadata.codeCitations : codeCitations,
     createdAt: prior?.metadata.createdAt ?? prior?.metadata.timestamp ?? timestamp,
     kind: input.kind,
-    memoryId: prior?.metadata.memoryId ?? memoryId ?? `tn_${randomUuidV4().replaceAll('-', '')}`,
+    memoryId:
+      prior?.metadata.memoryId ?? memoryId ?? `tn_${Effect.pipe(randomUuidV4(), EffectString.replaceAll('-', ''))}`,
     project: input.project,
     relations: input.relations === undefined ? prior?.metadata.relations : input.relations,
     schemaVersion: MEMORY_SCHEMA_VERSION,
@@ -41,7 +44,11 @@ export function makeRemoteDocument(
     updatedAt: timestamp,
     visibility: 'shared',
   };
-  const formatted = formatMemoryDocument(input.kind === 'handoff' ? 'HANDOFF' : 'MEMORY', metadata, input.text.trim());
+  const formatted = formatMemoryDocument(
+    input.kind === 'handoff' ? 'HANDOFF' : 'MEMORY',
+    metadata,
+    Effect.pipe(input.text, EffectString.trim),
+  );
   const inspected = inspectRemoteMemoryContent(formatted);
   if (!inspected.allowed) {
     throw remoteMemoryError('invalid_request', `Remote memory content was blocked by ${inspected.category} policy.`);

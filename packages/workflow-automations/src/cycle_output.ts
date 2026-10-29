@@ -76,7 +76,7 @@ export function boundNativeCycleOutput(
 
   const snapshot = payload.snapshot;
   const snapshotId =
-    typeof snapshot === 'object' && snapshot !== null ? (snapshot as Record<string, unknown>).snapshotId : undefined;
+    typeof snapshot === 'object' && snapshot !== null && 'snapshotId' in snapshot ? snapshot.snapshotId : undefined;
   const fallback = {
     available: false,
     reason: 'response-budget-exceeded',

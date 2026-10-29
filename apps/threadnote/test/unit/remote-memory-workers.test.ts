@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it, vi} from 'vitest';
 import {rotateTenantIds} from '@threadnote/remote-memory/handoff_retention';
@@ -8,14 +9,17 @@ import {
   remoteMemoryWorkerRowsReady,
   type RemoteMemoryWorkerHealthRow,
 } from '@threadnote/remote-memory/worker_health';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('remote memory worker scheduling', () => {
   it('rotates each sorted share to the front without changing the fair cyclic order', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({max: 100, min: 0}), {maxLength: 30, minLength: 1}), values => {
-        const shares = values
-          .sort((left, right) => left - right)
-          .map(value => ({share_id: String(value).padStart(3, '0'), tenant_id: 'tenant'}));
+        const shares = EffectArray.map(
+          values.sort((left, right) => left - right),
+          value => ({share_id: Effect.pipe(String(value), EffectString.padStart(3, '0')), tenant_id: 'tenant'}),
+        );
         for (const [index, share] of shares.entries()) {
           const rotated = rotateShares(shares, `${share.tenant_id}\u0000${share.share_id}`);
           expect(rotated).toEqual([...shares.slice(index), ...shares.slice(0, index)]);

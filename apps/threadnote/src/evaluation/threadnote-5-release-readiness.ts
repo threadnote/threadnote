@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {
   parseThreadnote5ReleaseEvidenceV1,
   parseThreadnote5ReleaseReadinessFixtureV1,
@@ -126,15 +128,18 @@ export function evaluateThreadnote5ReleaseReadiness(input: {
     productionReceiptVerification === null
       ? undefined
       : new Set(
-          productionReceiptVerification.scenarios
-            .filter(scenario => scenario.state === 'verified')
-            .map(scenario => scenario.scenario),
+          EffectArray.map(
+            EffectArray.filter(productionReceiptVerification.scenarios, scenario => scenario.state === 'verified'),
+            scenario => scenario.scenario,
+          ),
         );
   const verifierIncomplete =
     productionReceiptVerification?.state === 'unknown' &&
     productionReceiptVerification.reason === 'verifier-incomplete';
-  const scenarios = fixture.scenarios.map(contract => {
-    const observation = evidence.candidateObservations.find(item => item.scenario === contract.id);
+  const scenarios = EffectArray.map(fixture.scenarios, contract => {
+    const observation = EffectOption.getOrUndefined(
+      EffectArray.findFirst(evidence.candidateObservations, item => item.scenario === contract.id),
+    );
     const state: 'failed' | 'missing' | 'passed' | 'unknown' = captureTrusted
       ? verifiedCandidateScenarios === undefined || verifiedCandidateScenarios.has(contract.id)
         ? observationState(contract, observation)
@@ -178,16 +183,23 @@ export function evaluateThreadnote5ReleaseReadiness(input: {
       : captureTrusted && baselineTrusted
         ? aggregateBaselineMetrics(fixture, evidence.baseline.source, evidence.baseline.observations)
         : unavailableBaselineMetrics(fixture, captureTrusted ? 'baseline-untrusted' : 'capture-untrusted');
-  const metrics = fixture.metrics.map(definition => {
+  const metrics = EffectArray.map(fixture.metrics, definition => {
     const candidate = candidateMetrics.get(definition.id)!;
     const baseline = baselineMetrics.get(definition.id)!;
     const thresholdPassed = candidate.state === 'observed' ? passesThreshold(definition, candidate.value) : null;
     if (thresholdPassed !== true) {
       const dependsOnIncompleteVerifier =
         verifierIncomplete &&
-        fixture.scenarios
-          .filter(scenario => scenario.metricIds.includes(definition.id))
-          .some(scenario => !verifiedCandidateScenarios?.has(scenario.id));
+        EffectArray.some(
+          EffectArrayPipe(fixture.scenarios, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (scenario, __effectArrayIndex) =>
+                __effectArrayIndex in __effectArrayValues && scenario.metricIds.includes(definition.id),
+            ),
+          ),
+          scenario => !verifiedCandidateScenarios?.has(scenario.id),
+        );
       if (thresholdPassed === null && dependsOnIncompleteVerifier) {
         insufficiencies.push(`candidate metric ${definition.id} lacks a complete source verifier`);
       } else {
@@ -258,17 +270,29 @@ function aggregateMetrics(
   verifiedScenarios?: ReadonlySet<Threadnote5ReleaseScenario>,
 ): ReadonlyMap<Threadnote5ReleaseMetric, Threadnote5MetricValueV1> {
   return new Map(
-    fixture.metrics.map(definition => {
-      const requiredScenarios = fixture.scenarios.filter(scenario => scenario.metricIds.includes(definition.id));
-      const selected = requiredScenarios.map(contract => ({
+    EffectArray.map(fixture.metrics, definition => {
+      const requiredScenarios = EffectArrayPipe(fixture.scenarios, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (scenario, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && scenario.metricIds.includes(definition.id),
+        ),
+      );
+      const selected = EffectArray.map(requiredScenarios, contract => ({
         contract,
-        observation: observations.find(item => item.scenario === contract.id),
+        observation: EffectOption.getOrUndefined(
+          EffectArray.findFirst(observations, item => item.scenario === contract.id),
+        ),
       }));
-      const measurements = selected.map(({contract, observation}) => {
+      const measurements = EffectArray.map(selected, ({contract, observation}) => {
         if (verifiedScenarios !== undefined && !verifiedScenarios.has(contract.id)) return undefined;
         if (observation?.transcript.outcome !== 'passed') return undefined;
-        const measurement = observation.transcript.measurements.find(item => item.id === definition.id);
-        const minimum = contract.metricMinimums.find(item => item.id === definition.id);
+        const measurement = EffectOption.getOrUndefined(
+          EffectArray.findFirst(observation.transcript.measurements, item => item.id === definition.id),
+        );
+        const minimum = EffectOption.getOrUndefined(
+          EffectArray.findFirst(contract.metricMinimums, item => item.id === definition.id),
+        );
         if (
           measurement === undefined ||
           minimum === undefined ||
@@ -278,7 +302,8 @@ function aggregateMetrics(
         }
         return measurement;
       });
-      if (measurements.some(measurement => measurement === undefined)) {
+      const completeMeasurements = EffectArray.filter(measurements, Predicate.isNotUndefined);
+      if (completeMeasurements.length !== measurements.length) {
         return [
           definition.id,
           {
@@ -288,10 +313,7 @@ function aggregateMetrics(
           } satisfies Threadnote5UnknownMetricV1,
         ] as const;
       }
-      return [
-        definition.id,
-        observedMetric(source.version, definition, measurements as Threadnote5MeasurementV1[]),
-      ] as const;
+      return [definition.id, observedMetric(source.version, definition, completeMeasurements)] as const;
     }),
   );
 }
@@ -302,8 +324,10 @@ function observationState(
 ): 'failed' | 'missing' | 'passed' | 'unknown' {
   if (observation === undefined) return 'missing';
   if (observation.transcript.outcome !== 'passed') return observation.transcript.outcome;
-  const measurements = new Map(observation.transcript.measurements.map(measurement => [measurement.id, measurement]));
-  const hasMinimumTrials = contract.metricMinimums.every(minimum => {
+  const measurements = new Map(
+    EffectArray.map(observation.transcript.measurements, measurement => [measurement.id, measurement]),
+  );
+  const hasMinimumTrials = EffectArray.every(contract.metricMinimums, minimum => {
     const measurement = measurements.get(minimum.id);
     return measurement !== undefined && measurementEligibleCount(measurement) >= minimum.minimumEligibleCount;
   });
@@ -320,23 +344,17 @@ function observedMetric(
   measurements: readonly Threadnote5MeasurementV1[],
 ): Threadnote5MetricValueV1 {
   if (definition.kind === 'mean') {
-    const aggregate = measurements.reduce(
-      (result, measurement) => ({
-        count: result.count + ('sampleCount' in measurement ? measurement.sampleCount : 0),
-        total: result.total + ('total' in measurement ? measurement.total : 0),
-      }),
-      {count: 0, total: 0},
-    );
+    const aggregate = EffectArray.reduce(measurements, {count: 0, total: 0}, (result, measurement) => ({
+      count: result.count + ('sampleCount' in measurement ? measurement.sampleCount : 0),
+      total: result.total + ('total' in measurement ? measurement.total : 0),
+    }));
     if (aggregate.count === 0) return {reason: 'source-incomplete', sourceVersion, state: 'unknown'};
     return {sourceVersion, state: 'observed', value: aggregate.total / aggregate.count};
   }
-  const aggregate = measurements.reduce(
-    (result, measurement) => ({
-      eligible: result.eligible + ('eligibleCount' in measurement ? measurement.eligibleCount : 0),
-      positive: result.positive + ('positiveCount' in measurement ? measurement.positiveCount : 0),
-    }),
-    {eligible: 0, positive: 0},
-  );
+  const aggregate = EffectArray.reduce(measurements, {eligible: 0, positive: 0}, (result, measurement) => ({
+    eligible: result.eligible + ('eligibleCount' in measurement ? measurement.eligibleCount : 0),
+    positive: result.positive + ('positiveCount' in measurement ? measurement.positiveCount : 0),
+  }));
   if (aggregate.eligible === 0) return {reason: 'source-incomplete', sourceVersion, state: 'unknown'};
   return {sourceVersion, state: 'observed', value: aggregate.positive / aggregate.eligible};
 }
@@ -347,7 +365,7 @@ function unknownMetrics(
   reason: Threadnote5UnknownMetricReason,
 ): ReadonlyMap<Threadnote5ReleaseMetric, Threadnote5MetricValueV1> {
   return new Map(
-    fixture.metrics.map(definition => [
+    EffectArray.map(fixture.metrics, definition => [
       definition.id,
       {reason, sourceVersion, state: 'unknown'} satisfies Threadnote5UnknownMetricV1,
     ]),
@@ -362,7 +380,7 @@ function aggregateBaselineMetrics(
   const comparable = new Set(fixture.baselineComparison.comparableMetricIds);
   const aggregated = aggregateMetrics(fixture, source, observations);
   return new Map(
-    fixture.metrics.map(definition => [
+    EffectArray.map(fixture.metrics, definition => [
       definition.id,
       comparable.has(definition.id) ? aggregated.get(definition.id)! : notApplicableBaselineMetric(),
     ]),
@@ -375,7 +393,7 @@ function unavailableBaselineMetrics(
 ): ReadonlyMap<Threadnote5ReleaseMetric, Threadnote5MetricValueV1> {
   const comparable = new Set(fixture.baselineComparison.comparableMetricIds);
   return new Map(
-    fixture.metrics.map(definition => [
+    EffectArray.map(fixture.metrics, definition => [
       definition.id,
       comparable.has(definition.id)
         ? ({
@@ -461,7 +479,7 @@ function canonicalBaselineLedgerMatches(
 }
 
 function baselineLedgerValue(value: unknown): unknown {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
-  const source = value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) return value;
+  const source = value;
   return source.ledger === undefined ? value : source.ledger;
 }

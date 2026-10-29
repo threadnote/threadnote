@@ -16,15 +16,15 @@ export const REMOTE_MEMORY_REPOSITORY_ERROR_CODES = [
 
 export type RemoteMemoryRepositoryErrorCode = (typeof REMOTE_MEMORY_REPOSITORY_ERROR_CODES)[number];
 
-export class RemoteMemoryRepositoryError extends Schema.TaggedError<RemoteMemoryRepositoryError>()(
-  'RemoteMemoryRepositoryError',
-  {
-    code: Schema.Literals(REMOTE_MEMORY_REPOSITORY_ERROR_CODES),
-    message: Schema.String,
-    requestId: Schema.String,
-    retryable: Schema.Boolean,
-  },
-) {}
+export class RemoteMemoryRepositoryError extends Schema.TaggedError<
+  RemoteMemoryRepositoryError,
+  {readonly brand: unique symbol}
+>()('RemoteMemoryRepositoryError', {
+  code: Schema.Literals(REMOTE_MEMORY_REPOSITORY_ERROR_CODES),
+  message: Schema.String,
+  requestId: Schema.String,
+  retryable: Schema.Boolean,
+}) {}
 
 /** Authorization must resolve this scope before the repository is called. */
 export interface RemoteMemoryRepositoryScopeV1 {

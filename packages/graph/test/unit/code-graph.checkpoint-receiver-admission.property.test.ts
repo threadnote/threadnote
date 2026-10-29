@@ -1,12 +1,15 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {CodeGraphCheckpointReceiverFileVerifier} from '@threadnote/graph/checkpoint/receiver_admission';
 import type {CodeGraphCheckpointFileRecordV1} from '@threadnote/graph/checkpoint/schema';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function file(id: number): CodeGraphCheckpointFileRecordV1 {
   return {
-    blobId: id.toString(16).padStart(40, '0'),
-    contentHash: id.toString(16).padStart(64, '0'),
+    blobId: Effect.pipe(id.toString(16), EffectString.padStart(40, '0')),
+    contentHash: Effect.pipe(id.toString(16), EffectString.padStart(64, '0')),
     kind: 'file',
     language: 'typescript',
     mode: '100644',
@@ -24,11 +27,13 @@ describe('checkpoint receiver file admission', () => {
         fc.uniqueArray(fc.integer({min: 0, max: 50}), {maxLength: 12}),
         (receiver, donor) => {
           const verify = (ids: readonly number[]) => {
-            const verifier = new CodeGraphCheckpointReceiverFileVerifier(receiver.map(file));
-            return ids.every(id => verifier.accept(file(id))) && verifier.complete;
+            const verifier = new CodeGraphCheckpointReceiverFileVerifier(EffectArray.map(receiver, file));
+            return EffectArray.every(ids, id => verifier.accept(file(id))) && verifier.complete;
           };
           expect(verify([...receiver].reverse())).toBe(true);
-          expect(verify(donor)).toBe(receiver.length === donor.length && donor.every(id => receiver.includes(id)));
+          expect(verify(donor)).toBe(
+            receiver.length === donor.length && EffectArray.every(donor, id => receiver.includes(id)),
+          );
         },
       ),
       {numRuns: 100},
@@ -42,8 +47,8 @@ describe('checkpoint receiver file admission', () => {
     expect(duplicate.accept(original)).toBe(false);
     expect(duplicate.complete).toBe(false);
     for (const changed of [
-      {...original, blobId: 'a'.repeat(40)},
-      {...original, contentHash: 'a'.repeat(64)},
+      {...original, blobId: Effect.pipe('a', EffectString.repeat(40))},
+      {...original, contentHash: Effect.pipe('a', EffectString.repeat(64))},
       {...original, language: 'javascript'},
       {...original, mode: '100755'},
     ]) {
@@ -61,7 +66,7 @@ describe('checkpoint receiver file admission', () => {
     ];
     const complete = (records: readonly CodeGraphCheckpointFileRecordV1[]) => {
       const verifier = new CodeGraphCheckpointReceiverFileVerifier([source, ...images], {allowStructuralOnly: true});
-      return records.every(record => verifier.accept(record)) && verifier.complete;
+      return EffectArray.every(records, record => verifier.accept(record)) && verifier.complete;
     };
     expect(complete([source])).toBe(true);
     expect(complete([...images, source])).toBe(true);

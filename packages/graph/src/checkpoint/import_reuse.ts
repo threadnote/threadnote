@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import {runBinaryCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -25,16 +26,17 @@ import {
   type CodeGraphCheckpointAttributionFileV1,
   type CodeGraphCheckpointHeaderV1,
 } from './schema.js';
+
 const CAT_FILE_BATCH_ENTRIES = 128;
 const CAT_FILE_BATCH_BYTES = 4 * 1_048_576;
 
-export class CodeGraphCheckpointReuseHydrationError extends Schema.TaggedError<CodeGraphCheckpointReuseHydrationError>()(
-  'CodeGraphCheckpointReuseHydrationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphCheckpointReuseHydrationError extends Schema.TaggedError<
+  CodeGraphCheckpointReuseHydrationError,
+  {readonly brand: unique symbol}
+>()('CodeGraphCheckpointReuseHydrationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 function hydrationError(message: string, cause?: unknown): CodeGraphCheckpointReuseHydrationError {
   return CodeGraphCheckpointReuseHydrationError.make({
@@ -86,7 +88,7 @@ export const hydrateCodeGraphCheckpointReusableBaseReceipt = Effect.fn(
   ) {
     return yield* hydrationError('Checkpoint repository identity does not match the receiver.');
   }
-  const packProvenance = header.abi.input.languagePacks.map(pack => ({
+  const packProvenance = EffectArray.map(header.abi.input.languagePacks, pack => ({
     cacheIdentity: pack.cacheIdentity,
     derivationIdentity: pack.derivationIdentity,
     id: pack.id,
@@ -104,12 +106,12 @@ export const hydrateCodeGraphCheckpointReusableBaseReceipt = Effect.fn(
   if (
     portable.version !== CODE_GRAPH_INVENTORY_REUSE_RECEIPT_VERSION ||
     portable.policyExclusions.policyVersion !== CODE_GRAPH_INVENTORY_ADMISSION_POLICY_VERSION ||
-    portable.policyExclusions.reasons.some(reason => !isCodeGraphInventoryExclusionReason(reason.reason))
+    EffectArray.some(portable.policyExclusions.reasons, reason => !isCodeGraphInventoryExclusionReason(reason.reason))
   ) {
     return yield* hydrationError('Checkpoint inventory reuse contract is incompatible.');
   }
-  const totalContentBytes = portable.attributionFiles.reduce((total, file) => total + file.size, 0);
-  const totalSourceBytes = portable.attributionFiles.reduce((total, file) => total + file.blobSize, 0);
+  const totalContentBytes = EffectArray.reduce(portable.attributionFiles, 0, (total, file) => total + file.size);
+  const totalSourceBytes = EffectArray.reduce(portable.attributionFiles, 0, (total, file) => total + file.blobSize);
   if (
     portable.attributionFiles.length > CODE_GRAPH_CHECKPOINT_ATTRIBUTION_FILES_MAXIMUM ||
     !Number.isSafeInteger(totalContentBytes) ||
@@ -124,8 +126,13 @@ export const hydrateCodeGraphCheckpointReusableBaseReceipt = Effect.fn(
   for (const batch of attributionBatches(portable.attributionFiles)) {
     const result = yield* runBinaryCommandEffect('git', ['-C', identity.repoRoot, 'cat-file', '--batch'], {
       env: {...system.environment(), GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0'},
-      input: new TextEncoder().encode(`${batch.map(file => file.blobId).join('\n')}\n`),
-      maxOutputBytes: batch.reduce((total, file) => total + file.blobSize + 256, 0),
+      input: new TextEncoder().encode(
+        `${EffectArray.join(
+          EffectArray.map(batch, file => file.blobId),
+          '\n',
+        )}\n`,
+      ),
+      maxOutputBytes: EffectArray.reduce(batch, 0, (total, file) => total + file.blobSize + 256),
       timeoutMs: 0,
     }).pipe(Effect.mapError(cause => hydrationError('Checkpoint attribution Git blobs are unavailable.', cause)));
     const blobs = yield* Effect.try({
@@ -187,7 +194,7 @@ export const hydrateCodeGraphCheckpointReusableBaseReceipt = Effect.fn(
       policyExclusions: {
         ...portable.policyExclusions,
         policyVersion: CODE_GRAPH_INVENTORY_ADMISSION_POLICY_VERSION,
-        reasons: portable.policyExclusions.reasons.map(reason => {
+        reasons: EffectArray.map(portable.policyExclusions.reasons, reason => {
           if (!isCodeGraphInventoryExclusionReason(reason.reason)) {
             throw hydrationError('Checkpoint inventory reuse contract is incompatible.');
           }
@@ -204,5 +211,5 @@ export const hydrateCodeGraphCheckpointReusableBaseReceipt = Effect.fn(
 });
 
 function isCodeGraphInventoryExclusionReason(value: string): value is CodeGraphInventoryExclusionReason {
-  return CODE_GRAPH_INVENTORY_EXCLUSION_REASONS.some(reason => reason === value);
+  return EffectArray.some(CODE_GRAPH_INVENTORY_EXCLUSION_REASONS, reason => reason === value);
 }

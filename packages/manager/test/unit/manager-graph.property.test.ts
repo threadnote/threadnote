@@ -1,9 +1,11 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
   graphAdministrationJobSelection,
   graphBuildConcurrencyState,
   graphFocusTarget,
+  graphFocusLayoutTargets,
   graphWheelZoomFactor,
   graphWithNodeNeighborhood,
   orderGraphBuildStatuses,
@@ -23,8 +25,44 @@ import {
   MANAGER_GRAPH_MAX_NODE_LIMIT,
   managerGraphVisualizationLimits,
 } from '@threadnote/graph/visualization/limits';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('Manager graph properties', () => {
+  it('keeps focused layouts deterministic, finite, and independent of edge order without mutating input', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            label: fc.string({maxLength: 24}),
+            radius: fc.integer({min: 1, max: 15}),
+            x: fc.integer({min: -100, max: 100}),
+            y: fc.integer({min: -100, max: 100}),
+          }),
+          {minLength: 2, maxLength: 30},
+        ),
+        values => {
+          const nodes = EffectArray.map(values, (node, index) => ({...node, id: 'node-' + index}));
+          const edges = EffectArray.map(nodes.slice(1), node => ({sourceId: nodes[0].id, targetId: node.id}));
+          const sizes = new Map(EffectArray.map(nodes, node => [node.id, {height: 15, width: 120}]));
+          const original = JSON.stringify(nodes);
+          const result = graphFocusLayoutTargets(nodes, nodes[0].id, edges, sizes, 2.8);
+          expect(result).toEqual(graphFocusLayoutTargets(nodes, nodes[0].id, [...edges].reverse(), sizes, 2.8));
+          expect(result.size).toBe(nodes.length);
+          expect(result.get(nodes[0].id)).toEqual({x: nodes[0].x, y: nodes[0].y});
+          expect(
+            EffectArray.every(
+              [...result.values()],
+              position => Number.isFinite(position.x) && Number.isFinite(position.y),
+            ),
+          ).toBe(true);
+          expect(JSON.stringify(nodes)).toBe(original);
+        },
+      ),
+      {numRuns: 60},
+    );
+  });
+
   it('keeps catalog revisions order-independent and sensitive to lifecycle changes', () => {
     fc.assert(
       fc.property(
@@ -50,24 +88,28 @@ describe('Manager graph properties', () => {
           {maxLength: 12, selector: database => database.checkoutId},
         ),
         databases => {
-          const reordered = [...databases]
-            .reverse()
-            .map(database => ({...database, views: [...database.views].reverse()}));
+          const reordered = EffectArray.map([...databases].reverse(), database => ({
+            ...database,
+            views: [...database.views].reverse(),
+          }));
           expect(managerGraphCatalogRevision(reordered)).toBe(managerGraphCatalogRevision(databases));
 
           const changed =
             databases.length === 0
               ? [{checkoutId: 'new', state: 'ready' as const, views: [], viewsTruncated: false}]
-              : databases.map((database, index) =>
+              : EffectArray.map(databases, (database, index) =>
                   index === 0 ? {...database, viewsTruncated: !database.viewsTruncated} : database,
                 );
           expect(managerGraphCatalogRevision(changed)).not.toBe(managerGraphCatalogRevision(databases));
 
-          const targetDatabaseIndex = databases.findIndex(database => database.views.length > 0);
+          const targetDatabaseIndex = EffectOption.getOrElse(
+            EffectArray.findFirstIndex(databases, database => database.views.length > 0),
+            () => -1,
+          );
           if (targetDatabaseIndex >= 0) {
-            const scopeChanged = databases.map((database, databaseIndex) => ({
+            const scopeChanged = EffectArray.map(databases, (database, databaseIndex) => ({
               ...database,
-              views: database.views.map((candidate, viewIndex) =>
+              views: EffectArray.map(database.views, (candidate, viewIndex) =>
                 databaseIndex === targetDatabaseIndex && viewIndex === 0
                   ? {
                       ...candidate,
@@ -99,27 +141,29 @@ describe('Manager graph properties', () => {
           {maxLength: 80, selector: item => item.buildNumber},
         ),
         records => {
-          const statuses = records.map(record =>
+          const statuses = EffectArray.map(records, record =>
             graphBuildStatus(
               `build-${record.buildNumber}`,
-              record.buildNumber.toString(16).padStart(12, '0'),
+              Effect.pipe(record.buildNumber.toString(16), EffectString.padStart(12, '0')),
               record.startedAt,
               record.state,
             ),
           );
-          const builds = statuses.filter((_, index) => index % 2 === 0);
-          const waiters = statuses.filter((_, index) => index % 2 === 1);
+          const builds = EffectArray.filter(statuses, (_, index) => index % 2 === 0);
+          const waiters = EffectArray.filter(statuses, (_, index) => index % 2 === 1);
           const forward = graphAdministrationJobSelection(builds, waiters);
           const reverse = graphAdministrationJobSelection([...builds].reverse(), [...waiters].reverse());
-          const expectedTotal = builds.filter(status => status.state !== 'completed').length;
+          const expectedTotal = EffectArray.filter(builds, status => status.state !== 'completed').length;
 
           expect(forward).toEqual(reverse);
           expect(forward.jobs.length).toBeLessThanOrEqual(4);
           expect(forward.jobs.length + forward.hiddenCount).toBe(forward.total);
           expect(forward.total).toBe(expectedTotal);
-          expect(new Set(forward.jobs.map(job => job.buildId)).size).toBe(forward.jobs.length);
-          expect(forward.jobs.every(job => builds.some(build => build.buildId === job.buildId))).toBe(true);
-          expect(forward.jobs.every(job => job.state !== 'completed')).toBe(true);
+          expect(new Set(EffectArray.map(forward.jobs, job => job.buildId)).size).toBe(forward.jobs.length);
+          expect(
+            EffectArray.every(forward.jobs, job => EffectArray.some(builds, build => build.buildId === job.buildId)),
+          ).toBe(true);
+          expect(EffectArray.every(forward.jobs, job => job.state !== 'completed')).toBe(true);
         },
       ),
       {numRuns: 120},
@@ -138,23 +182,25 @@ describe('Manager graph properties', () => {
           {maxLength: 80, selector: item => item.buildNumber},
         ),
         records => {
-          const statuses = records.map(record => ({
+          const statuses = EffectArray.map(records, record => ({
             ...graphBuildStatus(
               `build-${record.buildNumber}`,
-              record.buildNumber.toString(16).padStart(12, '0'),
+              Effect.pipe(record.buildNumber.toString(16), EffectString.padStart(12, '0')),
               record.progressAt,
               'running',
             ),
             identity: {
-              checkoutId: `checkout-${record.buildNumber.toString().padStart(7, '0')}`,
-              commit: record.buildNumber.toString(16).padStart(12, '0'),
+              checkoutId: `checkout-${Effect.pipe(record.buildNumber.toString(), EffectString.padStart(7, '0'))}`,
+              commit: Effect.pipe(record.buildNumber.toString(16), EffectString.padStart(12, '0')),
               repositoryId: 'repository',
-              worktreeId: `worktree-${record.buildNumber.toString().padStart(7, '0')}`,
+              worktreeId: `worktree-${Effect.pipe(record.buildNumber.toString(), EffectString.padStart(7, '0'))}`,
             },
-            managerContext: {worktreePath: `/worktrees/${record.locationNumber.toString().padStart(3, '0')}`},
+            managerContext: {
+              worktreePath: `/worktrees/${Effect.pipe(record.locationNumber.toString(), EffectString.padStart(3, '0'))}`,
+            },
           }));
-          const expected = orderGraphBuildStatuses(statuses).map(status => status.buildId);
-          const polled = [...statuses].reverse().map((status, index) => ({
+          const expected = EffectArray.map(orderGraphBuildStatuses(statuses), status => status.buildId);
+          const polled = EffectArray.map([...statuses].reverse(), (status, index) => ({
             ...status,
             timestamps: {
               ...status.timestamps,
@@ -162,8 +208,10 @@ describe('Manager graph properties', () => {
             },
           }));
 
-          expect(orderGraphBuildStatuses(polled).map(status => status.buildId)).toEqual(expected);
-          expect(statuses.map(status => status.buildId)).toEqual(records.map(record => `build-${record.buildNumber}`));
+          expect(EffectArray.map(orderGraphBuildStatuses(polled), status => status.buildId)).toEqual(expected);
+          expect(EffectArray.map(statuses, status => status.buildId)).toEqual(
+            EffectArray.map(records, record => `build-${record.buildNumber}`),
+          );
         },
       ),
       {numRuns: 120},
@@ -176,10 +224,10 @@ describe('Manager graph properties', () => {
         fc.uniqueArray(fc.integer({min: 1, max: 1_000_000}), {minLength: 1, maxLength: 80}),
         startedAtValues => {
           const owner = graphBuildStatus('owner', '000000000000', 0, 'running');
-          const waiters = startedAtValues.map(startedAt =>
+          const waiters = EffectArray.map(startedAtValues, startedAt =>
             graphBuildStatus(
-              `waiter-${startedAt.toString().padStart(7, '0')}`,
-              startedAt.toString(16).padStart(12, '0'),
+              `waiter-${Effect.pipe(startedAt.toString(), EffectString.padStart(7, '0'))}`,
+              Effect.pipe(startedAt.toString(16), EffectString.padStart(12, '0')),
               startedAt,
               'queued',
             ),
@@ -192,9 +240,7 @@ describe('Manager graph properties', () => {
               worktreeId: 'other-worktree',
             },
           };
-          const expected = Math.max(...startedAtValues)
-            .toString(16)
-            .padStart(12, '0');
+          const expected = Effect.pipe(Math.max(...startedAtValues).toString(16), EffectString.padStart(12, '0'));
           const forward = graphBuildConcurrencyState(owner, [...waiters, unrelated], []);
           const reverse = graphBuildConcurrencyState(owner, [unrelated, ...waiters].reverse(), []);
 
@@ -274,7 +320,7 @@ describe('Manager graph properties', () => {
         ),
         relationships => {
           const detail = graphNodeDetail(
-            relationships.map(item => ({
+            EffectArray.map(relationships, item => ({
               confidence: 1,
               direction: item.direction,
               evidencePath: 'src/selected.ts',
@@ -293,12 +339,14 @@ describe('Manager graph properties', () => {
             })),
           );
           const expanded = graphWithNodeNeighborhood(baseGraph(), detail);
-          const nodeIds = expanded.nodes.map(node => node.id);
-          const edgeIds = expanded.edges.map(edge => edge.id);
+          const nodeIds = EffectArray.map(expanded.nodes, node => node.id);
+          const edgeIds = EffectArray.map(expanded.edges, edge => edge.id);
           const nodeSet = new Set(nodeIds);
           expect(nodeSet.size).toBe(nodeIds.length);
           expect(new Set(edgeIds).size).toBe(edgeIds.length);
-          expect(expanded.edges.every(edge => nodeSet.has(edge.sourceId) && nodeSet.has(edge.targetId))).toBe(true);
+          expect(
+            EffectArray.every(expanded.edges, edge => nodeSet.has(edge.sourceId) && nodeSet.has(edge.targetId)),
+          ).toBe(true);
           expect(expanded.stats.renderedNodes).toBe(expanded.nodes.length);
           expect(expanded.stats.renderedEdges).toBe(expanded.edges.length);
           expect(expanded.nodes.length).toBeLessThanOrEqual(MANAGER_GRAPH_MAX_NODE_LIMIT);
@@ -316,19 +364,28 @@ describe('Manager graph properties', () => {
         const neighbors = Array.from({length: neighborCount}, (_, index) =>
           codeGraphSymbol(`neighbor-${index}`, 'cgp_external'),
         );
-        const edges = neighbors.map((neighbor, index) => codeGraphEdge(`edge-${index}`, seed.id, neighbor.id));
+        const edges = EffectArray.map(neighbors, (neighbor, index) =>
+          codeGraphEdge(`edge-${index}`, seed.id, neighbor.id),
+        );
         const loadedNeighbors = neighbors.slice(0, Math.max(0, nodeLimit - 1));
         const result = managerGraphDetailWorkingSet([seed], loadedNeighbors, edges, 'facet:unscoped', {
           edgeLimit: 100,
           nodeLimit,
         });
-        expect(result.nodes.find(node => node.id === seed.id)?.projectId).toBe('facet:unscoped');
-        expect(result.nodes.filter(node => node.id !== seed.id).every(node => node.projectId === 'cgp_external')).toBe(
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(result.nodes, node => node.id === seed.id))?.projectId,
+        ).toBe('facet:unscoped');
+        expect(
+          EffectArray.every(
+            EffectArray.filter(result.nodes, node => node.id !== seed.id),
+            node => node.projectId === 'cgp_external',
+          ),
+        ).toBe(true);
+        expect(result.truncated).toBe(neighborCount > loadedNeighbors.length);
+        const visible = new Set(EffectArray.map(result.nodes, node => node.id));
+        expect(EffectArray.every(result.edges, edge => visible.has(edge.sourceId) && visible.has(edge.targetId))).toBe(
           true,
         );
-        expect(result.truncated).toBe(neighborCount > loadedNeighbors.length);
-        const visible = new Set(result.nodes.map(node => node.id));
-        expect(result.edges.every(edge => visible.has(edge.sourceId) && visible.has(edge.targetId))).toBe(true);
       }),
       {numRuns: 120},
     );
@@ -338,7 +395,7 @@ describe('Manager graph properties', () => {
     fc.assert(
       fc.property(fc.integer({min: 2, max: 120}), nodeCount => {
         const nodeIds = Array.from({length: nodeCount}, (_, index) => `component-${index}`);
-        const candidates: ManagerGraphEdge[] = nodeIds.slice(1).map((nodeId, index) => ({
+        const candidates: ManagerGraphEdge[] = EffectArray.map(nodeIds.slice(1), (nodeId, index) => ({
           confidence: 1,
           count: index + 1,
           id: `edge-${index}`,
@@ -350,7 +407,9 @@ describe('Manager graph properties', () => {
         const selected = representativeManagerGraphEdges(candidates, nodeIds, nodeIds.length);
         expect(selected.length).toBeLessThanOrEqual(nodeIds.length);
         expect(
-          nodeIds.every(nodeId => selected.some(edge => edge.sourceId === nodeId || edge.targetId === nodeId)),
+          EffectArray.every(nodeIds, nodeId =>
+            EffectArray.some(selected, edge => edge.sourceId === nodeId || edge.targetId === nodeId),
+          ),
         ).toBe(true);
       }),
       {numRuns: 100},

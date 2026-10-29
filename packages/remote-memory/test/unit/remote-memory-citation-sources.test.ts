@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {selectRemoteCanonicalCitations} from '@threadnote/remote-memory/citation_sources';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {requestFingerprint} from '@threadnote/remote-memory/remember/fingerprint';
@@ -14,9 +15,11 @@ import {
 import {makeRemoteDocument} from '@threadnote/remote-memory/remote_document';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {richRemoteMemoryMetadata} from '@threadnote/memory/test/helpers/remote-memory-document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const uri = 'threadnote://share/share-1/memories/durable/project/donor.md';
-const citationId = `tncc_${'a'.repeat(40)}`;
+const citationId = `tncc_${Effect.pipe('a', EffectString.repeat(40))}`;
 const input = {
   kind: 'durable' as const,
   operationId: 'operation',
@@ -30,7 +33,10 @@ describe('remote citation selectors', () => {
   it('normalizes permutations and duplicates without changing input or proposal identity', () => {
     FC.assert(
       FC.property(FC.array(FC.integer({min: 0, max: 99}), {maxLength: 4}), values => {
-        const sources = values.map(value => ({uri, citationId: `tncc_${value.toString(16).padStart(40, '0')}`}));
+        const sources = EffectArray.map(values, value => ({
+          uri,
+          citationId: `tncc_${Effect.pipe(value.toString(16), EffectString.padStart(40, '0'))}`,
+        }));
         const before = structuredClone(sources);
         const reversed = [...sources, ...sources].reverse();
         expect(normalizeRemoteCitationSources(reversed)).toEqual(normalizeRemoteCitationSources(sources));
@@ -44,7 +50,25 @@ describe('remote citation selectors', () => {
             shareId: 'share-1',
           });
         expect(hash(reversed)).toBe(hash(sources));
-        const principal = {shareId: 'share-1'} as AuthorizedRemotePrincipal;
+        const principal: AuthorizedRemotePrincipal = {
+          allowedProjects: 'all',
+          attestationRequiredForWrites: false,
+          capabilities: new Set(),
+          cloudAdmissionRequired: false,
+          OAuth: {issuer: 'issuer', scopes: new Set(), subject: 'subject'},
+          cursorOwnerIds: new Set(),
+          cursorSubjects: new Set(),
+          featureFlags: new Set(),
+          policyVersion: 'policy-v1',
+          policyDigest: 'policy-digest',
+          principalId: 'principal',
+          repositoryBindings: new Set(),
+          repositoriesByProject: new Map(),
+          shareId: 'share-1',
+          sharePolicyDigest: 'share-policy-digest',
+          sharePolicyVersion: 'share-policy-v1',
+          tenantId: 'tenant',
+        };
         expect(requestFingerprint(principal, {...input, citationSources: reversed})).toBe(
           requestFingerprint(principal, {...input, citationSources: sources}),
         );
@@ -73,9 +97,9 @@ describe('remote citation selectors', () => {
     expect(selectRemoteCanonicalCitations(uri, body, sources)).toEqual([citation]);
     expect(() => selectRemoteCanonicalCitations(uri, body, [{uri, citationId}])).toThrow('does not exist');
     for (const content of [
-      body.replace('status: active', 'status: archived'),
-      body.replace('code_citation: {', 'code_citation: invalid{'),
-      body.replace(`schema_version: ${metadata.schemaVersion}`, 'schema_version: 999'),
+      Effect.pipe(body, EffectString.replace('status: active', 'status: archived')),
+      Effect.pipe(body, EffectString.replace('code_citation: {', 'code_citation: invalid{')),
+      Effect.pipe(body, EffectString.replace(`schema_version: ${metadata.schemaVersion}`, 'schema_version: 999')),
       formatMemoryDocument(
         'MEMORY',
         {...metadata, codeCitations: [createMemoryCodeCitation({...citationInput, sourceDirty: true})]},

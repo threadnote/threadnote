@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {workflowFamilyStem, workflowTitleSlug} from './naming.js';
@@ -8,6 +9,14 @@ import {
   type WorkflowEvidenceReference,
   type WorkflowWriteIntent,
 } from './contracts.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const isJsonRecord = Schema.is(JsonRecordSchema);
+
+const NATIVE_WORKFLOW_CONTROL_CHARACTER = /[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
 
 export const nativeWorkflowProtocolVersion = 1 as const;
 export const nativeWorkflowExecutorVersion = 1 as const;
@@ -19,7 +28,10 @@ const nonEmpty = (maximum: number) => Schema.String.check(Schema.isMinLength(1),
 const portableId = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
   Schema.makeFilter(value =>
-    value.includes('..') || value === 'constructor' || value === 'prototype' || value === '__proto__'
+    Effect.pipe(value, EffectString.includes('..')) ||
+    value === 'constructor' ||
+    value === 'prototype' ||
+    value === '__proto__'
       ? 'Reserved identifiers are not allowed.'
       : undefined,
   ),
@@ -38,12 +50,7 @@ const generation = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(4096),
   Schema.makeFilter(value =>
-    [...value].some(character => {
-      const code = character.charCodeAt(0);
-      return code < 32 || (code >= 127 && code <= 159);
-    })
-      ? 'Generation contains a control character.'
-      : undefined,
+    NATIVE_WORKFLOW_CONTROL_CHARACTER.test(value) ? 'Generation contains a control character.' : undefined,
   ),
 );
 const uri = Schema.String.check(
@@ -51,19 +58,14 @@ const uri = Schema.String.check(
   Schema.isMaxLength(4096),
   Schema.isPattern(/^threadnote:\/\/[^\s]+$/u),
   Schema.makeFilter(value =>
-    [...value].some(character => {
-      const code = character.charCodeAt(0);
-      return code < 32 || (code >= 127 && code <= 159);
-    })
-      ? 'Memory URI contains a control character.'
-      : undefined,
+    NATIVE_WORKFLOW_CONTROL_CHARACTER.test(value) ? 'Memory URI contains a control character.' : undefined,
   ),
 );
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const memoryId = Schema.String.check(Schema.isPattern(/^tn_[A-Za-z0-9_-]{1,128}$/u));
 const body = Schema.String.check(
   Schema.makeFilter(value =>
-    value.trim().length === 0 || new TextEncoder().encode(value).byteLength > 60_000
+    Effect.pipe(value, EffectString.trim).length === 0 || new TextEncoder().encode(value).byteLength > 60_000
       ? 'Body must be nonblank and no larger than 60000 UTF-8 bytes.'
       : undefined,
   ),
@@ -230,19 +232,21 @@ const CachedNativeWorkflowStateSchema = Schema.Struct({
 });
 
 function sortedJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortedJson);
+  if (EffectArray.isArray(value)) return EffectArray.map(value, sortedJson);
   if (value !== null && typeof value === 'object')
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([, item]) => item !== undefined)
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-        .map(([key, item]) => [key, sortedJson(item)]),
+    return EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectArray.filter(EffectRecord.toEntries(value), ([, item]) => item !== undefined).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ),
+        ([key, item]) => [key, sortedJson(item)],
+      ),
     );
   return value;
 }
 
 export function nativeAuthoringPrefixDigest(operations: readonly {readonly intentDigest: string}[]): string {
-  return sha256HexSync(JSON.stringify(operations.map(operation => operation.intentDigest)));
+  return sha256HexSync(JSON.stringify(EffectArray.map(operations, operation => operation.intentDigest)));
 }
 
 /** Bound new packed journal/native content, including every growing permission table. */
@@ -255,7 +259,7 @@ export function nativeAuthoringSaveByteBudget(input: {
   readonly requestMetadataBytes: number;
 }): number {
   if (
-    Object.values(input).some(value => !Number.isSafeInteger(value) || value < 0) ||
+    EffectArray.some(EffectRecord.values(input), value => !Number.isSafeInteger(value) || value < 0) ||
     input.plannedOperations < 1 ||
     input.plannedOperations > nativeWorkflowOperationLimit
   )
@@ -290,7 +294,8 @@ export function admitNativeAuthoringSave(
   existing?: NativeAuthoringSaveReservation,
 ): NativeAuthoringSaveReservation {
   if (
-    [input.operationCount, input.plannedOperations, input.journalBytes, input.stateBytes, input.plannedBytes].some(
+    EffectArray.some(
+      [input.operationCount, input.plannedOperations, input.journalBytes, input.stateBytes, input.plannedBytes],
       value => !Number.isSafeInteger(value) || value < 0,
     ) ||
     input.plannedOperations < 1
@@ -391,9 +396,10 @@ function validateNativeWorkflowState(
       save.prefixDigest !== nativeAuthoringPrefixDigest(state.operations.slice(0, save.operationStart)) ||
       save.journalBytesAtStart + save.reservedBytes > byteLimit ||
       save.stateBytesAtStart + save.reservedBytes > byteLimit ||
-      state.operations
-        .slice(save.operationStart)
-        .some(operation => !save.operationIds.includes(operation.intent.operationId))
+      EffectArray.some(
+        state.operations.slice(save.operationStart),
+        operation => !save.operationIds.includes(operation.intent.operationId),
+      )
     )
       throw fail('invalid-state', 'The closeout reservation differs from its original receipts or capacity.');
   }
@@ -427,7 +433,7 @@ export function decodeNativeWorkflowState(
   input: unknown,
   hash: (value: string) => string = sha256HexSync,
 ): NativeWorkflowState {
-  const candidate = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : undefined;
+  const candidate = isJsonRecord(input) ? input : undefined;
   if (
     candidate?.format !== 'threadnote-native-workflow' ||
     candidate.stateVersion !== nativeWorkflowStateVersion ||
@@ -443,7 +449,7 @@ export function decodeNativeWorkflowState(
 function deepFreeze<A>(value: A, seen = new WeakSet<object>()): A {
   if (value !== null && typeof value === 'object' && !seen.has(value)) {
     seen.add(value);
-    for (const key of Reflect.ownKeys(value)) deepFreeze((value as Record<PropertyKey, unknown>)[key], seen);
+    for (const key of Reflect.ownKeys(value)) deepFreeze(Reflect.get(value, key), seen);
     Object.freeze(value);
   }
   return value;
@@ -457,9 +463,9 @@ function deepFreeze<A>(value: A, seen = new WeakSet<object>()): A {
 export function makeNativeWorkflowStateDecoder(
   hash: (value: string) => string = sha256HexSync,
 ): (input: unknown) => NativeWorkflowState {
-  const validatedOperations = new WeakSet<object>();
+  const validatedOperations = new WeakMap<object, NativeWorkflowState['operations'][number]>();
   return input => {
-    const candidate = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : undefined;
+    const candidate = isJsonRecord(input) ? input : undefined;
     if (
       candidate?.format !== 'threadnote-native-workflow' ||
       candidate.stateVersion !== nativeWorkflowStateVersion ||
@@ -473,10 +479,11 @@ export function makeNativeWorkflowStateDecoder(
       'invalid-state',
       'The native workflow state is malformed.',
     );
-    const freshOperations: NativeOperation[] = [];
-    const operations = decoded.operations.map(operation => {
-      if (typeof operation === 'object' && operation !== null && validatedOperations.has(operation))
-        return operation as NativeOperation;
+    const freshOperations: NativeWorkflowState['operations'][number][] = [];
+    const operations = EffectArray.map(decoded.operations, operation => {
+      const cached =
+        typeof operation === 'object' && operation !== null ? validatedOperations.get(operation) : undefined;
+      if (cached !== undefined) return cached;
       const validated = decode(
         nativeOperationSchema,
         operation,
@@ -486,14 +493,14 @@ export function makeNativeWorkflowStateDecoder(
       freshOperations.push(validated);
       return validated;
     });
-    const state = {...decoded, operations} as NativeWorkflowState;
+    const state: NativeWorkflowState = {...decoded, operations};
     validateNativeWorkflowState(state, hash, operation => validatedOperations.has(operation));
     // Cache only after every state-wide invariant passed. Freezing all nested
     // values prevents a caller from changing a cached operation through an
     // array, relation, evidence reference, intent, or artifact reference.
     for (const operation of freshOperations) {
       deepFreeze(operation);
-      validatedOperations.add(operation);
+      validatedOperations.set(operation, operation);
     }
     return state;
   };

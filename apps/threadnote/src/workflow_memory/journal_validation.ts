@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias, memoryIdentityAlias} from '@threadnote/memory/identity-alias';
@@ -25,6 +26,10 @@ import {
   type WorkflowJournal,
   type WorkflowOperation,
 } from './protocol.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 function check(condition: unknown): asserts condition {
   if (!condition)
@@ -34,26 +39,45 @@ function check(condition: unknown): asserts condition {
     );
 }
 const object = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === 'object' && !Array.isArray(value);
+  value !== null && typeof value === 'object' && !EffectArray.isArray(value);
 const same = (left: unknown, right: unknown) => stableJson(left) === stableJson(right);
 const root = (binding: WorkflowBinding) => `threadnote://user/${uriSegment(binding.user)}/memories`;
 const memoryId = (binding: WorkflowBinding, artifact: WorkflowArtifact) =>
-  `tn_${sha256HexSync(`${binding.bindingId}\n${artifact.sourceRunId}\n${artifact.artifactKey}`).slice(0, 20)}`;
+  `tn_${Effect.pipe(sha256HexSync(`${binding.bindingId}\n${artifact.sourceRunId}\n${artifact.artifactKey}`), EffectString.slice(0, 20))}`;
 const activeUri = workflowArtifactUri;
 const archiveUri = workflowArchiveUri;
 
+function assertWorkflowArtifact(value: unknown): asserts value is WorkflowArtifact {
+  check(object(value));
+  check(
+    typeof value.artifactKey === 'string' &&
+      typeof value.sourceRunId === 'string' &&
+      typeof value.role === 'string' &&
+      typeof value.canonicalUri === 'string' &&
+      typeof value.memoryId === 'string' &&
+      typeof value.revision === 'string' &&
+      typeof value.bodySha256 === 'string' &&
+      (value.storageKind === 'handoff' || value.storageKind === 'durable') &&
+      (value.state === 'active' || value.state === 'archived') &&
+      (value.naming === undefined ||
+        (object(value.naming) &&
+          typeof value.naming.role === 'string' &&
+          typeof value.naming.version === 'number' &&
+          (value.naming.archiveOrdinal === undefined || typeof value.naming.archiveOrdinal === 'number'))),
+  );
+}
+
 function assertArtifact(binding: WorkflowBinding, artifact: WorkflowArtifact, uri: string): void {
-  check(object(artifact));
   portableKey(artifact.artifactKey, 'artifactKey');
   portableKey(artifact.sourceRunId, 'sourceRunId');
   portableKey(artifact.role, 'role');
   check(artifact.storageKind === 'handoff' || (artifact.storageKind === 'durable' && binding.profile === 'desktop'));
-  check(artifact.state === 'active' || artifact.state === 'archived');
   check(artifact.canonicalUri === uri && parseResourceId(uri).canonicalUri === uri);
   check(artifact.memoryId === memoryId(binding, artifact));
+  check(typeof artifact.revision === 'string' && typeof artifact.bodySha256 === 'string');
   check(/^[a-f0-9]{64}$/u.test(artifact.revision) && /^[a-f0-9]{64}$/u.test(artifact.bodySha256));
   if (binding.naming) {
-    check(artifact.naming);
+    check(artifact.naming !== undefined);
     workflowMemoryStem(binding.naming, artifact.naming.role, artifact.naming.version);
   } else check(artifact.naming === undefined);
   if (artifact.state === 'active') {
@@ -65,9 +89,20 @@ function assertArtifact(binding: WorkflowBinding, artifact: WorkflowArtifact, ur
       return;
     }
     const prefix = archiveUri(binding, artifact, '');
-    const suffix = uri.slice(prefix.length - 3, -3);
+    const suffix = Effect.pipe(uri, EffectString.slice(prefix.length - 3, -3));
     portableKey(suffix, 'archive operationId');
     check(uri === archiveUri(binding, artifact, suffix));
+  }
+}
+
+function assertWorkflowArtifacts(
+  binding: WorkflowBinding,
+  value: unknown,
+): asserts value is WorkflowJournal['artifacts'] {
+  check(object(value));
+  for (const [uri, artifact] of EffectRecord.toEntries(value)) {
+    assertWorkflowArtifact(artifact);
+    assertArtifact(binding, artifact, uri);
   }
 }
 
@@ -77,22 +112,30 @@ function manifestArtifacts(
   cache?: WorkflowReadCache,
 ): WorkflowJournal['artifacts'] {
   check(typeof content === 'string');
-  const cached = cache?.manifests.find(
-    entry => entry.binding === state.binding && entry.manifestUri === state.manifestUri && entry.content === content,
+  const cached = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(cache?.manifests), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          __effectArrayReceiver,
+          entry =>
+            entry.binding === state.binding && entry.manifestUri === state.manifestUri && entry.content === content,
+        ),
+      ),
+    ),
   );
   if (cached) return cached.artifacts;
   const record = parseMemoryDocument(state.manifestUri, content);
   check(record && record.metadata.kind === 'handoff' && record.metadata.status === 'active');
   check(record.metadata.project === state.binding.project);
   check(record.metadata.topic === workflowStateTopic(state.binding));
-  check(record.metadata.memoryId === `tn_${state.binding.bindingId.slice(0, 20)}`);
+  check(record.metadata.memoryId === `tn_${Effect.pipe(state.binding.bindingId, EffectString.slice(0, 20))}`);
   check(record.metadata.sourceSessionId === state.binding.workflowRunId);
   const parsed: unknown = JSON.parse(record.body);
   check(
     object(parsed) && parsed.protocolVersion === 1 && same(parsed.binding, state.binding) && object(parsed.artifacts),
   );
-  const artifacts = parsed.artifacts as WorkflowJournal['artifacts'];
-  for (const [uri, artifact] of Object.entries(artifacts)) assertArtifact(state.binding, artifact, uri);
+  const artifacts = parsed.artifacts;
+  assertWorkflowArtifacts(state.binding, artifacts);
   if (cache) {
     immutableWorkflowImage(state.binding);
     immutableWorkflowImage(artifacts);
@@ -114,10 +157,14 @@ function assertOperation(state: WorkflowJournal, key: string, operation: Workflo
   check(['create', 'replace', 'archive'].includes(request.action));
   check(operation.status === 'prepared' || operation.status === 'verified');
   check(operation.intentDigest === sha256HexSync(stableJson(request)));
-  const artifact = operation.artifact;
-  assertArtifact(binding, artifact, artifact?.canonicalUri);
-  if (binding.naming && request.action === 'create')
-    check(artifact.naming?.role === (request.nameHint ?? workflowRoleName(request.role!)));
+  const artifactValue: unknown = operation.artifact;
+  assertWorkflowArtifact(artifactValue);
+  const artifact = artifactValue;
+  assertArtifact(binding, artifact, artifact.canonicalUri);
+  if (binding.naming && request.action === 'create') {
+    check(typeof request.role === 'string');
+    check(artifact.naming?.role === (request.nameHint ?? workflowRoleName(request.role)));
+  }
   if (binding.naming && request.nameHint !== undefined) check(artifact.naming?.role === request.nameHint);
   check(
     request.artifactKey === artifact.artifactKey &&
@@ -136,8 +183,8 @@ function assertOperation(state: WorkflowJournal, key: string, operation: Workflo
   } else {
     check(artifact.state === 'active' && typeof request.body === 'string');
     check(request.bodySha256 === sha256HexSync(request.body));
-    check(`${record.body.trim()}\n` === `${request.body.trim()}\n`);
-    check(artifact.bodySha256 === sha256HexSync(`${record.body.trim()}\n`));
+    check(`${Effect.pipe(record.body, EffectString.trim)}\n` === `${Effect.pipe(request.body, EffectString.trim)}\n`);
+    check(artifact.bodySha256 === sha256HexSync(`${Effect.pipe(record.body, EffectString.trim)}\n`));
     check(artifact.storageKind === (binding.profile === 'desktop' ? (request.storageKind ?? 'handoff') : 'handoff'));
     assertWorkflowArtifactIdentity(binding, request);
   }
@@ -160,11 +207,14 @@ function assertOperation(state: WorkflowJournal, key: string, operation: Workflo
     );
     check(before.metadata.sourceSessionId === binding.workflowRunId && before.metadata.kind === artifact.storageKind);
     if (request.action === 'archive') {
-      check(`${record.body.trim()}\n` === `Archived original Threadnote memory.\n\n${before.body.trim()}\n`);
-      check(artifact.bodySha256 === sha256HexSync(`${before.body.trim()}\n`));
+      check(
+        `${Effect.pipe(record.body, EffectString.trim)}\n` ===
+          `Archived original Threadnote memory.\n\n${Effect.pipe(before.body, EffectString.trim)}\n`,
+      );
+      check(artifact.bodySha256 === sha256HexSync(`${Effect.pipe(before.body, EffectString.trim)}\n`));
     }
   }
-  check(Array.isArray(operation.relations));
+  check(EffectArray.isArray(operation.relations));
   if (operation.deferredCodeAnchor) {
     check(
       operation.deferredCodeAnchor.callerCwd === binding.repo &&
@@ -204,37 +254,46 @@ function assertPreparedRelations(
     return;
   }
   const owned = workflowOwnedArtifacts(state);
-  const ownedUris = new Set(owned.map(artifact => artifact.canonicalUri));
+  const ownedUris = new Set(EffectArray.map(owned, artifact => artifact.canonicalUri));
   const sharedRoots = state.binding.profile === 'desktop' ? desktopSharedRoots : state.binding.sharedRoots;
   const scopes = [
     ...sharedRoots,
     ...workflowEvidenceScopes(state.binding, operation.request.evidenceRefs),
-    ...owned.map(artifact => artifact.canonicalUri),
+    ...EffectArray.map(owned, artifact => artifact.canonicalUri),
     ...(state.binding.profile === 'desktop'
       ? [`${root(state.binding)}/durable`, `${root(state.binding)}/preferences`]
       : []),
   ];
-  const allowed = (uri: string) => ownedUris.has(uri) || scopes.some(scope => resourceIdIsWithin(uri, scope));
+  const allowed = (uri: string) =>
+    ownedUris.has(uri) || EffectArray.some(scopes, scope => resourceIdIsWithin(uri, scope));
   for (const target of operation.relations) {
     check(object(target) && typeof target.uri === 'string' && allowed(target.uri));
     check(typeof target.content === 'string');
     const record = parseMemoryDocument(target.uri, target.content);
     check(record && record.metadata.status === 'active' && record.metadata.memoryId === target.memoryId);
-    const evidence = operation.request.evidenceRefs?.find(ref => ref.uri === target.uri);
+    const evidence = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(operation.request.evidenceRefs), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, ref => ref.uri === target.uri)),
+      ),
+    );
     if (evidence) assertWorkflowEvidenceSnapshot(state.binding, evidence, target.uri, target.content);
     check(target.memoryId === undefined || target.memoryId !== operation.artifact.memoryId);
     if (
-      record.metadata.topic?.startsWith('workflow-') ||
+      Effect.pipe(record.metadata.topic, effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect.pipe(effectOptionalString, EffectString.startsWith('workflow-')),
+      ) ||
       resourceIdIsWithin(target.uri, `${root(state.binding)}/handoffs`)
     )
       check(
         ownedUris.has(target.uri) ||
           evidence !== undefined ||
-          sharedRoots.some(scope => resourceIdIsWithin(target.uri, scope)),
+          EffectArray.some(sharedRoots, scope => resourceIdIsWithin(target.uri, scope)),
       );
     check(
       target.allowedUriScopes === undefined ||
-        (Array.isArray(target.allowedUriScopes) && target.allowedUriScopes.every(allowed)),
+        (EffectArray.isArray(target.allowedUriScopes) && EffectArray.every(target.allowedUriScopes, allowed)),
     );
     check(!target.memoryId || (target.allowedUriScopes?.length ?? 0) > 0);
   }
@@ -242,17 +301,19 @@ function assertPreparedRelations(
   const record = parseMemoryDocument(operation.artifact.canonicalUri, operation.desired)!;
   const relations = record.metadata.relations ?? [];
   check(requested.length === relations.length);
-  check(same(requested.map(item => item.type).sort(), relations.map(item => item.type).sort()));
-  const targets = operation.relations.map(target =>
+  check(
+    same(EffectArray.map(requested, item => item.type).sort(), EffectArray.map(relations, item => item.type).sort()),
+  );
+  const targets = EffectArray.map(operation.relations, target =>
     target.memoryId ? memoryIdentityAlias(target.memoryId) : target.uri,
   );
-  check(relations.every(relation => targets.includes(relation.uri)));
-  check(targets.every(uri => relations.some(relation => relation.uri === uri)));
+  check(EffectArray.every(relations, relation => targets.includes(relation.uri)));
+  check(EffectArray.every(targets, uri => EffectArray.some(relations, relation => relation.uri === uri)));
   for (const relation of requested) {
     const id = memoryIdFromIdentityAlias(relation.uri);
     check(
       id
-        ? operation.relations.some(target => target.memoryId === id)
+        ? EffectArray.some(operation.relations, target => target.memoryId === id)
         : allowed(parseResourceId(relation.uri).canonicalUri),
     );
   }
@@ -293,7 +354,7 @@ export function assertWorkflowJournalIntegrity(
   );
   const desired = manifestArtifacts(state, state.manifestContent, cache);
   check(same(desired, state.artifacts));
-  for (const [key, operation] of Object.entries(state.operations)) {
+  for (const [key, operation] of EffectRecord.toEntries(state.operations)) {
     const checked = cache?.operations.get(operation);
     if (checked?.binding === state.binding && checked.key === key) continue;
     assertOperation(state, key, operation);
@@ -303,7 +364,10 @@ export function assertWorkflowJournalIntegrity(
       cache.operations.set(operation, {binding: state.binding, key});
     }
   }
-  for (const operation of Object.values(state.operations).filter(item => item.status === 'prepared')) {
+  for (const operation of EffectArray.filter(
+    EffectRecord.values(state.operations),
+    item => item.status === 'prepared',
+  )) {
     assertSourceOwned(operation, state.artifacts);
     assertPreparedRelations(state, operation, desktopSharedRoots);
   }
@@ -311,17 +375,18 @@ export function assertWorkflowJournalIntegrity(
   // The caller reports missing/changed committed state. It must never repair it.
   if (state.manifestCommitted || currentManifestContent !== state.previousManifestContent) return;
   if (currentManifestContent === undefined) {
-    check(Object.keys(state.artifacts).length === 0 && Object.keys(state.operations).length === 0);
+    check(EffectRecord.keys(state.artifacts).length === 0 && EffectRecord.keys(state.operations).length === 0);
     return;
   }
   const previous = manifestArtifacts(state, currentManifestContent, cache);
-  const changed = Object.keys({...previous, ...state.artifacts}).filter(
+  const changed = EffectArray.filter(
+    EffectRecord.keys({...previous, ...state.artifacts}),
     uri => !same(previous[uri], state.artifacts[uri]),
   );
   if (changed.length === 0) return;
   const changedUris = new Set(changed);
   check(
-    Object.values(state.operations).some(operation => {
+    EffectArray.some(EffectRecord.values(state.operations), operation => {
       if (operation.status !== 'verified') return false;
       // A normal receipt can only alter its destination and optional source.
       // Deferred/citation receipts retain their complete original proof path.
@@ -350,9 +415,10 @@ export function assertWorkflowJournalIntegrity(
 /** Completed historical operations are receipts, never additional ownership grants. */
 export function workflowOwnedArtifacts(state: WorkflowJournal): readonly WorkflowArtifact[] {
   return [
-    ...Object.values(state.artifacts),
-    ...Object.values(state.operations)
-      .filter(operation => operation.status === 'prepared')
-      .map(operation => operation.artifact),
+    ...EffectRecord.values(state.artifacts),
+    ...EffectArray.map(
+      EffectArray.filter(EffectRecord.values(state.operations), operation => operation.status === 'prepared'),
+      operation => operation.artifact,
+    ),
   ];
 }

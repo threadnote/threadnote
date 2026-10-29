@@ -12,6 +12,9 @@ import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {extractBundledModelSource, type BundledModelSourceExtractor} from './bundled-model-source.js';
 import {modelArtifactFileIdentity, sameModelArtifactFile, type ModelArtifactFileIdentity} from './artifact_identity.js';
 import type {LocalModelManifest} from './catalog.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export interface LocalModelInstallation {
   readonly bytes: number;
@@ -49,12 +52,15 @@ export interface LocalModelStoreLayerOptions {
   readonly onModelLockContention?: (event: LocalModelLockEvent) => Effect.Effect<void, never>;
 }
 
-export class ModelStoreIoFailed extends Schema.TaggedError<ModelStoreIoFailed>()('ModelStoreIoFailed', {
-  cause: Schema.Defect(),
-  message: Schema.String,
-  modelId: Schema.String,
-  operation: Schema.String,
-}) {}
+export class ModelStoreIoFailed extends Schema.TaggedError<ModelStoreIoFailed, {readonly brand: unique symbol}>()(
+  'ModelStoreIoFailed',
+  {
+    cause: Schema.Defect(),
+    message: Schema.String,
+    modelId: Schema.String,
+    operation: Schema.String,
+  },
+) {}
 
 export type LocalModelStoreError =
   InsufficientDiskSpace | ModelChecksumMismatch | ModelDownloadFailed | ModelNotInstalled | ModelStoreIoFailed;
@@ -280,14 +286,15 @@ function makeLocalModelStore(
         const resumed =
           sourcePath === undefined
             ? yield* http.downloadToFile(sourceUrl, partial, {offset}).pipe(
-                Effect.map(response => offset > 0 && response.resumed),
-                Effect.mapError(cause =>
-                  ModelDownloadFailed.make({
-                    cause,
-                    message: `Could not download model ${manifest.id}: ${cause.message}`,
-                    modelId: manifest.id,
-                  }),
-                ),
+                Effect.mapBoth({
+                  onSuccess: response => offset > 0 && response.resumed,
+                  onFailure: cause =>
+                    ModelDownloadFailed.make({
+                      cause,
+                      message: `Could not download model ${manifest.id}: ${cause.message}`,
+                      modelId: manifest.id,
+                    }),
+                }),
               )
             : yield* (layerOptions.extractBundledSource ?? extractBundledModelSource)(sourcePath, partial).pipe(
                 Effect.tapError(() => fs.remove(partial, {force: true}).pipe(Effect.ignore)),
@@ -381,8 +388,20 @@ export function modelDownloadUrl(manifest: LocalModelManifest): string {
   if (threadnoteRelease) {
     return `https://github.com/threadnote/threadnote/releases/download/${threadnoteRelease}/${manifest.sha256}.gguf`;
   }
-  const repository = manifest.repository.split('/').filter(Boolean).map(encodeURIComponent).join('/');
-  const file = manifest.file.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  const repository = EffectArray.join(
+    EffectArray.map(
+      EffectArray.filter(Effect2.pipe(manifest.repository, EffectString.split('/')), Boolean),
+      encodeURIComponent,
+    ),
+    '/',
+  );
+  const file = EffectArray.join(
+    EffectArray.map(
+      EffectArray.filter(Effect2.pipe(manifest.file, EffectString.split('/')), Boolean),
+      encodeURIComponent,
+    ),
+    '/',
+  );
   return `https://huggingface.co/${repository}/resolve/${manifest.revision}/${file}`;
 }
 

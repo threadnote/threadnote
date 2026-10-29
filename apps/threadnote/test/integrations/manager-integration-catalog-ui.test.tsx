@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -9,8 +10,11 @@ import {filteredIntegrationProducts} from '@threadnote/manager/integration-catal
 import {managerIntegrations} from '../../src/manager/integrations_ui.js';
 import {MANAGER_STATIC_FILES} from '../../src/manager/static-files.js';
 import type {SuperhumanSource} from '@threadnote/integration-superhuman/manager-contracts';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
-const integrationProducts = managerIntegrations.map(integration => integration.product);
+const integrationProducts = EffectArray.map(managerIntegrations, integration => integration.product);
 let root: Root | undefined;
 afterEach(async () => {
   await act(async () => root?.unmount());
@@ -20,14 +24,29 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 async function render(node: React.ReactNode): Promise<void> {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
   await act(async () => root?.render(<ManagerDialogProvider>{node}</ManagerDialogProvider>));
 }
 function button(label: string): HTMLButtonElement {
-  const match = [...document.querySelectorAll('button')].find(item => item.textContent?.trim().startsWith(label));
+  const match = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(
+            item.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+          ))(__effectArrayValue),
+    ),
+  );
   if (!match) throw new Error('Button not found: ' + label);
   return match;
 }
@@ -120,17 +139,19 @@ describe('Integration catalog', () => {
     expect(MANAGER_STATIC_FILES['/integrations/github.svg']?.sourceDirectory).toBe(
       'packages/integration-github/static',
     );
-    expect(filteredIntegrationProducts(integrationProducts, 'recordings').map(product => product.id)).toEqual([
-      'pocket',
-    ]);
-    expect(filteredIntegrationProducts(integrationProducts, 'canvas').map(product => product.id)).toEqual([
+    expect(
+      EffectArray.map(filteredIntegrationProducts(integrationProducts, 'recordings'), product => product.id),
+    ).toEqual(['pocket']);
+    expect(EffectArray.map(filteredIntegrationProducts(integrationProducts, 'canvas'), product => product.id)).toEqual([
       'superhuman',
     ]);
-    expect(filteredIntegrationProducts(integrationProducts, 'repositories').map(product => product.id)).toEqual([
-      'github',
+    expect(
+      EffectArray.map(filteredIntegrationProducts(integrationProducts, 'repositories'), product => product.id),
+    ).toEqual(['github']);
+    expect(EffectArray.map(filteredIntegrationProducts(integrationProducts, 'export'), product => product.id)).toEqual([
+      'obsidian',
     ]);
-    expect(filteredIntegrationProducts(integrationProducts, 'export').map(product => product.id)).toEqual(['obsidian']);
-    expect(filteredIntegrationProducts(integrationProducts, 'issues').map(product => product.id)).toEqual([
+    expect(EffectArray.map(filteredIntegrationProducts(integrationProducts, 'issues'), product => product.id)).toEqual([
       'linear',
       'github',
     ]);
@@ -139,10 +160,10 @@ describe('Integration catalog', () => {
     fc.assert(
       fc.property(fc.constantFrom('Obsidian', 'Superhuman', 'canvas', 'export', 'read only'), query => {
         expect(filteredIntegrationProducts(integrationProducts, query)).toEqual(
-          filteredIntegrationProducts(integrationProducts, `  ${query.toUpperCase()}  `),
+          filteredIntegrationProducts(integrationProducts, `  ${Effect.pipe(query, EffectString.toUpperCase)}  `),
         );
         expect(
-          filteredIntegrationProducts(integrationProducts, query).every(product =>
+          EffectArray.every(filteredIntegrationProducts(integrationProducts, query), product =>
             integrationProducts.includes(product),
           ),
         ).toBe(true);

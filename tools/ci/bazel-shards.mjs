@@ -1,3 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 /**
  * @typedef {{
  *   label: string;
@@ -49,13 +53,14 @@ function targetWeight(target) {
  * @param {string} label
  */
 function targetName(label) {
-  if (label.startsWith('//apps/threadnote:test_long_')) return label.slice('//apps/threadnote:test_long_'.length);
+  if (Effect.pipe(label, EffectString.startsWith('//apps/threadnote:test_long_')))
+    return Effect.pipe(label, EffectString.slice('//apps/threadnote:test_long_'.length));
   if (label === '//apps/threadnote:test_postgres') return 'postgres tests';
-  if (label.startsWith('//apps/threadnote:test_standard_')) return 'threadnote tests';
-  if (label.startsWith('//packages/graph:')) return 'graph tests';
-  if (label.startsWith('//apps/website:')) return 'website';
-  if (label.startsWith('//packages/')) return 'package tests';
-  if (label.startsWith('//infra/')) return 'infrastructure';
+  if (Effect.pipe(label, EffectString.startsWith('//apps/threadnote:test_standard_'))) return 'threadnote tests';
+  if (Effect.pipe(label, EffectString.startsWith('//packages/graph:'))) return 'graph tests';
+  if (Effect.pipe(label, EffectString.startsWith('//apps/website:'))) return 'website';
+  if (Effect.pipe(label, EffectString.startsWith('//packages/'))) return 'package tests';
+  if (Effect.pipe(label, EffectString.startsWith('//infra/'))) return 'infrastructure';
   return 'repository checks';
 }
 
@@ -70,52 +75,70 @@ export function planBazelShards({inventory, selected, maxShards = 8}) {
   if (!Number.isSafeInteger(maxShards) || maxShards < 1) throw new Error('maxShards must be a positive integer');
 
   const selectedLabels = new Set(selected);
-  const executable = inventory
-    .filter(target => selectedLabels.has(target.label) && (target.kind === 'action' || target.kind === 'test'))
-    .map(target => ({...target, weight: targetWeight(target)}));
-  const network = executable.filter(target => target.requiresNetwork);
-  const ordinary = executable.filter(target => !target.requiresNetwork);
-  const checks = ordinary
-    .filter(target => REPOSITORY_CHECKS.has(target.label))
-    .sort((left, right) => left.label.localeCompare(right.label));
-  const groups = ordinary
-    .filter(target => !REPOSITORY_CHECKS.has(target.label))
-    .map(target => ({targets: [target], weight: target.weight}));
-  if (checks.length > 0) groups.push({targets: checks, weight: checks.reduce((sum, target) => sum + target.weight, 0)});
+  const executable = EffectArray.map(
+    EffectArray.filter(
+      inventory,
+      (target, index) =>
+        index in inventory && selectedLabels.has(target.label) && (target.kind === 'action' || target.kind === 'test'),
+    ),
+    target => ({...target, weight: targetWeight(target)}),
+  );
+  const network = EffectArray.filter(executable, target => target.requiresNetwork);
+  const ordinary = EffectArray.filter(executable, target => !target.requiresNetwork);
+  const checks = EffectArray.filter(ordinary, target => REPOSITORY_CHECKS.has(target.label)).sort((left, right) =>
+    Effect.pipe(left.label, EffectString.localeCompare(right.label)),
+  );
+  const groups = EffectArray.map(
+    EffectArray.filter(ordinary, target => !REPOSITORY_CHECKS.has(target.label)),
+    target => ({targets: [target], weight: target.weight}),
+  );
+  if (checks.length > 0)
+    groups.push({targets: checks, weight: EffectArray.reduce(checks, 0, (sum, target) => sum + target.weight)});
   const ordinaryShardCount = Math.min(groups.length, Math.max(maxShards - (network.length > 0 ? 1 : 0), 0));
   const bins = Array.from({length: ordinaryShardCount}, () => ({postgres: false, targets: [], weight: 0}));
   if (network.length > 0) {
     bins.push({
       postgres: true,
-      targets: [...network].sort((left, right) => left.label.localeCompare(right.label)),
-      weight: network.reduce((sum, target) => sum + target.weight, 0),
+      targets: [...network].sort((left, right) => Effect.pipe(left.label, EffectString.localeCompare(right.label))),
+      weight: EffectArray.reduce(network, 0, (sum, target) => sum + target.weight),
     });
   }
   if (ordinary.length > 0 && bins.length === 0) bins.push({postgres: false, targets: [], weight: 0});
   for (const group of groups.sort(
-    (left, right) => right.weight - left.weight || left.targets[0].label.localeCompare(right.targets[0].label),
+    (left, right) =>
+      right.weight - left.weight ||
+      Effect.pipe(left.targets[0].label, EffectString.localeCompare(right.targets[0].label)),
   )) {
-    const bin = bins.reduce((best, candidate) => (candidate.weight < best.weight ? candidate : best));
+    const bin = Effect.pipe(bins, __effectReduceValues =>
+      EffectArray.reduce(
+        EffectArray.drop(__effectReduceValues, 1),
+        Effect.Option.getOrElse(EffectArray.head(__effectReduceValues), () => {
+          throw new TypeError('Reduce of empty array with no initial value');
+        }),
+        (best, candidate) => (candidate.weight < best.weight ? candidate : best),
+      ),
+    );
     bin.targets.push(...group.targets);
     bin.weight += group.weight;
   }
 
-  return bins
-    .filter(bin => bin.targets.length > 0)
-    .sort((left, right) => {
+  return Effect.pipe(
+    EffectArray.filter(bins, bin => bin.targets.length > 0).sort((left, right) => {
       if (left.postgres !== right.postgres) return left.postgres ? 1 : -1;
       return left.targets[0].label.localeCompare(right.targets[0].label);
-    })
-    .map((bin, index, all) => {
-      const focus = [...bin.targets].sort(
-        (left, right) => right.weight - left.weight || left.label.localeCompare(right.label),
-      )[0];
-      return {
-        id: `shard-${String(index + 1).padStart(2, '0')}`,
-        name: `${index + 1}/${all.length} · ${targetName(focus.label)}`,
-        postgres: bin.postgres,
-        estimatedWeight: bin.weight,
-        targets: bin.targets.map(target => target.label).sort(),
-      };
-    });
+    }),
+    all =>
+      EffectArray.map(all, (bin, index) => {
+        const focus = [...bin.targets].sort(
+          (left, right) => right.weight - left.weight || left.label.localeCompare(right.label),
+        )[0];
+        return {
+          id: `shard-${Effect.pipe(String(index + 1), EffectString.padStart(2, '0'))}`,
+          name: `${index + 1}/${all.length} · ${targetName(focus.label)}`,
+          postgres: bin.postgres,
+          estimatedWeight: bin.weight,
+          targets: EffectArray.map(bin.targets, target => target.label).sort(),
+        };
+      }),
+  );
 }

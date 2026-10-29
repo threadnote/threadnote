@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {
@@ -18,8 +19,10 @@ import {
   assembleGraphShareBatch,
 } from '@threadnote/graph/sharing/frontier';
 import type {Sha256Digest} from '@threadnote/graph/sharing/digest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const digest = (character: string): Sha256Digest => `sha256:${character.repeat(64)}`;
+const digest = (character: string): Sha256Digest => `sha256:${Effect.pipe(character, EffectString.repeat(64))}`;
 
 describe('graph share receipts and frozen batches', () => {
   it('is order-independent and duplicate-idempotent for identical announcements', () => {
@@ -36,7 +39,9 @@ describe('graph share receipts and frozen batches', () => {
           right = announceGraphShareResult(right, announcement).store;
         }
         expect(left.receipts).toHaveLength(uniqueKeys(announcements).length);
-        expect(right.receipts.map(receiptKey).sort()).toEqual(left.receipts.map(receiptKey).sort());
+        expect(EffectArray.map(right.receipts, receiptKey).sort()).toEqual(
+          EffectArray.map(left.receipts, receiptKey).sort(),
+        );
       }),
       {numRuns: 25},
     );
@@ -44,9 +49,9 @@ describe('graph share receipts and frozen batches', () => {
 
   it('quarantines one action key with two semantic digests and never first-writer-wins', () => {
     const first: GraphShareResultAnnouncementV1 = {
-      actionKey: 'a'.repeat(64),
+      actionKey: Effect.pipe('a', EffectString.repeat(64)),
       attestationDigest: digest('1'),
-      batchId: 'b'.repeat(40),
+      batchId: Effect.pipe('b', EffectString.repeat(40)),
       resultManifestDigest: digest('2'),
       semanticDigest: digest('3'),
     };
@@ -73,12 +78,12 @@ describe('graph share receipts and frozen batches', () => {
   it('rejects late results from a different frozen batch', () => {
     let machine = idleGraphShareFrontier();
     machine = observeCanonicalHead(machine, {
-      commit: 'c'.repeat(40),
+      commit: Effect.pipe('c', EffectString.repeat(40)),
       isDescendantOfPublished: true,
       nowSeconds: 0,
     });
     machine = freezeGraphShareBatch(machine, {
-      actionKeys: ['a'.repeat(64)],
+      actionKeys: [Effect.pipe('a', EffectString.repeat(64))],
       changedBytes: 1,
       changedFiles: 1,
       nowSeconds: 30,
@@ -86,11 +91,11 @@ describe('graph share receipts and frozen batches', () => {
     });
     expect(machine.phase).toBe('frozen');
     expect(lateResultAdmitted(machine, machine.frozenBatchId ?? '')).toBe(true);
-    expect(lateResultAdmitted(machine, 'd'.repeat(40))).toBe(false);
+    expect(lateResultAdmitted(machine, Effect.pipe('d', EffectString.repeat(40)))).toBe(false);
     const late: GraphShareResultAnnouncementV1 = {
-      actionKey: 'a'.repeat(64),
+      actionKey: Effect.pipe('a', EffectString.repeat(64)),
       attestationDigest: digest('1'),
-      batchId: 'd'.repeat(40),
+      batchId: Effect.pipe('d', EffectString.repeat(40)),
       resultManifestDigest: digest('2'),
       semanticDigest: digest('3'),
     };
@@ -107,11 +112,11 @@ describe('graph share receipts and frozen batches', () => {
 
   it('keeps C in pendingRange while B is frozen and treats C receipts as late', () => {
     let machine = idleGraphShareFrontier();
-    const commitB = 'b'.repeat(40);
-    const commitC = 'c'.repeat(40);
+    const commitB = Effect.pipe('b', EffectString.repeat(40));
+    const commitC = Effect.pipe('c', EffectString.repeat(40));
     machine = observeCanonicalHead(machine, {commit: commitB, isDescendantOfPublished: true, nowSeconds: 0});
     machine = freezeGraphShareBatch(machine, {
-      actionKeys: ['a'.repeat(64)],
+      actionKeys: [Effect.pipe('a', EffectString.repeat(64))],
       changedBytes: 1,
       changedFiles: 1,
       nowSeconds: 30,
@@ -122,7 +127,7 @@ describe('graph share receipts and frozen batches', () => {
     expect(machine.pendingRange).toEqual([commitC]);
     expect(machine.buildingFrontier).toBe(commitB);
     const forB: GraphShareResultAnnouncementV1 = {
-      actionKey: 'a'.repeat(64),
+      actionKey: Effect.pipe('a', EffectString.repeat(64)),
       attestationDigest: digest('1'),
       batchId: commitB,
       resultManifestDigest: digest('2'),
@@ -133,8 +138,8 @@ describe('graph share receipts and frozen batches', () => {
     store = announceGraphShareResult(store, forB).store;
     store = announceGraphShareResult(store, forC).store;
     const selected = selectGraphShareResultsForFrozenMachine(store, machine);
-    expect(selected.selected.map(receipt => receipt.batchId)).toEqual([commitB]);
-    expect(selected.skippedLate.map(receipt => receipt.batchId)).toEqual([commitC]);
+    expect(EffectArray.map(selected.selected, receipt => receipt.batchId)).toEqual([commitB]);
+    expect(EffectArray.map(selected.skippedLate, receipt => receipt.batchId)).toEqual([commitC]);
     const generation = machine.generation;
     machine = assembleGraphShareBatch(machine);
     machine = verifyGraphShareBatch(machine);
@@ -146,7 +151,11 @@ describe('graph share receipts and frozen batches', () => {
 
   it('does not move generation when verify fails after freeze', () => {
     let machine = idleGraphShareFrontier();
-    machine = observeCanonicalHead(machine, {commit: 'b'.repeat(40), isDescendantOfPublished: true, nowSeconds: 0});
+    machine = observeCanonicalHead(machine, {
+      commit: Effect.pipe('b', EffectString.repeat(40)),
+      isDescendantOfPublished: true,
+      nowSeconds: 0,
+    });
     machine = freezeGraphShareBatch(machine, {
       actionKeys: [],
       changedBytes: 1,
@@ -163,7 +172,7 @@ describe('graph share receipts and frozen batches', () => {
   });
 
   it('retries freeze after a failed verifying batch without moving the pointer', () => {
-    const commit = 'b'.repeat(40);
+    const commit = Effect.pipe('b', EffectString.repeat(40));
     let machine = idleGraphShareFrontier();
     machine = observeCanonicalHead(machine, {commit, isDescendantOfPublished: true, nowSeconds: 0});
     machine = freezeGraphShareBatch(machine, {
@@ -197,7 +206,7 @@ describe('graph share receipts and frozen batches', () => {
 
   it('keeps the last published frontier when HEAD is unrelated', () => {
     let machine = idleGraphShareFrontier();
-    const published = 'a'.repeat(40);
+    const published = Effect.pipe('a', EffectString.repeat(40));
     machine = {
       ...machine,
       generation: 1,
@@ -205,7 +214,7 @@ describe('graph share receipts and frozen batches', () => {
       phase: 'published',
       publishedFrontier: published,
     };
-    const unrelated = 'f'.repeat(40);
+    const unrelated = Effect.pipe('f', EffectString.repeat(40));
     machine = observeCanonicalHead(machine, {
       commit: unrelated,
       isDescendantOfPublished: false,
@@ -221,7 +230,7 @@ describe('graph share receipts and frozen batches', () => {
   it('never opens a collection for a sequence of unrelated heads', () => {
     FC.assert(
       FC.property(hex(40), FC.array(hex(40), {minLength: 1, maxLength: 4}), (published, heads) => {
-        FC.pre(heads.every(head => head !== published));
+        FC.pre(EffectArray.every(heads, head => head !== published));
         let machine = idleGraphShareFrontier();
         machine = {...machine, generation: 3, phase: 'published', publishedFrontier: published};
         for (const head of heads) {
@@ -276,7 +285,7 @@ describe('graph share receipts and frozen batches', () => {
       FC.property(FC.integer({max: 5, min: 1}), publishes => {
         let machine = idleGraphShareFrontier();
         for (let index = 0; index < publishes; index += 1) {
-          const commit = index.toString(16).repeat(40).slice(0, 40);
+          const commit = Effect.pipe(index.toString(16), EffectString.repeat(40), EffectString.slice(0, 40));
           machine = observeCanonicalHead(machine, {
             commit,
             isDescendantOfPublished: true,
@@ -301,9 +310,21 @@ describe('graph share receipts and frozen batches', () => {
 
   it('coalesces collecting commits into one frozen batch', () => {
     let machine = idleGraphShareFrontier();
-    machine = observeCanonicalHead(machine, {commit: '1'.repeat(40), isDescendantOfPublished: true, nowSeconds: 0});
-    machine = observeCanonicalHead(machine, {commit: '2'.repeat(40), isDescendantOfPublished: true, nowSeconds: 1});
-    machine = observeCanonicalHead(machine, {commit: '3'.repeat(40), isDescendantOfPublished: true, nowSeconds: 2});
+    machine = observeCanonicalHead(machine, {
+      commit: Effect.pipe('1', EffectString.repeat(40)),
+      isDescendantOfPublished: true,
+      nowSeconds: 0,
+    });
+    machine = observeCanonicalHead(machine, {
+      commit: Effect.pipe('2', EffectString.repeat(40)),
+      isDescendantOfPublished: true,
+      nowSeconds: 1,
+    });
+    machine = observeCanonicalHead(machine, {
+      commit: Effect.pipe('3', EffectString.repeat(40)),
+      isDescendantOfPublished: true,
+      nowSeconds: 2,
+    });
     machine = freezeGraphShareBatch(machine, {
       actionKeys: [],
       changedBytes: 10,
@@ -312,12 +333,12 @@ describe('graph share receipts and frozen batches', () => {
       thresholds: {maximumAgeSeconds: 30, maximumChangedBytes: 1, maximumChangedFiles: 1},
     });
     expect(machine.phase).toBe('frozen');
-    expect(machine.buildingFrontier).toBe('3'.repeat(40));
+    expect(machine.buildingFrontier).toBe(Effect.pipe('3', EffectString.repeat(40)));
     machine = assembleGraphShareBatch(machine);
     machine = verifyGraphShareBatch(machine);
     machine = publishGraphShareBatch(machine, digest('9'));
     expect(machine.generation).toBe(1);
-    expect(machine.publishedFrontier).toBe('3'.repeat(40));
+    expect(machine.publishedFrontier).toBe(Effect.pipe('3', EffectString.repeat(40)));
   });
 });
 
@@ -326,7 +347,7 @@ function receiptKey(announcement: GraphShareResultAnnouncementV1): string {
 }
 
 function uniqueKeys(announcements: readonly GraphShareResultAnnouncementV1[]): string[] {
-  return [...new Set(announcements.map(receiptKey))];
+  return [...new Set(EffectArray.map(announcements, receiptKey))];
 }
 
 function announcementArb() {
@@ -344,7 +365,7 @@ function announcementArb() {
 
 function hex(length: number) {
   return FC.array(FC.constantFrom(...'0123456789abcdef'), {maxLength: length, minLength: length}).map(characters =>
-    characters.join(''),
+    EffectArray.join(characters, ''),
   );
 }
 

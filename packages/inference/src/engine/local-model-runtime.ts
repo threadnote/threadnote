@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, Exit, Layer, Path, Scope, Semaphore} from 'effect';
 import * as AiError from 'effect/ai/AiError';
 import * as EmbeddingModel from 'effect/ai/EmbeddingModel';
@@ -130,7 +131,7 @@ function embedManyNative(
     const vectors: number[][] = [];
     for (let start = 0; start < request.inputs.length; start += EMBEDDING_BATCH_SIZE) {
       const batch = yield* embedding.embedMany(request.inputs.slice(start, start + EMBEDDING_BATCH_SIZE));
-      vectors.push(...batch.embeddings.map(item => [...item.vector]));
+      vectors.push(...EffectArray.map(batch.embeddings, item => [...item.vector]));
     }
     return vectors;
   }).pipe(Effect.onExit(exit => (Exit.isFailure(exit) ? Effect.sync(() => models.delete(key)) : Effect.void)));
@@ -205,7 +206,7 @@ function generateNative(
  */
 export function localGenerationContextSize(request: LocalGenerationRequest): number {
   const inputBytes = new TextEncoder().encode(
-    [request.system ?? '', request.prompt, JSON.stringify(request.jsonSchema)].join('\n'),
+    EffectArray.join([request.system ?? '', request.prompt, JSON.stringify(request.jsonSchema)], '\n'),
   ).byteLength;
   const requested = roundUp(
     Math.max(GENERATION_CONTEXT_MINIMUM, inputBytes + request.maxTokens + GENERATION_CONTEXT_RESERVE),

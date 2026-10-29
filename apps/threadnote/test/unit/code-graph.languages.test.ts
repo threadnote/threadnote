@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -14,6 +15,8 @@ import {CodeGraphLanguagePackError, type CodeGraphLanguagePack} from '@threadnot
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
 import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {createWorkspaceAttributor, discoverManifestWorkspace} from '@threadnote/graph/workspace';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('polyglot code graph language packs', () => {
   effectIt.effect('discovers named TypeScript configs used by project references', () =>
@@ -27,7 +30,9 @@ describe('polyglot code graph language packs', () => {
         inventoryFile('tsconfig.tests.jsonc', '{"include":["test"],}'),
       ];
       const workspace = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.discoverWorkspace(files);
-      const root = workspace.projects.find(project => project.name === 'tsconfig.json');
+      const root = Option.getOrUndefined(
+        EffectArray.findFirst(workspace.projects, project => project.name === 'tsconfig.json'),
+      );
 
       expect(BUILTIN_LANGUAGE_PACK_REGISTRY.isResolutionContext('tsconfig.packages.json')).toBe(true);
       expect(BUILTIN_LANGUAGE_PACK_REGISTRY.isResolutionContext('config/tsconfig.tests.jsonc')).toBe(true);
@@ -52,7 +57,7 @@ describe('polyglot code graph language packs', () => {
       const viaRegistry = yield* runExtraction(file);
       const direct = extractFileFacts(file);
       expect(viaRegistry).toEqual(direct);
-      expect(viaRegistry.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+      expect(EffectArray.map(viaRegistry.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
         expect.arrayContaining([
           ['interface', 'Store'],
           ['class', 'Service'],
@@ -105,28 +110,34 @@ describe('polyglot code graph language packs', () => {
           concurrency: 'unbounded',
         },
       );
-      expect(java.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+      expect(EffectArray.map(java.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
         expect.arrayContaining([
           ['class', 'com.acme.Greeter'],
           ['method', 'com.acme.Greeter.greet'],
         ]),
       );
-      expect(java.edges.map(edge => edge.relation)).toEqual(expect.arrayContaining(['calls', 'contains', 'extends']));
-      expect(kotlin.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+      expect(EffectArray.map(java.edges, edge => edge.relation)).toEqual(
+        expect.arrayContaining(['calls', 'contains', 'extends']),
+      );
+      expect(EffectArray.map(kotlin.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
         expect.arrayContaining([
           ['class', 'com.acme.Greeter'],
           ['function', 'com.acme.Greeter.greet'],
         ]),
       );
-      expect(kotlin.edges.map(edge => edge.relation)).toEqual(expect.arrayContaining(['calls', 'contains', 'extends']));
-      expect(swift.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+      expect(EffectArray.map(kotlin.edges, edge => edge.relation)).toEqual(
+        expect.arrayContaining(['calls', 'contains', 'extends']),
+      );
+      expect(EffectArray.map(swift.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
         expect.arrayContaining([
           ['protocol', 'Greeting'],
           ['struct', 'Greeter'],
           ['method', 'Greeter.greet'],
         ]),
       );
-      expect(swift.edges.map(edge => edge.relation)).toEqual(expect.arrayContaining(['calls', 'contains', 'extends']));
+      expect(EffectArray.map(swift.edges, edge => edge.relation)).toEqual(
+        expect.arrayContaining(['calls', 'contains', 'extends']),
+      );
       expect(recovering.diagnostics).toEqual([
         'swift/Sources/Broken/Broken.swift: swift parser recovered from one or more syntax errors',
       ]);
@@ -174,41 +185,89 @@ describe('polyglot code graph language packs', () => {
         ],
       ] as const;
       const facts = yield* Effect.all(
-        samples.map(([path, content]) => runExtraction(inventoryFile(path, content))),
+        EffectArray.map(samples, ([path, content]) => runExtraction(inventoryFile(path, content))),
         {
           concurrency: 'unbounded',
         },
       );
-      const byLanguage = new Map(facts.map((value, index) => [inventoryFile(samples[index][0], '').language, value]));
-      expect(byLanguage.get('python')?.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+      const byLanguage = new Map(
+        EffectArray.map(facts, (value, index) => [inventoryFile(samples[index][0], '').language, value]),
+      );
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(byLanguage.get('python')?.symbols), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, symbol => [symbol.kind, symbol.qualifiedName]),
+          ),
+        ),
+      ).toEqual(
         expect.arrayContaining([
           ['class', 'Greeter'],
           ['function', 'Greeter.greet'],
         ]),
       );
-      expect(byLanguage.get('go')?.symbols.map(symbol => symbol.kind)).toEqual(
-        expect.arrayContaining(['struct', 'method']),
-      );
-      expect(byLanguage.get('rust')?.symbols.map(symbol => symbol.kind)).toEqual(
-        expect.arrayContaining(['struct', 'trait', 'impl', 'function']),
-      );
-      expect(byLanguage.get('c')?.symbols.map(symbol => symbol.kind)).toEqual(
-        expect.arrayContaining(['struct', 'function']),
-      );
-      expect(byLanguage.get('cpp')?.symbols.map(symbol => symbol.kind)).toEqual(
-        expect.arrayContaining(['namespace', 'class', 'function']),
-      );
-      expect(byLanguage.get('csharp')?.symbols.map(symbol => symbol.kind)).toEqual(
-        expect.arrayContaining(['interface', 'class', 'method']),
-      );
-      expect(byLanguage.get('ruby')?.symbols.map(symbol => symbol.kind)).toEqual(
-        expect.arrayContaining(['module', 'class', 'method']),
-      );
-      expect(byLanguage.get('php')?.symbols.map(symbol => symbol.kind)).toEqual(
-        expect.arrayContaining(['class', 'method', 'function']),
-      );
-      expect(byLanguage.get('bash')?.symbols.map(symbol => symbol.kind)).toContain('function');
-      expect(byLanguage.get('terraform')?.symbols.map(symbol => [symbol.kind, symbol.name])).toEqual(
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(byLanguage.get('go')?.symbols), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, symbol => symbol.kind),
+          ),
+        ),
+      ).toEqual(expect.arrayContaining(['struct', 'method']));
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(byLanguage.get('rust')?.symbols), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, symbol => symbol.kind),
+          ),
+        ),
+      ).toEqual(expect.arrayContaining(['struct', 'trait', 'impl', 'function']));
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(byLanguage.get('c')?.symbols), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, symbol => symbol.kind),
+          ),
+        ),
+      ).toEqual(expect.arrayContaining(['struct', 'function']));
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(byLanguage.get('cpp')?.symbols), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, symbol => symbol.kind),
+          ),
+        ),
+      ).toEqual(expect.arrayContaining(['namespace', 'class', 'function']));
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(byLanguage.get('csharp')?.symbols), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, symbol => symbol.kind),
+          ),
+        ),
+      ).toEqual(expect.arrayContaining(['interface', 'class', 'method']));
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(byLanguage.get('ruby')?.symbols), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, symbol => symbol.kind),
+          ),
+        ),
+      ).toEqual(expect.arrayContaining(['module', 'class', 'method']));
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(byLanguage.get('php')?.symbols), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, symbol => symbol.kind),
+          ),
+        ),
+      ).toEqual(expect.arrayContaining(['class', 'method', 'function']));
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(byLanguage.get('bash')?.symbols), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, symbol => symbol.kind),
+          ),
+        ),
+      ).toContain('function');
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(byLanguage.get('terraform')?.symbols), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, symbol => [symbol.kind, symbol.name]),
+          ),
+        ),
+      ).toEqual(
         expect.arrayContaining([
           ['variable', 'region'],
           ['resource', 'aws_s3_bucket.logs'],
@@ -315,11 +374,11 @@ describe('polyglot code graph language packs', () => {
       for (const [path, content, expectedKinds, expectedRelations] of samples) {
         const facts = yield* runExtraction(inventoryFile(path, content));
         expect(
-          facts.symbols.map(symbol => symbol.kind),
+          EffectArray.map(facts.symbols, symbol => symbol.kind),
           path,
         ).toEqual(expect.arrayContaining([...expectedKinds]));
         expect(
-          facts.edges.map(edge => edge.relation),
+          EffectArray.map(facts.edges, edge => edge.relation),
           path,
         ).toEqual(expect.arrayContaining([...expectedRelations]));
       }
@@ -333,8 +392,14 @@ describe('polyglot code graph language packs', () => {
         },
       );
       for (const facts of [vue, svelte]) {
-        expect(facts.edges.find(edge => edge.relation === 'constructs' && edge.targetName === 'Widget')).toBeDefined();
-        expect(facts.edges.some(edge => edge.targetName === 'div' || edge.targetName === 'section')).toBe(false);
+        expect(
+          Option.getOrUndefined(
+            EffectArray.findFirst(facts.edges, edge => edge.relation === 'constructs' && edge.targetName === 'Widget'),
+          ),
+        ).toBeDefined();
+        expect(EffectArray.some(facts.edges, edge => edge.targetName === 'div' || edge.targetName === 'section')).toBe(
+          false,
+        );
       }
     }),
   );
@@ -405,36 +470,41 @@ describe('polyglot code graph language packs', () => {
             concurrency: 'unbounded',
           },
         );
-        expect(fortran.symbols.map(symbol => [symbol.kind, symbol.name])).toEqual(
+        expect(EffectArray.map(fortran.symbols, symbol => [symbol.kind, symbol.name])).toEqual(
           expect.arrayContaining([
             ['module', 'solver'],
             ['subroutine', 'run'],
             ['function', 'helper'],
           ]),
         );
-        expect(fortran.edges.map(edge => [edge.relation, edge.targetName])).toEqual(
+        expect(EffectArray.map(fortran.edges, edge => [edge.relation, edge.targetName])).toEqual(
           expect.arrayContaining([
             ['imports', 'iso_fortran_env'],
             ['calls', 'helper'],
           ]),
         );
-        expect(apex.symbols.map(symbol => symbol.kind)).toEqual(expect.arrayContaining(['class', 'method']));
-        expect(apex.edges.map(edge => [edge.relation, edge.targetName])).toEqual(
+        expect(EffectArray.map(apex.symbols, symbol => symbol.kind)).toEqual(
+          expect.arrayContaining(['class', 'method']),
+        );
+        expect(EffectArray.map(apex.edges, edge => [edge.relation, edge.targetName])).toEqual(
           expect.arrayContaining([
             ['extends', 'BaseWidget'],
             ['implements', 'Runnable'],
             ['references', 'Account'],
           ]),
         );
-        expect(trigger.symbols.map(symbol => symbol.kind)).toContain('trigger');
-        expect(trigger.edges.map(edge => [edge.relation, edge.targetName])).toContainEqual(['references', 'Account']);
-        expect(razor.symbols.map(symbol => [symbol.kind, symbol.name])).toEqual(
+        expect(EffectArray.map(trigger.symbols, symbol => symbol.kind)).toContain('trigger');
+        expect(EffectArray.map(trigger.edges, edge => [edge.relation, edge.targetName])).toContainEqual([
+          'references',
+          'Account',
+        ]);
+        expect(EffectArray.map(razor.symbols, symbol => [symbol.kind, symbol.name])).toEqual(
           expect.arrayContaining([
             ['route', '/widget'],
             ['method', 'Refresh'],
           ]),
         );
-        expect(razor.edges.map(edge => [edge.relation, edge.targetName])).toEqual(
+        expect(EffectArray.map(razor.edges, edge => [edge.relation, edge.targetName])).toEqual(
           expect.arrayContaining([
             ['imports', 'App.Core'],
             ['imports', 'IService'],
@@ -510,11 +580,11 @@ describe('polyglot code graph language packs', () => {
       for (const [path, content, kinds, relations] of samples) {
         const facts = yield* runExtraction(inventoryFile(path, content));
         expect(
-          facts.symbols.map(symbol => symbol.kind),
+          EffectArray.map(facts.symbols, symbol => symbol.kind),
           path,
         ).toEqual(expect.arrayContaining([...kinds]));
         expect(
-          facts.edges.map(edge => edge.relation),
+          EffectArray.map(facts.edges, edge => edge.relation),
           path,
         ).toEqual(expect.arrayContaining([...relations, 'contains']));
         expect(facts.diagnostics, path).toEqual([]);
@@ -603,11 +673,15 @@ describe('polyglot code graph language packs', () => {
           concurrency: 'unbounded',
         },
       );
-      expect(java.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+      expect(EffectArray.map(java.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
         expect.arrayContaining([['module', 'com.acme.app']]),
       );
-      expect(java.edges.find(edge => edge.relation === 'imports' && edge.targetName === 'com.acme.core')).toBeDefined();
-      expect(kotlin.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+      expect(
+        Option.getOrUndefined(
+          EffectArray.findFirst(java.edges, edge => edge.relation === 'imports' && edge.targetName === 'com.acme.core'),
+        ),
+      ).toBeDefined();
+      expect(EffectArray.map(kotlin.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
         expect.arrayContaining([
           ['interface', 'acme.Contract'],
           ['enum', 'acme.State'],
@@ -619,8 +693,8 @@ describe('polyglot code graph language packs', () => {
           ['function', 'acme.slug'],
         ]),
       );
-      expect(kotlin.symbols.filter(symbol => symbol.kind === 'constructor')).toHaveLength(2);
-      expect(swift.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+      expect(EffectArray.filter(kotlin.symbols, symbol => symbol.kind === 'constructor')).toHaveLength(2);
+      expect(EffectArray.map(swift.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
         expect.arrayContaining([
           ['protocol', 'Contract'],
           ['method', 'Contract.run'],
@@ -680,22 +754,42 @@ describe('polyglot code graph language packs', () => {
         }),
       );
       const resolved = createRepositoryFactResolver(extracted, files).resolve(extracted);
-      const connected = resolved.find(file => file.path.includes('apps/app/src'))!;
-      const isolated = resolved.find(file => file.path.includes('apps/isolated/src'))!;
+      const connected = Option.getOrUndefined(
+        EffectArray.findFirst(
+          resolved,
+          __effectArrayValue =>
+            !!(file => Effect2.pipe(file.path, EffectString.includes('apps/app/src')))(__effectArrayValue),
+        ),
+      )!;
+      const isolated = Option.getOrUndefined(
+        EffectArray.findFirst(
+          resolved,
+          __effectArrayValue =>
+            !!(file => Effect2.pipe(file.path, EffectString.includes('apps/isolated/src')))(__effectArrayValue),
+        ),
+      )!;
       expect(
-        connected.edges.find(edge => edge.relation === 'constructs' && edge.targetName === 'Greeter'),
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            connected.edges,
+            edge => edge.relation === 'constructs' && edge.targetName === 'Greeter',
+          ),
+        ),
       ).toMatchObject({
         provenance: 'resolved',
         targetId: expect.stringMatching(/^cgs_/),
       });
-      const isolatedConstruction = isolated.edges.find(
-        edge => edge.relation === 'constructs' && edge.targetName === 'Greeter',
+      const isolatedConstruction = Option.getOrUndefined(
+        EffectArray.findFirst(isolated.edges, edge => edge.relation === 'constructs' && edge.targetName === 'Greeter'),
       );
       expect(isolatedConstruction).toMatchObject({
         provenance: 'syntactic',
       });
       expect(isolatedConstruction?.targetId).toBeUndefined();
-      expect(workspace.projects.find(project => project.name === 'app')?.dependencies).toHaveLength(1);
+      expect(
+        Option.getOrUndefined(EffectArray.findFirst(workspace.projects, project => project.name === 'app'))
+          ?.dependencies,
+      ).toHaveLength(1);
     }),
   );
   effectIt.effect(
@@ -750,9 +844,15 @@ describe('polyglot code graph language packs', () => {
           ),
         ];
         const workspace = discoverManifestWorkspace(files);
-        const app = workspace.projects.find(project => project.root === 'apps/app')!;
-        const feature = workspace.projects.find(project => project.root === 'apps/app/feature')!;
-        const shared = workspace.projects.find(project => project.root === 'libs/shared')!;
+        const app = Option.getOrUndefined(
+          EffectArray.findFirst(workspace.projects, project => project.root === 'apps/app'),
+        )!;
+        const feature = Option.getOrUndefined(
+          EffectArray.findFirst(workspace.projects, project => project.root === 'apps/app/feature'),
+        )!;
+        const shared = Option.getOrUndefined(
+          EffectArray.findFirst(workspace.projects, project => project.root === 'libs/shared'),
+        )!;
         const attribute = createWorkspaceAttributor(workspace);
         const extracted = attribute(
           yield* Effect.forEach(files, file => runExtraction(file), {
@@ -760,16 +860,26 @@ describe('polyglot code graph language packs', () => {
           }),
         );
         const resolved = createRepositoryFactResolver(extracted, files).resolve(extracted);
-        const appFacts = resolved.find(file => file.path.endsWith('/App.kt'))!;
-        const constructions = appFacts.edges.filter(edge => edge.relation === 'constructs');
+        const appFacts = Option.getOrUndefined(
+          EffectArray.findFirst(
+            resolved,
+            __effectArrayValue =>
+              !!(file => Effect2.pipe(file.path, EffectString.endsWith('/App.kt')))(__effectArrayValue),
+          ),
+        )!;
+        const constructions = EffectArray.filter(appFacts.edges, edge => edge.relation === 'constructs');
         expect(app.workspaceRoots).toEqual(['', 'apps/app']);
         expect(app.dependencies).toEqual(expect.arrayContaining([feature.id, shared.id]));
         expect(app.dependencies).toHaveLength(2);
-        expect(constructions.find(edge => edge.targetName === 'Greeter')).toMatchObject({
+        expect(
+          Option.getOrUndefined(EffectArray.findFirst(constructions, edge => edge.targetName === 'Greeter')),
+        ).toMatchObject({
           provenance: 'resolved',
           targetId: expect.stringMatching(/^cgs_/),
         });
-        expect(constructions.find(edge => edge.targetName === 'FeatureApi')).toMatchObject({
+        expect(
+          Option.getOrUndefined(EffectArray.findFirst(constructions, edge => edge.targetName === 'FeatureApi')),
+        ).toMatchObject({
           provenance: 'resolved',
           targetId: expect.stringMatching(/^cgs_/),
         });
@@ -802,8 +912,14 @@ describe('polyglot code graph language packs', () => {
         }),
       );
       const resolved = createRepositoryFactResolver(extracted, files).resolve(extracted);
-      const app = resolved.find(file => file.path === 'Sources/App/Main.swift')!;
-      expect(app.edges.find(edge => edge.relation === 'calls' && edge.targetName === 'makeService')).toMatchObject({
+      const app = Option.getOrUndefined(
+        EffectArray.findFirst(resolved, file => file.path === 'Sources/App/Main.swift'),
+      )!;
+      expect(
+        Option.getOrUndefined(
+          EffectArray.findFirst(app.edges, edge => edge.relation === 'calls' && edge.targetName === 'makeService'),
+        ),
+      ).toMatchObject({
         provenance: 'resolved',
         targetId: expect.stringMatching(/^cgs_/),
       });
@@ -834,9 +950,19 @@ describe('polyglot code graph language packs', () => {
         }),
       );
       const resolved = createRepositoryFactResolver(extracted, files).resolve(extracted);
-      const facts = resolved.find(file => file.path.endsWith('Types.swift'))!;
-      const conformance = facts.edges.find(edge => edge.sourceName === 'Service' && edge.targetName === 'Contract');
-      const override = facts.edges.find(edge => edge.relation === 'overrides' && edge.sourceName === 'refresh');
+      const facts = Option.getOrUndefined(
+        EffectArray.findFirst(
+          resolved,
+          __effectArrayValue =>
+            !!(file => Effect2.pipe(file.path, EffectString.endsWith('Types.swift')))(__effectArrayValue),
+        ),
+      )!;
+      const conformance = Option.getOrUndefined(
+        EffectArray.findFirst(facts.edges, edge => edge.sourceName === 'Service' && edge.targetName === 'Contract'),
+      );
+      const override = Option.getOrUndefined(
+        EffectArray.findFirst(facts.edges, edge => edge.relation === 'overrides' && edge.sourceName === 'refresh'),
+      );
       expect(conformance).toMatchObject({
         provenance: 'resolved',
         relation: 'implements',
@@ -870,9 +996,14 @@ describe('polyglot code graph language packs', () => {
         }),
       );
       const resolved = createRepositoryFactResolver(extracted, files).resolve(extracted);
-      const edge = resolved
-        .find(file => file.path === 'app/src/main/kotlin/acme/App.kt')!
-        .edges.find(candidate => candidate.relation === 'constructs' && candidate.targetName === 'Greeter');
+      const edge = Option.getOrUndefined(
+        EffectArray.findFirst(
+          Option.getOrUndefined(
+            EffectArray.findFirst(resolved, file => file.path === 'app/src/main/kotlin/acme/App.kt'),
+          )!.edges,
+          candidate => candidate.relation === 'constructs' && candidate.targetName === 'Greeter',
+        ),
+      );
       expect(edge).toMatchObject({
         provenance: 'syntactic',
       });
@@ -937,7 +1068,7 @@ describe('polyglot code graph language packs', () => {
   );
   it('separates parser cache identities from derived graph policy identities', () => {
     const policyChangedRegistry = createCodeGraphLanguagePackRegistry(
-      BUILTIN_LANGUAGE_PACK_REGISTRY.packs.map(pack =>
+      EffectArray.map(BUILTIN_LANGUAGE_PACK_REGISTRY.packs, pack =>
         pack.id === 'swift'
           ? {
               ...pack,
@@ -947,7 +1078,7 @@ describe('polyglot code graph language packs', () => {
       ),
     );
     const parserChangedRegistry = createCodeGraphLanguagePackRegistry(
-      BUILTIN_LANGUAGE_PACK_REGISTRY.packs.map(pack =>
+      EffectArray.map(BUILTIN_LANGUAGE_PACK_REGISTRY.packs, pack =>
         pack.id === 'swift'
           ? {
               ...pack,
@@ -985,8 +1116,8 @@ describe('polyglot code graph language packs', () => {
         );
       const raw = yield* provideRuntime(BUILTIN_LANGUAGE_PACK_REGISTRY.extractRawFile(file));
       const derived = BUILTIN_LANGUAGE_PACK_REGISTRY.postprocessFile(file, raw);
-      expect(raw.symbols.some(symbol => symbol.kind === 'rationale')).toBe(false);
-      expect(derived.symbols.some(symbol => symbol.kind === 'rationale')).toBe(true);
+      expect(EffectArray.some(raw.symbols, symbol => symbol.kind === 'rationale')).toBe(false);
+      expect(EffectArray.some(derived.symbols, symbol => symbol.kind === 'rationale')).toBe(true);
       expect(derived).toEqual(yield* provideRuntime(BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(file)));
     }),
   );

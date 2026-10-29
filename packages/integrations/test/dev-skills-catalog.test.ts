@@ -1,5 +1,8 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {AGENT_CATALOG, validateAgentCatalog} from '../src/catalog.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('development skill catalog', () => {
   it('declares every managed native surface independently of MCP and personal bootstrap capability', () => {
@@ -7,26 +10,36 @@ describe('development skill catalog', () => {
       if (entry.capabilities.skills.status === 'managed') expect(entry.devSkills.status).toBe('managed');
       if (entry.devSkills.status === 'managed') {
         expect(entry.devSkills.scopes).toContain(entry.devSkills.defaultScope);
-        expect(entry.devSkills.platforms.every(platform => entry.platforms.includes(platform))).toBe(true);
-      } else expect(entry.devSkills.reason.trim()).not.toBe('');
+        expect(EffectArray.every(entry.devSkills.platforms, platform => entry.platforms.includes(platform))).toBe(true);
+      } else expect(Effect.pipe(entry.devSkills.reason, EffectString.trim)).not.toBe('');
     }
-    expect(AGENT_CATALOG.find(entry => entry.id === 'claude-code')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(AGENT_CATALOG, entry => entry.id === 'claude-code')),
+    ).toMatchObject({
       scopes: ['user', 'project', 'local'],
       devSkills: {scopes: ['user']},
     });
-    expect(AGENT_CATALOG.find(entry => entry.id === 'cursor-cloud-personal')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(AGENT_CATALOG, entry => entry.id === 'cursor-cloud-personal')),
+    ).toMatchObject({
       capabilities: {skills: {status: 'unsupported'}},
       devSkills: {status: 'managed', profile: 'cursor-cloud-personal', scopes: ['user']},
     });
     expect(
-      AGENT_CATALOG.filter(entry => entry.devSkills.status === 'managed' && entry.devSkills.layout === 'flat').map(
+      EffectArray.map(
+        EffectArray.filter(
+          AGENT_CATALOG,
+          entry => entry.devSkills.status === 'managed' && entry.devSkills.layout === 'flat',
+        ),
         entry => entry.id,
       ),
     ).toEqual(['antigravity-cli']);
   });
 
   it('rejects missing scopes, unsupported defaults/platforms, unsafe roots and incomplete declarations', () => {
-    const original = AGENT_CATALOG.find(entry => entry.id === 'codex-cli')!;
+    const original = EffectOption.getOrUndefined(
+      EffectArray.findFirst(AGENT_CATALOG, entry => entry.id === 'codex-cli'),
+    )!;
     const capability = original.devSkills;
     if (capability.status !== 'managed') throw new Error('Expected managed fixture');
     const invalid = [
@@ -43,7 +56,9 @@ describe('development skill catalog', () => {
     ];
     for (const devSkills of invalid)
       expect(() => validateAgentCatalog({version: 1, agents: [{...original, devSkills}]})).toThrow();
-    const zeno = AGENT_CATALOG.find(entry => entry.id === 'zeno-desktop')!;
+    const zeno = EffectOption.getOrUndefined(
+      EffectArray.findFirst(AGENT_CATALOG, entry => entry.id === 'zeno-desktop'),
+    )!;
     expect(() =>
       validateAgentCatalog({version: 1, agents: [{...zeno, devSkills: {...zeno.devSkills, platforms: ['win32']}}]}),
     ).toThrow();

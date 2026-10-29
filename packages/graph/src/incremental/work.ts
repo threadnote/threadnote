@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {codeGraphUtf8ByteLength} from '../disk/capacity.js';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM, type MeasuredCodeGraphFact} from '../fact/budget.js';
 import {symbolTerms} from '../store/utilities.js';
@@ -6,6 +7,7 @@ import {
   PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES,
 } from '../store/resolution/candidate_closure.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '../types.js';
+import * as EffectRecord from 'effect/Record';
 
 export const CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FILES = 128;
 export const CODE_GRAPH_INCREMENTAL_REWRITE_MAX_SOURCE_BYTES = 16 * 1_048_576;
@@ -106,7 +108,7 @@ export function planCodeGraphIncrementalFoldForwardPaths(
   for (const path of fresh) cumulative.add(path);
   if (cumulative.size > CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_FILES) return undefined;
   return {
-    carriedPaths: [...prior].filter(path => !fresh.has(path)).sort(),
+    carriedPaths: EffectArray.filter([...prior], path => !fresh.has(path)).sort(),
     cumulativePaths: [...cumulative].sort(),
   };
 }
@@ -163,18 +165,24 @@ export function measureCodeGraphIncrementalWork(input: {
   readonly totalFiles: number;
 }): CodeGraphIncrementalWork {
   const deletedFiles = new Set(input.deletedPaths ?? []).size;
-  const factBytes = input.facts.reduce((total, facts) => total + codeGraphUtf8ByteLength(JSON.stringify(facts)), 0);
+  const factBytes = EffectArray.reduce(
+    input.facts,
+    0,
+    (total, facts) => total + codeGraphUtf8ByteLength(JSON.stringify(facts)),
+  );
   let factRows = 0;
   for (const facts of input.facts) {
     factRows += facts.symbols.length;
-    factRows += facts.symbols.reduce((total, symbol) => total + (symbol.lookupKeys?.length ?? 0), 0);
-    factRows += facts.symbols.reduce((total, symbol) => total + symbolTerms(symbol).length, 0);
+    factRows += EffectArray.reduce(facts.symbols, 0, (total, symbol) => total + (symbol.lookupKeys?.length ?? 0));
+    factRows += EffectArray.reduce(facts.symbols, 0, (total, symbol) => total + symbolTerms(symbol).length);
     factRows += facts.edges.length;
     const references = facts.references ?? [];
     factRows += references.length;
-    factRows += references.reduce(
-      (total, reference) => total + reference.lookupTiers.reduce((tierTotal, tier) => tierTotal + tier.length, 0),
+    factRows += EffectArray.reduce(
+      references,
       0,
+      (total, reference) =>
+        total + EffectArray.reduce(reference.lookupTiers, 0, (tierTotal, tier) => tierTotal + tier.length),
     );
   }
   return {
@@ -186,7 +194,7 @@ export function measureCodeGraphIncrementalWork(input: {
     factBytes,
     plannedRows: input.files.length + deletedFiles + factRows,
     probedDependencyPaths: input.observation?.probedDependencyPaths ?? 0,
-    sourceBytes: input.files.reduce((total, file) => total + file.size, 0),
+    sourceBytes: EffectArray.reduce(input.files, 0, (total, file) => total + file.size),
     totalFiles: input.totalFiles,
     inventoryFilesInspected: input.observation?.inventoryFilesInspected ?? input.totalFiles,
   };
@@ -196,7 +204,7 @@ export function codeGraphIncrementalWorkFitsBudget(work: CodeGraphIncrementalWor
   const candidate = work.membershipCandidate;
   if (
     candidate &&
-    (Object.values(candidate).some(value => !Number.isSafeInteger(value) || value < 0) ||
+    (EffectArray.some(EffectRecord.values(candidate), value => !Number.isSafeInteger(value) || value < 0) ||
       candidate.metadataFiles > PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES ||
       candidate.metadataFactBytes > PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES ||
       candidate.omittedFiles + candidate.rawBaseFiles + candidate.rawCurrentFiles < candidate.metadataFiles ||

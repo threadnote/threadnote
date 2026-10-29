@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {allowedRepositoryPath, sourceRepositoryPathCandidates} from '../repository-inputs.mjs';
@@ -75,9 +76,12 @@ describe('repository input discovery', () => {
     const segment = fc.stringMatching(/^[a-z][a-z0-9_-]{0,12}$/u);
     fc.assert(
       fc.property(fc.array(segment, {minLength: 2, maxLength: 6}), parts => {
-        const source = `join(process.cwd(), ${parts.map(part => JSON.stringify(part)).join(', ')})`;
+        const source = `join(process.cwd(), ${EffectArray.join(
+          EffectArray.map(parts, part => JSON.stringify(part)),
+          ', ',
+        )})`;
         const candidates = sourceRepositoryPathCandidates('example.ts', source);
-        expect(candidates).toContain(parts.join('/'));
+        expect(candidates).toContain(EffectArray.join(parts, '/'));
         expect(candidates).toEqual([...new Set(candidates)].sort());
       }),
       {numRuns: 100},

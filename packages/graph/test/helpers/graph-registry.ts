@@ -3,6 +3,8 @@ import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const graphRegistryFixture = Effect.fn('test.graphRegistry.fixture')(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -27,33 +29,34 @@ export const graphRegistryFixture = Effect.fn('test.graphRegistry.fixture')(func
       const method = init?.method ?? 'GET';
       requests.push({method, pathname: url.pathname});
       if (state.outage) return new Response(null, {status: 503, headers: {'retry-after': '17'}});
-      const worker = url.pathname.startsWith('/v2/acme/worker/');
+      const worker = Effect2.pipe(url.pathname, EffectString.startsWith('/v2/acme/worker/'));
       const prefix = worker ? '/v2/acme/worker/' : '/v2/acme/canonical/';
-      if (!url.pathname.startsWith(prefix)) throw new Error('Unexpected registry namespace');
+      if (!Effect2.pipe(url.pathname, EffectString.startsWith(prefix)))
+        throw new Error('Unexpected registry namespace');
       const blobStore = worker ? workerBlobs : blobs;
       const manifestStore = worker ? workerManifests : manifests;
-      const suffix = url.pathname.slice(prefix.length);
+      const suffix = Effect2.pipe(url.pathname, EffectString.slice(prefix.length));
       if (method === 'POST' && suffix === 'blobs/uploads/')
         return new Response(null, {status: 202, headers: {location: prefix + 'blobs/uploads/fixture?_state=opaque'}});
       if (method === 'DELETE') return new Response(null, {status: 204});
       if (method === 'PUT') {
         const bytes = new Uint8Array(await new Response(init?.body).arrayBuffer());
         const digest = sha256Digest(bytes);
-        if (suffix.startsWith('blobs/uploads/')) {
+        if (Effect2.pipe(suffix, EffectString.startsWith('blobs/uploads/'))) {
           if (url.searchParams.get('digest') !== digest) throw new Error('Invalid upload digest');
           blobStore.set(digest, bytes);
-        } else if (suffix.startsWith('manifests/')) {
-          const ref = suffix.slice('manifests/'.length);
+        } else if (Effect2.pipe(suffix, EffectString.startsWith('manifests/'))) {
+          const ref = Effect2.pipe(suffix, EffectString.slice('manifests/'.length));
           manifestStore.set(ref, bytes);
           manifestStore.set(digest, bytes);
-          if (ref.startsWith('tn-frontier-') && state.loseTagAcknowledgement)
+          if (Effect2.pipe(ref, EffectString.startsWith('tn-frontier-')) && state.loseTagAcknowledgement)
             return new Response(null, {status: 503, headers: {'retry-after': '17'}});
         } else throw new Error('Unexpected mutation');
         return new Response(null, {status: 201, headers: {'docker-content-digest': digest}});
       }
-      const manifest = suffix.startsWith('manifests/');
+      const manifest = Effect2.pipe(suffix, EffectString.startsWith('manifests/'));
       const bytes = (manifest ? manifestStore : blobStore).get(
-        suffix.slice(manifest ? 'manifests/'.length : 'blobs/'.length),
+        Effect2.pipe(suffix, EffectString.slice(manifest ? 'manifests/'.length : 'blobs/'.length)),
       );
       if (bytes === undefined) return new Response(null, {status: 404});
       return new Response(method === 'HEAD' ? null : Uint8Array.from(bytes), {

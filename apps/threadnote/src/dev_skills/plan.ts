@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, Path} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -30,6 +31,9 @@ import {hash, json, readOptional, statOptional, stableJson} from './files.js';
 import {generationRoot, inspectDuplicates, inspectOwned, renderEntrypoints} from './inspection.js';
 import {devSkillsCompatibility, devSkillsRuntimeVersion} from './manifest.js';
 import {knownStoreEnrollments, missingStoreIsEmpty} from './missing_store.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const selectDevSkillsTarget = Effect.fn('devSkills.selectTarget')(function* (
   config: RuntimeConfig,
@@ -39,16 +43,21 @@ export const selectDevSkillsTarget = Effect.fn('devSkills.selectTarget')(functio
   const context = yield* enrollmentContext(config);
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const capability = listDevSkillsTargets().find(target => target.surfaceId === identity.surfaceId)!;
+  const capability = EffectOption.getOrUndefined(
+    EffectArray.findFirst(listDevSkillsTargets(), target => target.surfaceId === identity.surfaceId),
+  )!;
   const scope = selector.scope ?? ('defaultScope' in capability ? capability.defaultScope : 'user');
   const cwd = scope === 'user' ? undefined : path.resolve(selector.cwd ?? system.currentDirectory());
-  const previous = Object.values(context.homeIndex.targets).find(
-    entry =>
-      entry.target.surfaceId === identity.surfaceId &&
-      entry.target.profile === identity.profile &&
-      entry.target.scope === scope &&
-      (entry.target.cwd === cwd ||
-        (entry.target.cwd !== undefined && cwd !== undefined && path.relative(entry.target.cwd, cwd) === '')),
+  const previous = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      EffectRecord.values(context.homeIndex.targets),
+      entry =>
+        entry.target.surfaceId === identity.surfaceId &&
+        entry.target.profile === identity.profile &&
+        entry.target.scope === scope &&
+        (entry.target.cwd === cwd ||
+          (entry.target.cwd !== undefined && cwd !== undefined && path.relative(entry.target.cwd, cwd) === '')),
+    ),
   );
   return yield* resolveDevSkillsTarget(config, selector, previous?.target);
 });
@@ -112,9 +121,11 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
     (yield* missingStoreIsEmpty(context, consumer, options.physicalLockHeld === true, sharing));
   const inspected = yield* inspectOwned(target, receipt);
   const obsolete = new Set(
-    Object.keys(receipt?.entrypoints ?? {}).filter(
+    EffectArray.filter(
+      EffectRecord.keys(receipt?.entrypoints ?? {}),
       relative =>
-        !bundle.manifest.skills.some(
+        !EffectArray.some(
+          bundle.manifest.skills,
           skill => relative === (target.layout === 'flat' ? `${skill.id}.md` : `${skill.id}/SKILL.md`),
         ),
     ),
@@ -123,31 +134,34 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
     action === 'update' &&
     (issue.code === 'modified' || issue.code === 'extra-file') &&
     issue.path !== undefined &&
-    [...obsolete].some(relative => {
+    EffectArray.some([...obsolete], relative => {
       const file = path.join(target.skillRoot, relative);
       const nested = path.relative(path.dirname(file), issue.path!);
       return (
         issue.path === file ||
         (target.layout === 'directory' &&
           nested !== '..' &&
-          !nested.startsWith(`..${path.sep}`) &&
+          !Effect2.pipe(nested, EffectString.startsWith(`..${path.sep}`)) &&
           !path.isAbsolute(nested))
       );
     });
   const discoveryRoots = [
     ...new Set([
       ...target.discoveryRoots,
-      ...Object.values(receipt?.consumers ?? {}).flatMap(item => item.target.discoveryRoots),
+      ...EffectArray.flatMap(EffectRecord.values(receipt?.consumers ?? {}), item => item.target.discoveryRoots),
     ]),
   ];
   const issues = [
-    ...inspected.issues.filter(issue => !obsoleteIssue(issue)),
+    ...EffectArray.filter(inspected.issues, issue => !obsoleteIssue(issue)),
     ...(yield* inspectDuplicates({...target, discoveryRoots})),
   ];
-  const active = receipt && Object.keys(receipt.consumers).length > 0;
+  const active = receipt && EffectRecord.keys(receipt.consumers).length > 0;
   const compatibility = active ? devSkillsCompatibility(receipt.manifest, yield* devSkillsRuntimeVersion()) : [];
   issues.push(
-    ...compatibility.filter(issue => action !== 'update' || issue.code !== 'legacy-workflow-update-required'),
+    ...EffectArray.filter(
+      compatibility,
+      issue => action !== 'update' || issue.code !== 'legacy-workflow-update-required',
+    ),
   );
   const enrolled = context.homeIndex.targets[id]?.state === 'enrolled';
   if (missingStoreAttempt && !missingStoreReinstall)
@@ -174,7 +188,7 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
     pending !== null
       ? 'recovery-needed'
       : issues.length
-        ? issues.some(issue => issue.code === 'modified')
+        ? EffectArray.some(issues, issue => issue.code === 'modified')
           ? 'modified'
           : 'conflict'
         : !active
@@ -182,7 +196,7 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
           : receipt.manifest.digest === bundle.manifest.digest
             ? 'current'
             : 'update-available';
-  if (pending === null && issues.some(issue => issue.code === 'incomplete')) state = 'incomplete';
+  if (pending === null && EffectArray.some(issues, issue => issue.code === 'incomplete')) state = 'incomplete';
   else if (pending === null && compatibility.length) state = 'incompatible';
   if (action === 'update' && !enrolled)
     issues.push({code: 'not-installed', message: 'Install this target explicitly before updating it.'});
@@ -199,7 +213,8 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
   else nextConsumers[id] = consumer;
   const removable = action === 'remove';
   const canApply = removable
-    ? pending === null && !issues.some(issue => ['incomplete', 'historical-ownership-conflict'].includes(issue.code))
+    ? pending === null &&
+      !EffectArray.some(issues, issue => ['incomplete', 'historical-ownership-conflict'].includes(issue.code))
     : issues.length === 0;
   if (canApply && (action !== 'remove' || enrolled)) {
     let entrypoints = {...receipt?.entrypoints};
@@ -223,9 +238,9 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
           path: generationRoot(path, target.skillRoot, bundle.manifest.digest),
         });
       }
-    } else if (Object.keys(nextConsumers).length === 0) {
+    } else if (EffectRecord.keys(nextConsumers).length === 0) {
       entrypoints = {};
-      for (const [relative, expected] of Object.entries(receipt?.entrypoints ?? {})) {
+      for (const [relative, expected] of EffectRecord.toEntries(receipt?.entrypoints ?? {})) {
         if (inspected.contents[relative] === expected)
           changes.push({path: path.join(target.skillRoot, relative), before: expected, after: null});
         else if (inspected.contents[relative] !== null) retainedPaths.push(path.join(target.skillRoot, relative));
@@ -233,7 +248,7 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
       for (const issue of issues) if (issue.path) retainedPaths.push(issue.path);
     }
     if (action !== 'remove')
-      for (const [relative, content] of Object.entries(entrypoints))
+      for (const [relative, content] of EffectRecord.toEntries(entrypoints))
         if (content !== inspected.contents[relative])
           changes.push({
             path: path.join(target.skillRoot, relative),
@@ -251,7 +266,9 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
           ...(action === 'remove' ? {} : {[bundle.manifest.digest]: bundle.manifest}),
         },
         entrypoints,
-        consumers: Object.fromEntries(Object.entries(nextConsumers).sort(([a], [b]) => a.localeCompare(b))),
+        consumers: EffectRecord.fromEntries(
+          EffectRecord.toEntries(nextConsumers).sort(([a], [b]) => Effect2.pipe(a, EffectString.localeCompare(b))),
+        ),
       };
       changes.push({path: receiptPath(path, target.skillRoot), before: physical.content, after: json(updated)});
     }
@@ -285,8 +302,10 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
       after: json({...context.runtimeIndex, enrollments: {...context.runtimeIndex.enrollments, [id]: entry}}),
     });
   }
-  const effective = changes.filter(change => change.before !== change.after);
-  const ownership = changes.find(change => change.path === receiptPath(path, target.skillRoot));
+  const effective = EffectArray.filter(changes, change => change.before !== change.after);
+  const ownership = EffectOption.getOrUndefined(
+    EffectArray.findFirst(changes, change => change.path === receiptPath(path, target.skillRoot)),
+  );
   if (effective.length && ownership && !effective.includes(ownership)) effective.push(ownership);
   const planBase = {
     schemaVersion: 1 as const,
@@ -295,14 +314,14 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
     consumerId: id,
     installationState: state,
     bundleDigest: bundle.manifest.digest,
-    changes: effective.map(change => ({
+    changes: EffectArray.map(effective, change => ({
       path: change.path,
       beforeHash: change.before === null ? null : hash(change.before),
       afterHash: change.after === null ? null : hash(change.after),
     })),
-    consumers: Object.values(receipt?.consumers ?? {}),
+    consumers: EffectRecord.values(receipt?.consumers ?? {}),
     issues,
-    canApply: canApply && !issues.some(issue => issue.code === 'unmanaged-generation'),
+    canApply: canApply && !EffectArray.some(issues, issue => issue.code === 'unmanaged-generation'),
   };
   // Include unchanged ownership/index images too: equal file edits and enrollment changes invalidate a Manager preview.
   const previewDigest = hash(

@@ -108,23 +108,45 @@ export function withCodeGraphIndexTiming<A, E, R>(
   });
 }
 
+type CodeGraphIndexTimingStore = Pick<CodeGraphStoreShape, 'releaseSnapshotLease' | 'withSession'>;
+
+function hasCodeGraphIndexTimingStoreSurface<S>(store: S): store is S & CodeGraphIndexTimingStore {
+  return (
+    typeof store === 'object' &&
+    store !== null &&
+    'releaseSnapshotLease' in store &&
+    typeof store.releaseSnapshotLease === 'function' &&
+    'withSession' in store &&
+    typeof store.withSession === 'function'
+  );
+}
+
 /** Preserve the original store and session context; observe even repeated scoped releases without changing ownership. */
-export function codeGraphIndexTimingStore(
-  store: CodeGraphStoreShape,
+export function codeGraphIndexTimingStore<S>(store: S, observer: undefined): S;
+export function codeGraphIndexTimingStore<S extends CodeGraphIndexTimingStore>(
+  store: S,
   observer: CodeGraphIndexTimingObserver | undefined,
-): CodeGraphStoreShape {
+): S;
+export function codeGraphIndexTimingStore<S>(store: S, observer: CodeGraphIndexTimingObserver | undefined): S {
   if (observer === undefined) return store;
-  return {
-    ...store,
+  if (!hasCodeGraphIndexTimingStoreSurface(store))
+    throw new TypeError('Timing observation requires a graph store surface.');
+  const timingStore: CodeGraphIndexTimingStore = store;
+  const observedMethods: CodeGraphIndexTimingStore = {
     releaseSnapshotLease: (...args) =>
-      withCodeGraphIndexTiming(observer, 'snapshot-lease-release', store.releaseSnapshotLease(...args)),
+      withCodeGraphIndexTiming(observer, 'snapshot-lease-release', timingStore.releaseSnapshotLease(...args)),
     withSession: (databasePath, effect, options) =>
       withCodeGraphIndexTiming(
         observer,
         'database-session',
-        store.withSession(databasePath, withCodeGraphIndexTiming(observer, 'database-session-body', effect), options),
+        timingStore.withSession(
+          databasePath,
+          withCodeGraphIndexTiming(observer, 'database-session-body', effect),
+          options,
+        ),
       ),
   };
+  return Object.assign({}, store, observedMethods);
 }
 
 export interface CodeGraphSourceVerification {

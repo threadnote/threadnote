@@ -1,10 +1,15 @@
 import {Effect, FileSystem, Option, Path} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAX_MIGRATION_EVIDENCE_DIRECTORIES = 256;
 const OPERATING_SYSTEM_METADATA_FILENAMES = new Set(['.ds_store', 'desktop.ini', 'thumbs.db']);
 
 export function isIgnorableOperatingSystemMetadata(name: string): boolean {
-  return OPERATING_SYSTEM_METADATA_FILENAMES.has(name.toLowerCase()) || name.startsWith('._');
+  return (
+    OPERATING_SYSTEM_METADATA_FILENAMES.has(Effect2.pipe(name, EffectString.toLowerCase)) ||
+    Effect2.pipe(name, EffectString.startsWith('._'))
+  );
 }
 
 /**

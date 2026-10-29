@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {readBoundedContainedStableRegularFile} from '@threadnote/graph/inventory/contained_file';
@@ -65,10 +67,10 @@ export interface ActivationProductionCommandV1 {
   readonly requestFile?: string;
 }
 
-export class ActivationProductionCommandError extends Schema.TaggedError<ActivationProductionCommandError>()(
-  'ActivationProductionCommandError',
-  {message: Schema.String},
-) {}
+export class ActivationProductionCommandError extends Schema.TaggedError<
+  ActivationProductionCommandError,
+  {readonly brand: unique symbol}
+>()('ActivationProductionCommandError', {message: Schema.String}) {}
 
 export const runActivationProductionCommandV1 = Effect.fn('activation.production.command')(function* (
   config: RuntimeConfig,
@@ -254,21 +256,25 @@ export function activationContinuationCommandV1(
   requestFile: string,
   approvalToken: string,
 ): string {
-  return [
-    'threadnote',
-    'activate',
-    'continue',
-    '--activation-id',
-    activationId,
-    '--request',
-    requestFile,
-    '--apply',
-    '--approved',
-    '--approval',
-    approvalToken,
-  ]
-    .map(shellQuote)
-    .join(' ');
+  return EffectArray.join(
+    EffectArray.map(
+      [
+        'threadnote',
+        'activate',
+        'continue',
+        '--activation-id',
+        activationId,
+        '--request',
+        requestFile,
+        '--apply',
+        '--approved',
+        '--approval',
+        approvalToken,
+      ],
+      shellQuote,
+    ),
+    ' ',
+  );
 }
 
 const activationApprovalForResumeV1 = Effect.fn('activation.production.approval')(function* (
@@ -360,7 +366,12 @@ const validateCompletedActivationWorldV1 = Effect.fn('activation.production.vali
   if (state.plan.planHash !== observation.plan.planHash) {
     return yield* activationProductionError('Activation request or live inputs drifted from the stored plan.');
   }
-  for (const operation of state.receipt.operations.filter(item => operationIsComplete(item.status))) {
+  for (const operation of EffectArrayPipe(state.receipt.operations, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (item, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && operationIsComplete(item.status),
+    ),
+  )) {
     if (operation.subsystemReceiptHash === undefined) {
       return yield* activationProductionError(`Activation operation ${operation.id} lacks receipt evidence.`);
     }
@@ -385,7 +396,7 @@ const validateCompletedActivationWorldV1 = Effect.fn('activation.production.vali
       if (
         activationImportedMemoriesEvidenceHashV1(
           observation.imports.sourceSetHash,
-          imported.map(decision => decision.review),
+          EffectArray.map(imported, decision => decision.review),
         ) !== operation.subsystemReceiptHash
       ) {
         return yield* activationProductionError('Activation imported memories changed after approval.');
@@ -448,8 +459,11 @@ const validateCompletedActivationWorldV1 = Effect.fn('activation.production.vali
         return yield* activationProductionError('Activation Git proposal evidence is unavailable.');
       }
     } else if (operation.kind === 'secondary.prove') {
-      const publicationReceiptHash = state.receipt.operations.find(
-        candidate => candidate.kind === 'decision.publish' || candidate.kind === 'decision.propose',
+      const publicationReceiptHash = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          state.receipt.operations,
+          candidate => candidate.kind === 'decision.publish' || candidate.kind === 'decision.propose',
+        ),
       )?.subsystemReceiptHash;
       const receiptRevision = state.receipt.previousRevision;
       if (publicationReceiptHash === undefined || receiptRevision === undefined) {

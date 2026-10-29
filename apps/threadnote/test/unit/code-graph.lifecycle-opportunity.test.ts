@@ -13,6 +13,8 @@ import type {
   CodeGraphMaintenanceCoordinatorShape,
   CodeGraphRoutineMaintenanceTick,
 } from '@threadnote/graph/maintenance/coordinator';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph lifecycle opportunities', () => {
   effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(layerIt => {
@@ -44,10 +46,10 @@ describe('code graph lifecycle opportunities', () => {
             tick: () => unexpected('rotating maintenance'),
           };
           const targets: readonly CodeGraphLifecycleOpportunityTarget[] = [
-            {checkoutId: '0'.repeat(64), databasePath: '/database/healthy'},
+            {checkoutId: Effect2.pipe('0', EffectString.repeat(64)), databasePath: '/database/healthy'},
             {
               anchorPath: '/repository/live-anchor',
-              checkoutId: 'f'.repeat(64),
+              checkoutId: Effect2.pipe('f', EffectString.repeat(64)),
               databasePath: '/database/missing-view',
               reconciliationPending: true,
             },
@@ -60,12 +62,12 @@ describe('code graph lifecycle opportunities', () => {
             threadnoteHome,
           });
 
-          expect(result).toMatchObject({checkoutId: 'f'.repeat(64), state: 'completed'});
+          expect(result).toMatchObject({checkoutId: Effect2.pipe('f', EffectString.repeat(64)), state: 'completed'});
           expect(yield* Ref.get(calls)).toEqual([
             expect.objectContaining({
               anchorPath: '/repository/live-anchor',
               automaticTail: false,
-              checkoutId: 'f'.repeat(64),
+              checkoutId: Effect2.pipe('f', EffectString.repeat(64)),
               databasePath: '/database/missing-view',
               joinActive: false,
             }),
@@ -82,8 +84,8 @@ describe('code graph lifecycle opportunities', () => {
           const threadnoteHome = yield* fs.makeTempDirectoryScoped({
             prefix: 'threadnote-lifecycle-opportunity-cursor-',
           });
-          const firstCheckoutId = '0'.repeat(64);
-          const secondCheckoutId = '1'.repeat(64);
+          const firstCheckoutId = Effect2.pipe('0', EffectString.repeat(64));
+          const secondCheckoutId = Effect2.pipe('1', EffectString.repeat(64));
           const calls = yield* Ref.make<readonly string[]>([]);
           const unexpected = (operation: string) =>
             Effect.die(TestError.make({message: `pending opportunity unexpectedly called ${operation}`}));
@@ -185,7 +187,7 @@ describe('code graph lifecycle opportunities', () => {
           };
           const target: CodeGraphLifecycleOpportunityTarget = {
             anchorPath: '/repository/unprovable-anchor',
-            checkoutId: '4'.repeat(64),
+            checkoutId: Effect2.pipe('4', EffectString.repeat(64)),
             databasePath: '/database/unprovable-missing-view',
             reconciliationPending: true,
           };
@@ -229,11 +231,11 @@ describe('code graph lifecycle opportunities', () => {
           const targets: readonly CodeGraphLifecycleOpportunityTarget[] = [
             {
               anchorPath: '/repository/unprovable-anchor',
-              checkoutId: '5'.repeat(64),
+              checkoutId: Effect2.pipe('5', EffectString.repeat(64)),
               databasePath: '/database/unprovable-missing-view',
               reconciliationPending: true,
             },
-            {checkoutId: '6'.repeat(64), databasePath: '/database/healthy'},
+            {checkoutId: Effect2.pipe('6', EffectString.repeat(64)), databasePath: '/database/healthy'},
           ];
 
           for (let index = 0; index < 5; index += 1) {
@@ -273,12 +275,12 @@ describe('code graph lifecycle opportunities', () => {
           const targets: readonly CodeGraphLifecycleOpportunityTarget[] = [
             {
               anchorPath: '/repository/first-anchor',
-              checkoutId: '7'.repeat(64),
+              checkoutId: Effect2.pipe('7', EffectString.repeat(64)),
               databasePath: '/database/first',
             },
             {
               anchorPath: '/repository/later-anchor',
-              checkoutId: '8'.repeat(64),
+              checkoutId: Effect2.pipe('8', EffectString.repeat(64)),
               databasePath: '/database/later-hidden-candidate',
             },
           ];
@@ -288,7 +290,10 @@ describe('code graph lifecycle opportunities', () => {
             yield* freshProcess({maintenance, opportunity: 'diagnostics', targets, threadnoteHome});
           }
 
-          expect(yield* Ref.get(calls)).toEqual(['7'.repeat(64), '8'.repeat(64)]);
+          expect(yield* Ref.get(calls)).toEqual([
+            Effect2.pipe('7', EffectString.repeat(64)),
+            Effect2.pipe('8', EffectString.repeat(64)),
+          ]);
         }),
       ),
     );
@@ -312,7 +317,7 @@ describe('code graph lifecycle opportunities', () => {
           };
           const target: CodeGraphLifecycleOpportunityTarget = {
             anchorPath: '/repository/healthy-anchor',
-            checkoutId: '9'.repeat(64),
+            checkoutId: Effect2.pipe('9', EffectString.repeat(64)),
             databasePath: '/database/healthy',
           };
 
@@ -346,8 +351,8 @@ describe('code graph lifecycle opportunities', () => {
           const threadnoteHome = yield* fs.makeTempDirectoryScoped({
             prefix: 'threadnote-lifecycle-opportunity-crash-',
           });
-          const firstCheckoutId = '2'.repeat(64);
-          const secondCheckoutId = '3'.repeat(64);
+          const firstCheckoutId = Effect2.pipe('2', EffectString.repeat(64));
+          const secondCheckoutId = Effect2.pipe('3', EffectString.repeat(64));
           const calls = yield* Ref.make<readonly string[]>([]);
           const unexpected = (operation: string) =>
             Effect.die(TestError.make({message: `pending opportunity unexpectedly called ${operation}`}));

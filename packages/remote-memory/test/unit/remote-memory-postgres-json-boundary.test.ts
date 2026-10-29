@@ -11,7 +11,7 @@ describe('remote memory PostgreSQL JSON boundary', () => {
     expect(controlPlane).toContain('${transaction.json(desiredSharePolicy.document)}');
     expect(controlPlane).toContain('${transaction.json(desiredPolicy.document)}');
     expect(controlPlane).toContain('${transaction.json(retentionPolicy.document)}');
-    expect(operator).toContain('${transaction.json(outcomes.map(outcome => ({...outcome})))}');
+    expect(operator).toContain('${transaction.json(EffectArray.map(outcomes, outcome => ({...outcome})))}');
     expect(operator).toContain('${transaction.json(migrationPolicyDocument)}');
     expect(`${controlPlane}\n${operator}`).not.toMatch(/\$\{JSON\.stringify\([^}]+\)\}::jsonb/u);
     expect(operator).not.toContain('${migrationPolicyDocument}::jsonb');

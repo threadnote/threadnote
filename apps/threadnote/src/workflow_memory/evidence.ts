@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {isMemoryId, memoryIdentityAlias} from '@threadnote/memory/identity-alias';
@@ -14,6 +15,8 @@ import {
   type WorkflowBinding,
   type WorkflowEvidenceReference,
 } from './protocol.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Per-intent exact read scopes; this never changes the run's binding or owned artifacts. */
 export function workflowEvidenceScopes(
@@ -36,11 +39,14 @@ export function workflowEvidenceScopes(
     if (
       resource.canonicalUri !== ref.uri ||
       resource.anchor !== undefined ||
-      !roots.some(
+      !EffectArray.some(
+        roots,
         scope =>
           resourceIdIsWithin(ref.uri, scope) && resource.segments.length === parseResourceId(scope).segments.length + 1,
       ) ||
-      !resource.segments.at(-1)?.endsWith('.md')
+      !Effect2.pipe(resource.segments.at(-1), effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.endsWith('.md')),
+      )
     )
       throw workflowError('out-of-scope', 'Evidence must be an exact private memory in this user and project.');
     if (!isMemoryId(ref.memoryId) || !/^[a-f0-9]{64}$/u.test(ref.revision))
@@ -95,7 +101,7 @@ export const verifyWorkflowEvidence = Effect.fn('workflowMemory.verifyEvidence')
     const store = yield* ResourceStore;
     const resolved = yield* resolveMemoryIdentityAliases(
       config,
-      refs.map(ref => memoryIdentityAlias(ref.memoryId)),
+      EffectArray.map(refs, ref => memoryIdentityAlias(ref.memoryId)),
       scopes,
       {validateNow: true},
     );

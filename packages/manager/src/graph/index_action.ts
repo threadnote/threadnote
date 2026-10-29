@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import type {ManagerDialogs} from '../dialog.js';
 import type {GraphAdministrationAction, GraphIndexActionResponse} from './model.js';
 
@@ -21,12 +22,19 @@ export async function requestGraphAdministrationAction(
   const values = await dialogs.prompt({
     title: 'Choose graph scope',
     message: 'This repository has multiple configured graph scopes. Choose the scope to index.',
-    detail: projects.map(project => `${project.name}: ${project.roots.join(', ') || '.'}`).join('\n'),
+    detail: EffectArray.join(
+      EffectArray.map(projects, project => `${project.name}: ${EffectArray.join(project.roots, ', ') || '.'}`),
+      '\n',
+    ),
     confirmLabel: action.full ? 'Reindex scope' : 'Index scope',
-    fields: [{id: 'project', label: 'Scope', options: projects.map(project => project.name), required: true}],
+    fields: [
+      {id: 'project', label: 'Scope', options: EffectArray.map(projects, project => project.name), required: true},
+    ],
   });
   if (!values) return undefined;
-  const selected = projects.find(project => project.name === values.project);
+  const selected = EffectOption.getOrUndefined(
+    EffectArray.findFirst(projects, project => project.name === values.project),
+  );
   if (!selected) throw new Error('Choose one of the configured graph scopes.');
   const indexed = await request({...action, project: selected.name, expectedRevision});
   if (!('output' in indexed)) throw new Error('Configured graph scopes changed. Refresh Manager and choose again.');

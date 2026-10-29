@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, Option} from 'effect';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {MEMORY_SCHEMA_VERSION, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
@@ -9,7 +10,7 @@ import {stableJson, type WorkflowBinding, type WorkflowOperation} from './protoc
 // Retention is a capture-time diagnostic, not source evidence. Capsules can be
 // evicted or become available independently of the immutable citation fields.
 const citationEvidence = (citations: readonly MemoryCodeCitationV1[]) =>
-  citations.map(citation => {
+  EffectArray.map(citations, citation => {
     const {evidenceRetention: _retention, ...evidence} = citation;
     return evidence;
   });
@@ -56,7 +57,7 @@ export const reconcileWorkflowCitationEnrichment = Effect.fn('workflowMemory.rec
   if (!observedAt) return undefined;
   const observedDate = DateTime.make(observedAt);
   if (Option.isNone(observedDate) || DateTime.formatIso(observedDate.value) !== observedAt) return undefined;
-  const commits = [...new Set(current.metadata.codeCitations.map(citation => citation.sourceCommit))];
+  const commits = [...new Set(EffectArray.map(current.metadata.codeCitations, citation => citation.sourceCommit))];
   const sourceCommit = commits.length === 1 ? commits[0] : undefined;
   const nativePostimage = formatMemoryDocument(
     original.headerTitle,

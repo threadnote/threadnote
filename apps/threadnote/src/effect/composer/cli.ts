@@ -9,15 +9,19 @@ import {resolveComposerServeShareId} from '../../mcp/composer_attach.js';
 import {LOCAL_COMPOSER_DEFAULT_LISTEN} from '../../remote_memory/local_idp.js';
 import {runComposerServe} from '../../remote_memory/composer_serve.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {CliRuntimeRunner} from '../cli.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class ComposerServeError extends Schema.TaggedError<ComposerServeError>()('ComposerServeError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class ComposerServeError extends Schema.TaggedError<ComposerServeError, {readonly brand: unique symbol}>()(
+  'ComposerServeError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
-export function makeComposerCommands(
-  withRuntimeEffect: <E, R>(effect: (config: RuntimeConfig) => Effect.Effect<void, E, R>) => Effect.Effect<void, E, R>,
-) {
+export function makeComposerCommands(withRuntimeEffect: CliRuntimeRunner) {
   const composerServe = Command.make(
     'serve',
     {
@@ -59,7 +63,13 @@ export const runComposerServeCommand = Effect.fn('composer.serveCommand')(functi
 ) {
   const system = yield* SystemInfo;
   const team = yield* resolveTeam(config, options.team);
-  const databaseUrl = options.databaseUrl?.trim() || system.environment().THREADNOTE_REMOTE_DATABASE_URL?.trim();
+  const databaseUrl =
+    Effect2.pipe(options.databaseUrl, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) ||
+    Effect2.pipe(system.environment().THREADNOTE_REMOTE_DATABASE_URL, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
   if (!databaseUrl) {
     return yield* ComposerServeError.make({
       message: 'Composer serve requires --database-url or THREADNOTE_REMOTE_DATABASE_URL.',
@@ -72,7 +82,10 @@ export const runComposerServeCommand = Effect.fn('composer.serveCommand')(functi
         message: cause instanceof Error ? cause.message : String(cause),
       }),
   });
-  const gitWorktree = options.gitWorktree?.trim() || team.config.worktree;
+  const gitWorktree =
+    Effect2.pipe(options.gitWorktree, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || team.config.worktree;
   yield* Effect.scoped(
     Effect.gen(function* () {
       const worktreeLock = yield* makeGitWorktreeLock();
@@ -86,9 +99,15 @@ export const runComposerServeCommand = Effect.fn('composer.serveCommand')(functi
                 gitCloneUrl: team.config.remote,
                 gitPush: options.push === true,
                 gitWorktree,
-                listen: options.listen?.trim() || LOCAL_COMPOSER_DEFAULT_LISTEN,
+                listen:
+                  Effect2.pipe(options.listen, effectOptionalString =>
+                    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+                  ) || LOCAL_COMPOSER_DEFAULT_LISTEN,
                 shareId,
-                subject: options.subject?.trim() || `local:${config.user}`,
+                subject:
+                  Effect2.pipe(options.subject, effectOptionalString =>
+                    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+                  ) || `local:${config.user}`,
                 tenantId: 'local-org',
               },
               {

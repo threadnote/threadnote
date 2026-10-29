@@ -10,6 +10,9 @@ import {join} from '@threadnote/testing/node-path';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256Digest, sha256HexFromDigest} from '@threadnote/graph/sharing/digest';
 import {defaultGraphShareProfile, graphShareProfileDigest} from '@threadnote/graph/sharing/profile';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 describe('MCP-owned passive graph contribution retries', () => {
   it.each(['persisted queue', 'strict graph impact', 'dirty graph then clean restart'] as const)(
@@ -229,7 +232,10 @@ describe('MCP-owned passive graph contribution retries', () => {
           const candidates = await readJournalCandidates(candidatePath);
           const {stdout: sourceCommit} = await command('git', ['-C', repository, 'rev-parse', 'HEAD']);
           const packageVersion = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')).version;
-          const currentCandidates = candidates.filter(candidate => candidate.sourceCommit === sourceCommit.trim());
+          const currentCandidates = EffectArray.filter(
+            candidates,
+            candidate => candidate.sourceCommit === Effect.pipe(sourceCommit, EffectString.trim),
+          );
           expect(currentCandidates.length).toBeGreaterThan(0);
           for (const candidate of currentCandidates) {
             expect(candidate).toMatchObject({
@@ -237,7 +243,7 @@ describe('MCP-owned passive graph contribution retries', () => {
               partialCoverage: false,
               releaseIdentity: packageVersion,
               resourceLimits: [],
-              sourceCommit: sourceCommit.trim(),
+              sourceCommit: Effect.pipe(sourceCommit, EffectString.trim),
             });
             expect(candidate.graphAbi).toMatch(/^[0-9a-f]{64}$/u);
           }
@@ -260,7 +266,7 @@ async function readJournalCandidates(manifestPath: string): Promise<Array<Record
   const pages = await Promise.all(
     manifest.segments.map((segment: {id: string}) => readFile(join(`${manifestPath}.d`, `${segment.id}.json`), 'utf8')),
   );
-  return pages.flatMap(page => JSON.parse(page).candidates);
+  return EffectArray.flatMap(pages, page => JSON.parse(page).candidates);
 }
 
 async function within<A>(promise: Promise<A>, milliseconds: number): Promise<A> {

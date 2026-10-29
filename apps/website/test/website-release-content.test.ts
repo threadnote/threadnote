@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -22,21 +23,26 @@ import {
 import {websiteSocialImageForArticle, websiteSocialImageForRelease} from '../src/content/websiteArticles.js';
 import {readFile} from './helpers/node-fs-promises.js';
 import {join} from './helpers/node-path.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const root = process.cwd();
 
 describe('website release-content producers', () => {
   it('shows published stable releases from the latest major only', () => {
     const selected = selectLatestMajorReleases(
-      [
-        ['v3.9.0', '2026-07-01T00:00:00Z'],
-        ['v4.0.0', '2026-08-01T00:00:00Z'],
-        ['v4.1.0', '2026-08-10T00:00:00Z'],
-      ].map(([version, publishedAt]) => ({...parseStableReleaseVersion(version)!, publishedAt})),
+      EffectArray.map(
+        [
+          ['v3.9.0', '2026-07-01T00:00:00Z'],
+          ['v4.0.0', '2026-08-01T00:00:00Z'],
+          ['v4.1.0', '2026-08-10T00:00:00Z'],
+        ],
+        ([version, publishedAt]) => ({...parseStableReleaseVersion(version)!, publishedAt}),
+      ),
     );
 
     expect(parseStableReleaseVersion('v4.1.0-beta.3')).toBeUndefined();
-    expect(selected.map(release => release.version)).toEqual(['v4.1.0', 'v4.0.0']);
+    expect(EffectArray.map(selected, release => release.version)).toEqual(['v4.1.0', 'v4.0.0']);
     expect(summarizeReleaseNote("## What's new\n\nA concise **summary**.\n\n### Safer upgrades\n\n- Details")).toEqual({
       highlights: ['Safer upgrades'],
       summary: 'A concise summary.',
@@ -52,21 +58,35 @@ describe('website release-content producers', () => {
     expect(() => releaseHeadlineFromSummary('Threadnote 4.7 has no terminal punctuation')).toThrow(
       'must contain a complete first sentence',
     );
-    expect(() => releaseHeadlineFromSummary(`Threadnote 4.7 ${'long '.repeat(60)}.`)).toThrow(
-      'social-card headline of at most 240 characters',
-    );
+    expect(() =>
+      releaseHeadlineFromSummary(`Threadnote 4.7 ${Effect.pipe('long ', EffectString.repeat(60))}.`),
+    ).toThrow('social-card headline of at most 240 characters');
 
     const releases = loadLatestMajorWebsiteReleases(root);
     expect(releases.length).toBeGreaterThan(0);
-    expect(releases.every(release => release.major === releases[0].major)).toBe(true);
-    expect(releases.every(release => !release.version.includes('-'))).toBe(true);
-    expect(releases.every(release => release.headline.endsWith('.'))).toBe(true);
-    expect(releases.every(release => release.socialImage.startsWith(`whats-new/releases/${release.version}/`))).toBe(
+    expect(EffectArray.every(releases, release => release.major === releases[0].major)).toBe(true);
+    expect(EffectArray.every(releases, release => !Effect.pipe(release.version, EffectString.includes('-')))).toBe(
       true,
     );
-    expect(releases.every(release => release.socialImageAlt.includes(release.headline))).toBe(true);
-    expect(releases.every(release => release.summary.length > 0)).toBe(true);
-    expect(releases.every(release => release.releaseUrl.endsWith(`/tag/${release.version}`))).toBe(true);
+    expect(EffectArray.every(releases, release => Effect.pipe(release.headline, EffectString.endsWith('.')))).toBe(
+      true,
+    );
+    expect(
+      EffectArray.every(releases, release =>
+        Effect.pipe(release.socialImage, EffectString.startsWith(`whats-new/releases/${release.version}/`)),
+      ),
+    ).toBe(true);
+    expect(
+      EffectArray.every(releases, release =>
+        Effect.pipe(release.socialImageAlt, EffectString.includes(release.headline)),
+      ),
+    ).toBe(true);
+    expect(EffectArray.every(releases, release => release.summary.length > 0)).toBe(true);
+    expect(
+      EffectArray.every(releases, release =>
+        Effect.pipe(release.releaseUrl, EffectString.endsWith(`/tag/${release.version}`)),
+      ),
+    ).toBe(true);
   });
 
   it('renders deterministic release social cards without dropping headline words', () => {
@@ -75,7 +95,7 @@ describe('website release-content producers', () => {
     const png = renderWebsiteReleaseSocialImagePng(root, release);
     const pngView = new DataView(png.buffer, png.byteOffset, png.byteLength);
 
-    expect(svg).toContain(`>${release.version.slice(1)}<`);
+    expect(svg).toContain(`>${Effect.pipe(release.version, EffectString.slice(1))}<`);
     expect(svg).toContain('<tspan fill="#f7fafc">Threadnote</tspan><tspan dx="20" fill="#67e8c7">');
     for (const line of layoutReleaseSocialHeadline(release.headline).lines) expect(svg).toContain(`>${line}<`);
     expect([...png.slice(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -88,11 +108,11 @@ describe('website release-content producers', () => {
     const word = fc.stringMatching(/^[A-Za-z0-9]{1,12}$/u);
     fc.assert(
       fc.property(
-        fc.array(word, {maxLength: 30, minLength: 1}).map(words => `${words.join(' ')}.`),
+        fc.array(word, {maxLength: 30, minLength: 1}).map(words => `${EffectArray.join(words, ' ')}.`),
         headline => {
           const layout = layoutReleaseSocialHeadline(headline);
-          expect(layout.lines.join(' ')).toBe(headline);
-          expect(layout.lines.every(line => line.length > 0)).toBe(true);
+          expect(EffectArray.join(layout.lines, ' ')).toBe(headline);
+          expect(EffectArray.every(layout.lines, line => line.length > 0)).toBe(true);
           expect(layout.lines.length * layout.lineHeight).toBeLessThanOrEqual(220);
         },
       ),
@@ -126,7 +146,7 @@ Make the bottleneck observable.
       publishedAt: '2027-01-01T00:00:00Z',
       author: 'Threadnote' as const,
       kind: 'release' as const,
-      title: `Threadnote ${release.version.replace(/^v/, '')}`,
+      title: `Threadnote ${Effect.pipe(release.version, EffectString.replace(/^v/, ''))}`,
     };
     const [template, sitemap] = await Promise.all([
       readFile(join(root, 'apps', 'website', 'whats-new', 'index.html'), 'utf8'),
@@ -200,9 +220,54 @@ Make the bottleneck observable.
     expect(renderedIndex).toContain(`<meta name="twitter:image:alt" content="${latestSocialImage.alt}" />`);
     expect(renderedIndex).toContain(`"image":"${latestSocialImage.url}"`);
     expect(renderedIndex).not.toContain('whats-new-og.png');
-    const crawlerIndex = renderedIndex.slice(renderedIndex.indexOf('<main class="crawler-post crawler-post--index">'));
-    expect(crawlerIndex.indexOf('>Articles</a>')).toBeLessThan(crawlerIndex.indexOf(article.title));
-    expect(crawlerIndex.indexOf(article.title)).toBeLessThan(crawlerIndex.indexOf('>Release notes</a>'));
-    expect(crawlerIndex.indexOf('>Release notes</a>')).toBeLessThan(crawlerIndex.indexOf(releasePost.title));
+    const crawlerIndex = Effect.pipe(
+      renderedIndex,
+      EffectString.slice(
+        Effect.pipe(
+          renderedIndex,
+          EffectString.indexOf('<main class="crawler-post crawler-post--index">'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      ),
+    );
+    expect(
+      Effect.pipe(
+        crawlerIndex,
+        EffectString.indexOf('>Articles</a>'),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    ).toBeLessThan(
+      Effect.pipe(
+        crawlerIndex,
+        EffectString.indexOf(article.title),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    );
+    expect(
+      Effect.pipe(
+        crawlerIndex,
+        EffectString.indexOf(article.title),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    ).toBeLessThan(
+      Effect.pipe(
+        crawlerIndex,
+        EffectString.indexOf('>Release notes</a>'),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    );
+    expect(
+      Effect.pipe(
+        crawlerIndex,
+        EffectString.indexOf('>Release notes</a>'),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    ).toBeLessThan(
+      Effect.pipe(
+        crawlerIndex,
+        EffectString.indexOf(releasePost.title),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    );
   });
 });

@@ -5,6 +5,10 @@ import {createRoot, type Root} from 'react-dom/client';
 import fc from 'fast-check';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {ContextHealthPanel} from '@threadnote/manager/attention-view';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Option as EffectOption} from 'effect';
 
 let root: Root | undefined;
 let requests: {signal?: AbortSignal; resolve: (response: Response) => void}[];
@@ -16,7 +20,8 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).includes('/citations/jobs')) return Promise.resolve(new Response('{"job":null}'));
+      if (Effect.pipe(String(input), EffectString.includes('/citations/jobs')))
+        return Promise.resolve(new Response('{"job":null}'));
       const {promise, resolve, reject} = Promise.withResolvers<Response>();
       const signal = init?.signal ?? undefined;
       requests.push({signal, resolve});
@@ -56,7 +61,7 @@ it('aborts pending pagination when a fresh report supersedes it', async () => {
         JSON.stringify({
           version: 1,
           project: 'first',
-          status: 'healthy',
+          status: 'findings',
           findings: [],
           recordPreviews: [],
           recordsScanned: 0,
@@ -65,12 +70,37 @@ it('aborts pending pagination when a fresh report supersedes it', async () => {
           remainingFindings: 1,
           nextCursor: 'next',
           repositoryEvidence: {state: 'available'},
-          semanticCompleteness: {state: 'complete'},
+          semanticCompleteness: {
+            version: 2,
+            state: 'complete',
+            eligibleRecords: 0,
+            analyzedRecords: 0,
+            unknownRecords: 0,
+            claimsAnalyzed: 0,
+            supportedClaims: 0,
+            unsupportedClaims: 0,
+            coverage: 'bounded-English-extraction',
+            contradictionCount: 0,
+            pairsCompared: 0,
+            omittedContradictions: 0,
+            unknownReasons: [],
+          },
         }),
       ),
     ),
   );
-  const more = [...document.querySelectorAll('button')].find(button => button.textContent?.includes('Load 1 findings'));
+  const more = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(button =>
+          Effect.pipe(button.textContent, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.includes('Load 1 findings')),
+          ))(__effectArrayValue),
+    ),
+  );
   expect(more).toBeDefined();
   await act(async () => more?.click());
   expect(requests).toHaveLength(2);
@@ -87,7 +117,7 @@ it('keeps one active report across bounded project and refresh schedules', async
     fc.asyncProperty(fc.array(fc.integer({min: 0, max: 5}), {minLength: 1, maxLength: 8}), async changes => {
       for (const [generation, project] of changes.entries()) {
         await render(`synthetic-${project}`, generation);
-        expect(requests.filter(request => !request.signal?.aborted)).toHaveLength(1);
+        expect(EffectArray.filter(requests, request => !request.signal?.aborted)).toHaveLength(1);
       }
     }),
     {numRuns: 12},

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -10,12 +11,15 @@ import {
   undoContextMaintenance,
   type MaintenanceState,
 } from '@threadnote/threadnote/memory/context/maintenance';
+import {isMaintenanceState} from '../../src/memory/context/maintenance_json.js';
 import {formatMemoryDocument, parseMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {runCommandEffect} from '@threadnote/platform/command';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const PROJECT = 'convergence';
 const NOW = '2026-10-03T15:00:00.000Z';
@@ -58,9 +62,13 @@ function fixture() {
     const write = (item: ReturnType<typeof record>) =>
       fs.writeFileString(path.join(directory, `${item.metadata.topic}.md`), item.content);
     const state = () =>
-      fs
-        .readFileString(path.join(home, 'context-maintenance', 'state-v2.json'))
-        .pipe(Effect.map(text => JSON.parse(text) as MaintenanceState));
+      fs.readFileString(path.join(home, 'context-maintenance', 'state-v2.json')).pipe(
+        Effect.map(text => {
+          const parsed: unknown = JSON.parse(text);
+          if (!isMaintenanceState(parsed)) throw new Error('Expected a valid persisted maintenance state.');
+          return parsed;
+        }),
+      );
     return {fs, path, home, directory, config, write, state};
   });
 }
@@ -69,7 +77,9 @@ function settle(f: Effect.Success<ReturnType<typeof fixture>>, cwd: string, batc
     for (let tick = 0; tick < 80; tick++) {
       const status = yield* runContextMaintenance(f.config, {cwd, project: PROJECT, maxRecords: batch});
       expect(status.state).not.toBe('failed');
-      const progress = status.projects.find(item => item.project === PROJECT);
+      const progress = EffectOption.getOrUndefined(
+        EffectArray.findFirst(status.projects, item => item.project === PROJECT),
+      );
       if (
         status.preparation?.complete &&
         progress &&
@@ -82,17 +92,17 @@ function settle(f: Effect.Success<ReturnType<typeof fixture>>, cwd: string, batc
   });
 }
 const activeCases = (state: MaintenanceState) =>
-  state.cases
-    .filter(item => !['resolved', 'retired'].includes(item.disposition))
-    .map(item => ({
+  EffectArray.map(
+    EffectArray.filter(state.cases, item => !['resolved', 'retired'].includes(item.disposition)),
+    item => ({
       caseId: item.caseId,
       family: item.family,
       slot: item.slot,
       memoryId: item.memoryId,
       reason: item.reason,
       disposition: item.disposition,
-    }))
-    .sort((a, b) => a.caseId.localeCompare(b.caseId));
+    }),
+  ).sort((a, b) => Effect2.pipe(a.caseId, EffectString.localeCompare(b.caseId)));
 
 describe('whole-engine convergence', () => {
   // Real Git, parser workers and SQLite leases deliberately require live time.
@@ -159,11 +169,16 @@ describe('whole-engine convergence', () => {
         yield* indexer.index({cwd: repository, threadnoteHome: f.home, ensureVectors: false});
         yield* settle(f, repository, batch);
         const maintained = yield* f.state();
-        const changed = activeCases(maintained).filter(item => item.family === 'citation');
+        const changed = EffectArray.filter(activeCases(maintained), item => item.family === 'citation');
         expect(changed).toHaveLength(1);
-        expect(changed[0].slot).toBe(`anchor:${citations.find(item => item.path === 'claim.ts')!.id}`);
+        expect(changed[0].slot).toBe(
+          `anchor:${EffectOption.getOrUndefined(EffectArray.findFirst(citations, item => item.path === 'claim.ts'))!.id}`,
+        );
         expect(
-          changed.some(item => item.memoryId === source.metadata.memoryId && item.disposition === 'needs-decision'),
+          EffectArray.some(
+            changed,
+            item => item.memoryId === source.metadata.memoryId && item.disposition === 'needs-decision',
+          ),
         ).toBe(true);
         expect(
           parseMemoryDocument(source.uri, yield* f.fs.readFileString(f.path.join(f.directory, 'claim.md')))!.body,
@@ -247,7 +262,9 @@ describe('whole-engine convergence', () => {
         const replay = yield* f.state();
         expect(replay.receipts.length).toBe(before.receipts.length);
         expect(activeCases(replay)).toEqual(activeCases(before));
-        const receipt = before.receipts.find(item => item.subjectUri === uri('source'))!;
+        const receipt = EffectOption.getOrUndefined(
+          EffectArray.findFirst(before.receipts, item => item.subjectUri === uri('source')),
+        )!;
         expect(receipt).toBeDefined();
         yield* f.write(record('source', {relations: [valid]}, `${body}\nPermitted later edit.`));
         expect(yield* undoContextMaintenance(f.config, receipt.receiptId)).toMatchObject({

@@ -1,20 +1,21 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const invalid = (message: string) => WorkflowAutomationError.make({code: 'invalid-document', message});
+const AUTHORING_CONTROL_CHARACTER = /[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
+const AUTHORING_TEXT_CONTROL_CHARACTER = /(?!\n)[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
 const boundedText = (maximum: number, nonblank = false, singleLine = false) =>
   Schema.String.check(
     Schema.makeFilter(value => {
       if (new TextEncoder().encode(value).byteLength > maximum) return `Text exceeds ${maximum} UTF-8 bytes.`;
-      if (nonblank && value.trim().length === 0) return 'Text must not be blank.';
-      if (
-        [...value].some(character => {
-          const code = character.charCodeAt(0);
-          return (code < 32 && code !== 10) || (code >= 127 && code <= 159);
-        })
-      )
-        return 'Text contains a control character.';
+      if (nonblank && Effect.pipe(value, EffectString.trim).length === 0) return 'Text must not be blank.';
+      if (AUTHORING_TEXT_CONTROL_CHARACTER.test(value)) return 'Text contains a control character.';
       if (singleLine && /[\r\n]/u.test(value)) return 'Text must be a single line.';
       return undefined;
     }),
@@ -22,7 +23,10 @@ const boundedText = (maximum: number, nonblank = false, singleLine = false) =>
 const portableId = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
   Schema.makeFilter(value =>
-    value.includes('..') || value === 'constructor' || value === 'prototype' || value === '__proto__'
+    Effect.pipe(value, EffectString.includes('..')) ||
+    value === 'constructor' ||
+    value === 'prototype' ||
+    value === '__proto__'
       ? 'Reserved identifiers are not allowed.'
       : undefined,
   ),
@@ -30,7 +34,9 @@ const portableId = Schema.String.check(
 const featureId = Schema.String.check(
   Schema.isPattern(/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/u),
   Schema.makeFilter(value =>
-    value.includes('..') ? 'Feature identifiers cannot contain traversal markers.' : undefined,
+    Effect.pipe(value, EffectString.includes('..'))
+      ? 'Feature identifiers cannot contain traversal markers.'
+      : undefined,
   ),
 );
 const relativePath = Schema.String.check(
@@ -39,14 +45,14 @@ const relativePath = Schema.String.check(
   Schema.makeFilter(value => {
     if (
       new TextEncoder().encode(value).byteLength > 4096 ||
-      value.startsWith('/') ||
-      value.includes('\\') ||
-      value.includes(':') ||
-      [...value].some(character => {
-        const code = character.charCodeAt(0);
-        return code < 32 || (code >= 127 && code <= 159);
-      }) ||
-      value.split('/').some(segment => segment.length === 0 || segment === '.' || segment === '..')
+      Effect.pipe(value, EffectString.startsWith('/')) ||
+      Effect.pipe(value, EffectString.includes('\\')) ||
+      Effect.pipe(value, EffectString.includes(':')) ||
+      AUTHORING_CONTROL_CHARACTER.test(value) ||
+      EffectArray.some(
+        Effect.pipe(value, EffectString.split('/')),
+        segment => segment.length === 0 || segment === '.' || segment === '..',
+      )
     )
       return 'Paths must be canonical relative paths without traversal or platform-specific roots.';
     return undefined;
@@ -273,10 +279,21 @@ export function validateNativeAuthoring(
   const decoded = decodeNativeAuthoringDocument(document);
   const issues: NativeAuthoringIssue[] = [];
   const add = (code: string, path: string, message: string) => issues.push({code, path, message});
-  const sourcePaths = new Set(decoded.source?.files.map(file => file.path) ?? []);
-  if (!decoded.source && !decoded.sourceFreeReason?.trim())
+  const sourcePaths = new Set(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(decoded.source?.files), __effectArrayReceiver =>
+        EffectArray.map(__effectArrayReceiver, file => file.path),
+      ),
+    ) ?? [],
+  );
+  if (
+    !decoded.source &&
+    !Effect.pipe(decoded.sourceFreeReason, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
     add('source-required', 'sourceFreeReason', 'A native document without a source snapshot needs a concrete reason.');
-  decoded.context.codeRefs.forEach((codeRef, index) => {
+  EffectArray.forEach(decoded.context.codeRefs, (codeRef, index) => {
     if (!sourcePaths.has(codeRef))
       add(
         'code-ref-out-of-snapshot',
@@ -284,34 +301,39 @@ export function validateNativeAuthoring(
         'Code references must name an inspected source path.',
       );
   });
-  const sourceFilePaths = decoded.source?.files.map(file => file.path) ?? [];
-  duplicates(sourceFilePaths).forEach(path =>
+  const sourceFilePaths =
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(decoded.source?.files), __effectArrayReceiver =>
+        EffectArray.map(__effectArrayReceiver, file => file.path),
+      ),
+    ) ?? [];
+  EffectArray.forEach(duplicates(sourceFilePaths), path =>
     add('duplicate-source-path', 'source.files', `Source path ${path} appears more than once.`),
   );
 
-  const requirementIds = new Set(decoded.requirements.map(item => item.id));
+  const requirementIds = new Set(EffectArray.map(decoded.requirements, item => item.id));
   reportDuplicates(
-    decoded.requirements.map(item => item.id),
+    EffectArray.map(decoded.requirements, item => item.id),
     'requirements',
     add,
   );
   if (decoded.kind === 'spec') {
     reportDuplicates(
-      decoded.scenarios.map(item => item.id),
+      EffectArray.map(decoded.scenarios, item => item.id),
       'scenarios',
       add,
     );
     reportDuplicates(
-      decoded.questions.map(item => item.id),
+      EffectArray.map(decoded.questions, item => item.id),
       'questions',
       add,
     );
     reportDuplicates(
-      decoded.artifacts.map(item => item.id),
+      EffectArray.map(decoded.artifacts, item => item.id),
       'artifacts',
       add,
     );
-    decoded.scenarios.forEach((item, index) => {
+    EffectArray.forEach(decoded.scenarios, (item, index) => {
       reportReferences(item.requirementIds, requirementIds, `scenarios[${index}].requirementIds`, add);
       if (new Set(item.requirementIds).size !== item.requirementIds.length)
         add(
@@ -320,13 +342,18 @@ export function validateNativeAuthoring(
           'Scenario requirement references must be unique.',
         );
     });
-    const covered = new Set(decoded.scenarios.flatMap(item => item.requirementIds));
-    decoded.requirements.forEach((item, index) => {
+    const covered = new Set(EffectArray.flatMap(decoded.scenarios, item => item.requirementIds));
+    EffectArray.forEach(decoded.requirements, (item, index) => {
       if (!covered.has(item.id))
         add('requirement-uncovered', `requirements[${index}]`, `Requirement ${item.id} is not covered by a scenario.`);
     });
-    decoded.artifacts.forEach((item, index) => {
-      if ((item.kind === 'domain' || item.kind === 'workflow') && !item.diagram?.trim())
+    EffectArray.forEach(decoded.artifacts, (item, index) => {
+      if (
+        (item.kind === 'domain' || item.kind === 'workflow') &&
+        !Effect.pipe(item.diagram, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        )
+      )
         add(
           'artifact-diagram-required',
           `artifacts[${index}].diagram`,
@@ -335,37 +362,39 @@ export function validateNativeAuthoring(
     });
   } else {
     reportDuplicates(
-      decoded.phases.map(item => item.id),
+      EffectArray.map(decoded.phases, item => item.id),
       'phases',
       add,
     );
     reportDuplicates(
-      decoded.decisions.map(item => item.id),
+      EffectArray.map(decoded.decisions, item => item.id),
       'decisions',
       add,
     );
-    const allAcceptanceIds = decoded.phases.flatMap(item => item.acceptance.map(entry => entry.id));
+    const allAcceptanceIds = EffectArray.flatMap(decoded.phases, item =>
+      EffectArray.map(item.acceptance, entry => entry.id),
+    );
     reportDuplicates(allAcceptanceIds, 'phases.acceptance', add);
-    const phaseIds = new Set(decoded.phases.map(item => item.id));
-    const planRequirementIds = new Set(decoded.requirements.map(item => item.id));
+    const phaseIds = new Set(EffectArray.map(decoded.phases, item => item.id));
+    const planRequirementIds = new Set(EffectArray.map(decoded.requirements, item => item.id));
     const coveredPlanRequirements = new Set<string>();
-    decoded.phases.forEach((item, index) => {
+    EffectArray.forEach(decoded.phases, (item, index) => {
       reportReferences(item.dependsOn, phaseIds, `phases[${index}].dependsOn`, add);
       if (item.dependsOn.includes(item.id))
         add('phase-self-dependency', `phases[${index}].dependsOn`, 'A phase cannot depend on itself.');
       reportDuplicates(
-        item.acceptance.map(entry => entry.id),
+        EffectArray.map(item.acceptance, entry => entry.id),
         `phases[${index}].acceptance`,
         add,
       );
-      item.acceptance.forEach((entry, acceptanceIndex) => {
+      EffectArray.forEach(item.acceptance, (entry, acceptanceIndex) => {
         reportReferences(
           entry.requirementIds,
           planRequirementIds,
           `phases[${index}].acceptance[${acceptanceIndex}].requirementIds`,
           add,
         );
-        entry.requirementIds.forEach(id => coveredPlanRequirements.add(id));
+        EffectArray.forEach(entry.requirementIds, id => coveredPlanRequirements.add(id));
         if (new Set(entry.requirementIds).size !== entry.requirementIds.length)
           add(
             'duplicate-reference',
@@ -380,14 +409,14 @@ export function validateNativeAuthoring(
           );
       });
     });
-    decoded.decisions.forEach((item, index) =>
+    EffectArray.forEach(decoded.decisions, (item, index) =>
       reportDuplicates(
-        item.alternatives.map(alternative => alternative.id),
+        EffectArray.map(item.alternatives, alternative => alternative.id),
         `decisions[${index}].alternatives`,
         add,
       ),
     );
-    decoded.requirements.forEach((item, index) => {
+    EffectArray.forEach(decoded.requirements, (item, index) => {
       if (!coveredPlanRequirements.has(item.id))
         add(
           'requirement-uncovered',
@@ -395,22 +424,22 @@ export function validateNativeAuthoring(
           `Requirement ${item.id} is not covered by a phase acceptance.`,
         );
     });
-    decoded.decisions.forEach((item, index) =>
+    EffectArray.forEach(decoded.decisions, (item, index) =>
       reportReferences(item.affectedPhases, phaseIds, `decisions[${index}].affectedPhases`, add),
     );
     if (hasDependencyCycle(decoded.phases))
       add('phase-dependency-cycle', 'phases', 'Phase dependencies must form an acyclic graph.');
 
     if (decoded.spec) {
-      const linkedRequirements = new Set(decoded.spec.requirements.map(item => item.id));
-      const linkedScenarios = new Set(decoded.spec.scenarios.map(item => item.id));
+      const linkedRequirements = new Set(EffectArray.map(decoded.spec.requirements, item => item.id));
+      const linkedScenarios = new Set(EffectArray.map(decoded.spec.scenarios, item => item.id));
       reportDuplicates(
-        decoded.spec.requirements.map(item => item.id),
+        EffectArray.map(decoded.spec.requirements, item => item.id),
         'spec.requirements',
         add,
       );
       reportDuplicates(
-        decoded.spec.scenarios.map(item => item.id),
+        EffectArray.map(decoded.spec.scenarios, item => item.id),
         'spec.scenarios',
         add,
       );
@@ -420,32 +449,36 @@ export function validateNativeAuthoring(
           'requirements',
           'The plan requirement IDs and behavior must exactly match its linked specification snapshot.',
         );
-      decoded.spec.scenarios.forEach((item, index) =>
+      EffectArray.forEach(decoded.spec.scenarios, (item, index) =>
         reportReferences(item.requirementIds, linkedRequirements, `spec.scenarios[${index}].requirementIds`, add),
       );
       const referencedRequirements = new Set<string>();
       const referencedScenarios = new Set<string>();
-      decoded.phases.forEach((item, phaseIndex) =>
-        item.acceptance.forEach((entry, acceptanceIndex) => {
+      EffectArray.forEach(decoded.phases, (item, phaseIndex) =>
+        EffectArray.forEach(item.acceptance, (entry, acceptanceIndex) => {
           reportReferences(
             entry.requirementIds,
             linkedRequirements,
             `phases[${phaseIndex}].acceptance[${acceptanceIndex}].requirementIds`,
             add,
           );
-          entry.requirementIds.forEach(id => referencedRequirements.add(id));
-          entry.scenarioIds?.forEach((id, scenarioIndex) => {
-            if (!linkedScenarios.has(id))
-              add(
-                'unknown-scenario-reference',
-                `phases[${phaseIndex}].acceptance[${acceptanceIndex}].scenarioIds[${scenarioIndex}]`,
-                `Scenario ${id} is not present in the linked specification.`,
-              );
-            referencedScenarios.add(id);
-          });
+          EffectArray.forEach(entry.requirementIds, id => referencedRequirements.add(id));
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(entry.scenarioIds), __effectArrayReceiver =>
+              EffectArray.forEach(__effectArrayReceiver, (id, scenarioIndex) => {
+                if (!linkedScenarios.has(id))
+                  add(
+                    'unknown-scenario-reference',
+                    `phases[${phaseIndex}].acceptance[${acceptanceIndex}].scenarioIds[${scenarioIndex}]`,
+                    `Scenario ${id} is not present in the linked specification.`,
+                  );
+                referencedScenarios.add(id);
+              }),
+            ),
+          );
         }),
       );
-      decoded.spec.requirements.forEach((item, index) => {
+      EffectArray.forEach(decoded.spec.requirements, (item, index) => {
         if (!referencedRequirements.has(item.id))
           add(
             'requirement-uncovered',
@@ -453,7 +486,7 @@ export function validateNativeAuthoring(
             `Linked requirement ${item.id} is not covered by a phase.`,
           );
       });
-      decoded.spec.scenarios.forEach((item, index) => {
+      EffectArray.forEach(decoded.spec.scenarios, (item, index) => {
         if (!referencedScenarios.has(item.id))
           add(
             'scenario-uncovered',
@@ -462,13 +495,17 @@ export function validateNativeAuthoring(
           );
       });
     } else {
-      decoded.phases.forEach((item, phaseIndex) =>
-        item.acceptance.forEach((entry, acceptanceIndex) => {
-          entry.scenarioIds?.forEach((id, scenarioIndex) =>
-            add(
-              'unknown-scenario-reference',
-              `phases[${phaseIndex}].acceptance[${acceptanceIndex}].scenarioIds[${scenarioIndex}]`,
-              `Scenario ${id} cannot be referenced without a linked specification.`,
+      EffectArray.forEach(decoded.phases, (item, phaseIndex) =>
+        EffectArray.forEach(item.acceptance, (entry, acceptanceIndex) => {
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(entry.scenarioIds), __effectArrayReceiver =>
+              EffectArray.forEach(__effectArrayReceiver, (id, scenarioIndex) =>
+                add(
+                  'unknown-scenario-reference',
+                  `phases[${phaseIndex}].acceptance[${acceptanceIndex}].scenarioIds[${scenarioIndex}]`,
+                  `Scenario ${id} cannot be referenced without a linked specification.`,
+                ),
+              ),
             ),
           );
         }),
@@ -480,12 +517,12 @@ export function validateNativeAuthoring(
   const intentHash = nativeSpecIntentDigest(decoded);
   if (options.ready) {
     if (decoded.kind === 'spec') {
-      decoded.questions.forEach((item, index) => {
+      EffectArray.forEach(decoded.questions, (item, index) => {
         if (item.disposition === 'open')
           add('open-question', `questions[${index}]`, 'Open behavioral questions must be resolved before readiness.');
       });
     } else {
-      decoded.openQuestions.forEach((_, index) =>
+      EffectArray.forEach(decoded.openQuestions, (_, index) =>
         add('open-question', `openQuestions[${index}]`, 'Open plan questions must be resolved before readiness.'),
       );
       if (decoded.decisions.length === 0)
@@ -509,7 +546,7 @@ export function validateNativeAuthoring(
     if (
       decoded.kind === 'spec' &&
       (typeof options.confirmation?.response !== 'string' ||
-        options.confirmation.response.trim().length === 0 ||
+        Effect.pipe(options.confirmation.response, EffectString.trim).length === 0 ||
         options.confirmation.decision !== 'approved' ||
         options.confirmation.intentHash !== intentHash)
     )
@@ -535,19 +572,21 @@ export function validateNativeAuthoring(
 }
 
 function sortJson(value: unknown, ancestors: Set<object>): unknown {
-  if (Array.isArray(value)) {
+  if (EffectArray.isArray(value)) {
     if (ancestors.has(value)) throw invalid('Canonical authoring JSON cannot contain cycles.');
     const next = new Set(ancestors).add(value);
-    return value.map(item => sortJson(item, next));
+    return EffectArray.map(value, item => sortJson(item, next));
   }
   if (value !== null && typeof value === 'object') {
     if (ancestors.has(value)) throw invalid('Canonical authoring JSON cannot contain cycles.');
     const next = new Set(ancestors).add(value);
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([, item]) => item !== undefined)
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-        .map(([key, item]) => [key, sortJson(item, next)]),
+    return EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectArray.filter(EffectRecord.toEntries(value), ([, item]) => item !== undefined).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ),
+        ([key, item]) => [key, sortJson(item, next)],
+      ),
     );
   }
   if (typeof value === 'bigint' || typeof value === 'function' || typeof value === 'symbol')
@@ -570,9 +609,12 @@ function sameRequirements(
   right: readonly {readonly id: string; readonly behavior: string}[],
 ): boolean {
   if (left.length !== right.length) return false;
-  const leftById = new Map(left.map(item => [item.id, item.behavior]));
-  const rightById = new Map(right.map(item => [item.id, item.behavior]));
-  return leftById.size === rightById.size && [...leftById].every(([id, behavior]) => rightById.get(id) === behavior);
+  const leftById = new Map(EffectArray.map(left, item => [item.id, item.behavior]));
+  const rightById = new Map(EffectArray.map(right, item => [item.id, item.behavior]));
+  return (
+    leftById.size === rightById.size &&
+    EffectArray.every([...leftById], ([id, behavior]) => rightById.get(id) === behavior)
+  );
 }
 
 function reportDuplicates(
@@ -589,13 +631,13 @@ function reportReferences(
   path: string,
   add: (code: string, path: string, message: string) => void,
 ) {
-  values.forEach((id, index) => {
+  EffectArray.forEach(values, (id, index) => {
     if (!known.has(id)) add('unknown-reference', `${path}[${index}]`, `Referenced identifier ${id} does not exist.`);
   });
 }
 
 function hasDependencyCycle(phases: readonly {readonly id: string; readonly dependsOn: readonly string[]}[]): boolean {
-  const graph = new Map(phases.map(item => [item.id, item.dependsOn]));
+  const graph = new Map(EffectArray.map(phases, item => [item.id, item.dependsOn]));
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const visit = (id: string): boolean => {
@@ -609,11 +651,15 @@ function hasDependencyCycle(phases: readonly {readonly id: string; readonly depe
     visited.add(id);
     return false;
   };
-  return [...graph.keys()].some(visit);
+  return EffectArray.some([...graph.keys()], visit);
 }
 
 function validMermaid(diagram: string): boolean {
-  const firstLine = diagram.trimStart().split(/\r?\n/u, 1)[0]?.trim() ?? '';
-  if (diagram.trimStart().startsWith('```')) return false;
+  const firstLine =
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+    Effect.pipe(Effect.pipe(diagram, EffectString.trimStart).split(/\r?\n/u, 1)[0], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) ?? '';
+  if (Effect.pipe(diagram, EffectString.trimStart, EffectString.startsWith('```'))) return false;
   return /^(?:graph|flowchart|sequenceDiagram|stateDiagram(?:-v2)?|classDiagram|erDiagram)(?:\s|$)/u.test(firstLine);
 }

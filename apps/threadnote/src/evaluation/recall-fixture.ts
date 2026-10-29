@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   RECALL_EVALUATION_VERSION,
   type RecallEvaluationCategory,
@@ -6,6 +7,9 @@ import {
   type RecallEvaluationQueryV2,
   validateRecallEvaluationFixtureV2,
 } from './recall.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const FIXTURE_CREATED_AT = '2026-07-27T00:00:00.000Z';
 const FIXTURE_NOW = '2026-07-27T12:00:00.000Z';
@@ -253,8 +257,8 @@ const SCENARIOS: readonly RecallScenario[] = [
 ] as const;
 
 export function createRecallEvaluationFixtureV2(): RecallEvaluationFixtureV2 {
-  const documents = SCENARIOS.flatMap((scenario, index) => scenarioDocuments(scenario, index));
-  const queries = SCENARIOS.flatMap((scenario, index) => scenarioQueries(scenario, index));
+  const documents = EffectArray.flatMap(SCENARIOS, (scenario, index) => scenarioDocuments(scenario, index));
+  const queries = EffectArray.flatMap(SCENARIOS, (scenario, index) => scenarioQueries(scenario, index));
   const fixture: RecallEvaluationFixtureV2 = {
     documents,
     metadata: {
@@ -326,10 +330,10 @@ export function expandRecallEvaluationFixtureV2(
       provenance: `Deterministic generated distractor; generator seed ${seed}.`,
       reviewed: false,
       status: index % 23 === 0 ? 'archived' : 'active',
-      text: `Synthetic benchmark distractor ${index}: ${terms.join(' ')}. This record is generated and has no expected relevance.`,
+      text: `Synthetic benchmark distractor ${index}: ${EffectArray.join(terms, ' ')}. This record is generated and has no expected relevance.`,
       timestamp: new Date(Date.UTC(2020 + (index % 6), index % 12, 1)).toISOString(),
       trust: 'untrusted',
-      uri: `threadnote://resources/generated/benchmark/${String(index).padStart(6, '0')}.md`,
+      uri: `threadnote://resources/generated/benchmark/${Effect.pipe(String(index), EffectString.padStart(6, '0'))}.md`,
     });
   }
   const expanded: RecallEvaluationFixtureV2 = {
@@ -352,7 +356,7 @@ function scenarioDocuments(scenario: RecallScenario, index: number): readonly Re
   const wrongScopeUri = wrongScopeDocumentUri(scenario, index);
   const lowAuthorityUri = lowAuthorityDocumentUri(scenario);
   const injectionUri = injectionDocumentUri(scenario);
-  const candidates = [
+  const candidates: readonly Omit<RecallEvaluationDocumentV2, 'language' | 'provenance' | 'reviewed'>[] = [
     {
       authority: 'canonical_repo',
       exactTerms: [scenario.exactIdentifier, scenario.codeSymbol],
@@ -466,15 +470,19 @@ function scenarioDocuments(scenario: RecallScenario, index: number): readonly Re
       text: 'This unrelated record discusses gardening schedules, ceramic glazing, and coastal weather observations.',
       timestamp: '2022-01-01T00:00:00.000Z',
       trust: 'untrusted',
-      uri: `threadnote://resources/generated/unrelated/${String(index).padStart(3, '0')}.md`,
+      uri: `threadnote://resources/generated/unrelated/${Effect.pipe(String(index), EffectString.padStart(3, '0'))}.md`,
     },
   ];
-  return candidates.map(document => ({
-    ...document,
-    language: 'en',
-    provenance: `Reviewed Threadnote 4.0 Phase 0 scenario: ${scenario.slug}.`,
-    reviewed: true,
-  })) as readonly RecallEvaluationDocumentV2[];
+  return EffectArray.map(
+    candidates,
+    document =>
+      ({
+        ...document,
+        language: 'en',
+        provenance: `Reviewed Threadnote 4.0 Phase 0 scenario: ${scenario.slug}.`,
+        reviewed: true,
+      }) satisfies RecallEvaluationDocumentV2,
+  );
 }
 
 function scenarioQueries(scenario: RecallScenario, index: number): readonly RecallEvaluationQueryV2[] {
@@ -665,21 +673,24 @@ function xorshift32(seed: number): () => number {
 export function recallEvaluationCategoryCounts(
   fixture: RecallEvaluationFixtureV2,
 ): Readonly<Record<RecallEvaluationCategory, number>> {
-  const counts = Object.fromEntries(
-    [
-      'exact_lexical',
-      'semantic',
-      'code_docs',
-      'scope',
-      'lifecycle',
-      'authority',
-      'time',
-      'graph',
-      'no_answer',
-      'adversarial',
-      'chunking',
-      'multilingual',
-    ].map(category => [category, 0]),
+  const counts = EffectRecord.fromEntries(
+    EffectArray.map(
+      [
+        'exact_lexical',
+        'semantic',
+        'code_docs',
+        'scope',
+        'lifecycle',
+        'authority',
+        'time',
+        'graph',
+        'no_answer',
+        'adversarial',
+        'chunking',
+        'multilingual',
+      ],
+      category => [category, 0],
+    ),
   ) as Record<RecallEvaluationCategory, number>;
   for (const query of fixture.queries) {
     counts[query.category] += 1;
@@ -693,5 +704,5 @@ export function recallEvaluationCategoryCounts(
  * scheme-only rewrite must not invalidate stored baselines or candidates.
  */
 export function serializeRecallEvaluationFixtureV2Identity(fixture: RecallEvaluationFixtureV2): string {
-  return JSON.stringify(fixture).replaceAll('threadnote://', 'viking://');
+  return Effect.pipe(JSON.stringify(fixture), EffectString.replaceAll('threadnote://', 'viking://'));
 }

@@ -1,8 +1,12 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 
 import {act} from 'react';
 import fc from 'fast-check';
 import {afterEach, expect, it, vi} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -35,10 +39,35 @@ it('keeps navigation available while the library is pending or failed and recove
     if (path === '/api/tree') {
       if (!treeReady) return new Promise<Response>((_resolve, reject) => (rejectTree = reject));
       if (!libraryReady) throw new Error('library unavailable');
-      return json({tree: undefined, resourcesTree: undefined});
+      const tree = {
+        name: 'memories',
+        uri: 'threadnote://user/test/memories',
+        relativePath: '',
+        isDir: true,
+        isSystem: false,
+        isShared: false,
+        children: [],
+      };
+      return json({tree, resourcesTree: tree});
     }
-    if (path === '/api/graphs') return json({repositories: [], builds: [], diagnostics: [], views: []});
-    if (path === '/api/worksets') return json({worksets: [], projects: []});
+    if (path === '/api/graphs')
+      return json({repositories: [], builds: [], diagnostics: [], views: [], waiterCount: 0, waiters: []});
+    if (path === '/api/worksets')
+      return json({
+        definitions: [],
+        definitionSource: 'seed-manifest',
+        editability: {state: 'editable'},
+        projectEditability: {state: 'editable'},
+        projects: [],
+        projectsReadOnly: false,
+        readOnly: false,
+        revision: 'fixture',
+        type: 'manager-workset-catalog',
+        version: 1,
+      });
+    if (path === '/api/shares/conflicts') return json({conflicts: []});
+    if (path === '/api/processes') return json({processes: [], schemaVersion: 1, truncated: false});
+    if (path === '/api/home') return json({version: 1, project: '', lanes: [], handoffs: []});
     if (path === '/api/shares') {
       if (!sharesReady) throw new Error('shares unavailable');
       return json({shares: []});
@@ -56,15 +85,17 @@ it('keeps navigation available while the library is pending or failed and recove
     ...container.querySelectorAll<HTMLButtonElement>('nav[aria-label="Manager sections"] button'),
   ];
   expect(navigation().length).toBeGreaterThan(0);
-  expect(navigation().every(button => !button.disabled)).toBe(true);
+  expect(EffectArray.every(navigation(), button => !button.disabled)).toBe(true);
   expect(container.textContent).not.toContain('Connecting to Manager');
 
   await act(async () => rejectTree?.(new Error('tree request timed out')));
 
-  expect(navigation().every(button => !button.disabled)).toBe(true);
+  expect(EffectArray.every(navigation(), button => !button.disabled)).toBe(true);
   expect(container.textContent).not.toContain('Manager disconnected');
   expect(container.textContent).toContain('Memory library unavailable');
-  const context = navigation().find(button => button.querySelector('strong')?.textContent === 'Context');
+  const context = EffectOption.getOrUndefined(
+    EffectArray.findFirst(navigation(), button => button.querySelector('strong')?.textContent === 'Context'),
+  );
   await act(async () => context?.click());
   expect(context?.getAttribute('aria-current')).toBe('page');
 
@@ -72,13 +103,15 @@ it('keeps navigation available while the library is pending or failed and recove
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Refresh manager"]')?.click());
 
   expect(container.textContent).not.toContain('Memory library unavailable');
-  expect(navigation().every(button => !button.disabled)).toBe(true);
+  expect(EffectArray.every(navigation(), button => !button.disabled)).toBe(true);
 
   libraryReady = false;
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Refresh manager"]')?.click());
   expect(container.textContent).toContain('Memory library unavailable');
   libraryReady = true;
-  const library = navigation().find(button => button.querySelector('strong')?.textContent === 'Library');
+  const library = EffectOption.getOrUndefined(
+    EffectArray.findFirst(navigation(), button => button.querySelector('strong')?.textContent === 'Library'),
+  );
   expect(library).toBeDefined();
   await act(async () => library?.click());
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Refresh manager"]')?.click());
@@ -93,9 +126,21 @@ it('keeps navigation available while the library is pending or failed and recove
           libraryReady = libraryAvailable;
           sharesReady = sharesAvailable;
           await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Refresh manager"]')?.click());
-          expect(navigation().every(button => !button.disabled)).toBe(runtimeAvailable);
-          expect(container.textContent?.includes('Manager disconnected')).toBe(!runtimeAvailable);
-          expect(container.textContent?.includes('Memory library unavailable')).toBe(!libraryAvailable);
+          expect(EffectArray.every(navigation(), button => !button.disabled)).toBe(runtimeAvailable);
+          expect(
+            Effect.pipe(container.textContent, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes('Manager disconnected')),
+            ),
+          ).toBe(!runtimeAvailable);
+          expect(
+            Effect.pipe(container.textContent, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes('Memory library unavailable')),
+            ),
+          ).toBe(!libraryAvailable);
         }
       },
     ),

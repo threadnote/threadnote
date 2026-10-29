@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -6,18 +7,24 @@ import {
   withThreadnoteHooks,
 } from '@threadnote/threadnote/hooks';
 import {codexHooksAreCurrent, withCodexHooks} from '@threadnote/threadnote/codex/hooks';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('session-start recall queue', () => {
   it('renders only actionable unread pointers and removes ranking diagnostics', () => {
-    const output = [
-      'Recall scope: threadnote://user/me/memories/handoffs/active/threadnote',
-      'Recall confidence: medium (0.62) — useful match',
-      '1. memory · rank 0.71 · score 0.83 · threadnote://user/me/memories/handoffs/active/threadnote/current.md',
-      '   why: exact_term_match +0.16; lifecycle +0.05',
-      '   warning: lexical-only result',
-      '2. resource · rank 0.64 · threadnote://resources/repos/threadnote/AGENTS.md',
-      '(+9 more — refine the query or read a URI above)',
-    ].join('\n');
+    const output = EffectArray.join(
+      [
+        'Recall scope: threadnote://user/me/memories/handoffs/active/threadnote',
+        'Recall confidence: medium (0.62) — useful match',
+        '1. memory · rank 0.71 · score 0.83 · threadnote://user/me/memories/handoffs/active/threadnote/current.md',
+        '   why: exact_term_match +0.16; lifecycle +0.05',
+        '   warning: lexical-only result',
+        '2. resource · rank 0.64 · threadnote://resources/repos/threadnote/AGENTS.md',
+        '(+9 more — refine the query or read a URI above)',
+      ],
+      '\n',
+    );
 
     const rendered = renderSessionStartRecallQueue('threadnote', output);
 
@@ -38,11 +45,32 @@ describe('session-start recall queue', () => {
     const uris = Array.from({length: 6}, (_, index) => `threadnote://resources/repos/p/${index}.md`);
     const rendered = renderSessionStartRecallQueue(
       'p',
-      [line(1, uris[0]), line(2, uris[0]), ...uris.slice(1).map((uri, index) => line(index + 3, uri))].join('\n'),
+      EffectArray.join(
+        [line(1, uris[0]), line(2, uris[0]), ...EffectArray.map(uris.slice(1), (uri, index) => line(index + 3, uri))],
+        '\n',
+      ),
     );
 
-    expect(rendered.match(/\[unread\]/g)).toHaveLength(5);
-    expect(rendered.indexOf(uris[0])).toBeLessThan(rendered.indexOf(uris[1]));
+    expect(
+      Effect.pipe(
+        rendered,
+        EffectString.match(/\[unread\]/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(5);
+    expect(
+      Effect.pipe(
+        rendered,
+        EffectString.indexOf(uris[0]),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    ).toBeLessThan(
+      Effect.pipe(
+        rendered,
+        EffectString.indexOf(uris[1]),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    );
     expect(rendered).not.toContain(uris[5]);
   });
 
@@ -55,14 +83,17 @@ describe('session-start recall queue', () => {
   });
 
   it('preserves bounded operational warnings and does not report a clean no-answer after failed sync', () => {
-    const output = [
-      'Auto-sync warning: shared repository refresh failed; cached memory may be stale.',
-      'Auto-sync warning: Obsidian source refresh failed: source is temporarily unavailable.',
-      'Local AI recall warning: semantic retrieval failed (RecallIndexUnavailable); deterministic lexical recall continued.',
-      'Recall index warning: the lexical generation is stale; retry after maintenance.',
-      '   warning: lexical-only result; no semantic corroboration',
-      'Recall confidence: no answer (0.00)',
-    ].join('\n');
+    const output = EffectArray.join(
+      [
+        'Auto-sync warning: shared repository refresh failed; cached memory may be stale.',
+        'Auto-sync warning: Obsidian source refresh failed: source is temporarily unavailable.',
+        'Local AI recall warning: semantic retrieval failed (RecallIndexUnavailable); deterministic lexical recall continued.',
+        'Recall index warning: the lexical generation is stale; retry after maintenance.',
+        '   warning: lexical-only result; no semantic corroboration',
+        'Recall confidence: no answer (0.00)',
+      ],
+      '\n',
+    );
 
     const rendered = renderSessionStartRecallQueue('degraded', output);
 
@@ -83,10 +114,16 @@ describe('session-start recall queue', () => {
     fc.assert(
       fc.property(fc.array(fc.integer({max: 20, min: 0}), {maxLength: 40}), ids => {
         const uriFor = (id: number) => `threadnote://resources/repos/p/${id}.md`;
-        const output = ids.map((id, index) => `${index + 1}. memory · rank 0.70 · ${uriFor(id)}`).join('\n');
+        const output = EffectArray.join(
+          EffectArray.map(ids, (id, index) => `${index + 1}. memory · rank 0.70 · ${uriFor(id)}`),
+          '\n',
+        );
         const rendered = renderSessionStartRecallQueue('p', output);
-        const emitted = [...rendered.matchAll(/^- \[unread\] (threadnote:\/\/\S+)$/gm)].map(match => match[1]);
-        const expected = [...new Set(ids)].slice(0, 5).map(uriFor);
+        const emitted = EffectArray.map(
+          [...Effect.pipe(rendered, EffectString.matchAll(/^- \[unread\] (threadnote:\/\/\S+)$/gm))],
+          match => match[1],
+        );
+        const expected = EffectArray.map([...new Set(ids)].slice(0, 5), uriFor);
 
         expect(emitted).toEqual(expected);
       }),
@@ -97,16 +134,20 @@ describe('session-start recall queue', () => {
   it('deduplicates, truncates, and bounds arbitrary operational warning streams', () => {
     fc.assert(
       fc.property(fc.array(fc.integer({max: 12, min: 0}), {maxLength: 30}), ids => {
-        const warningFor = (id: number) => `Auto-sync warning: source-${id} ${'detail'.repeat(80)}`;
-        const output = ids.map(warningFor).join('\n');
+        const warningFor = (id: number) =>
+          `Auto-sync warning: source-${id} ${Effect.pipe('detail', EffectString.repeat(80))}`;
+        const output = EffectArray.join(EffectArray.map(ids, warningFor), '\n');
         const rendered = renderSessionStartRecallQueue('p', output);
-        const emitted = [...rendered.matchAll(/^- (Auto-sync warning:.*)$/gm)].map(match => match[1]);
+        const emitted = EffectArray.map(
+          [...Effect.pipe(rendered, EffectString.matchAll(/^- (Auto-sync warning:.*)$/gm))],
+          match => match[1],
+        );
         const expectedIds = [...new Set(ids)].slice(0, 4);
 
         expect(emitted).toHaveLength(expectedIds.length);
-        expect(emitted.map(warning => Number(/source-(\d+)/.exec(warning)?.[1]))).toEqual(expectedIds);
-        expect(emitted.every(warning => [...warning].length <= 320)).toBe(true);
-        expect(emitted.every(warning => warning.endsWith('…'))).toBe(true);
+        expect(EffectArray.map(emitted, warning => Number(/source-(\d+)/.exec(warning)?.[1]))).toEqual(expectedIds);
+        expect(EffectArray.every(emitted, warning => [...warning].length <= 320)).toBe(true);
+        expect(EffectArray.every(emitted, warning => Effect.pipe(warning, EffectString.endsWith('…')))).toBe(true);
       }),
       {numRuns: 100},
     );
@@ -117,7 +158,8 @@ describe('Claude code-brief hook install', () => {
   it('adds one selective pre-edit hook and preserves unrelated hooks across reinstall', () => {
     const input = {hooks: {PreToolUse: [{matcher: 'Bash', hooks: [{type: 'command', command: 'other'}]}]}};
     const installed = withThreadnoteHooks(input);
-    const installedHooks = installed.hooks as Record<string, unknown>;
+    const installedHooks = installed.hooks;
+    if (!isJsonObject(installedHooks)) throw new Error('Expected installed hook settings.');
     expect(withThreadnoteHooks(installed)).toEqual(installed);
     expect(threadnoteHooksAreCurrent(installed)).toBe(true);
     expect(threadnoteHooksAreCurrent({hooks: {PreToolUse: installedHooks.PreToolUse}})).toBe(false);
@@ -168,7 +210,7 @@ describe('Codex resume hook install', () => {
   it('preserves arbitrary unrelated command order across install and removal', () => {
     fc.assert(
       fc.property(fc.array(fc.string({maxLength: 24}), {minLength: 1, maxLength: 30}), suffixes => {
-        const entries = suffixes.map(suffix => ({hooks: [{type: 'command', command: `other-${suffix}`}]}));
+        const entries = EffectArray.map(suffixes, suffix => ({hooks: [{type: 'command', command: `other-${suffix}`}]}));
         const input = {hooks: {UserPromptSubmit: entries}};
         const installed = withCodexHooks(input);
 

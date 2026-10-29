@@ -29,24 +29,24 @@ export const CODE_GRAPH_WORKSET_CATALOG_LIMITS = {
 export type CodeGraphWorksetCatalogErrorReason =
   'busy' | 'capacity' | 'corrupt' | 'expired' | 'incompatible' | 'invalid-input' | 'missing' | 'stale' | 'storage';
 
-export class CodeGraphWorksetCatalogError extends Schema.TaggedError<CodeGraphWorksetCatalogError>()(
-  'CodeGraphWorksetCatalogError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-    reason: Schema.Literals([
-      'busy',
-      'capacity',
-      'corrupt',
-      'expired',
-      'incompatible',
-      'invalid-input',
-      'missing',
-      'stale',
-      'storage',
-    ]),
-  },
-) {
+export class CodeGraphWorksetCatalogError extends Schema.TaggedError<
+  CodeGraphWorksetCatalogError,
+  {readonly brand: unique symbol}
+>()('CodeGraphWorksetCatalogError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+  reason: Schema.Literals([
+    'busy',
+    'capacity',
+    'corrupt',
+    'expired',
+    'incompatible',
+    'invalid-input',
+    'missing',
+    'stale',
+    'storage',
+  ]),
+}) {
   static of(
     reason: CodeGraphWorksetCatalogErrorReason,
     message: string,

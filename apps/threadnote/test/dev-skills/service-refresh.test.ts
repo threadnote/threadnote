@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -42,7 +43,7 @@ describe('exact-release enrolled workflow refresh', () => {
         yield* release.activate;
         const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
         expect(result.repairRequired).toBe(false);
-        expect(result.targets.map(target => target.outcome.state)).toEqual(['current', 'current']);
+        expect(EffectArray.map(result.targets, target => target.outcome.state)).toEqual(['current', 'current']);
         expect(yield* f.fs.readFileString(f.path.join(other.agentContextHome, 'private-evidence.json'))).toBe(
           '{"unchanged":"review-identity"}',
         );
@@ -100,7 +101,10 @@ describe('exact-release enrolled workflow refresh', () => {
         yield* release.activate;
         const firstRun = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
         expect(firstRun.repairRequired).toBe(true);
-        expect(firstRun.targets.map(target => target.outcome.state).sort()).toEqual(['current', 'pending']);
+        expect(EffectArray.map(firstRun.targets, target => target.outcome.state).sort()).toEqual([
+          'current',
+          'pending',
+        ]);
         expect(yield* f.fs.readFileString(file)).toBe('user edit');
         yield* f.fs.writeFileString(file, original);
         expect((yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId))).repairRequired).toBe(false);
@@ -209,7 +213,7 @@ describe('exact-release enrolled workflow refresh', () => {
           expect(result.repairRequired).toBe(true);
           expect(result).toMatchObject({issues: [{code: 'enrollment-drift'}]});
           if (alreadyCurrent) expect(result.targets[0].outcome.state).toBe('current');
-          expect(result.targets.some(target => target.consumerId === late.consumerId)).toBe(false);
+          expect(EffectArray.some(result.targets, target => target.consumerId === late.consumerId)).toBe(false);
           expect(yield* snapshot(late.target.skillRoot)).toEqual(lateBefore);
           expect(JSON.parse(yield* f.fs.readFileString(stateFile)).request).toEqual(originalRequest);
           expect(yield* release.run(readDevSkillsRefresh(f.config))).toEqual(result);
@@ -220,7 +224,7 @@ describe('exact-release enrolled workflow refresh', () => {
           expect(retry.intentId).not.toBe(prepared.intentId);
           const completed = yield* release.run(runDevSkillsRefresh(f.config, retry.intentId));
           expect(completed.repairRequired).toBe(false);
-          expect(completed.targets.map(target => target.outcome.state)).toEqual(['current', 'current']);
+          expect(EffectArray.map(completed.targets, target => target.outcome.state)).toEqual(['current', 'current']);
           expect((yield* release.run(statusDevSkills(other, lateSelector))).targets[0].installed?.releaseVersion).toBe(
             '5.3.0-beta.5',
           );
@@ -324,7 +328,10 @@ describe('exact-release enrolled workflow refresh', () => {
           diagnostics.phase('refresh');
           const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
           diagnostics.phase('assertions-status');
-          expect(result.targets.map(target => target.outcome.state).sort()).toEqual(['current', 'pending']);
+          expect(EffectArray.map(result.targets, target => target.outcome.state).sort()).toEqual([
+            'current',
+            'pending',
+          ]);
           expect(yield* f.fs.exists(homeFile)).toBe(false);
           diagnostics.phase('restore-home-index');
           yield* f.fs.writeFileString(homeFile, originalHome);
@@ -398,7 +405,7 @@ describe('exact-release enrolled workflow refresh', () => {
       yield* release.activate;
       const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
       expect(result.repairRequired).toBe(false);
-      expect(result.targets.map(target => target.outcome.state).sort()).toEqual(['current', 'skipped']);
+      expect(EffectArray.map(result.targets, target => target.outcome.state).sort()).toEqual(['current', 'skipped']);
       expect(yield* f.fs.readFileString(homeIndexPath(f.path, foreign.agentContextHome))).toBe(foreignHome);
       expect(yield* f.fs.readFileString(runtimeIndexPath(f.path, foreignRoot))).toBe(foreignRuntime);
     }).pipe(provide),
@@ -432,7 +439,7 @@ describe('exact-release enrolled workflow refresh', () => {
             .pipe(Effect.provideService(FileSystem.FileSystem, failing), Effect.result),
         ).toMatchObject({_tag: 'Failure'});
         const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
-        expect(result.targets.map(target => target.outcome.state)).toEqual(['current', 'current']);
+        expect(EffectArray.map(result.targets, target => target.outcome.state)).toEqual(['current', 'current']);
       }).pipe(provide),
   );
   effectIt.effect('superseding an intent retains its history and stale children cannot change the newer request', () =>

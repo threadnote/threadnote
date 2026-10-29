@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {recallWorkspaceScopeMatches} from '@threadnote/recall/index/scope';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {
@@ -13,6 +14,9 @@ import {
   prioritizeWorkspaceRecallCandidates,
   recallCrossScopeLaneBudgets,
 } from '@threadnote/recall/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const FIXED_NOW = new Date('2026-08-20T00:00:00.000Z');
 const FIXED_TIMESTAMP = FIXED_NOW.toISOString();
@@ -95,8 +99,8 @@ export function createMonorepoShareRecallStressFixture(
       const topic = relevant
         ? 'checkout-retry-contract'
         : topicalDecoy
-          ? `checkout-retry-history-${String(logicalIndex).padStart(3, '0')}`
-          : `operational-note-${String(logicalIndex).padStart(3, '0')}`;
+          ? `checkout-retry-history-${Effect.pipe(String(logicalIndex), EffectString.padStart(3, '0'))}`
+          : `operational-note-${Effect.pipe(String(logicalIndex), EffectString.padStart(3, '0'))}`;
       const text = relevant
         ? 'Checkout retry contract uses bounded backoff and deterministic jitter.'
         : topicalDecoy
@@ -157,8 +161,12 @@ export function monorepoShareRecallStressCandidates(
   mode: MonorepoShareRecallStressMode,
 ): readonly RecallCandidate[] {
   if (mode === 'full-corpus') return fixture.candidates;
-  const workspaceCandidates = fixture.candidates.filter(candidate =>
-    recallWorkspaceScopeMatches(fixture.targetWorkspaceScope, candidate.fields?.workspaceScope),
+  const candidates = fixture.candidates;
+  const workspaceCandidates = EffectArray.filter(
+    candidates,
+    (candidate, index) =>
+      index in candidates &&
+      recallWorkspaceScopeMatches(fixture.targetWorkspaceScope, candidate.fields?.workspaceScope),
   );
   if (mode === 'workspace-prefiltered') return workspaceCandidates;
 
@@ -209,17 +217,21 @@ export function summarizeMonorepoShareRecallStressPass(
 ): MonorepoShareRecallStressSummary {
   const logicalCandidates = deduplicateLogicalRecallCandidates(candidates).length;
   const sourceLogicalCandidates = deduplicateLogicalRecallCandidates(fixture.candidates).length;
-  const resultMemoryIds = ranked.results.flatMap(result =>
+  const resultMemoryIds = EffectArray.flatMap(ranked.results, result =>
     result.candidate.memoryId === undefined ? [] : [result.candidate.memoryId],
   );
   const duplicateResultCount = resultMemoryIds.length - new Set(resultMemoryIds).size;
   const relevant = new Set(fixture.relevantMemoryIds);
-  const adversarialTopicalRelevantIndex = crowdedTopicalCandidates(
-    fixture,
-    deduplicateLogicalRecallCandidates(fixture.candidates),
-  ).findIndex(candidate => candidate.memoryId !== undefined && relevant.has(candidate.memoryId));
+  const adversarialTopicalRelevantIndex = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(
+      crowdedTopicalCandidates(fixture, deduplicateLogicalRecallCandidates(fixture.candidates)),
+      __effectArrayValue =>
+        !!(candidate => candidate.memoryId !== undefined && relevant.has(candidate.memoryId))(__effectArrayValue),
+    ),
+    () => -1,
+  );
   const topMemoryIds = resultMemoryIds.slice(0, fixture.options.topK);
-  const relevantHitsAtK = new Set(topMemoryIds.filter(memoryId => relevant.has(memoryId))).size;
+  const relevantHitsAtK = new Set(EffectArray.filter(topMemoryIds, memoryId => relevant.has(memoryId))).size;
   const relevantIsCrossScope = fixture.relevantWorkspaceScope !== fixture.targetWorkspaceScope;
   return {
     admissionLimit: recallCrossScopeLaneBudgets(fixture.options.topK).admissionLimit,
@@ -295,19 +307,19 @@ function scenarioSeed(seed: number, scenario: MonorepoShareRecallStressScenario)
 }
 
 function stressWorkspaceScope(packageIndex: number, width: number): string {
-  return `apps/package-${String(packageIndex).padStart(width, '0')}`;
+  return `apps/package-${Effect.pipe(String(packageIndex), EffectString.padStart(width, '0'))}`;
 }
 
 function stressMemoryId(packageIndex: number, logicalIndex: number, width: number): string {
-  return `tn_stress_p${String(packageIndex).padStart(width, '0')}_m${String(logicalIndex).padStart(4, '0')}`;
+  return `tn_stress_p${Effect.pipe(String(packageIndex), EffectString.padStart(width, '0'))}_m${Effect.pipe(String(logicalIndex), EffectString.padStart(4, '0'))}`;
 }
 
 function personalMemoryUri(packageIndex: number, logicalIndex: number, width: number): string {
-  return `threadnote://user/benchmark/memories/durable/projects/monorepo-stress/package-${String(packageIndex).padStart(width, '0')}-memory-${String(logicalIndex).padStart(4, '0')}.md`;
+  return `threadnote://user/benchmark/memories/durable/projects/monorepo-stress/package-${Effect.pipe(String(packageIndex), EffectString.padStart(width, '0'))}-memory-${Effect.pipe(String(logicalIndex), EffectString.padStart(4, '0'))}.md`;
 }
 
 function sharedMemoryUri(packageIndex: number, logicalIndex: number, shareIndex: number, width: number): string {
-  return `threadnote://user/benchmark/memories/shared/team-${String(shareIndex).padStart(2, '0')}/durable/projects/monorepo-stress/package-${String(packageIndex).padStart(width, '0')}-memory-${String(logicalIndex).padStart(4, '0')}.md`;
+  return `threadnote://user/benchmark/memories/shared/team-${Effect.pipe(String(shareIndex), EffectString.padStart(2, '0'))}/durable/projects/monorepo-stress/package-${Effect.pipe(String(packageIndex), EffectString.padStart(width, '0'))}-memory-${Effect.pipe(String(logicalIndex), EffectString.padStart(4, '0'))}.md`;
 }
 
 function deterministicShuffle<T>(values: readonly T[], seed: number): readonly T[] {

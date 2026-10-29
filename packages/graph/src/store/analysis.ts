@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -48,7 +49,7 @@ const selectSymbolPage = Effect.fn('codeGraph.selectSymbolPage')(function* (
          LIMIT ?`,
         [...effectiveSnapshotParameters(snapshotId, baseSnapshotId), boundedPageLimit(limit)],
       );
-  return rows.map(symbolFromRow);
+  return EffectArray.map(rows, symbolFromRow);
 });
 
 interface AnalysisSymbolAggregateRow {
@@ -123,10 +124,10 @@ const selectAnalysisSummary = Effect.fn('codeGraph.selectAnalysisSummary')(funct
     ],
     {concurrency: 1},
   );
-  const symbols = symbolRows.map(analysisSymbolAggregateFromRow);
-  const edges = edgeRows.map(analysisEdgeAggregateFromRow);
-  const symbolCount = symbols.reduce((total, row) => total + row.count, 0);
-  const edgeCount = edges.reduce((total, row) => total + row.count, 0);
+  const symbols = EffectArray.map(symbolRows, analysisSymbolAggregateFromRow);
+  const edges = EffectArray.map(edgeRows, analysisEdgeAggregateFromRow);
+  const symbolCount = EffectArray.reduce(symbols, 0, (total, row) => total + row.count);
+  const edgeCount = EffectArray.reduce(edges, 0, (total, row) => total + row.count);
   const summary = {
     digest: receipt.digest,
     edgeCount,
@@ -196,15 +197,14 @@ const selectAnalysisSymbolAggregatePage = Effect.fn('codeGraph.selectAnalysisSym
   const baseSnapshotId = yield* selectBaseSnapshotId(sql, snapshotId);
   const statement = codeGraphAnalysisSymbolAggregatePageStatement(snapshotId, baseSnapshotId, cursorId, limit);
   const rows = yield* sql.unsafe<AnalysisSymbolAggregateRow>(statement.text, statement.parameters);
-  const counts = rows.map(row => ({
+  const counts = EffectArray.map(rows, row => ({
     count: Number(row.count),
     kind: row.kind,
     language: row.language,
   }));
-  const rowCount = counts.reduce((total, row) => total + row.count, 0);
-  const lastId = rows.reduce<string | undefined>(
-    (current, row) => (current === undefined || compareCodeUnits(current, row.last_id) < 0 ? row.last_id : current),
-    undefined,
+  const rowCount = EffectArray.reduce(counts, 0, (total, row) => total + row.count);
+  const lastId = EffectArray.reduce(rows, undefined, (current: string | undefined, row) =>
+    current === undefined || compareCodeUnits(current, row.last_id) < 0 ? row.last_id : current,
   );
   return {
     counts,
@@ -324,7 +324,7 @@ const selectAnalysisEdgeAggregatePage = Effect.fn('codeGraph.selectAnalysisEdgeA
   const baseSnapshotId = yield* selectBaseSnapshotId(sql, snapshotId);
   const statement = codeGraphAnalysisEdgeAggregatePageStatement(snapshotId, baseSnapshotId, cursorId, limit);
   const rows = yield* sql.unsafe<AnalysisEdgeAggregateRow>(statement.text, statement.parameters);
-  const counts = rows.map(row => ({
+  const counts = EffectArray.map(rows, row => ({
     confidenceHigh: Number(row.confidence_high),
     confidenceInvalid: Number(row.confidence_invalid),
     confidenceLow: Number(row.confidence_low),
@@ -338,10 +338,9 @@ const selectAnalysisEdgeAggregatePage = Effect.fn('codeGraph.selectAnalysisEdgeA
     selfLoopCount: Number(row.self_loop_count),
     unresolvedEndpointCount: Number(row.unresolved_endpoint_count),
   }));
-  const rowCount = counts.reduce((total, row) => total + row.count, 0);
-  const lastId = rows.reduce<string | undefined>(
-    (current, row) => (current === undefined || compareCodeUnits(current, row.last_id) < 0 ? row.last_id : current),
-    undefined,
+  const rowCount = EffectArray.reduce(counts, 0, (total, row) => total + row.count);
+  const lastId = EffectArray.reduce(rows, undefined, (current: string | undefined, row) =>
+    current === undefined || compareCodeUnits(current, row.last_id) < 0 ? row.last_id : current,
   );
   return {
     counts,
@@ -416,7 +415,10 @@ const selectEmbeddingSymbolCount = Effect.fn('codeGraph.selectEmbeddingSymbolCou
     `${effectiveSymbolsCte()}
      SELECT COUNT(*) AS count
      FROM effective_symbols
-     WHERE exported = 1 OR kind IN (${EMBEDDING_SYMBOL_KINDS.map(() => '?').join(', ')})`,
+     WHERE exported = 1 OR kind IN (${EffectArray.join(
+       EffectArray.map(EMBEDDING_SYMBOL_KINDS, () => '?'),
+       ', ',
+     )})`,
     [...effectiveSnapshotParameters(snapshotId, baseSnapshotId), ...EMBEDDING_SYMBOL_KINDS],
   );
   return Number(rows[0]?.count ?? 0);
@@ -430,7 +432,10 @@ const selectEmbeddingSymbolPage = Effect.fn('codeGraph.selectEmbeddingSymbolPage
   const sql = yield* SqlClient.SqlClient;
   yield* configureConnection(sql);
   const baseSnapshotId = yield* selectBaseSnapshotId(sql, snapshotId);
-  const eligibility = `exported = 1 OR kind IN (${EMBEDDING_SYMBOL_KINDS.map(() => '?').join(', ')})`;
+  const eligibility = `exported = 1 OR kind IN (${EffectArray.join(
+    EffectArray.map(EMBEDDING_SYMBOL_KINDS, () => '?'),
+    ', ',
+  )})`;
   const parameters = [...effectiveSnapshotParameters(snapshotId, baseSnapshotId), ...EMBEDDING_SYMBOL_KINDS];
   const rows = cursor
     ? yield* sql.unsafe<SymbolRow>(
@@ -450,7 +455,7 @@ const selectEmbeddingSymbolPage = Effect.fn('codeGraph.selectEmbeddingSymbolPage
          LIMIT ?`,
         [...parameters, boundedPageLimit(limit)],
       );
-  return rows.map(symbolFromRow);
+  return EffectArray.map(rows, symbolFromRow);
 });
 
 export {

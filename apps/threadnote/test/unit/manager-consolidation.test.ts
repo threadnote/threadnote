@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Exit, Fiber, FileSystem, Path, Result} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -20,6 +21,8 @@ import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {runCommandEffect} from '@threadnote/platform/command';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const timestamp = '2026-10-08T00:00:00.000Z';
 const archiveRoot = 'threadnote://user/test/memories/durable/archived/threadnote';
@@ -45,10 +48,10 @@ const fixture = Effect.fn('test.consolidationFixture')(function* (indexedCode = 
   let citation = createMemoryCodeCitation({
     version: 1,
     extractorSet: 'test',
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
     repositoryIdentityKind: 'local',
-    sourceCommit: 'b'.repeat(40),
-    sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+    sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
+    sourceSnapshotId: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
     sourceDirty: false,
     fileContentHash: {algorithm: 'sha256', value: sha256HexSync(code)},
     path: 'code.ts',
@@ -88,7 +91,7 @@ const fixture = Effect.fn('test.consolidationFixture')(function* (indexedCode = 
       return captureConsolidationSource({uri, content});
     }),
   );
-  const reviews: readonly ConsolidationReview[] = sources.map((source, i) => ({
+  const reviews: readonly ConsolidationReview[] = EffectArray.map(sources, (source, i) => ({
     section: bodies[i],
     disposition: i === 0 ? 'direct' : 'contextual',
     supports: [{sourceUri: source.uri, fragment: 0, citationIds: [citation.id], relationIndexes: i === 0 ? [0] : []}],
@@ -96,7 +99,7 @@ const fixture = Effect.fn('test.consolidationFixture')(function* (indexedCode = 
   const job: ReviewedConsolidationJob = {
     id: 'test-operation',
     createdAt: timestamp,
-    draft: bodies.join('\n\n'),
+    draft: EffectArray.join(bodies, '\n\n'),
     sources,
     target: {kind: 'durable', project: 'threadnote', topic: 'consolidated', status: 'active'},
   };
@@ -116,7 +119,7 @@ describe('Manager reviewed consolidation application', () => {
         expect(record.metadata.relations).toEqual([f.relation]);
         const receipt = record.metadata.consolidation;
         if (receipt?.version !== 1) throw new Error('Expected a V1 consolidation receipt.');
-        expect(receipt.sources.map(s => s.fragments)).toEqual([['Claim one.'], ['Claim two.']]);
+        expect(EffectArray.map(receipt.sources, s => s.fragments)).toEqual([['Claim one.'], ['Claim two.']]);
         for (const source of f.sources)
           expect(yield* f.store.read(f.location, source.uri).pipe(Effect.option)).toMatchObject({_tag: 'None'});
         expect(yield* f.store.list(f.location, archiveRoot, {recursive: true})).toHaveLength(2);
@@ -132,7 +135,14 @@ describe('Manager reviewed consolidation application', () => {
         };
         const freshness = () =>
           validateContextBriefMemoryCitations(f.config, {callerCwd: f.repo, kind: 'repository'}, [candidate]);
-        expect((yield* freshness())[0]?.receipts.map(r => r.status)).toEqual(['exact']);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectOption.map(
+              EffectOption.fromNullishOr((yield* freshness())[0]?.receipts),
+              __effectOptionalArrayReceiver => EffectArray.map(__effectOptionalArrayReceiver, r => r.status),
+            ),
+          ),
+        ).toEqual(['exact']);
         yield* f.fs.writeFileString(f.codePath, 'export const enabled = false;\n');
         yield* runCommandEffect('git', ['-C', f.repo, 'add', '.']);
         yield* runCommandEffect('git', [
@@ -161,7 +171,9 @@ describe('Manager reviewed consolidation application', () => {
           f.store.read(f.location, entry.uri).pipe(Effect.map(content => parseMemoryDocument(entry.uri, content))),
         );
         expect(
-          resultArchive.find(r => r?.metadata.memoryId === record.metadata.memoryId)?.metadata.consolidation,
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(resultArchive, r => r?.metadata.memoryId === record.metadata.memoryId),
+          )?.metadata.consolidation,
         ).toEqual(record.metadata.consolidation);
       }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
@@ -175,7 +187,7 @@ describe('Manager reviewed consolidation application', () => {
       expect(Result.isFailure(stale)).toBe(true);
       const source = f.sources[0];
       const old = yield* f.store.read(f.location, source.uri);
-      const changed = old.replace('Claim one.', 'A newer decision.');
+      const changed = Effect2.pipe(old, EffectString.replace('Claim one.', 'A newer decision.'));
       yield* f.store.write(f.location, source.uri, changed, {mode: 'replace'});
       const result = yield* applyReviewedConsolidation(f.config, f.job, f.job.id, f.request).pipe(Effect.result);
       expect(Result.isFailure(result)).toBe(true);
@@ -233,7 +245,7 @@ describe('Manager reviewed consolidation application', () => {
         const f = yield* fixture();
         const source = f.sources[0];
         const original = yield* f.store.read(f.location, source.uri);
-        const changed = original.replace('Claim one.', 'Newer revision survives.');
+        const changed = Effect2.pipe(original, EffectString.replace('Claim one.', 'Newer revision survives.'));
         let raced = false;
         const racing = ResourceStore.of({
           ...f.store,
@@ -272,7 +284,12 @@ describe('Manager reviewed consolidation application', () => {
         remove: (location, uri, options) =>
           Effect.gen(function* () {
             if (uri === source.uri) {
-              yield* f.store.write(location, uri, original.replace('Claim one.', 'Newer source.'), {mode: 'replace'});
+              yield* f.store.write(
+                location,
+                uri,
+                Effect2.pipe(original, EffectString.replace('Claim one.', 'Newer source.')),
+                {mode: 'replace'},
+              );
               const archives = yield* f.store.list(location, archiveRoot, {recursive: true});
               changedArchiveUri = archives[0].uri;
               yield* f.store.write(location, changedArchiveUri, 'Newer archive revision.', {mode: 'replace'});
@@ -300,7 +317,9 @@ describe('Manager reviewed consolidation application', () => {
             .read(location, uri)
             .pipe(
               Effect.map(content =>
-                uri.endsWith('/consolidated.md') ? content.replace('Claim one.', 'Corrupted.') : content,
+                Effect2.pipe(uri, EffectString.endsWith('/consolidated.md'))
+                  ? Effect2.pipe(content, EffectString.replace('Claim one.', 'Corrupted.'))
+                  : content,
               ),
             ),
       });
@@ -324,7 +343,7 @@ describe('Manager reviewed consolidation application', () => {
       }).pipe(Effect.result);
       expect(Result.isFailure(sourceCollision)).toBe(true);
       expect(yield* f.store.read(f.location, f.sources[0].uri)).toBe(sourceBytes);
-      const existing = sourceBytes.replace('Claim one.', 'Unrelated existing memory.');
+      const existing = Effect2.pipe(sourceBytes, EffectString.replace('Claim one.', 'Unrelated existing memory.'));
       yield* f.store.write(f.location, `${resultRoot}/consolidated.md`, existing, {mode: 'create'});
       const collision = yield* applyReviewedConsolidation(f.config, f.job, f.job.id, f.request).pipe(Effect.result);
       expect(Result.isFailure(collision)).toBe(true);
@@ -361,9 +380,9 @@ describe('Manager reviewed consolidation application', () => {
     Effect.gen(function* () {
       const f = yield* fixture();
       const resultUri = `${resultRoot}/consolidated.md`;
-      const existing = (yield* f.store.read(f.location, f.sources[0].uri)).replace(
-        'Claim one.',
-        'Concurrent destination.',
+      const existing = Effect2.pipe(
+        yield* f.store.read(f.location, f.sources[0].uri),
+        EffectString.replace('Claim one.', 'Concurrent destination.'),
       );
       let raced = false;
       const racing = ResourceStore.of({

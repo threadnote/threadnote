@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -28,6 +29,9 @@ import {
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {ShareTeamConfig, ShareTeamsFile} from '@threadnote/threadnote/types';
 import {InvalidResourceId, validatePortableSegment} from '@threadnote/store/resource-id';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const runtime: RuntimeConfig = {
   account: 'local',
@@ -45,7 +49,9 @@ const scopeFixture = Effect.fn('test.cursorCloud.scopeFixture')(function* (
   const fs = yield* FileSystem.FileSystem;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-cursor-scope-'});
   yield* fs.makeDirectory(`${home}/share`);
-  const teams = Object.fromEntries(names.map(name => [name, {remote: `https://example.invalid/${name}.git`}]));
+  const teams = EffectRecord.fromEntries(
+    EffectArray.map(names, name => [name, {remote: `https://example.invalid/${name}.git`}]),
+  );
   const file = `${home}/share/teams.json`;
   yield* fs.writeFileString(file, JSON.stringify({version: 1, defaultTeam, teams}));
   return {config: {...runtime, agentContextHome: home}, fs, file};
@@ -106,7 +112,8 @@ describe('Cursor Cloud discovered scope', () => {
         fc.uniqueArray(fc.stringMatching(/^[a-z][a-z0-9]{0,12}$/u), {maxLength: 16}),
         fc.array(fc.boolean(), {minLength: 1, maxLength: 16}),
         (names, readOnly) => {
-          const entries = names.map(
+          const entries = EffectArray.map(
+            names,
             (name, index) =>
               [
                 name,
@@ -119,17 +126,21 @@ describe('Cursor Cloud discovered scope', () => {
                 },
               ] as const,
           );
-          const registry: ShareTeamsFile = {version: 1, defaultTeam: names[0], teams: Object.fromEntries(entries)};
+          const registry: ShareTeamsFile = {
+            version: 1,
+            defaultTeam: names[0],
+            teams: EffectRecord.fromEntries(entries),
+          };
           const original = structuredClone(registry);
           const selected = registeredCursorCloudTeams(registry);
           expect(selected).toEqual([...new Set(selected)].sort());
           for (const [name, team] of entries) expect(selected.includes(name)).toBe(team.access !== 'read-only');
-          expect(selected.every(name => names.includes(name))).toBe(true);
+          expect(EffectArray.every(selected, name => names.includes(name))).toBe(true);
           expect(
             registeredCursorCloudTeams({
               ...registry,
               defaultTeam: names.at(-1),
-              teams: Object.fromEntries([...entries].reverse()),
+              teams: EffectRecord.fromEntries([...entries].reverse()),
             }),
           ).toEqual(selected);
           expect(registry).toEqual(original);
@@ -142,7 +153,7 @@ describe('Cursor Cloud discovered scope', () => {
     Effect.gen(function* () {
       const f = yield* scopeFixture(['engineering', 'docs'], 'engineering');
       const before = yield* f.fs.readFileString(f.file);
-      expect((yield* resolveCursorCloudMemoryScope(f.config, {})).shares.map(s => s.team)).toEqual([
+      expect(EffectArray.map((yield* resolveCursorCloudMemoryScope(f.config, {})).shares, s => s.team)).toEqual([
         'docs',
         'engineering',
       ]);
@@ -158,9 +169,12 @@ describe('Cursor Cloud discovered scope', () => {
           },
         }),
       );
-      expect((yield* resolveCursorCloudMemoryScope(f.config, {})).shares.map(s => s.team)).toEqual(['engineering']);
+      expect(EffectArray.map((yield* resolveCursorCloudMemoryScope(f.config, {})).shares, s => s.team)).toEqual([
+        'engineering',
+      ]);
       expect(
-        (yield* resolveCursorCloudMemoryScope(f.config, {THREADNOTE_CURSOR_CLOUD_TEAM: 'docs'})).shares.map(
+        EffectArray.map(
+          (yield* resolveCursorCloudMemoryScope(f.config, {THREADNOTE_CURSOR_CLOUD_TEAM: 'docs'})).shares,
           s => s.team,
         ),
       ).toEqual(['docs']);
@@ -253,7 +267,7 @@ describe('Cursor Cloud profile', () => {
         fc.uniqueArray(fc.stringMatching(/^[a-z][a-z0-9-]{0,15}$/u), {maxLength: 12, minLength: 1}),
         fc.array(fc.nat(), {maxLength: 24}),
         (teams, order) => {
-          const reordered = order.map(index => teams[index % teams.length]).concat(teams);
+          const reordered = EffectArray.map(order, index => teams[index % teams.length]).concat(teams);
           expect(normalizeCursorCloudTeams(reordered)).toEqual([...teams].sort());
         },
       ),
@@ -341,7 +355,7 @@ describe('Cursor Cloud profile', () => {
         },
       },
     });
-    expect(Object.keys(config.mcpServers['threadnote-memory'].headers)).toEqual(['threadnote-share-id']);
+    expect(EffectRecord.keys(config.mcpServers['threadnote-memory'].headers)).toEqual(['threadnote-share-id']);
     expect(new URL(config.mcpServers['threadnote-memory'].url).search).toBe('');
     expect(JSON.stringify(config)).not.toMatch(/authorization|bearer|CLIENT_SECRET|secret/i);
   });
@@ -354,7 +368,7 @@ describe('Cursor Cloud profile', () => {
       {numRuns: 100},
     );
 
-    for (const shareId of ['share:other', '-leading-hyphen', `${'a'.repeat(128)}b`]) {
+    for (const shareId of ['share:other', '-leading-hyphen', `${Effect2.pipe('a', EffectString.repeat(128))}b`]) {
       let message = '';
       try {
         cursorCloudRemoteShareId(shareId);

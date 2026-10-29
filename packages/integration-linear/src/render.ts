@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {LinearSourceConfig} from './config.js';
 import type {createLinearClient} from './client.js';
 import type {LinearComment} from './schema.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const LINEAR_RENDERER_VERSION = 'linear-markdown-v1';
 export const LINEAR_COVERAGE =
@@ -22,28 +25,30 @@ export const linearDocumentId = (
   organizationId: string,
   kind: 'issue' | 'project' | 'document' | 'update',
   id: string,
-) => `${kind}-${sha256HexSync(`${organizationId}:${kind}:${id}`).slice(0, 40)}`;
+) => `${kind}-${Effect.pipe(sha256HexSync(`${organizationId}:${kind}:${id}`), EffectString.slice(0, 40))}`;
 export function scrubLinearMarkdown(value: string): string {
-  return value
-    .replace(/!\[[^\]\n]{0,2048}\]\([^\n)]{1,4096}\)/g, '[Attachment image omitted]')
-    .replace(/https?:\/\/[^\s<>"\]]+/gi, candidate => {
-      const suffix = candidate.endsWith(')') ? ')' : '';
-      const target = suffix ? candidate.slice(0, -1) : candidate;
-      try {
-        const url = new URL(target);
-        if (
-          url.username ||
-          url.password ||
-          [...url.searchParams.keys()].some(key =>
-            /^(?:token|access_token|auth|authorization|signature|sig|key|expires|x-amz-.+|x-goog-.+)$/i.test(key),
+  return (
+    Effect.pipe(value, EffectString.replace(/!\[[^\]\n]{0,2048}\]\([^\n)]{1,4096}\)/g, '[Attachment image omitted]'))
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+      .replace(/https?:\/\/[^\s<>"\]]+/gi, candidate => {
+        const suffix = Effect.pipe(candidate, EffectString.endsWith(')')) ? ')' : '';
+        const target = suffix ? Effect.pipe(candidate, EffectString.slice(0, -1)) : candidate;
+        try {
+          const url = new URL(target);
+          if (
+            url.username ||
+            url.password ||
+            EffectArray.some([...url.searchParams.keys()], key =>
+              /^(?:token|access_token|auth|authorization|signature|sig|key|expires|x-amz-.+|x-goog-.+)$/i.test(key),
+            )
           )
-        )
-          return `[Capability link omitted]${suffix}`;
-        return candidate;
-      } catch {
-        return candidate;
-      }
-    });
+            return `[Capability link omitted]${suffix}`;
+          return candidate;
+        } catch {
+          return candidate;
+        }
+      })
+  );
 }
 function chunks(title: string, body: string, url: string, revision: string, pageId = 'text'): readonly LinearChunk[] {
   body = scrubLinearMarkdown(body);
@@ -52,15 +57,16 @@ function chunks(title: string, body: string, url: string, revision: string, page
   for (let offset = 0; offset < body.length;) {
     let end = Math.min(body.length, offset + 12000);
     if (end < body.length) {
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
       const newline = body.lastIndexOf('\n', end);
       if (newline > offset + 6000) end = newline + 1;
       if (/[\uD800-\uDBFF]/.test(body[end - 1] ?? '')) end--;
     }
     result.push({
       pageId,
-      chunkId: `part-${String(result.length + 1).padStart(4, '0')}`,
+      chunkId: `part-${Effect.pipe(String(result.length + 1), EffectString.padStart(4, '0'))}`,
       title,
-      body: body.slice(offset, end),
+      body: Effect.pipe(body, EffectString.slice(offset, end)),
       browserLink: url,
       remoteRevision: revision,
     });
@@ -72,11 +78,17 @@ const provenance = (source: LinearSourceConfig, kind: string, id: string, url: s
   `Source: Linear (${source.id})\nOrganization: ${source.organizationId}\nObject: ${kind} ${id}\nURL: ${url}\nEvidence: untrusted provider text, read-only observation\nCoverage: ${LINEAR_COVERAGE}\n\n`;
 function thread(comments: readonly LinearComment[], root: LinearComment): string {
   const descendants = (parent: string): string =>
-    comments
-      .filter(c => c.parentId === parent)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
-      .map(c => render(c) + descendants(c.id))
-      .join('');
+    EffectArray.join(
+      EffectArray.map(
+        EffectArray.filter(comments, c => c.parentId === parent).sort(
+          (a, b) =>
+            Effect.pipe(a.createdAt, EffectString.localeCompare(b.createdAt)) ||
+            Effect.pipe(a.id, EffectString.localeCompare(b.id)),
+        ),
+        c => render(c) + descendants(c.id),
+      ),
+      '',
+    );
   const render = (c: LinearComment) =>
     `### ${c.parentId ? 'Reply' : 'Comment'} ${c.id}\nAuthor: ${c.user?.name ?? 'Unattributed author'}\nCreated: ${c.createdAt}\nUpdated: ${c.updatedAt}\n${c.editedAt ? `Edited: ${c.editedAt}\n` : ''}${c.resolvedAt ? `Resolved observation: ${c.resolvedAt}; resolving comment ${c.resolvingCommentId ?? 'unavailable'}\n` : ''}URL: ${c.url}\n\n${c.body}\n\n`;
   return render(root) + descendants(root.id);
@@ -90,15 +102,19 @@ export function renderLinearIssue(
   const header = provenance(source, 'issue', i.id, i.url);
   const body = `${header}# ${i.identifier}: ${i.title}\nState: ${i.state.name} (${i.state.type}; ${i.state.id})\nTeam: ${i.team.name} (${i.team.id})\nProject: ${i.project ? `${i.project.name} (${i.project.id})` : 'none'}\nCreated: ${i.createdAt}\nUpdated: ${i.updatedAt}\nArchived: ${i.archivedAt ?? 'no'}\n\n## Description\n${i.description ?? '[Description unavailable]'}\n`;
   const result = [...chunks(i.title, body, i.url, i.updatedAt, 'description')];
-  for (const root of snapshot.comments
-    .filter(c => c.parentId === null)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)))
+  for (const root of EffectArray.filter(snapshot.comments, c => c.parentId === null).sort(
+    (a, b) =>
+      Effect.pipe(a.createdAt, EffectString.localeCompare(b.createdAt)) ||
+      Effect.pipe(a.id, EffectString.localeCompare(b.id)),
+  ))
     result.push(
       ...chunks(
         i.title,
         header + `## Complete issue thread ${root.id}\n\n` + thread(snapshot.comments, root),
         root.url,
-        sha256HexSync(JSON.stringify([...snapshot.comments].sort((a, b) => a.id.localeCompare(b.id)))),
+        sha256HexSync(
+          JSON.stringify([...snapshot.comments].sort((a, b) => Effect.pipe(a.id, EffectString.localeCompare(b.id)))),
+        ),
         `thread-${root.id}`,
       ),
     );

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {useEffect, useMemo, useRef, useState} from 'react';
 
 export type TraceStep = {
@@ -92,14 +93,10 @@ export function AgentTrace({
     return () => window.clearTimeout(timer);
   }, [inView, pageVisible, playing, reducedMotion, scenario.steps, visibleCount]);
 
-  const evidence = useMemo(
-    () =>
-      scenario.steps
-        .slice(0, visibleCount)
-        .flatMap(step => step.evidence ?? [])
-        .filter((item, index, items) => items.indexOf(item) === index),
-    [scenario.steps, visibleCount],
-  );
+  const evidence = useMemo(() => {
+    const evidenceItems = EffectArray.flatMap(scenario.steps.slice(0, visibleCount), step => step.evidence ?? []);
+    return EffectArray.filter(evidenceItems, (item, index) => evidenceItems.indexOf(item) === index);
+  }, [scenario.steps, visibleCount]);
 
   const replay = () => {
     if (reducedMotion) return;
@@ -144,7 +141,7 @@ export function AgentTrace({
             </span>
           </div>
           <ol className="trace-list" aria-live="polite">
-            {scenario.steps.map((item, index) => {
+            {EffectArray.map(scenario.steps, (item, index) => {
               const visible = index < visibleCount;
               if (item.kind === 'tool' || item.kind === 'result') return null;
               return (
@@ -169,7 +166,7 @@ export function AgentTrace({
             </span>
           </div>
           <ol className="tool-trace" aria-label="Tool calls">
-            {scenario.steps.map((item, index) => {
+            {EffectArray.map(scenario.steps, (item, index) => {
               const visible = index < visibleCount;
               if (item.kind !== 'tool' && item.kind !== 'result') return null;
               return (
@@ -198,7 +195,7 @@ export function AgentTrace({
           </div>
           {evidence.length ? (
             <ul className="evidence-list">
-              {evidence.map(item => (
+              {EffectArray.map(evidence, item => (
                 <li key={item}>
                   <span aria-hidden="true">◆</span>
                   <code>{item}</code>

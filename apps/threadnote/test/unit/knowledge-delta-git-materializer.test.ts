@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {createReviewedSupportSnapshot, reviewedMemorySupportDigest} from '@threadnote/memory/reviewed-support';
 import {
@@ -17,26 +18,32 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {KnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {enrolledGitTarget} from '../helpers/enrolled-git-target.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const reviewId = 'review-0123456789abcdef';
-const source = [
-  'MEMORY',
-  'kind: durable',
-  'status: active',
-  'project: threadnote',
-  'topic: architecture',
-  'source_agent_client: test',
-  'timestamp: 2026-01-01T00:00:00.000Z',
-  'schema_version: 5',
-  'memory_id: tn_source',
-  'visibility: personal',
-  'authority: user_approved',
-  'trust: approved',
-  `candidate_id: ${reviewId}-1`,
-  'relation: references threadnote://memory/tn_platform_contract',
-  '',
-  'Text.',
-].join('\n');
+const source = EffectArray.join(
+  [
+    'MEMORY',
+    'kind: durable',
+    'status: active',
+    'project: threadnote',
+    'topic: architecture',
+    'source_agent_client: test',
+    'timestamp: 2026-01-01T00:00:00.000Z',
+    'schema_version: 5',
+    'memory_id: tn_source',
+    'visibility: personal',
+    'authority: user_approved',
+    'trust: approved',
+    `candidate_id: ${reviewId}-1`,
+    'relation: references threadnote://memory/tn_platform_contract',
+    '',
+    'Text.',
+  ],
+  '\n',
+);
 const delta: KnowledgeDeltaV1 = {
   items: [
     {
@@ -60,7 +67,7 @@ const delta: KnowledgeDeltaV1 = {
   version: 1,
 };
 const proposal = buildKnowledgeDeltaGitProposalV1({
-  baseCommit: 'a'.repeat(40),
+  baseCommit: Effect.pipe('a', EffectString.repeat(40)),
   delta,
   mutations: [
     {
@@ -73,26 +80,36 @@ const proposal = buildKnowledgeDeltaGitProposalV1({
     },
   ],
   project: 'threadnote',
-  target: {repositoryId: '1'.repeat(64), team: 'default'},
+  target: {repositoryId: Effect.pipe('1', EffectString.repeat(64)), team: 'default'},
 }).proposal;
-const state = {baseCommit: 'a'.repeat(40), files: {}, repositoryId: '1'.repeat(64)};
+const state = {
+  baseCommit: Effect.pipe('a', EffectString.repeat(40)),
+  files: {},
+  repositoryId: Effect.pipe('1', EffectString.repeat(64)),
+};
 
 describe('Knowledge Delta Git materializer', () => {
   it('plans the deterministic local branch, commit message, and exact file bytes', () => {
     expect(planKnowledgeDeltaGitMaterializationV1(proposal, state)).toMatchObject({
       branch: proposal.branch.name,
       commitMessage: proposal.commit.message,
-      files: proposal.files.map(file => ({content: file.content, path: file.path})),
+      files: EffectArray.map(proposal.files, file => ({content: file.content, path: file.path})),
       proposalHash: proposal.proposalHash,
     });
   });
   it('fails closed on repository, base, or target CAS drift', () => {
-    expect(() => planKnowledgeDeltaGitMaterializationV1(proposal, {...state, repositoryId: '2'.repeat(64)})).toThrow(
-      /repository binding/u,
-    );
-    expect(() => planKnowledgeDeltaGitMaterializationV1(proposal, {...state, baseCommit: 'b'.repeat(40)})).toThrow(
-      /base commit/u,
-    );
+    expect(() =>
+      planKnowledgeDeltaGitMaterializationV1(proposal, {
+        ...state,
+        repositoryId: Effect.pipe('2', EffectString.repeat(64)),
+      }),
+    ).toThrow(/repository binding/u);
+    expect(() =>
+      planKnowledgeDeltaGitMaterializationV1(proposal, {
+        ...state,
+        baseCommit: Effect.pipe('b', EffectString.repeat(40)),
+      }),
+    ).toThrow(/base commit/u);
     expect(() =>
       planKnowledgeDeltaGitMaterializationV1(proposal, {...state, files: {[proposal.files[0].path]: 'changed'}}),
     ).toThrow(/target changed/u);
@@ -100,8 +117,8 @@ describe('Knowledge Delta Git materializer', () => {
   it('has deterministic plans independent of irrelevant state key ordering', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.string({minLength: 1, maxLength: 4}), {maxLength: 8}), keys => {
-        const forward = Object.fromEntries(keys.map(key => [key, undefined]));
-        const reverse = Object.fromEntries([...keys].reverse().map(key => [key, undefined]));
+        const forward = EffectRecord.fromEntries(EffectArray.map(keys, key => [key, undefined]));
+        const reverse = EffectRecord.fromEntries(EffectArray.map([...keys].reverse(), key => [key, undefined]));
         expect(planKnowledgeDeltaGitMaterializationV1(proposal, {...state, files: forward})).toEqual(
           planKnowledgeDeltaGitMaterializationV1(proposal, {...state, files: reverse}),
         );
@@ -112,7 +129,10 @@ describe('Knowledge Delta Git materializer', () => {
 
   it('rejects a prebuilt valid V1 replacement artifact whose exact baseline is enrolled', () => {
     const enrolled = enrolledGitTarget('tn_source');
-    for (const content of [enrolled, enrolled.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:')]) {
+    for (const content of [
+      enrolled,
+      Effect.pipe(enrolled, EffectString.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:')),
+    ]) {
       const prebuilt = replacementProposal(content);
       expect(() => verifyKnowledgeDeltaGitProposalV1(prebuilt)).not.toThrow();
       expect(() =>
@@ -128,9 +148,14 @@ describe('Knowledge Delta Git materializer', () => {
         fc.constantFrom('', ' ', '\t'),
         fc.constantFrom('\n', '\r\n'),
         (indent, padding, newline) => {
-          const enrolled = enrolledGitTarget('tn_source')
-            .replace(/^topic_maintenance: .+$/mu, `${indent}topic_maintenance${padding}: {broken`)
-            .replaceAll('\n', newline);
+          const enrolled = Effect.pipe(enrolledGitTarget('tn_source'), __effectPipeInput => {
+            const __effectPipeStage0 = Effect.pipe(
+              __effectPipeInput,
+              EffectString.replace(/^topic_maintenance: .+$/mu, `${indent}topic_maintenance${padding}: {broken`),
+            );
+            const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.replaceAll('\n', newline));
+            return __effectPipeStage1;
+          });
           const prebuilt = replacementProposal(enrolled);
           expect(() =>
             planKnowledgeDeltaGitMaterializationV1(prebuilt, {...state, files: {[prebuilt.files[0].path]: enrolled}}),
@@ -139,7 +164,9 @@ describe('Knowledge Delta Git materializer', () => {
       ),
       {numRuns: 16},
     );
-    const ordinary = source.replace('visibility: personal', 'visibility: shared') + '\n\ntopic_maintenance: prose only';
+    const ordinary =
+      Effect.pipe(source, EffectString.replace('visibility: personal', 'visibility: shared')) +
+      '\n\ntopic_maintenance: prose only';
     const compatible = replacementProposal(ordinary);
     expect(() =>
       planKnowledgeDeltaGitMaterializationV1(compatible, {...state, files: {[compatible.files[0].path]: ordinary}}),
@@ -196,8 +223,8 @@ function automaticArtifact(kind: 'durable' | 'handoff' | 'incident' | 'preferenc
         reviewId,
         approvedAt: '2026-10-21T00:00:00.000Z',
         targetBeforeHash: beforeCanonicalHash,
-        preparationDigest: '2'.repeat(64),
-        sourceVectorDigest: '3'.repeat(64),
+        preparationDigest: Effect.pipe('2', EffectString.repeat(64)),
+        sourceVectorDigest: Effect.pipe('3', EffectString.repeat(64)),
       },
     }),
   };
@@ -215,7 +242,7 @@ function automaticArtifact(kind: 'durable' | 'handoff' | 'incident' | 'preferenc
     },
     body,
   );
-  const target = {repositoryId: '1'.repeat(64), team: 'default'};
+  const target = {repositoryId: Effect.pipe('1', EffectString.repeat(64)), team: 'default'};
   const files = [
     {
       approval: {
@@ -240,10 +267,10 @@ function automaticArtifact(kind: 'durable' | 'handoff' | 'incident' | 'preferenc
   ];
   const maintenance = {
     kind: 'automatic' as const,
-    approvalDigest: '4'.repeat(64),
+    approvalDigest: Effect.pipe('4', EffectString.repeat(64)),
     beforeCanonicalHash,
-    sourceVectorHash: '5'.repeat(64),
-    reviewHash: '6'.repeat(64),
+    sourceVectorHash: Effect.pipe('5', EffectString.repeat(64)),
+    reviewHash: Effect.pipe('6', EffectString.repeat(64)),
     supportDigest: reviewedMemorySupportDigest(reviewedSupport),
     target: {kind, headerTitle},
     baseBranch: 'main',
@@ -289,7 +316,7 @@ describe('automatic ordinary shared Git materialization', () => {
       expect(proposal).toEqual(original);
       expect(() => verifyKnowledgeDeltaGitProposalV1({...proposal, version: 1})).toThrow();
       for (const altered of [
-        {...proposal, maintenance: {...proposal.maintenance, supportDigest: '0'.repeat(64)}},
+        {...proposal, maintenance: {...proposal.maintenance, supportDigest: Effect.pipe('0', EffectString.repeat(64))}},
         {
           ...proposal,
           maintenance: {
@@ -300,15 +327,17 @@ describe('automatic ordinary shared Git materialization', () => {
             },
           },
         },
-        {
-          ...proposal,
-          maintenance: {
-            ...proposal.maintenance,
-            policy: {...proposal.maintenance.policy, access: 'read-only' as never},
-          },
-        },
       ])
         expect(() => verifyAutomaticMaintenanceGitProposal(altered)).toThrow();
+      const invalidAccess = {
+        ...proposal,
+        maintenance: {
+          ...proposal.maintenance,
+          policy: {...proposal.maintenance.policy, access: 'read-only'},
+        },
+      };
+      // @ts-expect-error This negative case intentionally violates the policy access union.
+      expect(() => verifyAutomaticMaintenanceGitProposal(invalidAccess)).toThrow();
       expect(() =>
         planKnowledgeDeltaGitMaterializationV1(proposal, {
           ...current,
@@ -320,7 +349,10 @@ describe('automatic ordinary shared Git materialization', () => {
   it('refuses generic V1 replacement of even malformed reviewed-support declarations', () => {
     const {proposal: automatic} = automaticArtifact('durable');
     const approved = automatic.files[0].content;
-    for (const current of [approved, approved.replace('reviewed_support:', ' reviewed_support :')]) {
+    for (const current of [
+      approved,
+      Effect.pipe(approved, EffectString.replace('reviewed_support:', ' reviewed_support :')),
+    ]) {
       const file = {
         ...proposal.files[0],
         operation: 'replace' as const,

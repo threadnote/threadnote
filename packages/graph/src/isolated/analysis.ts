@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, Logger, Schema, Stdio, Stream} from 'effect';
 import {CommandExecutor, CommandTimedOut} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -85,14 +86,14 @@ export type CodeGraphAnalysisReadResult =
       readonly status?: CodeGraphStatus;
     };
 
-export class CodeGraphAnalysisReadTimedOut extends Schema.TaggedError<CodeGraphAnalysisReadTimedOut>()(
-  'CodeGraphAnalysisReadTimedOut',
-  {message: Schema.String},
-) {}
-export class CodeGraphAnalysisReadError extends Schema.TaggedError<CodeGraphAnalysisReadError>()(
-  'CodeGraphAnalysisReadError',
-  {message: Schema.String},
-) {}
+export class CodeGraphAnalysisReadTimedOut extends Schema.TaggedError<
+  CodeGraphAnalysisReadTimedOut,
+  {readonly brand: unique symbol}
+>()('CodeGraphAnalysisReadTimedOut', {message: Schema.String}) {}
+export class CodeGraphAnalysisReadError extends Schema.TaggedError<
+  CodeGraphAnalysisReadError,
+  {readonly brand: unique symbol}
+>()('CodeGraphAnalysisReadError', {message: Schema.String}) {}
 
 /** Status, selection, native reads, and strict re-observation all run in the deadline-owned child. */
 export const serveCodeGraphAnalysisRead = Effect.fn('codeGraph.serveAnalysisRead')(function* (
@@ -299,5 +300,5 @@ export const codeGraphAnalysisWorkerProgram = (threadnoteHome: string) =>
   }).pipe(Effect.ignore, Effect.provideService(Logger.LogToStderr, true));
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }

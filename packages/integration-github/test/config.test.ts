@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {makeSourceConfigurationRegistry} from '@threadnote/integration-runtime/config';
@@ -8,6 +9,7 @@ import {
   sourceConfigurationFingerprint,
   normalizeGitHubRepository,
 } from '../src/config.js';
+
 const registry = makeSourceConfigurationRegistry({sources: [githubSourceCodec], projections: []});
 const emptyObsidianConfiguration = registry.empty;
 const parseObsidianConfiguration = registry.parse;
@@ -17,7 +19,7 @@ describe('GitHub configuration', () => {
   it('round-trips GitHub repository allowlists and fingerprints independently of repository order', () => {
     const name = fc
       .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789-'), {minLength: 1, maxLength: 12})
-      .map(parts => `r${parts.join('')}`);
+      .map(parts => `r${EffectArray.join(parts, '')}`);
     fc.assert(
       fc.property(fc.uniqueArray(name, {minLength: 1, maxLength: 8}), fc.boolean(), (names, local) => {
         const source = {
@@ -27,14 +29,16 @@ describe('GitHub configuration', () => {
           credentialEnv: 'THREADNOTE_GITHUB_TOKEN',
           ...(local ? {credentialStorage: 'local' as const} : {}),
           project: 'engineering',
-          repositories: names.map(value => `Owner/${value}`),
+          repositories: EffectArray.map(names, value => `Owner/${value}`),
           refreshIntervalMinutes: 15,
           maxStaleHours: 24,
         };
         const configuration = upsertGitHubSource(emptyObsidianConfiguration(), source);
         const parsed = parseObsidianConfiguration(renderObsidianConfiguration(configuration));
         expect(parsed).toEqual(configuration);
-        expect(requireGitHubSource(parsed, 'github').repositories).toEqual(names.map(value => `owner/${value}`).sort());
+        expect(requireGitHubSource(parsed, 'github').repositories).toEqual(
+          EffectArray.map(names, value => `owner/${value}`).sort(),
+        );
         expect(sourceConfigurationFingerprint(source)).toBe(
           sourceConfigurationFingerprint({...source, repositories: [...source.repositories].reverse()}),
         );

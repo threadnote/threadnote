@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 
@@ -7,10 +8,12 @@ import {
   type ContextHealthAggregateSourceV1,
 } from '@threadnote/context/health_schedule';
 import type {ContextHealthReportV1} from '@threadnote/context/health';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const PROJECT = 'threadnote';
-const PERSONAL_REVISION = '1'.repeat(64);
-const TEAM_REVISION = '2'.repeat(64);
+const PERSONAL_REVISION = Effect.pipe('1', EffectString.repeat(64));
+const TEAM_REVISION = Effect.pipe('2', EffectString.repeat(64));
 
 describe('context health aggregation and schedule contract', () => {
   it('supports a canonical shared-only aggregate without a personal source', () => {
@@ -20,7 +23,7 @@ describe('context health aggregation and schedule contract', () => {
     });
 
     expect(aggregate).toMatchObject({completeSources: 1, status: 'clean', unknownSources: 0});
-    expect(aggregate.sources.map(source => source.sourceKey)).toEqual(['team:canonical']);
+    expect(EffectArray.map(aggregate.sources, source => source.sourceKey)).toEqual(['team:canonical']);
     expect(() => aggregateContextHealthReportsV1({project: PROJECT, teams: []})).toThrow(
       /at least one evidence source/i,
     );
@@ -42,7 +45,7 @@ describe('context health aggregation and schedule contract', () => {
       unknownSources: 0,
       version: 1,
     });
-    expect(aggregate.sources.map(source => source.sourceKey)).toEqual(['personal', 'team:platform']);
+    expect(EffectArray.map(aggregate.sources, source => source.sourceKey)).toEqual(['personal', 'team:platform']);
   });
 
   it('preserves known findings but reports unknown when any selected source is incomplete', () => {
@@ -129,7 +132,7 @@ describe('context health aggregation and schedule contract', () => {
       ],
     });
     expect(aggregate).toMatchObject({knownFindings: 2, status: 'unknown', exitCode: 2, unknownSources: 2});
-    expect(aggregate.findings.map(finding => finding.sourceKey)).toEqual(['personal', 'team:platform']);
+    expect(EffectArray.map(aggregate.findings, finding => finding.sourceKey)).toEqual(['personal', 'team:platform']);
   });
 
   it('returns findings only after all selected sources are complete', () => {
@@ -140,7 +143,7 @@ describe('context health aggregation and schedule contract', () => {
     });
 
     expect(aggregate).toMatchObject({exitCode: 1, knownFindings: 2, status: 'findings'});
-    expect(aggregate.findings.every(finding => finding.sourceKey === 'team:platform')).toBe(true);
+    expect(EffectArray.every(aggregate.findings, finding => finding.sourceKey === 'team:platform')).toBe(true);
   });
 
   it('fails closed for duplicate scopes, cross-project reports, and invalid complete revisions', () => {
@@ -148,7 +151,10 @@ describe('context health aggregation and schedule contract', () => {
       aggregateContextHealthReportsV1({
         personal: completePersonal(report()),
         project: PROJECT,
-        teams: [completeTeam('platform', report(), TEAM_REVISION), completeTeam('platform', report(), '3'.repeat(64))],
+        teams: [
+          completeTeam('platform', report(), TEAM_REVISION),
+          completeTeam('platform', report(), Effect.pipe('3', EffectString.repeat(64))),
+        ],
       }),
     ).toThrow(/duplicate team source/i);
     expect(() =>
@@ -172,9 +178,14 @@ describe('context health aggregation and schedule contract', () => {
         teams: [],
       }),
     ).toThrow(/omitted findings/i);
+    const invalidVersionReport = {...report(), version: 2};
     expect(() =>
       aggregateContextHealthReportsV1({
-        personal: completePersonal({...report(), version: 2 as 1}),
+        personal: {
+          ...completePersonal(report()),
+          // @ts-expect-error -- exercise runtime rejection of an unsupported report version.
+          report: invalidVersionReport,
+        },
         project: PROJECT,
         teams: [],
       }),
@@ -208,12 +219,14 @@ describe('context health aggregation and schedule contract', () => {
         teams: [],
       }),
     ).toThrow(/finding/i);
+    const invalidFindingsReport = {...report(), findings: [null]};
     expect(() =>
       aggregateContextHealthReportsV1({
-        personal: completePersonal({
-          ...report(),
-          findings: [null] as unknown as ContextHealthReportV1['findings'],
-        }),
+        personal: {
+          ...completePersonal(report()),
+          // @ts-expect-error -- exercise runtime rejection of a non-record finding.
+          report: invalidFindingsReport,
+        },
         project: PROJECT,
         teams: [],
       }),
@@ -279,7 +292,11 @@ describe('context health aggregation and schedule contract', () => {
       }),
     ).toThrow(/at most 32/i);
     expect(() =>
-      buildContextHealthSchedulePlanV1({cadenceMinutes: 60, project: PROJECT, teams: [`a${'b'.repeat(128)}`]}),
+      buildContextHealthSchedulePlanV1({
+        cadenceMinutes: 60,
+        project: PROJECT,
+        teams: [`a${Effect.pipe('b', EffectString.repeat(128))}`],
+      }),
     ).toThrow(/team/i);
     expect(() => buildContextHealthSchedulePlanV1({cadenceMinutes: 60, project: 'threadnote/other'})).toThrow(
       /project/i,
@@ -307,9 +324,9 @@ describe('context health aggregation and schedule contract', () => {
         fc.uniqueArray(fc.stringMatching(/^[a-z][a-z0-9-]{0,11}$/u), {maxLength: 8}),
         fc
           .array(fc.constantFrom(...'0123456789abcdef'), {maxLength: 64, minLength: 64})
-          .map(characters => characters.join('')),
+          .map(characters => EffectArray.join(characters, '')),
         (teams, revision) => {
-          const sources = teams.map((team, index) => completeTeam(team, report(index % 2), revision));
+          const sources = EffectArray.map(teams, (team, index) => completeTeam(team, report(index % 2), revision));
           const forward = aggregateContextHealthReportsV1({
             personal: completePersonal(report()),
             project: PROJECT,
@@ -341,7 +358,7 @@ describe('context health aggregation and schedule contract', () => {
     const changed = aggregateContextHealthReportsV1({
       personal: completePersonal(report()),
       project: PROJECT,
-      teams: [completeTeam('platform', report(), 'f'.repeat(64))],
+      teams: [completeTeam('platform', report(), Effect.pipe('f', EffectString.repeat(64)))],
     });
     expect(changed.aggregateId).not.toBe(first.aggregateId);
   });

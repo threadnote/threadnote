@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {canonicalJson} from '../checkpoint/canonical_json.js';
@@ -13,6 +14,9 @@ import {ensureSharedGraphBlob as ensureSharedLayerBlob, type GraphShareBlobSourc
 import {parseSha256Digest, type Sha256Digest} from './digest.js';
 import {graphSharingFailure, graphSharingUnavailable, GraphSharingError} from './errors.js';
 import {GRAPH_SHARE_HTTP_CAS_MAX_BYTES} from './oci.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CHECKPOINT_IO_CHUNK_BYTES = 64 * 1_024;
 const GRAPH_SHARE_CHECKPOINT_METADATA_SCHEMA_VERSION = 1 as const;
@@ -44,12 +48,12 @@ export function parseGraphShareCheckpointMetadata(value: unknown): GraphShareChe
   if (value.mediaType !== GRAPH_SHARE_CHECKPOINT_MEDIA_TYPE && value.mediaType !== GRAPH_SHARE_DELTA_MEDIA_TYPE) {
     throw graphSharingFailure('Checkpoint metadata media type is not supported.');
   }
-  if (!Array.isArray(value.chunks) || value.chunks.length > 16_384) {
+  if (!EffectArray.isArray(value.chunks) || value.chunks.length > 16_384) {
     throw graphSharingFailure('Checkpoint metadata chunk list is invalid.');
   }
   const metadata: GraphShareCheckpointMetadataV1 = {
     artifactDigest: parseSha256Digest(requiredText(value.artifactDigest, 'artifactDigest')),
-    chunks: value.chunks.map(parseChunkLayer),
+    chunks: EffectArray.map(value.chunks, parseChunkLayer),
     mediaType: value.mediaType,
     prefixDigest: parseSha256Digest(requiredText(value.prefixDigest, 'prefixDigest')),
     schemaVersion: GRAPH_SHARE_CHECKPOINT_METADATA_SCHEMA_VERSION,
@@ -57,7 +61,7 @@ export function parseGraphShareCheckpointMetadata(value: unknown): GraphShareChe
   for (const [index, chunk] of metadata.chunks.entries()) {
     if (chunk.ordinal !== index) throw graphSharingFailure('Checkpoint metadata chunk ordinals are not contiguous.');
   }
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(Object.keys(metadata).sort())) {
+  if (JSON.stringify(EffectRecord.keys(value).sort()) !== JSON.stringify(EffectRecord.keys(metadata).sort())) {
     throw graphSharingFailure('Checkpoint metadata contains unsupported fields.');
   }
   return metadata;
@@ -201,7 +205,7 @@ const materializeSharedCheckpoint = Effect.fn('codeGraph.sharing.materializeChec
         error =>
           Schema.is(GraphSharingError)(error) &&
           error.kind === 'unavailable' &&
-          error.message.includes('exceeds the HTTP transfer limit'),
+          Effect2.pipe(error.message, EffectString.includes('exceeds the HTTP transfer limit')),
         () =>
           graphSharingUnavailable(
             `Checkpoint exceeds the HTTP CAS limit; metadataDigest is required: ${artifactDigest}`,
@@ -287,7 +291,7 @@ function parseChunkLayer(value: unknown): GraphShareCheckpointChunkLayerV1 {
     digest: parseSha256Digest(requiredText(value.digest, 'chunks.digest')),
     ordinal: requiredOrdinal(value.ordinal),
   };
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(Object.keys(chunk).sort())) {
+  if (JSON.stringify(EffectRecord.keys(value).sort()) !== JSON.stringify(EffectRecord.keys(chunk).sort())) {
     throw graphSharingFailure('Checkpoint metadata chunk contains unsupported fields.');
   }
   return chunk;
@@ -301,14 +305,14 @@ function requiredOrdinal(value: unknown): number {
 }
 
 function requiredText(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 128) {
+  if (typeof value !== 'string' || Effect2.pipe(value, EffectString.trim).length === 0 || value.length > 128) {
     throw graphSharingFailure(`Checkpoint metadata field ${label} is invalid.`);
   }
   return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function isUnavailableSharingFailure(error: unknown): error is GraphSharingError {

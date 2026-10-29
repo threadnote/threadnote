@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type * as SqlClient from 'effect/sql/SqlClient';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
@@ -18,11 +19,12 @@ export function normalizeWorksetScopeReceipt(input: CodeGraphWorksetScopeReceipt
     }
     return {scopeId, completeness: 'legacy-full'};
   }
+  const completeness = input.completeness;
   if (
     !/^code-graph-scope:[0-9a-f]{64}$/u.test(scopeId) ||
     !/^[0-9a-f]{64}$/u.test(input.definitionDigest ?? '') ||
     !/^[0-9a-f]{64}$/u.test(input.closureDigest ?? '') ||
-    (input.completeness !== 'complete' && input.completeness !== 'partial')
+    (completeness !== 'complete' && completeness !== 'partial')
   ) {
     throw CodeGraphWorksetCatalogError.of('invalid-input', 'The scoped Workset receipt is missing or invalid.');
   }
@@ -62,12 +64,17 @@ export interface WorksetScopeRow {
 
 export function decodeWorksetScopeRow(row: WorksetScopeRow): CodeGraphWorksetScopeReceiptV1 {
   // Pristine v4 readers have no scope columns; connection admission validates that legacy schema first.
-  if ([row.scope_id, row.definition_digest, row.closure_digest, row.completeness].every(value => value === undefined)) {
+  if (
+    EffectArray.every(
+      [row.scope_id, row.definition_digest, row.closure_digest, row.completeness],
+      value => value === undefined,
+    )
+  ) {
     return normalizeWorksetScopeReceipt({});
   }
   if (
     typeof row.scope_id !== 'string' ||
-    typeof row.completeness !== 'string' ||
+    (row.completeness !== 'complete' && row.completeness !== 'partial' && row.completeness !== 'legacy-full') ||
     (row.definition_digest !== null && typeof row.definition_digest !== 'string') ||
     (row.closure_digest !== null && typeof row.closure_digest !== 'string')
   ) {
@@ -78,7 +85,7 @@ export function decodeWorksetScopeRow(row: WorksetScopeRow): CodeGraphWorksetSco
       scopeId: row.scope_id,
       ...(row.definition_digest === null ? {} : {definitionDigest: row.definition_digest}),
       ...(row.closure_digest === null ? {} : {closureDigest: row.closure_digest}),
-      completeness: row.completeness as CodeGraphWorksetScopeReceiptV1['completeness'],
+      completeness: row.completeness,
     });
   } catch (cause) {
     throw CodeGraphWorksetCatalogError.of('corrupt', 'Stored Workset scope receipt is inconsistent.', {cause});
@@ -91,8 +98,11 @@ export function validateWorksetScopeReadSchema(sql: SqlClient.SqlClient) {
       "SELECT value FROM catalog_metadata WHERE key = 'scope_receipt_version'",
     );
     const columns = yield* sql.unsafe<{readonly name: string}>('PRAGMA table_info(repository_snapshots)');
-    const present = columns.filter(column =>
-      ['scope_id', 'definition_digest', 'closure_digest', 'completeness'].includes(column.name),
+    const present = EffectArray.filter(
+      columns,
+      (column, __effectArrayIndex) =>
+        __effectArrayIndex in columns &&
+        ['scope_id', 'definition_digest', 'closure_digest', 'completeness'].includes(column.name),
     ).length;
     if (versions.length === 0 && present === 0) return;
     if (versions.length !== 1 || versions[0].value !== '1' || present !== 4) {
@@ -133,7 +143,7 @@ export function migrateWorksetScopeReceipts(sql: SqlClient.SqlClient) {
   return sql.withTransaction(
     Effect.gen(function* () {
       const columns = yield* sql.unsafe<{readonly name: string}>('PRAGMA table_info(repository_snapshots)');
-      const names = new Set(columns.map(column => column.name));
+      const names = new Set(EffectArray.map(columns, column => column.name));
       const versions = yield* sql.unsafe<{readonly value: unknown}>(
         "SELECT value FROM catalog_metadata WHERE key = 'scope_receipt_version'",
       );
@@ -144,8 +154,9 @@ export function migrateWorksetScopeReceipts(sql: SqlClient.SqlClient) {
         ['completeness', "TEXT NOT NULL DEFAULT 'legacy-full'"],
       ];
       if (
-        (versions.length === 0 && additions.some(([name]) => names.has(name))) ||
-        (versions.length > 0 && (versions[0].value !== '1' || additions.some(([name]) => !names.has(name))))
+        (versions.length === 0 && EffectArray.some(additions, ([name]) => names.has(name))) ||
+        (versions.length > 0 &&
+          (versions[0].value !== '1' || EffectArray.some(additions, ([name]) => !names.has(name))))
       ) {
         return yield* CodeGraphWorksetCatalogError.of(
           'corrupt',

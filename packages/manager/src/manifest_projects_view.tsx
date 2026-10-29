@@ -1,3 +1,11 @@
+import {
+  isCodeGraphProjectScopePreview,
+  isManagerManifestProject,
+  isManagerManifestProjectMutationResult,
+} from './api/response_guards.js';
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {ArrowLeft, FolderGit2, Plus} from 'lucide-react';
 import {PageActions} from './workspace.js';
 import {Schema} from 'effect';
@@ -11,6 +19,9 @@ import type {
   ManagerWorksetProjectSummary,
 } from '@threadnote/manager/workset/contracts';
 import type {CodeGraphProjectScopePreview} from '@threadnote/graph/scope/preview';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 interface ProjectDraft {
   readonly graphEnabled: boolean;
@@ -55,7 +66,11 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
   useEffect(() => {
     const projects = props.catalog?.projects ?? [];
     setSelectedName(current =>
-      projects.some(project => project.name.toLowerCase() === current.toLowerCase())
+      EffectArray.some(
+        projects,
+        project =>
+          Effect.pipe(project.name, EffectString.toLowerCase) === Effect.pipe(current, EffectString.toLowerCase),
+      )
         ? current
         : (projects[0]?.name ?? ''),
     );
@@ -99,6 +114,7 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
         `/api/worksets/project?project=${encodeURIComponent(name)}`,
         undefined,
         {signal: controller.signal},
+        isManagerManifestProject,
       );
       if (sequence !== detailSequenceRef.current || controller.signal.aborted) return;
       setSelectedProject(project);
@@ -133,13 +149,23 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
     setDraft({
       mode: 'edit',
       graphEnabled: selectedProject.graph !== undefined,
-      graphIncludeText: selectedProject.graph?.include?.join('\n') ?? '',
-      graphRootsText: selectedProject.graph?.roots.join('\n') ?? '',
+      graphIncludeText:
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(selectedProject.graph?.include), __effectArrayJoinReceiver =>
+            EffectArray.join(__effectArrayJoinReceiver, '\n'),
+          ),
+        ) ?? '',
+      graphRootsText:
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(selectedProject.graph?.roots), __effectArrayJoinReceiver =>
+            EffectArray.join(__effectArrayJoinReceiver, '\n'),
+          ),
+        ) ?? '',
       graphWasConfigured: selectedProject.graph !== undefined,
       name: selectedProject.name,
       originalName: selectedProject.name,
       path: selectedProject.path,
-      seedText: selectedProject.seed.join('\n'),
+      seedText: EffectArray.join(selectedProject.seed, '\n'),
       uri: selectedProject.uri,
     });
   }
@@ -149,34 +175,46 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
     setBusy(true);
     setNotice('');
     try {
-      const result = await api<ManagerManifestProjectMutationResult>('/api/worksets/projects', {
-        expectedRevision: props.catalog.revision,
-        ...(draft.graphEnabled
-          ? {
-              graph: {
-                closure: 'dependencies',
-                include: seedLines(draft.graphIncludeText),
-                roots: seedLines(draft.graphRootsText),
-              },
-            }
-          : draft.mode === 'edit' && draft.graphWasConfigured
-            ? {clearGraph: true}
-            : {}),
-        name: draft.name,
-        operation: draft.mode === 'create' ? 'create' : 'update',
-        path: draft.path,
-        seed: seedLines(draft.seedText),
-        uri: draft.uri,
-        ...(draft.originalName === undefined ? {} : {project: draft.originalName}),
-      });
+      const result = await api<ManagerManifestProjectMutationResult>(
+        '/api/worksets/projects',
+        {
+          expectedRevision: props.catalog.revision,
+          ...(draft.graphEnabled
+            ? {
+                graph: {
+                  closure: 'dependencies',
+                  include: seedLines(draft.graphIncludeText),
+                  roots: seedLines(draft.graphRootsText),
+                },
+              }
+            : draft.mode === 'edit' && draft.graphWasConfigured
+              ? {clearGraph: true}
+              : {}),
+          name: draft.name,
+          operation: draft.mode === 'create' ? 'create' : 'update',
+          path: draft.path,
+          seed: seedLines(draft.seedText),
+          uri: draft.uri,
+          ...(draft.originalName === undefined ? {} : {project: draft.originalName}),
+        },
+        undefined,
+        isManagerManifestProjectMutationResult,
+      );
       props.onCatalog(result.catalog);
       const savedName =
-        result.catalog.projects.find(project => project.name.toLowerCase() === draft.name.toLowerCase())?.name ??
-        draft.name;
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            result.catalog.projects,
+            project =>
+              Effect.pipe(project.name, EffectString.toLowerCase) === Effect.pipe(draft.name, EffectString.toLowerCase),
+          ),
+        )?.name ?? draft.name;
       setSelectedName(savedName);
       setSelectedProject(undefined);
       setDraft(undefined);
-      setNotice(result.warnings.join(' ') || (result.changed ? 'Manifest project saved.' : 'No project change.'));
+      setNotice(
+        EffectArray.join(result.warnings, ' ') || (result.changed ? 'Manifest project saved.' : 'No project change.'),
+      );
     } catch (cause) {
       if (Schema.is(ManagerApiError)(cause) && cause.code === 'revision-conflict') {
         setNotice('The manifest changed. Projects were refreshed; your draft is preserved for review and retry.');
@@ -207,6 +245,7 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
         `/api/worksets/project-graph-preview?project=${encodeURIComponent(selectedProject.name)}`,
         undefined,
         {signal: controller.signal},
+        isCodeGraphProjectScopePreview,
       );
       if (sequence !== scopePreviewSequenceRef.current || controller.signal.aborted) return;
       setScopePreview(preview);
@@ -231,7 +270,7 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
     const affectedWorksets =
       visibleWorksets.length === 0
         ? ''
-        : `: ${visibleWorksets.join(', ')}${omittedWorksets > 0 ? `, +${omittedWorksets} more` : ''}`;
+        : `: ${EffectArray.join(visibleWorksets, ', ')}${omittedWorksets > 0 ? `, +${omittedWorksets} more` : ''}`;
     const confirmed = await dialogs.confirm({
       cancelLabel: 'Keep project',
       confirmLabel: 'Confirm project deletion',
@@ -245,16 +284,23 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
     setBusy(true);
     setNotice('');
     try {
-      const result = await api<ManagerManifestProjectMutationResult>('/api/worksets/projects', {
-        confirm: true,
-        expectedRevision: props.catalog.revision,
-        operation: 'delete',
-        project: project.name,
-      });
+      const result = await api<ManagerManifestProjectMutationResult>(
+        '/api/worksets/projects',
+        {
+          confirm: true,
+          expectedRevision: props.catalog.revision,
+          operation: 'delete',
+          project: project.name,
+        },
+        undefined,
+        isManagerManifestProjectMutationResult,
+      );
       props.onCatalog(result.catalog);
       setSelectedName(result.catalog.projects[0]?.name ?? '');
       setSelectedProject(undefined);
-      setNotice(result.warnings.join(' ') || 'Manifest project deleted. Referencing Worksets are now unresolved.');
+      setNotice(
+        EffectArray.join(result.warnings, ' ') || 'Manifest project deleted. Referencing Worksets are now unresolved.',
+      );
     } catch (cause) {
       setNotice(errorMessage(cause));
       await props.onRefreshCatalog();
@@ -263,9 +309,17 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
     }
   }
 
-  const selectedSummary = props.catalog?.projects.find(
-    project => project.name.toLowerCase() === selectedName.toLowerCase(),
-  );
+  const selectedSummary =
+    props.catalog === undefined
+      ? undefined
+      : EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            props.catalog.projects,
+            project =>
+              Effect.pipe(project.name, EffectString.toLowerCase) ===
+              Effect.pipe(selectedName, EffectString.toLowerCase),
+          ),
+        );
   const projectsReadOnly = props.catalog?.projectsReadOnly ?? true;
 
   return (
@@ -290,26 +344,30 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
           ) : null}
           <ProjectEditabilityBoundary catalog={props.catalog} />
           {props.catalogError ? <p role="alert">{props.catalogError}</p> : null}
-          {props.catalog?.projects.map(project => (
-            <section className="workspace-card" key={project.name}>
-              <div className="workspace-row">
-                <FolderGit2 />
-                <div className="row-copy">
-                  <strong>{project.name}</strong>
-                  <p>{managerManifestProjectLocation(project)}</p>
-                </div>
-                <span className="workspace-status neutral">{project.worksetCount} worksets</span>
-                <button
-                  onClick={() => {
-                    setSelectedName(project.name);
-                    setDetailsOpen(true);
-                  }}
-                >
-                  Project settings
-                </button>
-              </div>
-            </section>
-          ))}
+          {EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(props.catalog?.projects), __effectArrayReceiver =>
+              EffectArray.map(__effectArrayReceiver, project => (
+                <section className="workspace-card" key={project.name}>
+                  <div className="workspace-row">
+                    <FolderGit2 />
+                    <div className="row-copy">
+                      <strong>{project.name}</strong>
+                      <p>{managerManifestProjectLocation(project)}</p>
+                    </div>
+                    <span className="workspace-status neutral">{project.worksetCount} worksets</span>
+                    <button
+                      onClick={() => {
+                        setSelectedName(project.name);
+                        setDetailsOpen(true);
+                      }}
+                    >
+                      Project settings
+                    </button>
+                  </div>
+                </section>
+              )),
+            ),
+          )}
           {props.catalog?.projects.length === 0 ? (
             <section className="workspace-card">
               <div className="workspace-pad">
@@ -350,21 +408,35 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
           <ProjectEditabilityBoundary catalog={props.catalog} />
           {props.catalogError ? <p className="worksets-error">{props.catalogError}</p> : null}
           <div className="worksets-definition-list projects-list">
-            {props.catalog?.projects.map(project => (
-              <button
-                aria-current={selectedName.toLowerCase() === project.name.toLowerCase() ? 'true' : undefined}
-                className={selectedName.toLowerCase() === project.name.toLowerCase() ? 'is-selected' : undefined}
-                key={project.name}
-                onClick={() => setSelectedName(project.name)}
-                type="button"
-              >
-                <strong>{project.name}</strong>
-                <span>{managerManifestProjectLocation(project)}</span>
-                <span>
-                  {project.worksetCount} {project.worksetCount === 1 ? 'Workset' : 'Worksets'}
-                </span>
-              </button>
-            ))}
+            {EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(props.catalog?.projects), __effectArrayReceiver =>
+                EffectArray.map(__effectArrayReceiver, project => (
+                  <button
+                    aria-current={
+                      Effect.pipe(selectedName, EffectString.toLowerCase) ===
+                      Effect.pipe(project.name, EffectString.toLowerCase)
+                        ? 'true'
+                        : undefined
+                    }
+                    className={
+                      Effect.pipe(selectedName, EffectString.toLowerCase) ===
+                      Effect.pipe(project.name, EffectString.toLowerCase)
+                        ? 'is-selected'
+                        : undefined
+                    }
+                    key={project.name}
+                    onClick={() => setSelectedName(project.name)}
+                    type="button"
+                  >
+                    <strong>{project.name}</strong>
+                    <span>{managerManifestProjectLocation(project)}</span>
+                    <span>
+                      {project.worksetCount} {project.worksetCount === 1 ? 'Workset' : 'Worksets'}
+                    </span>
+                  </button>
+                )),
+              ),
+            )}
             {props.catalog && props.catalog.projects.length === 0 ? <p>No manifest projects yet.</p> : null}
           </div>
           <button className="quiet-button" onClick={() => void props.onRefreshCatalog()} type="button">
@@ -428,14 +500,18 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
                     </div>
                     <div>
                       <dt>Seed patterns</dt>
-                      <dd>{selectedProject.seed.length > 0 ? selectedProject.seed.join(', ') : 'No seed patterns'}</dd>
+                      <dd>
+                        {selectedProject.seed.length > 0
+                          ? EffectArray.join(selectedProject.seed, ', ')
+                          : 'No seed patterns'}
+                      </dd>
                     </div>
                     <div>
                       <dt>Graph scope</dt>
                       <dd>
                         {selectedProject.graph === undefined
                           ? 'Full repository (no optional scope configured)'
-                          : `${selectedProject.graph.roots.join(', ')} · dependency closure`}
+                          : `${EffectArray.join(selectedProject.graph.roots, ', ')} · dependency closure`}
                       </dd>
                     </div>
                   </dl>
@@ -512,13 +588,13 @@ function ProjectScopePreview(props: {readonly preview: CodeGraphProjectScopePrev
         <div>
           <dt>Repository</dt>
           <dd>
-            {preview.repository.displayName} @ {preview.repository.commit.slice(0, 12)}
+            {preview.repository.displayName} @ {Effect.pipe(preview.repository.commit, EffectString.slice(0, 12))}
             {preview.repository.dirty ? ' (dirty)' : ''}
           </dd>
         </div>
         <div>
           <dt>Root components</dt>
-          <dd>{preview.scope.rootComponents.join(', ') || 'Full repository'}</dd>
+          <dd>{EffectArray.join(preview.scope.rootComponents, ', ') || 'Full repository'}</dd>
         </div>
         <div>
           <dt>Dependency components</dt>
@@ -526,12 +602,12 @@ function ProjectScopePreview(props: {readonly preview: CodeGraphProjectScopePrev
         </div>
         <div>
           <dt>Additional includes</dt>
-          <dd>{preview.scope.includes.join(', ') || 'None'}</dd>
+          <dd>{EffectArray.join(preview.scope.includes, ', ') || 'None'}</dd>
         </div>
       </dl>
       {preview.scope.diagnostics.length > 0 ? (
         <ul className="project-scope-preview-diagnostics">
-          {preview.scope.diagnostics.map(diagnostic => (
+          {EffectArray.map(preview.scope.diagnostics, diagnostic => (
             <li key={diagnostic}>{diagnostic}</li>
           ))}
         </ul>
@@ -695,9 +771,9 @@ function ProjectEditor(props: {
           <button
             disabled={
               props.busy ||
-              !props.draft.name.trim() ||
-              !props.draft.path.trim() ||
-              !props.draft.uri.trim() ||
+              !Effect.pipe(props.draft.name, EffectString.trim) ||
+              !Effect.pipe(props.draft.path, EffectString.trim) ||
+              !Effect.pipe(props.draft.uri, EffectString.trim) ||
               (props.draft.graphEnabled && seedLines(props.draft.graphRootsText).length === 0)
             }
             onClick={props.onSave}
@@ -721,7 +797,12 @@ function Metric(props: {readonly label: string; readonly value: string}): React.
 }
 
 function seedLines(value: string): readonly string[] {
-  return value.split(/\r?\n/u).filter(line => line.length > 0);
+  return EffectArrayPipe(value, EffectString.split(/\r?\n/u), __effectFilterValues =>
+    EffectArray.filter(
+      __effectFilterValues,
+      (line, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && line.length > 0,
+    ),
+  );
 }
 
 function branchLabel(project: ManagerWorksetProjectSummary): string {
@@ -743,7 +824,12 @@ export function managerManifestProjectLocation(project: ManagerWorksetProjectSum
         : project.branchState === 'not-observed'
           ? 'branch observation deferred'
           : 'branch observation unavailable';
-  return [observedBranch, project.folder, project.path]
-    .filter((value, index, values) => value && values.indexOf(value) === index)
-    .join(' · ');
+  const values = [observedBranch, project.folder, project.path];
+  return EffectArray.join(
+    EffectArray.filter(
+      values,
+      (value, index): value is string => value !== undefined && value !== '' && values.indexOf(value) === index,
+    ),
+    ' · ',
+  );
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {ContextBriefCitationScaleObservationDescriptor} from '@threadnote/threadnote/evaluation/context-brief-citation-scale';
 import {
   CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS,
@@ -45,12 +46,12 @@ export function expectedObservationDescriptors(
   samples: number,
   warmups: number,
 ): readonly ContextBriefCitationScaleObservationDescriptor[] {
-  const rss = CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS.flatMap(profileId =>
+  const rss = EffectArray.flatMap(CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS, profileId =>
     Array.from({length: samples}, (_, ordinal) => ({pass: 'rss-memory' as const, profileId, ordinal})),
   );
   return [
     ...rss,
-    ...CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS.flatMap(profileId => [
+    ...EffectArray.flatMap(CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS, profileId => [
       ...Array.from({length: warmups}, (_, ordinal) => ({pass: 'warmup' as const, profileId, ordinal})),
       ...Array.from({length: samples}, (_, ordinal) => ({pass: 'timed' as const, profileId, ordinal})),
     ]),
@@ -59,20 +60,21 @@ export function expectedObservationDescriptors(
 
 export function observationCoverage(markers: readonly ObservationMarker[], samples: number, warmups: number) {
   const expected = expectedObservationDescriptors(samples, warmups);
-  const actual = markers.map(({pass, profileId, ordinal}) => ({pass, profileId, ordinal}));
+  const actual = EffectArray.map(markers, ({pass, profileId, ordinal}) => ({pass, profileId, ordinal}));
   return {
     complete:
       JSON.stringify(actual) === JSON.stringify(expected) &&
-      markers.every(marker => marker.outcome === 'success' && marker.counters !== undefined),
+      EffectArray.every(markers, marker => marker.outcome === 'success' && marker.counters !== undefined),
     expectedObservations: expected.length,
     observedObservations: markers.length,
-    detailedObservations: markers.filter(marker => marker.details === 'collected').length,
-    intentionallyOmittedObservations: markers.filter(marker => marker.details === 'intentionally-omitted').length,
-    profiles: CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS.map(profileId => ({
+    detailedObservations: EffectArray.filter(markers, marker => marker.details === 'collected').length,
+    intentionallyOmittedObservations: EffectArray.filter(markers, marker => marker.details === 'intentionally-omitted')
+      .length,
+    profiles: EffectArray.map(CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS, profileId => ({
       profileId,
-      passes: (['rss-memory', 'warmup', 'timed'] as const).map(pass => ({
+      passes: EffectArray.map(['rss-memory', 'warmup', 'timed'] as const, pass => ({
         pass,
-        observed: markers.filter(marker => marker.profileId === profileId && marker.pass === pass).length,
+        observed: EffectArray.filter(markers, marker => marker.profileId === profileId && marker.pass === pass).length,
       })),
     })),
   };
@@ -91,10 +93,10 @@ export function diagnosticEvidence(artifact: ContextBriefCitationScaleArtifactV2
       fixture: artifact.fixture,
       samples: artifact.samples,
       warmups: artifact.warmups,
-      profiles: artifact.profiles.map(profile => profile.profile),
+      profiles: EffectArray.map(artifact.profiles, profile => profile.profile),
     },
     builtExecution: artifact.execution,
-    metrics: artifact.profiles.map(profile => ({
+    metrics: EffectArray.map(artifact.profiles, profile => ({
       profileId: profile.profile.id,
       measurements: profile.measurements,
       counters: profile.counters,

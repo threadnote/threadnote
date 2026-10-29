@@ -1,10 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect} from 'effect';
 import {CliOutput} from './cli/output.js';
 import {SystemInfo} from '@threadnote/platform/system';
 
 function capturingConsole(parent: Console.Console, lines: string[]): Console.Console {
   const append = (...args: readonly unknown[]): void => {
-    lines.push(args.map(String).join(' '));
+    lines.push(EffectArray.join(EffectArray.map(args, String), ' '));
   };
   return {
     ...parent,
@@ -41,7 +42,7 @@ export function captureConsole<A, E, R>(
     return effect.pipe(
       Effect.provideService(Console.Console, service),
       Effect.provideService(CliOutput, cliOutput),
-      Effect.map(value => ({output: lines.join('\n'), value})),
+      Effect.map(value => ({output: EffectArray.join(lines, '\n'), value})),
     );
   });
 }

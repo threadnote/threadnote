@@ -1,10 +1,13 @@
 import {Schema} from 'effect';
 import type {DevSkillsMutationLease} from './lease.js';
 
-export class DevSkillsError extends Schema.TaggedError<DevSkillsError>()('DevSkillsError', {
-  code: Schema.String,
-  message: Schema.String,
-}) {}
+export class DevSkillsError extends Schema.TaggedError<DevSkillsError, {readonly brand: unique symbol}>()(
+  'DevSkillsError',
+  {
+    code: Schema.String,
+    message: Schema.String,
+  },
+) {}
 
 export type DevSkillsScope = 'user' | 'project' | 'local';
 export type DevSkillsProfile = 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal';

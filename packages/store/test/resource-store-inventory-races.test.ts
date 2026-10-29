@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError} from 'effect';
@@ -8,6 +9,8 @@ import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-invalidation';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const systemLayer = SystemInfo.layer.pipe(
   Layer.provide(
@@ -59,7 +62,7 @@ for (const mode of ['create', 'replace'] as const) {
       if (mode === 'replace') yield* f.store.write(f.location, uri, 'old', {mode: 'create'});
       const store = yield* f.withFs({
         link: (source, target) =>
-          source.endsWith('.tmp') && f.path.dirname(source) === f.directory
+          Effect2.pipe(source, EffectString.endsWith('.tmp')) && f.path.dirname(source) === f.directory
             ? Effect.gen(function* () {
                 temporary = source;
                 yield* Deferred.succeed(ready, undefined);
@@ -68,7 +71,7 @@ for (const mode of ['create', 'replace'] as const) {
               })
             : f.fs.link(source, target),
         rename: (source, target) =>
-          source.endsWith('.tmp') && f.path.dirname(source) === f.directory
+          Effect2.pipe(source, EffectString.endsWith('.tmp')) && f.path.dirname(source) === f.directory
             ? Effect.gen(function* () {
                 temporary = source;
                 yield* Deferred.succeed(ready, undefined);
@@ -99,9 +102,9 @@ for (const mode of ['create', 'replace'] as const) {
       expect(f.path.dirname(temporary)).toBe(f.directory);
       const entries = yield* store.list(f.location, ROOT);
       yield* Fiber.join(writer);
-      expect(entries.some(entry => entry.uri.includes('.tmp'))).toBe(false);
+      expect(EffectArray.some(entries, entry => Effect2.pipe(entry.uri, EffectString.includes('.tmp')))).toBe(false);
       expect(yield* store.read(f.location, uri)).toBe('new');
-      expect(entries.some(entry => entry.uri === `${ROOT}/seed.md`)).toBe(true);
+      expect(EffectArray.some(entries, entry => entry.uri === `${ROOT}/seed.md`)).toBe(true);
     }).pipe(run),
   );
 }
@@ -134,7 +137,7 @@ for (const kind of ['file', 'directory'] as const) {
           );
         },
       });
-      expect((yield* store.list(f.location, ROOT, {recursive: true})).map(entry => entry.uri)).toEqual([
+      expect(EffectArray.map(yield* store.list(f.location, ROOT, {recursive: true}), entry => entry.uri)).toEqual([
         `${ROOT}/seed.md`,
       ]);
     }).pipe(run),

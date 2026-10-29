@@ -12,6 +12,8 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {projectRecallMcpResponse} from '@threadnote/recall/mcp/response';
 import {SystemInfo} from '@threadnote/platform/system';
 import {recallCandidateIsEligible} from '@threadnote/recall/eligibility';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const fixture = Effect.acquireRelease(
   Effect.sync(() => mkdtempSync(join(tmpdir(), 'threadnote-recall-scope-'))),
@@ -87,7 +89,7 @@ effectIt.effect(
         expect(recallCandidateIsEligible(scope.eligibility, {kind: 'preference', project: 'style'})).toBe(true);
         expect(scope.provenance.reason).toBe('workspace-checkout');
       }
-      const unicode = yield* resolve({project: '界'.repeat(100)});
+      const unicode = yield* resolve({project: Effect2.pipe('界', EffectString.repeat(100))});
       expect(unicode.provenance.truncatedProjectNames).toBe(true);
       for (const responseFormat of ['agent', 'dual'] as const) {
         const response = projectRecallMcpResponse(

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -7,6 +8,8 @@ import {
   orderCodeGraphBuilderAdmissionTickets as order,
   selectCodeGraphBuilderAdmissionTickets as select,
 } from '@threadnote/graph/builder/admission_scheduler';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const checkoutId = fc.option(fc.constantFrom('a', 'b', 'c'), {nil: undefined});
 const candidate = fc.record({
@@ -28,7 +31,9 @@ describe('checkout-aware builder scheduler properties', () => {
         (input, active, now, priority) => {
           const original = structuredClone(input);
           const permuted = [...input].sort(
-            (left, right) => priority(left.token) - priority(right.token) || left.token.localeCompare(right.token),
+            (left, right) =>
+              priority(left.token) - priority(right.token) ||
+              Effect.pipe(left.token, EffectString.localeCompare(right.token)),
           );
           const result = select(input, active, now);
           expect(select(permuted, active, now)).toEqual(result);
@@ -36,8 +41,8 @@ describe('checkout-aware builder scheduler properties', () => {
           expect(select(input, active, now)).toEqual(result);
           expect(input).toEqual(original);
           expect(result.length + active.length).toBeLessThanOrEqual(capacity);
-          expect(new Set(result.map(value => value.token)).size).toBe(result.length);
-          expect(result.every(value => input.includes(value))).toBe(true);
+          expect(new Set(EffectArray.map(result, value => value.token)).size).toBe(result.length);
+          expect(EffectArray.every(result, value => input.includes(value))).toBe(true);
         },
       ),
       {numRuns: 200},
@@ -49,7 +54,9 @@ describe('checkout-aware builder scheduler properties', () => {
       fc.property(tickets, fc.integer({min: 0, max: aging * 3}), fc.func(fc.integer()), (input, now, priority) => {
         const active = ['a', 'b'];
         const permuted = [...input].sort(
-          (left, right) => priority(left.token) - priority(right.token) || left.token.localeCompare(right.token),
+          (left, right) =>
+            priority(left.token) - priority(right.token) ||
+            Effect.pipe(left.token, EffectString.localeCompare(right.token)),
         );
         expect(select(input, active, now)).toEqual([]);
         expect(projectQueue(permuted, active, now)).toEqual(projectQueue(input, active, now));
@@ -63,12 +70,12 @@ describe('checkout-aware builder scheduler properties', () => {
     fc.assert(
       fc.property(tickets, fc.array(checkoutId, {maxLength: capacity - 1}), (input, active) => {
         const selected = select(input, active, 0);
-        const occupied = new Set(active.filter((value): value is 'a' | 'b' | 'c' => value !== undefined));
+        const occupied = new Set(EffectArray.filter(active, (value): value is 'a' | 'b' | 'c' => value !== undefined));
         const remaining = [...input];
         for (const ticket of selected) {
           if (
             ticket.checkoutId !== undefined &&
-            remaining.some(value => value.checkoutId !== undefined && !occupied.has(value.checkoutId))
+            EffectArray.some(remaining, value => value.checkoutId !== undefined && !occupied.has(value.checkoutId))
           )
             expect(occupied.has(ticket.checkoutId)).toBe(false);
           if (ticket.checkoutId !== undefined) occupied.add(ticket.checkoutId);
@@ -96,7 +103,9 @@ describe('checkout-aware builder scheduler properties', () => {
         fc.array(checkoutId, {maxLength: capacity}),
         fc.integer({min: 0, max: aging * 3}),
         (input, active, now) => {
-          const occupied = new Set(active.filter((value): value is 'a' | 'b' | 'c' => value !== undefined));
+          const occupied = new Set(
+            EffectArray.filter(active, (value): value is 'a' | 'b' | 'c' => value !== undefined),
+          );
           for (const ticket of select(input, active, now)) {
             if (
               ticket.admissionClass === 'background' &&
@@ -139,7 +148,7 @@ describe('checkout-aware builder scheduler properties', () => {
         fc.array(fc.integer({min: 1, max: aging * 2}), {maxLength: 40}),
         (createdAt, offsets) => {
           const background = {admissionClass: 'background' as const, checkoutId: 'a', createdAt, token: 'background'};
-          const current = offsets.map((offset, index) => ({
+          const current = EffectArray.map(offsets, (offset, index) => ({
             admissionClass: 'current-required' as const,
             checkoutId: 'a',
             createdAt: createdAt + offset,

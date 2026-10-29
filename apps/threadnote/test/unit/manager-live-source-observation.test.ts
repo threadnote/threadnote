@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer, Path, Schema, Stream} from 'effect';
@@ -170,10 +171,10 @@ describe('Manager bounded source observation', () => {
     ({now, stamps}) =>
       Effect.sync(() => {
         const member = (stamp: number, time: number) => stamp >= time - 10 && stamp <= time;
-        const before = stamps.map(stamp => member(stamp, now));
+        const before = EffectArray.map(stamps, stamp => member(stamp, now));
         let expected: number | undefined;
         for (let time = now + 1; time <= 36; time++)
-          if (stamps.some((stamp, index) => member(stamp, time) !== before[index])) {
+          if (EffectArray.some(stamps, (stamp, index) => member(stamp, time) !== before[index])) {
             expected = time;
             break;
           }

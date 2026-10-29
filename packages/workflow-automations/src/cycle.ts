@@ -1,24 +1,31 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+const CYCLE_CONTROL_CHARACTER = /[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
+const CYCLE_TEXT_CONTROL_CHARACTER = /(?!\n)[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
 
 const id = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
   Schema.makeFilter(value =>
-    value.includes('..') || ['constructor', 'prototype', '__proto__'].includes(value)
+    Effect.pipe(value, EffectString.includes('..')) || ['constructor', 'prototype', '__proto__'].includes(value)
       ? 'Reserved identifier.'
       : undefined,
   ),
 );
 export const nativeCycleHasControl = (value: string, allowLineFeed = false): boolean =>
-  [...value].some(character => {
-    const code = character.charCodeAt(0);
-    return (code < 32 && !(allowLineFeed && code === 10)) || (code >= 127 && code <= 159);
-  });
+  (allowLineFeed ? CYCLE_TEXT_CONTROL_CHARACTER : CYCLE_CONTROL_CHARACTER).test(value);
 const text = (max = 4096) =>
   Schema.String.check(
     Schema.makeFilter(value =>
-      !value.trim() || new TextEncoder().encode(value).byteLength > max || nativeCycleHasControl(value, true)
+      !Effect.pipe(value, EffectString.trim) ||
+      new TextEncoder().encode(value).byteLength > max ||
+      nativeCycleHasControl(value, true)
         ? 'Use nonblank bounded text without control characters.'
         : undefined,
     ),
@@ -29,7 +36,9 @@ const isGitObject = (value: unknown): value is string =>
   typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
 export const nativeCycleAbsolutePath = (value: string): boolean =>
   !nativeCycleHasControl(value) &&
-  (value.startsWith('/') || /^[A-Za-z]:[\\/]/u.test(value) || /^\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/u.test(value));
+  (Effect.pipe(value, EffectString.startsWith('/')) ||
+    /^[A-Za-z]:[\\/]/u.test(value) ||
+    /^\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/u.test(value));
 const memoryUri = text().check(Schema.isPattern(/^threadnote:\/\/[^\s]+$/u));
 const root = Schema.Struct({
   uri: memoryUri,
@@ -151,25 +160,29 @@ function err(message: string): never {
 function canonical(v: unknown): string {
   if (v === null || typeof v === 'string' || typeof v === 'boolean') return JSON.stringify(v);
   if (typeof v === 'number' && Number.isFinite(v)) return JSON.stringify(v);
-  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (EffectArray.isArray(v)) return `[${EffectArray.join(EffectArray.map(v, canonical), ',')}]`;
   if (v && typeof v === 'object')
-    return `{${Object.entries(v as Record<string, unknown>)
-      .filter(([, value]) => value !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`)
-      .join(',')}}`;
+    return `{${EffectArray.join(
+      EffectArray.map(
+        EffectArray.filter(EffectRecord.toEntries(v), ([, value]) => value !== undefined).sort(([a], [b]) =>
+          a < b ? -1 : a > b ? 1 : 0,
+        ),
+        ([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`,
+      ),
+      ',',
+    )}}`;
   return err('Value is not canonical JSON.');
 }
 function isJson(v: unknown, depth = 0): boolean {
   if (depth > 32) return false;
   if (v === null || typeof v === 'string' || typeof v === 'boolean') return true;
   if (typeof v === 'number') return Number.isFinite(v);
-  if (Array.isArray(v)) return v.length <= 4096 && v.every(x => isJson(x, depth + 1));
+  if (EffectArray.isArray(v)) return v.length <= 4096 && EffectArray.every(v, x => isJson(x, depth + 1));
   if (v && typeof v === 'object')
     return (
       Object.getPrototypeOf(v) === Object.prototype &&
-      Object.entries(v).length <= 4096 &&
-      Object.values(v).every(x => x === undefined || isJson(x, depth + 1))
+      EffectRecord.toEntries(v).length <= 4096 &&
+      EffectArray.every(EffectRecord.values(v), x => x === undefined || isJson(x, depth + 1))
     );
   return false;
 }
@@ -186,9 +199,14 @@ function safePath(p: string): boolean {
     new TextEncoder().encode(p).byteLength <= 4096 &&
     !/[\\:]/u.test(p) &&
     !nativeCycleHasControl(p) &&
-    !p.startsWith('/') &&
+    !Effect.pipe(p, EffectString.startsWith('/')) &&
     !/^[A-Za-z]:/u.test(p) &&
-    p.split('/').every((part, i, all) => part !== '.' && part !== '..' && (part !== '' || i === all.length - 1))
+    Effect.pipe(p, EffectString.split('/'), __effectNativeArray =>
+      EffectArray.every(
+        __effectNativeArray,
+        (part, i) => part !== '.' && part !== '..' && (part !== '' || i === __effectNativeArray.length - 1),
+      ),
+    )
   );
 }
 function validatePlan(p: NativeCyclePlan): void {
@@ -199,13 +217,16 @@ function validatePlan(p: NativeCyclePlan): void {
   )
     err('Plan contains non-JSON metadata.');
   if (new TextEncoder().encode(canonical(p)).length > 1_000_000) err('Plan exceeds its canonical byte limit.');
-  const ids = new Set(p.phases.map(x => x.id));
+  const ids = new Set(EffectArray.map(p.phases, x => x.id));
   if (ids.size !== p.phases.length) err('Duplicate phase IDs.');
   const acceptanceIds = new Set<string>();
   for (const ph of p.phases) {
-    if (new Set(ph.dependsOn).size !== ph.dependsOn.length || ph.dependsOn.some(x => !ids.has(x) || x === ph.id))
+    if (
+      new Set(ph.dependsOn).size !== ph.dependsOn.length ||
+      EffectArray.some(ph.dependsOn, x => !ids.has(x) || x === ph.id)
+    )
       err('Invalid phase dependency.');
-    if (ph.allowedPaths.some(x => !safePath(x))) err('Unsafe relative path.');
+    if (EffectArray.some(ph.allowedPaths, x => !safePath(x))) err('Unsafe relative path.');
     if (
       new Set(ph.acceptanceCriteria).size !== ph.acceptanceCriteria.length ||
       ph.acceptanceRefs.length !== ph.acceptanceCriteria.length
@@ -231,11 +252,11 @@ function validatePlan(p: NativeCyclePlan): void {
     if (visiting.has(x)) err('Dependency cycle.');
     if (done.has(x)) return;
     visiting.add(x);
-    nativeCycleEffectiveParents(p, x).forEach(visit);
+    EffectArray.forEach(nativeCycleEffectiveParents(p, x), visit);
     visiting.delete(x);
     done.add(x);
   };
-  p.phases.forEach(x => visit(x.id));
+  EffectArray.forEach(p.phases, x => visit(x.id));
 }
 export function decodeNativeCyclePlan(value: unknown): NativeCyclePlan {
   const p = decode(NativeCyclePlanSchema, value, 'Unsupported or malformed native cycle plan.');
@@ -244,18 +265,19 @@ export function decodeNativeCyclePlan(value: unknown): NativeCyclePlan {
 }
 export function decodeNativeCycleState(value: unknown): NativeCycleState {
   const omitUndefined = (input: unknown): unknown =>
-    Array.isArray(input)
-      ? input.map(omitUndefined)
+    EffectArray.isArray(input)
+      ? EffectArray.map(input, omitUndefined)
       : input && typeof input === 'object'
-        ? Object.fromEntries(
-            Object.entries(input)
-              .filter(([, item]) => item !== undefined)
-              .map(([key, item]) => [key, omitUndefined(item)]),
+        ? EffectRecord.fromEntries(
+            EffectArray.map(
+              EffectArray.filter(EffectRecord.toEntries(input), ([, item]) => item !== undefined),
+              ([key, item]) => [key, omitUndefined(item)],
+            ),
           )
         : input;
   const s = decode(NativeCycleStateSchema, omitUndefined(value), 'Malformed native cycle state.');
   validatePlan(s.plan);
-  if (canonical(Object.keys(s.phases).sort()) !== canonical(s.plan.phases.map(p => p.id).sort()))
+  if (canonical(EffectRecord.keys(s.phases).sort()) !== canonical(EffectArray.map(s.plan.phases, p => p.id).sort()))
     err('State phase keyset does not match plan.');
   for (const p of s.plan.phases) {
     const r = s.phases[p.id];
@@ -271,11 +293,11 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
       err('State proof fields are inconsistent.');
     if (r.validation) {
       if (!['validated', 'published', 'merged'].includes(r.status)) err('Inactive phase carries current validation.');
-      const criteria = r.validation.acceptance.map(item => item.criterion);
+      const criteria = EffectArray.map(r.validation.acceptance, item => item.criterion);
       if (
         new Set(criteria).size !== criteria.length ||
         criteria.length !== p.acceptanceCriteria.length ||
-        p.acceptanceCriteria.some(item => !criteria.includes(item))
+        EffectArray.some(p.acceptanceCriteria, item => !criteria.includes(item))
       )
         err('State acceptance proof is inconsistent.');
     }
@@ -293,11 +315,23 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
     if (r.delivery && r.delivery.delivery !== s.plan.delivery) err('Delivery mode does not match plan.');
     if (r.delivery?.delivery === 'local' && (r.delivery.pr || r.delivery.watch || r.delivery.commitEvidence))
       err('Local delivery carries unrelated publication fields.');
-    if (r.delivery?.delivery === 'commit' && (!r.delivery.commitEvidence?.trim() || r.delivery.pr || r.delivery.watch))
+    if (
+      r.delivery?.delivery === 'commit' &&
+      (!Effect.pipe(r.delivery.commitEvidence, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) ||
+        r.delivery.pr ||
+        r.delivery.watch)
+    )
       err('Commit delivery lacks its exact commit evidence.');
     if (r.delivery?.delivery === 'pr') {
       const pr = r.delivery.pr;
-      if (!r.delivery.commitEvidence?.trim()) err('PR delivery lacks commit evidence.');
+      if (
+        !Effect.pipe(r.delivery.commitEvidence, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        )
+      )
+        err('PR delivery lacks commit evidence.');
       if (
         !pr ||
         !/^https:\/\//u.test(pr.url) ||
@@ -312,7 +346,9 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
           r.delivery.watch.prUrl !== pr.url ||
           r.delivery.watch.headSha !== pr.headSha ||
           !nativeCycleAbsolutePath(r.delivery.watch.stateDir) ||
-          !r.delivery.commitEvidence?.trim())
+          !Effect.pipe(r.delivery.commitEvidence, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+          ))
       )
         err('Open PR receipt lacks matching watch evidence.');
       if (pr.state === 'merged' && r.status !== 'merged') err('Merged receipt has an inconsistent phase status.');
@@ -326,7 +362,7 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
   return s;
 }
 export function nativeCyclePhaseHash(plan: NativeCyclePlan, phaseId: string): string {
-  const p = plan.phases.find(x => x.id === phaseId);
+  const p = EffectOption.getOrUndefined(EffectArray.findFirst(plan.phases, x => x.id === phaseId));
   if (!p) return err('Unknown phase.');
   const {
     id: key,
@@ -348,8 +384,9 @@ export function initializeNativeCycle(value: NativeCyclePlan): NativeCycleState 
     format: 'threadnote-native-cycle',
     version: 1,
     plan,
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     phases: Object.fromEntries(
-      plan.phases.map(p => [p.id, {status: 'pending', phaseHash: nativeCyclePhaseHash(plan, p.id)}]),
+      EffectArray.map(plan.phases, p => [p.id, {status: 'pending', phaseHash: nativeCyclePhaseHash(plan, p.id)}]),
     ),
   };
 }
@@ -360,15 +397,20 @@ export type NativeCycleAction = {
 };
 /** Exact branch bindings add stack parents without changing authored material intent. */
 export function nativeCycleEffectiveParents(plan: NativeCyclePlan, idValue: string): readonly string[] {
-  const selected = plan.phases.find(p => p.id === idValue);
+  const selected = EffectOption.getOrUndefined(EffectArray.findFirst(plan.phases, p => p.id === idValue));
   if (!selected) err('Unknown phase.');
-  return plan.phases
-    .filter(
-      p =>
-        selected.dependsOn.includes(p.id) ||
-        (p.id !== selected.id && selected.branch !== selected.baseBranch && p.branch === selected.baseBranch),
-    )
-    .map(p => p.id);
+  return EffectArray.map(
+    EffectArrayPipe(plan.phases, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (p, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues &&
+          (selected.dependsOn.includes(p.id) ||
+            (p.id !== selected.id && selected.branch !== selected.baseBranch && p.branch === selected.baseBranch)),
+      ),
+    ),
+    p => p.id,
+  );
 }
 export function nativeCycleParentsReady(s: NativeCycleState, idValue: string): boolean {
   // The plan is an admitted bounded DAG. Memoization is confined to this traversal.
@@ -380,11 +422,11 @@ export function nativeCycleParentsReady(s: NativeCycleState, idValue: string): b
     const result =
       ['validated', 'published', 'merged'].includes(phase.status) &&
       (s.plan.delivery === 'local' || phase.delivery !== undefined) &&
-      nativeCycleEffectiveParents(s.plan, id).every(ready);
+      EffectArray.every(nativeCycleEffectiveParents(s.plan, id), ready);
     accepted.set(id, result);
     return result;
   };
-  return nativeCycleEffectiveParents(s.plan, idValue).every(ready);
+  return EffectArray.every(nativeCycleEffectiveParents(s.plan, idValue), ready);
 }
 export function nextNativeCycle(value: NativeCycleState): NativeCycleAction {
   const s = decodeNativeCycleState(value),
@@ -397,12 +439,26 @@ export function nextNativeCycle(value: NativeCycleState): NativeCycleAction {
       nativeCycleParentsReady(s, p.id)
     )
       return {action: 'deliver', phaseId: p.id};
-  const ready = ps.find(p => ['pending', 'active'].includes(s.phases[p.id].status) && nativeCycleParentsReady(s, p.id));
+  const ready = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      ps,
+      __effectArrayValue =>
+        !!(p => ['pending', 'active'].includes(s.phases[p.id].status) && nativeCycleParentsReady(s, p.id))(
+          __effectArrayValue,
+        ),
+    ),
+  );
   if (ready) return {action: 'implement', phaseId: ready.id};
-  const stuck = ps.find(p => ['stale', 'blocked'].includes(s.phases[p.id].status));
+  const stuck = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      ps,
+      __effectArrayValue => !!(p => ['stale', 'blocked'].includes(s.phases[p.id].status))(__effectArrayValue),
+    ),
+  );
   if (stuck)
     return {action: 'blocked', phaseId: stuck.id, reason: s.phases[stuck.id].reason ?? 'A phase is stale or blocked.'};
-  if (ps.every(p => ['validated', 'published', 'merged'].includes(s.phases[p.id].status))) return {action: 'complete'};
+  if (EffectArray.every(ps, p => ['validated', 'published', 'merged'].includes(s.phases[p.id].status)))
+    return {action: 'complete'};
   return {action: 'blocked', reason: 'No eligible phase is available.'};
 }
 export interface CycleSnapshot {
@@ -411,16 +467,20 @@ export interface CycleSnapshot {
   readonly files: readonly string[];
 }
 export function checkNativeCycleScope(phase: NativeCyclePlan['phases'][number], files: readonly string[]): boolean {
-  return files.every(
+  return EffectArray.every(
+    files,
     f =>
       safePath(f) &&
-      phase.allowedPaths.some(a => {
-        if (!a.includes('*')) return a.endsWith('/') ? f.startsWith(a) : f === a;
+      EffectArray.some(phase.allowedPaths, a => {
+        if (!Effect.pipe(a, EffectString.includes('*')))
+          return Effect.pipe(a, EffectString.endsWith('/')) ? Effect.pipe(f, EffectString.startsWith(a)) : f === a;
         const regex = new RegExp(
-          `^${a
-            .split('*')
-            .map(x => x.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'))
-            .join('.*')}$`,
+          `^${EffectArray.join(
+            EffectArray.map(Effect.pipe(a, EffectString.split('*')), x =>
+              Effect.pipe(x, EffectString.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')),
+            ),
+            '.*',
+          )}$`,
           'u',
         );
         return regex.test(f);
@@ -431,11 +491,11 @@ export function validateNativeCyclePhase(
   value: NativeCycleState,
   idValue: string,
   snapshot: CycleSnapshot,
-  evidence: NativeCycleValidation,
+  evidence: unknown,
 ): NativeCycleState {
   const s = decodeNativeCycleState(value),
     r = s.phases[idValue],
-    p = s.plan.phases.find(x => x.id === idValue);
+    p = EffectOption.getOrUndefined(EffectArray.findFirst(s.plan.phases, x => x.id === idValue));
   if (!r || !p) err('Unknown phase.');
   if (r.status === 'merged') err('Merged history cannot be rewritten.');
   if (!nativeCycleParentsReady(s, idValue)) err('Reconcile unvalidated dependencies before accepting this phase.');
@@ -452,11 +512,11 @@ export function validateNativeCyclePhase(
   )
     err('Validation does not match snapshot.');
   if (!checkNativeCycleScope(p, snapshot.files)) err('Changed paths exceed allowed scope.');
-  const covered = v.acceptance.map(x => x.criterion);
+  const covered = EffectArray.map(v.acceptance, x => x.criterion);
   if (
     new Set(covered).size !== covered.length ||
     covered.length !== p.acceptanceCriteria.length ||
-    p.acceptanceCriteria.some(x => !covered.includes(x))
+    EffectArray.some(p.acceptanceCriteria, x => !covered.includes(x))
   )
     err('Acceptance criteria coverage is incomplete.');
   if (r.head === snapshot.head && r.tree === snapshot.tree && canonical(r.validation ?? null) === canonical(v))
@@ -508,11 +568,23 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
   if (d.delivery === 'local') {
     if (d.pr || d.watch || d.commitEvidence) err('Unexpected local delivery evidence.');
   } else if (d.delivery === 'commit') {
-    if (!d.commitEvidence?.trim() || d.pr || d.watch) err('Commit evidence is required.');
+    if (
+      !Effect.pipe(d.commitEvidence, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ) ||
+      d.pr ||
+      d.watch
+    )
+      err('Commit evidence is required.');
   } else {
     const pr = d.pr,
-      p = s.plan.phases.find(x => x.id === idValue)!;
-    if (!d.commitEvidence?.trim()) err('PR delivery requires verified commit evidence.');
+      p = EffectOption.getOrUndefined(EffectArray.findFirst(s.plan.phases, x => x.id === idValue))!;
+    if (
+      !Effect.pipe(d.commitEvidence, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      )
+    )
+      err('PR delivery requires verified commit evidence.');
     if (
       !pr ||
       !/^https:\/\//u.test(pr.url) ||
@@ -528,8 +600,8 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
         w.prUrl !== pr.url ||
         w.headSha !== d.headSha ||
         !nativeCycleAbsolutePath(w.stateDir) ||
-        !w.consumerId.trim() ||
-        !w.evidence.trim()
+        !Effect.pipe(w.consumerId, EffectString.trim) ||
+        !Effect.pipe(w.evidence, EffectString.trim)
       )
         err('Open PR requires a matching watch.');
     } else status = 'merged';
@@ -543,7 +615,7 @@ function descendants(plans: readonly NativeCyclePlan[], seeds: readonly string[]
     changed = false;
     for (const plan of plans)
       for (const p of plan.phases)
-        if (!found.has(p.id) && nativeCycleEffectiveParents(plan, p.id).some(id => found.has(id))) {
+        if (!found.has(p.id) && EffectArray.some(nativeCycleEffectiveParents(plan, p.id), id => found.has(id))) {
           found.add(p.id);
           changed = true;
         }
@@ -569,7 +641,7 @@ function withHistory(r: NativeCycleState['phases'][string]) {
 }
 export function invalidateNativeCycle(value: NativeCycleState, idValue: string, reason: string): NativeCycleState {
   const s = decodeNativeCycleState(value);
-  if (!reason.trim()) err('Record the concrete invalidation reason.');
+  if (!Effect.pipe(reason, EffectString.trim)) err('Record the concrete invalidation reason.');
   if (!s.phases[idValue]) err('Unknown phase.');
   const affected = descendants([s.plan], [idValue]);
   for (const k of affected) if (s.phases[k].status === 'merged') err('Merged history cannot be rewritten.');
@@ -603,11 +675,14 @@ export function reconcileNativeCyclePlan(
   )
     err('Plan reconciliation changes identity or spec.');
   for (const p of old.phases)
-    if (!plan.phases.some(x => x.id === p.id) && s.phases[p.id].status !== 'pending')
+    if (!EffectArray.some(plan.phases, x => x.id === p.id) && s.phases[p.id].status !== 'pending')
       err('Cannot remove evidence-bearing phases.');
-  const seeds = old.phases.filter(p => !plan.phases.some(x => x.id === p.id)).map(p => p.id);
+  const seeds = EffectArray.map(
+    EffectArray.filter(old.phases, p => !EffectArray.some(plan.phases, x => x.id === p.id)),
+    p => p.id,
+  );
   for (const p of plan.phases) {
-    const before = old.phases.find(x => x.id === p.id);
+    const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === p.id));
     if (!before || nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id)) seeds.push(p.id);
   }
   const affected = descendants([old, plan], seeds);
@@ -619,7 +694,7 @@ export function reconcileNativeCyclePlan(
     if (!prior || affected.has(p.id))
       phases[p.id] = {status: 'stale', phaseHash, reason, ...(prior ? {history: withHistory(prior)} : {})};
     else {
-      const before = old.phases.find(x => x.id === p.id)!,
+      const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === p.id))!,
         metadataChanged = before.branch !== p.branch || before.baseBranch !== p.baseBranch;
       if (metadataChanged && prior.status === 'merged') err('Merged delivery metadata cannot change.');
       phases[p.id] = {

@@ -3,7 +3,10 @@ import {Context, Effect, Schema} from 'effect';
 /** Versioned executor contracts are independent from immutable skill provenance. */
 export const workflowAutomationProtocol = 1 as const;
 
-export class WorkflowAutomationError extends Schema.TaggedError<WorkflowAutomationError>()('WorkflowAutomationError', {
+export class WorkflowAutomationError extends Schema.TaggedError<
+  WorkflowAutomationError,
+  {readonly brand: unique symbol}
+>()('WorkflowAutomationError', {
   code: Schema.String,
   message: Schema.String,
   retryable: Schema.optionalKey(Schema.Boolean),

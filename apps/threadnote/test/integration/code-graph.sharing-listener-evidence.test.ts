@@ -15,6 +15,7 @@ import {readGraphPublisherRegistryStatus} from '@threadnote/graph/sharing/publis
 import {readJsonFile, writePrivateJsonFile} from '@threadnote/graph/sharing/atomic';
 import {graphSharingLayout, graphSharingPublisherEvidencePath} from '@threadnote/graph/sharing/layout';
 import {parseSha256Digest} from '@threadnote/graph/sharing/digest';
+import {isJsonObject} from '@threadnote/platform/json';
 
 describe('publisher listener source-use evidence', () => {
   effectIt.effect(
@@ -91,7 +92,9 @@ describe('publisher listener source-use evidence', () => {
             (yield* resolveRepositoryIdentity(repository)).repositoryId,
             parseSha256Digest(status!.localCandidate!.manifestDigest),
           );
-          const record = (yield* readJsonFile(recordPath)) as Record<string, unknown>;
+          const recordValue: unknown = yield* readJsonFile(recordPath);
+          if (!isJsonObject(recordValue)) throw new Error('Expected a publisher evidence record.');
+          const record = recordValue;
           yield* writePrivateJsonFile(recordPath, {...record, generation: 'not-a-generation'});
           const malformed = yield* readGraphPublisherRegistryStatus(config(home), {cas, cwd: repository});
           expect(malformed.localCandidate?.sourceCommit).toBe(sourceCommit);

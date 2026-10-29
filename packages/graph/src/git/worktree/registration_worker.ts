@@ -10,14 +10,16 @@ import {
   validCodeGraphGitWorktreeRegistryBatchRequest,
   validCodeGraphWorktreeAuthorityWorkerRequest,
 } from './registration.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class GitWorktreeRegistrationError extends Schema.TaggedError<GitWorktreeRegistrationError>()(
-  'GitWorktreeRegistrationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class GitWorktreeRegistrationError extends Schema.TaggedError<
+  GitWorktreeRegistrationError,
+  {readonly brand: unique symbol}
+>()('GitWorktreeRegistrationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const UTF8 = new TextEncoder();
 
@@ -39,11 +41,18 @@ const workerResponse = Effect.fn('codeGraph.gitWorktreeRegistrationWorkerRespons
     try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(input),
     catch: () => GitWorktreeRegistrationError.make({message: 'invalid'}),
   });
-  if (!decoded.endsWith('\n') || decoded.slice(0, -1).includes('\n')) {
+  if (
+    !Effect2.pipe(decoded, EffectString.endsWith('\n')) ||
+    Effect2.pipe(decoded, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+      const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.includes('\n'));
+      return __effectPipeStage1;
+    })
+  ) {
     return yield* GitWorktreeRegistrationError.make({message: 'invalid'});
   }
   const request = yield* Effect.try({
-    try: (): unknown => JSON.parse(decoded.slice(0, -1)),
+    try: (): unknown => JSON.parse(Effect2.pipe(decoded, EffectString.slice(0, -1))),
     catch: () => GitWorktreeRegistrationError.make({message: 'invalid'}),
   });
   if (validCodeGraphWorktreeAuthorityWorkerRequest(request)) {

@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {canonicalCodeGraphMonikers} from '../cross_repository/monikers.js';
 import type {CodeGraphMonikerV1} from '../cross_repository/types.js';
 import {compareCodeUnits} from '../ordering.js';
 import type {CodeGraphReusableReexport} from '../store/models.js';
 import type {CodeGraphEdge, CodeGraphReference, CodeGraphSymbol} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const referenceCandidateEncoder = new TextEncoder();
 
@@ -22,9 +25,9 @@ export interface CodeGraphMaterializationEdgeRow {
 export function codeGraphMaterializationEdgeRows(
   edges: readonly CodeGraphEdge[],
 ): readonly CodeGraphMaterializationEdgeRow[] {
-  return [...edges]
-    .sort((left, right) => compareCodeUnits(left.id, right.id))
-    .map(edge => ({
+  return EffectArray.map(
+    [...edges].sort((left, right) => compareCodeUnits(left.id, right.id)),
+    edge => ({
       confidence: edge.confidence,
       evidencePath: edge.evidencePath,
       evidenceSpanJson: JSON.stringify(edge.evidenceSpan),
@@ -35,7 +38,8 @@ export function codeGraphMaterializationEdgeRows(
       sourceName: edge.sourceName,
       targetId: edge.targetId ?? null,
       targetName: edge.targetName,
-    }));
+    }),
+  );
 }
 
 export interface CodeGraphMaterializationSymbolLookupRow {
@@ -120,9 +124,9 @@ export interface CodeGraphMaterializationSymbolRow {
 export function codeGraphMaterializationSymbolRows(
   symbols: readonly CodeGraphSymbol[],
 ): readonly CodeGraphMaterializationSymbolRow[] {
-  return [...symbols]
-    .sort((left, right) => compareCodeUnits(left.id, right.id))
-    .map(symbol => ({
+  return EffectArray.map(
+    [...symbols].sort((left, right) => compareCodeUnits(left.id, right.id)),
+    symbol => ({
       arity: symbol.arity ?? null,
       contentHash: symbol.contentHash,
       documentation: symbol.documentation ?? null,
@@ -139,7 +143,8 @@ export function codeGraphMaterializationSymbolRows(
       resolutionScopeId: symbol.resolutionScopeId ?? null,
       signature: symbol.signature ?? null,
       spanJson: JSON.stringify(symbol.span),
-    }));
+    }),
+  );
 }
 
 /** Canonical snapshot-independent lookup rows shared by direct and spool writers. */
@@ -190,9 +195,9 @@ export function codeGraphMaterializationReferenceRows(
   referenceEdges: ReadonlyMap<string, CodeGraphEdge>,
 ): readonly CodeGraphMaterializationReferenceRow[] {
   const edgeIds = new Set<string>();
-  return [...references]
-    .sort((left, right) => compareCodeUnits(left.edgeId, right.edgeId))
-    .map(reference => {
+  return EffectArray.map(
+    [...references].sort((left, right) => compareCodeUnits(left.edgeId, right.edgeId)),
+    reference => {
       if (edgeIds.has(reference.edgeId)) {
         throw new Error('Code graph materialization reference identities are duplicated.');
       }
@@ -219,13 +224,14 @@ export function codeGraphMaterializationReferenceRows(
         sourceName: edge.sourceName,
         targetName: edge.targetName,
       };
-    });
+    },
+  );
 }
 
 export function codeGraphMaterializationMonikerRows(
   monikers: readonly CodeGraphMonikerV1[],
 ): readonly CodeGraphMaterializationMonikerRow[] {
-  return canonicalCodeGraphMonikers(monikers).map(moniker => ({
+  return EffectArray.map(canonicalCodeGraphMonikers(monikers), moniker => ({
     componentId: 'componentId' in moniker ? (moniker.componentId ?? null) : null,
     dependencyKind: 'dependencyKind' in moniker ? (moniker.dependencyKind ?? null) : null,
     evidencePath: moniker.evidence.path,
@@ -248,10 +254,10 @@ export function codeGraphMaterializationMonikerRows(
 export function compactReferenceLookupTiers(
   lookupTiers: readonly (readonly string[])[],
 ): CompactedReferenceLookupTiers {
-  const tiers = lookupTiers.map(tier => [...new Set(tier)].sort(compareCodeUnits));
+  const tiers = EffectArray.map(lookupTiers, tier => [...new Set(tier)].sort(compareCodeUnits));
   const json = JSON.stringify(tiers);
   return {
-    candidateCount: tiers.reduce((total, tier) => total + tier.length, 0),
+    candidateCount: EffectArray.reduce(tiers, 0, (total, tier) => total + tier.length),
     json,
     payloadBytes: referenceCandidateEncoder.encode(json).byteLength,
     tiers,
@@ -264,7 +270,7 @@ export function codeGraphMaterializationReexportRows(
   const rows = new Map<string, CodeGraphReusableReexport>();
   for (const reference of references) {
     for (const row of normalizedReexportProvenance(reference)) {
-      rows.set([row.sourcePath, row.localName, row.targetPath, row.importedName].join('\0'), row);
+      rows.set(EffectArray.join([row.sourcePath, row.localName, row.targetPath, row.importedName], '\0'), row);
     }
   }
   return [...rows.values()].sort(
@@ -278,12 +284,13 @@ export function codeGraphMaterializationReexportRows(
 
 export function normalizedReexportProvenance(reference: CodeGraphReference): readonly CodeGraphReusableReexport[] {
   if (reference.relation !== 'reexports' || reference.resolutionDomain !== 'typescript') return [];
-  const aliases = uniquePathNameLookupKeys(reference.aliasLookupKeys ?? []).filter(
+  const aliases = EffectArray.filter(
+    uniquePathNameLookupKeys(reference.aliasLookupKeys ?? []),
     candidate => candidate.path === reference.evidencePath,
   );
   const targets = uniquePathNameLookupKeys(reference.lookupTiers.flat());
-  return aliases.flatMap(alias =>
-    targets.map(target => ({
+  return EffectArray.flatMap(aliases, alias =>
+    EffectArray.map(targets, target => ({
       importedName: target.name,
       localName: alias.name,
       sourcePath: alias.path,
@@ -317,6 +324,10 @@ function uniquePathNameLookupKeys(
 }
 
 export function codeGraphLookupDomain(lookupKey: string, fallback: string | undefined): string {
-  const separator = lookupKey.indexOf(':');
-  return separator > 0 ? lookupKey.slice(0, separator) : (fallback ?? 'generic');
+  const separator = Effect.pipe(
+    lookupKey,
+    EffectString.indexOf(':'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  return separator > 0 ? Effect.pipe(lookupKey, EffectString.slice(0, separator)) : (fallback ?? 'generic');
 }

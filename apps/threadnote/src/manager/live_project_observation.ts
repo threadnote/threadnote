@@ -1,5 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
 import {invalidateManagerReviewReadiness} from './review_actionability.js';
-import {Clock, Effect, FileSystem, Path} from 'effect';
+import {Clock, Effect, FileSystem, Path, pipe} from 'effect';
 import {managerLiveResourceKey, type ManagerLiveResource} from '@threadnote/manager/live/contracts';
 import {candidateReviewObservationPaths} from '@threadnote/memory/candidate';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -108,8 +110,8 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
     );
   const connections = new Map<string, readonly ManagerLiveResource[]>();
   const accountSubscribed = () =>
-    [...connections.values()].some(resources =>
-      resources.some(resource => resource.topic === 'home' && 'scope' in resource),
+    EffectArray.some([...connections.values()], resources =>
+      EffectArray.some(resources, resource => resource.topic === 'home' && 'scope' in resource),
     );
   const syncAccountSources = Effect.gen(function* () {
     if (!accountSubscribed()) {
@@ -118,11 +120,16 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
     } else yield* health.subscribe('review-account-sources', [...accountSourceProjects]);
   });
   const prune = () => {
-    const retained = new Set([...connections.values()].flat().map(managerLiveResourceKey));
+    const retained = new Set(
+      EffectArray.map(
+        EffectArray.flatMap([...connections.values()], resources => resources),
+        managerLiveResourceKey,
+      ),
+    );
     for (const key of clocks.keys()) if (!retained.has(key)) clocks.delete(key);
     const projects = new Set(
-      [...connections.values()].flatMap(resources =>
-        resources.flatMap(resource => ('project' in resource ? [resource.project] : [])),
+      EffectArray.flatMap([...connections.values()], resources =>
+        EffectArray.flatMap(resources, resource => ('project' in resource ? [resource.project] : [])),
       ),
     );
     for (const project of accountSourceProjects) projects.add(project);
@@ -148,15 +155,17 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
           }
           const retained =
             accountSourceProjects.has(project) ||
-            [...connections.values()].some(resources =>
-              resources.some(resource => 'project' in resource && resource.project === project),
+            EffectArray.some([...connections.values()], resources =>
+              EffectArray.some(resources, resource => 'project' in resource && resource.project === project),
             );
           if (!retained) return;
           const cwd = yield* fs.realPath(observation.cwd).pipe(Effect.orElseSucceed(() => observation.cwd));
           const previous = retainedHealthInputs.get(project);
           const sameRoot = previous?.cwd === cwd;
           const key = (citation: HealthSelector) => `${citation.repositoryId}:${citation.sourceCommit}`;
-          const citations = new Map((sameRoot ? previous.citations : []).map(citation => [key(citation), citation]));
+          const citations = new Map(
+            EffectArray.map(sameRoot ? previous.citations : [], citation => [key(citation), citation] as const),
+          );
           for (const citation of observation.citations) {
             const identity = key(citation);
             if (citations.has(identity)) continue;
@@ -165,12 +174,15 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
             citations.set(identity, {repositoryId: citation.repositoryId, sourceCommit: citation.sourceCommit});
           }
           const now = yield* Clock.currentTimeMillis;
-          const deadlines = [sameRoot ? previous.nextChangeAt : undefined, observation.nextChangeAt].filter(
+          const deadlines = EffectArray.filter(
+            [sameRoot ? previous.nextChangeAt : undefined, observation.nextChangeAt],
             (value): value is number => value !== undefined && Number.isFinite(value) && value > now,
           );
           const input: ManagerHealthObservation = {
             cwd,
-            citations: [...citations.values()].sort((a, b) => key(a).localeCompare(key(b))),
+            citations: EffectArray.sort([...citations.values()], (a: HealthSelector, b: HealthSelector) =>
+              pipe(key(a), EffectString.localeCompare(key(b))),
+            ),
             ...(deadlines.length ? {nextChangeAt: Math.min(...deadlines)} : {}),
           };
           retainedHealthInputs.set(project, input);
@@ -200,7 +212,8 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
     },
     subscribe: (connection: string, requested: readonly ManagerLiveResource[]) =>
       Effect.gen(function* () {
-        const resources = requested.filter(
+        const resources = EffectArray.filter(
+          requested,
           resource => resource.topic === 'home' || resource.topic === 'automatic-memory',
         );
         connections.set(connection, resources);
@@ -208,7 +221,7 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
         prune();
         yield* health.subscribe(
           connection,
-          resources.flatMap(resource => ('project' in resource ? [resource.project] : [])),
+          EffectArray.flatMap(resources, resource => ('project' in resource ? [resource.project] : [])),
         );
         return yield* observer.subscribe(connection, resources);
       }),
@@ -223,7 +236,10 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
     canonicalChanged: (revision: string) =>
       Effect.gen(function* () {
         const resources = new Map(
-          [...connections.values()].flat().map(resource => [managerLiveResourceKey(resource), resource]),
+          EffectArray.map(
+            EffectArray.flatMap([...connections.values()], resources => resources),
+            resource => [managerLiveResourceKey(resource), resource],
+          ),
         );
         for (const resource of resources.values()) yield* observer.invalidate(resource, revision);
         yield* observer.wake;

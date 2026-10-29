@@ -1,4 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {parseResourceId} from '@threadnote/store/resource-id';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const UTF8 = new TextEncoder();
 
@@ -7,8 +10,9 @@ export function validateManagerConfiguredProjectPath(value: string, maximumBytes
     throw new Error('Project path must be bounded text without control characters.');
   }
   if (!isAbsoluteProjectPath(value)) throw new Error('Project path must be absolute or start with ~/.');
-  const normalized = value.replaceAll('\\', '/');
-  if (normalized.split('/').includes('..')) throw new Error('Project path must not contain parent traversal segments.');
+  const normalized = Effect.pipe(value, EffectString.replaceAll('\\', '/'));
+  if (Effect.pipe(normalized, EffectString.split('/')).includes('..'))
+    throw new Error('Project path must not contain parent traversal segments.');
   return value;
 }
 
@@ -34,18 +38,23 @@ export function validateManagerConfiguredProjectUri(value: string, retainedCanon
 
 function isAbsoluteProjectPath(value: string): boolean {
   return (
-    value.startsWith('/') ||
+    Effect.pipe(value, EffectString.startsWith('/')) ||
     value === '~' ||
-    value.startsWith('~/') ||
-    value.startsWith('~\\') ||
+    Effect.pipe(value, EffectString.startsWith('~/')) ||
+    Effect.pipe(value, EffectString.startsWith('~\\')) ||
     /^[a-z]:[\\/]/iu.test(value) ||
     /^\\\\/u.test(value)
   );
 }
 
 function hasControlCharacter(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code <= 31 || code === 127;
   });
 }

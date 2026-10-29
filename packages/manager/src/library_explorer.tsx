@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {ArrowLeft, ArrowRight, Folder, FileText} from 'lucide-react';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import type {TreeNode} from '@threadnote/manager/ui/contracts';
@@ -5,6 +6,9 @@ import {treeItemClass} from '@threadnote/manager/ui/support';
 
 import {ActionMenu, type MenuAction} from './action_menu.js';
 import {descendantMemoryUris, libraryExplorerNodes, libraryItemTitle, librarySearchTree} from './library_model.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const EMPTY_SELECTED_URIS: ReadonlySet<string> = new Set();
 
@@ -63,7 +67,11 @@ export function LibraryExplorer(props: {
     const result = new Set<string>();
     const visit = (node: TreeNode) => {
       result.add(node.uri);
-      node.children?.forEach(visit);
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(node.children), __effectArrayReceiver =>
+          EffectArray.forEach(__effectArrayReceiver, visit),
+        ),
+      );
     };
     const filtered = librarySearchTree(sourceTree, props.filter, new Set(props.recalledUris), props.showSystem);
     if (filtered) visit(filtered);
@@ -85,7 +93,7 @@ export function LibraryExplorer(props: {
         </p>
       ) : null}
       <nav className="tree" aria-label="Context tree">
-        {libraryExplorerNodes(sourceTree).map(node => (
+        {EffectArray.map(libraryExplorerNodes(sourceTree), node => (
           <Tree
             key={node.uri}
             depth={0}
@@ -102,7 +110,7 @@ export function LibraryExplorer(props: {
             visibleUris={visibleUris}
           />
         ))}
-        {props.filter.trim() && visibleUris.size === 0 ? (
+        {Effect.pipe(props.filter, EffectString.trim) && visibleUris.size === 0 ? (
           <p className="explorer-note">No matching memories or resources.</p>
         ) : null}
       </nav>
@@ -131,12 +139,20 @@ function Tree(props: {
 }): React.ReactElement | null {
   const [open, setOpen] = useState((props.depth ?? 0) === 0);
   const [searchOpen, setSearchOpen] = useState(true);
-  const searching = props.filter.trim().length > 0;
+  const searching = Effect.pipe(props.filter, EffectString.trim).length > 0;
   useEffect(() => {
     if (searching) setSearchOpen(true);
   }, [searching, props.filter, props.visibleUris]);
   useEffect(() => {
-    if (props.node.isDir && props.selectedUri?.startsWith(props.node.uri + '/')) setOpen(true);
+    if (
+      props.node.isDir &&
+      Effect.pipe(props.selectedUri, effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect.pipe(effectOptionalString, EffectString.startsWith(props.node.uri + '/')),
+      )
+    )
+      setOpen(true);
   }, [props.node.isDir, props.node.uri, props.selectedUri]);
   const selectable = props.selectable !== false && !props.node.isSystem;
   const selectedUris = props.selectedUris ?? EMPTY_SELECTED_URIS;
@@ -144,7 +160,10 @@ function Tree(props: {
   if (!props.visibleUris.has(props.node.uri)) return null;
   if (props.node.isDir) {
     const selectableUris = selectable ? descendantMemoryUris(props.node) : [];
-    const selectedCount = selectableUris.filter(uri => selectedUris.has(uri)).length;
+    const selectedCount = EffectArray.filter(
+      selectableUris,
+      (uri, __effectArrayIndex) => __effectArrayIndex in selectableUris && selectedUris.has(uri),
+    ).length;
     const checked = selectableUris.length > 0 && selectedCount === selectableUris.length;
     const indeterminate = selectedCount > 0 && selectedCount < selectableUris.length;
     return (
@@ -184,7 +203,7 @@ function Tree(props: {
           ) : null}
         </summary>
         <div className="tree-children">
-          {(props.node.children ?? []).map(child => (
+          {EffectArray.map(props.node.children ?? [], child => (
             <Tree key={child.uri} {...props} node={child} depth={(props.depth ?? 0) + 1} />
           ))}
         </div>

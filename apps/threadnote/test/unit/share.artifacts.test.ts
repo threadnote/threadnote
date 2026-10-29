@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtemp, mkdir, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -19,6 +20,9 @@ import type {ShareRuntime} from '@threadnote/threadnote/types';
 import * as utils from '@threadnote/threadnote/utils';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const runShareInstallArtifacts = (...args: Parameters<typeof runShareInstallArtifactsEffect>) =>
   runEffect(runShareInstallArtifactsEffect(...args));
@@ -104,7 +108,7 @@ describe('shared agent artifacts', () => {
       process.env.HOME = originalHome;
     }
     vi.restoreAllMocks();
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   async function blockNativeArtifactWrites(config: ShareRuntime): Promise<void> {
@@ -498,9 +502,13 @@ describe('shared agent artifacts', () => {
   });
 
   function findGitAddArgs(): readonly string[] | undefined {
-    const call = vi
-      .mocked(utils.runCommand)
-      .mock.calls.find(([executable, args]) => executable === 'git' && args.includes('add'));
+    const call = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        vi.mocked(utils.runCommand).mock.calls,
+        __effectArrayValue =>
+          !!(([executable, args]) => executable === 'git' && args.includes('add'))(__effectArrayValue),
+      ),
+    );
     return call?.[1];
   }
 
@@ -601,7 +609,10 @@ describe('shared agent artifacts', () => {
     const skillDir = join(config.agentContextHome, '.codex', 'skills', 'reviewer');
     await mkdir(skillDir, {recursive: true});
     await writeFile(join(skillDir, 'SKILL.md'), '# Reviewer\n');
-    const secretBlob = Buffer.concat([Buffer.from([0x00, 0x01]), Buffer.from(`sk-${'a'.repeat(24)}`)]);
+    const secretBlob = Buffer.concat([
+      Buffer.from([0x00, 0x01]),
+      Buffer.from(`sk-${Effect2.pipe('a', EffectString.repeat(24))}`),
+    ]);
     await writeFile(join(skillDir, 'helper.bin'), secretBlob);
     mockPublishCommands();
 
@@ -614,7 +625,7 @@ describe('shared agent artifacts', () => {
     const config = await makeRuntime();
     homes.push(config.agentContextHome);
     const skillDir = join(config.agentContextHome, '.codex', 'skills', 'reviewer');
-    const script = `const token = "ghp_${'b'.repeat(36)}";\n`;
+    const script = `const token = "ghp_${Effect2.pipe('b', EffectString.repeat(36))}";\n`;
     await mkdir(join(skillDir, 'scripts'), {recursive: true});
     await writeFile(join(skillDir, 'SKILL.md'), '# Reviewer\n');
     await writeFile(join(skillDir, 'scripts', 'run.ts'), script);
@@ -651,7 +662,7 @@ describe('shared agent artifacts', () => {
     mockPublishCommands();
 
     const result = await runEffect(shareAgentArtifact(config, sourcePath, {redact: true}));
-    expect(result.messages.join('\n')).toMatch(/--redact is ignored/);
+    expect(EffectArray.join(result.messages, '\n')).toMatch(/--redact is ignored/);
     await expect(
       readFile(
         join(
@@ -929,11 +940,11 @@ describe('shared agent artifacts', () => {
     );
     const installedVcs = await readFile(join(installRoot, 'scripts', 'vcs.ts'), 'utf8');
     expect(installedVcs).toBe(`const root = "${installRoot}/scripts";\n`);
-    expect(installedVcs.includes('${THREADNOTE_PACK_ROOT}')).toBe(false);
+    expect(Effect2.pipe(installedVcs, EffectString.includes('${THREADNOTE_PACK_ROOT}'))).toBe(false);
     await expect(readFile(join(installRoot, '.threadnote-bundle-install.json'), 'utf8')).resolves.toMatch(
       /scripts\/vcs\.ts/,
     );
-    expect(result.messages.join('\n')).toContain('mcp__pal__clink');
+    expect(EffectArray.join(result.messages, '\n')).toContain('mcp__pal__clink');
   });
 
   effectIt.effect('publishes and installs a Cursor skill pack in the Cursor pack namespace', () =>
@@ -1226,7 +1237,7 @@ describe('shared agent artifacts', () => {
     await writeFile(join(ghost, 'ghost.pack.md'), '---\nname: ghost\nkind: pack\n---\n');
 
     const result = await listSharedAgentArtifacts(config, {sync: false});
-    const names = result.artifacts.map(entry => entry.artifact.name);
+    const names = EffectArray.map(result.artifacts, entry => entry.artifact.name);
     expect(names).toContain('triage');
     expect(names).not.toContain('ghost');
   });
@@ -1259,7 +1270,7 @@ describe('shared agent artifacts', () => {
     );
 
     const result = await listSharedAgentArtifacts(config, {sync: false});
-    expect(result.artifacts.map(entry => entry.artifact.name)).toContain('reviewer');
+    expect(EffectArray.map(result.artifacts, entry => entry.artifact.name)).toContain('reviewer');
   });
 
   it('publishes a residual /home path in a pack member unchanged', async () => {
@@ -1299,7 +1310,7 @@ describe('shared agent artifacts', () => {
     mockPublishCommands();
 
     const result = await runEffect(shareBundlePack(config, join(repo, 'threadnote-bundle.json'), {redact: true}));
-    expect(result.messages.join('\n')).toMatch(/--redact is ignored/);
+    expect(EffectArray.join(result.messages, '\n')).toMatch(/--redact is ignored/);
     await expect(
       readFile(
         join(
@@ -1325,7 +1336,9 @@ describe('shared agent artifacts', () => {
       fc.constant('/Users/someone/secret/notes'),
       fc.constant('/home/deploy/.ssh/id_rsa'),
       fc.constant("str.replace(/\\\\/g, '\\\\\\\\')"),
-      fc.string({maxLength: 24}).map(value => `/tmp/${value.replaceAll(/[/\\\0]/g, '_') || 'x'}`),
+      fc
+        .string({maxLength: 24})
+        .map(value => `/tmp/${Effect2.pipe(value, EffectString.replaceAll(/[/\\\0]/g, '_')) || 'x'}`),
     );
     await fc.assert(
       fc.asyncProperty(fragment, async value => {
@@ -1595,8 +1608,8 @@ describe('shared agent artifacts', () => {
     mockPublishCommands();
 
     const result = await runEffect(shareBundlePack(config, join(repo, 'threadnote-bundle.json'), {}));
-    expect(result.messages.join('\n')).toContain('/opt/work/secrets/run');
-    expect(result.messages.join('\n')).toMatch(/machine-local/);
+    expect(EffectArray.join(result.messages, '\n')).toContain('/opt/work/secrets/run');
+    expect(EffectArray.join(result.messages, '\n')).toMatch(/machine-local/);
   });
 
   it('re-publishes a changed pack with --force, leaving the new version in place', async () => {

@@ -1,3 +1,5 @@
+import {isOneOf as checkedIsOneOf} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {isManagerProjectName} from './project/name.js';
 import {Effect, Result} from 'effect';
 import {consolidationSections} from '@threadnote/memory/consolidation';
@@ -7,10 +9,14 @@ import {
   inspectTopicEnrollment,
   previewTopicEnrollment,
 } from '../memory/maintenance/topic_enrollment.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const HASH = /^[a-f0-9]{64}$/u;
 const privateTopicUri = (value: string) =>
-  /^threadnote:\/\/user\/[^/]+\/memories\/durable\/projects\//u.test(value) && !value.includes('/shared/');
+  /^threadnote:\/\/user\/[^/]+\/memories\/durable\/projects\//u.test(value) &&
+  !Effect2.pipe(value, EffectString.includes('/shared/'));
 const unavailable = () => ({
   status: 409,
   body: {error: 'This private note memory is unavailable for topic updates. Refresh the memory and source access.'},
@@ -32,7 +38,8 @@ export const handleManagerTopicEnrollment = Effect.fn('managerTopicEnrollment.ha
   const body = request.method === 'POST' ? yield* request.body : undefined;
   const uri = body?.uri ?? request.url.searchParams.get('uri');
   if (typeof uri !== 'string' || !privateTopicUri(uri) || uri.length > 4096) return invalid();
-  if (request.method === 'GET' && [...request.url.searchParams.keys()].some(key => key !== 'uri')) return invalid();
+  if (request.method === 'GET' && EffectArray.some([...request.url.searchParams.keys()], key => key !== 'uri'))
+    return invalid();
   const inspected = yield* inspectTopicEnrollment(request.config, uri).pipe(Effect.result);
   if (
     Result.isFailure(inspected) ||
@@ -63,7 +70,7 @@ export const handleManagerTopicEnrollment = Effect.fn('managerTopicEnrollment.ha
       },
     };
   }
-  if (!body || body.project !== inspection.project || !['preview', 'apply'].includes(body.action as string))
+  if (!body || body.project !== inspection.project || !checkedIsOneOf(['preview', 'apply'], body.action))
     return invalid();
   const allowed = [
     'action',
@@ -73,17 +80,8 @@ export const handleManagerTopicEnrollment = Effect.fn('managerTopicEnrollment.ha
     ...(body.action === 'apply' ? ['approved', 'expectedContentHash', 'revision'] : []),
   ];
   if (
-    Object.keys(body).some(key => !allowed.includes(key)) ||
+    EffectArray.some(EffectRecord.keys(body), key => !allowed.includes(key)) ||
     new TextEncoder().encode(JSON.stringify(body)).byteLength > 36 * 1024
-  )
-    return invalid();
-  if (
-    body.action === 'apply' &&
-    (body.approved !== true ||
-      typeof body.expectedContentHash !== 'string' ||
-      !HASH.test(body.expectedContentHash) ||
-      typeof body.revision !== 'string' ||
-      !HASH.test(body.revision))
   )
     return invalid();
   const options = {uri: inspection.targetUri, project: inspection.project, input: body.input};
@@ -101,11 +99,19 @@ export const handleManagerTopicEnrollment = Effect.fn('managerTopicEnrollment.ha
       },
     };
   }
+  if (
+    body.approved !== true ||
+    typeof body.expectedContentHash !== 'string' ||
+    !HASH.test(body.expectedContentHash) ||
+    typeof body.revision !== 'string' ||
+    !HASH.test(body.revision)
+  )
+    return invalid();
   const result = yield* applyTopicEnrollment(request.config, {
     ...options,
     approved: true,
-    expectedContentHash: body.expectedContentHash as string,
-    revision: body.revision as string,
+    expectedContentHash: body.expectedContentHash,
+    revision: body.revision,
   }).pipe(Effect.result);
   if (
     Result.isFailure(result) ||

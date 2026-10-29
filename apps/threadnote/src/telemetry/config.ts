@@ -1,9 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {Base64Url} from 'effect/encoding';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const TELEMETRY_CONFIGURATION_VERSION = 1 as const;
 export const TELEMETRY_CONSENT_VERSION = 6 as const;
@@ -41,13 +45,13 @@ export interface TelemetryConsentRenewal {
 
 export type TelemetryEnvironmentOptOut = 'DNT' | 'DO_NOT_TRACK' | 'THREADNOTE_TELEMETRY';
 
-export class TelemetryConfigurationError extends Schema.TaggedError<TelemetryConfigurationError>()(
-  'TelemetryConfigurationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class TelemetryConfigurationError extends Schema.TaggedError<
+  TelemetryConfigurationError,
+  {readonly brand: unique symbol}
+>()('TelemetryConfigurationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const TELEMETRY_DIRECTORY_NAME = 'telemetry';
 const TELEMETRY_CONFIGURATION_FILE_NAME = 'config.json';
@@ -237,7 +241,7 @@ export function renderTelemetryConfiguration(value: TelemetryConfiguration): str
 }
 
 export function normalizeTelemetryEndpoint(value: string): string {
-  const trimmed = value.trim();
+  const trimmed = Effect2.pipe(value, EffectString.trim);
   if (trimmed.length === 0 || trimmed.length > TELEMETRY_ENDPOINT_MAX_CHARACTERS) {
     throw TelemetryConfigurationError.make({message: 'Telemetry endpoint must be a non-empty bounded URL.'});
   }
@@ -352,26 +356,37 @@ function unsupportedTelemetryConsentVersion(source: string): TelemetryConfigurat
 }
 
 function assertExactKeys(value: Record<string, unknown>, expected: readonly string[], source: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const sortedExpected = [...expected].sort();
-  if (actual.length !== sortedExpected.length || actual.some((key, index) => key !== sortedExpected[index])) {
+  if (
+    actual.length !== sortedExpected.length ||
+    EffectArray.some(actual, (key, index) => key !== sortedExpected[index])
+  ) {
     throw TelemetryConfigurationError.make({message: `Telemetry configuration contains unsupported fields: ${source}`});
   }
 }
 
 function environmentOptOutEnabled(value: string | undefined): boolean {
-  return value !== undefined && ['1', 'on', 'true', 'yes'].includes(value.trim().toLowerCase());
+  return (
+    value !== undefined &&
+    ['1', 'on', 'true', 'yes'].includes(Effect2.pipe(value, EffectString.trim, EffectString.toLowerCase))
+  );
 }
 
 function threadnoteTelemetryDisabled(value: string | undefined): boolean {
-  return value !== undefined && ['0', 'false', 'no', 'off'].includes(value.trim().toLowerCase());
+  return (
+    value !== undefined &&
+    ['0', 'false', 'no', 'off'].includes(Effect2.pipe(value, EffectString.trim, EffectString.toLowerCase))
+  );
 }
 
 function isLoopbackHostname(value: string): boolean {
-  const hostname = value
-    .toLowerCase()
-    .replace(/^\[|\]$/gu, '')
-    .replace(/\.$/u, '');
+  const hostname = Effect2.pipe(
+    value,
+    EffectString.toLowerCase,
+    EffectString.replace(/^\[|\]$/gu, ''),
+    EffectString.replace(/\.$/u, ''),
+  );
   return hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/u.test(hostname);
 }
 

@@ -57,6 +57,7 @@ describe('remote durable proposal canonicalization', () => {
     expect(() => durableProposalPayload(input('Do not store sk-abcdefghijklmnop'))).toThrow(
       'blocked by credential policy',
     );
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     expect(() => durableProposalPayload(input('🦊'.repeat(REMOTE_MEMORY_PROPOSAL_PAYLOAD_MAX_BYTES / 2)))).toThrow(
       'exceeds the size limit',
     );

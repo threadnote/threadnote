@@ -1,5 +1,9 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isIsoDateOrCanonicalIsoInstant, type MemoryRecord} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION = 2 as const;
 export const MAXIMUM_CONTEXT_HEALTH_SEMANTIC_RECORDS = 128 as const;
@@ -143,14 +147,13 @@ interface ExtractedClaims {
 export function analyzeContextHealthSemantics(
   input: ContextHealthSemanticAnalysisInputV2,
 ): ContextHealthSemanticAnalysisV2 {
-  const eligible = input.records
-    .filter(
-      record =>
-        record.metadata.kind === 'durable' &&
-        record.metadata.status === 'active' &&
-        record.metadata.project === input.project,
-    )
-    .sort(compareRecords);
+  const eligible = EffectArray.filter(
+    input.records,
+    record =>
+      record.metadata.kind === 'durable' &&
+      record.metadata.status === 'active' &&
+      record.metadata.project === input.project,
+  ).sort(compareRecords);
   const selected = eligible.slice(0, MAXIMUM_CONTEXT_HEALTH_SEMANTIC_RECORDS);
   const unknownByRecord = new Map<string, Set<ContextHealthSemanticUnknownReasonV2>>();
   for (const record of eligible.slice(MAXIMUM_CONTEXT_HEALTH_SEMANTIC_RECORDS)) {
@@ -199,17 +202,17 @@ export function analyzeContextHealthSemantics(
     completeness: {
       analyzedRecords,
       claimsAnalyzed: claims.length,
-      supportedClaims: claims.filter(claim => claim.extraction !== 'unsupported').length,
-      unsupportedClaims: claims.filter(claim => claim.extraction === 'unsupported').length,
+      supportedClaims: EffectArray.filter(claims, claim => claim.extraction !== 'unsupported').length,
+      unsupportedClaims: EffectArray.filter(claims, claim => claim.extraction === 'unsupported').length,
       coverage: 'bounded-English-extraction',
       contradictionCount: found.length,
       eligibleRecords: eligible.length,
       omittedContradictions,
       pairsCompared,
       state,
-      unknownReasons: [...unknownReasonCounts]
-        .map(([reason, count]) => ({count, reason}))
-        .sort((left, right) => compareText(left.reason, right.reason)),
+      unknownReasons: EffectArray.map([...unknownReasonCounts], ([reason, count]) => ({count, reason})).sort(
+        (left, right) => compareText(left.reason, right.reason),
+      ),
       unknownRecords,
       version: CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION,
     },
@@ -223,13 +226,13 @@ function extractClaims(
 ): ExtractedClaims {
   const reasons = new Set<ContextHealthSemanticUnknownReasonV2>();
   if (record.body.length > MAXIMUM_BODY_CODE_UNITS) reasons.add('body-limit');
-  const body = record.body.slice(0, MAXIMUM_BODY_CODE_UNITS);
+  const body = Effect.pipe(record.body, EffectString.slice(0, MAXIMUM_BODY_CODE_UNITS));
   const claims: ContextHealthSemanticExtractedClaimV2[] = [];
   const headings: {text: string; span: {start: number; end: number}; truncated: boolean}[] = [];
   let fenced = false;
   let offset = 0;
-  for (const rawLine of body.split('\n')) {
-    const line = rawLine.replace(/\r$/u, '');
+  for (const rawLine of Effect.pipe(body, EffectString.split('\n'))) {
+    const line = Effect.pipe(rawLine, EffectString.replace(/\r$/u, ''));
     const lineOffset = offset;
     offset += rawLine.length + 1;
     if (/^\s*(?:```|~~~)/u.test(line)) {
@@ -240,25 +243,31 @@ function extractClaims(
     const heading = /^\s*(#{1,6})\s+(.+?)\s*#*$/u.exec(line);
     if (heading) {
       headings.splice(heading[1].length - 1);
-      const text = heading[2].slice(0, MAXIMUM_CLAIM_CODE_UNITS);
-      const start = lineOffset + line.indexOf(heading[2]);
+      const text = Effect.pipe(heading[2], EffectString.slice(0, MAXIMUM_CLAIM_CODE_UNITS));
+      const start =
+        lineOffset +
+        Effect.pipe(
+          line,
+          EffectString.indexOf(heading[2]),
+          Effect.Option.getOrElse(() => -1),
+        );
       const truncated = text.length !== heading[2].length;
       if (truncated) reasons.add('claim-too-large');
       headings[heading[1].length - 1] = {text, span: {start, end: start + text.length}, truncated};
       continue;
     }
-    for (const match of line.matchAll(/(?:[^.!?]|\.(?=[0-9]))+(?:[.!?](?=\s|$)|$)/gu)) {
+    for (const match of Effect.pipe(line, EffectString.matchAll(/(?:[^.!?]|\.(?=[0-9]))+(?:[.!?](?=\s|$)|$)/gu))) {
       const sentence = match[0];
       const prefix = /^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s*)?/u.exec(sentence)?.[0].length ?? 0;
-      const text = sentence.slice(prefix).trimEnd();
+      const text = Effect.pipe(sentence, EffectString.slice(prefix), EffectString.trimEnd);
       if (!text || tokens(text).length < 2) continue;
       if (text.length > MAXIMUM_CLAIM_CODE_UNITS) {
         reasons.add('claim-too-large');
         continue;
       }
-      const inheritedEvidence = headings.filter(Boolean);
-      const inherited = inheritedEvidence.map(heading => heading.text);
-      const contextTruncated = inheritedEvidence.some(heading => heading.truncated);
+      const inheritedEvidence = EffectArray.filter(headings, Boolean);
+      const inherited = EffectArray.map(inheritedEvidence, heading => heading.text);
+      const contextTruncated = EffectArray.some(inheritedEvidence, heading => heading.truncated);
       const extraction: ParsedClaim = contextTruncated
         ? {role: 'descriptive', extraction: 'unsupported'}
         : parseClaim(text, inherited);
@@ -266,7 +275,7 @@ function extractClaims(
       const environment = extractEnvironment(scopeText ?? '', inherited);
       const context: ContextHealthSemanticContextV2 = {
         headings: [...inherited],
-        headingEvidence: inheritedEvidence.map(({text, span}) => ({text, span})),
+        headingEvidence: EffectArray.map(inheritedEvidence, ({text, span}) => ({text, span})),
         ...(record.metadata.project === undefined ? {} : {project: record.metadata.project}),
         ...(record.metadata.workspaceScope === undefined ? {} : {workspaceScope: record.metadata.workspaceScope}),
         ...(environment.value === undefined ? {} : {environment: environment.value}),
@@ -287,7 +296,7 @@ function extractClaims(
         span,
         recordContentFingerprint,
         claimFingerprint,
-        claimId: `tnclaim_${sha256HexSync(`${record.uri}\u0000${claimFingerprint}`).slice(0, 32)}`,
+        claimId: `tnclaim_${Effect.pipe(sha256HexSync(`${record.uri}\u0000${claimFingerprint}`), EffectString.slice(0, 32))}`,
         recordUri: record.uri,
         basisTokens: tokens(withoutNegation(text)),
         denied: NEGATION.test(text),
@@ -343,12 +352,17 @@ export function compareContextHealthSemanticClaimWindow(
 export function findContextHealthSemanticContradiction(
   records: readonly MemoryRecord[],
   contradictionId?: string,
-  fingerprints?: readonly [string, string],
+  fingerprints?: readonly string[],
 ): ContextHealthSemanticContradictionV2 | undefined {
   if (records.length !== 2) return undefined;
-  const [left, right] = records.map(record =>
-    extractContextHealthSemanticClaims(record).claims.filter(
-      claim => fingerprints === undefined || fingerprints.includes(claim.claimFingerprint),
+  const [left, right] = EffectArray.map(records, record =>
+    EffectArrayPipe(extractContextHealthSemanticClaims(record).claims, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (claim, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues &&
+          (fingerprints === undefined || fingerprints.includes(claim.claimFingerprint)),
+      ),
     ),
   );
   for (const a of left)
@@ -370,20 +384,29 @@ interface ParsedClaim {
 }
 
 function extractEnvironment(text: string, headings: readonly string[]): {value?: string; ambiguous: boolean} {
-  const prefix = /^(?:the )?(production|local|staging|development|testing)\b/iu.exec(text.trim());
-  const inline = prefix ? [prefix[1].toLowerCase()] : [];
-  const inherited = headings.flatMap(environmentWords);
+  const prefix = /^(?:the )?(production|local|staging|development|testing)\b/iu.exec(
+    Effect.pipe(text, EffectString.trim),
+  );
+  const inline = prefix ? [Effect.pipe(prefix[1], EffectString.toLowerCase)] : [];
+  const inherited = EffectArray.flatMap(headings, environmentWords);
   const values = [...new Set([...inline, ...inherited])];
   if (values.length === 1) return {value: values[0], ambiguous: false};
   if (values.length > 1) return {ambiguous: true};
-  if (/\b(?:repo(?:sitory)?[- ]wide|all environments)\b/iu.test([text, ...headings].join(' '))) {
+  if (/\b(?:repo(?:sitory)?[- ]wide|all environments)\b/iu.test(EffectArray.join([text, ...headings], ' '))) {
     return {value: '*', ambiguous: false};
   }
   return {ambiguous: false};
 }
 
 function environmentWords(value: string): string[] {
-  return [...value.toLowerCase().matchAll(/\b(?:production|local|staging|development|testing)\b/gu)].map(
+  return EffectArray.map(
+    [
+      ...Effect.pipe(
+        value,
+        EffectString.toLowerCase,
+        EffectString.matchAll(/\b(?:production|local|staging|development|testing)\b/gu),
+      ),
+    ],
     match => match[0],
   );
 }
@@ -393,8 +416,8 @@ export function contextHealthSemanticClaimRole(
   text: string,
   headings: readonly string[] = [],
 ): ContextHealthSemanticClaimReferenceV2['role'] {
-  const value = text.toLowerCase().replace(/\s+/gu, ' ');
-  return /\b(?:history|historical|previous(?:ly)?|formerly)\b/iu.test(headings.join(' ')) ||
+  const value = Effect.pipe(text, EffectString.toLowerCase, EffectString.replace(/\s+/gu, ' '));
+  return /\b(?:history|historical|previous(?:ly)?|formerly)\b/iu.test(EffectArray.join(headings, ' ')) ||
     /\b(?:was|were|used to)\b/u.test(value)
     ? 'historical'
     : /\b(?:must|shall|required)\b/u.test(value)
@@ -403,11 +426,13 @@ export function contextHealthSemanticClaimRole(
 }
 
 function parseClaim(text: string, headings: readonly string[]): ParsedClaim {
-  const value = text
-    .toLowerCase()
-    .replace(/[.!?]$/u, '')
-    .replace(/\s+/gu, ' ')
-    .trim();
+  const value = Effect.pipe(
+    text,
+    EffectString.toLowerCase,
+    EffectString.replace(/[.!?]$/u, ''),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
   const role = contextHealthSemanticClaimRole(value, headings);
   const unsupported: ParsedClaim = {role, extraction: 'unsupported'};
   if (
@@ -448,18 +473,20 @@ function parseClaim(text: string, headings: readonly string[]): ParsedClaim {
 }
 
 function canonicalSubject(value: string): string {
-  return value
-    .replace(/\b(?:production|local|staging|development|testing|the|all)\b/gu, '')
-    .replace(/\b(?:repo(?:sitory)?[- ]wide|environments)\b/gu, '')
-    .replace(/\s+/gu, ' ')
-    .trim();
+  return Effect.pipe(
+    value,
+    EffectString.replace(/\b(?:production|local|staging|development|testing|the|all)\b/gu, ''),
+    EffectString.replace(/\b(?:repo(?:sitory)?[- ]wide|environments)\b/gu, ''),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
 }
 
 function claimIdentity(value: string): {subject: string; property: string} | undefined {
   const canonical = canonicalSubject(value);
   if (!/^[a-z][a-z -]*$/u.test(canonical)) return undefined;
-  const parts = canonical.split(' ');
-  return {subject: parts.slice(0, -1).join(' ') || 'self', property: parts.at(-1)!};
+  const parts = Effect.pipe(canonical, EffectString.split(' '));
+  return {subject: EffectArray.join(parts.slice(0, -1), ' ') || 'self', property: parts.at(-1)!};
 }
 
 const NUMBER = '(?:[0-9]+(?:,[0-9]{3})*(?:\\.[0-9]+)?)';
@@ -494,7 +521,7 @@ function parseNumeric(operator: string, value: string): SemanticConstraint | und
   const unit = range ? range[3] : single![2];
   const [dimension, factor] = UNIT_FACTORS[unit];
   const normalized = (raw: string) => {
-    const [whole, fraction = ''] = raw.replace(/,/gu, '').split('.');
+    const [whole, fraction = ''] = Effect.pipe(raw, EffectString.replace(/,/gu, ''), EffectString.split('.'));
     const numerator = BigInt(whole + fraction) * BigInt(factor);
     if (fraction.length > 12 || numerator > BigInt(Number.MAX_SAFE_INTEGER)) return NaN;
     return Number(numerator) / 10 ** fraction.length;
@@ -516,7 +543,16 @@ function parseNumeric(operator: string, value: string): SemanticConstraint | und
 function parseSet(value: string, property: string, operator: string): SemanticConstraint | undefined {
   const multiple = /^one of \[([a-z][a-z0-9_-]*(?:, ?[a-z][a-z0-9_-]*)+)\]$/u.exec(value);
   if (multiple)
-    return {kind: 'set', values: [...new Set(multiple[1].split(',').map(part => part.trim()))].sort(compareText)};
+    return {
+      kind: 'set',
+      values: [
+        ...new Set(
+          EffectArray.map(Effect.pipe(multiple[1], EffectString.split(',')), part =>
+            Effect.pipe(part, EffectString.trim),
+          ),
+        ),
+      ].sort(compareText),
+    };
   // Single identifier values intentionally exclude prose, measurements, and inferred synonyms.
   if (
     (operator === '=' || ['engine', 'protocol', 'format', 'mode'].includes(property)) &&
@@ -578,11 +614,15 @@ function compareWorkspace(left: string | undefined, right: string | undefined): 
   const valid = (value: string | undefined) =>
     value === undefined ||
     value === '.' ||
-    (/^(?:[a-zA-Z0-9_-]+)(?:\/[a-zA-Z0-9_.-]+)*$/u.test(value) && !value.split('/').includes('..'));
+    (/^(?:[a-zA-Z0-9_-]+)(?:\/[a-zA-Z0-9_.-]+)*$/u.test(value) &&
+      !Effect.pipe(value, EffectString.split('/')).includes('..'));
   if (!valid(left) || !valid(right)) return 'unknown';
   // MemoryMetadata explicitly defines absent workspaceScope as repo-wide.
   if (left === undefined || right === undefined || left === '.' || right === '.' || left === right) return 'overlap';
-  return left.startsWith(`${right}/`) || right.startsWith(`${left}/`) ? 'overlap' : 'disjoint';
+  return Effect.pipe(left, EffectString.startsWith(`${right}/`)) ||
+    Effect.pipe(right, EffectString.startsWith(`${left}/`))
+    ? 'overlap'
+    : 'disjoint';
 }
 
 function compareValidity(
@@ -616,7 +656,8 @@ function compareValidity(
 function constraintsIncompatible(left: SemanticConstraint, right: SemanticConstraint): boolean | undefined {
   if (left.kind !== right.kind) return undefined;
   if (left.kind === 'polarity' && right.kind === 'polarity') return left.denied !== right.denied;
-  if (left.kind === 'set' && right.kind === 'set') return !left.values.some(value => right.values.includes(value));
+  if (left.kind === 'set' && right.kind === 'set')
+    return !EffectArray.some(left.values, value => right.values.includes(value));
   if (left.kind === 'numeric' && right.kind === 'numeric') {
     if (left.dimension !== right.dimension) return undefined;
     const separated = (a: typeof left, b: typeof right) =>
@@ -636,7 +677,7 @@ function contradiction(
   const [left, right] = compareClaims(first, second) <= 0 ? [first, second] : [second, first];
   const basisFingerprint = sha256HexSync(JSON.stringify({subject: left.subject, property: left.property, comparison}));
   const contradictionId = sha256HexSync(
-    ['threadnote-semantic-contradiction-v2', left.claimId, right.claimId, basisFingerprint].join('\u0000'),
+    EffectArray.join(['threadnote-semantic-contradiction-v2', left.claimId, right.claimId, basisFingerprint], '\u0000'),
   );
   return {
     basisFingerprint,
@@ -656,23 +697,35 @@ function claimReference(claim: ContextHealthSemanticExtractedClaimV2): ContextHe
 }
 
 function withoutNegation(value: string): string {
-  return value
-    .replace(/\bcannot\b/giu, 'can')
-    .replace(/\bdisabled\b/giu, 'enabled')
-    .replace(/\bdoesn't\b/giu, 'does')
-    .replace(/\bdo not\b/giu, 'do')
-    .replace(/\bmust not\b/giu, 'must')
-    .replace(/\b(?:never|no|not)\b/giu, '');
+  return Effect.pipe(
+    value,
+    EffectString.replace(/\bcannot\b/giu, 'can'),
+    EffectString.replace(/\bdisabled\b/giu, 'enabled'),
+    EffectString.replace(/\bdoesn't\b/giu, 'does'),
+    EffectString.replace(/\bdo not\b/giu, 'do'),
+    EffectString.replace(/\bmust not\b/giu, 'must'),
+    EffectString.replace(/\b(?:never|no|not)\b/giu, ''),
+  );
 }
 
 function tokens(value: string): readonly string[] {
-  return [...new Set([...value.toLowerCase().matchAll(TOKEN)].map(match => match[0]))].sort(compareText);
+  return [
+    ...new Set(
+      EffectArray.map(
+        [...Effect.pipe(value, EffectString.toLowerCase, EffectString.matchAll(TOKEN))],
+        match => match[0],
+      ),
+    ),
+  ].sort(compareText);
 }
 
 function tokenSimilarityMilli(left: readonly string[], right: readonly string[]): number {
   if (left.length === 0 || right.length === 0) return 0;
   const leftSet = new Set(left);
-  const intersection = right.filter(token => leftSet.has(token)).length;
+  const intersection = EffectArray.filter(
+    right,
+    (token, __effectArrayIndex) => __effectArrayIndex in right && leftSet.has(token),
+  ).length;
   const union = new Set([...left, ...right]).size;
   return Math.round((intersection / union) * 1_000);
 }

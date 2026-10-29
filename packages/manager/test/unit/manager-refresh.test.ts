@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {settleManagerRefreshTasks} from '@threadnote/manager/refresh';
@@ -23,9 +24,9 @@ describe('Manager refresh isolation', () => {
   it('attempts every refresh once and reports failures in task order', async () => {
     await fc.assert(
       fc.asyncProperty(fc.array(fc.boolean(), {maxLength: 12}), async shouldFail => {
-        const calls = shouldFail.map(() => 0);
+        const calls = EffectArray.map(shouldFail, () => 0);
         const failures = await settleManagerRefreshTasks(
-          shouldFail.map((fail, index) => ({
+          EffectArray.map(shouldFail, (fail, index) => ({
             label: `task-${index}`,
             run: async () => {
               calls[index] += 1;
@@ -34,8 +35,10 @@ describe('Manager refresh isolation', () => {
           })),
         );
 
-        expect(calls).toEqual(shouldFail.map(() => 1));
-        expect(failures).toEqual(shouldFail.flatMap((fail, index) => (fail ? [`task-${index}: failed-${index}`] : [])));
+        expect(calls).toEqual(EffectArray.map(shouldFail, () => 1));
+        expect(failures).toEqual(
+          EffectArray.flatMap(shouldFail, (fail, index) => (fail ? [`task-${index}: failed-${index}`] : [])),
+        );
       }),
       {numRuns: 64},
     );

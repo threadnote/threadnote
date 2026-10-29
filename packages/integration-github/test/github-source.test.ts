@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer, Redacted, Result, Schema} from 'effect';
@@ -48,6 +49,11 @@ import {
 } from '../src/state.js';
 import {makeGitHubClientBudget} from '../src/client.js';
 import {fixtureFetch, json, restItem, timestamp} from './fixtures.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
+
 const baseServices = Layer.mergeAll(
   BunServices.layer,
   SystemInfo.layer.pipe(
@@ -73,7 +79,7 @@ const access = Layer.merge(
 const layer = Layer.merge(access, ResourceStore.layer.pipe(Layer.provide(access)));
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.scoped(Layer.build(layer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
-const configFor = (home: string) => ({agentContextHome: home, account: 'local', user: 'tester'}) as RuntimeConfig;
+const configFor = (home: string) => runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
 const location = (config: RuntimeConfig) => ({
   home: config.agentContextHome,
   account: config.account,
@@ -99,9 +105,11 @@ const uri = (number = 1) =>
     chunkId: 'part-0',
   });
 const namePath = (url: URL) =>
-  url.pathname
-    .replace(/^\/repositories\/7(?=\/|$)/, '/repos/owner/repo')
-    .replace(/^\/repositories\/9(?=\/|$)/, '/repos/zowner/healthy');
+  Effect2.pipe(
+    url.pathname,
+    EffectString.replace(/^\/repositories\/7(?=\/|$)/, '/repos/owner/repo'),
+    EffectString.replace(/^\/repositories\/9(?=\/|$)/, '/repos/zowner/healthy'),
+  );
 const healthyUri = externalResourceUri({
   provider: 'github',
   sourceId: 'github',
@@ -116,7 +124,7 @@ const selectedFetch = (url: URL) => {
   const item = {...restItem(3), html_url: 'https://github.com/zowner/healthy/issues/3'};
   if (pathname === '/repos/zowner/healthy/issues') return Promise.resolve(json([item]));
   if (pathname === '/repos/zowner/healthy/issues/3') return Promise.resolve(json(item));
-  if (pathname.startsWith('/repos/zowner/healthy/')) return Promise.resolve(json([]));
+  if (Effect2.pipe(pathname, EffectString.startsWith('/repos/zowner/healthy/'))) return Promise.resolve(json([]));
   return fixtureFetch([1, 2])(url);
 };
 describe('GitHub source', () => {
@@ -131,7 +139,10 @@ describe('GitHub source', () => {
       yield* runGitHubSourceRemove(config, {id: 'first', apply: true});
       expect(Redacted.value(yield* resolveGitHubCredential(config, second))).toBe('ghp_synthetic_test_only_key');
       expect(
-        (yield* fs.readFileString(`${home}/threadnote/sources.yaml`)).includes('ghp_synthetic_test_only_key'),
+        Effect2.pipe(
+          yield* fs.readFileString(`${home}/threadnote/sources.yaml`),
+          EffectString.includes('ghp_synthetic_test_only_key'),
+        ),
       ).toBe(false);
     }).pipe(TestClock.withLive, provide),
   );
@@ -153,7 +164,9 @@ describe('GitHub source', () => {
       expect(yield* policy.evidenceFingerprint!(location(config), 'github', 'github')).toBeUndefined();
       yield* mutateSourceConfiguration(config, configuration => ({
         ...configuration,
-        sources: configuration.sources.map(source => (source.id === 'github' ? {...source, enabled: false} : source)),
+        sources: EffectArray.map(configuration.sources, source =>
+          source.id === 'github' ? {...source, enabled: false} : source,
+        ),
       }));
       expect(yield* policy.evidenceFingerprint!(location(config), 'github', 'github')).toBeUndefined();
       const pinId = '12345678-1234-4234-8234-123456789abc';
@@ -163,11 +176,11 @@ describe('GitHub source', () => {
         version: 1 as const,
         provider: 'github' as const,
         sourceId: 'github',
-        sourceInstanceId: 'a'.repeat(64),
+        sourceInstanceId: Effect2.pipe('a', EffectString.repeat(64)),
         resourceUri: uri(),
-        accessHash: 'a'.repeat(64),
+        accessHash: Effect2.pipe('a', EffectString.repeat(64)),
         revisionHash: sha256HexSync('abcd'),
-        contentHash: 'a'.repeat(64),
+        contentHash: Effect2.pipe('a', EffectString.repeat(64)),
         rendererVersion: 'github-v1',
         sanitizerVersion: 'scrubber-redact-v1',
         fragmentHash: sha256HexSync('abcd'),
@@ -260,8 +273,10 @@ describe('GitHub source', () => {
         expect(done).toBe(true);
         expect(yield* readGitHubSyncState(config, 'github')).toBeUndefined();
         const inventory = yield* runGitHubSourceInventory(config, 'github');
-        expect(inventory.entries.map(x => x.documentId).sort()).toEqual(numbers.map(n => `r-7-issue-${n + 10}`).sort());
-        expect(inventory.entries.every(x => x.status === 'active')).toBe(true);
+        expect(EffectArray.map(inventory.entries, x => x.documentId).sort()).toEqual(
+          EffectArray.map(numbers, n => `r-7-issue-${n + 10}`).sort(),
+        );
+        expect(EffectArray.every(inventory.entries, x => x.status === 'active')).toBe(true);
         const store = yield* ResourceStore;
         for (const number of numbers)
           expect(yield* store.read(location(config), uri(number))).toContain(`Body ${number}`);
@@ -277,7 +292,7 @@ describe('GitHub source', () => {
         let phase = 0;
         const mock = fixtureFetch([1]);
         const fetch = async (url: URL) => {
-          if (namePath(url).endsWith('/issues/1/comments'))
+          if (Effect2.pipe(namePath(url), EffectString.endsWith('/issues/1/comments')))
             return json(
               phase === 2
                 ? []
@@ -292,7 +307,8 @@ describe('GitHub source', () => {
                     },
                   ],
             );
-          if (namePath(url).endsWith('/issues/1')) return json({...restItem(1), comments: phase === 2 ? 0 : 1});
+          if (Effect2.pipe(namePath(url), EffectString.endsWith('/issues/1')))
+            return json({...restItem(1), comments: phase === 2 ? 0 : 1});
           if (phase === 1 && namePath(url) === '/repos/owner/repo/issues/comments')
             return json([{id: 5, issue_url: 'https://api.github.com/repos/owner/Repo/issues/1'}]);
           if (phase > 0 && namePath(url) === '/repos/owner/repo/issues') return json([]);
@@ -364,7 +380,7 @@ describe('GitHub source', () => {
                 },
               },
             });
-          if (namePath(url).endsWith('/reviews'))
+          if (Effect2.pipe(namePath(url), EffectString.endsWith('/reviews')))
             return json([
               {
                 id: 5,
@@ -375,9 +391,9 @@ describe('GitHub source', () => {
                 html_url: 'https://github.com/owner/repo/pull/1#pullrequestreview-5',
               },
             ]);
-          if (namePath(url).includes('/pulls/1'))
+          if (Effect2.pipe(namePath(url), EffectString.includes('/pulls/1')))
             return json({number: 1, html_url: 'https://github.com/owner/repo/pull/1', merged: false, draft: false});
-          if (namePath(url).endsWith('/comments')) return json([]);
+          if (Effect2.pipe(namePath(url), EffectString.endsWith('/comments'))) return json([]);
           return json(restItem(1, true));
         };
         for (const changed of [false, true]) {
@@ -387,11 +403,11 @@ describe('GitHub source', () => {
           const manifest = yield* readExternalDocumentManifest(location(config), 'github', 'r-7-pull-11', 'github');
           const store = yield* ResourceStore;
           const resources: string[] = [];
-          for (const uri of Object.keys(manifest?.chunks ?? {}))
+          for (const uri of EffectRecord.keys(manifest?.chunks ?? {}))
             resources.push(yield* store.read(location(config), uri));
-          expect(resources.join('\n')).toContain(`Resolved: ${changed}; outdated: ${changed}`);
-          expect(resources.join('\n')).toContain(`Review: ${changed ? 'DISMISSED' : 'APPROVED'}`);
-          expect(resources.join('\n')).toContain(`updated: ${timestamp}`);
+          expect(EffectArray.join(resources, '\n')).toContain(`Resolved: ${changed}; outdated: ${changed}`);
+          expect(EffectArray.join(resources, '\n')).toContain(`Review: ${changed ? 'DISMISSED' : 'APPROVED'}`);
+          expect(EffectArray.join(resources, '\n')).toContain(`updated: ${timestamp}`);
         }
       }).pipe(TestClock.withLive, provide),
   );
@@ -432,7 +448,7 @@ describe('GitHub source', () => {
         apply: true,
         clientOptions: {
           fetch: async url =>
-            namePath(url).endsWith('/issues/1')
+            Effect2.pipe(namePath(url), EffectString.endsWith('/issues/1'))
               ? json({...restItem(1), body: 'api_token: synthetic-secret'})
               : mock(url),
         },
@@ -474,14 +490,19 @@ describe('GitHub source', () => {
         clientOptions: {
           fetch: async url =>
             namePath(url) === '/repos/owner/repo/issues/1'
-              ? new Response('x'.repeat(3 * 1024 * 1024), {headers: {'content-type': 'application/json'}})
+              ? new Response(Effect2.pipe('x', EffectString.repeat(3 * 1024 * 1024)), {
+                  headers: {'content-type': 'application/json'},
+                })
               : mock(url),
         },
       });
       expect(result.syncedDocuments).toContain('r-7-issue-12');
       const inventory = yield* runGitHubSourceInventory(config, 'github');
-      expect(inventory.entries.find(e => e.documentId === 'r-7-issue-11')?.status).toBe('pending');
-      expect(result.warnings.join(' ')).toContain('response-too-large');
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(inventory.entries, e => e.documentId === 'r-7-issue-11'))
+          ?.status,
+      ).toBe('pending');
+      expect(EffectArray.join(result.warnings, ' ')).toContain('response-too-large');
     }).pipe(TestClock.withLive, provide),
   );
   effectIt.effect('denies pending publication when configuration changes during provider reads', () =>
@@ -495,11 +516,11 @@ describe('GitHub source', () => {
         apply: true,
         clientOptions: {
           fetch: async url => {
-            if (!changed && namePath(url).endsWith('/issues/1')) {
+            if (!changed && Effect2.pipe(namePath(url), EffectString.endsWith('/issues/1'))) {
               changed = true;
               const file = `${config.agentContextHome}/threadnote/sources.yaml`;
               const text = await Bun.file(file).text();
-              await Bun.write(file, text.replace('enabled: true', 'enabled: false'));
+              await Bun.write(file, Effect2.pipe(text, EffectString.replace('enabled: true', 'enabled: false')));
             }
             return mock(url);
           },
@@ -524,11 +545,12 @@ describe('GitHub source', () => {
           ...store,
           mutateChecked: (where, mutations, check) => {
             if (
-              mutations.some(
+              EffectArray.some(
+                mutations,
                 m =>
                   m.type === 'write' &&
-                  m.uri.endsWith('/.manifest.json') &&
-                  m.content.includes('"status":"quarantined"'),
+                  Effect2.pipe(m.uri, EffectString.endsWith('/.manifest.json')) &&
+                  Effect2.pipe(m.content, EffectString.includes('"status":"quarantined"')),
               ) &&
               ++quarantined === 2
             )
@@ -586,7 +608,9 @@ describe('GitHub source', () => {
         const pathname = namePath(url);
         if (pathname === '/repos/owner/repo/issues') return json([]);
         if (pathname === '/repos/owner/repo/issues/comments')
-          return json([1, 2].map(n => ({id: n, issue_url: `https://api.github.com/repos/owner/repo/issues/${n}`})));
+          return json(
+            EffectArray.map([1, 2], n => ({id: n, issue_url: `https://api.github.com/repos/owner/repo/issues/${n}`})),
+          );
         if (pathname === '/repos/owner/repo/issues/1') return json({}, 404);
         return selectedFetch(url);
       };
@@ -614,9 +638,13 @@ describe('GitHub source', () => {
       expect(synced).toContain('r-7-issue-12');
       expect(synced).toContain('r-9-issue-13');
       const repositories = yield* readGitHubRepositoryStates(config, 'github');
-      expect(repositories?.find(r => r.id === '7')?.unresolvedNumbers).toEqual([
-        {number: 1, nextAttemptAt: expect.any(Number)},
-      ]);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(repositories), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, r => r.id === '7')),
+          ),
+        )?.unresolvedNumbers,
+      ).toEqual([{number: 1, nextAttemptAt: expect.any(Number)}]);
       const store = yield* ResourceStore;
       expect(Result.isFailure(yield* store.read(location(config), uri()).pipe(Effect.result))).toBe(true);
       expect(yield* store.read(location(config), uri(2))).toContain('Body 2');
@@ -636,7 +664,9 @@ describe('GitHub source', () => {
         const mock = fixtureFetch([1, 2]);
         const fetch = async (url: URL) =>
           namePath(url) === '/repos/owner/repo/issues/1'
-            ? new Response('x'.repeat(3 * 1024 * 1024), {headers: {'content-type': 'application/json'}})
+            ? new Response(Effect2.pipe('x', EffectString.repeat(3 * 1024 * 1024)), {
+                headers: {'content-type': 'application/json'},
+              })
             : mock(url);
         let boundary = Date.parse(timestamp) + 3600000;
         for (let cycle = 0; cycle < cycles; cycle++) {
@@ -656,8 +686,17 @@ describe('GitHub source', () => {
           expect(repository.issueWatermark).toBe(boundary);
           expect(repository.commentsWatermark).toBe(boundary);
           expect(repository.reviewCommentsWatermark).toBe(boundary);
-          if (cycle > 0) expect(observed.every(since => Date.parse(since) >= boundary - 300000)).toBe(true);
-          expect((yield* listGitHubIdMarkers(config, 'github'))?.find(m => m.number === 1)?.pending).toBe(true);
+          if (cycle > 0)
+            expect(EffectArray.every(observed, since => Date.parse(since) >= boundary - 300000)).toBe(true);
+          expect(
+            EffectOption.getOrUndefined(
+              EffectOption.map(
+                EffectOption.fromNullishOr(yield* listGitHubIdMarkers(config, 'github')),
+                __effectArrayReceiver =>
+                  EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, m => m.number === 1)),
+              ),
+            )?.pending,
+          ).toBe(true);
           expect(yield* (yield* ResourceStore).read(location(config), uri(2))).toContain('Body 2');
           boundary += 180000;
         }
@@ -676,7 +715,7 @@ describe('GitHub source', () => {
             return json(forbidden && mode === 'candidate' ? [] : [restItem(1, true), restItem(2, true)]);
           if (pathname === '/repos/owner/repo/issues/comments' && forbidden && mode === 'candidate')
             return json(
-              [1, 2].map(number => ({
+              EffectArray.map([1, 2], number => ({
                 id: number,
                 issue_url: `https://api.github.com/repos/owner/repo/issues/${number}`,
               })),
@@ -695,7 +734,7 @@ describe('GitHub source', () => {
                   },
                 });
           if (/^\/repos\/owner\/repo\/pulls\/[12]$/.test(pathname)) {
-            const number = Number(pathname.split('/').at(-1));
+            const number = Number(Effect2.pipe(pathname, EffectString.split('/')).at(-1));
             return json({
               number,
               html_url: `https://github.com/owner/repo/pull/${number}`,
@@ -706,8 +745,11 @@ describe('GitHub source', () => {
           if (/^\/repos\/owner\/repo\/issues\/[12]$/.test(pathname))
             return forbidden && mode === 'candidate'
               ? json({}, 403)
-              : json(restItem(Number(pathname.split('/').at(-1)), true));
-          if (pathname === '/repos/owner/repo' || pathname.startsWith('/repos/zowner/healthy'))
+              : json(restItem(Number(Effect2.pipe(pathname, EffectString.split('/')).at(-1)), true));
+          if (
+            pathname === '/repos/owner/repo' ||
+            Effect2.pipe(pathname, EffectString.startsWith('/repos/zowner/healthy'))
+          )
             return selectedFetch(url);
           return json([]);
         };
@@ -731,11 +773,12 @@ describe('GitHub source', () => {
           ...store,
           mutateChecked: (where, mutations, check) => {
             if (
-              mutations.some(
+              EffectArray.some(
+                mutations,
                 m =>
                   m.type === 'write' &&
-                  m.uri.endsWith('/.manifest.json') &&
-                  m.content.includes('"status":"quarantined"'),
+                  Effect2.pipe(m.uri, EffectString.endsWith('/.manifest.json')) &&
+                  Effect2.pipe(m.content, EffectString.includes('"status":"quarantined"')),
               ) &&
               ++quarantined === 2
             )
@@ -776,7 +819,7 @@ describe('GitHub source', () => {
           'quarantined',
         );
         expect(Result.isFailure(yield* store.read(location(config), pullUri(2)).pipe(Effect.result))).toBe(true);
-        expect(Object.keys(yield* loadExternalResourceAccess(location(config)))).not.toContain(pullUri(2));
+        expect(EffectRecord.keys(yield* loadExternalResourceAccess(location(config)))).not.toContain(pullUri(2));
         yield* runGitHubSourceSync(config, {id: 'github', apply: true, clientOptions: {fetch}});
         for (const number of [1, 2])
           expect(yield* store.read(location(config), pullUri(number))).toContain(`Body ${number}`);
@@ -805,7 +848,7 @@ describe('GitHub source', () => {
             const next = new URL(url);
             next.searchParams.set('page', '2');
             return json(
-              numbers.map(number => ({
+              EffectArray.map(numbers, number => ({
                 id: number,
                 issue_url: `https://api.github.com/repos/owner/repo/issues/${number}`,
               })),
@@ -823,9 +866,10 @@ describe('GitHub source', () => {
             body: `Healthy cycle ${cycle}`,
             html_url: `https://github.com/zowner/healthy/issues/${number}`,
           });
-          if (pathname === '/repos/zowner/healthy/issues') return json(changed ? [] : healthyNumbers.map(item));
+          if (pathname === '/repos/zowner/healthy/issues')
+            return json(changed ? [] : EffectArray.map(healthyNumbers, item));
           if (/^\/repos\/zowner\/healthy\/issues\/\d+$/.test(pathname))
-            return json(item(Number(pathname.split('/').at(-1))));
+            return json(item(Number(Effect2.pipe(pathname, EffectString.split('/')).at(-1))));
           return json([]);
         };
         yield* runGitHubSourceSync(config, {id: 'github', apply: true, clientOptions: {fetch}});
@@ -840,12 +884,14 @@ describe('GitHub source', () => {
             apply: true,
             clientOptions: {fetch, maxRequests: 16, budget: makeGitHubClientBudget(20000, 16)},
           });
-          expect(result.syncedDocuments.some(doc => doc.startsWith('r-9-'))).toBe(true);
+          expect(
+            EffectArray.some(result.syncedDocuments, doc => Effect2.pipe(doc, EffectString.startsWith('r-9-'))),
+          ).toBe(true);
           expect(unavailableCalls).toBeLessThan(8);
           const repositories = (yield* readGitHubRepositoryStates(config, 'github'))!;
-          const unavailable = repositories.find(r => r.id === '7')!;
+          const unavailable = EffectOption.getOrUndefined(EffectArray.findFirst(repositories, r => r.id === '7'))!;
           expect(unavailable.commentsWatermark).toBe(boundary);
-          const healthy = repositories.find(r => r.id === '9')!;
+          const healthy = EffectOption.getOrUndefined(EffectArray.findFirst(repositories, r => r.id === '9'))!;
           if (cycle === 1) {
             expect(healthy.parked).toBe(true);
             sawUnfinishedHealthy = true;
@@ -853,14 +899,16 @@ describe('GitHub source', () => {
           if (sawUnfinishedHealthy && !healthy.parked) sawResumedHealthyComplete = true;
         }
         expect(sawUnfinishedHealthy && sawResumedHealthyComplete).toBe(true);
-        const unavailable = (yield* readGitHubRepositoryStates(config, 'github'))!.find(r => r.id === '7')!;
+        const unavailable = EffectOption.getOrUndefined(
+          EffectArray.findFirst((yield* readGitHubRepositoryStates(config, 'github'))!, r => r.id === '7'),
+        )!;
         expect(unavailable.unresolvedNumbers).toHaveLength(100);
         expect(unavailable.parked).toBe(true);
         const parked = (yield* readGitHubRepositoryCheckpoint(config, 'github', '7', 0))!;
         expect(parked.page).toBe(2);
         expect(parked.phase).toBe('comments');
         expect(parked.numbers).toEqual([101, 102, 103]);
-        const retained = [...unavailable.unresolvedNumbers!.map(item => item.number), ...parked.numbers!];
+        const retained = [...EffectArray.map(unavailable.unresolvedNumbers!, item => item.number), ...parked.numbers!];
         expect(new Set(retained)).toEqual(new Set(Array.from({length: 103}, (_, i) => i + 1)));
       }).pipe(provide),
     {timeout: 120000},
@@ -878,7 +926,7 @@ describe('GitHub source', () => {
         const config = yield* setup(yield* fs.makeTempDirectoryScoped());
         const legacy: GitHubSyncState = {
           version: 1,
-          fingerprint: 'a'.repeat(64),
+          fingerprint: Effect2.pipe('a', EffectString.repeat(64)),
           accessEpoch: (yield* readExternalSourceReceipt(location(config), 'github', 'github'))!.accessEpoch,
           repositoryIndex: 0,
           phase: 'comments',
@@ -894,7 +942,12 @@ describe('GitHub source', () => {
           ...legacy,
           numbers: Array.from({length: count}, (_, i) => i + 1),
           incomplete: true,
-          ...(revalidating ? {revalidatingRepositoryId: '7', revalidatingRepositoryGeneration: 'b'.repeat(64)} : {}),
+          ...(revalidating
+            ? {
+                revalidatingRepositoryId: '7',
+                revalidatingRepositoryGeneration: Effect2.pipe('b', EffectString.repeat(64)),
+              }
+            : {}),
         };
         const before = structuredClone(parked);
         yield* writeGitHubSyncState(config, 'github', legacy, Effect.void);
@@ -919,12 +972,12 @@ describe('GitHub source', () => {
           clientOptions: {fetch: fixtureFetch([1]), maxRequests: 3},
         });
         const saved = (yield* readGitHubRepositoryCheckpoint(config, 'github', '7', 0))!;
-        expect(saved.items.map(item => item.number)).toEqual([1]);
+        expect(EffectArray.map(saved.items, item => item.number)).toEqual([1]);
         const filename = `${config.agentContextHome}/data/local/resources/external/github/github/.checkpoints/r-7-0.json`;
         for (const invalid of [
-          {...saved, accessEpoch: 'f'.repeat(64)},
+          {...saved, accessEpoch: Effect2.pipe('f', EffectString.repeat(64))},
           {...saved, numbers: Array.from({length: 101}, (_, i) => i + 1)},
-          {...saved, revalidatingRepositoryGeneration: 'b'.repeat(64)},
+          {...saved, revalidatingRepositoryGeneration: Effect2.pipe('b', EffectString.repeat(64))},
           {...saved, revalidatingRepositoryId: '7', revalidatingRepositoryGeneration: 'invalid'},
         ]) {
           yield* fs.writeFileString(filename, JSON.stringify(invalid));
@@ -981,7 +1034,10 @@ describe('GitHub source', () => {
         }
         expect(done).toBe(true);
         expect(
-          (yield* runGitHubSourceInventory(config, 'github')).entries.filter(entry => entry.status === 'active'),
+          EffectArray.filter(
+            (yield* runGitHubSourceInventory(config, 'github')).entries,
+            entry => entry.status === 'active',
+          ),
         ).toHaveLength(names.length);
       }).pipe(provide),
     {timeout: 120000},
@@ -1007,7 +1063,7 @@ describe('GitHub source', () => {
           const fetch = async (url: URL) => {
             const pathname = namePath(url);
             if (pathname === '/repos/owner/repo') return mode === 'denied' ? json({}, 403) : selectedFetch(url);
-            if (pathname.startsWith('/repos/zowner/healthy')) return selectedFetch(url);
+            if (Effect2.pipe(pathname, EffectString.startsWith('/repos/zowner/healthy'))) return selectedFetch(url);
             if (pathname === '/repos/owner/repo/issues') return json([restItem(1, true), restItem(2, true)]);
             if (pathname === '/repos/owner/repo/issues/1') {
               if (mode === 'unavailable') {
@@ -1022,7 +1078,7 @@ describe('GitHub source', () => {
             }
             if (pathname === '/repos/owner/repo/issues/2') return json(restItem(2, true));
             if (/^\/repos\/owner\/repo\/pulls\/[12]$/.test(pathname)) {
-              const number = Number(pathname.split('/').at(-1));
+              const number = Number(Effect2.pipe(pathname, EffectString.split('/')).at(-1));
               return mode === 'recovering' && number === 2
                 ? json({}, 403)
                 : json({number, html_url: `https://github.com/owner/repo/pull/${number}`, merged: false, draft: false});
@@ -1069,26 +1125,34 @@ describe('GitHub source', () => {
           const interruptedStore: typeof store = {
             ...store,
             mutateChecked: (where, mutations, check) => {
-              if (repeatedDenialPersisted && mutations.some(m => m.type === 'write' && m.uri.endsWith('/.sync.json')))
+              if (
+                repeatedDenialPersisted &&
+                EffectArray.some(
+                  mutations,
+                  m => m.type === 'write' && Effect2.pipe(m.uri, EffectString.endsWith('/.sync.json')),
+                )
+              )
                 return Effect.die('Synthetic crash after repeated denial receipt');
               return store.mutateChecked(where, mutations, check).pipe(
                 Effect.tap(() =>
                   Effect.sync(() => {
                     if (
-                      mutations.some(
+                      EffectArray.some(
+                        mutations,
                         m =>
                           m.type === 'write' &&
-                          m.uri.endsWith('/r-7-pull-11/.manifest.json') &&
-                          m.content.includes('"status":"active"'),
+                          Effect2.pipe(m.uri, EffectString.endsWith('/r-7-pull-11/.manifest.json')) &&
+                          Effect2.pipe(m.content, EffectString.includes('"status":"active"')),
                       )
                     )
                       firstPublished = true;
                     if (
                       firstPublished &&
-                      mutations.some(
+                      EffectArray.some(
+                        mutations,
                         m =>
                           m.type === 'write' &&
-                          m.uri.endsWith('/.access.json') &&
+                          Effect2.pipe(m.uri, EffectString.endsWith('/.access.json')) &&
                           JSON.parse(m.content).deniedRepositoryIds?.includes('7'),
                       )
                     )
@@ -1112,8 +1176,15 @@ describe('GitHub source', () => {
             (yield* readExternalDocumentManifest(location(config), 'github', 'r-7-pull-11', 'github'))?.status,
           ).toBe('active');
           expect(
-            (yield* listGitHubIdMarkers(config, 'github'))?.find(marker => marker.documentId === 'r-7-pull-11')
-              ?.observedBoundary,
+            EffectOption.getOrUndefined(
+              EffectOption.map(
+                EffectOption.fromNullishOr(yield* listGitHubIdMarkers(config, 'github')),
+                __effectArrayReceiver =>
+                  EffectOption.getOrUndefined(
+                    EffectArray.findFirst(__effectArrayReceiver, marker => marker.documentId === 'r-7-pull-11'),
+                  ),
+              ),
+            )?.observedBoundary,
           ).toBe(retained.boundary);
           const latest = (yield* readExternalSourceReceipt(location(config), 'github', 'github'))!;
           expect(latest.deniedRepositoryIds).toContain('7');
@@ -1123,7 +1194,7 @@ describe('GitHub source', () => {
           expect(Result.isFailure(yield* store.readBounded(location(config), pullUri, 64).pipe(Effect.result))).toBe(
             true,
           );
-          expect(Object.keys(yield* loadExternalResourceAccess(location(config)))).not.toContain(pullUri);
+          expect(EffectRecord.keys(yield* loadExternalResourceAccess(location(config)))).not.toContain(pullUri);
           expect(unavailableReads).toBeGreaterThan(0);
           expect(latest.repositoryDenialGenerations?.['7']).not.toBe(retained.revalidatingRepositoryGeneration);
           expect(yield* store.read(location(config), healthyUri)).toContain('Body 3');
@@ -1132,7 +1203,7 @@ describe('GitHub source', () => {
           yield* runGitHubSourceSync(config, {id: 'github', apply: true, clientOptions: {fetch}});
           expect(freshReads).toBeGreaterThanOrEqual(2);
           expect(yield* store.read(location(config), pullUri)).toContain('Fresh restored snapshot');
-          expect(Object.keys(yield* loadExternalResourceAccess(location(config)))).toContain(pullUri);
+          expect(EffectRecord.keys(yield* loadExternalResourceAccess(location(config)))).toContain(pullUri);
         }
       }).pipe(provide),
     {timeout: 120000},

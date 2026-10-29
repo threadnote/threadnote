@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, Path} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {
@@ -36,6 +37,9 @@ import {
   type RefreshRequest,
   type RefreshState,
 } from './refresh_state.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface DevSkillsRefreshCandidate {
   readonly releaseRoot: string;
@@ -57,9 +61,9 @@ export const requirementsIssues = (
       !capabilities.manifestSchemas?.includes(2) ||
       !installed.nativeRequirements ||
       !capabilities.nativeFeatures ||
-      Object.entries(installed.nativeRequirements).some(
-        ([key, required]) =>
-          capabilities.nativeFeatures?.[key as keyof typeof installed.nativeRequirements] !== required,
+      EffectArray.some(
+        EffectRecord.toEntries(installed.nativeRequirements),
+        ([key, required]) => capabilities.nativeFeatures?.[key] !== required,
       ))) ||
   !capabilities.workflowProtocols.includes(installed.workflowProtocol) ||
   !capabilities.stateSchemas.includes(installed.stateSchema) ||
@@ -73,7 +77,7 @@ export const requirementsIssues = (
     : [];
 const errorIssue = (error: unknown): DevSkillsIssue => ({
   code: 'inspection-pending',
-  message: `Ownership could not be verified: ${String(error).slice(0, 3000)}`,
+  message: `Ownership could not be verified: ${Effect2.pipe(String(error), EffectString.slice(0, 3000))}`,
 });
 export const previewDevSkillsRefresh = Effect.fn('devSkills.previewRefresh')(function* (
   config: RuntimeConfig,
@@ -93,7 +97,10 @@ export const previewDevSkillsRefresh = Effect.fn('devSkills.previewRefresh')(fun
     );
   const source = candidate.bundleRoot ?? candidate.releaseRoot;
   if (source !== candidate.releaseRoot) {
-    const segments = path.relative(path.join(context.root, 'versions'), source).split(path.sep);
+    const segments = Effect2.pipe(
+      path.relative(path.join(context.root, 'versions'), source),
+      EffectString.split(path.sep),
+    );
     if (
       segments.length !== 2 ||
       segments[1] !== 'release' ||
@@ -113,7 +120,7 @@ export const previewDevSkillsRefresh = Effect.fn('devSkills.previewRefresh')(fun
     return yield* fail('invalid-candidate', 'Candidate bundle version differs from its executable.');
   const globalIssues: DevSkillsIssue[] = [];
   if (
-    ![1, 2].every(schema => capabilities.enrollmentSchemas.includes(schema)) ||
+    !EffectArray.every([1, 2], schema => capabilities.enrollmentSchemas.includes(schema)) ||
     !capabilities.workflowProtocols.includes(1) ||
     !capabilities.stateSchemas.includes(1)
   )
@@ -124,8 +131,8 @@ export const previewDevSkillsRefresh = Effect.fn('devSkills.previewRefresh')(fun
   globalIssues.push(...requirementsIssues(installedSummary(bundle.manifest), capabilities));
   const members: RefreshMember[] = [];
   const affected = new Map<string, DevSkillsConsumer>();
-  for (const [id, enrollment] of Object.entries(context.runtimeIndex.enrollments).sort(([a], [b]) =>
-    a.localeCompare(b),
+  for (const [id, enrollment] of EffectRecord.toEntries(context.runtimeIndex.enrollments).sort(([a], [b]) =>
+    Effect2.pipe(a, EffectString.localeCompare(b)),
   )) {
     const issues: DevSkillsIssue[] = [];
     let retained: DevSkillsInstalled[] = [];
@@ -142,18 +149,18 @@ export const previewDevSkillsRefresh = Effect.fn('devSkills.previewRefresh')(fun
           stableJson({home: enrollment.home, installationRoot: enrollment.installationRoot, target: enrollment.target})
       )
         issues.push({code: 'enrollment-conflict', message: 'Runtime enrollment does not match physical ownership.'});
-      if (read.receipt && Object.keys(read.receipt.consumers).length) {
+      if (read.receipt && EffectRecord.keys(read.receipt.consumers).length) {
         installed = installedSummary(read.receipt.manifest);
-        retained = Object.values(read.receipt.generations)
-          .map(installedSummary)
-          .sort((a, b) => a.digest.localeCompare(b.digest));
+        retained = EffectArray.map(EffectRecord.values(read.receipt.generations), installedSummary).sort((a, b) =>
+          Effect2.pipe(a.digest, EffectString.localeCompare(b.digest)),
+        );
         for (const requirement of retained) issues.push(...requirementsIssues(requirement, capabilities));
         const inspection = yield* inspectOwned(enrollment.target, read.receipt);
         issues.push(...inspection.issues);
         observedHash = hash(stableJson(inspection.contents));
         const projection = yield* verifyReceiptProjection(enrollment.target, read.receipt).pipe(Effect.result);
         if (projection._tag === 'Failure') issues.push(errorIssue(projection.failure));
-        for (const [otherId, consumer] of Object.entries(read.receipt.consumers))
+        for (const [otherId, consumer] of EffectRecord.toEntries(read.receipt.consumers))
           if (!context.runtimeIndex.enrollments[otherId]) affected.set(otherId, consumer);
       }
     }).pipe(Effect.result);
@@ -165,9 +172,11 @@ export const previewDevSkillsRefresh = Effect.fn('devSkills.previewRefresh')(fun
         const content = yield* readOptional(receiptPath(path, enrollment.target.skillRoot));
         if (content === null) return;
         const requirements = yield* decode(content, value => {
-          if (!isRecord(value) || !isRecord(value.generations) || Object.keys(value.generations).length > 1024)
+          if (!isRecord(value) || !isRecord(value.generations) || EffectRecord.keys(value.generations).length > 1024)
             return [];
-          return Object.values(value.generations).filter((item): item is Record<string, unknown> => isRecord(item));
+          return EffectArray.filter(EffectRecord.values(value.generations), (item): item is Record<string, unknown> =>
+            isRecord(item),
+          );
         });
         for (const item of requirements) {
           if (
@@ -266,13 +275,15 @@ export const previewDevSkillsRefresh = Effect.fn('devSkills.previewRefresh')(fun
     desired: bundle.manifest,
     runtimeHash: context.runtimeContent === null ? null : hash(context.runtimeContent),
     members,
-    affected: [...affected.values()].sort((a, b) => consumerId(a).localeCompare(consumerId(b))),
+    affected: [...affected.values()].sort((a, b) =>
+      Effect2.pipe(consumerId(a), EffectString.localeCompare(consumerId(b))),
+    ),
   };
-  const issues = [...globalIssues, ...members.flatMap(member => member.issues)];
+  const issues = [...globalIssues, ...EffectArray.flatMap(members, member => member.issues)];
   const plan: DevSkillsRefreshPlan = {
     schemaVersion: 1,
     release: request.release,
-    targets: members.map(member => ({
+    targets: EffectArray.map(members, member => ({
       consumerId: member.consumerId,
       home: member.enrollment.home,
       target: member.enrollment.target,
@@ -281,9 +292,9 @@ export const previewDevSkillsRefresh = Effect.fn('devSkills.previewRefresh')(fun
       ...(member.installed ? {installed: member.installed} : {}),
       issues: member.issues,
     })),
-    compatibility: issues.some(issue => issue.code === 'incompatible')
+    compatibility: EffectArray.some(issues, issue => issue.code === 'incompatible')
       ? 'incompatible'
-      : issues.some(issue => ['inspection-pending', 'enrollment-conflict'].includes(issue.code))
+      : EffectArray.some(issues, issue => ['inspection-pending', 'enrollment-conflict'].includes(issue.code))
         ? 'unknown'
         : 'compatible',
     issues,
@@ -308,10 +319,13 @@ export const prepareDevSkillsRefresh = Effect.fn('devSkills.prepareRefresh')(fun
       if (current.compatibility === 'incompatible')
         return yield* fail(
           'incompatible',
-          current.issues
-            .filter(issue => issue.code === 'incompatible')
-            .map(issue => issue.message)
-            .join(' '),
+          EffectArray.join(
+            EffectArray.map(
+              EffectArray.filter(current.issues, issue => issue.code === 'incompatible'),
+              issue => issue.message,
+            ),
+            ' ',
+          ),
         );
       const request = prepared.get(current)!.request;
       const path = yield* Path.Path;
@@ -319,15 +333,17 @@ export const prepareDevSkillsRefresh = Effect.fn('devSkills.prepareRefresh')(fun
       // A successful partial refresh changes ownership hashes. Reuse the original intent
       // for the same release and membership, so response-loss retries retain their identity.
       const sameMembership = (a: RefreshRequest, b: RefreshRequest) =>
-        stableJson(a.members.map(member => member.enrollment)) ===
-        stableJson(b.members.map(member => member.enrollment));
+        stableJson(EffectArray.map(a.members, member => member.enrollment)) ===
+        stableJson(EffectArray.map(b.members, member => member.enrollment));
       if (
         old.state &&
         stableJson(old.state.request.release) === stableJson(request.release) &&
         sameMembership(old.state.request, request) &&
         stableJson(old.state.request.affected) === stableJson(request.affected) &&
-        old.state.request.members.every(prior => {
-          const actual = request.members.find(member => member.consumerId === prior.consumerId)?.installed;
+        EffectArray.every(old.state.request.members, prior => {
+          const actual = EffectOption.getOrUndefined(
+            EffectArray.findFirst(request.members, member => member.consumerId === prior.consumerId),
+          )?.installed;
           return (
             !prior.installed ||
             !actual ||
@@ -340,20 +356,31 @@ export const prepareDevSkillsRefresh = Effect.fn('devSkills.prepareRefresh')(fun
       const content = json(state);
       const reservation = {
         ...state,
-        issues: [{code: 'enrollment-drift', message: String.fromCharCode(0).repeat(512)}],
-        outcomes: Object.fromEntries(
-          [...request.members.map(member => member.consumerId), ...request.affected.map(consumerId)].map(id => [
-            id,
-            {
-              intentId: state.intentId,
-              requestedReleaseVersion: request.release.releaseVersion,
-              requestedBundleDigest: request.release.bundleDigest,
-              state: 'current',
-              attemptedAt: '2000-01-01T00:00:00.000Z',
-              completedAt: '2000-01-01T00:00:00.000Z',
-              issues: [{code: 'x'.repeat(128), message: String.fromCharCode(0).repeat(512)}],
-            },
-          ]),
+        issues: [{code: 'enrollment-drift', message: Effect2.pipe(String.fromCharCode(0), EffectString.repeat(512))}],
+        outcomes: EffectRecord.fromEntries(
+          EffectArray.map(
+            [
+              ...EffectArray.map(request.members, member => member.consumerId),
+              ...EffectArray.map(request.affected, consumerId),
+            ],
+            id => [
+              id,
+              {
+                intentId: state.intentId,
+                requestedReleaseVersion: request.release.releaseVersion,
+                requestedBundleDigest: request.release.bundleDigest,
+                state: 'current',
+                attemptedAt: '2000-01-01T00:00:00.000Z',
+                completedAt: '2000-01-01T00:00:00.000Z',
+                issues: [
+                  {
+                    code: Effect2.pipe('x', EffectString.repeat(128)),
+                    message: Effect2.pipe(String.fromCharCode(0), EffectString.repeat(512)),
+                  },
+                ],
+              },
+            ],
+          ),
         ),
       };
       if (Buffer.byteLength(json(reservation)) > 8_000_000)

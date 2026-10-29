@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {runtimeOpenTextDirectoryNameReader} from '@threadnote/platform/system';
@@ -19,6 +20,8 @@ import {codeGraphStorageAccounting, type CodeGraphStoragePressure} from '../stor
 import {CodeGraphStore} from '../store.js';
 import {type CodeGraphRoutineMaintenanceResult} from '../store/models.js';
 import {type RepositoryIdentity} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_LIFECYCLE_OPPORTUNITIES = [
   'startup',
@@ -80,13 +83,13 @@ export interface CodeGraphLifecycleOpportunityUnit {
   readonly target: CodeGraphLifecycleOpportunityTarget;
 }
 
-class CodeGraphLifecycleOpportunityCursorError extends Schema.TaggedError<CodeGraphLifecycleOpportunityCursorError>()(
-  'CodeGraphLifecycleOpportunityCursorError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphLifecycleOpportunityCursorError extends Schema.TaggedError<
+  CodeGraphLifecycleOpportunityCursorError,
+  {readonly brand: unique symbol}
+>()('CodeGraphLifecycleOpportunityCursorError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 /** Read bounded active-pointer provenance without invoking Git on the healthy hot path. */
 export const observeCodeGraphLifecycleOpportunityTargets = Effect.fn('codeGraph.observeLifecycleOpportunityTargets')(
@@ -116,7 +119,12 @@ export const observeCodeGraphLifecycleOpportunityTargets = Effect.fn('codeGraph.
               }),
             {concurrency: 1},
           );
-          const anchor = associations.find(association => association.state === 'verified' && 'path' in association);
+          const anchor = Option.getOrUndefined(
+            EffectArray.findFirst(
+              associations,
+              association => association.state === 'verified' && 'path' in association,
+            ),
+          );
           const anchorPath = anchor !== undefined && 'path' in anchor ? anchor.path : undefined;
           const pressure = storage?.state === 'available' ? codeGraphStorageAccounting(storage).pressure : undefined;
           return {
@@ -124,7 +132,7 @@ export const observeCodeGraphLifecycleOpportunityTargets = Effect.fn('codeGraph.
             checkoutId,
             databasePath,
             ...(pressure === 'critical' || pressure === 'elevated' ? {pressure} : {}),
-            reconciliationPending: associations.some(association => association.state === 'missing'),
+            reconciliationPending: EffectArray.some(associations, association => association.state === 'missing'),
           } satisfies CodeGraphLifecycleOpportunityTarget;
         }),
       {concurrency: 2},
@@ -151,7 +159,7 @@ export function makeCodeGraphLifecycleOpportunityRunner() {
     const cursorKey = `${input.threadnoteHome}\0${input.opportunity}`;
     const memoryCursor = opportunityCursors.get(cursorKey);
     const units = codeGraphLifecycleOpportunityUnits(input.targets, input.opportunity);
-    const persistentRotation = units.some(unit => unit.lane === 'reconciliation');
+    const persistentRotation = EffectArray.some(units, unit => unit.lane === 'reconciliation');
     const unit = persistentRotation
       ? yield* claimPersistedLifecycleOpportunityUnit({...input, units}).pipe(
           Effect.catch(() => Effect.sync(() => selectCodeGraphLifecycleOpportunityUnit(units, memoryCursor))),
@@ -219,13 +227,17 @@ export function selectCodeGraphLifecycleOpportunityTarget(
   const ordered = [...unique.entries()].sort(([left], [right]) => compareCodeUnits(left, right));
   if (ordered.length === 0) return undefined;
   if (cursor === undefined) {
-    return (ordered.find(
-      ([, target]) =>
-        target.reconciliationPending === true &&
-        (target.anchorIdentity !== undefined || target.anchorPath !== undefined),
+    return (Option.getOrUndefined(
+      EffectArray.findFirst(
+        ordered,
+        ([, target]) =>
+          target.reconciliationPending === true &&
+          (target.anchorIdentity !== undefined || target.anchorPath !== undefined),
+      ),
     ) ?? ordered[0])[1];
   }
-  return (ordered.find(([key]) => compareCodeUnits(key, cursor) > 0) ?? ordered[0])[1];
+  return (Option.getOrUndefined(EffectArray.findFirst(ordered, ([key]) => compareCodeUnits(key, cursor) > 0)) ??
+    ordered[0])[1];
 }
 
 /** @internal Plan one deterministic bounded ring without deriving deletion authority. */
@@ -235,18 +247,19 @@ export function codeGraphLifecycleOpportunityUnits(
 ): readonly CodeGraphLifecycleOpportunityUnit[] {
   const ordered = orderedCodeGraphLifecycleOpportunityTargets(targets);
   if (opportunity === 'index-completion') {
-    return ordered.map(target => ({lane: 'ordinary', target}));
+    return EffectArray.map(ordered, target => ({lane: 'ordinary', target}));
   }
-  const reconciliation = ordered.filter(
+  const reconciliation = EffectArray.filter(
+    ordered,
     target =>
       (opportunity === 'diagnostics' || target.reconciliationPending === true) &&
       (target.anchorIdentity !== undefined || target.anchorPath !== undefined),
   );
-  if (reconciliation.length === 0) return ordered.map(target => ({lane: 'rotating', target}));
+  if (reconciliation.length === 0) return EffectArray.map(ordered, target => ({lane: 'rotating', target}));
   return [
-    ...reconciliation.map(target => ({lane: 'reconciliation' as const, target})),
-    ...ordered.map(target => ({lane: 'ordinary' as const, target})),
-    ...ordered.map(target => ({lane: 'residual' as const, target})),
+    ...EffectArray.map(reconciliation, target => ({lane: 'reconciliation' as const, target})),
+    ...EffectArray.map(ordered, target => ({lane: 'ordinary' as const, target})),
+    ...EffectArray.map(ordered, target => ({lane: 'residual' as const, target})),
   ];
 }
 
@@ -257,7 +270,10 @@ export function selectCodeGraphLifecycleOpportunityUnit(
 ): CodeGraphLifecycleOpportunityUnit | undefined {
   if (units.length === 0) return undefined;
   if (cursor === undefined) return units[0];
-  const cursorIndex = units.findIndex(unit => lifecycleOpportunityUnitKey(unit) === cursor);
+  const cursorIndex = Option.getOrElse(
+    EffectArray.findFirstIndex(units, unit => lifecycleOpportunityUnitKey(unit) === cursor),
+    () => -1,
+  );
   return cursorIndex < 0 ? units[0] : units[(cursorIndex + 1) % units.length];
 }
 
@@ -278,7 +294,10 @@ function orderedCodeGraphLifecycleOpportunityTargets(
       unique.set(lifecycleTargetKey(target), target);
     }
   }
-  return [...unique.entries()].sort(([left], [right]) => compareCodeUnits(left, right)).map(([, target]) => target);
+  return EffectArray.map(
+    [...unique.entries()].sort(([left], [right]) => compareCodeUnits(left, right)),
+    ([, target]) => target,
+  );
 }
 
 const claimPersistedLifecycleOpportunityUnit = Effect.fn('codeGraph.claimLifecycleOpportunityUnit')(function* (input: {
@@ -390,11 +409,14 @@ function persistedLifecycleOpportunityUnitKey(
   cursor: PersistedLifecycleOpportunityCursor | undefined,
 ): string | undefined {
   if (cursor === undefined) return undefined;
-  const unit = units.find(
-    candidate =>
-      candidate.lane === cursor.lane &&
-      candidate.target.checkoutId === cursor.checkoutId &&
-      sha256HexSync(candidate.target.databasePath) === cursor.databasePathDigest,
+  const unit = Option.getOrUndefined(
+    EffectArray.findFirst(
+      units,
+      candidate =>
+        candidate.lane === cursor.lane &&
+        candidate.target.checkoutId === cursor.checkoutId &&
+        sha256HexSync(candidate.target.databasePath) === cursor.databasePathDigest,
+    ),
   );
   return unit === undefined ? undefined : lifecycleOpportunityUnitKey(unit);
 }
@@ -459,7 +481,12 @@ export const resumeExistingCodeGraphEmbeddingDemand = Effect.fn('codeGraph.resum
           for (const checkoutId of page.names) {
             if (!/^[a-f0-9]{64}$/u.test(checkoutId)) continue;
             const pending = yield* Effect.gen(function* () {
-              const layout = codeGraphLayout(path, threadnoteHome, checkoutId, '0'.repeat(64));
+              const layout = codeGraphLayout(
+                path,
+                threadnoteHome,
+                checkoutId,
+                Effect2.pipe('0', EffectString.repeat(64)),
+              );
               if (Option.isSome(yield* fs.readLink(layout.repositoryRoot).pipe(Effect.option))) return false;
               if (Option.isSome(yield* fs.readLink(layout.databasePath).pipe(Effect.option))) return false;
               if (!(yield* fs.exists(layout.databasePath))) return false;

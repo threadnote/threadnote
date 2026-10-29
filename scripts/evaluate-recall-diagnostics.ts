@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, DateTime, Effect, FileSystem, Option} from 'effect';
 import {benchmarkMeasurement} from '@threadnote/evidence/benchmark';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -11,6 +12,9 @@ import {
   withRecallEvaluationTracing,
   type RecallEvaluationSpans,
 } from './evaluate-recall-tracing.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 
@@ -67,7 +71,7 @@ export const captureRecallEvaluationSource = Effect.fn('recallEvaluation.capture
     ],
     {concurrency: 4},
   );
-  const sha = Option.isSome(commit) ? commit.value.stdout.trim() : undefined;
+  const sha = Option.isSome(commit) ? Effect2.pipe(commit.value.stdout, EffectString.trim) : undefined;
   return {
     commit: sha && COMMIT_PATTERN.test(sha) ? sha : undefined,
     dirty: Option.isSome(dirty) ? dirty.value.stdout.length > 0 : undefined,
@@ -107,7 +111,7 @@ export function recallEvaluationScenario(
   const measured = benchmarkMeasurement(
     'recall',
     'milliseconds',
-    observations.map(sample => sample.wallMilliseconds),
+    EffectArray.map(observations, sample => sample.wallMilliseconds),
   );
   return {
     p50Milliseconds: measured.p50,
@@ -142,7 +146,7 @@ export const writeRecallEvaluationDiagnosticsAndEnforce = Effect.fn('recallEvalu
       message: `Recall evaluation failed ${diagnostics.correctnessFailureCount} contract check(s).`,
     });
   }
-  for (const [name, benchmark] of Object.entries(diagnostics.productionBenchmark.scenarios)) {
+  for (const [name, benchmark] of EffectRecord.toEntries(diagnostics.productionBenchmark.scenarios)) {
     if (benchmark.p95Milliseconds > benchmark.p95LimitMilliseconds) {
       return yield* ScriptError.make({
         message: `Recall ${name} benchmark p95 ${benchmark.p95Milliseconds.toFixed(2)}ms exceeds ${benchmark.p95LimitMilliseconds}ms.`,

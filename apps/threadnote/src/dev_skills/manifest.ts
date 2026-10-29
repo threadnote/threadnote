@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {nativeWorkflowFeatureVersions} from '../workflow_automation/features.js';
 import {Context, Effect, FileSystem, Option, Path} from 'effect';
 import {toolRoot} from '@threadnote/workspace/installation';
@@ -5,6 +6,9 @@ import {getThreadnoteVersion, isStandaloneThreadnoteBuild} from '@threadnote/wor
 import {compareVersions} from '../release/version/compare.js';
 import type {DevSkillMember, DevSkillsBundle, DevSkillsIssue, DevSkillsManifest} from './contract.js';
 import {decode, enumerateFiles, fail, hash, isRecord, readOptional, requireValue} from './files.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const version = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
 const historicalPrerequisites = {python: '>=3.10', commands: ['threadnote', 'git', 'rg'], prCommands: ['gh']};
@@ -13,9 +17,12 @@ const prerequisites = {commands: ['threadnote', 'git', 'rg'], prCommands: ['gh']
 export function parseNativeRequirements(value: unknown) {
   requireValue(
     isRecord(value) &&
-      Object.keys(value).length === Object.keys(nativeRequirements).length &&
-      Object.keys(value).every(key => key in nativeRequirements) &&
-      Object.values(value).every(item => Number.isSafeInteger(item) && typeof item === 'number' && item > 0),
+      EffectRecord.keys(value).length === EffectRecord.keys(nativeRequirements).length &&
+      EffectArray.every(EffectRecord.keys(value), key => key in nativeRequirements) &&
+      EffectArray.every(
+        EffectRecord.values(value),
+        item => Number.isSafeInteger(item) && typeof item === 'number' && item > 0,
+      ),
     'Invalid native workflow requirements.',
   );
   const {executorVersion, authoringVersion, cycleVersion, watchVersion, closeoutVersion} = value;
@@ -33,22 +40,24 @@ export function validDevSkillPath(value: unknown): value is string {
   return (
     typeof value === 'string' &&
     /^[A-Za-z0-9_./-]+$/u.test(value) &&
-    value
-      .split('/')
-      .every(
-        part =>
-          !['', '.', '..'].includes(part) &&
-          !part.endsWith('.') &&
-          !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part) &&
-          !['__pycache__', '.DS_Store', '.context', '.git'].includes(part),
-      ) &&
-    !value.endsWith('.pyc')
+    EffectArray.every(
+      Effect2.pipe(value, EffectString.split('/')),
+      part =>
+        !['', '.', '..'].includes(part) &&
+        !Effect2.pipe(part, EffectString.endsWith('.')) &&
+        !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part) &&
+        !['__pycache__', '.DS_Store', '.context', '.git'].includes(part),
+    ) &&
+    !Effect2.pipe(value, EffectString.endsWith('.pyc'))
   );
 }
 const primaryIds = ['dev-cycle', 'dev-plan', 'dev-spec'];
 export const DEV_SKILLS_MAX_HISTORICAL_SUPPORT_MEMBERS = 16;
 export const hasHistoricalDevSkillsMembers = (manifest: DevSkillsManifest) =>
-  manifest.skills.map(skill => skill.id).join(',') !== 'dev-cycle,dev-plan,dev-spec,watch-pr';
+  EffectArray.join(
+    EffectArray.map(manifest.skills, skill => skill.id),
+    ',',
+  ) !== 'dev-cycle,dev-plan,dev-spec,watch-pr';
 export function parseDevSkillsInventory(value: unknown, historical = false) {
   requireValue(
     isRecord(value) &&
@@ -57,12 +66,12 @@ export function parseDevSkillsInventory(value: unknown, historical = false) {
       value.stateSchema === 1 &&
       typeof value.minimumRuntime === 'string' &&
       version.test(value.minimumRuntime) &&
-      Array.isArray(value.skills) &&
+      EffectArray.isArray(value.skills) &&
       value.skills.length <= (historical ? 3 + DEV_SKILLS_MAX_HISTORICAL_SUPPORT_MEMBERS : 4),
     'Unsupported development workflow manifest contract.',
   );
   requireValue(
-    Object.keys(value).every(key =>
+    EffectArray.every(EffectRecord.keys(value), key =>
       [
         'schemaVersion',
         ...(value.schemaVersion === 2 ? ['nativeRequirements'] : []),
@@ -85,36 +94,40 @@ export function parseDevSkillsInventory(value: unknown, historical = false) {
       'Invalid development workflow prerequisites.',
     );
   const native = value.schemaVersion === 2 ? parseNativeRequirements(value.nativeRequirements) : undefined;
-  const skills: DevSkillMember[] = value.skills
-    .map((skill: unknown): DevSkillMember => {
-      requireValue(
-        isRecord(skill) &&
-          typeof skill.id === 'string' &&
-          /^[a-z][a-z-]+$/u.test(skill.id) &&
-          (skill.role === 'primary' || skill.role === 'support') &&
-          Array.isArray(skill.files) &&
-          skill.files.length <= 256 &&
-          skill.files.every(validDevSkillPath) &&
-          skill.files.includes('SKILL.md') &&
-          new Set(skill.files.map(file => file.toLowerCase())).size === skill.files.length,
-        'Invalid development skill member or payload path.',
-      );
-      requireValue(
-        Object.keys(skill).every(key => ['id', 'role', 'files'].includes(key)),
-        'Unknown skill manifest fields.',
-      );
-      return {id: skill.id, role: skill.role, files: [...skill.files].sort()};
-    })
-    .sort((a, b) => a.id.localeCompare(b.id));
+  const skills: DevSkillMember[] = EffectArray.map(value.skills, (skill: unknown): DevSkillMember => {
+    requireValue(
+      isRecord(skill) &&
+        typeof skill.id === 'string' &&
+        /^[a-z][a-z-]+$/u.test(skill.id) &&
+        (skill.role === 'primary' || skill.role === 'support') &&
+        EffectArray.isArray(skill.files) &&
+        skill.files.length <= 256 &&
+        EffectArray.every(skill.files, validDevSkillPath) &&
+        skill.files.includes('SKILL.md') &&
+        new Set(EffectArray.map(skill.files, file => Effect2.pipe(file, EffectString.toLowerCase))).size ===
+          skill.files.length,
+      'Invalid development skill member or payload path.',
+    );
+    requireValue(
+      EffectArray.every(EffectRecord.keys(skill), key => ['id', 'role', 'files'].includes(key)),
+      'Unknown skill manifest fields.',
+    );
+    return {id: skill.id, role: skill.role, files: [...skill.files].sort()};
+  }).sort((a, b) => Effect2.pipe(a.id, EffectString.localeCompare(b.id)));
   if (historical) {
     requireValue(
-      skills
-        .filter(skill => skill.role === 'primary')
-        .map(skill => skill.id)
-        .join(',') === primaryIds.join(',') &&
-        skills.filter(skill => skill.role === 'support').length <= DEV_SKILLS_MAX_HISTORICAL_SUPPORT_MEMBERS &&
-        new Set(skills.map(skill => skill.id.toLowerCase())).size === skills.length &&
-        skills.every(skill =>
+      EffectArray.join(
+        EffectArray.map(
+          EffectArray.filter(skills, skill => skill.role === 'primary'),
+          skill => skill.id,
+        ),
+        ',',
+      ) === EffectArray.join(primaryIds, ',') &&
+        EffectArray.filter(skills, skill => skill.role === 'support').length <=
+          DEV_SKILLS_MAX_HISTORICAL_SUPPORT_MEMBERS &&
+        new Set(EffectArray.map(skills, skill => Effect2.pipe(skill.id, EffectString.toLowerCase))).size ===
+          skills.length &&
+        EffectArray.every(skills, skill =>
           primaryIds.includes(skill.id)
             ? skill.role === 'primary'
             : skill.role === 'support' &&
@@ -125,8 +138,11 @@ export function parseDevSkillsInventory(value: unknown, historical = false) {
     );
   } else
     requireValue(
-      skills.map(skill => skill.id).join(',') === 'dev-cycle,dev-plan,dev-spec,watch-pr' &&
-        skills.every(skill => skill.role === (skill.id === 'watch-pr' ? 'support' : 'primary')),
+      EffectArray.join(
+        EffectArray.map(skills, skill => skill.id),
+        ',',
+      ) === 'dev-cycle,dev-plan,dev-spec,watch-pr' &&
+        EffectArray.every(skills, skill => skill.role === (skill.id === 'watch-pr' ? 'support' : 'primary')),
       'The complete development bundle must contain all four workflows.',
     );
   return {value, skills, minimumRuntime: value.minimumRuntime, native};
@@ -158,7 +174,7 @@ function parseManifest(value: unknown, historical: boolean): DevSkillsManifest {
       requireValue(typeof digest === 'string' && /^[a-f0-9]{64}$/u.test(digest), 'Invalid bundle file digest.');
       hashes[key] = digest;
     }
-  requireValue(Object.keys(v.hashes).length === Object.keys(hashes).length, 'Unexpected bundle hashes.');
+  requireValue(EffectRecord.keys(v.hashes).length === EffectRecord.keys(hashes).length, 'Unexpected bundle hashes.');
   const manifest = {
     schemaVersion: v.schemaVersion === 1 ? (1 as const) : (2 as const),
     ...(inventory.native ? {nativeRequirements: inventory.native} : {}),
@@ -257,8 +273,9 @@ export function devSkillsCompatibility(manifest: DevSkillsManifest, runtimeVersi
     ];
   if (
     !manifest.nativeRequirements ||
-    Object.entries(nativeRequirements).some(
-      ([key, supported]) => manifest.nativeRequirements?.[key as keyof typeof nativeRequirements] !== supported,
+    EffectArray.some(
+      EffectRecord.toEntries(nativeRequirements),
+      ([key, supported]) => manifest.nativeRequirements?.[key] !== supported,
     )
   )
     return [

@@ -1,4 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {isPurePrivateReleaseEvidenceDiff} from './private-release-evidence-family.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export interface CodeGraphProductionRatchetDiff {
   readonly afterCiWorkflow?: string;
@@ -18,13 +23,20 @@ export interface CodeGraphProductionRatchetScope {
 
 type JsonObject = Readonly<Record<string, unknown>>;
 
+function isJsonObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === 'object' && !EffectArray.isArray(value);
+}
+
 function normalizeGitPath(path: string): string | undefined {
   if (
     path.length === 0 ||
-    path.startsWith('/') ||
-    path.includes('\\') ||
-    path.includes('\0') ||
-    path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect.pipe(path, EffectString.startsWith('/')) ||
+    Effect.pipe(path, EffectString.includes('\\')) ||
+    Effect.pipe(path, EffectString.includes('\0')) ||
+    EffectArray.some(
+      Effect.pipe(path, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     return undefined;
   }
@@ -86,11 +98,21 @@ function isCiTestPolicyPath(path: string): boolean {
 }
 
 function windowsSmokeTimeoutLine(lines: readonly string[]): number | undefined {
-  const starts = lines.flatMap((line, index) => (line === '  windows-smoke:' ? [index] : []));
+  const starts = EffectArray.flatMap(lines, (line, index) => (line === '  windows-smoke:' ? [index] : []));
   if (starts.length !== 1) return undefined;
   const start = starts[0];
-  const end = lines.findIndex((line, index) => index > start && /^ {2}[^\s:#][^:]*:$/u.test(line));
-  const timeoutLines = lines.flatMap((line, index) =>
+  const end = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(
+      lines,
+      (__effectArrayValue, __effectArrayValueIndex) =>
+        !!((line, index) => index > start && /^ {2}[^\s:#][^:]*:$/u.test(line))(
+          __effectArrayValue,
+          __effectArrayValueIndex,
+        ),
+    ),
+    () => -1,
+  );
+  const timeoutLines = EffectArray.flatMap(lines, (line, index) =>
     index > start && (end === -1 || index < end) && /^ {4}timeout-minutes:/u.test(line) ? [index] : [],
   );
   return timeoutLines.length === 1 ? timeoutLines[0] : undefined;
@@ -103,11 +125,21 @@ function validTimeoutMinutes(line: string): number | undefined {
 }
 
 function windowsSmokeShardCommandLine(lines: readonly string[], command: string): number | undefined {
-  const starts = lines.flatMap((line, index) => (line === '  windows-smoke:' ? [index] : []));
+  const starts = EffectArray.flatMap(lines, (line, index) => (line === '  windows-smoke:' ? [index] : []));
   if (starts.length !== 1) return undefined;
   const start = starts[0];
-  const end = lines.findIndex((line, index) => index > start && /^ {2}[^\s:#][^:]*:$/u.test(line));
-  const matches = lines.flatMap((line, index) =>
+  const end = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(
+      lines,
+      (__effectArrayValue, __effectArrayValueIndex) =>
+        !!((line, index) => index > start && /^ {2}[^\s:#][^:]*:$/u.test(line))(
+          __effectArrayValue,
+          __effectArrayValueIndex,
+        ),
+    ),
+    () => -1,
+  );
+  const matches = EffectArray.flatMap(lines, (line, index) =>
     index > start && (end === -1 || index < end) && line === command ? [index] : [],
   );
   return matches.length === 1 ? matches[0] : undefined;
@@ -115,8 +147,8 @@ function windowsSmokeShardCommandLine(lines: readonly string[], command: string)
 
 function changesOnlyWindowsSmokeBudget(before: string | undefined, after: string | undefined): boolean {
   if (before === undefined || after === undefined) return false;
-  const beforeLines = before.split('\n');
-  const afterLines = after.split('\n');
+  const beforeLines = Effect.pipe(before, EffectString.split('\n'));
+  const afterLines = Effect.pipe(after, EffectString.split('\n'));
   const beforeTimeout = windowsSmokeTimeoutLine(beforeLines);
   const afterTimeout = windowsSmokeTimeoutLine(afterLines);
   const beforeCommand = windowsSmokeShardCommandLine(beforeLines, WINDOWS_VITEST_SHARD_COMMAND);
@@ -130,7 +162,8 @@ function changesOnlyWindowsSmokeBudget(before: string | undefined, after: string
     validTimeoutMinutes(afterLines[afterTimeout]) !== undefined &&
     (beforeLines[beforeTimeout] !== afterLines[afterTimeout] || addedDefault) &&
     beforeLines.length === afterLines.length &&
-    beforeLines.every(
+    EffectArray.every(
+      beforeLines,
       (line, index) =>
         index === beforeTimeout || (index === beforeCommand && addedDefault) || line === afterLines[index],
     )
@@ -141,7 +174,7 @@ function parseJsonObject(source: string | undefined): JsonObject | undefined {
   if (source === undefined) return undefined;
   try {
     const value: unknown = JSON.parse(source);
-    return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as JsonObject) : undefined;
+    return isJsonObject(value) ? value : undefined;
   } catch {
     return undefined;
   }
@@ -149,23 +182,26 @@ function parseJsonObject(source: string | undefined): JsonObject | undefined {
 
 function jsonValuesEqual(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
-  if (Array.isArray(left) || Array.isArray(right)) {
+  if (EffectArray.isArray(left) || EffectArray.isArray(right)) {
     return (
-      Array.isArray(left) &&
-      Array.isArray(right) &&
+      EffectArray.isArray(left) &&
+      EffectArray.isArray(right) &&
       left.length === right.length &&
-      left.every((value, index) => jsonValuesEqual(value, right[index]))
+      EffectArray.every(left, (value, index) => jsonValuesEqual(value, right[index]))
     );
   }
-  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (!isJsonObject(left) || !isJsonObject(right)) return false;
 
-  const leftObject = left as JsonObject;
-  const rightObject = right as JsonObject;
-  const leftKeys = Object.keys(leftObject).sort();
-  const rightKeys = Object.keys(rightObject).sort();
+  const leftObject = left;
+  const rightObject = right;
+  const leftKeys = EffectRecord.keys(leftObject).sort();
+  const rightKeys = EffectRecord.keys(rightObject).sort();
   return (
     leftKeys.length === rightKeys.length &&
-    leftKeys.every((key, index) => key === rightKeys[index] && jsonValuesEqual(leftObject[key], rightObject[key]))
+    EffectArray.every(
+      leftKeys,
+      (key, index) => key === rightKeys[index] && jsonValuesEqual(leftObject[key], rightObject[key]),
+    )
   );
 }
 
@@ -177,15 +213,11 @@ function changesOnlyTopLevelVersion(beforeSource: string | undefined, afterSourc
     return false;
   }
 
-  const beforeKeys = Object.keys(before)
-    .filter(key => key !== 'version')
-    .sort();
-  const afterKeys = Object.keys(after)
-    .filter(key => key !== 'version')
-    .sort();
+  const beforeKeys = EffectArray.filter(EffectRecord.keys(before), key => key !== 'version').sort();
+  const afterKeys = EffectArray.filter(EffectRecord.keys(after), key => key !== 'version').sort();
   return (
     beforeKeys.length === afterKeys.length &&
-    beforeKeys.every((key, index) => key === afterKeys[index] && jsonValuesEqual(before[key], after[key]))
+    EffectArray.every(beforeKeys, (key, index) => key === afterKeys[index] && jsonValuesEqual(before[key], after[key]))
   );
 }
 
@@ -206,7 +238,10 @@ export function classifyCodeGraphProductionRatchetScope(
 
   const sortedPaths = [...paths].sort();
   const packageChanged = paths.has('package.json');
-  const pathsAreReleaseMetadata = sortedPaths.every(path => path === 'package.json' || isReleaseNotePath(path));
+  const pathsAreReleaseMetadata = EffectArray.every(
+    sortedPaths,
+    path => path === 'package.json' || isReleaseNotePath(path),
+  );
   const releaseMetadataOnly =
     !invalidPath &&
     sortedPaths.length > 0 &&
@@ -214,11 +249,12 @@ export function classifyCodeGraphProductionRatchetScope(
     pathsAreReleaseMetadata &&
     changesOnlyTopLevelVersion(diff.beforePackageJson, diff.afterPackageJson);
 
-  const evaluationOnly = !invalidPath && sortedPaths.length > 0 && sortedPaths.every(isUnrelatedEvaluationPath);
+  const evaluationOnly =
+    !invalidPath && sortedPaths.length > 0 && EffectArray.every(sortedPaths, isUnrelatedEvaluationPath);
   const ciAndTestPolicyOnly =
     !invalidPath &&
     sortedPaths.length > 0 &&
-    sortedPaths.every(isCiTestPolicyPath) &&
+    EffectArray.every(sortedPaths, isCiTestPolicyPath) &&
     (!paths.has(CI_WORKFLOW_PATH) || changesOnlyWindowsSmokeBudget(diff.beforeCiWorkflow, diff.afterCiWorkflow));
   const skipReason =
     !invalidPath && isPurePrivateReleaseEvidenceDiff(sortedPaths)
@@ -266,12 +302,15 @@ function classifyCurrentDiff(
   if (!isCommitId(base) || !isCommitId(head)) return failSafe('missing-or-invalid-commit-range');
 
   const mergeBaseResult = runGit(['merge-base', base, head]);
-  const mergeBase = new TextDecoder().decode(mergeBaseResult.stdout).trim();
+  const mergeBase = Effect.pipe(new TextDecoder().decode(mergeBaseResult.stdout), EffectString.trim);
   if (mergeBaseResult.exitCode !== 0 || !isCommitId(mergeBase)) return failSafe('git-merge-base-failed');
 
   const diffResult = runGit(['diff', '--name-only', '--no-renames', '-z', `${mergeBase}..${head}`, '--']);
   if (diffResult.exitCode !== 0) return failSafe(`git-diff-failed-${diffResult.exitCode}`);
-  const changedPaths = new TextDecoder().decode(diffResult.stdout).split('\0').filter(Boolean);
+  const changedPaths = EffectArray.filter(
+    Effect.pipe(new TextDecoder().decode(diffResult.stdout), EffectString.split('\0')),
+    Boolean,
+  );
   const scope = classifyCodeGraphProductionRatchetScope({
     afterCiWorkflow: changedPaths.includes(CI_WORKFLOW_PATH) ? readGitFile(head, CI_WORKFLOW_PATH) : undefined,
     afterPackageJson: readGitFile(head, 'package.json'),

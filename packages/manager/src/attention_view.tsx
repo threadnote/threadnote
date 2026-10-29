@@ -1,3 +1,12 @@
+import {
+  isCitationRepairApplyResult,
+  isCitationRepairPreview,
+  isManagerCitationRepairJobResponseV1,
+  isManagerContextHealthResponseV1,
+  isManagerReviewInboxResponseV1,
+} from './api/response_guards.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {ManagerResponseContractError} from './api/response_guard.js';
 import {MarkdownViewer} from './ui/controls.js';
 import {Sparkles} from 'lucide-react';
 import {Schema} from 'effect';
@@ -16,6 +25,8 @@ import {AutomaticMemoryReviewDialog} from './attention/automatic_review.js';
 import {ReviewDetail, HealthDetail} from './attention_details.js';
 import {api, errorMessage, ManagerApiError} from '@threadnote/manager/ui/support';
 import {useManagerLiveQuery, useManagerLiveResource} from './live/provider.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface AttentionPanelProps {
   readonly onOpenLibrary: (uri?: string) => void;
@@ -92,7 +103,9 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
         `/api/reviews?project=${encodeURIComponent(props.project)}&view=${view}`,
         undefined,
         {signal, timeoutMilliseconds: 8_000},
+        isManagerReviewInboxResponseV1,
       ),
+    isManagerReviewInboxResponseV1,
   );
   const fallback = !live.active || live.snapshot.status === 'unsupported';
   useEffect(() => {
@@ -120,7 +133,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
     if (fallback) return;
     if (live.snapshot.status === 'ready') {
       const result = live.snapshot.data;
-      if (result.version === 1 && result.project === props.project && Array.isArray(result.items)) {
+      if (result.version === 1 && result.project === props.project && EffectArray.isArray(result.items)) {
         setInbox({scope, value: result});
         setError('');
         setLoading(false);
@@ -146,8 +159,11 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
   useEffect(() => {
     if (selected || !returnFocus.current) return;
     const target = returnFocus.current;
-    const button = [...document.querySelectorAll<HTMLButtonElement>('button[data-review-id]')].find(
-      item => item.dataset.reviewId === target.reviewId && item.dataset.candidateId === target.candidateId,
+    const button = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('button[data-review-id]')],
+        item => item.dataset.reviewId === target.reviewId && item.dataset.candidateId === target.candidateId,
+      ),
     );
     if (button) {
       button.focus();
@@ -166,10 +182,11 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
       `/api/reviews?project=${encodeURIComponent(props.project)}&view=${view}`,
       undefined,
       {signal: controller.signal, timeoutMilliseconds: 8_000},
+      isManagerReviewInboxResponseV1,
     )
       .then(result => {
         if (cancelled) return;
-        if (!result || result.version !== 1 || result.project !== props.project || !Array.isArray(result.items)) {
+        if (!result || result.version !== 1 || result.project !== props.project || !EffectArray.isArray(result.items)) {
           throw ManagerApiError.of('The review inbox does not match this selection. Refresh Manager.', 409);
         }
         setInbox({scope, value: result});
@@ -181,7 +198,11 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
             setInbox(undefined);
             setSelected(undefined);
           }
-          setError(errorMessage(cause));
+          setError(
+            Schema.is(ManagerResponseContractError)(cause)
+              ? 'The review inbox does not match this selection. Refresh Manager.'
+              : errorMessage(cause),
+          );
         }
       })
       .finally(() => {
@@ -199,7 +220,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
     <section aria-busy={loading} className="panel attention-panel is-active">
       {notice ? <p role="status">{notice}</p> : null}
       <div className="workspace-tabs" role="tablist" aria-label="Review sections">
-        {(['pending', 'deferred', 'history'] as const).map(value => (
+        {EffectArray.map(['pending', 'deferred', 'history'] as const, value => (
           <button
             key={value}
             role="tab"
@@ -207,7 +228,15 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
             className={view === value ? 'is-active' : undefined}
             onClick={() => setView(value)}
           >
-            {value.charAt(0).toUpperCase() + value.slice(1)}
+            {Effect.pipe(value, __effectPipeInput => {
+              const __effectPipeStage0 = Effect.pipe(
+                __effectPipeInput,
+                EffectString.charAt(0),
+                Effect.Option.getOrElse(() => ''),
+              );
+              const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.toUpperCase);
+              return __effectPipeStage1;
+            }) + Effect.pipe(value, EffectString.slice(1))}
           </button>
         ))}
       </div>
@@ -255,7 +284,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
         />
       ) : (
         <div className="attention-list">
-          {inbox.items.map(review => (
+          {EffectArray.map(inbox.items, review => (
             <article className="attention-card" key={review.reviewId}>
               <header>
                 <div>
@@ -284,7 +313,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                 Created {new Date(review.createdAt).toLocaleString()} · revision {review.revision}
               </p>
               <div className="attention-candidates">
-                {review.candidates.map(candidate => (
+                {EffectArray.map(review.candidates, candidate => (
                   <section key={candidate.candidateId}>
                     <div className="attention-tags">
                       <ReviewBadge
@@ -302,7 +331,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                       </ReviewBadge>
                       {!review.kind ? (
                         <>
-                          <span>{candidate.recommendation.replaceAll('_', ' ')}</span>
+                          <span>{Effect.pipe(candidate.recommendation, EffectString.replaceAll('_', ' '))}</span>
                           <span>{Math.round(candidate.confidence * 100)}% confidence</span>
                         </>
                       ) : null}
@@ -407,10 +436,11 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         `/api/context-health?project=${encodeURIComponent(props.project)}`,
         undefined,
         {signal, timeoutMilliseconds: 8_000},
+        isManagerContextHealthResponseV1,
       ),
     [props.project],
   );
-  const live = useManagerLiveResource('context-health', props.project, readHealth);
+  const live = useManagerLiveResource('context-health', props.project, readHealth, isManagerContextHealthResponseV1);
   const legacyHealth = !live.active || live.snapshot.status === 'unsupported';
   const [selected, setSelected] = useState<ManagerContextHealthResponseV1['findings'][number]>();
   const [generation, setGeneration] = useState(0);
@@ -444,7 +474,9 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         `/api/context-health/citations/jobs?project=${encodeURIComponent(props.project)}`,
         undefined,
         {signal},
+        isManagerCitationRepairJobResponseV1,
       ),
+    isManagerCitationRepairJobResponseV1,
   );
   const citationFallback = !citationLive.active || citationLive.snapshot.status === 'unsupported';
   const activeCitationRepairJobId = useRef<string | undefined>(undefined);
@@ -525,7 +557,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
               setNextCursor(undefined);
             }
             setFallbackFreshProject(undefined);
-            setError(errorMessage(cause));
+            setError(contextHealthReadErrorMessage(cause));
           }
         })
         .finally(() => {
@@ -614,6 +646,9 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       try {
         const response = await api<ManagerCitationRepairJobResponseV1>(
           `/api/context-health/citations/jobs?project=${encodeURIComponent(props.project)}`,
+          undefined,
+          undefined,
+          isManagerCitationRepairJobResponseV1,
         );
         if (cancelled) return;
         if (!response.job && (activeCitationRepairJobId.current || refreshedCitationRepairJobId.current)) {
@@ -665,6 +700,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       `/api/context-health?project=${encodeURIComponent(props.project)}&after=${encodeURIComponent(nextCursor)}`,
       undefined,
       {signal: requestController.current?.signal, timeoutMilliseconds: 8_000},
+      isManagerContextHealthResponseV1,
     )
       .then(next => {
         if (epoch !== requestEpoch.current) return;
@@ -693,7 +729,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
             setCitationRepairOpen(false);
             setNextCursor(undefined);
           }
-          setError(errorMessage(cause));
+          setError(contextHealthReadErrorMessage(cause));
         }
       })
       .finally(() => {
@@ -709,9 +745,14 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
     setCitationRepairJobStarting(true);
     setCitationRepairJobError('');
     try {
-      const response = await api<ManagerCitationRepairJobResponseV1>('/api/context-health/citations/jobs', {
-        project,
-      });
+      const response = await api<ManagerCitationRepairJobResponseV1>(
+        '/api/context-health/citations/jobs',
+        {
+          project,
+        },
+        undefined,
+        isManagerCitationRepairJobResponseV1,
+      );
       if (citationRepairJobProjectEpoch.current !== projectEpoch || citationRepairJobProject.current !== project)
         return;
       const job = response.job ?? undefined;
@@ -754,7 +795,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
           <AttentionEmpty text="No projects are available yet. Save a project memory or configure a repository to get started." />
         ) : (
           <div className="health-project-grid">
-            {props.projects.map(project => (
+            {EffectArray.map(props.projects, project => (
               <button
                 aria-label={`Inspect ${project}`}
                 className="health-project-tile"
@@ -833,7 +874,8 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
             One memory can have several issues. The list groups the loaded issues by affected memory.
           </p>
           {report.repositoryEvidence.state === 'available' &&
-          (report.findings.some(finding => finding.repair.kind === 'repair-citation') || citationRepairJob) ? (
+          (EffectArray.some(report.findings, finding => finding.repair.kind === 'repair-citation') ||
+            citationRepairJob) ? (
             <>
               <div className="attention-bulk-repair">
                 <div>
@@ -883,7 +925,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
             />
           ) : (
             <div className="attention-list health-record-list">
-              {healthRecordGroups(report).map(group => (
+              {EffectArray.map(healthRecordGroups(report), group => (
                 <article className="attention-card health-record" key={group.uri}>
                   <header>
                     <div>
@@ -903,20 +945,28 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
                       Open memory
                     </button>
                   </div>
-                  {group.preview?.code.map(code => (
-                    <section className="health-code-preview" key={code.citationId}>
-                      <header>
-                        <strong>{code.targetLabel ?? code.path}</strong>
-                        <span>
-                          {code.path}
-                          {code.line === undefined ? '' : `:${code.line}`}
-                        </span>
-                      </header>
-                      {code.excerpt ? <pre>{code.excerpt}</pre> : <p>Review this finding to check source evidence.</p>}
-                    </section>
-                  ))}
+                  {EffectOption.getOrUndefined(
+                    EffectOption.map(EffectOption.fromNullishOr(group.preview?.code), __effectArrayReceiver =>
+                      EffectArray.map(__effectArrayReceiver, code => (
+                        <section className="health-code-preview" key={code.citationId}>
+                          <header>
+                            <strong>{code.targetLabel ?? code.path}</strong>
+                            <span>
+                              {code.path}
+                              {code.line === undefined ? '' : `:${code.line}`}
+                            </span>
+                          </header>
+                          {code.excerpt ? (
+                            <pre>{code.excerpt}</pre>
+                          ) : (
+                            <p>Review this finding to check source evidence.</p>
+                          )}
+                        </section>
+                      )),
+                    ),
+                  )}
                   <div className="health-issues">
-                    {group.findings.map(finding => (
+                    {EffectArray.map(group.findings, finding => (
                       <section className="health-finding" key={finding.id}>
                         <header>
                           <strong>{contextHealthCategoryLabel(finding.category)}</strong>
@@ -926,7 +976,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
                         <p>{contextHealthNextStep(finding.category)}</p>
                         <div className="attention-tags">
                           <span>{finding.confidence} confidence</span>
-                          <span>{finding.repairability.replaceAll('-', ' ')}</span>
+                          <span>{Effect.pipe(finding.repairability, EffectString.replaceAll('-', ' '))}</span>
                         </div>
                         <button onClick={() => setSelected(finding)} type="button">
                           {report.repositoryEvidence.state === 'available' ? 'Review and repair' : 'Review issue'}
@@ -951,12 +1001,22 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         <HealthDetail
           key={`${props.project}:${selected.id}`}
           finding={selected}
-          memoryPreview={report?.recordPreviews.find(preview => preview.uri === selected.repair.subjectUri)}
+          memoryPreview={EffectOption.getOrUndefined(
+            EffectOption.flatMap(EffectOption.fromNullishOr(report?.recordPreviews), __effectOptionalArrayReceiver =>
+              EffectArray.findFirst(
+                __effectOptionalArrayReceiver,
+                preview => preview.uri === selected.repair.subjectUri,
+              ),
+            ),
+          )}
           project={props.project}
           repairsAvailable={report?.repositoryEvidence.state === 'available'}
           stale={
             healthUnconfirmed ||
-            JSON.stringify(report.findings.find(item => item.id === selected.id)) !== JSON.stringify(selected)
+            (live.active && live.snapshot.status !== 'ready' && fallbackFreshProject !== props.project) ||
+            JSON.stringify(
+              EffectOption.getOrUndefined(EffectArray.findFirst(report.findings, item => item.id === selected.id)),
+            ) !== JSON.stringify(selected)
           }
           onClose={() => setSelected(undefined)}
           onChanged={() => setGeneration(value => value + 1)}
@@ -975,8 +1035,17 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
   );
 }
 
+function contextHealthReadErrorMessage(cause: unknown): string {
+  return Schema.is(ManagerResponseContractError)(cause)
+    ? 'Context health does not match this project. Refresh Manager.'
+    : errorMessage(cause);
+}
+
 function attentionReadRequiresRedaction(cause: unknown): boolean {
-  return Schema.is(ManagerApiError)(cause) && [400, 401, 403, 404, 409, 410].includes(cause.status);
+  return (
+    Schema.is(ManagerResponseContractError)(cause) ||
+    (Schema.is(ManagerApiError)(cause) && [400, 401, 403, 404, 409, 410].includes(cause.status))
+  );
 }
 
 function validHealthReport(result: ManagerContextHealthResponseV1, project: string): boolean {
@@ -984,27 +1053,27 @@ function validHealthReport(result: ManagerContextHealthResponseV1, project: stri
     !!result &&
     result.version === 1 &&
     result.project === project &&
-    Array.isArray(result.findings) &&
-    Array.isArray(result.recordPreviews)
+    EffectArray.isArray(result.findings) &&
+    EffectArray.isArray(result.recordPreviews)
   );
 }
 
 function healthRecordGroups(report: ManagerContextHealthResponseV1) {
   type Finding = ManagerContextHealthResponseV1['findings'][number];
-  const previews = new Map((report.recordPreviews ?? []).map(preview => [preview.uri, preview] as const));
+  const previews = new Map(EffectArray.map(report.recordPreviews ?? [], preview => [preview.uri, preview] as const));
   const groups = new Map<string, Finding[]>();
   for (const finding of report.findings) {
     const uri = finding.repair.subjectUri ?? finding.uris[0] ?? finding.id;
     groups.set(uri, [...(groups.get(uri) ?? []), finding]);
   }
-  return [...groups.entries()].map(([uri, findings]) => ({findings, preview: previews.get(uri), uri}));
+  return EffectArray.map([...groups.entries()], ([uri, findings]) => ({findings, preview: previews.get(uri), uri}));
 }
 
 function mergeHealthRecordPreviews(
   current: ManagerContextHealthResponseV1['recordPreviews'],
   next: ManagerContextHealthResponseV1['recordPreviews'],
 ) {
-  const merged = new Map(current.map(preview => [preview.uri, preview] as const));
+  const merged = new Map(EffectArray.map(current, preview => [preview.uri, preview] as const));
   for (const preview of next) {
     const prior = merged.get(preview.uri);
     merged.set(
@@ -1015,8 +1084,9 @@ function mergeHealthRecordPreviews(
             ...prior,
             code: [
               ...prior.code,
-              ...preview.code.filter(
-                item => !prior.code.some(currentItem => currentItem.citationId === item.citationId),
+              ...EffectArray.filter(
+                preview.code,
+                item => !EffectArray.some(prior.code, currentItem => currentItem.citationId === item.citationId),
               ),
             ],
           },
@@ -1045,7 +1115,7 @@ function CitationRepairJobStatus(props: {
     <section aria-live="polite" className={`citation-repair-job is-${job.status}`} role="status">
       <header>
         <strong>{title}</strong>
-        <span>{job.progress.phase.replaceAll('-', ' ')}</span>
+        <span>{Effect.pipe(job.progress.phase, EffectString.replaceAll('-', ' '))}</span>
       </header>
       <p>{job.progress.message}</p>
       {job.status === 'running' ? <progress aria-label="Background citation repair progress" /> : null}
@@ -1146,12 +1216,17 @@ function CitationRepairDialog(props: {
       }
       setProgress({stage: 'scan'});
       setPreview(
-        await api<CitationRepairPreview>('/api/context-health/citations/preview', {
-          project: props.project,
-        }),
+        await api<CitationRepairPreview>(
+          '/api/context-health/citations/preview',
+          {
+            project: props.project,
+          },
+          undefined,
+          isCitationRepairPreview,
+        ),
       );
     } catch (cause) {
-      setError(errorMessage(cause));
+      setError(contextHealthReadErrorMessage(cause));
     } finally {
       setProgress(undefined);
       setBusy(false);
@@ -1163,7 +1238,7 @@ function CitationRepairDialog(props: {
     setBusy(true);
     setError('');
     setResult(undefined);
-    const items = preview.items.map(item => ({
+    const items = EffectArray.map(preview.items, item => ({
       category: item.category,
       citationId: item.citationId,
       findingId: item.findingId,
@@ -1172,7 +1247,7 @@ function CitationRepairDialog(props: {
       revision: item.revision,
       subjectUri: item.subjectUri,
     }));
-    const recordCount = new Set(items.map(item => item.subjectUri)).size;
+    const recordCount = new Set(EffectArray.map(items, item => item.subjectUri)).size;
     setProgress({
       appliedCount: 0,
       completedCount: 0,
@@ -1182,11 +1257,16 @@ function CitationRepairDialog(props: {
       totalCount: items.length,
     });
     try {
-      const applied = await api<CitationRepairApplyResult>('/api/context-health/citations/apply', {
-        approved: true,
-        items,
-        project: props.project,
-      });
+      const applied = await api<CitationRepairApplyResult>(
+        '/api/context-health/citations/apply',
+        {
+          approved: true,
+          items,
+          project: props.project,
+        },
+        undefined,
+        isCitationRepairApplyResult,
+      );
       setResult(applied);
       setProgress({
         appliedCount: applied.appliedCount,
@@ -1197,7 +1277,7 @@ function CitationRepairDialog(props: {
         totalCount: items.length,
       });
     } catch (cause) {
-      setError(errorMessage(cause));
+      setError(contextHealthReadErrorMessage(cause));
     } finally {
       setProgress(undefined);
       setBusy(false);
@@ -1239,7 +1319,7 @@ function CitationRepairDialog(props: {
             </div>
             {preview.items.length > 0 ? (
               <div className="citation-repair-list">
-                {citationRepairGroups(preview.items).map(group => (
+                {EffectArray.map(citationRepairGroups(preview.items), group => (
                   <article key={group.subjectUri}>
                     <strong>{group.title}</strong>
                     {group.excerpt ? <MemoryExcerpt label="Saved memory">{group.excerpt}</MemoryExcerpt> : null}
@@ -1247,12 +1327,12 @@ function CitationRepairDialog(props: {
                       {group.items.length} citation{group.items.length === 1 ? '' : 's'} ready in this memory
                     </span>
                     <ul>
-                      {group.items.map(item => (
+                      {EffectArray.map(group.items, item => (
                         <li key={`${item.findingId}:${item.replacementId}`}>
                           <code>{item.path}</code>
                           <span>
-                            {item.targetKind} · {item.category.replaceAll('-', ' ')} · commit{' '}
-                            <code>{item.sourceCommit.slice(0, 12)}</code>
+                            {item.targetKind} · {Effect.pipe(item.category, EffectString.replaceAll('-', ' '))} · commit{' '}
+                            <code>{Effect.pipe(item.sourceCommit, EffectString.slice(0, 12))}</code>
                           </span>
                         </li>
                       ))}
@@ -1298,7 +1378,7 @@ function CitationRepairDialog(props: {
 function citationRepairGroups(items: CitationRepairPreview['items']) {
   const groups = new Map<string, CitationRepairPreview['items'][number][]>();
   for (const item of items) groups.set(item.subjectUri, [...(groups.get(item.subjectUri) ?? []), item]);
-  return [...groups.entries()].map(([subjectUri, groupItems]) => ({
+  return EffectArray.map([...groups.entries()], ([subjectUri, groupItems]) => ({
     excerpt: groupItems[0]?.subjectExcerpt,
     items: groupItems,
     subjectUri,
@@ -1308,10 +1388,21 @@ function citationRepairGroups(items: CitationRepairPreview['items']) {
 
 function memoryNameFromUri(uri: string): string {
   return (
-    uri
-      .slice(uri.lastIndexOf('/') + 1)
-      .replace(/\.md$/u, '')
-      .replaceAll('-', ' ') || 'Affected memory'
+    Effect.pipe(uri, __effectPipeInput => {
+      const __effectPipeStage0 = Effect.pipe(
+        __effectPipeInput,
+        EffectString.slice(
+          Effect.pipe(
+            uri,
+            EffectString.lastIndexOf('/'),
+            Effect.Option.getOrElse(() => -1),
+          ) + 1,
+        ),
+      );
+      const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.replace(/\.md$/u, ''));
+      const __effectPipeStage2 = Effect.pipe(__effectPipeStage1, EffectString.replaceAll('-', ' '));
+      return __effectPipeStage2;
+    }) || 'Affected memory'
   );
 }
 
@@ -1409,10 +1500,14 @@ function contextHealthNextStep(category: ManagerContextHealthResponseV1['finding
 }
 
 function contextHealthCategoryLabel(category: ManagerContextHealthResponseV1['findings'][number]['category']): string {
-  return category
-    .split('-')
-    .map(word => `${word.slice(0, 1).toUpperCase()}${word.slice(1)}`)
-    .join(' ');
+  return EffectArray.join(
+    EffectArray.map(
+      Effect.pipe(category, EffectString.split('-')),
+      word =>
+        `${Effect.pipe(word, EffectString.slice(0, 1), EffectString.toUpperCase)}${Effect.pipe(word, EffectString.slice(1))}`,
+    ),
+    ' ',
+  );
 }
 
 function AttentionHeader(props: {
@@ -1434,7 +1529,7 @@ function AttentionHeader(props: {
         Project
         <select onChange={event => props.onProjectChange(event.target.value)} value={props.project}>
           <option value="">All</option>
-          {props.projects.map(project => (
+          {EffectArray.map(props.projects, project => (
             <option key={project}>{project}</option>
           ))}
         </select>

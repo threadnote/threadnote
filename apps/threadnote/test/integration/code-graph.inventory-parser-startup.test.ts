@@ -23,6 +23,7 @@ describe('inventory parser preparation', () => {
       const path = yield* Path.Path;
       const command = yield* CommandExecutor;
       const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-inventory-parser-startup-'});
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       yield* fs.writeFileString(path.join(root, '000-large.ts'), 'a'.repeat(CODE_GRAPH_CAT_FILE_BATCH_BYTES));
       for (let index = 0; index < 4; index += 1) {
         yield* fs.writeFileString(path.join(root, `100-source-${index}.ts`), `export const source${index} = true;\n`);

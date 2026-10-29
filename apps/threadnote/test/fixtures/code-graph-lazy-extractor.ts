@@ -1,14 +1,17 @@
+import {Array as EffectArray} from 'effect';
 import {extractFileFacts} from '@threadnote/graph/extractor';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const content = 'export function bundledExample() { return 1; }';
 const facts = extractFileFacts({
-  blobId: 'b'.repeat(40),
+  blobId: Effect.pipe('b', EffectString.repeat(40)),
   content,
-  contentHash: 'a'.repeat(64),
+  contentHash: Effect.pipe('a', EffectString.repeat(64)),
   language: 'typescript',
   mode: '100644',
   path: 'src/example.ts',
   size: Buffer.byteLength(content),
   source: 'commit',
 });
-process.stdout.write(JSON.stringify(facts.symbols.map(symbol => symbol.name)) + '\n');
+process.stdout.write(JSON.stringify(EffectArray.map(facts.symbols, symbol => symbol.name)) + '\n');

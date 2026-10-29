@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {it as effectIt} from '@effect/vitest';
 import {succeedUndefined} from '@threadnote/platform/optional';
@@ -15,16 +16,20 @@ import {
   type CodeGraphQueryAnonymousTelemetryProjection,
   type CodeGraphQueryAnonymousTelemetrySnapshotSurface,
 } from '@threadnote/threadnote/code_graph/query/anonymous_telemetry';
-import type {CodeGraphStatus} from '@threadnote/graph/types';
+import type {CodeGraphSnapshot, CodeGraphStatus} from '@threadnote/graph/types';
 import {anonymousTelemetryTestLayer, withAnonymousTelemetry} from '@threadnote/threadnote/effect/telemetry';
 import type {SystemInfoShape} from '@threadnote/platform/system';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph query anonymous telemetry', () => {
   it('maps only the reviewed MCP operation vocabulary', () => {
     expect(
-      (['query', 'node', 'neighbors', 'explain', 'path', 'impact', 'topology'] as const).map(
+      EffectArray.map(
+        ['query', 'node', 'neighbors', 'explain', 'path', 'impact', 'topology'] as const,
         codeGraphInspectAnonymousTelemetryRequestKind,
       ),
     ).toEqual([
@@ -36,13 +41,17 @@ describe('code graph query anonymous telemetry', () => {
       'inspect.impact',
       'inspect.topology',
     ]);
-    expect(
-      ['stats', 'communities', 'community', 'groups', 'hubs', 'surprises', 'confidence', 'full'].map(operation =>
-        codeGraphAnalyzeAnonymousTelemetryRequestKind(
-          operation as Parameters<typeof codeGraphAnalyzeAnonymousTelemetryRequestKind>[0],
-        ),
-      ),
-    ).toEqual([
+    const analyzeOperations = [
+      'stats',
+      'communities',
+      'community',
+      'groups',
+      'hubs',
+      'surprises',
+      'confidence',
+      'full',
+    ] as const;
+    expect(EffectArray.map(analyzeOperations, codeGraphAnalyzeAnonymousTelemetryRequestKind)).toEqual([
       'analyze.stats',
       'analyze.communities',
       'analyze.community',
@@ -66,19 +75,19 @@ describe('code graph query anonymous telemetry', () => {
         fc.string().map(value => `private-query:${value}`),
         fc.string().map(value => `private-symbol:${value}`),
         (counts, repository, query, symbol) => {
+          const privateCounts = {...counts, id: symbol};
+          const privateQueryFields = {query, repository, symbol};
           const projected = codeGraphQueryAnonymousTelemetryFields({
             phase: 'graph.query.execute',
-            query,
-            repository,
             requestKind: 'inspect.query',
             requestScope: 'local',
             snapshot: {
               freshness: 'deferred',
               selection: 'active',
-              snapshot: {...counts, id: symbol},
+              snapshot: privateCounts,
             },
-            symbol,
-          } as CodeGraphQueryAnonymousTelemetryProjection);
+            ...privateQueryFields,
+          } satisfies CodeGraphQueryAnonymousTelemetryProjection);
 
           expect(projected).toEqual({
             phase: 'graph.query.execute',
@@ -112,15 +121,16 @@ describe('code graph query anonymous telemetry', () => {
         fc.constantFrom('fallback' as const, 'skipped' as const),
         fc.string().map(value => `private-stage-input:${value}`),
         (stage, subphase, privateValue) => {
+          const privateStageFields = {privateValue};
           const projected = codeGraphQueryAnonymousTelemetryFields({
             phase: 'graph.query.execute',
-            privateValue,
             requestKind: 'inspect.path',
             requestScope: 'local',
             snapshot: selectedSnapshot(),
             stage,
             subphase,
-          } as CodeGraphQueryAnonymousTelemetryProjection);
+            ...privateStageFields,
+          } satisfies CodeGraphQueryAnonymousTelemetryProjection);
 
           expect(projected).toEqual({
             phase: 'graph.query.execute',
@@ -284,7 +294,7 @@ describe('code graph query anonymous telemetry', () => {
 
       expect(result).toBe('same-result');
       expect(capture.spans).toHaveLength(5);
-      expect(capture.spans.slice(0, 4).map(span => spanAttributes(span))).toEqual([
+      expect(EffectArray.map(capture.spans.slice(0, 4), span => spanAttributes(span))).toEqual([
         expect.objectContaining({
           'threadnote.phase': 'graph.query.status',
           'threadnote.phase.outcome': 'success',
@@ -538,12 +548,38 @@ function selectedSnapshot(): CodeGraphQueryAnonymousTelemetrySnapshotSurface {
 }
 
 function statusWithSnapshot(id?: string): CodeGraphStatus {
+  const identity = {
+    caseMode: 'sensitive',
+    checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+    displayName: 'private repository',
+    gitCommonDirectory: '/private/not-serialized/.git',
+    headCommit: Effect2.pipe('b', EffectString.repeat(40)),
+    objectFormat: 'sha1',
+    repoRoot: '/private/not-serialized',
+    repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
+  } satisfies CodeGraphStatus['identity'];
+  const readySnapshot =
+    id === undefined
+      ? undefined
+      : ({
+          commit: Effect2.pipe('b', EffectString.repeat(40)),
+          dirty: false,
+          edgeCount: 1,
+          extractorSet: 'fixture-extractor-v1',
+          fileCount: 1,
+          id,
+          repositoryId: identity.repositoryId,
+          state: 'ready',
+          symbolCount: 1,
+          worktreeId: identity.worktreeId,
+        } satisfies CodeGraphSnapshot);
   return {
     databasePath: '/private/not-serialized.sqlite',
     freshness: id === undefined ? 'stale' : 'current',
-    identity: {} as CodeGraphStatus['identity'],
+    identity,
     languagePacks: [],
-    ...(id === undefined ? {} : {readySnapshot: {id} as CodeGraphStatus['readySnapshot']}),
+    ...(readySnapshot === undefined ? {} : {readySnapshot}),
     stale: id === undefined,
   };
 }
@@ -551,11 +587,11 @@ function statusWithSnapshot(id?: string): CodeGraphStatus {
 function bucketOrdinal(bucket: ReturnType<typeof codeGraphQueryAnonymousTelemetryQuantityBucket>): number {
   if (bucket === undefined) return Number.NEGATIVE_INFINITY;
   if (bucket === '0') return -1;
-  return Number(bucket.slice(2));
+  return Number(Effect2.pipe(bucket, EffectString.slice(2)));
 }
 
 function spanAttributes(span: {readonly span: Tracer.NativeSpan}): Record<string, unknown> {
-  return Object.fromEntries(span.span.attributes);
+  return EffectRecord.fromEntries(span.span.attributes);
 }
 
 function capturingTracer(): {

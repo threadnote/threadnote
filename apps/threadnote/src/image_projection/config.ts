@@ -3,6 +3,9 @@ import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {isJsonObject} from '../utils.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const IMAGE_PROJECTION_CONFIGURATION_VERSION = 1 as const;
 
@@ -11,13 +14,13 @@ export interface ImageProjectionConfiguration {
   readonly version: typeof IMAGE_PROJECTION_CONFIGURATION_VERSION;
 }
 
-export class ImageProjectionConfigurationError extends Schema.TaggedError<ImageProjectionConfigurationError>()(
-  'ImageProjectionConfigurationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {
+export class ImageProjectionConfigurationError extends Schema.TaggedError<
+  ImageProjectionConfigurationError,
+  {readonly brand: unique symbol}
+>()('ImageProjectionConfigurationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {
   static of(message: string, options?: ErrorOptions): ImageProjectionConfigurationError {
     return ImageProjectionConfigurationError.make({
       message,
@@ -124,7 +127,10 @@ export function imageProjectionConfiguration(enabled: boolean): ImageProjectionC
 
 export function imageProjectionEnvironmentDisabled(environment: Readonly<Record<string, string | undefined>>): boolean {
   const value = environment[IMAGE_PROJECTION_ENVIRONMENT_KEY];
-  return value !== undefined && ['0', 'false', 'no', 'off'].includes(value.trim().toLowerCase());
+  return (
+    value !== undefined &&
+    ['0', 'false', 'no', 'off'].includes(Effect2.pipe(value, EffectString.trim, EffectString.toLowerCase))
+  );
 }
 
 export const imageProjectionDoctorCheck = Effect.fn('imageProjection.doctorCheck')(function* (
@@ -169,7 +175,7 @@ function parseImageProjectionConfigurationValue(value: unknown, source: string):
       `Image projection configuration requires a boolean enabled field: ${source}`,
     );
   }
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   if (actual.length !== 2 || actual[0] !== 'enabled' || actual[1] !== 'version') {
     throw ImageProjectionConfigurationError.of(`Image projection configuration contains unsupported fields: ${source}`);
   }

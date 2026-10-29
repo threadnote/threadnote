@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed evaluation helper owns a disposable filesystem trust boundary. */
 import {createHash} from 'node:crypto';
 import {chmod, lstat, mkdir, open, readdir, realpath, rm, writeFile} from 'node:fs/promises';
 import {basename, dirname, isAbsolute, join, relative, resolve, sep} from 'node:path';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface CodeMemoryLinkRepositorySnapshotV1 {
   readonly repositorySnapshotHash: string;
@@ -67,8 +70,8 @@ export async function createCodeMemoryLinkRepositorySnapshot(input: {
   }
   if (
     destinationRoot === sourceRoot ||
-    destinationRoot.startsWith(`${sourceRoot}${sep}`) ||
-    sourceRoot.startsWith(`${destinationRoot}${sep}`)
+    Effect.pipe(destinationRoot, EffectString.startsWith(`${sourceRoot}${sep}`)) ||
+    Effect.pipe(sourceRoot, EffectString.startsWith(`${destinationRoot}${sep}`))
   ) {
     throw new Error('Repository snapshot source and destination must be disjoint.');
   }
@@ -130,7 +133,7 @@ export async function assertCodeMemoryLinkRepositorySnapshot(
   if (inspected.repositorySnapshotHash !== snapshot.repositorySnapshotHash) {
     throw new Error('Repository snapshot changed after it was frozen.');
   }
-  return inspected.files.map(({byteCount, bytes, contentSha256, relativePath}) => ({
+  return EffectArray.map(inspected.files, ({byteCount, bytes, contentSha256, relativePath}) => ({
     byteCount,
     bytes,
     contentSha256,
@@ -189,8 +192,8 @@ async function inventory(root: string, requireImmutable: boolean): Promise<Snaps
       const path = join(directory, name);
       const metadata = await lstat(path);
       if (metadata.isSymbolicLink()) throw new Error('Repository snapshot symlinks are forbidden.');
-      const relativePath = relative(root, path).replaceAll('\\', '/');
-      if (!relativePath || relativePath.startsWith('../') || isAbsolute(relativePath)) {
+      const relativePath = Effect.pipe(relative(root, path), EffectString.replaceAll('\\', '/'));
+      if (!relativePath || Effect.pipe(relativePath, EffectString.startsWith('../')) || isAbsolute(relativePath)) {
         throw new Error('Repository snapshot entry escaped its root.');
       }
       if (metadata.isDirectory()) {
@@ -218,8 +221,8 @@ async function inventory(root: string, requireImmutable: boolean): Promise<Snaps
   };
   await visit(root);
   const hashInput = [
-    ...directories.map(entry => ({path: entry.relativePath, type: entry.type})),
-    ...files.map(entry => ({
+    ...EffectArray.map(directories, entry => ({path: entry.relativePath, type: entry.type})),
+    ...EffectArray.map(files, entry => ({
       byteCount: entry.byteCount,
       contentSha256: entry.contentSha256,
       path: entry.relativePath,
@@ -292,7 +295,7 @@ async function assertMissing(path: string): Promise<void> {
 }
 
 function normalizedAbsolute(path: string, label: string): string {
-  if (!isAbsolute(path) || resolve(path) !== path || path.includes('\0')) {
+  if (!isAbsolute(path) || resolve(path) !== path || Effect.pipe(path, EffectString.includes('\0'))) {
     throw new Error(`${label} must be normalized and absolute.`);
   }
   return path;

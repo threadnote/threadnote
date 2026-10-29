@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {mergeResolvedSuperhumanSelections, retainedSuperhumanSelection} from '../src/selection.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('Superhuman selection presentation', () => {
   it('preserves whole-document and explicit-page scope through chip reconstruction and deduplication', () => {
@@ -17,9 +20,10 @@ describe('Superhuman selection presentation', () => {
       fc.property(documents, scope => {
         const retained = retainedSuperhumanSelection(scope);
         const result = mergeResolvedSuperhumanSelections([...retained.selections, ...retained.selections].reverse());
-        const expected = scope
-          .map(item => ({id: item.id, ...(item.pages === undefined ? {} : {pages: [...item.pages].sort()})}))
-          .sort((a, b) => a.id.localeCompare(b.id));
+        const expected = EffectArray.map(scope, item => ({
+          id: item.id,
+          ...(item.pages === undefined ? {} : {pages: [...item.pages].sort()}),
+        })).sort((a, b) => Effect.pipe(a.id, EffectString.localeCompare(b.id)));
         expect(result.documents).toEqual(expected);
         expect(mergeResolvedSuperhumanSelections(result.selections)).toEqual(result);
       }),

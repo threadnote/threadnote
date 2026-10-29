@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {compareCodeUnits} from '../ordering.js';
@@ -69,7 +70,10 @@ const selectSymbolsByPaths = Effect.fn('codeGraph.selectSymbolsByPaths')(functio
   const grouped = new Map<string, CodeGraphQueryNode[]>();
   const safeLimit = Math.max(1, Math.min(500, Math.floor(limitPerPath)));
   for (const pathBatch of chunk(normalizedPaths, 300)) {
-    const placeholders = pathBatch.map(() => '?').join(', ');
+    const placeholders = EffectArray.join(
+      EffectArray.map(pathBatch, () => '?'),
+      ', ',
+    );
     const rows = yield* sql.unsafe<SymbolRow & {readonly path_rank: number}>(
       `WITH effective_path_symbols AS (
          SELECT current_symbols.*
@@ -109,7 +113,7 @@ const selectSymbolsByPaths = Effect.fn('codeGraph.selectSymbolsByPaths')(functio
       grouped.set(row.path, values);
     }
   }
-  return paths.map(sourcePath => grouped.get(sourcePath) ?? []);
+  return EffectArray.map(paths, sourcePath => grouped.get(sourcePath) ?? []);
 });
 
 const selectSymbolsByPathAndName = Effect.fn('codeGraph.selectSymbolsByPathAndName')(function* (
@@ -147,7 +151,7 @@ const selectSymbolsByPathAndName = Effect.fn('codeGraph.selectSymbolsByPathAndNa
      LIMIT 20`,
     [snapshotId, sourcePath, name, name, baseSnapshotId ?? '', sourcePath, name, name, snapshotId, snapshotId],
   );
-  return rows.map(row => ({...symbolFromRow(row), score: 1}));
+  return EffectArray.map(rows, row => ({...symbolFromRow(row), score: 1}));
 });
 
 /** Build bounded adjacency SQL whose branches seek the directional indexes. */
@@ -182,9 +186,9 @@ const selectRepresentativeEdgesForNodes = Effect.fn('codeGraph.selectRepresentat
     pages.push({nodeId, rows: rows.slice(0, perNodeLimit)});
   }
   const selected = representativeEdgeRows(pages, safeLimit);
-  const uniqueCandidates = new Set(pages.flatMap(page => page.rows.map(row => row.id))).size;
+  const uniqueCandidates = new Set(EffectArray.flatMap(pages, page => EffectArray.map(page.rows, row => row.id))).size;
   if (uniqueCandidates > selected.length) truncated = true;
-  return {edges: selected.map(edgeFromRow), truncated};
+  return {edges: EffectArray.map(selected, edgeFromRow), truncated};
 });
 
 const selectRelationshipSummaryForNode = Effect.fn('codeGraph.selectRelationshipSummaryForNode')(function* (
@@ -229,12 +233,12 @@ const selectRelationshipSummaryForNode = Effect.fn('codeGraph.selectRelationship
   return {
     incoming,
     outgoing,
-    provenances: [...provenanceCounts]
-      .map(([provenance, count]) => ({count, provenance}))
-      .sort((left, right) => right.count - left.count || compareCodeUnits(left.provenance, right.provenance)),
-    relations: [...relationCounts]
-      .map(([relation, counts]) => ({...counts, relation}))
-      .sort((left, right) => right.count - left.count || compareCodeUnits(left.relation, right.relation)),
+    provenances: EffectArray.map([...provenanceCounts], ([provenance, count]) => ({count, provenance})).sort(
+      (left, right) => right.count - left.count || compareCodeUnits(left.provenance, right.provenance),
+    ),
+    relations: EffectArray.map([...relationCounts], ([relation, counts]) => ({...counts, relation})).sort(
+      (left, right) => right.count - left.count || compareCodeUnits(left.relation, right.relation),
+    ),
     sampledEdges: rows.length,
     truncated: page.length > safeLimit,
   };

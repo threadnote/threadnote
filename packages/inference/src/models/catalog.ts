@@ -1,5 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, Layer, Schema} from 'effect';
 import {ModelManifestInvalid} from '../engine/errors.js';
+
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const LOCAL_MODEL_MANIFEST_VERSION = 1 as const;
 export const LOCAL_MODEL_ROLES = ['embedding', 'generation', 'reranker'] as const;
@@ -68,7 +72,7 @@ function makeLocalModelCatalog(
 ) {
   return Effect.try({
     try: () => {
-      const manifests = values.map(parseLocalModelManifest);
+      const manifests = EffectArray.map(values, parseLocalModelManifest);
       const byId = new Map<string, LocalModelManifest>();
       for (const manifest of manifests) {
         if (byId.has(manifest.id)) {
@@ -79,6 +83,7 @@ function makeLocalModelCatalog(
         }
         byId.set(manifest.id, manifest);
       }
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
       for (const [role, id] of Object.entries(selected)) {
         const manifest = id ? byId.get(id) : undefined;
         if (!manifest || manifest.role !== role) {
@@ -102,9 +107,9 @@ function makeLocalModelCatalog(
         },
         list: role =>
           Effect.succeed(
-            manifests
-              .filter(manifest => role === undefined || manifest.role === role)
-              .sort((left, right) => left.id.localeCompare(right.id)),
+            EffectArray.filter(manifests, manifest => role === undefined || manifest.role === role).sort(
+              (left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id)),
+            ),
           ),
         selected: role => {
           const id = selected[role];
@@ -143,11 +148,14 @@ function validateManifest(manifest: LocalModelManifest): string | undefined {
   if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(manifest.repository)) {
     return `Model ${manifest.id} must declare a safe owner/repository identifier.`;
   }
-  const fileSegments = manifest.file.split('/');
+  const fileSegments = Effect2.pipe(manifest.file, EffectString.split('/'));
   if (
     fileSegments.length === 0 ||
-    fileSegments.some(segment => !segment || segment === '.' || segment === '..' || /[\\?#]/.test(segment)) ||
-    !manifest.file.toLowerCase().endsWith('.gguf')
+    EffectArray.some(
+      fileSegments,
+      segment => !segment || segment === '.' || segment === '..' || /[\\?#]/.test(segment),
+    ) ||
+    !Effect2.pipe(manifest.file, EffectString.toLowerCase, EffectString.endsWith('.gguf'))
   ) {
     return `Model ${manifest.id} must declare a safe relative GGUF filename.`;
   }

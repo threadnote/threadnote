@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect} from 'effect';
 import type {ObservedCodeGraphBuildStatus} from '../build_status.js';
 
@@ -25,18 +26,26 @@ export function renderCodeGraphBuildCounters(status: ObservedCodeGraphBuildStatu
     counters.completed === undefined || counters.total === undefined
       ? undefined
       : `${counters.completed}/${counters.total} ${counters.unit ?? 'items'}`;
-  const details = [
-    counters.accepted === undefined ? undefined : `${counters.accepted} accepted`,
-    counters.reused === undefined ? undefined : `${counters.reused} reused`,
-    counters.resolved === undefined ? undefined : `${counters.resolved} references linked`,
-    counters.skipped === undefined ? undefined : `${counters.skipped} skipped`,
-    counters.excluded === undefined ? undefined : `${counters.excluded} excluded`,
-    counters.pagesCompleted === undefined ? undefined : `${counters.pagesCompleted} cleanup pages`,
-    counters.rowsDeleted === undefined ? undefined : `${counters.rowsDeleted} rows reclaimed`,
-    counters.symbols === undefined ? undefined : `${counters.symbols} symbols`,
-    counters.edges === undefined ? undefined : `${counters.edges} edges`,
-  ].filter((value): value is string => value !== undefined);
-  return [measured, ...details].filter((value): value is string => value !== undefined).join(' · ') || undefined;
+  const details = EffectArray.filter(
+    [
+      counters.accepted === undefined ? undefined : `${counters.accepted} accepted`,
+      counters.reused === undefined ? undefined : `${counters.reused} reused`,
+      counters.resolved === undefined ? undefined : `${counters.resolved} references linked`,
+      counters.skipped === undefined ? undefined : `${counters.skipped} skipped`,
+      counters.excluded === undefined ? undefined : `${counters.excluded} excluded`,
+      counters.pagesCompleted === undefined ? undefined : `${counters.pagesCompleted} cleanup pages`,
+      counters.rowsDeleted === undefined ? undefined : `${counters.rowsDeleted} rows reclaimed`,
+      counters.symbols === undefined ? undefined : `${counters.symbols} symbols`,
+      counters.edges === undefined ? undefined : `${counters.edges} edges`,
+    ],
+    (value): value is string => value !== undefined,
+  );
+  return (
+    EffectArray.join(
+      EffectArray.filter([measured, ...details], (value): value is string => value !== undefined),
+      ' · ',
+    ) || undefined
+  );
 }
 
 export function formatCodeGraphStatusDuration(milliseconds: number): string {

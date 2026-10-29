@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Result} from 'effect';
 import {
   parseActivationProductionRequestV1,
@@ -10,6 +11,7 @@ import {
   type ActivationProductionObservationV1,
 } from '../activation/production/observe.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectRecord from 'effect/Record';
 
 export interface ManagerActivationApiRequest {
   readonly body: Effect.Effect<Record<string, unknown>, unknown>;
@@ -38,7 +40,7 @@ export const handleManagerActivationRequest = Effect.fn('managerActivation.handl
     if (request.method !== 'POST')
       return {body: {error: 'Not found'}, status: 404} satisfies ManagerActivationApiResponse;
     const body = yield* request.body;
-    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, 'request') || !isObject(body.request)) {
+    if (EffectRecord.keys(body).length !== 1 || !EffectRecord.has(body, 'request') || !isObject(body.request)) {
       return {
         body: {code: 'invalid-request', error: 'Provide one activation request object.'},
         status: 400,
@@ -99,7 +101,7 @@ export function activationPreview(
 ) {
   return {
     activationId: plan.activationId,
-    operations: plan.operations.map(operation => ({
+    operations: EffectArray.map(plan.operations, operation => ({
       approvalKind: operation.approvalKind,
       id: operation.id,
       kind: operation.kind,
@@ -121,5 +123,5 @@ export function activationPreview(
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }

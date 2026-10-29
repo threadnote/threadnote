@@ -1,6 +1,9 @@
-import {Database} from 'bun:sqlite';
+import {Array as EffectArray} from 'effect';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {storedCodeGraphFactRawBytesSql} from '../fact/storage.js';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '../languages/registry.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_STORAGE_SNAPSHOT_ATTRIBUTION_LIMIT = 64;
 export const CODE_GRAPH_STORAGE_SEMANTIC_OBJECT_LIMIT = 512;
@@ -167,9 +170,9 @@ function semanticStorageGroups(
     current.pages += object.pages;
     groups.set(name, current);
   }
-  return [...groups]
-    .map(([name, value]) => ({name, ...value}))
-    .sort((left, right) => right.bytes - left.bytes || left.name.localeCompare(right.name));
+  return EffectArray.map([...groups], ([name, value]) => ({name, ...value})).sort(
+    (left, right) => right.bytes - left.bytes || Effect.pipe(left.name, EffectString.localeCompare(right.name)),
+  );
 }
 
 function readSnapshotStorageAttribution(
@@ -177,7 +180,7 @@ function readSnapshotStorageAttribution(
   attributedBtreeBytes: number,
 ): CodeGraphStorageSnapshotAttribution {
   const metadata = database
-    .query(
+    .query<SnapshotMetadataRow, SQLQueryBindings[]>(
       `SELECT snapshot.id, snapshot.commit_id, snapshot.state, snapshot.symbol_count,
               snapshot.edge_count, snapshot.completed_at,
               EXISTS (
@@ -196,7 +199,7 @@ function readSnapshotStorageAttribution(
                  snapshot.completed_at DESC, snapshot.id DESC
         LIMIT ?`,
     )
-    .all(CODE_GRAPH_STORAGE_SNAPSHOT_ATTRIBUTION_LIMIT + 1) as readonly SnapshotMetadataRow[];
+    .all(CODE_GRAPH_STORAGE_SNAPSHOT_ATTRIBUTION_LIMIT + 1);
   const snapshotsTruncated = metadata.length > CODE_GRAPH_STORAGE_SNAPSHOT_ATTRIBUTION_LIMIT;
   const selected = metadata.slice(0, CODE_GRAPH_STORAGE_SNAPSHOT_ATTRIBUTION_LIMIT);
   if (selected.length === 0) {
@@ -216,10 +219,13 @@ function readSnapshotStorageAttribution(
     };
   }
   validateSnapshotMetadata(selected);
-  const ids = selected.map(row => row.id);
-  const values = ids.map(() => '(?)').join(', ');
+  const ids = EffectArray.map(selected, row => row.id);
+  const values = EffectArray.join(
+    EffectArray.map(ids, () => '(?)'),
+    ', ',
+  );
   const logicalRows = database
-    .query(
+    .query<SnapshotLogicalRow, SQLQueryBindings[]>(
       `WITH selected(snapshot_id) AS (VALUES ${values})
        SELECT file.snapshot_id, 'workspace-inventory' AS group_name, COUNT(*) AS row_count,
               COALESCE(SUM(length(CAST(file.path AS BLOB)) + length(CAST(file.content_hash AS BLOB)) +
@@ -307,7 +313,7 @@ function readSnapshotStorageAttribution(
          FROM workspace_scopes AS scope JOIN selected ON selected.snapshot_id = scope.snapshot_id
         GROUP BY scope.snapshot_id`,
     )
-    .all(...ids) as readonly SnapshotLogicalRow[];
+    .all(...ids);
   const classifierRows = readSnapshotClassifierStorageAttribution(database, ids, values);
   const aggregates = new Map<
     string,
@@ -323,7 +329,7 @@ function readSnapshotStorageAttribution(
     }
     aggregates.set(row.snapshot_id, current);
   }
-  const snapshots = selected.map(row => {
+  const snapshots = EffectArray.map(selected, row => {
     const aggregate = aggregates.get(row.id) ?? {factRawBytes: 0, factStoredBytes: 0, logicalBytes: 0, rows: 0};
     return {
       active: row.active === 1,
@@ -340,15 +346,26 @@ function readSnapshotStorageAttribution(
       symbolCount: row.symbol_count,
     } satisfies CodeGraphSnapshotStorageAttribution;
   });
-  const active = snapshots.filter(snapshot => snapshot.active);
-  const activeSymbolCount = active.reduce((total, snapshot) => total + snapshot.symbolCount, 0);
-  const activeLogicalPayloadBytes = active.reduce((total, snapshot) => total + snapshot.logicalPayloadBytes, 0);
-  const readyLogicalPayloadBytes = snapshots
-    .filter(snapshot => snapshot.state === 'ready')
-    .reduce((total, snapshot) => total + snapshot.logicalPayloadBytes, 0);
-  const retiredLogicalPayloadBytes = snapshots
-    .filter(snapshot => snapshot.state === 'retired' || snapshot.state === 'failed')
-    .reduce((total, snapshot) => total + snapshot.logicalPayloadBytes, 0);
+  const active = EffectArray.filter(
+    snapshots,
+    (snapshot, __effectArrayIndex) => __effectArrayIndex in snapshots && snapshot.active,
+  );
+  const activeSymbolCount = EffectArray.reduce(active, 0, (total, snapshot) => total + snapshot.symbolCount);
+  const activeLogicalPayloadBytes = EffectArray.reduce(
+    active,
+    0,
+    (total, snapshot) => total + snapshot.logicalPayloadBytes,
+  );
+  const readyLogicalPayloadBytes = EffectArray.reduce(
+    EffectArray.filter(snapshots, snapshot => snapshot.state === 'ready'),
+    0,
+    (total, snapshot) => total + snapshot.logicalPayloadBytes,
+  );
+  const retiredLogicalPayloadBytes = EffectArray.reduce(
+    EffectArray.filter(snapshots, snapshot => snapshot.state === 'retired' || snapshot.state === 'failed'),
+    0,
+    (total, snapshot) => total + snapshot.logicalPayloadBytes,
+  );
   return {
     baseline: {
       activeLogicalPayloadBytes,
@@ -377,7 +394,7 @@ function readSnapshotClassifierStorageAttribution(
   selectedValues: string,
 ): ReadonlyMap<string, readonly CodeGraphClassifierStorageAttribution[]> {
   const rows = database
-    .query(
+    .query<SnapshotClassifierLogicalRow, SQLQueryBindings[]>(
       `WITH selected(snapshot_id) AS (VALUES ${selectedValues})
        SELECT file.snapshot_id, file.language, 'source' AS group_name, COUNT(*) AS row_count,
               COALESCE(SUM(file.size), 0) AS source_bytes,
@@ -434,7 +451,7 @@ function readSnapshotClassifierStorageAttribution(
          JOIN snapshot_files AS file ON file.snapshot_id = symbol.snapshot_id AND file.path = symbol.path
         GROUP BY lookup.snapshot_id, file.language`,
     )
-    .all(...snapshotIds) as readonly SnapshotClassifierLogicalRow[];
+    .all(...snapshotIds);
   const aggregates = new Map<string, Map<string, CodeGraphClassifierStorageAttribution>>();
   for (const row of rows) {
     if (typeof row.language !== 'string' || typeof row.group_name !== 'string') {
@@ -472,10 +489,12 @@ function readSnapshotClassifierStorageAttribution(
     byClassifier.set(classifier, next);
   }
   return new Map(
-    [...aggregates].map(([snapshotId, values]) => [
+    EffectArray.map([...aggregates], ([snapshotId, values]) => [
       snapshotId,
       [...values.values()].sort(
-        (left, right) => right.logicalBytes - left.logicalBytes || left.classifier.localeCompare(right.classifier),
+        (left, right) =>
+          right.logicalBytes - left.logicalBytes ||
+          Effect.pipe(left.classifier, EffectString.localeCompare(right.classifier)),
       ),
     ]),
   );
@@ -483,7 +502,7 @@ function readSnapshotClassifierStorageAttribution(
 
 export function codeGraphStorageClassifierForLanguage(language: string): string {
   for (const pack of BUILTIN_LANGUAGE_PACK_REGISTRY.packs) {
-    if (pack.files.some(matcher => matcher.language === language)) return pack.id;
+    if (EffectArray.some(pack.files, matcher => matcher.language === language)) return pack.id;
   }
   return 'unmatched';
 }

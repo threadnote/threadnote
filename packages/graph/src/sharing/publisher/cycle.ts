@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Context, Crypto, Effect, FileSystem, Layer, Path, Ref, Schema} from 'effect';
 import {canonicalJson} from '../../checkpoint/canonical_json.js';
 import {CommandExecutor} from '@threadnote/platform/command';
@@ -92,6 +93,8 @@ import {makeGraphShareRegistryReader} from '../registry/reader.js';
 import {selectGraphWorkerReceiptsForSource} from '../worker/receipts.js';
 import {verifyPublisherWorkerReceipt} from '../worker/publisher_receipt.js';
 import type {GraphWorkerAdmissionReceiptV2} from '../worker/admission_state.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface GraphPublisherCycleOptions {
   readonly authorizationPolicy?: string;
@@ -154,7 +157,7 @@ const advanceGraphPublisherCandidate = Effect.fn('codeGraph.sharing.advancePubli
   const enrollment = parseGraphShareEnrollment(yield* readJsonFile(graphShareEnrollmentPath(path, identity.repoRoot)));
   assertEnrollmentMatchesIdentity(enrollment, identity.repositoryId);
   const profile = yield* readGraphShareEnrolledProfile(casRoot, enrollment);
-  const signedProfile = profile.registry.worker.startsWith('oci://');
+  const signedProfile = Effect2.pipe(profile.registry.worker, EffectString.startsWith('oci://'));
   const layout = graphSharingLayout(path, config.agentContextHome, casRoot);
   const pointerPath = graphSharingFrontierPointerPath(path, layout.frontiersRoot, identity.repositoryId);
   const pointer = parseGraphShareFrontierPointer(yield* readJsonFile(pointerPath));
@@ -272,12 +275,17 @@ const advanceGraphPublisherCandidate = Effect.fn('codeGraph.sharing.advancePubli
       : yield* readGraphWorkerAdmissionStore(config.agentContextHome, initialPolicy, identity.headCommit);
   const actionKeys =
     admissions === undefined
-      ? coordinator.receipts.receipts
-          .filter(receipt => receipt.batchId === identity.headCommit || receipt.batchId === machine.frozenBatchId)
-          .map(receipt => receipt.actionKey)
-      : admissions.receipts
-          .filter(receipt => receipt.sourceCommit === identity.headCommit)
-          .map(receipt => receipt.announcement.body.actionKey);
+      ? EffectArray.map(
+          EffectArray.filter(
+            coordinator.receipts.receipts,
+            receipt => receipt.batchId === identity.headCommit || receipt.batchId === machine.frozenBatchId,
+          ),
+          receipt => receipt.actionKey,
+        )
+      : EffectArray.map(
+          EffectArray.filter(admissions.receipts, receipt => receipt.sourceCommit === identity.headCommit),
+          receipt => receipt.announcement.body.actionKey,
+        );
   machine = freezeGraphShareBatch(machine, {
     actionKeys,
     changedBytes: options.forceFreeze === true ? 1 : stats.changedBytes,
@@ -311,7 +319,9 @@ const advanceGraphPublisherCandidate = Effect.fn('codeGraph.sharing.advancePubli
   }
   const selectedSigned: GraphWorkerAdmissionReceiptV2[] = [];
   if (
-    admissions?.receipts.some(receipt => receipt.sourceCommit === identity.headCommit) &&
+    admissions != null &&
+    admissions.receipts != null &&
+    Boolean(EffectArray.some(admissions.receipts, receipt => receipt.sourceCommit === identity.headCommit)) &&
     initialPolicy !== undefined
   ) {
     const indexer = yield* CodeGraphIndexer;
@@ -337,7 +347,7 @@ const advanceGraphPublisherCandidate = Effect.fn('codeGraph.sharing.advancePubli
         observeParserBatch: group =>
           Effect.try({
             try: () => {
-              const facts = new Map(group.facts.map(item => [item.facts.path, item.facts]));
+              const facts = new Map(EffectArray.map(group.facts, item => [item.facts.path, item.facts]));
               for (const file of group.files) {
                 const parsed = facts.get(file.path);
                 if (file.source !== 'commit' || parsed === undefined)
@@ -484,7 +494,8 @@ const advanceGraphPublisherCandidate = Effect.fn('codeGraph.sharing.advancePubli
       const provenance = yield* store.snapshotPackProvenance(layout.databasePath, ready.id);
       if (
         provenance === undefined ||
-        selectedSigned.some(
+        EffectArray.some(
+          selectedSigned,
           receipt =>
             receipt.graphAbi !== codeGraphCheckpointAbiDigestV1(codeGraphCheckpointAbiInputV1(provenance)).digest,
         )
@@ -500,7 +511,7 @@ const advanceGraphPublisherCandidate = Effect.fn('codeGraph.sharing.advancePubli
       index: indexed,
       selectedResults: selected?.selected.length ?? selectedSigned.length,
       sourceUse,
-      verifiedResultDigests: verified.map(item => item.announcement.resultManifestDigest),
+      verifiedResultDigests: EffectArray.map(verified, item => item.announcement.resultManifestDigest),
     });
     const exported = yield* exportSignedGeneration(config, options, current, identity.repositoryId, profile, {
       contributionEvidence,
@@ -515,7 +526,10 @@ const advanceGraphPublisherCandidate = Effect.fn('codeGraph.sharing.advancePubli
               initialPolicy,
               policyFile: policyFile!,
               receipts: selectedSigned,
-              sourceSnapshot: admissions!.receipts.filter(receipt => receipt.sourceCommit === identity.headCommit),
+              sourceSnapshot: EffectArray.filter(
+                admissions!.receipts,
+                receipt => receipt.sourceCommit === identity.headCommit,
+              ),
             },
           }),
     });
@@ -652,7 +666,7 @@ const exportSignedGeneration = Effect.fn('codeGraph.sharing.exportSignedGenerati
   });
   yield* assertGraphShareCommitChain(identity.repoRoot, [
     current.checkpoint.sourceCommit,
-    ...current.deltas.map(delta => delta.targetCommit),
+    ...EffectArray.map(current.deltas, delta => delta.targetCommit),
     exported.sourceCommit,
   ]);
   const checkpointDigest =
@@ -703,18 +717,23 @@ const exportSignedGeneration = Effect.fn('codeGraph.sharing.exportSignedGenerati
             expected.sourceCommit,
           );
           if (
-            canonicalJson(admissions.receipts.filter(receipt => receipt.sourceCommit === expected.sourceCommit)) !==
-            canonicalJson(expected.signedAdmissions.sourceSnapshot)
+            canonicalJson(
+              EffectArray.filter(admissions.receipts, receipt => receipt.sourceCommit === expected.sourceCommit),
+            ) !== canonicalJson(expected.signedAdmissions.sourceSnapshot)
           )
             return yield* graphSharingFailure('Signed contributions changed during publication; retry the batch.');
           const quarantine = new Set(
-            admissions.quarantine.filter(item => item.repositoryId === repositoryId).map(item => item.actionKey),
+            EffectArray.map(
+              EffectArray.filter(admissions.quarantine, item => item.repositoryId === repositoryId),
+              item => item.actionKey,
+            ),
           );
           for (const receipt of expected.signedAdmissions.receipts) {
             const body = receipt.announcement.body;
             if (
               quarantine.has(body.actionKey) ||
-              !admissions.receipts.some(
+              !EffectArray.some(
+                admissions.receipts,
                 current =>
                   current.announcement.body.idempotencyKey === body.idempotencyKey &&
                   current.announcementDigest === receipt.announcementDigest &&
@@ -739,12 +758,14 @@ const exportSignedGeneration = Effect.fn('codeGraph.sharing.exportSignedGenerati
             options.stateRef === undefined
               ? yield* loadGraphShareCoordinatorState(coordinatorOptions)
               : yield* Ref.get(options.stateRef);
-          const quarantine = new Set(state.receipts.quarantine.map(item => item.actionKey));
+          const quarantine = new Set(EffectArray.map(state.receipts.quarantine, item => item.actionKey));
           if (
-            expected.verified.some(
+            EffectArray.some(
+              expected.verified,
               item =>
                 quarantine.has(item.announcement.actionKey) ||
-                !state.receipts.receipts.some(
+                !EffectArray.some(
+                  state.receipts.receipts,
                   receipt =>
                     receipt.actionKey === item.announcement.actionKey &&
                     receipt.resultManifestDigest === item.announcement.resultManifestDigest &&
@@ -892,6 +913,10 @@ function commandCwd(value: string | undefined) {
   return Effect.gen(function* () {
     const system = yield* SystemInfo;
     const path = yield* Path.Path;
-    return path.resolve(value?.trim() || system.currentDirectory());
+    return path.resolve(
+      Effect2.pipe(value, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || system.currentDirectory(),
+    );
   });
 }

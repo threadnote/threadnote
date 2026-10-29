@@ -1,3 +1,5 @@
+import {Predicate} from 'effect';
+import {Array as EffectArray} from 'effect';
 /** Compiled host controller: drive the extracted native CLI outside the checkout. */
 // Bun 1.4.2 compile cannot bundle the testing builtin export-star wrappers.
 // oxlint-disable-next-line effecttsgo/node-builtin-import
@@ -17,19 +19,25 @@ import {extractGzipTar} from '../../src/effect/archive.js';
 import {runReleaseCommand} from './native-release-process.js';
 import {runNativeWorkflows} from './native-release-workflows.js';
 import {nativeSocketConnect, requireNativeNetworkDenial} from './native-release-network-probe.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function requireCondition(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
-const errorCode = (error: unknown) => (error as NodeJS.ErrnoException)?.code;
+const errorCode = (error: unknown) =>
+  Predicate.hasProperty(error, 'code') && typeof error.code === 'string' ? error.code : undefined;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const sleep = (milliseconds: number) => new Promise<void>(done => setTimeout(done, milliseconds));
-const readJson = <T>(path: string): T => JSON.parse(fs.readFileSync(path, 'utf8')) as T;
+const readJson = (path: string): unknown => JSON.parse(fs.readFileSync(path, 'utf8'));
 const writeJson = (path: string, value: unknown) =>
   fs.writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 const inside = (root: string, target: string) => {
   const part = relative(root, target);
-  return part === '' || (!isAbsolute(part) && part !== '..' && !part.startsWith(`..${sep}`));
+  return (
+    part === '' || (!isAbsolute(part) && part !== '..' && !Effect2.pipe(part, EffectString.startsWith(`..${sep}`)))
+  );
 };
 
 interface LockOwner {
@@ -61,13 +69,24 @@ interface WatchWork {
 }
 interface WatchResponse {
   status: string;
-  collector: {alive: boolean};
+  collector: {alive: boolean} | null;
   delivery?: WatchDelivery;
   sourceErrors: unknown[];
-  sources: unknown[];
+  sources?: unknown[];
   pending: number;
-  work: {open: number; items: WatchWork[]};
-  revision: number;
+  work: {open: number; items?: WatchWork[]};
+  revision: string;
+}
+
+interface WatchWorkResponse {
+  status: string;
+  watchId: string;
+  revision: string;
+  work: {
+    items?: WatchWork[];
+    offset: number;
+    nextOffset: number | null;
+  };
 }
 interface ReleaseManifest {
   digest: string;
@@ -90,6 +109,189 @@ interface StageResult {
   [key: string]: unknown;
 }
 
+function objectRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!Predicate.isObject(value)) throw new Error(`${label} must be an object.`);
+  return value;
+}
+
+function stringField(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new Error(`${label} must be a string.`);
+  return value;
+}
+
+function booleanField(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') throw new Error(`${label} must be a boolean.`);
+  return value;
+}
+
+function parseLockOwner(value: unknown): LockOwner {
+  const record = objectRecord(value, 'Lock owner');
+  return {
+    version: numberField(record.version, 'Lock owner version'),
+    processId: numberField(record.processId, 'Lock owner process id'),
+    token: stringField(record.token, 'Lock owner token'),
+  };
+}
+
+function numberField(value: unknown, label: string): number {
+  if (typeof value !== 'number') throw new Error(`${label} must be a number.`);
+  return value;
+}
+
+function parseRelease(value: unknown): Release {
+  const record = objectRecord(value, 'Release');
+  const devSkills = objectRecord(record.devSkills, 'Release developer skills');
+  return {
+    executable: stringField(record.executable, 'Release executable'),
+    devSkills: {manifest: stringField(devSkills.manifest, 'Release manifest path')},
+  };
+}
+
+function parseReleaseManifest(value: unknown): ReleaseManifest {
+  const record = objectRecord(value, 'Release manifest');
+  const rawHashes = objectRecord(record.hashes, 'Release hashes');
+  const hashes: Record<string, string> = {};
+  for (const [name, hash] of EffectRecord.toEntries(rawHashes))
+    hashes[name] = stringField(hash, `Release hash ${name}`);
+  if (!EffectArray.isArray(record.skills)) throw new Error('Release skills must be an array.');
+  return {
+    digest: stringField(record.digest, 'Release digest'),
+    schemaVersion: numberField(record.schemaVersion, 'Release schema version'),
+    hashes,
+    skills: EffectArray.map(record.skills, (skill, index) => ({
+      id: stringField(objectRecord(skill, `Release skill ${index}`).id, `Release skill ${index} id`),
+    })),
+  };
+}
+
+function parseInstallation(value: unknown): Installation {
+  const record = objectRecord(value, 'Installation');
+  const target = objectRecord(record.target, 'Installation target');
+  return {
+    applied: booleanField(record.applied, 'Installation applied'),
+    target: {skillRoot: stringField(target.skillRoot, 'Installation skill root')},
+    bundleDigest: stringField(record.bundleDigest, 'Installation bundle digest'),
+  };
+}
+
+function parseManagerPreview(value: unknown): ManagerPreview {
+  const record = objectRecord(value, 'Manager preview');
+  const target = objectRecord(record.target, 'Manager preview target');
+  return {
+    canApply: booleanField(record.canApply, 'Manager preview canApply'),
+    issues: record.issues,
+    previewDigest: stringField(record.previewDigest, 'Manager preview digest'),
+    target: {layout: stringField(target.layout, 'Manager preview layout')},
+  };
+}
+
+function parseManagerApply(value: unknown): ManagerApply {
+  const record = objectRecord(value, 'Manager apply');
+  const result = objectRecord(record.result, 'Manager apply result');
+  const status = objectRecord(record.status, 'Manager apply status');
+  if (!EffectArray.isArray(status.targets)) throw new Error('Manager apply targets must be an array.');
+  return {
+    result: {applied: booleanField(result.applied, 'Manager apply result applied')},
+    status: {
+      targets: EffectArray.map(status.targets, (target, index) => ({
+        installationState: stringField(
+          objectRecord(target, `Manager target ${index}`).installationState,
+          `Manager target ${index} state`,
+        ),
+      })),
+    },
+  };
+}
+
+function parseStageResult(value: unknown): StageResult {
+  const record = objectRecord(value, 'Release stage result');
+  const isolation = objectRecord(record.isolation, 'Release isolation result');
+  return {
+    ...record,
+    status: stringField(record.status, 'Release result status'),
+    isolation: {enforced: booleanField(isolation.enforced, 'Release isolation enforced')},
+  };
+}
+
+export function parseWatchWorkResponse(value: unknown): WatchWorkResponse {
+  const record = objectRecord(value, 'Native watch work response');
+  const work = objectRecord(record.work, 'Native watch work');
+  if (!EffectArray.isArray(work.items)) throw new Error('Native watch work items must be an array.');
+  if (work.nextOffset !== null && typeof work.nextOffset !== 'number')
+    throw new Error('Native watch work next offset must be a number or null.');
+  return {
+    status: stringField(record.status, 'Native watch work status'),
+    watchId: stringField(record.watchId, 'Native watch work id'),
+    revision: stringField(record.revision, 'Native watch work revision'),
+    work: {
+      items: EffectArray.map(work.items, (item, index) => {
+        const entry = objectRecord(item, `Native watch work item ${index}`);
+        return {
+          eventId: stringField(entry.eventId, `Native watch work item ${index} event id`),
+          status: stringField(entry.status, `Native watch work item ${index} status`),
+        };
+      }),
+      offset: numberField(work.offset, 'Native watch work offset'),
+      nextOffset: work.nextOffset === null ? null : numberField(work.nextOffset, 'Native watch work next offset'),
+    },
+  };
+}
+
+export function parseWatchResponse(value: unknown): WatchResponse {
+  const record = objectRecord(value, 'Native watch response');
+  const collector = record.collector === null ? null : objectRecord(record.collector, 'Native watch collector');
+  const work = objectRecord(record.work, 'Native watch work');
+  if (
+    !EffectArray.isArray(record.sourceErrors) ||
+    (record.sources !== undefined && !EffectArray.isArray(record.sources)) ||
+    (work.items !== undefined && !EffectArray.isArray(work.items))
+  )
+    throw new Error('Native watch response arrays are malformed.');
+  let delivery: WatchDelivery | undefined;
+  if (record.delivery !== undefined && record.delivery !== null) {
+    const source = objectRecord(record.delivery, 'Native watch delivery');
+    if (!EffectArray.isArray(source.events)) throw new Error('Native watch events must be an array.');
+    delivery = {
+      id: stringField(source.id, 'Native watch delivery id'),
+      events: EffectArray.map(source.events, (event, index) => {
+        const item = objectRecord(event, `Native watch event ${index}`);
+        return {
+          id: stringField(item.id, `Native watch event ${index} id`),
+          kind: stringField(item.kind, `Native watch event ${index} kind`),
+        };
+      }),
+    };
+  }
+  return {
+    status: stringField(record.status, 'Native watch status'),
+    collector: collector === null ? null : {alive: booleanField(collector.alive, 'Native watch collector alive')},
+    ...(delivery === undefined ? {} : {delivery}),
+    sourceErrors: record.sourceErrors,
+    ...(record.sources === undefined ? {} : {sources: record.sources}),
+    pending: numberField(record.pending, 'Native watch pending'),
+    work: {
+      open: numberField(work.open, 'Native watch open work'),
+      ...(work.items === undefined
+        ? {}
+        : {
+            items: EffectArray.map(work.items, (item, index) => {
+              const value = objectRecord(item, `Native watch work ${index}`);
+              return {
+                eventId: stringField(value.eventId, `Native watch work ${index} event id`),
+                status: stringField(value.status, `Native watch work ${index} status`),
+              };
+            }),
+          }),
+    },
+    revision: stringField(record.revision, 'Native watch revision'),
+  };
+}
+
+function parseJsonArray(value: unknown, label: string): unknown[] {
+  if (!EffectArray.isArray(value)) throw new Error(`${label} must be an array.`);
+  return value;
+}
+
 export function digest(path: string): string {
   const hash = createHash('sha256');
   const descriptor = fs.openSync(path, 'r');
@@ -110,7 +312,7 @@ export function inventory(root: string): Record<string, InventoryEntry> {
     if (!fs.existsSync(directory)) return;
     for (const name of fs.readdirSync(directory).sort()) {
       const path = join(directory, name);
-      const key = relative(root, path).split(sep).join('/');
+      const key = Effect2.pipe(relative(root, path), EffectString.split(sep), EffectArray.join('/'));
       const stat = fs.lstatSync(path);
       if (stat.isSymbolicLink()) entries[key] = {link: fs.readlinkSync(path)};
       else if (stat.isDirectory()) {
@@ -172,15 +374,24 @@ export function removeOwnedFixture(
 }
 
 function copyNativeLogs(root: string, destination: string) {
-  for (const name of fs.readdirSync(root).filter(name => name.endsWith('-native.log'))) {
+  for (const name of EffectArray.filter(
+    fs.readdirSync(root),
+    (name): name is string => typeof name === 'string' && Effect2.pipe(name, EffectString.endsWith('-native.log')),
+  )) {
     for (const suffix of ['', '.stdout.bin', '.stderr.bin'])
       fs.copyFileSync(join(root, name + suffix), join(destination, name + suffix));
   }
 }
 const evidenceDirectory = (report: string) => {
   const name = basename(report);
-  const dot = name.lastIndexOf('.');
-  return (dot > 0 ? report.slice(0, report.length - name.length + dot) : report) + '.provenance';
+  const dot = Effect2.pipe(
+    name,
+    EffectString.lastIndexOf('.'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  return (
+    (dot > 0 ? Effect2.pipe(report, EffectString.slice(0, report.length - name.length + dot)) : report) + '.provenance'
+  );
 };
 function preserveFailedNativeLogs(root: string, report: string) {
   try {
@@ -240,7 +451,9 @@ export async function verifyIsolation(checkout: string, enforced: boolean) {
   } catch (error) {
     const code = errorCode(error);
     requireCondition(['EPERM', 'EACCES', 'ENOENT'].includes(code ?? ''), `Unexpected source denial: ${message(error)}`);
-    sourceErrno = constants.errno[code as keyof typeof constants.errno];
+    if (code === undefined) throw new Error('Expected an errno code for the source denial.', {cause: error});
+    const errno = Object.getOwnPropertyDescriptor(constants.errno, code)?.value;
+    if (typeof errno === 'number') sourceErrno = errno;
   }
   requireCondition(sourceErrno !== undefined, 'The source checkout is readable inside the isolated fixture');
   const denied = requireNativeNetworkDenial(await nativeSocketConnect());
@@ -318,7 +531,7 @@ async function waitForCompactionScheduler(root: string, manager: ChildProcess) {
       'Manager stopped before its compaction scheduler was ready',
     );
     try {
-      const owner = readJson<LockOwner>(lock);
+      const owner = parseLockOwner(readJson(lock));
       if (owner.version === 1 && owner.processId === manager.pid && owner.token) return;
     } catch (error) {
       if (!(error instanceof SyntaxError) && !errorCode(error)) throw error;
@@ -328,14 +541,14 @@ async function waitForCompactionScheduler(root: string, manager: ChildProcess) {
   throw new Error('Manager did not acquire its automatic compaction scheduler lock');
 }
 
-function managerRequest<T = unknown>(
+function managerRequest(
   origin: string,
   token: string,
   path: string,
   body?: unknown,
   authenticated = true,
   expected = 200,
-): Promise<T> {
+): Promise<unknown | Buffer> {
   return new Promise((done, reject) => {
     const headers: Record<string, string> = {'Content-Type': 'application/json'};
     if (authenticated) headers.Authorization = `Bearer ${token}`;
@@ -351,9 +564,12 @@ function managerRequest<T = unknown>(
             const payload = Buffer.concat(chunks);
             requireCondition(
               response.statusCode === expected,
-              `${path}: ${response.statusCode} ${payload.toString('utf8').slice(0, 1000)}`,
+              `${path}: ${response.statusCode} ${Effect2.pipe(payload.toString('utf8'), EffectString.slice(0, 1000))}`,
             );
-            done((path.startsWith('/api/') ? JSON.parse(payload.toString('utf8')) : payload) as T);
+            const result: unknown | Buffer = Effect2.pipe(path, EffectString.startsWith('/api/'))
+              ? JSON.parse(payload.toString('utf8'))
+              : payload;
+            done(result);
           } catch (error) {
             reject(error);
           }
@@ -404,22 +620,30 @@ async function managerChecksWhilePaused(
     let match: RegExpMatchArray | null = null;
     while (performance.now() < deadline) {
       const contents = fs.readFileSync(log, 'utf8');
-      match = contents.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=([^\s]+)/);
+      match = Effect2.pipe(
+        contents,
+        EffectString.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=([^\s]+)/),
+        Effect2.Option.getOrElse(() => null),
+      );
       if (match) break;
       if (spawnError) throw spawnError;
       requireCondition(
         manager.exitCode === null && manager.signalCode === null,
-        `Manager stopped: ${contents.slice(-3000)}`,
+        `Manager stopped: ${Effect2.pipe(contents, EffectString.slice(-3000))}`,
       );
       await sleep(100);
     }
     requireCondition(match, 'Manager startup timed out');
-    const origin = match[0].split('/?')[0];
+    const origin = Effect2.pipe(match[0], EffectString.split('/?'))[0];
     const token = decodeURIComponent(match[1]);
-    const request = <T = unknown>(path: string, body?: unknown, authenticated = true, expected = 200) =>
-      managerRequest<T>(origin, token, path, body, authenticated, expected);
+    const request = (path: string, body?: unknown, authenticated = true, expected = 200) =>
+      managerRequest(origin, token, path, body, authenticated, expected);
     requireCondition(
-      (await request<Buffer>('/')).toString('utf8').toLowerCase().includes('<html'),
+      await request('/').then(
+        value =>
+          Buffer.isBuffer(value) &&
+          Effect2.pipe(value.toString('utf8'), EffectString.toLowerCase, EffectString.includes('<html')),
+      ),
       'Packaged Manager HTML is missing',
     );
     await request('/api/dev-skills/catalog', undefined, false, 401);
@@ -429,17 +653,22 @@ async function managerChecksWhilePaused(
     for (const action of ['install', 'update', 'remove']) {
       const preview = await withLock(root, 'data/context-maintenance/state-v2.json.lock', 'maintenance', () =>
         withAccountMutationLock(root, async () => {
-          const before = Object.fromEntries(
-            ['user', 'data', 'runtime'].map(name => [name, inventory(join(root, name))]),
+          const before = EffectRecord.fromEntries(
+            EffectArray.map(['user', 'data', 'runtime'], name => [name, inventory(join(root, name))]),
           );
-          const preview = await request<ManagerPreview>('/api/dev-skills/preview', {action, selector});
+          const preview = parseManagerPreview(await request('/api/dev-skills/preview', {action, selector}));
           requireCondition(preview.canApply, `Manager preview blocked: ${JSON.stringify(preview.issues)}`);
-          const after = Object.fromEntries(Object.keys(before).map(name => [name, inventory(join(root, name))]));
-          const changed = Object.keys(before).flatMap(name =>
-            [...new Set([...Object.keys(before[name]), ...Object.keys(after[name])])]
-              .sort()
-              .filter(path => !isDeepStrictEqual(before[name][path], after[name][path]))
-              .map(path => `${name}/${path}`),
+          const after = EffectRecord.fromEntries(
+            EffectArray.map(EffectRecord.keys(before), name => [name, inventory(join(root, name))]),
+          );
+          const changed = EffectArray.flatMap(EffectRecord.keys(before), name =>
+            EffectArray.map(
+              EffectArray.filter(
+                [...new Set([...EffectRecord.keys(before[name]), ...EffectRecord.keys(after[name])])].sort(),
+                path => !isDeepStrictEqual(before[name][path], after[name][path]),
+              ),
+              path => `${name}/${path}`,
+            ),
           );
           requireCondition(
             isDeepStrictEqual(before, after),
@@ -448,12 +677,14 @@ async function managerChecksWhilePaused(
           return preview;
         }),
       );
-      const result = await request<ManagerApply>('/api/dev-skills/apply', {
-        action,
-        selector,
-        previewDigest: preview.previewDigest,
-        confirm: true,
-      });
+      const result = parseManagerApply(
+        await request('/api/dev-skills/apply', {
+          action,
+          selector,
+          previewDigest: preview.previewDigest,
+          confirm: true,
+        }),
+      );
       requireCondition(result.result.applied === (action !== 'update'), 'Unexpected Manager apply result');
       const target = result.status.targets[0];
       requireCondition(
@@ -512,17 +743,24 @@ async function nativeWatchChecks(root: string, binary: string, environment: Node
   const receipt = join(root, 'provenance/watch-deliveries.json');
   fs.mkdirSync(dirname(receipt), {recursive: true});
   const deliveries: unknown[] = [];
-  const call = (command: string, fields: Record<string, unknown> = {}): WatchResponse => {
-    const response = JSON.parse(
+  const readResponse = (command: string, fields: Record<string, unknown> = {}): unknown =>
+    JSON.parse(
       runReleaseCommand([binary, 'workflow-automation'], environment, root, {
         input: JSON.stringify({...base, command, ...fields}),
       }),
-    ) as WatchResponse;
+    );
+  const call = (command: string, fields: Record<string, unknown> = {}): WatchResponse => {
+    const response = parseWatchResponse(readResponse(command, fields));
+    requireCondition(response.status === 'ok', `Native watch failed: ${JSON.stringify(response)}`);
+    return response;
+  };
+  const callWork = (): WatchWorkResponse => {
+    const response = parseWatchWorkResponse(readResponse('work'));
     requireCondition(response.status === 'ok', `Native watch failed: ${JSON.stringify(response)}`);
     return response;
   };
   const settle = (delivery: WatchDelivery, status: string) => {
-    const dispositions = delivery.events.map(event => ({
+    const dispositions = EffectArray.map(delivery.events, event => ({
       eventId: event.id,
       status,
       reason: 'Private extracted-release lifecycle observation.',
@@ -543,7 +781,7 @@ async function nativeWatchChecks(root: string, binary: string, environment: Node
   try {
     const initial = call('start', {pr: 'https://github.com/fixture/repo/pull/1'});
     started = true;
-    requireCondition(initial.collector.alive, 'Native collector did not start');
+    requireCondition(initial.collector?.alive, 'Native collector did not start');
     const deadline = performance.now() + 30_000;
     let delivery: WatchDelivery | undefined;
     while (performance.now() < deadline) {
@@ -553,11 +791,15 @@ async function nativeWatchChecks(root: string, binary: string, environment: Node
     requireCondition(delivery, 'Native collector missed the private provider signals');
     let health = call('inspect');
     requireCondition(
-      health.sourceErrors.length === 0 && health.sources.length === 5,
+      health.sourceErrors.length === 0 && health.sources?.length === 5,
       'Native watch did not complete all five sources',
     );
     requireCondition(
-      isDeepStrictEqual(delivery.events.map(event => event.kind).sort(), ['ci_error', 'comment', 'review_thread']),
+      isDeepStrictEqual(EffectArray.map(delivery.events, event => event.kind).sort(), [
+        'ci_error',
+        'comment',
+        'review_thread',
+      ]),
       'Native provider signals were lost or invented',
     );
     const requests = fs.readFileSync(join(root, 'provider-requests.json'));
@@ -571,23 +813,28 @@ async function nativeWatchChecks(root: string, binary: string, environment: Node
     );
     const acknowledged = settle(delivery, 'open');
     requireCondition(acknowledged.pending === 0 && acknowledged.work.open === 3, 'ACK discarded actionable work');
-    const work = call('work').work.items;
+    const work = callWork().work.items;
+    requireCondition(work !== undefined, 'Native work response omitted its items');
     requireCondition(
-      isDeepStrictEqual(new Set(work.map(item => item.eventId)), new Set(delivery.events.map(event => event.id))),
+      isDeepStrictEqual(
+        new Set(EffectArray.map(work, item => item.eventId)),
+        new Set(EffectArray.map(delivery.events, event => event.id)),
+      ),
       'Actionable work was not durably retained',
     );
     health = call('inspect');
     call('work-disposition', {
       expectedRevision: health.revision,
-      dispositions: work.map(item => ({
+      dispositions: EffectArray.map(work, item => ({
         eventId: item.eventId,
         status: 'resolved',
         reason: 'Synthetic fixture issues verified.',
         evidence: 'provenance/watch-deliveries.json',
       })),
     });
+    const resolvedWork = callWork().work.items;
     requireCondition(
-      call('work').work.items.every(item => item.status === 'resolved'),
+      resolvedWork !== undefined && EffectArray.every(resolvedWork, item => item.status === 'resolved'),
       'Verified work disposition was not retained',
     );
     return {
@@ -603,11 +850,11 @@ async function nativeWatchChecks(root: string, binary: string, environment: Node
       call('stop');
       const deadline = performance.now() + 15_000;
       let stopped = call('inspect');
-      while (stopped.collector.alive && performance.now() < deadline) {
+      while (stopped.collector?.alive && performance.now() < deadline) {
         await sleep(50);
         stopped = call('inspect');
       }
-      requireCondition(!stopped.collector.alive, 'Fixture left an unowned native collector');
+      requireCondition(!stopped.collector?.alive, 'Fixture left an unowned native collector');
       for (let index = 0; index < 4; index++) {
         const pending = call('relay').delivery;
         if (!pending) break;
@@ -620,7 +867,7 @@ async function nativeWatchChecks(root: string, binary: string, environment: Node
 
 export async function execute(root: string, checkout: string, enforced: boolean) {
   const releaseRoot = join(root, 'runtime/versions/payload');
-  const release = readJson<Release>(join(releaseRoot, 'release.json'));
+  const release = parseRelease(readJson(join(releaseRoot, 'release.json')));
   const binary = join(releaseRoot, release.executable);
   const beforeRelease = inventory(releaseRoot);
   const environment = fixtureEnvironment(root, releaseRoot);
@@ -639,10 +886,10 @@ export async function execute(root: string, checkout: string, enforced: boolean)
       Bun.which('git', {PATH: environment.PATH}) && Bun.which('rg', {PATH: environment.PATH}),
       'Installed workflow checks require Git and ripgrep',
     );
-    const cli = <T = unknown>(...args: string[]): T => {
+    const cli = (...args: string[]): unknown => {
       const text = runReleaseCommand([binary, 'dev-skills', ...args], environment, root);
       checks.push({cli: args});
-      return JSON.parse(text) as T;
+      return JSON.parse(text);
     };
     const beforePreview = inventory(join(root, 'user'));
     cli('list', '--json');
@@ -651,55 +898,63 @@ export async function execute(root: string, checkout: string, enforced: boolean)
       isDeepStrictEqual(beforePreview, inventory(join(root, 'user'))) && !fs.existsSync(join(root, 'data')),
       'CLI discovery or preview changed the fresh target',
     );
-    const installed = cli<Installation>('install', '--agent', 'codex', '--json');
+    const installed = parseInstallation(cli('install', '--agent', 'codex', '--json'));
     requireCondition(installed.applied, 'Compiled CLI did not install the bundled skills');
     const skills = installed.target.skillRoot;
     const generation = join(skills, '.threadnote-dev-skills/generations', installed.bundleDigest);
-    const manifest = readJson<ReleaseManifest>(join(releaseRoot, release.devSkills.manifest));
+    const manifest = parseReleaseManifest(readJson(join(releaseRoot, release.devSkills.manifest)));
     requireCondition(manifest.digest === installed.bundleDigest, 'Installed bundle differs from the archive');
     requireCondition(
       isDeepStrictEqual(
-        Object.fromEntries(Object.keys(manifest.hashes).map(name => [name, digest(join(generation, name))])),
+        EffectRecord.fromEntries(
+          EffectArray.map(EffectRecord.keys(manifest.hashes), name => [name, digest(join(generation, name))]),
+        ),
         manifest.hashes,
       ),
       'Installed helper bytes differ from the archive manifest',
     );
     requireCondition(
-      manifest.schemaVersion === 2 && Object.keys(manifest.hashes).every(name => !name.endsWith('.py')),
+      manifest.schemaVersion === 2 &&
+        EffectArray.every(
+          EffectRecord.keys(manifest.hashes),
+          name => !Effect2.pipe(name, EffectString.endsWith('.py')),
+        ),
       'New release includes a Python workflow payload or old manifest',
     );
     result.installedProvenance = {
       generation,
       digest: manifest.digest,
-      files: Object.keys(manifest.hashes).length,
+      files: EffectRecord.keys(manifest.hashes).length,
       nativeOnly: true,
     };
     for (const skill of manifest.skills) {
       const content = fs.readFileSync(join(skills, skill.id, 'SKILL.md'), 'utf8');
       requireCondition(
-        content.includes(generation) && !content.includes(checkout) && !content.includes('{{THREADNOTE_'),
+        Effect2.pipe(content, EffectString.includes(generation)) &&
+          !Effect2.pipe(content, EffectString.includes(checkout)) &&
+          !Effect2.pipe(content, EffectString.includes('{{THREADNOTE_')),
         `Entrypoint does not resolve to its installed generation: ${skill.id}`,
       );
     }
     for (const action of ['install', 'update'])
       requireCondition(
-        !cli<{applied: boolean}>(action, '--agent', 'codex', '--json').applied,
+        !booleanField(objectRecord(cli(action, '--agent', 'codex', '--json'), 'CLI result').applied, 'CLI applied'),
         'Idempotent action changed files',
       );
     await managerChecks(root, binary, environment, checks);
     result.nativeWorkflows = await runNativeWorkflows(root, binary, environment, installed.bundleDigest);
     checks.push(await nativeWatchChecks(root, binary, environment));
     requireCondition(
-      readJson<unknown[]>(join(root, 'interpreter-attempts.json')).length === 0,
+      parseJsonArray(readJson(join(root, 'interpreter-attempts.json')), 'Interpreter attempts').length === 0,
       'Product attempted to launch an external interpreter',
     );
     result.externalInterpreters = {denied: true, productAttempts: 0};
     requireCondition(
-      cli<{applied: boolean}>('remove', '--agent', 'codex', '--json').applied,
+      booleanField(objectRecord(cli('remove', '--agent', 'codex', '--json'), 'CLI result').applied, 'CLI applied'),
       'CLI remove did not apply',
     );
     requireCondition(
-      manifest.skills.every(skill => !fs.existsSync(join(skills, skill.id, 'SKILL.md'))),
+      EffectArray.every(manifest.skills, skill => !fs.existsSync(join(skills, skill.id, 'SKILL.md'))),
       'Removed entrypoint still exists',
     );
     requireCondition(
@@ -737,7 +992,11 @@ export async function stage(arguments_: StageArguments, dependencies: StageDepen
   const archive = resolve(arguments_.archive);
   const report = resolve(arguments_.report);
   requireCondition(fs.statSync(archive).isFile(), 'Build and archive the real release first');
-  const checksum = fs.readFileSync(`${archive}.sha256`, 'utf8').trim().split(/\s+/)[0];
+  const checksum = Effect2.pipe(
+    fs.readFileSync(`${archive}.sha256`, 'utf8'),
+    EffectString.trim,
+    EffectString.split(/\s+/),
+  )[0];
   requireCondition(digest(archive) === checksum, 'Release archive checksum mismatch');
   const root = fs.realpathSync(
     dependencies.allocate?.() ?? fs.mkdtempSync(join(tmpdir(), 'threadnote-extracted-release-')),
@@ -747,7 +1006,7 @@ export async function stage(arguments_: StageArguments, dependencies: StageDepen
   fs.mkdirSync(payload, {recursive: true});
   try {
     const expected = inventory(join(checkout, 'dist'));
-    requireCondition(Object.keys(expected).length > 0, 'Expected built release is absent');
+    requireCondition(EffectRecord.keys(expected).length > 0, 'Expected built release is absent');
     // This compiled host-controller entrypoint owns the extraction scope.
     // oxlint-disable-next-line effecttsgo/strict-effect-provide
     await Effect.runPromise(extractGzipTar(archive, payload).pipe(Effect.provide(BunServices.layer)));
@@ -760,8 +1019,11 @@ export async function stage(arguments_: StageArguments, dependencies: StageDepen
     const tools = join(root, 'tools');
     fs.mkdirSync(tools);
     const findTool = dependencies.findTool ?? ((name: string) => Bun.which(name));
-    const toolPaths = Object.fromEntries(['git', 'rg'].map(name => [name, findTool(name)]));
-    requireCondition(Object.values(toolPaths).every(Boolean), 'Native release fixtures require Git and ripgrep');
+    const toolPaths = EffectRecord.fromEntries(EffectArray.map(['git', 'rg'], name => [name, findTool(name)]));
+    requireCondition(
+      EffectArray.every(EffectRecord.values(toolPaths), Boolean),
+      'Native release fixtures require Git and ripgrep',
+    );
     writeJson(join(root, 'tool-paths.json'), toolPaths);
     const platform = dependencies.platform ?? process.platform;
     for (const name of ['git', 'rg', 'gh', 'memory-read', 'python', 'python3', 'python3.14', 'node', 'bun']) {
@@ -775,7 +1037,11 @@ export async function stage(arguments_: StageArguments, dependencies: StageDepen
     }
     writeJson(join(root, 'interpreter-attempts.json'), []);
     writeJson(join(root, 'provider-requests.json'), []);
-    writeJson(join(root, 'provider.json'), {head: 'a'.repeat(40), terminal: false, revision: 1});
+    writeJson(join(root, 'provider.json'), {
+      head: Effect2.pipe('a', EffectString.repeat(40)),
+      terminal: false,
+      revision: 1,
+    });
     const harness = join(root, platform === 'win32' ? 'release-artifact.exe' : 'release-artifact');
     fs.copyFileSync(process.execPath, harness);
     fs.chmodSync(harness, fs.statSync(process.execPath).mode);
@@ -820,10 +1086,10 @@ export async function stage(arguments_: StageArguments, dependencies: StageDepen
       command.push('--functional-only');
     }
     (dependencies.run ?? runReleaseCommand)(command, {...process.env}, root, {timeoutMs: 1_800_000});
-    const result = readJson<StageResult>(join(root, 'result.json'));
+    const result = parseStageResult(readJson(join(root, 'result.json')));
     Object.assign(result, {
       archiveSha256: checksum,
-      archiveEntries: Object.keys(expected).length,
+      archiveEntries: EffectRecord.keys(expected).length,
       checkoutAccess: result.isolation.enforced ? 'denied' : 'not OS-enforced',
     });
     fs.mkdirSync(dirname(report), {recursive: true});
@@ -854,9 +1120,21 @@ async function holdAccountLock(root: string): Promise<void> {
       };
       const data = (chunk: Buffer) => {
         buffer += chunk.toString('utf8');
-        if (buffer.includes('\n')) {
+        if (Effect2.pipe(buffer, EffectString.includes('\n'))) {
           cleanup();
-          done(buffer.slice(0, buffer.indexOf('\n') + 1));
+          done(
+            Effect2.pipe(
+              buffer,
+              EffectString.slice(
+                0,
+                Effect2.pipe(
+                  buffer,
+                  EffectString.indexOf('\n'),
+                  Effect2.Option.getOrElse(() => -1),
+                ) + 1,
+              ),
+            ),
+          );
         }
       };
       const end = () => {
@@ -890,7 +1168,7 @@ async function main(args: string[]): Promise<void> {
       `Unknown argument: ${flag}`,
     );
     const value = args[++index];
-    requireCondition(value && !value.startsWith('--'), `Missing value for ${flag}`);
+    requireCondition(value && !Effect2.pipe(value, EffectString.startsWith('--')), `Missing value for ${flag}`);
     values.set(flag, value);
   }
   if (values.has('--hold-account-lock')) return holdAccountLock(values.get('--hold-account-lock')!);

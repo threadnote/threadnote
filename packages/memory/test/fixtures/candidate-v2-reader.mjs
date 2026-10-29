@@ -1,3 +1,4 @@
+/* oxlint-disable effecttsgo/prefer-effect-array, effecttsgo/prefer-effect-record, effecttsgo/prefer-effect-string -- Frozen generated compatibility oracle must retain its historical implementation. */
 /* oxlint-disable no-unused-vars, no-empty, effecttsgo/effect-fn-implicit-any, effecttsgo/unknown-in-effect-catch -- Frozen bundled legacy reader must preserve historical code; TypeScript annotations were erased by bundling. */
 // Frozen actual candidate reader from HEAD724cc6def34c1fd9630d309e8f9c9e9ff7096814.
 // Built from git-archived memory source, never current candidate logic. External platform dependencies are unchanged; envelope rejection executes before payload decoding.

@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {isMemoryId, memoryIdentityAlias, memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('stable memory identity aliases', () => {
   it('round-trips every valid bounded memory identity deterministically', () => {
@@ -14,7 +17,7 @@ describe('stable memory identity aliases', () => {
             maxLength: 128,
             minLength: 1,
           })
-          .map(characters => `tn_${characters.join('')}`),
+          .map(characters => `tn_${EffectArray.join(characters, '')}`),
         memoryId => {
           const alias = memoryIdentityAlias(memoryId);
           expect(isMemoryId(memoryId)).toBe(true);
@@ -32,7 +35,7 @@ describe('stable memory identity aliases', () => {
     'threadnote://memory/tn_',
     'threadnote://memory/tn_bad/value',
     'threadnote://memory/tn_bad#fragment',
-    `threadnote://memory/tn_${'a'.repeat(129)}`,
+    `threadnote://memory/tn_${Effect2.pipe('a', EffectString.repeat(129))}`,
     'threadnote://user/test/memories/tn_valid',
   ])('rejects malformed or non-identity URI %s', uri => {
     expect(memoryIdFromIdentityAlias(uri)).toBeUndefined();
@@ -46,16 +49,19 @@ describe('stable memory identity aliases', () => {
         verifyResolvedMemoryIdentity(
           {canonicalUri, expectedMemoryId: 'tn_expected', requestedUri: alias},
           canonicalUri,
-          [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'memory_id: tn_reused_uri',
-            'source_agent_client: test',
-            'timestamp: 2026-08-31T00:00:00.000Z',
-            '',
-            'Different live identity.',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'memory_id: tn_reused_uri',
+              'source_agent_client: test',
+              'timestamp: 2026-08-31T00:00:00.000Z',
+              '',
+              'Different live identity.',
+            ],
+            '\n',
+          ),
         ),
       );
 

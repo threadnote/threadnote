@@ -1,3 +1,5 @@
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 export interface XmlStartTag {
   readonly attributes: string;
   readonly end: number;
@@ -13,10 +15,13 @@ export interface XmlAttribute {
 export function* scanXmlStartTags(source: string): IterableIterator<XmlStartTag> {
   let cursor = 0;
   while (cursor < source.length) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const opening = source.indexOf('<', cursor);
     if (opening < 0) return;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const closing = source.indexOf('>', opening + 1);
     if (closing < 0) return;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const nestedOpening = source.indexOf('<', opening + 1);
     if (nestedOpening >= 0 && nestedOpening < closing) {
       cursor = nestedOpening;
@@ -30,9 +35,9 @@ export function* scanXmlStartTags(source: string): IterableIterator<XmlStartTag>
     nameEnd += 1;
     while (nameEnd < closing && isXmlNameCharacter(source[nameEnd])) nameEnd += 1;
     yield {
-      attributes: source.slice(nameEnd, closing),
+      attributes: Effect.pipe(source, EffectString.slice(nameEnd, closing)),
       end: closing + 1,
-      name: source.slice(opening + 1, nameEnd),
+      name: Effect.pipe(source, EffectString.slice(opening + 1, nameEnd)),
       offset: opening,
     };
     cursor = closing + 1;
@@ -51,7 +56,7 @@ export function* scanXmlAttributes(source: string): IterableIterator<XmlAttribut
     const nameStart = cursor;
     cursor += 1;
     while (cursor < source.length && isXmlNameCharacter(source[cursor])) cursor += 1;
-    const name = source.slice(nameStart, cursor);
+    const name = Effect.pipe(source, EffectString.slice(nameStart, cursor));
     while (cursor < source.length && isXmlWhitespace(source[cursor])) cursor += 1;
     if (source[cursor] !== '=') continue;
     cursor += 1;
@@ -59,22 +64,31 @@ export function* scanXmlAttributes(source: string): IterableIterator<XmlAttribut
     const quote = source[cursor];
     if (quote !== '"' && quote !== "'") continue;
     const valueStart = cursor + 1;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const valueEnd = source.indexOf(quote, valueStart);
     if (valueEnd < 0) return;
-    yield {name, value: source.slice(valueStart, valueEnd)};
+    yield {name, value: Effect.pipe(source, EffectString.slice(valueStart, valueEnd))};
     cursor = valueEnd + 1;
   }
 }
 
 function isXmlNameStart(value: string | undefined): boolean {
   if (!value) return false;
-  const code = value.charCodeAt(0);
+  const code = Effect.pipe(
+    value,
+    EffectString.charCodeAt(0),
+    Effect.Option.getOrElse(() => NaN),
+  );
   return value === '_' || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
 }
 
 function isXmlNameCharacter(value: string | undefined): boolean {
   if (!value) return false;
-  const code = value.charCodeAt(0);
+  const code = Effect.pipe(
+    value,
+    EffectString.charCodeAt(0),
+    Effect.Option.getOrElse(() => NaN),
+  );
   return isXmlNameStart(value) || value === '.' || value === ':' || value === '-' || (code >= 48 && code <= 57);
 }
 

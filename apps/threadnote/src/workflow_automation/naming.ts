@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -6,6 +7,8 @@ import {WorkflowAutomationError} from '@threadnote/workflow-automations/contract
 import {workflowFamilyStem, workflowTitleSlug, type WorkflowNameFamily} from '@threadnote/workflow-automations/naming';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {stableJson, WorkflowNameFamilySchema, type WorkflowBinding} from '../workflow_memory/protocol.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface Reservation {
   readonly owner: string;
@@ -41,7 +44,8 @@ export const reserveWorkflowNameFamily = Effect.fn('workflowAutomation.reserveNa
 ) {
   const slug = yield* Effect.try({
     try: () => workflowTitleSlug(title),
-    catch: error => error as WorkflowAutomationError,
+    catch: error =>
+      Schema.is(WorkflowAutomationError)(error) ? error : issue('Could not validate the workflow title.'),
   });
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -98,7 +102,7 @@ export const reserveWorkflowNameFamily = Effect.fn('workflowAutomation.reserveNa
             value.format !== 'threadnote-workflow-names' ||
             value.version !== 1 ||
             value.project !== binding.project ||
-            !Array.isArray(value.reservations) ||
+            !EffectArray.isArray(value.reservations) ||
             value.reservations.length > 4_096
           )
             throw issue('Name allocation state is unsupported. Restore its original state; no names were reassigned.');
@@ -120,7 +124,9 @@ export const reserveWorkflowNameFamily = Effect.fn('workflowAutomation.reserveNa
         },
         catch: () => issue('Name allocation state is invalid. Restore its original bytes; no names were reassigned.'),
       });
-      const existing = registry.reservations.find(item => item.owner === binding.bindingId);
+      const existing = Option.getOrUndefined(
+        EffectArray.findFirst(registry.reservations, item => item.owner === binding.bindingId),
+      );
       if (existing) {
         if (existing.title !== title) return yield* issue('This native run already reserved another title.');
         return existing.family;
@@ -141,19 +147,26 @@ export const reserveWorkflowNameFamily = Effect.fn('workflowAutomation.reserveNa
         const found = yield* store
           .list({account: config.account, home: config.agentContextHome, user: config.user}, uri)
           .pipe(Effect.catchTag('ResourceNotFound', () => Effect.succeed([])));
-        for (const entry of found) entries.push(entry.uri.toLowerCase());
+        for (const entry of found) entries.push(Effect2.pipe(entry.uri, EffectString.toLowerCase));
         if (entries.length > 8_192)
           return yield* issue(
             'The project destination inventory exceeds the bounded allocation limit. No names were changed.',
           );
       }
       let family: WorkflowNameFamily | undefined;
-      const used = new Set(registry.reservations.map(item => workflowFamilyStem(item.family)));
+      const used = new Set(EffectArray.map(registry.reservations, item => workflowFamilyStem(item.family)));
       for (let ordinal = 1; ordinal <= 1_000_000; ordinal++) {
         const candidate = {policyVersion: 1 as const, slug, ordinal};
         const stem = workflowFamilyStem(candidate);
-        const prefixes = roots.map(uri => `${uri}/${uriSegment(stem)}-`.toLowerCase());
-        if (!used.has(stem) && !entries.some(uri => prefixes.some(prefix => uri.startsWith(prefix)))) {
+        const prefixes = EffectArray.map(roots, uri =>
+          Effect2.pipe(`${uri}/${uriSegment(stem)}-`, EffectString.toLowerCase),
+        );
+        if (
+          !used.has(stem) &&
+          !EffectArray.some(entries, uri =>
+            EffectArray.some(prefixes, prefix => Effect2.pipe(uri, EffectString.startsWith(prefix))),
+          )
+        ) {
           family = candidate;
           break;
         }

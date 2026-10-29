@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -21,10 +22,18 @@ import {
 import {planAgentSurface} from '@threadnote/threadnote/agent_integration/surfaces';
 
 import {SystemInfo} from '@threadnote/platform/system';
-import type {JsonObject} from '@threadnote/platform/json';
+import {isJsonObject, type JsonObject} from '@threadnote/platform/json';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {expansionFixtures} from '../fixtures/agent-adapters/expansion.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requireJsonObject(value: unknown): JsonObject {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 const commandLayer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(BunServices.layer),
@@ -69,33 +78,37 @@ describe('agent expansion conformance', () => {
             });
             yield* Effect.gen(function* () {
               const plan = yield* planAgentSurface(config, adapter, {scope});
-              const expectedRoot = (
+              const expectedRoot = Effect2.pipe(
                 scope === 'user'
                   ? 'environmentRoot' in fixture
                     ? fixture.environmentRoot
                     : fixture.root
                   : 'projectRoot' in fixture
                     ? fixture.projectRoot
-                    : fixture.root
-              )
-                .replace('{home}', home)
-                .replace('{cwd}', cwd)
-                .replace('{xdg}', xdg)
-                .replace('{kiroHome}', kiroHome);
+                    : fixture.root,
+                EffectString.replace('{home}', home),
+                EffectString.replace('{cwd}', cwd),
+                EffectString.replace('{xdg}', xdg),
+                EffectString.replace('{kiroHome}', kiroHome),
+              );
               expect(plan.root).toBe(expectedRoot);
               expect(plan.scope).toBe(scope);
               expect(plan.cwd).toBe(scope === 'user' ? undefined : cwd);
-              const expectedMcpRoot = (
-                scope === 'user' && 'environmentMcpRoot' in fixture ? fixture.environmentMcpRoot : '{root}'
-              )
-                .replace('{root}', expectedRoot)
-                .replace('{clineData}', clineData);
+              const expectedMcpRoot = Effect2.pipe(
+                scope === 'user' && 'environmentMcpRoot' in fixture ? fixture.environmentMcpRoot : '{root}',
+                EffectString.replace('{root}', expectedRoot),
+                EffectString.replace('{clineData}', clineData),
+              );
               expect(plan.mcpPath).toBe(
                 path.join(expectedMcpRoot, scope === 'local' && 'localMcp' in fixture ? fixture.localMcp : fixture.mcp),
               );
               expect(adapter.json!.container).toBe(fixture.container);
               if ('instructions' in fixture)
-                expect(plan.artifacts.find(artifact => artifact.name === 'instructions')?.path).toBe(
+                expect(
+                  EffectOption.getOrUndefined(
+                    EffectArray.findFirst(plan.artifacts, artifact => artifact.name === 'instructions'),
+                  )?.path,
+                ).toBe(
                   path.join(
                     expectedRoot,
                     scope !== 'user' && 'projectInstructions' in fixture
@@ -103,15 +116,22 @@ describe('agent expansion conformance', () => {
                       : fixture.instructions,
                   ),
                 );
-              else expect(plan.artifacts.some(artifact => artifact.name === 'instructions')).toBe(false);
+              else expect(EffectArray.some(plan.artifacts, artifact => artifact.name === 'instructions')).toBe(false);
               if ('skills' in fixture) {
-                const expectedSkills = (
-                  scope !== 'user' && 'projectSkills' in fixture ? fixture.projectSkills : fixture.skills
-                )
-                  .replace('{home}', home)
-                  .replace('{root}', expectedRoot);
+                const expectedSkills = Effect2.pipe(
+                  scope !== 'user' && 'projectSkills' in fixture ? fixture.projectSkills : fixture.skills,
+                  EffectString.replace('{home}', home),
+                  EffectString.replace('{root}', expectedRoot),
+                );
                 expect(plan.skillRoot).toBe(expectedSkills);
-                expect(plan.artifacts.filter(artifact => artifact.name.startsWith('skill '))).toHaveLength(4);
+                const artifacts = plan.artifacts;
+                expect(
+                  EffectArray.filter(
+                    artifacts,
+                    (artifact, index) =>
+                      index in artifacts && Effect2.pipe(artifact.name, EffectString.startsWith('skill ')),
+                  ),
+                ).toHaveLength(4);
                 expect(plan.artifacts.at(-1)?.path).toBe(
                   path.join(expectedSkills, 'flat' in fixture ? 'threadnote-health.md' : 'threadnote-health/SKILL.md'),
                 );
@@ -138,21 +158,25 @@ describe('agent expansion conformance', () => {
               yield* adapter.actions.install(config, adapter, {apply: true, scope});
               const first = yield* fs.readFileString(plan.mcpPath);
               const parsed = parseAgentJson(first, adapter.json!.codec);
-              const entry = (parsed[fixture.container] as JsonObject).threadnote as JsonObject;
-              expect(Array.isArray(entry.command)).toBe('commandArray' in fixture);
+              const entry = requireJsonObject(requireJsonObject(parsed[fixture.container]).threadnote);
+              expect(EffectArray.isArray(entry.command)).toBe('commandArray' in fixture);
               if ('commandArray' in fixture) expect(entry).toMatchObject({type: 'local', enabled: true});
               if (adapter.json!.codec === 'jsonc') expect(first).toContain('// user comment');
               expect((yield* agentAdapterStatus(config, adapter)).state).toBe('current');
               expect(
-                (yield* agentAdapterDoctorChecks(config)).find(check => check.name === `${fixture.id} agent surface`)
-                  ?.status,
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    yield* agentAdapterDoctorChecks(config),
+                    check => check.name === `${fixture.id} agent surface`,
+                  ),
+                )?.status,
               ).toBe('ok');
               yield* adapter.actions.install(config, adapter, {apply: true, scope});
               expect(yield* fs.readFileString(plan.mcpPath)).toBe(first);
               const environmentKey = 'commandArray' in fixture ? 'environment' : 'env';
               const customized = {
                 ...entry,
-                [environmentKey]: {...(entry[environmentKey] as JsonObject), CUSTOM_OPTION: 'preserved'},
+                [environmentKey]: {...requireJsonObject(entry[environmentKey]), CUSTOM_OPTION: 'preserved'},
               };
               yield* fs.writeFileString(
                 plan.mcpPath,
@@ -167,7 +191,7 @@ describe('agent expansion conformance', () => {
               yield* adapter.actions.repair(config, adapter, {apply: true});
               const afterCustomization = parseAgentJson(yield* fs.readFileString(plan.mcpPath), adapter.json!.codec);
               expect(
-                ((afterCustomization[fixture.container] as JsonObject).threadnote as JsonObject)[environmentKey],
+                requireJsonObject(requireJsonObject(afterCustomization[fixture.container]).threadnote)[environmentKey],
               ).toMatchObject({CUSTOM_OPTION: 'preserved'});
               const disabled = {...entry, ...('commandArray' in fixture ? {enabled: false} : {disabled: true})};
               yield* fs.writeFileString(
@@ -182,8 +206,12 @@ describe('agent expansion conformance', () => {
               );
               expect((yield* agentAdapterStatus(config, adapter)).state).toBe('disabled');
               expect(
-                (yield* agentAdapterDoctorChecks(config)).find(check => check.name === `${fixture.id} agent surface`)
-                  ?.status,
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    yield* agentAdapterDoctorChecks(config),
+                    check => check.name === `${fixture.id} agent surface`,
+                  ),
+                )?.status,
               ).toBe('warn');
               yield* adapter.actions.repair(config, adapter, {apply: true});
               expect((yield* agentAdapterStatus(config, adapter)).state).toBe('disabled');
@@ -268,22 +296,30 @@ describe('agent expansion conformance', () => {
                     ? fixture.windowsRoot
                     : fixture.root;
               expect(plan.root).toBe(
-                template
-                  .replace('{home}', home)
-                  .replace('{cwd}', cwd)
-                  .replace('{xdg}', xdg)
-                  .replace('{appdata}', appdata)
-                  .replace('{kiroHome}', kiroHome),
+                Effect2.pipe(
+                  template,
+                  EffectString.replace('{home}', home),
+                  EffectString.replace('{cwd}', cwd),
+                  EffectString.replace('{xdg}', xdg),
+                  EffectString.replace('{appdata}', appdata),
+                  EffectString.replace('{kiroHome}', kiroHome),
+                ),
               );
-              const expectedMcpRoot = (
+              const expectedMcpRoot = Effect2.pipe(
                 configured && 'environmentMcpRoot' in fixture
                   ? fixture.environmentMcpRoot
                   : 'defaultMcpRoot' in fixture
                     ? fixture.defaultMcpRoot
-                    : '{root}'
-              )
-                .replace('{root}', plan.root)
-                .replace('{clineData}', clineData);
+                    : '{root}',
+                __effectPipeInput => {
+                  const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.replace('{root}', plan.root));
+                  const __effectPipeStage1 = Effect2.pipe(
+                    __effectPipeStage0,
+                    EffectString.replace('{clineData}', clineData),
+                  );
+                  return __effectPipeStage1;
+                },
+              );
               expect(plan.mcpPath).toBe(path.join(expectedMcpRoot, fixture.mcp));
             }
           }
@@ -329,7 +365,7 @@ describe('agent expansion conformance', () => {
 
   it('JSONC edits preserve unrelated values and comments, round-trip and are idempotent', () => {
     const verifyRoundTrip = (settings: JsonObject) => {
-      const original = JSON.parse(JSON.stringify({...settings, mcp: {other: {command: 'kept'}}})) as JsonObject;
+      const original = parseAgentJson(JSON.stringify({...settings, mcp: {other: {command: 'kept'}}}));
       const raw = `// preserved heading\n${JSON.stringify(original, undefined, 2)}\n`;
       const merged = mergeAgentServer(original, 'mcp', 'threadnote', {type: 'local', command: ['threadnote']});
       const written = writeAgentServer(raw, 'jsonc', 'mcp', 'threadnote', merged);
@@ -363,13 +399,13 @@ describe('agent expansion conformance', () => {
   it('preserves an own __proto__ JSONC property without exposing it as the object prototype', () => {
     const raw = '{"__proto__":null,"mcp":{"other":{"command":"kept"}}}';
     const parsed = parseAgentJson(raw, 'jsonc');
-    expect(Object.hasOwn(parsed, '__proto__')).toBe(true);
+    expect(EffectRecord.has(parsed, '__proto__')).toBe(true);
     expect(parsed.__proto__).toBe(null);
     expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
     const merged = mergeAgentServer(parsed, 'mcp', 'threadnote', {command: ['threadnote']});
     const written = writeAgentServer(raw, 'jsonc', 'mcp', 'threadnote', merged);
     const roundTrip = parseAgentJson(written, 'jsonc');
-    expect(Object.hasOwn(roundTrip, '__proto__')).toBe(true);
+    expect(EffectRecord.has(roundTrip, '__proto__')).toBe(true);
     expect(roundTrip.__proto__).toBe(null);
   });
 
@@ -397,15 +433,18 @@ describe('agent expansion conformance', () => {
         yield* Effect.gen(function* () {
           yield* adapter.actions.install(config, adapter, {apply: true});
           const plan = yield* planAgentSurface(config, adapter);
-          const installed = (yield* fs.readFileString(plan.mcpPath)).replaceAll('\n', '\r\n');
+          const installed = Effect2.pipe(yield* fs.readFileString(plan.mcpPath), EffectString.replaceAll('\n', '\r\n'));
           yield* fs.writeFileString(
             plan.mcpPath,
-            installed.replace('"threadnote": {', '"threadnote": {\r\n      // keep this user note'),
+            Effect2.pipe(
+              installed,
+              EffectString.replace('"threadnote": {', '"threadnote": {\r\n      // keep this user note'),
+            ),
           );
           yield* adapter.actions.remove(config, adapter, {apply: true});
           const remaining = yield* fs.readFileString(plan.mcpPath);
           expect(remaining).toContain('// keep this user note');
-          expect(remaining.replaceAll('\r\n', '')).not.toContain('\n');
+          expect(Effect2.pipe(remaining, EffectString.replaceAll('\r\n', ''))).not.toContain('\n');
           expect(parseAgentJson(remaining, 'jsonc')).toEqual({});
         }).pipe(Effect.provideService(SystemInfo, SystemInfo.of({...system, homeDirectory: home})));
       }),

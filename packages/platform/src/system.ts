@@ -1,5 +1,19 @@
+import {Array as EffectArray} from 'effect';
 import {RuntimeEntrypoint} from './runtime-entrypoint.js';
-import {Config, Context, Deferred, Effect, Exit, FileSystem, Layer, Option, Ref, Semaphore, Schema} from 'effect';
+import {
+  Config,
+  Context,
+  Deferred,
+  Effect,
+  Exit,
+  FileSystem,
+  Layer,
+  Option,
+  Predicate,
+  Ref,
+  Semaphore,
+  Schema,
+} from 'effect';
 import {succeedUndefined} from './optional.js';
 import {effectiveLinuxMemoryBytes, linuxCgroupMemoryFiles} from './linux_cgroup.js';
 import {ChildEnvironmentPolicy, type ChildEnvironmentPolicyShape} from './child-environment-policy.js';
@@ -8,11 +22,16 @@ import {
   WINDOWS_DISK_CAPACITY_WORKER_ARGUMENT,
   WINDOWS_DISK_CAPACITY_WORKER_PROTOCOL_VERSION,
 } from './windows-disk-worker-contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class SystemOperationError extends Schema.TaggedError<SystemOperationError>()('SystemOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class SystemOperationError extends Schema.TaggedError<SystemOperationError, {readonly brand: unique symbol}>()(
+  'SystemOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 function systemOperationError(cause: unknown): SystemOperationError {
   return Schema.is(SystemOperationError)(cause)
@@ -29,41 +48,6 @@ export interface PlatformPathShape {
   readonly relative: (from: string, to: string) => string;
   readonly resolve: (...paths: readonly string[]) => string;
   readonly sep: string;
-}
-
-interface NativeFileSystemPromisesShape {
-  readonly lstat: (path: string, options: {readonly bigint: true}) => Promise<RuntimeBigIntStats>;
-  readonly open: (path: string, flags: number) => Promise<RuntimeFileHandle>;
-  readonly opendir: (
-    path: string,
-    options: {readonly bufferSize: number; readonly encoding: 'buffer' | 'utf8'},
-  ) => Promise<RuntimeDirectoryHandle>;
-  readonly stat: (path: string, options: {readonly bigint: true}) => Promise<RuntimeBigIntStats>;
-  readonly statfs?: (path: string, options: {readonly bigint: true}) => Promise<unknown>;
-}
-
-interface RuntimeFileHandle {
-  readonly close: () => Promise<void>;
-  readonly read: (
-    buffer: Uint8Array,
-    offset: number,
-    length: number,
-    position: null,
-  ) => Promise<{readonly bytesRead: number}>;
-  readonly stat: (options: {readonly bigint: true}) => Promise<RuntimeBigIntStats>;
-  readonly utimes: (atime: Date | number | string, mtime: Date | number | string) => Promise<void>;
-}
-
-interface NativeFileSystemModuleShape {
-  readonly constants: {
-    readonly O_NOFOLLOW?: number;
-    readonly O_NONBLOCK?: number;
-    readonly O_RDONLY: number;
-    readonly O_RDWR: number;
-  };
-  readonly promises: NativeFileSystemPromisesShape;
-  readonly fstatSync: (fd: number, options: {readonly bigint: true}) => RuntimeNativeFileStat;
-  readonly statSync: (path: string, options: {readonly bigint: true}) => RuntimeNativeFileStat;
 }
 
 interface NativePathModuleShape {
@@ -90,16 +74,9 @@ export interface RuntimeBigIntStats {
   readonly isSymbolicLink: () => boolean;
 }
 
-export interface RuntimeNativeFileStat {
+export interface RuntimeNativeFileStat extends RuntimeBigIntStats {
   readonly birthtime: Date;
-  readonly dev: bigint;
-  readonly ino: bigint;
-  readonly mode: bigint;
   readonly mtime: Date;
-  readonly size: bigint;
-  isDirectory(): boolean;
-  isFile(): boolean;
-  isSymbolicLink(): boolean;
 }
 
 export interface FileSystemIdentity {
@@ -122,6 +99,28 @@ interface RuntimeDirectoryHandle extends AsyncIterable<RuntimeDirectoryEntry | U
   readonly close: () => Promise<void> | void;
 }
 
+/** Bun supports raw directory-name buffers beyond Node's opendir options type. */
+async function openRuntimeDirectory(
+  path: string,
+  options: {readonly bufferSize: number; readonly encoding: 'buffer' | 'utf8'},
+): Promise<RuntimeDirectoryHandle> {
+  const directory: unknown = await Reflect.apply(nativeFileSystemPromises.opendir, nativeFileSystemPromises, [
+    path,
+    options,
+  ]);
+  if (!isRuntimeDirectoryHandle(directory)) throw new TypeError('Native opendir returned an invalid directory handle.');
+  return directory;
+}
+
+function isRuntimeDirectoryHandle(value: unknown): value is RuntimeDirectoryHandle {
+  return (
+    Predicate.isObject(value) &&
+    typeof value.read === 'function' &&
+    typeof value.close === 'function' &&
+    typeof value[Symbol.asyncIterator] === 'function'
+  );
+}
+
 export interface RuntimeDirectoryNamePage {
   readonly names: readonly Uint8Array[];
   readonly overflow: boolean;
@@ -134,7 +133,7 @@ export interface RuntimeTextDirectoryNamePage {
 
 /** Stream UTF-8 directory names without retaining a corpus-sized listing. */
 export async function* runtimeTextDirectoryNames(path: string): AsyncGenerator<string, void, void> {
-  const directory = await nativeFileSystemPromises.opendir(path, {
+  const directory = await openRuntimeDirectory(path, {
     bufferSize: 32,
     encoding: runtimePlatform === 'win32' ? 'utf8' : 'buffer',
   });
@@ -158,7 +157,7 @@ export const runtimeArchitecture = process.arch;
 export const runtimePlatform = process.platform;
 const nativeOperatingSystemModule = process.getBuiltinModule('os') as NativeOperatingSystemModuleShape;
 export const runtimeOperatingSystemRelease = nativeOperatingSystemModule.release();
-const nativeFileSystemModule = process.getBuiltinModule('fs') as NativeFileSystemModuleShape;
+const nativeFileSystemModule = process.getBuiltinModule('fs');
 const nativeFileSystemPromises = nativeFileSystemModule.promises;
 const nativePathModule = process.getBuiltinModule('path') as NativePathModuleShape;
 
@@ -184,7 +183,9 @@ export function processResourceUsageMaxRssBytes(
   runtime: ProcessResourceUsageRuntime,
   bunVersion?: string,
 ): number {
-  return runtime === 'bun' && platform === 'darwin' && (bunVersion ?? Bun.version).startsWith('1.3.')
+  return runtime === 'bun' &&
+    platform === 'darwin' &&
+    Effect2.pipe(bunVersion ?? Bun.version, EffectString.startsWith('1.3.'))
     ? maxRss
     : maxRss * 1_024;
 }
@@ -387,14 +388,15 @@ export function readPathFileSystemAuthority(
 }
 
 export function readOpenedFileSystemIdentity(
-  file: FileSystem.File,
+  file: unknown,
   info: FileSystem.File.Info,
   expectedType: 'Directory' | 'File',
 ): Effect.Effect<Option.Option<FileSystemIdentity>> {
   if (info.type !== expectedType) return Effect.succeedNone;
   const observed = resolveFileSystemIdentity(info.dev, info.ino);
   if (Option.isSome(observed)) return Effect.succeed(observed);
-  const descriptor = (file as FileSystem.File & {readonly fd?: unknown}).fd;
+  if (!Predicate.isObject(file) || !Predicate.hasProperty(file, 'fd')) return Effect.succeedNone;
+  const descriptor = file.fd;
   if (typeof descriptor !== 'number' || !Number.isSafeInteger(descriptor) || descriptor < 0) {
     return Effect.succeedNone;
   }
@@ -483,7 +485,7 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 export async function runtimeDirectoryNamePage(path: string, entryLimit: number): Promise<RuntimeDirectoryNamePage> {
   if (!Number.isSafeInteger(entryLimit) || entryLimit < 0)
     throw SystemOperationError.make({message: 'Runtime directory entry limit is invalid.'});
-  const directory = await nativeFileSystemPromises.opendir(path, {
+  const directory = await openRuntimeDirectory(path, {
     bufferSize: 32,
     encoding: runtimePlatform === 'win32' ? 'utf8' : 'buffer',
   });
@@ -506,7 +508,7 @@ export async function runtimeDirectoryNamePage(path: string, entryLimit: number)
 
 /** Scoped callers retain this native iterator; every read advances at most 64 directory entries. */
 export async function runtimeOpenTextDirectoryNameReader(root: string) {
-  const directory = await nativeFileSystemPromises.opendir(root, {bufferSize: 32, encoding: 'utf8'});
+  const directory = await openRuntimeDirectory(root, {bufferSize: 32, encoding: 'utf8'});
   let closed = false;
   const close = async () => {
     if (closed) return;
@@ -549,7 +551,7 @@ export function runtimeTextDirectoryNamePage(
       Effect.try({
         try: () => {
           const decoder = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true});
-          return {names: page.names.map(name => decoder.decode(name)), overflow: page.overflow};
+          return {names: EffectArray.map(page.names, name => decoder.decode(name)), overflow: page.overflow};
         },
         catch: systemOperationError,
       }),
@@ -726,12 +728,7 @@ export class SystemInfo extends Context.Service<SystemInfo, SystemInfoShape>()(
             process.kill(processId, 0);
             return true;
           } catch (cause: unknown) {
-            return !(
-              typeof cause === 'object' &&
-              cause !== null &&
-              'code' in cause &&
-              (cause as {readonly code?: unknown}).code === 'ESRCH'
-            );
+            return !(typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'ESRCH');
           }
         },
         memoryUsage: () => {
@@ -768,9 +765,13 @@ export class SystemInfo extends Context.Service<SystemInfo, SystemInfoShape>()(
           };
           const onData = (chunk: string | Uint8Array) => {
             buffered += String(chunk);
-            const newline = buffered.search(/[\r\n]/);
+            const newline = Effect2.pipe(
+              buffered,
+              EffectString.search(/[\r\n]/),
+              Effect2.Option.getOrElse(() => -1),
+            );
             if (newline >= 0) {
-              finish(buffered.slice(0, newline));
+              finish(Effect2.pipe(buffered, EffectString.slice(0, newline)));
             }
           };
           const onEnd = () => finish(buffered);
@@ -917,9 +918,8 @@ export function probeAvailableDiskBytes(
 
 export function availableDiskBytesFromStatfs(statistics: unknown): number | undefined {
   if (typeof statistics !== 'object' || statistics === null) return undefined;
-  const fields = statistics as {readonly bavail?: unknown; readonly bsize?: unknown};
-  const availableBlocks = nonNegativeIntegerBigInt(fields.bavail);
-  const blockSize = positiveIntegerBigInt(fields.bsize);
+  const availableBlocks = nonNegativeIntegerBigInt('bavail' in statistics ? statistics.bavail : undefined);
+  const blockSize = positiveIntegerBigInt('bsize' in statistics ? statistics.bsize : undefined);
   if (availableBlocks === undefined || blockSize === undefined) return undefined;
   const availableBytes = availableBlocks * blockSize;
   return Number(availableBytes > MAXIMUM_SAFE_BYTE_COUNT ? MAXIMUM_SAFE_BYTE_COUNT : availableBytes);
@@ -930,7 +930,7 @@ function nativeStatfs(path: string) {
     return Effect.fail(new NativeStatfsUnavailableError());
   }
   return Effect.tryPromise({
-    try: () => nativeFileSystemPromises.statfs!(path, {bigint: true}),
+    try: () => nativeFileSystemPromises.statfs(path, {bigint: true}),
     catch: systemOperationError,
   });
 }
@@ -977,7 +977,7 @@ export function legacyAvailableDiskBytes(
         try: async () => {
           const [exitCode, output] = await Promise.all([child.exited, new Response(child.stdout).text()]);
           if (exitCode !== 0) return undefined;
-          const text = output.trim();
+          const text = Effect2.pipe(output, EffectString.trim);
           return platform === 'win32' ? parseWindowsAvailableDiskBytes(text) : parsePosixAvailableDiskBytes(text);
         },
         catch: systemOperationError,
@@ -1000,7 +1000,11 @@ export function windowsDiskCapacityWorkerInvocation(
   processArguments: readonly string[],
   developmentEntrypoint: string,
 ): {readonly arguments: readonly string[]; readonly executable: string} {
-  const executableName = executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  const executableName = Effect2.pipe(
+    Effect2.pipe(executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   if (executableName !== 'bun' && executableName !== 'bun.exe') {
     return {arguments: [WINDOWS_DISK_CAPACITY_WORKER_ARGUMENT], executable: executablePath};
   }
@@ -1170,7 +1174,8 @@ class WindowsDiskCapacityWorkerConnection {
       }
       this.stdoutBuffer += this.decoder.decode();
       this.consumeStdoutLines();
-      if (this.stdoutBuffer.trim()) this.fail('Windows disk capacity worker returned an incomplete response.');
+      if (Effect2.pipe(this.stdoutBuffer, EffectString.trim))
+        this.fail('Windows disk capacity worker returned an incomplete response.');
       else this.fail('Windows disk capacity worker exited.');
     } catch {
       this.fail('Could not read Windows disk capacity worker response.');
@@ -1179,10 +1184,14 @@ class WindowsDiskCapacityWorkerConnection {
 
   private consumeStdoutLines(): void {
     for (;;) {
-      const newline = this.stdoutBuffer.indexOf('\n');
+      const newline = Effect2.pipe(
+        this.stdoutBuffer,
+        EffectString.indexOf('\n'),
+        Effect2.Option.getOrElse(() => -1),
+      );
       if (newline < 0) return;
-      const line = this.stdoutBuffer.slice(0, newline).replace(/\r$/u, '');
-      this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
+      const line = Effect2.pipe(this.stdoutBuffer, EffectString.slice(0, newline), EffectString.replace(/\r$/u, ''));
+      this.stdoutBuffer = Effect2.pipe(this.stdoutBuffer, EffectString.slice(newline + 1));
       if (!line) continue;
       const pending = this.pending;
       const response = decodeWindowsDiskCapacityWorkerResponse(line);
@@ -1352,7 +1361,7 @@ function isNativeStatfsUnavailable(cause: unknown): boolean {
   const underlying = Schema.is(SystemOperationError)(cause) ? cause.cause : cause;
   if (underlying instanceof NativeStatfsUnavailableError) return true;
   if (typeof underlying !== 'object' || underlying === null || !('code' in underlying)) return false;
-  const code = (underlying as {readonly code?: unknown}).code;
+  const code = underlying.code;
   return typeof code === 'string' && NATIVE_STATFS_UNAVAILABLE_CODES.has(code);
 }
 
@@ -1367,9 +1376,11 @@ function positiveIntegerBigInt(value: unknown): bigint | undefined {
 }
 
 export function parsePosixAvailableDiskBytes(output: string): number | undefined {
-  const lastLine = output.trim().split(/\r?\n/).filter(Boolean).at(-1);
+  const lastLine = EffectArray.filter(Effect2.pipe(output, EffectString.trim, EffectString.split(/\r?\n/)), Boolean).at(
+    -1,
+  );
   if (!lastLine) return undefined;
-  const fields = lastLine.trim().split(/\s+/);
+  const fields = Effect2.pipe(lastLine, EffectString.trim, EffectString.split(/\s+/));
   const availableKibibytes = Number(fields.at(-3));
   return Number.isSafeInteger(availableKibibytes) && availableKibibytes >= 0
     ? availableKibibytes * KIBIBYTE_BYTES
@@ -1377,7 +1388,7 @@ export function parsePosixAvailableDiskBytes(output: string): number | undefined
 }
 
 export function parseWindowsAvailableDiskBytes(output: string): number | undefined {
-  const bytes = Number(output.trim());
+  const bytes = Number(Effect2.pipe(output, EffectString.trim));
   return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : undefined;
 }
 
@@ -1386,7 +1397,11 @@ export function parseLinuxHardwareInfo(
   memoryInfo: string,
   architecture: string,
 ): Pick<SystemHardwareInfo, 'cpuModel' | 'memoryBytes'> {
-  const cpuModel = /^(?:model name|Hardware)[\t ]*:[\t ]*(\S[^\r\n]*)/m.exec(cpuInfo)?.[1]?.trim();
+  const cpuModel = Effect2.pipe(
+    /^(?:model name|Hardware)[\t ]*:[\t ]*(\S[^\r\n]*)/m.exec(cpuInfo)?.[1],
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   const memoryKibibytes = Number(/^MemTotal:[\t ]+(\d+)[\t ]+kB[\t ]*\r?$/m.exec(memoryInfo)?.[1]);
   const memoryBytes = memoryKibibytes * KIBIBYTE_BYTES;
   if (!Number.isSafeInteger(memoryBytes) || memoryBytes <= 0) {
@@ -1442,7 +1457,7 @@ async function readLinuxEffectiveMemoryBytes(physicalMemoryBytes: number): Promi
   ]);
   if (processCgroup === undefined || processMountInfo === undefined) return physicalMemoryBytes;
   const files = linuxCgroupMemoryFiles(processCgroup, processMountInfo);
-  const limits = await Promise.all(files.map(file => readOptionalBunFile(file.path)));
+  const limits = await Promise.all(EffectArray.map(files, file => readOptionalBunFile(file.path)));
   return effectiveLinuxMemoryBytes(physicalMemoryBytes, limits);
 }
 
@@ -1468,10 +1483,10 @@ function spawnText(
   });
   if (result.exitCode !== 0) {
     throw SystemOperationError.make({
-      message: `${command[0]} exited with ${result.exitCode}: ${result.stderr.toString().trim()}`,
+      message: `${command[0]} exited with ${result.exitCode}: ${Effect2.pipe(result.stderr.toString(), EffectString.trim)}`,
     });
   }
-  const output = result.stdout.toString().trim();
+  const output = Effect2.pipe(result.stdout.toString(), EffectString.trim);
   if (!output) throw SystemOperationError.make({message: `${command[0]} returned no hardware metadata.`});
   return output;
 }
@@ -1654,19 +1669,25 @@ function readProcessStartIdentityCommand(
 }
 
 export function parseLinuxProcessStartIdentity(stat: string): string | undefined {
-  const commandEnd = stat.lastIndexOf(')');
+  const commandEnd = Effect2.pipe(
+    stat,
+    EffectString.lastIndexOf(')'),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (commandEnd < 0) return undefined;
-  const fieldsAfterCommand = stat
-    .slice(commandEnd + 1)
-    .trim()
-    .split(/\s+/);
+  const fieldsAfterCommand = Effect2.pipe(
+    stat,
+    EffectString.slice(commandEnd + 1),
+    EffectString.trim,
+    EffectString.split(/\s+/),
+  );
   const startClockTick = fieldsAfterCommand[19];
   return startClockTick && /^[0-9]+$/.test(startClockTick) ? `linux:${startClockTick}` : undefined;
 }
 
 export function parseProcessStartIdentityOutput(platform: NodeJS.Platform, output: string): string | undefined {
   if (platform !== 'darwin' && platform !== 'win32') return undefined;
-  const identity = output.trim();
+  const identity = Effect2.pipe(output, EffectString.trim);
   return identity ? `${platform}:${identity}` : undefined;
 }
 
@@ -1701,5 +1722,5 @@ export function resolveHomeDirectory(environment: NodeJS.ProcessEnv, platform: N
 }
 
 function nonEmptyEnvironmentValue(value: string | undefined): string | undefined {
-  return value && value.trim().length > 0 ? value : undefined;
+  return value && Effect2.pipe(value, EffectString.trim).length > 0 ? value : undefined;
 }

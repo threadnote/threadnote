@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
@@ -125,7 +126,12 @@ describe('Cursor Cloud workload attestation', () => {
       expect(requests[1]?.args).toContain(challenge.completionUrl);
       expect(requests[1]?.args).not.toContain('--retry');
       expect(JSON.parse(requests[1]?.body ?? '')).toEqual({challengeId: challenge.challengeId, token});
-      expect(requests.flatMap(request => request.args).join('\n')).not.toContain(token);
+      expect(
+        EffectArray.join(
+          EffectArray.flatMap(requests, request => request.args),
+          '\n',
+        ),
+      ).not.toContain(token);
       expect(JSON.stringify(receipt)).not.toContain(token);
       expect(receipt.attestationId).toBe('attestation_direct');
     }).pipe(provideTestLayer(TestSystemInfoLayer)),

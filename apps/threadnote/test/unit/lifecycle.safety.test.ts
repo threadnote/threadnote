@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {
@@ -31,12 +32,16 @@ import {THREADNOTE_STORAGE_LAYOUT_VERSION} from '@threadnote/store/layout';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {assertSafeThreadnoteHomeForErase} from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const temporaryRoots: string[] = [];
-const embeddingManifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === CORE_EMBEDDING_MODEL_ID)!;
+const embeddingManifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === CORE_EMBEDDING_MODEL_ID),
+)!;
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryRoots.splice(0), root => rm(root, {force: true, recursive: true})));
 });
 
 describe('destructive Threadnote home validation', () => {
@@ -171,7 +176,7 @@ describe('read-only doctor', () => {
       'indexes',
       'code-graph',
       'repositories',
-      'a'.repeat(64),
+      Effect2.pipe('a', EffectString.repeat(64)),
       `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`,
     );
     await mkdir(dirname(databasePath), {recursive: true});
@@ -292,7 +297,7 @@ async function filesystemSnapshot(
 ): Promise<readonly string[]> {
   const output: string[] = [];
   const visit = async (current: string, relative: string): Promise<void> => {
-    if (ignoredRelativePaths.has(relative.replaceAll('\\', '/'))) return;
+    if (ignoredRelativePaths.has(Effect2.pipe(relative, EffectString.replaceAll('\\', '/')))) return;
     const info = await lstat(current);
     const mode = (info.mode & 0o777).toString(8);
     if (info.isSymbolicLink()) {
@@ -369,7 +374,7 @@ function fixtureEmbeddingManifest(content: Uint8Array): LocalModelManifest {
     promptPrefixes: {document: '', query: ''},
     quantization: 'fixture',
     repository: 'threadnote/fixture',
-    revision: 'a'.repeat(40),
+    revision: Effect2.pipe('a', EffectString.repeat(40)),
     role: 'embedding',
     runtime: {nodeLlamaCpp: '3.19.1'},
     sha256: createHash('sha256').update(content).digest('hex'),

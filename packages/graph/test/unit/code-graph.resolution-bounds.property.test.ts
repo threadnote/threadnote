@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -92,12 +93,12 @@ describe('code graph resolution pass bounds', () => {
           {maxLength: 16, minLength: 1},
         ),
         pages => {
-          const boundaries = pages.map(page => ({
+          const boundaries = EffectArray.map(pages, page => ({
             ...page,
             operation: 'resolve persistent code graph references' as const,
           }));
-          const expectedBytes = pages.reduce((total, page) => total + BigInt(page.finalFactBytes), 0n);
-          const expectedRows = pages.reduce((total, page) => total + BigInt(page.rowCount), 0n);
+          const expectedBytes = EffectArray.reduce(pages, 0n, (total, page) => total + BigInt(page.finalFactBytes));
+          const expectedRows = EffectArray.reduce(pages, 0n, (total, page) => total + BigInt(page.rowCount));
           const maximum = BigInt(Number.MAX_SAFE_INTEGER);
           const expected = {
             finalFactBytes: Number(expectedBytes > maximum ? maximum : expectedBytes),
@@ -147,7 +148,7 @@ describe('code graph resolution pass bounds', () => {
     fc.assert(
       fc.property(fc.array(fc.integer(), {maxLength: 257}), pages => {
         const reservations = planPersistentReferenceResolutionPages(pages);
-        expect(reservations.flatMap(reservation => reservation.pages)).toEqual(pages);
+        expect(EffectArray.flatMap(reservations, reservation => reservation.pages)).toEqual(pages);
         expect(reservations).toHaveLength(Math.ceil(pages.length / PERSISTENT_FULL_RESOLUTION_RESERVATION_PAGES));
         for (const reservation of reservations) {
           expect(reservation.pages.length).toBeGreaterThan(0);
@@ -158,7 +159,7 @@ describe('code graph resolution pass bounds', () => {
             expect(transaction.length).toBeLessThanOrEqual(PERSISTENT_FULL_RESOLUTION_TRANSACTION_PAGES);
           }
         }
-        expect(reservations.flatMap(reservation => reservation.transactions)).toHaveLength(
+        expect(EffectArray.flatMap(reservations, reservation => reservation.transactions)).toHaveLength(
           Math.ceil(pages.length / PERSISTENT_FULL_RESOLUTION_TRANSACTION_PAGES),
         );
       }),
@@ -166,21 +167,21 @@ describe('code graph resolution pass bounds', () => {
     );
 
     const boundary = planPersistentReferenceResolutionPages(Array.from({length: 17}, (_, index) => index));
-    expect(boundary.map(reservation => reservation.pages.length)).toEqual([8, 8, 1]);
-    expect(boundary.map(reservation => reservation.transactions.map(transaction => transaction.length))).toEqual([
-      [4, 4],
-      [4, 4],
-      [1],
-    ]);
+    expect(EffectArray.map(boundary, reservation => reservation.pages.length)).toEqual([8, 8, 1]);
+    expect(
+      EffectArray.map(boundary, reservation =>
+        EffectArray.map(reservation.transactions, transaction => transaction.length),
+      ),
+    ).toEqual([[4, 4], [4, 4], [1]]);
     const widened = planPersistentReferenceResolutionPages(
       Array.from({length: 17}, (_, index) => index),
       PERSISTENT_FULL_RESOLUTION_MAXIMUM_TRANSACTION_PAGES,
     );
-    expect(widened.map(reservation => reservation.transactions.map(transaction => transaction.length))).toEqual([
-      [8],
-      [8],
-      [1],
-    ]);
+    expect(
+      EffectArray.map(widened, reservation =>
+        EffectArray.map(reservation.transactions, transaction => transaction.length),
+      ),
+    ).toEqual([[8], [8], [1]]);
 
     fc.assert(
       fc.property(
@@ -191,9 +192,9 @@ describe('code graph resolution pass bounds', () => {
         }),
         (pages, transactionPageLimit) => {
           const reservations = planPersistentReferenceResolutionPages(pages, transactionPageLimit);
-          expect(reservations.flatMap(reservation => reservation.pages)).toEqual(pages);
-          expect(reservations.flatMap(reservation => reservation.transactions).flat()).toEqual(pages);
-          for (const transaction of reservations.flatMap(reservation => reservation.transactions)) {
+          expect(EffectArray.flatMap(reservations, reservation => reservation.pages)).toEqual(pages);
+          expect(EffectArray.flatMap(reservations, reservation => reservation.transactions).flat()).toEqual(pages);
+          for (const transaction of EffectArray.flatMap(reservations, reservation => reservation.transactions)) {
             expect(transaction.length).toBeGreaterThan(0);
             expect(transaction.length).toBeLessThanOrEqual(transactionPageLimit);
           }

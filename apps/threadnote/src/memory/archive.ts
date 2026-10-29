@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, DateTime, Effect, FileSystem, Option, Result} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
@@ -24,6 +25,8 @@ import {
   resourceStoreLocation,
 } from './migrations.js';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const runArchive = Effect.fn('runArchive')(function* (
   config: RuntimeConfig,
@@ -44,7 +47,10 @@ export const runArchive = Effect.fn('runArchive')(function* (
       topic: normalizeOptionalMetadata(options.topic),
     };
     yield* storeMemory(config, {
-      bodyText: ['Archived original Threadnote memory.', '', '<original memory content would be read here>'].join('\n'),
+      bodyText: EffectArray.join(
+        ['Archived original Threadnote memory.', '', '<original memory content would be read here>'],
+        '\n',
+      ),
       dryRun: true,
       metadata: fallbackMetadata,
       title: 'MEMORY',
@@ -60,7 +66,7 @@ export const runArchive = Effect.fn('runArchive')(function* (
     [uri],
     Effect.gen(function* () {
       const rawOriginalMemory = yield* store.read(resourceStoreLocation(config), uri);
-      const originalMemory = rawOriginalMemory.trim();
+      const originalMemory = Effect2.pipe(rawOriginalMemory, EffectString.trim);
       if (
         options.expectedRevision !== undefined &&
         consolidationRevision(rawOriginalMemory) !== options.expectedRevision
@@ -68,7 +74,10 @@ export const runArchive = Effect.fn('runArchive')(function* (
         return yield* MemoryOperationError.make({
           message: `Memory ${uri} changed after consolidation review. Source cleanup was refused.`,
         });
-      if (options.expectedContent !== undefined && originalMemory !== options.expectedContent.trim()) {
+      if (
+        options.expectedContent !== undefined &&
+        originalMemory !== Effect2.pipe(options.expectedContent, EffectString.trim)
+      ) {
         return yield* MemoryOperationError.make({
           message: `Memory ${uri} changed after the hygiene plan. Re-run compact before archiving.`,
         });
@@ -78,7 +87,10 @@ export const runArchive = Effect.fn('runArchive')(function* (
       if (!sourceRecord) return yield* MemoryOperationError.make({message: `Cannot archive invalid memory ${uri}.`});
       const inferredMetadata = sourceRecord.metadata;
       if (inferredMetadata.citationErrors && inferredMetadata.citationErrors.length > 0) {
-        const reasons = [...new Set(inferredMetadata.citationErrors.map(error => error.reason))].sort().join(', ');
+        const reasons = EffectArray.join(
+          [...new Set(EffectArray.map(inferredMetadata.citationErrors, error => error.reason))].sort(),
+          ', ',
+        );
         return yield* MemoryOperationError.make({
           message: `Cannot archive ${uri}: malformed code citation metadata (${reasons}) must be repaired or recaptured first.`,
         });
@@ -104,7 +116,7 @@ export const runArchive = Effect.fn('runArchive')(function* (
       });
       invalidatedUris.push(archiveUri);
       const currentSource = yield* store.read(resourceStoreLocation(config), uri).pipe(Effect.option);
-      if (Option.isNone(currentSource) || currentSource.value.trim() !== originalMemory) {
+      if (Option.isNone(currentSource) || Effect2.pipe(currentSource.value, EffectString.trim) !== originalMemory) {
         const rolledBack = yield* removeResourceWithRetry(ov, config, archiveUri, {
           expectedFingerprint: archiveFingerprint,
         });

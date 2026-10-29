@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {expect, it as effectIt} from '@effect/vitest';
 import {DateTime, Effect, FileSystem, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -13,17 +14,20 @@ const TARGET_IDENTIFIER = 'rankRecallCandidates';
 const TARGET_URI = 'threadnote://user/tester/memories/durable/projects/threadnote/recall-ranker-code.md';
 
 function memoryDocument(topic: string, body: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    `topic: ${topic}`,
-    'source_agent_client: test',
-    'timestamp: 2026-08-20T00:00:00.000Z',
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      `topic: ${topic}`,
+      'source_agent_client: test',
+      'timestamp: 2026-08-20T00:00:00.000Z',
+      '',
+      body,
+    ],
+    '\n',
+  );
 }
 
 effectIt.effect('recalls an exact camelCase identifier extracted from the canonical store', () =>
@@ -71,7 +75,7 @@ effectIt.effect('recalls an exact camelCase identifier extracted from the canoni
         includeInactive: false,
         query: `Where is ${TARGET_IDENTIFIER} behavior defined?`,
       });
-      const target = indexed.find(candidate => candidate.uri === TARGET_URI);
+      const target = Option.getOrUndefined(EffectArray.findFirst(indexed, candidate => candidate.uri === TARGET_URI));
       expect(target?.fields?.identifiers).toContain(TARGET_IDENTIFIER);
 
       const prepared = yield* prepareRecallSections(config, {

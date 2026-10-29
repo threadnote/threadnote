@@ -3,7 +3,7 @@
  * Cloud acceptance uses actual bootstrap/publication against private bare Git.
  */
 import assert from 'node:assert/strict';
-import {String as EffectString} from 'effect';
+import {Array as EffectArray, Option as EffectOption, String as EffectString} from 'effect';
 // Bun 1.4.2 compile cannot bundle the testing builtin export-star wrappers.
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- Independent checksum boundary in the compiled release controller.
 import {createHash} from 'node:crypto';
@@ -31,13 +31,21 @@ import {
   runReleaseCommand,
   runReleaseCommandBytes,
 } from './native-release-process.js';
+import * as EffectRecord from 'effect/Record';
+import * as Effect from 'effect';
 
 // JSON documents are native protocol fixtures; assertions below validate their readbacks.
 // oxlint-disable-next-line typescript/no-explicit-any -- Native JSON fixture fields are checked by the protocol and explicit readback assertions.
 type Json = {[key: string]: any};
-const object = (value: unknown): value is Json => value !== null && typeof value === 'object' && !Array.isArray(value);
+const object = (value: unknown): value is Json =>
+  value !== null && typeof value === 'object' && !EffectArray.isArray(value);
 const hash = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex');
-const jsonFile = (path: string) => JSON.parse(readFileSync(path, 'utf8')) as Json;
+const jsonObject = (value: unknown): Json => {
+  assert(object(value), 'Expected a JSON object.');
+  return value;
+};
+const parseJsonObject = (input: string): Json => jsonObject(JSON.parse(input));
+const jsonFile = (path: string) => parseJsonObject(readFileSync(path, 'utf8'));
 const save = (path: string, value: unknown) => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 const canonical = (path: string): string => {
   path = resolve(path);
@@ -50,10 +58,22 @@ const canonical = (path: string): string => {
 };
 const within = (parent: string, child: string) => {
   const path = relative(canonical(parent), canonical(child));
-  return path !== '' && !path.startsWith(`..${sep}`) && path !== '..' && !isAbsolute(path);
+  return path !== '' && !Effect.pipe(path, EffectString.startsWith(`..${sep}`)) && path !== '..' && !isAbsolute(path);
 };
 const asciiJson = (value: unknown) =>
-  JSON.stringify(value).replace(/[\u007f-\uffff]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+  JSON.stringify(value).replace(
+    /[\u007f-\uffff]/g,
+    c =>
+      `\\u${Effect.pipe(
+        Effect.pipe(
+          c,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ).toString(16),
+        EffectString.padStart(4, '0'),
+      )}`,
+  );
 const isMissing = (error: unknown) => object(error) && error.code === 'ENOENT';
 const readBounded = (path: string, limit: number) => {
   const fd = openSync(path, 'r');
@@ -82,23 +102,32 @@ export async function runNativeWorkflows(
   assert(statSync(binary).isFile(), binary);
   assert(typeof generation === 'string' && generation);
   mkdirSync(root, {recursive: true});
-  const listed = JSON.parse(runReleaseCommand([binary, 'dev-skills', 'list', '--json'], environment, root));
-  const surfaces = Object.fromEntries(
-    listed.surfaces
-      .filter((item: Json) => ['codex-cloud-personal', 'cursor-cloud-personal'].includes(item.profile))
-      .map((item: Json) => [item.profile, item]),
+  const listed = parseJsonObject(runReleaseCommand([binary, 'dev-skills', 'list', '--json'], environment, root));
+  assert(EffectArray.isArray(listed.surfaces) && EffectArray.every(listed.surfaces, object));
+  const surfaces = EffectRecord.fromEntries(
+    EffectArray.map(
+      EffectArray.filter(listed.surfaces, (item: Json) =>
+        ['codex-cloud-personal', 'cursor-cloud-personal'].includes(item.profile),
+      ),
+      (item: Json): [string, Json] => [item.profile, item],
+    ),
   );
-  assert.deepEqual(Object.keys(surfaces).sort(), ['codex-cloud-personal', 'cursor-cloud-personal']);
+  assert.deepEqual(EffectRecord.keys(surfaces).sort(), ['codex-cloud-personal', 'cursor-cloud-personal']);
   const profiles = [
     'desktop',
-    ...Object.entries(surfaces)
-      .filter(([, surface]) => (surface as Json).platforms.includes(process.platform))
-      .map(([name]) => name),
+    ...EffectArray.map(
+      EffectArray.filter(EffectRecord.toEntries(surfaces), ([, surface]) =>
+        surface.platforms.includes(process.platform),
+      ),
+      ([name]) => name,
+    ),
   ];
-  const results = profiles.map(profile => runProfile(join(root, profile), binary, environment, generation, profile));
+  const results = EffectArray.map(profiles, profile =>
+    runProfile(join(root, profile), binary, environment, generation, profile),
+  );
   const rejected = [];
-  for (const [name, surface] of Object.entries(surfaces)) {
-    if ((surface as Json).platforms.includes(process.platform)) continue;
+  for (const [name, surface] of EffectRecord.toEntries(surfaces)) {
+    if (surface.platforms.includes(process.platform)) continue;
     const host = name === 'codex-cloud-personal' ? 'codex' : 'cursor';
     try {
       runReleaseCommand(
@@ -123,14 +152,14 @@ export async function runNativeWorkflows(
       assert.fail('Unsupported native workflow target was accepted');
     } catch (error) {
       assert(error instanceof ReleaseCommandError && error.status !== 0);
-      assert(decodeReleaseOutput(error.stderr).includes('no native workflow target on'));
+      assert(Effect.pipe(decodeReleaseOutput(error.stderr), EffectString.includes('no native workflow target on')));
     }
     rejected.push(name);
   }
   return {
     status: 'passed',
     profiles: results,
-    operations: results.reduce((sum, item) => sum + item.operations, 0),
+    operations: EffectArray.reduce(results, 0, (sum, item) => sum + item.operations),
     unsupportedHostProfilesRejected: rejected,
     personalCloudHost: 'catalog-declared native platforms',
     liveProviderAcceptance: false,
@@ -183,7 +212,7 @@ function runProfile(
   // Intel macOS cloud closeout archives a full published graph; keep other native request budgets unchanged.
   const closeoutFinishTimeoutMs =
     profile !== 'desktop' && process.platform === 'darwin' && process.arch === 'x64' ? 600_000 : 180_000;
-  const git = (...args: string[]) => run(['git', ...args]).trim();
+  const git = (...args: string[]) => Effect.pipe(run(['git', ...args]), EffectString.trim);
   writeFileSync(join(repo, 'source.ts'), 'export const completeRead = (value: string) => value;\n', 'utf8');
   for (const args of [
     ['init', '--initial-branch=main'],
@@ -232,28 +261,31 @@ function runProfile(
       'errorCode',
       'syscall',
     ]);
-    const enums: Record<string, Set<string>> = Object.fromEntries(
-      Object.entries({
-        event: ['start', 'result', 'forwarded', 'exception'],
-        verb: ['show', 'rev-parse', 'config', 'add', 'commit', 'status', 'push', 'fetch', 'other'],
-        specForm: ['SHA40', 'SHA64', 'HEAD', 'index', 'other'],
-        signal: ['none', 'SIGTERM', 'SIGKILL', 'SIGPIPE', 'SIGABRT', 'SIGSEGV', 'SIGINT', 'other'],
-        stderrCategory: [
-          'none',
-          'missing-path',
-          'missing-object',
-          'not-repository',
-          'unsafe-repository',
-          'path-too-long',
-          'path-invalid',
-          'permission',
-          'index-lock',
-          'unknown',
-        ],
-        phase: ['load', 'spawn', 'stdout', 'stderr'],
-        errorCode: ['ENOENT', 'EACCES', 'EPERM', 'EPIPE', 'EBADF', 'EINVAL', 'ENOSPC', 'other'],
-        syscall: ['spawn', 'write', 'open', 'read', 'other'],
-      }).map(([key, values]) => [key, new Set(values)]),
+    const enums: Record<string, Set<string>> = EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectRecord.toEntries({
+          event: ['start', 'result', 'forwarded', 'exception'],
+          verb: ['show', 'rev-parse', 'config', 'add', 'commit', 'status', 'push', 'fetch', 'other'],
+          specForm: ['SHA40', 'SHA64', 'HEAD', 'index', 'other'],
+          signal: ['none', 'SIGTERM', 'SIGKILL', 'SIGPIPE', 'SIGABRT', 'SIGSEGV', 'SIGINT', 'other'],
+          stderrCategory: [
+            'none',
+            'missing-path',
+            'missing-object',
+            'not-repository',
+            'unsafe-repository',
+            'path-too-long',
+            'path-invalid',
+            'permission',
+            'index-lock',
+            'unknown',
+          ],
+          phase: ['load', 'spawn', 'stdout', 'stderr'],
+          errorCode: ['ENOENT', 'EACCES', 'EPERM', 'EPIPE', 'EBADF', 'EINVAL', 'ENOSPC', 'other'],
+          syscall: ['spawn', 'write', 'open', 'read', 'other'],
+        }),
+        ([key, values]) => [key, new Set(values)],
+      ),
     );
     for (let slot = 0; slot < (traceSetup === 'enabled' ? 128 : 0); slot++) {
       try {
@@ -261,41 +293,64 @@ function runProfile(
         const text = decodeReleaseOutput(raw);
         // Keep JSON integer fields strict: parsing alone erases the distinction
         // between integer tokens and floating-point spellings such as 1.0.
-        const tokens = text.match(/"(?:\\[\s\S]|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g) ?? [];
-        assert(tokens.every(token => token.startsWith('"') || !/[.eE]/.test(token)));
+        const tokens =
+          Effect.pipe(
+            text,
+            EffectString.match(/"(?:\\[\s\S]|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g),
+            Effect.Option.getOrElse(() => null),
+          ) ?? [];
+        assert(
+          EffectArray.every(tokens, token => Effect.pipe(token, EffectString.startsWith('"')) || !/[.eE]/.test(token)),
+        );
         const value = JSON.parse(text);
         assert(
-          raw.length <= 480 && object(value) && Object.keys(value).every(key => fields.has(key)) && value.version === 1,
+          raw.length <= 480 &&
+            object(value) &&
+            EffectArray.every(EffectRecord.keys(value), key => fields.has(key)) &&
+            value.version === 1,
         );
-        assert(Object.entries(enums).every(([key, allowed]) => !(key in value) || allowed.has(value[key])));
         assert(
-          Object.entries(value).every(
+          EffectArray.every(
+            EffectRecord.toEntries(enums),
+            ([key, allowed]) => !(key in value) || allowed.has(value[key]),
+          ),
+        );
+        assert(
+          EffectArray.every(
+            EffectRecord.toEntries(value),
             ([key, item]) => key in enums || typeof item === 'boolean' || Number.isInteger(item),
           ),
         );
-        assert(['version', 'pid', 'event', 'verb'].every(key => key in value));
+        assert(EffectArray.every(['version', 'pid', 'event', 'verb'], key => key in value));
         events.push(value);
       } catch (error) {
         if (isMissing(error)) missing++;
         else corrupt++;
       }
     }
-    const starts = events.filter(event => event.event === 'start');
+    const starts = EffectArray.filter(events, event => event.event === 'start');
     const latest =
-      [...starts].reverse().find(event => event.verb === 'show') ??
-      [...events].reverse().find(event => event.verb === 'show');
-    const relevant = events.filter(event => latest && event.pid === latest.pid);
+      EffectOption.getOrUndefined(EffectArray.findFirst([...starts].reverse(), event => event.verb === 'show')) ??
+      EffectOption.getOrUndefined(EffectArray.findFirst([...events].reverse(), event => event.verb === 'show'));
+    const relevant = EffectArray.filter(events, event => latest !== undefined && event.pid === latest.pid);
     const counts = {
       events: events.length,
       corrupt,
       unusedOrMissingSlots: missing,
-      exceptions: events.filter(event => event.event === 'exception').length,
-      orphanResults: events.filter(event => event.event === 'result' && !starts.some(row => row.pid === event.pid))
-        .length,
-      unmatchedStarts: starts.filter(event => !events.some(row => row.pid === event.pid && row.event === 'result'))
-        .length,
-      unforwardedResults: events.filter(
-        event => event.event === 'result' && !events.some(row => row.pid === event.pid && row.event === 'forwarded'),
+      exceptions: EffectArray.filter(events, event => event.event === 'exception').length,
+      orphanResults: EffectArray.filter(
+        events,
+        event => event.event === 'result' && !EffectArray.some(starts, row => row.pid === event.pid),
+      ).length,
+      unmatchedStarts: EffectArray.filter(
+        starts,
+        event => !EffectArray.some(events, row => row.pid === event.pid && row.event === 'result'),
+      ).length,
+      unforwardedResults: EffectArray.filter(
+        events,
+        event =>
+          event.event === 'result' &&
+          !EffectArray.some(events, row => row.pid === event.pid && row.event === 'forwarded'),
       ).length,
     };
     const projection: Json = {
@@ -344,7 +399,7 @@ function runProfile(
           assert(
             !('format' in value) &&
               object(value.intent) &&
-              Array.isArray(value.intent.stages) &&
+              EffectArray.isArray(value.intent.stages) &&
               object(value.progress),
             'publication-shape-invalid',
           );
@@ -368,7 +423,7 @@ function runProfile(
     assert(raw.length <= storedLimit, 'journal-too-large');
     const value = JSON.parse(decodeReleaseOutput(raw));
     if (codec === null || !object(value) || value.format !== codec) return admitted(value);
-    assert.deepEqual(Object.keys(value).sort(), ['expandedBytes', 'format', 'payload', 'sha256']);
+    assert.deepEqual(EffectRecord.keys(value).sort(), ['expandedBytes', 'format', 'payload', 'sha256']);
     assert(
       Number.isInteger(value.expandedBytes) &&
         value.expandedBytes > 0 &&
@@ -410,8 +465,17 @@ function runProfile(
       // Only bounded persisted receipt reads are reachable after a timeout.
       const closedStatus = (value: unknown, choices: string[]) =>
         typeof value === 'string' && choices.includes(value) ? value : 'other';
-      const count = (value: unknown, kind: 'array' | 'object') =>
-        (kind === 'array' ? Array.isArray(value) : object(value)) ? Object.keys(value as object).length : null;
+      const count = (value: unknown, kind: 'array' | 'object') => {
+        if (value === null || typeof value !== 'object') return null;
+        return kind === 'array'
+          ? EffectArray.isArray(value)
+            ? // oxlint-disable-next-line effecttsgo/prefer-effect-record -- Native array keys exclude the length property and sparse holes in persisted diagnostic counts.
+              Object.keys(value).length
+            : null
+          : !EffectArray.isArray(value)
+            ? EffectRecord.keys(value).length
+            : null;
+      };
       const snapshot = (path: string, codec: string | null): [Json, string] => {
         try {
           const value = readJournal(path, codec, true);
@@ -424,18 +488,20 @@ function runProfile(
         `${statePath}.closeout.json`,
         'threadnote-native-closeout-state-gzip-v1',
       );
+      const unavailablePublication: [Json, string] = [{}, 'binding-unavailable'];
       const [publication, publicationRead] =
         bindingId && captureError === null
           ? snapshot(join(home, 'workflow-memory', `${bindingId}.publication.json`), null)
-          : ([{}, 'binding-unavailable'] as [Json, string]);
+          : unavailablePublication;
       const native = object(nativeState) ? nativeState : {};
       const operationCount = count(native.operations, 'array');
-      const operations: Json[] = Array.isArray(native.operations) ? native.operations : [];
-      const last = object(operations.at(-1)) ? operations.at(-1)! : {};
+      const operations = EffectArray.isArray(native.operations) ? native.operations : [];
+      const lastOperation = operations.at(-1);
+      const last: Json = object(lastOperation) ? lastOperation : {};
       const stages =
-        object(publication.intent) && Array.isArray(publication.intent.stages) ? publication.intent.stages : [];
+        object(publication.intent) && EffectArray.isArray(publication.intent.stages) ? publication.intent.stages : [];
       const progress = object(publication.progress) ? publication.progress : {};
-      const rows = stages.slice(0, 3).map((stage: Json, index: number) => {
+      const rows = EffectArray.map(stages.slice(0, 3), (stage, index) => {
         const key = object(stage) ? stage.key : null;
         const receipt = typeof key === 'string' && object(progress[key]) ? progress[key] : {};
         return {
@@ -452,18 +518,18 @@ function runProfile(
         phase: 'persisted-after-finish-timeout',
         timeoutSeconds: closeoutFinishTimeoutMs / 1000,
         stdout: timeoutOutput,
-        producerRetainedShow: Array.isArray(producer.latestShow) && producer.latestShow.length > 0,
+        producerRetainedShow: EffectArray.isArray(producer.latestShow) && producer.latestShow.length > 0,
         native: {
           captureError,
           operations: operationCount,
           prepared:
             operationCount === null
               ? null
-              : operations.filter(item => object(item) && item.status === 'prepared').length,
+              : EffectArray.filter(operations, item => object(item) && item.status === 'prepared').length,
           verified:
             operationCount === null
               ? null
-              : operations.filter(item => object(item) && item.status === 'verified').length,
+              : EffectArray.filter(operations, item => object(item) && item.status === 'verified').length,
           lastOperationInArray: {
             ordinal: operations.length ? operations.length - 1 : null,
             status: closedStatus(last.status, ['prepared', 'verified']),
@@ -480,19 +546,19 @@ function runProfile(
           publicationSaved: object(closeout.publication),
         },
         publication: {read: publicationRead, stages: rows},
-        producer: Object.fromEntries(
-          [
-            'events',
-            'corrupt',
-            'unusedOrMissingSlots',
-            'exceptions',
-            'orphanResults',
-            'unmatchedStarts',
-            'unforwardedResults',
-          ].map(key => [
-            key,
-            Number.isInteger(counts[key]) && counts[key] >= 0 && counts[key] <= 128 ? counts[key] : null,
-          ]),
+        producer: EffectRecord.fromEntries(
+          EffectArray.map(
+            [
+              'events',
+              'corrupt',
+              'unusedOrMissingSlots',
+              'exceptions',
+              'orphanResults',
+              'unmatchedStarts',
+              'unforwardedResults',
+            ],
+            key => [key, Number.isInteger(counts[key]) && counts[key] >= 0 && counts[key] <= 128 ? counts[key] : null],
+          ),
         ),
       };
       const prefix = 'NATIVE_CLOSEOUT_TIMEOUT_DIAGNOSTICS ';
@@ -536,8 +602,8 @@ function runProfile(
       }
     }
     const intent = object(publication?.intent) ? publication.intent : {};
-    const rawStages: Json[] = Array.isArray(intent.stages) ? intent.stages : [];
-    const rawNodes: Json[] = Array.isArray(intent.nodes) ? intent.nodes : [];
+    const rawStages = EffectArray.isArray(intent.stages) ? intent.stages : [];
+    const rawNodes = EffectArray.isArray(intent.nodes) ? intent.nodes : [];
     const progress = object(publication?.progress) ? publication.progress : {};
     const binding = object(bindingJournal?.binding) ? bindingJournal.binding : {};
     const expectedRemote = binding.remote,
@@ -545,22 +611,29 @@ function runProfile(
     const finalReceipts: Json[] = [];
     const nodeKeys = [
       ...new Set(
-        rawNodes
-          .slice(0, 3)
-          .flatMap(node =>
-            object(node) && object(node.input) && typeof node.input.key === 'string' ? [node.input.key] : [],
-          ),
+        EffectArray.flatMap(rawNodes.slice(0, 3), node =>
+          object(node) && object(node.input) && typeof node.input.key === 'string' ? [node.input.key] : [],
+        ),
       ),
     ];
     for (const nodeKey of nodeKeys.slice(0, 3)) {
-      const node = rawNodes.slice(0, 3).find(item => object(item) && object(item.input) && item.input.key === nodeKey)!;
-      const stage = [...rawStages.slice(0, 3)].reverse().find(item => object(item) && item.nodeKey === nodeKey);
-      if (!object(stage)) continue;
+      const node = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          rawNodes.slice(0, 3),
+          item => object(item) && object(item.input) && item.input.key === nodeKey,
+        ),
+      );
+      const stage = EffectOption.getOrUndefined(
+        EffectArray.findFirst([...rawStages.slice(0, 3)].reverse(), item => object(item) && item.nodeKey === nodeKey),
+      );
+      if (!object(node) || !object(stage)) continue;
       const stageKey = stage.key,
         prepared = object(node.prepared) ? node.prepared : {};
       const uri = prepared.memoryUri;
       const expectedPath =
-        typeof uri === 'string' && uri.includes('/shared/default/') ? uri.split('/shared/default/')[1] : null;
+        typeof uri === 'string' && Effect.pipe(uri, EffectString.includes('/shared/default/'))
+          ? Effect.pipe(uri, EffectString.split('/shared/default/'))[1]
+          : null;
       const expectedHash = typeof prepared.memory === 'string' ? hash(prepared.memory) : null;
       const stageProgress = typeof stageKey === 'string' && object(progress[stageKey]) ? progress[stageKey] : {};
       const receipt = object(stageProgress.verified) ? stageProgress.verified : {};
@@ -572,10 +645,11 @@ function runProfile(
         contentHashMatches: expectedHash !== null && receipt.contentHash === expectedHash,
       };
       checks.verifyFinalGraphPredicate =
-        Object.keys(receipt).length > 0 && Object.values(checks).every(value => value === true);
+        EffectRecord.keys(receipt).length > 0 &&
+        EffectArray.every(EffectRecord.values(checks), value => value === true);
       finalReceipts.push({
-        nodeKey: nodeKey.slice(0, 64),
-        stageKey: String(stageKey || '').slice(0, 96),
+        nodeKey: Effect.pipe(nodeKey, EffectString.slice(0, 64)),
+        stageKey: Effect.pipe(String(stageKey || ''), EffectString.slice(0, 96)),
         started: stageProgress.started === true,
         committedPresent: object(stageProgress.committed),
         verifiedPresent: object(stageProgress.verified),
@@ -588,7 +662,7 @@ function runProfile(
       if (!object(stage)) continue;
       const state = object(progress[stage.key]) ? progress[stage.key] : {};
       stageReceipts.push({
-        key: String(stage.key ?? '').slice(0, 96),
+        key: Effect.pipe(String(stage.key ?? ''), EffectString.slice(0, 96)),
         started: state.started === true,
         committed: object(state.committed),
         verified: object(state.verified),
@@ -617,13 +691,19 @@ function runProfile(
             result = error;
           }
           const {status, stdout, stderr} = result;
-          const errorText = stderr.toString('utf8').toLowerCase();
-          const failure = [
-            ['filename too long', 'path-too-long'],
-            ['invalid path', 'invalid-path'],
-            ['permission denied', 'permission-denied'],
-            ['index.lock', 'index-lock'],
-          ].find(([token]) => errorText.includes(token))?.[1];
+          const errorText = Effect.pipe(stderr.toString('utf8'), EffectString.toLowerCase);
+          const failure = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              [
+                ['filename too long', 'path-too-long'],
+                ['invalid path', 'invalid-path'],
+                ['permission denied', 'permission-denied'],
+                ['index.lock', 'index-lock'],
+              ],
+              __effectArrayValue =>
+                !!(([token]) => Effect.pipe(errorText, EffectString.includes(token)))(__effectArrayValue),
+            ),
+          )?.[1];
           return {
             status,
             stdout,
@@ -652,7 +732,7 @@ function runProfile(
           worktreeProbe[label] = {...result.detail, matches: result.status === 0 && result.stdout.equals(expected)};
         }
         const resolved = probeGit(['rev-parse', '--verify', 'HEAD']);
-        const revision = resolved.stdout.toString('ascii').trim();
+        const revision = Effect.pipe(resolved.stdout.toString('ascii'), EffectString.trim);
         if (resolved.status === 0 && /^[a-fA-F0-9]{40}(?:[a-fA-F0-9]{24})?$/.test(revision)) {
           const result = probeGit(['show', `${revision}:${relativePath}`]);
           worktreeProbe.fullSha = {...result.detail, matches: result.status === 0 && result.stdout.equals(expected)};
@@ -662,7 +742,7 @@ function runProfile(
           ['autocrlf', 'core.autocrlf'],
         ]) {
           const result = probeGit(['config', '--get', option]);
-          const value = result.stdout.toString('ascii').trim();
+          const value = Effect.pipe(result.stdout.toString('ascii'), EffectString.trim);
           worktreeProbe[label] = {
             ...result.detail,
             value: ['true', 'false', 'input', ''].includes(value) ? value : 'other',
@@ -675,9 +755,9 @@ function runProfile(
     const diagnostic: Json = {
       version: 1,
       profile,
-      bindingIdPrefix: typeof bindingId === 'string' ? bindingId.slice(0, 12) : null,
+      bindingIdPrefix: typeof bindingId === 'string' ? Effect.pipe(bindingId, EffectString.slice(0, 12)) : null,
       captureError,
-      closeoutCode: object(response) ? String(response.code ?? '').slice(0, 80) : null,
+      closeoutCode: object(response) ? Effect.pipe(String(response.code ?? ''), EffectString.slice(0, 80)) : null,
       finalReceipts: finalReceipts.slice(0, 3),
       stageReceipts,
       worktreeProbe,
@@ -696,7 +776,7 @@ function runProfile(
       marker = asciiJson({
         version: 1,
         profile,
-        bindingIdPrefix: typeof bindingId === 'string' ? bindingId.slice(0, 12) : null,
+        bindingIdPrefix: typeof bindingId === 'string' ? Effect.pipe(bindingId, EffectString.slice(0, 12)) : null,
         captureError: 'marker-overflow',
         finalReceiptCount: finalReceipts.length,
         producer,
@@ -800,7 +880,9 @@ function runProfile(
           );
         }
       }
-      throw new Error(`CLI request failed: ${JSON.stringify(value)}\n${stderr.slice(-2000)}`);
+      throw new Error(
+        `CLI request failed: ${JSON.stringify(value)}\n${Effect.pipe(stderr, EffectString.slice(-2000))}`,
+      );
     }
     return value;
   }
@@ -976,19 +1058,11 @@ function runProfile(
     ...(profile === 'desktop' ? {} : {team: 'default'}),
   });
   call({...common, action: 'graph-ready'});
-  const spec: Json = Object.fromEntries(
-    [
-      'format',
-      'schemaVersion',
-      'id',
-      'project',
-      'title',
-      'objective',
-      'requirements',
-      'context',
-      'source',
-      'review',
-    ].map(key => [key, plan[key]]),
+  const spec: Json = EffectRecord.fromEntries(
+    EffectArray.map(
+      ['format', 'schemaVersion', 'id', 'project', 'title', 'objective', 'requirements', 'context', 'source', 'review'],
+      key => [key, plan[key]],
+    ),
   );
   Object.assign(spec, {
     kind: 'spec',
@@ -1142,12 +1216,12 @@ function runProfile(
     ),
   ].sort();
   assert(ownedUris.length && !ownedUris.includes(unrelatedUri));
-  const ownedMemoryIds = Object.fromEntries(
+  const ownedMemoryIds = EffectRecord.fromEntries(
     beforeCloseoutInspect.operations
       .filter((operation: Json) => ownedUris.includes(operation.uri))
       .map((operation: Json) => [operation.uri, operation.memoryId]),
   );
-  assert.deepEqual(Object.keys(ownedMemoryIds).sort(), ownedUris);
+  assert.deepEqual(EffectRecord.keys(ownedMemoryIds).sort(), ownedUris);
   let decisionDocuments: string[],
     remoteHead: string | null = null;
   if (profile === 'desktop') {
@@ -1156,16 +1230,19 @@ function runProfile(
     assert.equal(closeoutSummary.owned, ownedUris.length);
     assert.equal(closeoutSummary.archived, ownedUris.length);
     assert.equal(readArtifact(unrelatedUri).state, 'active');
-    const outputs = Object.fromEntries(closeoutSummary.outputs.map((item: Json) => [item.key, item]));
+    const outputs = EffectRecord.fromEntries(closeoutSummary.outputs.map((item: Json) => [item.key, item]));
     const architectureRef = outputs.architecture,
       decisionIndexRef = outputs['decisions-0'];
     const architectureArtifact = readArtifact(architectureRef.uri);
     assert(architectureArtifact.body.includes(decisionIndexRef.uri));
     const decisionIndexDocument = structuredDocument(readArtifact(decisionIndexRef.uri));
     const decisionEntries = decisionIndexDocument.sections.find((section: Json) => section.id === 'entries').body;
-    const decisionUris = [...decisionEntries.matchAll(/^-\s*(threadnote:\/\/\S+)$/gm)].map(match => match[1]);
+    const decisionUris = EffectArray.map(
+      [...decisionEntries.matchAll(/^-\s*(threadnote:\/\/\S+)$/gm)],
+      match => match[1],
+    );
     assert.equal(decisionUris.length, plan.decisions.length, JSON.stringify(decisionUris));
-    decisionDocuments = decisionUris.map(uri => readArtifact(uri).body);
+    decisionDocuments = EffectArray.map(decisionUris, uri => readArtifact(uri).body);
     const historyUris = new Set<string>([outputs['history-0'].uri]),
       seenHistoryUris = new Set<string>();
     const archiveDestinations: Record<string, string> = {};
@@ -1184,8 +1261,8 @@ function runProfile(
         } else if (line.startsWith('Next: threadnote://')) historyUris.add(line.slice('Next: '.length).trim());
       }
     }
-    assert.deepEqual(Object.keys(archiveDestinations).sort(), ownedUris);
-    assert.equal(new Set(Object.values(archiveDestinations)).size, ownedUris.length);
+    assert.deepEqual(EffectRecord.keys(archiveDestinations).sort(), ownedUris);
+    assert.equal(new Set(EffectRecord.values(archiveDestinations)).size, ownedUris.length);
     for (const sourceUri of ownedUris) {
       const archived = readArtifact(archiveDestinations[sourceUri]);
       assert.equal(archived.state, 'archived');
@@ -1199,7 +1276,7 @@ function runProfile(
         ...common,
         action: 'closeout',
         command: 'publication-approve',
-        approvalDigest: '0'.repeat(64),
+        approvalDigest: Effect.pipe('0', EffectString.repeat(64)),
         decision: 'approve',
         approvalEvidence: 'Synthetic wrong-digest rejection fixture.',
       },
@@ -1219,18 +1296,29 @@ function runProfile(
     assert.equal(closeoutSummary.owned, ownedUris.length);
     assert.equal(closeoutSummary.archived, ownedUris.length);
     assert.equal(readArtifact(unrelatedUri).state, 'active');
-    const extensions = process.platform === 'win32' ? (environment.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';') : [''];
-    const memoryReader = (environment.PATH ?? '')
-      .split(delimiter)
-      .flatMap(directory => extensions.map(extension => join(directory, `memory-read${extension}`)))
-      .find(path => {
-        try {
-          accessSync(path, constants.X_OK);
-          return statSync(path).isFile();
-        } catch {
-          return false;
-        }
-      });
+    const extensions =
+      process.platform === 'win32'
+        ? Effect.pipe(environment.PATHEXT ?? '.COM;.EXE;.BAT;.CMD', EffectString.split(';'))
+        : [''];
+    const memoryReader = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(
+          (environment.PATH ?? '')
+            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+            .split(delimiter),
+          directory => EffectArray.map(extensions, extension => join(directory, `memory-read${extension}`)),
+        ),
+        __effectArrayValue =>
+          !!(path => {
+            try {
+              accessSync(path, constants.X_OK);
+              return statSync(path).isFile();
+            } catch {
+              return false;
+            }
+          })(__effectArrayValue),
+      ),
+    );
     assert(memoryReader, 'The isolated native memory reader must be available');
     const remoteBodies: Record<string, string> = {};
     for (const node of publication.nodes) {
@@ -1241,15 +1329,16 @@ function runProfile(
       assert.equal(hash(durableBody), node.bodySha256);
       assert.equal(durableBody, `${node.body.trim()}\n`);
       for (const forbidden of [fixture, home, '.context', '.closeout.json', ...ownedUris])
-        assert(!raw.includes(forbidden), forbidden);
+        assert(!Effect.pipe(raw, EffectString.includes(forbidden)), forbidden);
       remoteBodies[node.key] = durableBody;
     }
-    assert(remoteBodies.spec.includes(spec.scenarios[0].given));
+    assert(Effect.pipe(remoteBodies.spec, EffectString.includes(spec.scenarios[0].given)));
     decisionDocuments = [remoteBodies.architecture];
     const receipt = jsonFile(join(home, 'workflow-automations', 'native-v1', `${runId}.json.closeout.json`));
-    assert.deepEqual(Object.keys(receipt.archives).sort(), ownedUris);
+    assert(object(receipt.archives));
+    assert.deepEqual(EffectRecord.keys(receipt.archives).sort(), ownedUris);
     assert.equal(
-      new Set(Object.values(receipt.archives as Record<string, Json>).map(item => item.uri)).size,
+      new Set(EffectArray.map(EffectRecord.values(receipt.archives), item => item.uri)).size,
       ownedUris.length,
     );
     for (const uri of ownedUris) {
@@ -1258,24 +1347,29 @@ function runProfile(
       assert.equal(archived.memoryId, ownedMemoryIds[uri]);
       assert.equal(archived.memoryId, receipt.archives[uri].memoryId);
     }
-    remoteHead = run(['git', '-C', remote!, 'rev-parse', 'main']).trim();
+    remoteHead = Effect.pipe(run(['git', '-C', remote!, 'rev-parse', 'main']), EffectString.trim);
   }
   for (const planned of plan.decisions) {
     const actual = actualDecisions[planned.id],
-      matching = decisionDocuments.filter(body => body.includes(planned.id));
+      matching = EffectArray.filter(decisionDocuments, body => Effect.pipe(body, EffectString.includes(planned.id)));
     assert.equal(matching.length, 1, planned.id);
     const body = matching[0];
     for (const value of [planned.selected, planned.rationale, actual.implemented, actual.rationale])
-      assert(body.includes(value));
+      assert(Effect.pipe(body, EffectString.includes(value)));
     for (const alternative of planned.alternatives)
-      assert(body.includes(alternative.design) && body.includes(alternative.tradeoffs));
+      assert(
+        Effect.pipe(body, EffectString.includes(alternative.design)) &&
+          Effect.pipe(body, EffectString.includes(alternative.tradeoffs)),
+      );
   }
   const receiptPath = join(home, 'workflow-automations', 'native-v1', `${runId}.json.closeout.json`),
     receiptBytes = readFileSync(receiptPath);
   assert.equal(call({...common, action: 'closeout', command: 'inspect'}).closeout.state, 'complete');
   assert.equal(call({...common, action: 'closeout', command: 'finish'}).closeout.state, 'complete');
   assert(readFileSync(receiptPath).equals(receiptBytes));
-  if (remote !== null) assert.equal(run(['git', '-C', remote, 'rev-parse', 'main']).trim(), remoteHead);
+  if (remote !== null)
+    assert.equal(Effect.pipe(run(['git', '-C', remote, 'rev-parse', 'main']), EffectString.trim), remoteHead);
+  assert(EffectArray.isArray(plan.decisions));
   if (profile === 'desktop') {
     const jobCommon = {protocolVersion: 1, executorVersion: 1, runId: 'extracted-job-smoke', generation};
     const jobStates = ['accepted', 'running', 'completed', 'failed', 'blocked-with-progress', 'stopped-with-progress'];
@@ -1413,7 +1507,7 @@ function runProfile(
     privateHome: home,
     ownedDraftsArchived: ownedUris.length,
     unrelatedArtifactPreserved: true,
-    completeDecisionReadback: plan.decisions.length as number,
+    completeDecisionReadback: plan.decisions.length,
     profile,
     specConfirmationAndBinding: true,
     profileBootstrap: remote === null ? 'not-applicable' : 'actual-cli',

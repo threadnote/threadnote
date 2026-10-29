@@ -1,6 +1,10 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Deferred, Effect, Exit, Fiber} from 'effect';
+import {Cause, Deferred, Effect, Exit, Fiber, Layer, Schema} from 'effect';
+import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
+import * as SqlClient from 'effect/sql/SqlClient';
+import {SqlError} from 'effect/sql/SqlError';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {
@@ -11,7 +15,6 @@ import {
   exportCodeGraph,
   type CodeGraphExportFormat,
   type CodeGraphExportLimit,
-  type CodeGraphExportSummary,
 } from '@threadnote/graph/export';
 import {
   CodeGraphStore,
@@ -19,18 +22,45 @@ import {
   type CodeGraphStoreShape,
   type CodeGraphSymbolCursor,
 } from '@threadnote/graph/store';
+import {CodeGraphStoreError} from '@threadnote/graph/types';
 import type {CodeGraphEdge, CodeGraphSnapshot, CodeGraphSymbol} from '@threadnote/graph/types';
+
+const ExportPayloadSchema = Schema.Struct({
+  edges: Schema.Array(Schema.Struct({id: Schema.String})),
+  nodes: Schema.Array(Schema.Struct({id: Schema.String, name: Schema.String})),
+  summary: Schema.Struct({
+    edges: Schema.Struct({
+      available: Schema.Finite,
+      omitted: Schema.Finite,
+      scanned: Schema.Finite,
+      truncated: Schema.Boolean,
+      written: Schema.Finite,
+    }),
+    format: Schema.String,
+    limits: Schema.Struct({
+      edgeLimit: Schema.Union([Schema.Finite, Schema.Literal('all')]),
+      nodeLimit: Schema.Union([Schema.Finite, Schema.Literal('all')]),
+    }),
+    nodes: Schema.Struct({
+      available: Schema.Finite,
+      supplemental: Schema.Finite,
+      truncated: Schema.Boolean,
+      written: Schema.Finite,
+    }),
+    provenanceCounts: Schema.Record(Schema.String, Schema.Finite),
+    warnings: Schema.Array(Schema.String),
+  }),
+});
 
 describe('portable code graph exports', () => {
   effectIt.effect('streams versioned JSON with explicit limits, provenance, and sensitivity metadata', () =>
     Effect.gen(function* () {
       const fixture = exportFixture();
       const result = yield* captureExport('json', fixture, {edgeLimit: 2, nodeLimit: 2, pageSize: 1});
-      const parsed = JSON.parse(result.output) as Record<string, unknown> & {
-        edges: CodeGraphEdge[];
-        nodes: CodeGraphSymbol[];
-        summary: CodeGraphExportSummary;
-      };
+      const parsedValue: unknown = JSON.parse(result.output);
+      expect(Schema.is(ExportPayloadSchema)(parsedValue)).toBe(true);
+      if (!Schema.is(ExportPayloadSchema)(parsedValue)) return yield* Effect.die('Invalid code graph export JSON.');
+      const parsed = parsedValue;
 
       expect(parsed).toMatchObject({
         canonical: false,
@@ -45,15 +75,15 @@ describe('portable code graph exports', () => {
         type: 'threadnote-code-graph-export',
         version: CODE_GRAPH_EXPORT_VERSION,
       });
-      expect(parsed.nodes.map(node => node.id)).toEqual(['node-a', 'node-b']);
+      expect(EffectArray.map(parsed.nodes, node => node.id)).toEqual(['node-a', 'node-b']);
       expect(parsed.nodes[0].name).toBe(`Alpha <unsafe>&"'\u0000`);
-      expect(parsed.edges.map(edge => edge.id)).toEqual(['edge-a', 'edge-b']);
+      expect(EffectArray.map(parsed.edges, edge => edge.id)).toEqual(['edge-a', 'edge-b']);
       expect(parsed.summary).toMatchObject({
         edges: {available: 3, omitted: 0, scanned: 2, truncated: true, written: 2},
         nodes: {available: 3, truncated: true, written: 2},
         provenanceCounts: {declared: 1, heuristic: 1, model: 0, resolved: 0, syntactic: 0},
       });
-      expect(parsed.summary.warnings.join('\n')).toContain('Source-sensitive export');
+      expect(EffectArray.join(parsed.summary.warnings, '\n')).toContain('Source-sensitive export');
       expect(fixture.nodePageSizes).toEqual([1, 1]);
       expect(fixture.edgePageSizes).toEqual([1, 1]);
       expect(fixture.leases).toEqual({acquired: 1, released: 1});
@@ -130,14 +160,17 @@ describe('portable code graph exports', () => {
     Effect.gen(function* () {
       const fixture = exportFixture();
       let writes = 0;
-      const failure = yield* exportCodeGraph({
-        databasePath: '/graph.sqlite',
-        format: 'svg',
-        nodeLimit: Number.MAX_SAFE_INTEGER + 1,
-        repository: {displayName: 'acme/repo', repositoryId: 'repository'},
-        snapshotId: fixture.snapshot.id,
-        write: () => Effect.sync(() => void (writes += 1)),
-      }).pipe(Effect.provideService(CodeGraphStore, fixture.store), Effect.flip);
+      const failure = yield* provideStore(
+        exportCodeGraph({
+          databasePath: '/graph.sqlite',
+          format: 'svg',
+          nodeLimit: Number.MAX_SAFE_INTEGER + 1,
+          repository: {displayName: 'acme/repo', repositoryId: 'repository'},
+          snapshotId: fixture.snapshot.id,
+          write: () => Effect.sync(() => void (writes += 1)),
+        }),
+        fixture.store,
+      ).pipe(Effect.flip);
       expect(failure).toBeInstanceOf(CodeGraphExportError);
 
       expect(writes).toBe(0);
@@ -159,7 +192,7 @@ describe('portable code graph exports', () => {
         edges: {scanned: 3, written: 2},
         nodes: {written: 3},
       });
-      expect(result.summary.warnings.join('\n')).toContain('Large SVG overviews');
+      expect(EffectArray.join(result.summary.warnings, '\n')).toContain('Large SVG overviews');
     }),
   );
 
@@ -176,7 +209,7 @@ describe('portable code graph exports', () => {
         edges: {available: 3, scanned: 3, written: 2},
         nodes: {available: 3, written: 3},
       });
-      expect(result.summary.warnings.join('\n')).toContain('Complete snapshot selection');
+      expect(EffectArray.join(result.summary.warnings, '\n')).toContain('Complete snapshot selection');
     }),
   );
 
@@ -187,25 +220,28 @@ describe('portable code graph exports', () => {
         format => {
           const fixture = exportFixture();
           const chunks: string[] = [];
-          return exportCodeGraph({
-            databasePath: '/graph.sqlite',
-            format,
-            repository: {displayName: 'acme/repo', repositoryId: 'repository'},
-            snapshotId: fixture.snapshot.id,
-            write: chunk => Effect.sync(() => void chunks.push(chunk)),
-          }).pipe(Effect.provideService(CodeGraphStore, fixture.store));
+          return provideStore(
+            exportCodeGraph({
+              databasePath: '/graph.sqlite',
+              format,
+              repository: {displayName: 'acme/repo', repositoryId: 'repository'},
+              snapshotId: fixture.snapshot.id,
+              write: chunk => Effect.sync(() => void chunks.push(chunk)),
+            }),
+            fixture.store,
+          );
         },
         {concurrency: 'unbounded'},
       );
 
-      expect(summaries.map(summary => [summary.format, summary.limits])).toEqual([
+      expect(EffectArray.map(summaries, summary => [summary.format, summary.limits])).toEqual([
         ['json', {edgeLimit: 'all', nodeLimit: 'all'}],
         ['graphml', {edgeLimit: 'all', nodeLimit: 'all'}],
         ['html', {edgeLimit: 'all', nodeLimit: 'all'}],
         ['svg', {edgeLimit: 1_000, nodeLimit: 300}],
       ]);
-      expect(summaries.slice(0, 3).every(summary => summary.nodes.written === 3)).toBe(true);
-      expect(summaries.slice(0, 3).every(summary => summary.edges.written === 3)).toBe(true);
+      expect(EffectArray.every(summaries.slice(0, 3), summary => summary.nodes.written === 3)).toBe(true);
+      expect(EffectArray.every(summaries.slice(0, 3), summary => summary.edges.written === 3)).toBe(true);
     }),
   );
 
@@ -213,17 +249,20 @@ describe('portable code graph exports', () => {
     Effect.gen(function* () {
       const fixture = exportFixture();
       let writes = 0;
-      const exit = yield* exportCodeGraph({
-        databasePath: '/graph.sqlite',
-        format: 'json',
-        repository: {displayName: 'acme/repo', repositoryId: 'repository'},
-        snapshotId: fixture.snapshot.id,
-        write: () =>
-          Effect.sync(() => {
-            writes += 1;
-            if (writes === 2) throw TestError.make({message: 'disk full'});
-          }),
-      }).pipe(Effect.provideService(CodeGraphStore, fixture.store), Effect.exit);
+      const exit = yield* provideStore(
+        exportCodeGraph({
+          databasePath: '/graph.sqlite',
+          format: 'json',
+          repository: {displayName: 'acme/repo', repositoryId: 'repository'},
+          snapshotId: fixture.snapshot.id,
+          write: () =>
+            Effect.sync(() => {
+              writes += 1;
+              if (writes === 2) throw TestError.make({message: 'disk full'});
+            }),
+        }),
+        fixture.store,
+      ).pipe(Effect.exit);
 
       expect(Exit.isFailure(exit)).toBe(true);
       if (Exit.isFailure(exit)) expect(String(Cause.squash(exit.cause))).toContain('disk full');
@@ -234,31 +273,36 @@ describe('portable code graph exports', () => {
   effectIt.effect('renews the snapshot lease while a complete export remains in progress', () =>
     Effect.gen(function* () {
       const fixture = exportFixture();
-      const writing = yield* Deferred.make<void>();
-      const resume = yield* Deferred.make<void>();
-      let first = true;
-      const fiber = yield* exportCodeGraph({
-        databasePath: '/graph.sqlite',
-        format: 'json',
-        repository: {displayName: 'acme/repo', repositoryId: 'repository'},
-        snapshotId: fixture.snapshot.id,
-        write: () =>
-          first
-            ? Effect.gen(function* () {
-                first = false;
-                yield* Deferred.succeed(writing, undefined);
-                yield* Deferred.await(resume);
-              })
-            : Effect.void,
-      }).pipe(Effect.provideService(CodeGraphStore, fixture.store), Effect.forkChild);
+      yield* provideStore(
+        Effect.gen(function* () {
+          const writing = yield* Deferred.make<void>();
+          const resume = yield* Deferred.make<void>();
+          let first = true;
+          const fiber = yield* exportCodeGraph({
+            databasePath: '/graph.sqlite',
+            format: 'json',
+            repository: {displayName: 'acme/repo', repositoryId: 'repository'},
+            snapshotId: fixture.snapshot.id,
+            write: () =>
+              first
+                ? Effect.gen(function* () {
+                    first = false;
+                    yield* Deferred.succeed(writing, undefined);
+                    yield* Deferred.await(resume);
+                  })
+                : Effect.void,
+          }).pipe(Effect.forkChild);
 
-      yield* Deferred.await(writing);
-      yield* TestClock.adjust(CODE_GRAPH_EXPORT_LEASE_RENEWAL_INTERVAL_MILLISECONDS + 1);
-      expect(fixture.leaseRenewals).toBe(1);
-      yield* Deferred.succeed(resume, undefined);
-      yield* Fiber.join(fiber);
+          yield* Deferred.await(writing);
+          yield* TestClock.adjust(CODE_GRAPH_EXPORT_LEASE_RENEWAL_INTERVAL_MILLISECONDS + 1);
+          expect(fixture.leaseRenewals).toBe(1);
+          yield* Deferred.succeed(resume, undefined);
+          yield* Fiber.join(fiber);
 
-      expect(fixture.leases).toEqual({acquired: 1, released: 1});
+          expect(fixture.leases).toEqual({acquired: 1, released: 1});
+        }),
+        fixture.store,
+      );
     }),
   );
 });
@@ -270,7 +314,7 @@ interface Fixture {
   readonly nodePageSizes: number[];
   readonly snapshot: CodeGraphSnapshot;
   snapshotReads: number;
-  store: CodeGraphStoreShape;
+  store: Partial<CodeGraphStoreShape>;
 }
 
 function exportFixture(): Fixture {
@@ -307,7 +351,7 @@ function exportFixture(): Fixture {
     nodePageSizes,
     snapshot,
     snapshotReads: 0,
-    store: undefined as unknown as CodeGraphStoreShape,
+    store: {},
   };
   fixture.store = {
     acquireSnapshotLease: () =>
@@ -323,7 +367,12 @@ function exportFixture(): Fixture {
     ) =>
       Effect.sync(() => {
         edgePageSizes.push(limit);
-        const start = cursor ? edges.findIndex(candidate => candidate.id === cursor.id) + 1 : 0;
+        const start = cursor
+          ? EffectOption.getOrElse(
+              EffectArray.findFirstIndex(edges, candidate => candidate.id === cursor.id),
+              () => -1,
+            ) + 1
+          : 0;
         return edges.slice(start, start + limit);
       }),
     loadSymbolPage: (
@@ -334,7 +383,12 @@ function exportFixture(): Fixture {
     ) =>
       Effect.sync(() => {
         nodePageSizes.push(limit);
-        const start = cursor ? nodes.findIndex(candidate => candidate.id === cursor.id) + 1 : 0;
+        const start = cursor
+          ? EffectOption.getOrElse(
+              EffectArray.findFirstIndex(nodes, candidate => candidate.id === cursor.id),
+              () => -1,
+            ) + 1
+          : 0;
         return nodes.slice(start, start + limit);
       }),
     readySnapshotById: () =>
@@ -344,9 +398,21 @@ function exportFixture(): Fixture {
       }),
     releaseSnapshotLease: () => Effect.sync(() => void (leases.released += 1)),
     renewSnapshotLease: () => Effect.sync(() => void (fixture.leaseRenewals += 1)),
-    withSession: <A, E, R>(_databasePath: string, effect: Effect.Effect<A, E, R>) => effect,
-  } as unknown as CodeGraphStoreShape;
+    withSession: <A, E, R>(_databasePath: string, effect: Effect.Effect<A, E, R | SqlClient.SqlClient>) =>
+      Effect.scoped(
+        Layer.build(SqliteClient.layer({filename: ':memory:'})).pipe(
+          Effect.flatMap(context => Effect.provide(effect, context)),
+          Effect.mapError(error => (Schema.is(SqlError)(error) ? CodeGraphStoreError.of(error.message) : error)),
+        ),
+      ),
+  };
   return fixture;
+}
+
+function provideStore<A, E>(effect: Effect.Effect<A, E, CodeGraphStore>, store: Partial<CodeGraphStoreShape>) {
+  return Effect.scoped(
+    Layer.build(Layer.mock(CodeGraphStore, store)).pipe(Effect.flatMap(context => Effect.provide(effect, context))),
+  );
 }
 
 function captureExport(
@@ -359,16 +425,16 @@ function captureExport(
   },
 ) {
   const chunks: string[] = [];
-  return exportCodeGraph({
+  const program = exportCodeGraph({
     databasePath: '/graph.sqlite',
     format,
     ...limits,
     repository: {displayName: 'acme/repo', repositoryId: 'repository'},
     snapshotId: fixture.snapshot.id,
     write: chunk => Effect.sync(() => void chunks.push(chunk)),
-  }).pipe(
-    Effect.provideService(CodeGraphStore, fixture.store),
-    Effect.map(summary => ({output: chunks.join(''), summary})),
+  });
+  return provideStore(program, fixture.store).pipe(
+    Effect.map(summary => ({output: EffectArray.join(chunks, ''), summary})),
   );
 }
 

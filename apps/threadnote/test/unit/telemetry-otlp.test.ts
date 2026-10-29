@@ -7,6 +7,9 @@ import {anonymousTelemetryLayer, withAnonymousTelemetry} from '@threadnote/threa
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('anonymous telemetry OTLP transport', () => {
   effectIt.effect('posts one traces-only protobuf envelope without private failure data', () => {
@@ -90,7 +93,7 @@ describe('anonymous telemetry OTLP transport', () => {
           expect(envelope.startTimeUnixNano).toBeGreaterThan(0n);
           expect(envelope.endTimeUnixNano).toBeGreaterThanOrEqual(envelope.startTimeUnixNano);
           expect(envelope.status).toEqual({code: 1});
-          expect(Object.keys(envelope.spanAttributes).sort()).toEqual([
+          expect(EffectRecord.keys(envelope.spanAttributes).sort()).toEqual([
             'error.type',
             'threadnote.component',
             'threadnote.duration_ms',
@@ -122,8 +125,9 @@ describe('anonymous telemetry OTLP transport', () => {
           });
           expect(envelope.spanAttributes['threadnote.invocation.id']).toMatch(/^tni_[\da-f]{24}$/u);
           expect(envelope.spanAttributes['threadnote.duration_ms']).toBeTypeOf('number');
-          for (const [key, value] of Object.entries(envelope.spanAttributes)) {
-            if (key.startsWith('threadnote.memory.')) expect(value).toMatch(TELEMETRY_MEMORY_BUCKET);
+          for (const [key, value] of EffectRecord.toEntries(envelope.spanAttributes)) {
+            if (Effect2.pipe(key, EffectString.startsWith('threadnote.memory.')))
+              expect(value).toMatch(TELEMETRY_MEMORY_BUCKET);
           }
           const protobufText = new TextDecoder().decode(requests[0].body);
           expect(protobufText).toContain('threadnote.anonymous-diagnostic');
@@ -307,7 +311,7 @@ function decodeAttributes(message: ProtoMessage, fieldNumber: number): Readonly<
     const entry = decodeProtoMessage(lengthDelimitedValue(field, fieldNumber));
     expect(fieldNumbers(entry)).toEqual([1, 2]);
     const key = stringField(entry, 1);
-    if (Object.hasOwn(attributes, key)) throw new Error(`Duplicate OTLP attribute: ${key}`);
+    if (EffectRecord.has(attributes, key)) throw new Error(`Duplicate OTLP attribute: ${key}`);
     const value = embeddedField(entry, 2);
     const valueFields = fieldNumbers(value);
     expect(valueFields).toHaveLength(1);

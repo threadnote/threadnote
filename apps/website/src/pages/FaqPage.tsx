@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {Icon} from '../components/Icons';
 import {SiteShell} from '../components/SiteShell';
 import {docsArticleHref, setDocumentMeta, siteHref} from '../lib/site';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const questions = [
   {
@@ -126,10 +129,10 @@ export default function FaqPage() {
           <h2>What teams ask before installing.</h2>
         </header>
         <div className="faq-list">
-          {questions.map((item, index) => (
+          {EffectArray.map(questions, (item, index) => (
             <details key={item.question} open={index === 0}>
               <summary>
-                <span>{String(index + 1).padStart(2, '0')}</span>
+                <span>{Effect.pipe(String(index + 1), EffectString.padStart(2, '0'))}</span>
                 <strong>{item.question}</strong>
                 <i aria-hidden="true" />
               </summary>

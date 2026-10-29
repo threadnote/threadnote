@@ -6,6 +6,8 @@ import {createActivationPlanV1} from '@threadnote/threadnote/activation/index';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const config: RuntimeConfig = {
   account: 'local',
@@ -38,15 +40,15 @@ const request = {
 };
 
 const plan = createActivationPlanV1({
-  catalogSnapshotHash: 'a'.repeat(64),
+  catalogSnapshotHash: Effect2.pipe('a', EffectString.repeat(64)),
   primarySurfaceId: 'codex',
   publicationMode: 'proposal',
-  repositoryIdentityHash: 'b'.repeat(64),
+  repositoryIdentityHash: Effect2.pipe('b', EffectString.repeat(64)),
   secondarySurfaceId: 'cursor',
-  selectedSourceSetHash: 'c'.repeat(64),
-  taskHash: 'd'.repeat(64),
+  selectedSourceSetHash: Effect2.pipe('c', EffectString.repeat(64)),
+  taskHash: Effect2.pipe('d', EffectString.repeat(64)),
   teamId: 'local-team',
-  teamShareStateHash: 'e'.repeat(64),
+  teamShareStateHash: Effect2.pipe('e', EffectString.repeat(64)),
   threadnoteVersion: 'test',
 });
 

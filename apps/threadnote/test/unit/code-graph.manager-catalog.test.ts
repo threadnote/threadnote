@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
@@ -7,7 +9,7 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {Clock, Deferred, Effect, Fiber, Layer, Option} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -48,6 +50,13 @@ import type {
   CodeGraphSymbol,
   RepositoryIdentity,
 } from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const temporaryRoots: string[] = [];
 const storeLayer = Layer.merge(CodeGraphStore.layer, TestCommandExecutorLayer).pipe(
@@ -122,7 +131,7 @@ describe('Manager logical repository and workspace catalogs', () => {
       Effect.gen(function* () {
         const root = temporaryRoot('threadnote-activation-timestamps-');
         const databasePath = join(root, 'graph-v3.sqlite');
-        const identity = repositoryIdentity(root, '1'.repeat(64));
+        const identity = repositoryIdentity(root, Effect2.pipe('1', EffectString.repeat(64)));
         const requested = readySnapshot(identity, 0, 0, 0, '2000-01-01T00:00:00.000Z');
 
         yield* Effect.gen(function* () {
@@ -130,8 +139,10 @@ describe('Manager logical repository and workspace catalogs', () => {
           yield* store.markBuilding(databasePath, identity, {...requested, completedAt: undefined, state: 'building'});
         }).pipe(provideTestLayer(storeLayer));
         const before = new Database(databasePath, {readonly: true});
-        const startedAt = (
-          before.query('SELECT started_at FROM snapshots WHERE id = ?').get(requested.id) as {started_at: string}
+        const startedAt = requiredRow(
+          before
+            .query<{started_at: string}, SQLQueryBindings[]>('SELECT started_at FROM snapshots WHERE id = ?')
+            .get(requested.id),
         ).started_at;
         before.close();
         yield* Effect.sleep(10);
@@ -149,9 +160,13 @@ describe('Manager logical repository and workspace catalogs', () => {
         }).pipe(provideTestLayer(storeLayer));
 
         const after = new Database(databasePath, {readonly: true});
-        const activated = after
-          .query('SELECT state, started_at, completed_at FROM snapshots WHERE id = ?')
-          .get(requested.id) as {completed_at: string; started_at: string; state: string};
+        const activated = requiredRow(
+          after
+            .query<{completed_at: string; started_at: string; state: string}, SQLQueryBindings[]>(
+              'SELECT state, started_at, completed_at FROM snapshots WHERE id = ?',
+            )
+            .get(requested.id),
+        );
         after.close();
         expect(activated).toMatchObject({started_at: startedAt, state: 'ready'});
         expect(activated.completed_at).not.toBe(requested.completedAt);
@@ -164,7 +179,7 @@ describe('Manager logical repository and workspace catalogs', () => {
     Effect.gen(function* () {
       const root = temporaryRoot('threadnote-incremental-staging-');
       const databasePath = join(root, 'graph-v3.sqlite');
-      const identity = repositoryIdentity(root, '1'.repeat(64));
+      const identity = repositoryIdentity(root, Effect2.pipe('1', EffectString.repeat(64)));
       const originalSymbol = symbol('symbol-original', 'src/value.ts', 'value', 'typescript');
       const originalFiles = fileFixtures([originalSymbol]);
       const base = readySnapshot(identity, 1, 1, 0, '2026-07-31T10:00:00.000Z');
@@ -212,11 +227,11 @@ describe('Manager logical repository and workspace catalogs', () => {
     Effect.gen(function* () {
       const root = temporaryRoot('threadnote-worktree-views-');
       const databasePath = join(root, 'graph-v3.sqlite');
-      const firstIdentity = repositoryIdentity(root, '2'.repeat(64));
+      const firstIdentity = repositoryIdentity(root, Effect2.pipe('2', EffectString.repeat(64)));
       const secondIdentity: RepositoryIdentity = {
         ...firstIdentity,
         headCommit: '1234567890abcdef1234567890abcdef12345678',
-        worktreeId: 'a'.repeat(64),
+        worktreeId: Effect2.pipe('a', EffectString.repeat(64)),
       };
       const first = readySnapshot(firstIdentity, 0, 0, 0, '2026-07-30T10:00:00.000Z');
       const second = readySnapshot(secondIdentity, 0, 0, 0, '2026-07-31T10:00:00.000Z');
@@ -230,11 +245,13 @@ describe('Manager logical repository and workspace catalogs', () => {
         return yield* store.loadVisualizationCatalogs(databasePath);
       }).pipe(provideTestLayer(storeLayer));
 
-      expect(catalogs.map(catalog => catalog.viewWorktreeId)).toEqual([
+      expect(EffectArray.map(catalogs, catalog => catalog.viewWorktreeId)).toEqual([
         secondIdentity.worktreeId,
         firstIdentity.worktreeId,
       ]);
-      expect(new Set(catalogs.map(catalog => catalog.snapshot.id))).toEqual(new Set([first.id, second.id]));
+      expect(new Set(EffectArray.map(catalogs, catalog => catalog.snapshot.id))).toEqual(
+        new Set([first.id, second.id]),
+      );
     }),
   );
 
@@ -244,7 +261,7 @@ describe('Manager logical repository and workspace catalogs', () => {
       Effect.gen(function* () {
         const root = temporaryRoot('threadnote-workspace-catalog-');
         const databasePath = join(root, 'graph-v3.sqlite');
-        const identity = repositoryIdentity(root, '1'.repeat(64));
+        const identity = repositoryIdentity(root, Effect2.pipe('1', EffectString.repeat(64)));
         const workspace = workspaceFixture();
         const symbols = symbolFixtures();
         const edges = edgeFixtures();
@@ -324,9 +341,20 @@ describe('Manager logical repository and workspace catalogs', () => {
         expect(result.aggregatesBuilt).toBe(true);
         expect(result.aggregatesReused).toBe(false);
         expect(result.catalog?.metrics).toBe('complete');
-        expect(result.catalog?.projects.filter(project => project.label === 'core').map(project => project.id)).toEqual(
-          ['cgp_component_a', 'cgp_component_b'],
-        );
+        expect(
+          Option.getOrUndefined(
+            Option.map(Option.fromNullishOr(result.catalog), __catalog => {
+              const __projects = __catalog.projects;
+              return EffectArray.map(
+                EffectArray.filter(
+                  __projects,
+                  (__project, __effectArrayIndex) => __effectArrayIndex in __projects && __project.label === 'core',
+                ),
+                __project => __project.id,
+              );
+            }),
+          ),
+        ).toEqual(['cgp_component_a', 'cgp_component_b']);
         expect(result.catalog?.projects).toContainEqual(
           expect.objectContaining({id: 'facet:unscoped-documentation', kind: 'documentation', model: 'facet'}),
         );
@@ -355,8 +383,14 @@ describe('Manager logical repository and workspace catalogs', () => {
             expect.objectContaining({id: 'facet:unscoped', symbolCount: 0}),
           ]),
         );
-        expect(result.unscoped.map(symbol => symbol.id)).toEqual(['symbol-doc']);
-        expect(result.unscopedCatalog?.projects.map(project => project.id)).toEqual(['facet:unscoped']);
+        expect(EffectArray.map(result.unscoped, symbol => symbol.id)).toEqual(['symbol-doc']);
+        expect(
+          Option.getOrUndefined(
+            Option.map(Option.fromNullishOr(result.unscopedCatalog?.projects), __effectArrayReceiver =>
+              EffectArray.map(__effectArrayReceiver, project => project.id),
+            ),
+          ),
+        ).toEqual(['facet:unscoped']);
         expect(result.scopeEdges).toEqual(
           expect.arrayContaining([
             expect.objectContaining({
@@ -389,21 +423,31 @@ describe('Manager logical repository and workspace catalogs', () => {
         expect(result.highFanElapsedMilliseconds).toBeLessThan(1_000);
         expect(result.representativeEdges.truncated).toBe(true);
         const representativeEndpoints = new Set(
-          result.representativeEdges.edges.flatMap(item => [item.sourceId, item.targetId]),
+          EffectArrayPipe(result.representativeEdges.edges, __effectFlatMapValues =>
+            EffectArray.flatMap(__effectFlatMapValues, (item, __effectFlatMapIndex) =>
+              __effectFlatMapIndex in __effectFlatMapValues ? [item.sourceId, item.targetId] : [],
+            ),
+          ),
         );
         expect([...representativeEndpoints]).toEqual(expect.arrayContaining(['symbol-a-1', 'symbol-a-2', 'symbol-b']));
         expect(result.representativeElapsedMilliseconds).toBeLessThan(1_000);
         const queryPlanDatabase = new Database(databasePath, {readonly: true});
-        const aggregateReceipt = queryPlanDatabase
-          .query(
-            `SELECT row_count, edge_count
+        const aggregateReceipt = requiredRow(
+          queryPlanDatabase
+            .query<{readonly edge_count: number; readonly row_count: number}, SQLQueryBindings[]>(
+              `SELECT row_count, edge_count
          FROM snapshot_component_edge_aggregate_receipts
          WHERE snapshot_id = ?`,
-          )
-          .get(snapshot.id) as {readonly edge_count: number; readonly row_count: number};
-        const persistedAggregateCount = queryPlanDatabase
-          .query('SELECT COUNT(*) AS count FROM snapshot_component_edge_aggregates WHERE snapshot_id = ?')
-          .get(snapshot.id) as {readonly count: number};
+            )
+            .get(snapshot.id),
+        );
+        const persistedAggregateCount = requiredRow(
+          queryPlanDatabase
+            .query<{readonly count: number}, SQLQueryBindings[]>(
+              'SELECT COUNT(*) AS count FROM snapshot_component_edge_aggregates WHERE snapshot_id = ?',
+            )
+            .get(snapshot.id),
+        );
         expect(aggregateReceipt.row_count).toBe(persistedAggregateCount.count);
         expect(aggregateReceipt.edge_count).toBe(3);
         const componentStatement = codeGraphVisualizationSymbolsQueryStatement(
@@ -413,9 +457,13 @@ describe('Manager logical repository and workspace catalogs', () => {
           157,
         );
         const queryPlan = queryPlanDatabase
-          .query(`EXPLAIN QUERY PLAN ${componentStatement.text}`)
-          .all(...componentStatement.parameters) as readonly {readonly detail: string}[];
-        expect(queryPlan.some(row => row.detail.includes('symbols_visualization_scope_v2'))).toBe(true);
+          .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${componentStatement.text}`)
+          .all(...componentStatement.parameters);
+        expect(
+          EffectArray.some(queryPlan, row =>
+            Effect2.pipe(row.detail, EffectString.includes('symbols_visualization_scope_v2')),
+          ),
+        ).toBe(true);
         const unscopedStatement = codeGraphVisualizationSymbolsQueryStatement(
           snapshot.id,
           undefined,
@@ -423,9 +471,13 @@ describe('Manager logical repository and workspace catalogs', () => {
           20,
         );
         const unscopedPlan = queryPlanDatabase
-          .query(`EXPLAIN QUERY PLAN ${unscopedStatement.text}`)
-          .all(...unscopedStatement.parameters) as readonly {readonly detail: string}[];
-        expect(unscopedPlan.some(row => row.detail.includes('symbols_visualization_scope_v2'))).toBe(true);
+          .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${unscopedStatement.text}`)
+          .all(...unscopedStatement.parameters);
+        expect(
+          EffectArray.some(unscopedPlan, row =>
+            Effect2.pipe(row.detail, EffectString.includes('symbols_visualization_scope_v2')),
+          ),
+        ).toBe(true);
         const packageStatement = codeGraphVisualizationSymbolsQueryStatement(
           snapshot.id,
           undefined,
@@ -433,9 +485,13 @@ describe('Manager logical repository and workspace catalogs', () => {
           20,
         );
         const packagePlan = queryPlanDatabase
-          .query(`EXPLAIN QUERY PLAN ${packageStatement.text}`)
-          .all(...packageStatement.parameters) as readonly {readonly detail: string}[];
-        expect(packagePlan.some(row => row.detail.includes('symbols_visualization_package_v2'))).toBe(true);
+          .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${packageStatement.text}`)
+          .all(...packageStatement.parameters);
+        expect(
+          EffectArray.some(packagePlan, row =>
+            Effect2.pipe(row.detail, EffectString.includes('symbols_visualization_package_v2')),
+          ),
+        ).toBe(true);
         const pathStatement = codeGraphVisualizationSymbolsQueryStatement(
           snapshot.id,
           undefined,
@@ -443,9 +499,13 @@ describe('Manager logical repository and workspace catalogs', () => {
           20,
         );
         const pathPlan = queryPlanDatabase
-          .query(`EXPLAIN QUERY PLAN ${pathStatement.text}`)
-          .all(...pathStatement.parameters) as readonly {readonly detail: string}[];
-        expect(pathPlan.some(row => row.detail.includes('symbols_visualization_path_v2'))).toBe(true);
+          .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${pathStatement.text}`)
+          .all(...pathStatement.parameters);
+        expect(
+          EffectArray.some(pathPlan, row =>
+            Effect2.pipe(row.detail, EffectString.includes('symbols_visualization_path_v2')),
+          ),
+        ).toBe(true);
         const repositoryStatement = codeGraphVisualizationSymbolsQueryStatement(
           snapshot.id,
           undefined,
@@ -453,8 +513,8 @@ describe('Manager logical repository and workspace catalogs', () => {
           157,
         );
         const repositoryPlan = queryPlanDatabase
-          .query(`EXPLAIN QUERY PLAN ${repositoryStatement.text}`)
-          .all(...repositoryStatement.parameters) as readonly {readonly detail: string}[];
+          .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${repositoryStatement.text}`)
+          .all(...repositoryStatement.parameters);
         queryPlanDatabase.run(
           `CREATE TEMP TABLE ${COMPONENT_SCOPE_TEMP_TABLE} (
         id TEXT PRIMARY KEY NOT NULL,
@@ -463,14 +523,26 @@ describe('Manager logical repository and workspace catalogs', () => {
         );
         const aggregateStatement = componentEdgeAggregateMaterializationStatement(snapshot.id, undefined);
         const aggregatePlan = queryPlanDatabase
-          .query(`EXPLAIN QUERY PLAN ${aggregateStatement.text}`)
-          .all(...aggregateStatement.parameters) as readonly {readonly detail: string}[];
-        expect(aggregatePlan.some(row => row.detail.includes(`SCAN ${COMPONENT_SCOPE_TEMP_TABLE}`))).toBe(false);
+          .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${aggregateStatement.text}`)
+          .all(...aggregateStatement.parameters);
         expect(
-          aggregatePlan.filter(row => /^SEARCH (?:source|target) USING PRIMARY KEY \(id=\?\)$/u.test(row.detail)),
+          EffectArray.some(aggregatePlan, row =>
+            Effect2.pipe(row.detail, EffectString.includes(`SCAN ${COMPONENT_SCOPE_TEMP_TABLE}`)),
+          ),
+        ).toBe(false);
+        expect(
+          EffectArray.filter(
+            aggregatePlan,
+            (row, index) =>
+              index in aggregatePlan && /^SEARCH (?:source|target) USING PRIMARY KEY \(id=\?\)$/u.test(row.detail),
+          ),
         ).toHaveLength(2);
         queryPlanDatabase.close();
-        expect(repositoryPlan.some(row => row.detail.includes('symbols_export_order (snapshot_id=?)'))).toBe(true);
+        expect(
+          EffectArray.some(repositoryPlan, row =>
+            Effect2.pipe(row.detail, EffectString.includes('symbols_export_order (snapshot_id=?)')),
+          ),
+        ).toBe(true);
 
         const previousBetaDatabase = new Database(databasePath);
         previousBetaDatabase.run('DROP INDEX symbols_visualization_scope_v2');
@@ -496,24 +568,42 @@ describe('Manager logical repository and workspace catalogs', () => {
             unscoped: store.loadVisualizationSymbols(databasePath, snapshot.id, {type: 'unscoped'}, 20),
           });
         }).pipe(provideTestLayer(storeLayer));
-        expect(previousBetaReads.component.map(item => item.id)).toEqual(['symbol-a-1', 'symbol-a-2']);
-        expect(previousBetaReads.package.map(item => item.id)).toEqual(['symbol-root-ts']);
-        expect(previousBetaReads.path.map(item => item.id)).toEqual(['symbol-script']);
-        expect(previousBetaReads.unscoped.map(item => item.id)).toEqual(
+        expect(EffectArray.map(previousBetaReads.component, item => item.id)).toEqual(['symbol-a-1', 'symbol-a-2']);
+        expect(EffectArray.map(previousBetaReads.package, item => item.id)).toEqual(['symbol-root-ts']);
+        expect(EffectArray.map(previousBetaReads.path, item => item.id)).toEqual(['symbol-script']);
+        expect(EffectArray.map(previousBetaReads.unscoped, item => item.id)).toEqual(
           expect.arrayContaining(['symbol-doc', 'symbol-root-ts', 'symbol-script']),
         );
       }),
   );
 
   it('groups checkouts only by logical repository identity and defaults to the newest activation', () => {
-    const older = catalogFixture('logical-a', 'Same display', '2026-07-30T10:00:00.000Z', 90_000, '1'.repeat(64));
-    const newer = catalogFixture('logical-a', 'Same display', '2026-07-31T10:00:00.000Z', 10, '2'.repeat(64));
-    const collision = catalogFixture('logical-b', 'Same display', '2026-07-29T10:00:00.000Z', 100_000, '3'.repeat(64));
+    const older = catalogFixture(
+      'logical-a',
+      'Same display',
+      '2026-07-30T10:00:00.000Z',
+      90_000,
+      Effect2.pipe('1', EffectString.repeat(64)),
+    );
+    const newer = catalogFixture(
+      'logical-a',
+      'Same display',
+      '2026-07-31T10:00:00.000Z',
+      10,
+      Effect2.pipe('2', EffectString.repeat(64)),
+    );
+    const collision = catalogFixture(
+      'logical-b',
+      'Same display',
+      '2026-07-29T10:00:00.000Z',
+      100_000,
+      Effect2.pipe('3', EffectString.repeat(64)),
+    );
     const groups = groupManagerGraphRepositories([
-      {catalog: older, checkoutId: 'a'.repeat(64)},
+      {catalog: older, checkoutId: Effect2.pipe('a', EffectString.repeat(64))},
       {
         catalog: newer,
-        checkoutId: 'b'.repeat(64),
+        checkoutId: Effect2.pipe('b', EffectString.repeat(64)),
         localAssociation: {
           available: true,
           displayPath: '~/src/current',
@@ -521,18 +611,24 @@ describe('Manager logical repository and workspace catalogs', () => {
           state: 'verified',
         },
       },
-      {catalog: collision, checkoutId: 'c'.repeat(64)},
+      {catalog: collision, checkoutId: Effect2.pipe('c', EffectString.repeat(64))},
     ]);
 
     expect(groups).toHaveLength(2);
-    expect(groups.map(group => group.repositoryId)).toEqual(['logical-a', 'logical-b']);
+    expect(EffectArray.map(groups, group => group.repositoryId)).toEqual(['logical-a', 'logical-b']);
     expect(groups[0]).toMatchObject({
-      defaultViewId: `${'b'.repeat(64)}.${'2'.repeat(64)}`,
+      defaultViewId: `${Effect2.pipe('b', EffectString.repeat(64))}.${Effect2.pipe('2', EffectString.repeat(64))}`,
       displayName: 'Same display',
     });
-    expect(groups[0]?.views.map(view => view.id)).toEqual([
-      `${'b'.repeat(64)}.${'2'.repeat(64)}`,
-      `${'a'.repeat(64)}.${'1'.repeat(64)}`,
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(groups[0]?.views), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, view => view.id),
+        ),
+      ),
+    ).toEqual([
+      `${Effect2.pipe('b', EffectString.repeat(64))}.${Effect2.pipe('2', EffectString.repeat(64))}`,
+      `${Effect2.pipe('a', EffectString.repeat(64))}.${Effect2.pipe('1', EffectString.repeat(64))}`,
     ]);
     expect(groups[0]?.views[0]?.label).toBe('abcdef01 · clean · indexed 2026-07-31 10:00Z');
     expect(groups[0]?.views[0]?.localAssociation).toMatchObject({
@@ -546,7 +642,7 @@ describe('Manager logical repository and workspace catalogs', () => {
     Effect.gen(function* () {
       const root = temporaryRoot('threadnote-bazel-catalog-');
       const databasePath = join(root, 'graph-v3.sqlite');
-      const identity = repositoryIdentity(root, '9'.repeat(64));
+      const identity = repositoryIdentity(root, Effect2.pipe('9', EffectString.repeat(64)));
       const snapshot = readySnapshot(identity, 5_000, 5_000, 4_999, '2026-08-01T12:00:00.000Z');
       yield* Effect.gen(function* () {
         const store = yield* CodeGraphStore;
@@ -598,7 +694,7 @@ describe('Manager logical repository and workspace catalogs', () => {
       );
       database.transaction(() => {
         for (let index = 1; index < 130; index += 1) {
-          const suffix = index.toString().padStart(3, '0');
+          const suffix = Effect2.pipe(index.toString(), EffectString.padStart(3, '0'));
           insertWorkspace.run(
             snapshot.id,
             `cgw_bazel_${suffix}`,
@@ -610,7 +706,7 @@ describe('Manager logical repository and workspace catalogs', () => {
           );
         }
         for (let index = 0; index < 5_000; index += 1) {
-          const suffix = index.toString().padStart(5, '0');
+          const suffix = Effect2.pipe(index.toString(), EffectString.padStart(5, '0'));
           insertComponent.run(
             snapshot.id,
             `cgp_bazel_${suffix}`,
@@ -631,9 +727,9 @@ describe('Manager logical repository and workspace catalogs', () => {
             insertDependency.run(
               snapshot.id,
               `cgp_bazel_${suffix}`,
-              `cgp_bazel_${(index - 1).toString().padStart(5, '0')}`,
+              `cgp_bazel_${Effect2.pipe((index - 1).toString(), EffectString.padStart(5, '0'))}`,
               'declared',
-              `discarded-evidence-${'x'.repeat(2_048)}`,
+              `discarded-evidence-${Effect2.pipe('x', EffectString.repeat(2_048))}`,
             );
           }
           if (index < 500) {
@@ -658,7 +754,7 @@ describe('Manager logical repository and workspace catalogs', () => {
               '{"column":1,"endColumn":2,"endLine":1,"line":1}',
             );
             if (index > 0) {
-              const previousSuffix = (index - 1).toString().padStart(5, '0');
+              const previousSuffix = Effect2.pipe((index - 1).toString(), EffectString.padStart(5, '0'));
               insertEdge.run(
                 snapshot.id,
                 `edge-bazel-${suffix}`,
@@ -741,7 +837,10 @@ describe('Manager logical repository and workspace catalogs', () => {
         return yield* store.loadVisualizationScopeEdgeSummary(
           databasePath,
           snapshot.id,
-          Array.from({length: 5_000}, (_, index) => `cgp_bazel_${index.toString().padStart(5, '0')}`),
+          Array.from(
+            {length: 5_000},
+            (_, index) => `cgp_bazel_${Effect2.pipe(index.toString(), EffectString.padStart(5, '0'))}`,
+          ),
           1_500,
         );
       }).pipe(provideTestLayer(storeLayer));
@@ -750,25 +849,64 @@ describe('Manager logical repository and workspace catalogs', () => {
       expect(catalog?.projects).toHaveLength(160);
       expect(catalog?.workspaces).toHaveLength(64);
       expect(catalog?.workspacesTruncated).toBe(true);
-      expect(catalog?.projects.every(project => project.dependencies.length === 0)).toBe(true);
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(catalog?.projects), __effectArrayReceiver =>
+            EffectArray.every(__effectArrayReceiver, project => project.dependencies.length === 0),
+          ),
+        ),
+      ).toBe(true);
       expect(payload).not.toContain('discarded-evidence');
       expect(new TextEncoder().encode(payload).byteLength).toBeLessThan(100_000);
       expect(elapsedMilliseconds).toBeLessThan(1_500);
-      expect(detailCatalog?.projects.map(project => project.id)).toEqual(['cgp_bazel_04999']);
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(detailCatalog?.projects), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, project => project.id),
+          ),
+        ),
+      ).toEqual(['cgp_bazel_04999']);
       expect(detailElapsedMilliseconds).toBeLessThan(500);
       expect(catalogContinuation?.projects).toHaveLength(160);
       expect(catalogContinuation?.projects[0]?.id).not.toBe(catalog?.projects[0]?.id);
       expect(catalogContinuation?.workspaces).toHaveLength(64);
       expect(catalogContinuation?.workspaces[0]?.id).toBe('cgw_bazel_064');
-      expect(catalogSearch?.projects.map(project => project.id)).toEqual(['cgp_bazel_04999']);
-      expect(catalogSearch?.workspaces.map(workspace => workspace.id)).toEqual(['cgw_bazel_129']);
-      expect(catalogWorkspaceSearch?.projects.map(project => project.id)).toEqual(['cgp_bazel_00129']);
-      expect(catalogWorkspaceSearch?.workspaces.map(workspace => workspace.id)).toEqual(['cgw_bazel_129']);
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(catalogSearch?.projects), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, project => project.id),
+          ),
+        ),
+      ).toEqual(['cgp_bazel_04999']);
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(catalogSearch?.workspaces), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, workspace => workspace.id),
+          ),
+        ),
+      ).toEqual(['cgw_bazel_129']);
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(catalogWorkspaceSearch?.projects), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, project => project.id),
+          ),
+        ),
+      ).toEqual(['cgp_bazel_00129']);
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(catalogWorkspaceSearch?.workspaces), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, workspace => workspace.id),
+          ),
+        ),
+      ).toEqual(['cgw_bazel_129']);
       expect(sourceSummary).toMatchObject({sampledScopes: 500, truncated: true});
       expect(sourceSummary.edges.length).toBeGreaterThan(0);
       expect(sourceSummaryElapsedMilliseconds).toBeLessThan(1_500);
 
-      const sampledScopeIds = Array.from({length: 500}, (_, index) => `cgp_bazel_${index.toString().padStart(5, '0')}`);
+      const sampledScopeIds = Array.from(
+        {length: 500},
+        (_, index) => `cgp_bazel_${Effect2.pipe(index.toString(), EffectString.padStart(5, '0'))}`,
+      );
       const symbolStatements = codeGraphVisualizationScopeSymbolSampleStatements(
         snapshot.id,
         undefined,
@@ -778,9 +916,9 @@ describe('Manager logical repository and workspace catalogs', () => {
       const edgeStatements = codeGraphVisualizationScopeEdgeSampleStatements(
         snapshot.id,
         undefined,
-        sampledScopeIds.map((scopeId, index) => ({
+        EffectArray.map(sampledScopeIds, (scopeId, index) => ({
           scopeId,
-          symbolIds: [`symbol-bazel-${index.toString().padStart(5, '0')}`],
+          symbolIds: [`symbol-bazel-${Effect2.pipe(index.toString(), EffectString.padStart(5, '0'))}`],
         })),
         8,
         ['resolved'],
@@ -800,26 +938,35 @@ describe('Manager logical repository and workspace catalogs', () => {
       expect(edgeStatements).toHaveLength(8);
       const planDatabase = new Database(databasePath, {readonly: true});
       const symbolPlan = planDatabase
-        .query(`EXPLAIN QUERY PLAN ${symbolStatements[0].text}`)
-        .all(...symbolStatements[0].parameters) as readonly {readonly detail: string}[];
+        .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${symbolStatements[0].text}`)
+        .all(...symbolStatements[0].parameters);
       const edgePlan = planDatabase
-        .query(`EXPLAIN QUERY PLAN ${edgeStatements[0].text}`)
-        .all(...edgeStatements[0].parameters) as readonly {readonly detail: string}[];
+        .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${edgeStatements[0].text}`)
+        .all(...edgeStatements[0].parameters);
       const endpointPlan = planDatabase
-        .query(`EXPLAIN QUERY PLAN ${endpointStatement.text}`)
-        .all(...endpointStatement.parameters) as readonly {readonly detail: string}[];
+        .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${endpointStatement.text}`)
+        .all(...endpointStatement.parameters);
       const catalogComponentPlan = planDatabase
-        .query(`EXPLAIN QUERY PLAN ${catalogComponentStatement.text}`)
-        .all(...catalogComponentStatement.parameters) as readonly {readonly detail: string}[];
+        .query<{readonly detail: string}, SQLQueryBindings[]>(`EXPLAIN QUERY PLAN ${catalogComponentStatement.text}`)
+        .all(...catalogComponentStatement.parameters);
       planDatabase.close();
-      expect(symbolPlan.some(row => row.detail.includes('symbols_visualization_scope_v2'))).toBe(true);
-      expect(edgePlan.some(row => row.detail.includes('edges_source'))).toBe(true);
-      expect(edgePlan.some(row => row.detail.includes('edges_target_resolved'))).toBe(true);
       expect(
-        endpointPlan.some(
+        EffectArray.some(symbolPlan, row =>
+          Effect2.pipe(row.detail, EffectString.includes('symbols_visualization_scope_v2')),
+        ),
+      ).toBe(true);
+      expect(EffectArray.some(edgePlan, row => Effect2.pipe(row.detail, EffectString.includes('edges_source')))).toBe(
+        true,
+      );
+      expect(
+        EffectArray.some(edgePlan, row => Effect2.pipe(row.detail, EffectString.includes('edges_target_resolved'))),
+      ).toBe(true);
+      expect(
+        EffectArray.some(
+          endpointPlan,
           row =>
-            row.detail.includes('SEARCH current_symbols USING PRIMARY KEY') &&
-            row.detail.includes('snapshot_id=? AND id=?'),
+            Effect2.pipe(row.detail, EffectString.includes('SEARCH current_symbols USING PRIMARY KEY')) &&
+            Effect2.pipe(row.detail, EffectString.includes('snapshot_id=? AND id=?')),
         ),
       ).toBe(true);
       expect(catalogComponentStatement.text).toContain('candidate_components AS MATERIALIZED');
@@ -827,11 +974,19 @@ describe('Manager logical repository and workspace catalogs', () => {
       expect(catalogComponentStatement.text).toContain(
         'JOIN candidate_components AS candidate ON candidate.id = incoming.target_component_id',
       );
-      expect(catalogComponentPlan.some(row => row.detail.includes('MATERIALIZE candidate_components'))).toBe(true);
-      expect(catalogComponentPlan.map(row => row.detail)).toEqual(
+      expect(
+        EffectArray.some(catalogComponentPlan, row =>
+          Effect2.pipe(row.detail, EffectString.includes('MATERIALIZE candidate_components')),
+        ),
+      ).toBe(true);
+      expect(EffectArray.map(catalogComponentPlan, row => row.detail)).toEqual(
         expect.arrayContaining([expect.stringContaining('outgoing USING PRIMARY KEY')]),
       );
-      expect(catalogComponentPlan.some(row => row.detail.includes('candidate_dependency_endpoints'))).toBe(true);
+      expect(
+        EffectArray.some(catalogComponentPlan, row =>
+          Effect2.pipe(row.detail, EffectString.includes('candidate_dependency_endpoints')),
+        ),
+      ).toBe(true);
       expect(catalogSearchElapsedMilliseconds).toBeLessThan(500);
       expect(catalogWorkspaceSearchElapsedMilliseconds).toBeLessThan(500);
 
@@ -844,12 +999,12 @@ describe('Manager logical repository and workspace catalogs', () => {
       );
       viewDatabase.transaction(() => {
         for (let index = 0; index < 40; index += 1) {
-          const suffix = index.toString(16).padStart(64, '0');
+          const suffix = Effect2.pipe(index.toString(16), EffectString.padStart(64, '0'));
           insertSnapshot.run(
             `cgsn_view_${index}`,
             identity.repositoryId,
             suffix,
-            suffix.slice(0, 40),
+            Effect2.pipe(suffix, EffectString.slice(0, 40)),
             null,
             'workspace-test',
             0,
@@ -866,8 +1021,8 @@ describe('Manager logical repository and workspace catalogs', () => {
         insertSnapshot.run(
           'cgsn_historical_view',
           identity.repositoryId,
-          '0'.repeat(62) + '26',
-          'deadbeef'.repeat(5),
+          Effect2.pipe('0', EffectString.repeat(62)) + '26',
+          Effect2.pipe('deadbeef', EffectString.repeat(5)),
           null,
           'workspace-test',
           0,
@@ -887,7 +1042,7 @@ describe('Manager logical repository and workspace catalogs', () => {
           .run('cgsn_view_39');
         viewDatabase
           .query('INSERT INTO active_snapshots (worktree_id, snapshot_id, activated_at) VALUES (?, ?, ?)')
-          .run('0'.repeat(62) + '27', 'cgsn_view_39', '2099-08-02T13:00:02.000Z');
+          .run(Effect2.pipe('0', EffectString.repeat(62)) + '27', 'cgsn_view_39', '2099-08-02T13:00:02.000Z');
       })();
       viewDatabase.close();
       const [firstViews, continuedViews, searchedViews, historicalViews] = yield* Effect.gen(function* () {
@@ -911,12 +1066,14 @@ describe('Manager logical repository and workspace catalogs', () => {
       // Ready snapshot rows are reusable caches, not views. Only the explicit
       // active pointer participates in view pagination or search.
       expect(firstViews).toHaveLength(2);
-      expect(firstViews[0]?.viewWorktreeId).toBe('0'.repeat(62) + '27');
+      expect(firstViews[0]?.viewWorktreeId).toBe(Effect2.pipe('0', EffectString.repeat(62)) + '27');
       expect(continuedViews).toEqual([]);
-      expect(new Set([...firstViews, ...continuedViews].map(view => view.viewWorktreeId))).toEqual(
-        new Set(['0'.repeat(62) + '27', identity.worktreeId]),
+      expect(new Set(EffectArray.map([...firstViews, ...continuedViews], view => view.viewWorktreeId))).toEqual(
+        new Set([Effect2.pipe('0', EffectString.repeat(62)) + '27', identity.worktreeId]),
       );
-      expect(searchedViews.map(view => view.viewWorktreeId)).toEqual(['0'.repeat(62) + '27']);
+      expect(EffectArray.map(searchedViews, view => view.viewWorktreeId)).toEqual([
+        Effect2.pipe('0', EffectString.repeat(62)) + '27',
+      ]);
       expect(historicalViews).toEqual([]);
     }),
   );
@@ -924,7 +1081,7 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('surfaces an unreadable database without exposing its local path', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-unreadable-');
-      const checkoutId = 'd'.repeat(64);
+      const checkoutId = Effect2.pipe('d', EffectString.repeat(64));
       const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
       mkdirSync(repositoryRoot, {recursive: true});
       writeFileSync(join(repositoryRoot, 'graph-v3.sqlite'), 'not a sqlite database');
@@ -940,11 +1097,11 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('retains and identifies a scoped Manager view independently from the full-repository view', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-scoped-view-');
-      const identity = repositoryIdentity(home, '9'.repeat(64));
+      const identity = repositoryIdentity(home, Effect2.pipe('9', EffectString.repeat(64)));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const full = readySnapshot(identity, 0, 0, 0, '2026-09-21T08:00:00.000Z');
-      const scopeId = `code-graph-scope:${'a'.repeat(64)}`;
-      const otherScopeId = `code-graph-scope:${'b'.repeat(64)}`;
+      const scopeId = `code-graph-scope:${Effect2.pipe('a', EffectString.repeat(64))}`;
+      const otherScopeId = `code-graph-scope:${Effect2.pipe('b', EffectString.repeat(64))}`;
       const scoped = {
         ...readySnapshot(identity, 0, 0, 0, '2026-09-21T08:01:00.000Z'),
         scopeId,
@@ -968,16 +1125,34 @@ describe('Manager logical repository and workspace catalogs', () => {
       expect(catalog.diagnostics).toEqual([]);
       expect(catalog.repositories).toHaveLength(1);
       expect(catalog.repositories[0]?.views).toHaveLength(3);
-      expect(catalog.repositories[0]?.views.map(view => view.scopeId ?? 'full-repository').sort()).toEqual([
-        scopeId,
-        otherScopeId,
-        'full-repository',
-      ]);
-      expect(new Set(catalog.repositories[0]?.views.map(view => view.id)).size).toBe(3);
-      expect(catalog.repositories[0]?.views.find(view => view.scopeId === scopeId)?.id).toMatch(
-        /^[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}$/u,
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(catalog.repositories[0]?.views), __effectOptionalArrayReceiver =>
+            EffectArray.map(__effectOptionalArrayReceiver, view => view.scopeId ?? 'full-repository').sort(),
+          ),
+        ),
+      ).toEqual([scopeId, otherScopeId, 'full-repository']);
+      expect(
+        new Set(
+          Option.getOrUndefined(
+            Option.map(Option.fromNullishOr(catalog.repositories[0]?.views), __effectOptionalArrayReceiver =>
+              EffectArray.map(__effectOptionalArrayReceiver, view => view.id),
+            ),
+          ),
+        ).size,
+      ).toBe(3);
+      expect(
+        Option.getOrUndefined(
+          Option.flatMap(Option.fromNullishOr(catalog.repositories[0]?.views), __effectOptionalArrayReceiver =>
+            EffectArray.findFirst(__effectOptionalArrayReceiver, view => view.scopeId === scopeId),
+          ),
+        )?.id,
+      ).toMatch(/^[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}$/u);
+      const scopedView = Option.getOrUndefined(
+        Option.flatMap(Option.fromNullishOr(catalog.repositories[0]?.views), __effectOptionalArrayReceiver =>
+          EffectArray.findFirst(__effectOptionalArrayReceiver, view => view.scopeId === scopeId),
+        ),
       );
-      const scopedView = catalog.repositories[0]?.views.find(view => view.scopeId === scopeId);
       expect(scopedView).toBeDefined();
       const analysis = yield* managerGraphAnalysis(home, scopedView!.id, Option.some(scoped.id)).pipe(
         provideTestLayer(storeLayer),
@@ -988,14 +1163,27 @@ describe('Manager logical repository and workspace catalogs', () => {
         scopeIds: [scopeId],
       }).pipe(provideTestLayer(storeLayer));
       expect(searched.query).toBe('project-only-mobile');
-      expect(searched.repositories.flatMap(repository => repository.views).map(view => view.scopeId)).toEqual([
-        scopeId,
-      ]);
+      expect(
+        EffectArray.map(
+          EffectArrayPipe(searched.repositories, __effectArrayValues =>
+            EffectArray.flatMap(__effectArrayValues, (repository, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues ? repository.views : [],
+            ),
+          ),
+          view => view.scopeId,
+        ),
+      ).toEqual([scopeId]);
       const textSearched = yield* managerGraphViewsPage(home, scopedView!.id, {
         query: 'acme/mobile',
-        scopeIds: [`code-graph-scope:${'c'.repeat(64)}`],
+        scopeIds: [`code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`],
       }).pipe(provideTestLayer(storeLayer));
-      expect(textSearched.repositories.flatMap(repository => repository.views)).toHaveLength(3);
+      expect(
+        EffectArrayPipe(textSearched.repositories, __effectArrayValues =>
+          EffectArray.flatMap(__effectArrayValues, (repository, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues ? repository.views : [],
+          ),
+        ),
+      ).toHaveLength(3);
       const invalidScope = yield* managerGraphViewsPage(home, scopedView!.id, {
         scopeIds: ['not-a-scope'],
       }).pipe(provideTestLayer(storeLayer), Effect.flip);
@@ -1007,7 +1195,7 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('migrates a readable legacy lease table while retaining the Manager catalog', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-legacy-lease-');
-      const identity = repositoryIdentity(home, '8'.repeat(64));
+      const identity = repositoryIdentity(home, Effect2.pipe('8', EffectString.repeat(64)));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const snapshot = readySnapshot(identity, 0, 0, 0, '2026-08-05T12:00:00.000Z');
       const store = yield* CodeGraphStore;
@@ -1097,7 +1285,7 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('returns readable catalogs promptly with a lease-deferred diagnostic while a writer is active', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-writer-busy-');
-      const identity = repositoryIdentity(home, '7'.repeat(64));
+      const identity = repositoryIdentity(home, Effect2.pipe('7', EffectString.repeat(64)));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const writerLockPath = join(
         home,
@@ -1144,7 +1332,7 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('single-flights concurrent catalog retention without leaking snapshot leases', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-catalog-single-flight-');
-      const identity = repositoryIdentity(home, '3'.repeat(64));
+      const identity = repositoryIdentity(home, Effect2.pipe('3', EffectString.repeat(64)));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const snapshot = readySnapshot(identity, 0, 0, 0, '2026-08-05T12:00:00.000Z');
 
@@ -1155,7 +1343,7 @@ describe('Manager logical repository and workspace catalogs', () => {
         return yield* Effect.all([managerGraphCatalog(home), managerGraphCatalog(home)], {concurrency: 2});
       }).pipe(provideTestLayer(storeLayer));
 
-      expect(catalogs.map(catalog => catalog.diagnostics)).toEqual([[], []]);
+      expect(EffectArray.map(catalogs, catalog => catalog.diagnostics)).toEqual([[], []]);
       const database = new Database(databasePath, {readonly: true});
       expect(database.query('SELECT COUNT(*) AS count FROM snapshot_leases').get()).toEqual({count: 1});
       database.close();
@@ -1166,7 +1354,7 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('keeps a readable catalog visible and classifies a non-busy retention failure accurately', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-catalog-lease-failure-');
-      const identity = repositoryIdentity(home, '2'.repeat(64));
+      const identity = repositoryIdentity(home, Effect2.pipe('2', EffectString.repeat(64)));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const snapshot = readySnapshot(identity, 0, 0, 0, '2026-08-05T12:00:00.000Z');
 
@@ -1194,7 +1382,7 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('returns a prompt privacy-safe busy error when a query cannot retain its selected snapshot', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-query-writer-busy-');
-      const identity = repositoryIdentity(home, '6'.repeat(64));
+      const identity = repositoryIdentity(home, Effect2.pipe('6', EffectString.repeat(64)));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const writerLockPath = join(
         home,
@@ -1243,7 +1431,7 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('reuses a live catalog lease for a query while a new writer is active', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-query-reuse-');
-      const identity = repositoryIdentity(home, '5'.repeat(64));
+      const identity = repositoryIdentity(home, Effect2.pipe('5', EffectString.repeat(64)));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const writerLockPath = join(
         home,
@@ -1294,7 +1482,7 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('reuses a live catalog lease for analysis while a new writer is active', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-analysis-reuse-');
-      const identity = repositoryIdentity(home, '1'.repeat(64));
+      const identity = repositoryIdentity(home, Effect2.pipe('1', EffectString.repeat(64)));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const writerLockPath = join(
         home,
@@ -1341,7 +1529,7 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('does not block Manager shutdown while a graph writer owns lease cleanup', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-release-writer-busy-');
-      const identity = repositoryIdentity(home, '4'.repeat(64));
+      const identity = repositoryIdentity(home, Effect2.pipe('4', EffectString.repeat(64)));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const writerLockPath = join(
         home,
@@ -1383,7 +1571,7 @@ describe('Manager logical repository and workspace catalogs', () => {
   effectIt.effect('releases catalog snapshot leases when the Manager lifecycle ends', () =>
     Effect.gen(function* () {
       const home = temporaryRoot('threadnote-manager-lease-lifecycle-');
-      const identity = repositoryIdentity(home, '9'.repeat(64));
+      const identity = repositoryIdentity(home, Effect2.pipe('9', EffectString.repeat(64)));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const snapshot = readySnapshot(identity, 0, 0, 0, '2026-08-05T12:00:00.000Z');
 
@@ -1411,7 +1599,7 @@ describe('Manager logical repository and workspace catalogs', () => {
         Effect.scoped(
           Effect.gen(function* () {
             const home = temporaryRoot('threadnote-manager-lease-validation-');
-            const identity = repositoryIdentity(home, 'a'.repeat(64));
+            const identity = repositoryIdentity(home, Effect2.pipe('a', EffectString.repeat(64)));
             const databasePath = join(
               home,
               'indexes',
@@ -1422,7 +1610,7 @@ describe('Manager logical repository and workspace catalogs', () => {
             );
             const snapshot = {
               ...readySnapshot(identity, 0, 0, 0, '2026-08-08T12:00:00.000Z'),
-              id: `cgsn_${'a'.repeat(40)}-direct`,
+              id: `cgsn_${Effect2.pipe('a', EffectString.repeat(40))}-direct`,
             };
             const store = yield* CodeGraphStore;
             yield* store.activate(databasePath, identity, snapshot, [], [], []);
@@ -1430,9 +1618,13 @@ describe('Manager logical repository and workspace catalogs', () => {
             yield* managerGraphCatalog(home);
 
             const database = new Database(databasePath, {readonly: true});
-            const lease = database
-              .query('SELECT token FROM snapshot_leases WHERE snapshot_id = ? LIMIT 1')
-              .get(snapshot.id) as {readonly token: string};
+            const lease = requiredRow(
+              database
+                .query<{readonly token: string}, SQLQueryBindings[]>(
+                  'SELECT token FROM snapshot_leases WHERE snapshot_id = ? LIMIT 1',
+                )
+                .get(snapshot.id),
+            );
             database.close();
 
             expect(
@@ -1482,7 +1674,7 @@ describe('Manager logical repository and workspace catalogs', () => {
         Effect.scoped(
           Effect.gen(function* () {
             const home = temporaryRoot('threadnote-manager-external-removal-busy-');
-            const identity = repositoryIdentity(home, 'b'.repeat(64));
+            const identity = repositoryIdentity(home, Effect2.pipe('b', EffectString.repeat(64)));
             const databasePath = join(
               home,
               'indexes',
@@ -1501,7 +1693,7 @@ describe('Manager logical repository and workspace catalogs', () => {
             );
             const snapshot = {
               ...readySnapshot(identity, 0, 0, 0, '2026-08-08T12:00:00.000Z'),
-              id: `cgsn_${'b'.repeat(40)}-direct`,
+              id: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}-direct`,
             };
             const store = yield* CodeGraphStore;
             yield* store.activate(databasePath, identity, snapshot, [], [], []);
@@ -1580,7 +1772,7 @@ describe('Manager logical repository and workspace catalogs', () => {
         Effect.scoped(
           Effect.gen(function* () {
             const home = temporaryRoot('threadnote-manager-inflight-removal-');
-            const identity = repositoryIdentity(home, '6'.repeat(64));
+            const identity = repositoryIdentity(home, Effect2.pipe('6', EffectString.repeat(64)));
             const databasePath = join(
               home,
               'indexes',
@@ -1593,7 +1785,7 @@ describe('Manager logical repository and workspace catalogs', () => {
             const files = fileFixtures(symbols);
             const snapshot = {
               ...readySnapshot(identity, files.length, symbols.length, 0, '2026-08-08T12:00:00.000Z'),
-              id: `cgsn_${'6'.repeat(40)}-direct`,
+              id: `cgsn_${Effect2.pipe('6', EffectString.repeat(40))}-direct`,
             };
             const store = yield* CodeGraphStore;
             yield* store.activate(databasePath, identity, snapshot, files, symbols, []);
@@ -1636,7 +1828,7 @@ describe('Manager logical repository and workspace catalogs', () => {
             yield* Deferred.succeed(resumeTraversal, undefined);
             const result = yield* Fiber.join(queryFiber);
             expect(result.repository.snapshot.id).toBe(snapshot.id);
-            expect(result.nodes.map(node => node.id)).toContain('symbol-reader');
+            expect(EffectArray.map(result.nodes, node => node.id)).toContain('symbol-reader');
             const reclaimed = new Database(databasePath, {readonly: true});
             expect(reclaimed.query('SELECT COUNT(*) AS count FROM snapshot_leases').get()).toEqual({count: 0});
             reclaimed.close();
@@ -1650,7 +1842,7 @@ describe('Manager logical repository and workspace catalogs', () => {
         Effect.scoped(
           Effect.gen(function* () {
             const home = temporaryRoot('threadnote-manager-atomic-retention-');
-            const identity = repositoryIdentity(home, '5'.repeat(64));
+            const identity = repositoryIdentity(home, Effect2.pipe('5', EffectString.repeat(64)));
             const databasePath = join(
               home,
               'indexes',
@@ -1661,7 +1853,7 @@ describe('Manager logical repository and workspace catalogs', () => {
             );
             const snapshot = {
               ...readySnapshot(identity, 0, 0, 0, '2026-08-08T12:00:00.000Z'),
-              id: `cgsn_${'5'.repeat(40)}-direct`,
+              id: `cgsn_${Effect2.pipe('5', EffectString.repeat(40))}-direct`,
             };
             const store = yield* CodeGraphStore;
             yield* store.activate(databasePath, identity, snapshot, [], [], []);
@@ -1702,9 +1894,15 @@ describe('Manager logical repository and workspace catalogs', () => {
             const catalog = yield* Fiber.join(catalogFiber);
             const removal = yield* Fiber.join(removalFiber);
             expect(order).toEqual(['observed', 'retained', 'remove-open']);
-            expect(catalog.repositories.flatMap(repository => repository.views.map(view => view.worktreeId))).toEqual([
-              identity.worktreeId,
-            ]);
+            expect(
+              EffectArrayPipe(catalog.repositories, __effectArrayValues =>
+                EffectArray.flatMap(__effectArrayValues, (repository, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues
+                    ? EffectArray.map(repository.views, view => view.worktreeId)
+                    : [],
+                ),
+              ),
+            ).toEqual([identity.worktreeId]);
             expect(removal.state).toBe('removed');
 
             const refreshed = yield* managerGraphCatalog(home);
@@ -1727,7 +1925,7 @@ describe('Manager logical repository and workspace catalogs', () => {
         Effect.scoped(
           Effect.gen(function* () {
             const home = temporaryRoot('threadnote-manager-retention-purge-race-');
-            const identity = repositoryIdentity(home, '4'.repeat(64));
+            const identity = repositoryIdentity(home, Effect2.pipe('4', EffectString.repeat(64)));
             const databasePath = join(
               home,
               'indexes',
@@ -1738,7 +1936,7 @@ describe('Manager logical repository and workspace catalogs', () => {
             );
             const snapshot = {
               ...readySnapshot(identity, 0, 0, 0, '2026-08-08T12:00:00.000Z'),
-              id: `cgsn_${'4'.repeat(40)}-direct`,
+              id: `cgsn_${Effect2.pipe('4', EffectString.repeat(40))}-direct`,
             };
             const store = yield* CodeGraphStore;
             yield* store.activate(databasePath, identity, snapshot, [], [], []);
@@ -1782,8 +1980,8 @@ describe('Manager logical repository and workspace catalogs', () => {
         Effect.scoped(
           Effect.gen(function* () {
             const home = temporaryRoot('threadnote-manager-stale-catalog-');
-            const identity = repositoryIdentity(home, '7'.repeat(64));
-            const neighborWorktreeId = '8'.repeat(64);
+            const identity = repositoryIdentity(home, Effect2.pipe('7', EffectString.repeat(64)));
+            const neighborWorktreeId = Effect2.pipe('8', EffectString.repeat(64));
             const databasePath = join(
               home,
               'indexes',
@@ -1794,7 +1992,7 @@ describe('Manager logical repository and workspace catalogs', () => {
             );
             const snapshot = {
               ...readySnapshot(identity, 0, 0, 0, '2026-08-08T12:00:00.000Z'),
-              id: `cgsn_${'7'.repeat(40)}-direct`,
+              id: `cgsn_${Effect2.pipe('7', EffectString.repeat(40))}-direct`,
             };
             const store = yield* CodeGraphStore;
             yield* store.activate(databasePath, identity, snapshot, [], [], []);
@@ -1808,9 +2006,13 @@ describe('Manager logical repository and workspace catalogs', () => {
             yield* managerGraphCatalog(home);
             const initiallyLeased = new Database(databasePath, {readonly: true});
             expect(initiallyLeased.query('SELECT COUNT(*) AS count FROM snapshot_leases').get()).toEqual({count: 1});
-            const initialLease = initiallyLeased
-              .query('SELECT token, snapshot_id AS snapshotId FROM snapshot_leases')
-              .get() as {readonly snapshotId: string; readonly token: string};
+            const initialLease = requiredRow(
+              initiallyLeased
+                .query<{readonly snapshotId: string; readonly token: string}, SQLQueryBindings[]>(
+                  'SELECT token, snapshot_id AS snapshotId FROM snapshot_leases',
+                )
+                .get(),
+            );
             initiallyLeased.close();
 
             const failedAction = yield* withManagerGraphSnapshotLeaseInvalidated(
@@ -1863,9 +2065,15 @@ describe('Manager logical repository and workspace catalogs', () => {
             expect(removed.warnings).toEqual([]);
             yield* Deferred.succeed(resume, undefined);
             const catalog = yield* Fiber.join(staleCatalogFiber);
-            expect(catalog.repositories.flatMap(repository => repository.views.map(view => view.worktreeId))).toEqual([
-              neighborWorktreeId,
-            ]);
+            expect(
+              EffectArrayPipe(catalog.repositories, __effectArrayValues =>
+                EffectArray.flatMap(__effectArrayValues, (repository, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues
+                    ? EffectArray.map(repository.views, view => view.worktreeId)
+                    : [],
+                ),
+              ),
+            ).toEqual([neighborWorktreeId]);
 
             const startedAt = yield* TestClock.withLive(Clock.currentTimeMillis);
             const catalogs = yield* Effect.all(
@@ -1875,9 +2083,9 @@ describe('Manager logical repository and workspace catalogs', () => {
             const elapsed = (yield* TestClock.withLive(Clock.currentTimeMillis)) - startedAt;
             expect(elapsed).toBeLessThan(5_000);
             expect(
-              catalogs.every(result =>
-                result.repositories.every(repository =>
-                  repository.views.every(view => view.worktreeId === neighborWorktreeId),
+              EffectArray.every(catalogs, result =>
+                EffectArray.every(result.repositories, repository =>
+                  EffectArray.every(repository.views, view => view.worktreeId === neighborWorktreeId),
                 ),
               ),
             ).toBe(true);
@@ -1903,14 +2111,14 @@ function temporaryRoot(prefix: string): string {
 function repositoryIdentity(root: string, repositoryId: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'e'.repeat(64),
+    checkoutId: Effect2.pipe('e', EffectString.repeat(64)),
     displayName: 'acme/mobile',
     gitCommonDirectory: join(root, '.git'),
     headCommit: 'abcdef0123456789abcdef0123456789abcdef01',
     objectFormat: 'sha1',
     repoRoot: root,
     repositoryId,
-    worktreeId: 'f'.repeat(64),
+    worktreeId: Effect2.pipe('f', EffectString.repeat(64)),
   };
 }
 
@@ -1999,7 +2207,7 @@ function symbol(id: string, path: string, name: string, language: string, resolu
 
 function edgeFixtures(): readonly CodeGraphEdge[] {
   const intra = Array.from({length: 12_001}, (_, index) =>
-    edge(`edge-${index.toString().padStart(4, '0')}`, 'symbol-a-1', 'symbol-a-2'),
+    edge(`edge-${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}`, 'symbol-a-1', 'symbol-a-2'),
   );
   return [
     ...intra,
@@ -2025,10 +2233,10 @@ function edge(id: string, sourceId: string, targetId: string): CodeGraphEdge {
 }
 
 function fileFixtures(symbols: readonly CodeGraphSymbol[]): readonly CodeGraphInventoryFile[] {
-  return [...new Set(symbols.map(symbol => symbol.path))].map(path => ({
+  return EffectArray.map([...new Set(EffectArray.map(symbols, symbol => symbol.path))], path => ({
     blobId: `blob-${path}`,
     contentHash: `hash-${path}`,
-    language: path.endsWith('.md') ? 'markdown' : 'kotlin',
+    language: Effect2.pipe(path, EffectString.endsWith('.md')) ? 'markdown' : 'kotlin',
     mode: '100644',
     path,
     size: 10,
@@ -2043,7 +2251,12 @@ function readySnapshot(
   edges: number,
   completedAt: string,
 ): CodeGraphSnapshot {
-  const timestampId = completedAt.replaceAll(/\D/g, '').padEnd(40, '0').slice(0, 40);
+  const timestampId = Effect2.pipe(
+    completedAt,
+    EffectString.replaceAll(/\D/g, ''),
+    EffectString.padEnd(40, '0'),
+    EffectString.slice(0, 40),
+  );
   return {
     commit: identity.headCommit,
     completedAt,

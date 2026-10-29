@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {codeGraphCitationSourceKey, readCodeGraphCitationSources} from '@threadnote/graph/citation/source';
 import type {CodeGraphQueryResult, RepositoryIdentity} from '@threadnote/graph/types';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CONTEXT_BRIEF_SOURCE_MAXIMUM_COVERED_REFS, type ContextBriefSourceExcerptV1} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CONTEXT_BRIEF_SOURCE_MAXIMUM_FILES = 3 as const;
 export const CONTEXT_BRIEF_SOURCE_MAXIMUM_RANGES_PER_FILE = 2 as const;
@@ -26,7 +29,7 @@ export interface ContextBriefSelectedSourceRangeV1 extends ContextBriefSourceRan
 export function contextBriefSourceRangeCandidates(
   result: CodeGraphQueryResult,
 ): readonly ContextBriefSourceRangeCandidateV1[] {
-  const nodeRank = new Map(result.nodes.map((node, rank) => [node.id, rank] as const));
+  const nodeRank = new Map(EffectArray.map(result.nodes, (node, rank) => [node.id, rank] as const));
   const byPath = new Map<string, (typeof result.nodes)[number]>();
   for (const node of result.nodes) {
     const existing = byPath.get(node.path);
@@ -35,7 +38,7 @@ export function contextBriefSourceRangeCandidates(
     }
   }
   const relationshipFirst = result.operation === 'impact' || result.operation === 'neighbors';
-  const relationships = result.edges.flatMap((edge, rank): ContextBriefSourceRangeCandidateV1[] => {
+  const relationships = EffectArray.flatMap(result.edges, (edge, rank): ContextBriefSourceRangeCandidateV1[] => {
     if (edge.sourceId === undefined || edge.targetId === undefined) return [];
     const source = byPath.get(edge.evidencePath);
     if (source === undefined) return [];
@@ -50,7 +53,7 @@ export function contextBriefSourceRangeCandidates(
       },
     ];
   });
-  const declarations = result.nodes.map((node, rank): ContextBriefSourceRangeCandidateV1 => ({
+  const declarations = EffectArray.map(result.nodes, (node, rank): ContextBriefSourceRangeCandidateV1 => ({
     contentHash: node.contentHash,
     coveredGraphRefs: [node.id],
     endLine: node.span.endLine,
@@ -64,32 +67,39 @@ export function contextBriefSourceRangeCandidates(
 export function selectContextBriefSourceRanges(
   candidates: readonly ContextBriefSourceRangeCandidateV1[],
 ): readonly ContextBriefSelectedSourceRangeV1[] {
-  const normalized = candidates
-    .filter(candidate => validCandidate(candidate))
-    .map(candidate => {
+  const normalized = EffectArray.map(
+    EffectArray.filter(
+      candidates,
+      (candidate, __effectArrayIndex) => __effectArrayIndex in candidates && validCandidate(candidate),
+    ),
+    candidate => {
       const endLine = Math.min(
         candidate.endLine,
         candidate.startLine + CONTEXT_BRIEF_SOURCE_MAXIMUM_LINES_PER_RANGE - 1,
       );
       return {...candidate, endLine, truncated: candidate.truncated === true || endLine < candidate.endLine};
-    })
-    .sort(compareCandidates);
+    },
+  ).sort(compareCandidates);
   const hashesByPath = new Map<string, Set<string>>();
   for (const candidate of normalized) {
     const hashes = hashesByPath.get(candidate.path) ?? new Set<string>();
     hashes.add(candidate.contentHash);
     hashesByPath.set(candidate.path, hashes);
   }
-  const safe = normalized.filter(candidate => hashesByPath.get(candidate.path)?.size === 1);
-  const files = [...new Set(safe.map(candidate => candidate.path))]
-    .map(path => ({
-      path,
-      rank: Math.min(...safe.filter(candidate => candidate.path === path).map(candidate => candidate.rank)),
-    }))
+  const safe = EffectArray.filter(normalized, candidate => hashesByPath.get(candidate.path)?.size === 1);
+  const files = EffectArray.map([...new Set(EffectArray.map(safe, candidate => candidate.path))], path => ({
+    path,
+    rank: Math.min(
+      ...EffectArray.map(
+        EffectArray.filter(safe, candidate => candidate.path === path),
+        candidate => candidate.rank,
+      ),
+    ),
+  }))
     .sort((left, right) => left.rank - right.rank || compareText(left.path, right.path))
     .slice(0, CONTEXT_BRIEF_SOURCE_MAXIMUM_FILES);
-  return files.flatMap(({path}) => {
-    const ranges = safe.filter(candidate => candidate.path === path).sort(compareSourceRanges);
+  return EffectArray.flatMap(files, ({path}) => {
+    const ranges = EffectArray.filter(safe, candidate => candidate.path === path).sort(compareSourceRanges);
     const merged: ContextBriefSelectedSourceRangeV1[] = [];
     for (const range of ranges) {
       const current = merged.at(-1);
@@ -135,7 +145,7 @@ export const retrieveContextBriefSourceEvidence = Effect.fn('contextBrief.retrie
     repositoryRoot: input.identity.repoRoot,
     retainedBytesLimit: CONTEXT_BRIEF_SOURCE_MAXIMUM_RETAINED_FILE_BYTES * CONTEXT_BRIEF_SOURCE_MAXIMUM_FILES,
     sourceCommit: input.result.snapshot.commit,
-    sources: sources.map(source => ({...source, requireBytes: true})),
+    sources: EffectArray.map(sources, source => ({...source, requireBytes: true})),
   });
   const materialized = materializeContextBriefSourceExcerpts({
     dirty: input.result.snapshot.dirty,
@@ -188,9 +198,18 @@ export function materializeContextBriefSourceExcerpts(input: {
       endLine: selected.endLine,
       evidenceKind: input.dirty ? 'current-dirty-overlay' : 'graph-snapshot',
       freshness: 'fresh',
-      id: `cbsx_${sha256HexSync(
-        [input.repositoryId, range.path, range.startLine, selected.endLine, ...coveredGraphRefs].join('\u0000'),
-      ).slice(0, 24)}`,
+      id: `cbsx_${Effect2.pipe(
+        sha256HexSync(
+          EffectArray.join(
+            EffectArray.map(
+              [input.repositoryId, range.path, range.startLine, selected.endLine, ...coveredGraphRefs],
+              item => (item === null || item === undefined ? '' : String(item)),
+            ),
+            '\u0000',
+          ),
+        ),
+        EffectString.slice(0, 24),
+      )}`,
       path: range.path,
       repositoryKey: input.repositoryKey,
       snapshotIdentity: input.dirty ? 'current-dirty-overlay' : 'current-clean',
@@ -213,7 +232,7 @@ function selectSourceLines(
   range: ContextBriefSelectedSourceRangeV1,
   maximumBytes: number,
 ): {readonly content: string; readonly endLine: number; readonly truncated: boolean} | undefined {
-  const lines = content.split(/\r?\n/u);
+  const lines = Effect2.pipe(content, EffectString.split(/\r?\n/u));
   if (range.startLine > lines.length) return undefined;
   const requested = lines.slice(range.startLine - 1, Math.min(range.endLine, lines.length));
   if (requested.length === 0) return undefined;
@@ -229,7 +248,7 @@ function selectSourceLines(
   }
   if (selected.length === 0) return undefined;
   return {
-    content: selected.join('\n'),
+    content: EffectArray.join(selected, '\n'),
     endLine: range.startLine + selected.length - 1,
     truncated: selected.length < requested.length || range.endLine > lines.length,
   };
@@ -275,7 +294,7 @@ function compareCandidates(
     compareText(left.path, right.path) ||
     left.startLine - right.startLine ||
     left.endLine - right.endLine ||
-    compareText(left.coveredGraphRefs.join('\u0000'), right.coveredGraphRefs.join('\u0000'))
+    compareText(EffectArray.join(left.coveredGraphRefs, '\u0000'), EffectArray.join(right.coveredGraphRefs, '\u0000'))
   );
 }
 
@@ -287,7 +306,7 @@ function compareSourceRanges(
     left.startLine - right.startLine ||
     left.endLine - right.endLine ||
     left.rank - right.rank ||
-    compareText(left.coveredGraphRefs.join('\u0000'), right.coveredGraphRefs.join('\u0000'))
+    compareText(EffectArray.join(left.coveredGraphRefs, '\u0000'), EffectArray.join(right.coveredGraphRefs, '\u0000'))
   );
 }
 

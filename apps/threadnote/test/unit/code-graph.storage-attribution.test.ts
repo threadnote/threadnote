@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Database} from 'bun:sqlite';
@@ -13,11 +14,13 @@ import {
 } from '@threadnote/graph/storage/attribution';
 import {CODE_GRAPH_EXTRACTOR_GENERATION} from '@threadnote/graph/types';
 import {rm} from '../helpers/effect-filesystem.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const temporaryHomes: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryHomes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryHomes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('code graph semantic storage attribution', () => {
@@ -32,11 +35,11 @@ describe('code graph semantic storage attribution', () => {
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectory({prefix: 'threadnote-storage-attribution-'});
       temporaryHomes.push(home);
-      const checkoutId = 'a'.repeat(64);
-      const repositoryId = 'b'.repeat(64);
-      const worktreeId = 'c'.repeat(64);
-      const snapshotId = `cgsn_${'d'.repeat(40)}`;
-      const retiredSnapshotId = `cgsn_${'e'.repeat(40)}`;
+      const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
+      const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
+      const worktreeId = Effect2.pipe('c', EffectString.repeat(64));
+      const snapshotId = `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`;
+      const retiredSnapshotId = `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`;
       const repositoryRoot = path.join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
       const databasePath = path.join(repositoryRoot, 'graph-v3.sqlite');
       yield* fs.makeDirectory(repositoryRoot, {recursive: true});
@@ -60,7 +63,15 @@ describe('code graph semantic storage attribution', () => {
              edge_count, started_at, completed_at, failure_summary
            ) VALUES (?, ?, ?, ?, ?, NULL, 'storage-fixture', 0, NULL, 'ready', 1, 1, 0, ?, ?, NULL)`,
           )
-          .run(snapshotId, repositoryId, worktreeId, 'e'.repeat(40), `cgc_${'f'.repeat(40)}`, now, now);
+          .run(
+            snapshotId,
+            repositoryId,
+            worktreeId,
+            Effect2.pipe('e', EffectString.repeat(40)),
+            `cgc_${Effect2.pipe('f', EffectString.repeat(40))}`,
+            now,
+            now,
+          );
         database
           .query('INSERT INTO snapshot_extractor_generations (snapshot_id, generation) VALUES (?, ?)')
           .run(snapshotId, CODE_GRAPH_EXTRACTOR_GENERATION);
@@ -72,7 +83,15 @@ describe('code graph semantic storage attribution', () => {
              edge_count, started_at, completed_at, failure_summary
            ) VALUES (?, ?, ?, ?, ?, NULL, 'storage-fixture', 0, NULL, 'retired', 0, 0, 0, ?, ?, NULL)`,
           )
-          .run(retiredSnapshotId, repositoryId, worktreeId, 'f'.repeat(40), `cgc_${'a'.repeat(40)}`, now, now);
+          .run(
+            retiredSnapshotId,
+            repositoryId,
+            worktreeId,
+            Effect2.pipe('f', EffectString.repeat(40)),
+            `cgc_${Effect2.pipe('a', EffectString.repeat(40))}`,
+            now,
+            now,
+          );
         database
           .query('INSERT INTO active_snapshots (worktree_id, snapshot_id, activated_at) VALUES (?, ?, ?)')
           .run(worktreeId, snapshotId, now);
@@ -81,7 +100,7 @@ describe('code graph semantic storage attribution', () => {
             `INSERT INTO snapshot_files (snapshot_id, path, content_hash, language, mode, size, source)
            VALUES (?, 'src/index.ts', ?, 'typescript', '100644', 32, 'commit')`,
           )
-          .run(snapshotId, '1'.repeat(64));
+          .run(snapshotId, Effect2.pipe('1', EffectString.repeat(64)));
         database
           .query(
             `INSERT INTO symbols (
@@ -91,7 +110,7 @@ describe('code graph semantic storage attribution', () => {
            ) VALUES (?, 'symbol', ?, 'module', 'index', 'index', 'src/index.ts', 'typescript',
              NULL, '[]', 'typescript', NULL, 1, NULL, NULL, '{"line":1}', NULL)`,
           )
-          .run(snapshotId, '2'.repeat(64));
+          .run(snapshotId, Effect2.pipe('2', EffectString.repeat(64)));
         database
           .query(
             `INSERT INTO symbols (
@@ -101,7 +120,7 @@ describe('code graph semantic storage attribution', () => {
            ) VALUES (?, 'orphan', ?, 'module', 'orphan', 'orphan', 'src/old.ts', 'typescript',
              NULL, '[]', 'typescript', NULL, 1, NULL, NULL, '{"line":1}', NULL)`,
           )
-          .run(retiredSnapshotId, '3'.repeat(64));
+          .run(retiredSnapshotId, Effect2.pipe('3', EffectString.repeat(64)));
         database
           .query(
             `INSERT INTO materialized_file_shards (
@@ -109,7 +128,7 @@ describe('code graph semantic storage attribution', () => {
              facts_json, created_at, last_used_at
            ) VALUES ('shard', ?, 'storage-fixture', 'derivation', 'src/index.ts', ?, ?, ?)`,
           )
-          .run('1'.repeat(64), factsJson, now, now);
+          .run(Effect2.pipe('1', EffectString.repeat(64)), factsJson, now, now);
         database
           .query(
             `INSERT INTO snapshot_file_shards (snapshot_id, path, shard_id)

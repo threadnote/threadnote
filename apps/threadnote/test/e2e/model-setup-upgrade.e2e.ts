@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {spawn} from '@threadnote/testing/node-child-process';
 import {cp, mkdir, mkdtemp, readFile, readdir, realpath, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir, totalmem} from '@threadnote/testing/node-os';
@@ -25,10 +26,15 @@ import {
   upgradeHomeSnapshot,
   upgradeQualificationAllowed,
 } from '../helpers/model-setup-upgrade.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const checkout = process.cwd();
 const requested = process.env.THREADNOTE_QUALIFY_OLD_UPGRADE !== undefined;
-const manifest = BUILTIN_MODEL_MANIFESTS.find(item => item.id === CORE_GENERATION_MODEL_ID)!;
+const manifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, item => item.id === CORE_GENERATION_MODEL_ID),
+)!;
 const expectedEnvironment = {
   THREADNOTE_QUALIFY_OLD_UPGRADE: UPGRADE_ACKNOWLEDGEMENT,
   GITHUB_ACTIONS: 'true',
@@ -39,14 +45,14 @@ const expectedEnvironment = {
 
 it('requires every ephemeral-runner admission condition', () => {
   expect(upgradeQualificationAllowed(expectedEnvironment, 'darwin', 'arm64')).toBe(true);
-  for (const key of Object.keys(expectedEnvironment)) {
+  for (const key of EffectRecord.keys(expectedEnvironment)) {
     expect(upgradeQualificationAllowed({...expectedEnvironment, [key]: undefined}, 'darwin', 'arm64')).toBe(false);
     expect(upgradeQualificationAllowed({...expectedEnvironment, [key]: 'wrong'}, 'darwin', 'arm64')).toBe(false);
   }
   fc.assert(
     fc.property(
       fc.dictionary(fc.string({maxLength: 20}), fc.string({maxLength: 30})),
-      fc.constantFrom(...Object.keys(expectedEnvironment)),
+      fc.constantFrom(...EffectRecord.keys(expectedEnvironment)),
       (noise, missing) => {
         expect(
           upgradeQualificationAllowed({...noise, ...expectedEnvironment, [missing]: undefined}, 'darwin', 'arm64'),
@@ -115,8 +121,14 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
     expect(metadata).toMatchObject({version, target: 'bun-darwin-arm64'});
     expect(compareVersions(version, PREDECESSOR_VERSION)).toBeGreaterThan(0);
     expect(version).not.toContain('.local.g');
-    sourceCommit = (await execute('git', ['rev-parse', 'HEAD'], {cwd: checkout})).stdout.trim();
-    sourceTree = (await execute('git', ['rev-parse', 'HEAD^{tree}'], {cwd: checkout})).stdout.trim();
+    sourceCommit = Effect.pipe(
+      (await execute('git', ['rev-parse', 'HEAD'], {cwd: checkout})).stdout,
+      EffectString.trim,
+    );
+    sourceTree = Effect.pipe(
+      (await execute('git', ['rev-parse', 'HEAD^{tree}'], {cwd: checkout})).stdout,
+      EffectString.trim,
+    );
     expect(sourceCommit).toBe(process.env.GITHUB_SHA);
     await execute('git', ['diff', '--exit-code', 'HEAD', '--'], {cwd: checkout});
     candidateSha256 = bytesSha256(await readFile(join(checkout, 'dist', 'threadnote')));
@@ -172,12 +184,14 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
           `v${version}`,
         );
         const psArguments = ['-p', String(process.pid), '-o', 'lstart='];
-        expect((await execute('/bin/ps', psArguments, {env: environment})).stdout.trim()).not.toBe('');
+        expect(
+          Effect.pipe((await execute('/bin/ps', psArguments, {env: environment})).stdout, EffectString.trim),
+        ).not.toBe('');
         const sandboxPs = await sandbox('/bin/ps', psArguments).then(
           () => ({denied: false, reason: ''}),
           cause => ({
             denied: /Operation not permitted|Permission denied|EPERM|EACCES/i.test(String(cause)),
-            reason: String(cause).slice(0, 1024),
+            reason: Effect.pipe(String(cause), EffectString.slice(0, 1024)),
           }),
         );
         const defaultBefore = await upgradeHomeSnapshot(defaultHome);
@@ -210,11 +224,20 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
         expect(releaseRequests).toEqual(
           expect.arrayContaining(['/threadnote-darwin-arm64.tar.gz', '/threadnote-darwin-arm64.tar.gz.sha256']),
         );
-        expect(commands.filter(command => /model-setup-(?:request|worker)/.test(command))).toEqual([]);
+        expect(
+          EffectArray.filter(
+            commands,
+            (command, index) => index in commands && /model-setup-(?:request|worker)/.test(command),
+          ),
+        ).toEqual([]);
         const newRelease = join(releases, version);
         const candidate = join(newRelease, 'threadnote');
-        for (const command of commands.filter(
-          line => line.includes(`${candidate} post-update`) || line.includes(`${candidate} repair`),
+        for (const command of EffectArray.filter(
+          commands,
+          (line, __effectArrayIndex) =>
+            __effectArrayIndex in commands &&
+            (Effect.pipe(line, EffectString.includes(`${candidate} post-update`)) ||
+              Effect.pipe(line, EffectString.includes(`${candidate} repair`))),
         ))
           expect(command).not.toContain('--home');
         expect(bytesSha256(await readFile(candidate))).toBe(candidateSha256);
@@ -225,13 +248,13 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
         expect(await optionalUpgradeFile(join(home, 'models', 'setup.json'))).toBeUndefined();
         expect(await optionalUpgradeFile(join(defaultHome, 'models', 'setup.json'))).toBeUndefined();
         const logAfter = (await optionalUpgradeFile(join(defaultHome, 'logs', 'threadnote.log'))) ?? '';
-        expect(logAfter.startsWith(defaultLogBefore)).toBe(true);
-        const log = logAfter.slice(defaultLogBefore.length).trim();
+        expect(Effect.pipe(logAfter, EffectString.startsWith(defaultLogBefore))).toBe(true);
+        const log = Effect.pipe(logAfter, EffectString.slice(defaultLogBefore.length), EffectString.trim);
         const completed = log
-          ? log
-              .split('\n')
-              .map(line => JSON.parse(line))
-              .filter(entry => entry.event === 'invocation.finished')
+          ? EffectArray.filter(
+              EffectArray.map(Effect.pipe(log, EffectString.split('\n')), line => JSON.parse(line)),
+              entry => entry.event === 'invocation.finished',
+            )
           : [];
         // Preserve the actual child/log boundary even when an assertion below fails.
         await writeFile(
@@ -244,11 +267,17 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
               defaultHome,
               intendedHome: home,
               observedCommands: commands,
-              stdout: update.stdout.slice(-16_384),
-              stderr: update.stderr.slice(-16_384),
+              stdout: Effect.pipe(update.stdout, EffectString.slice(-16_384)),
+              stderr: Effect.pipe(update.stderr, EffectString.slice(-16_384)),
               defaultHomeFiles: await upgradeHomeSnapshot(defaultHome),
-              defaultHomeLog: logAfter.slice(-16_384),
-              intendedHomeLog: (await optionalUpgradeFile(join(home, 'logs', 'threadnote.log')))?.slice(-16_384),
+              defaultHomeLog: Effect.pipe(logAfter, EffectString.slice(-16_384)),
+              intendedHomeLog: Effect.pipe(
+                await optionalUpgradeFile(join(home, 'logs', 'threadnote.log')),
+                effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.slice(-16_384)),
+              ),
             },
             null,
             2,
@@ -266,7 +295,11 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
           expect(output).toContain('Repairing local Threadnote setup after standalone update.');
         }
         const defaultAfterUpdate = await upgradeHomeSnapshot(defaultHome);
-        expect(Object.keys(defaultAfterUpdate).filter(file => file.startsWith('models/generation/'))).toEqual([]);
+        expect(
+          EffectArray.filter(EffectRecord.keys(defaultAfterUpdate), file =>
+            Effect.pipe(file, EffectString.startsWith('models/generation/')),
+          ),
+        ).toEqual([]);
         expect(await upgradeHomeSnapshot(join(home, 'models', 'generation'))).toEqual({});
         let managerOutput = '';
         const manager = spawn(
@@ -279,10 +312,10 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
           },
         );
         manager.stdout.on('data', data => {
-          managerOutput = `${managerOutput}${data}`.slice(-128 * 1024);
+          managerOutput = Effect.pipe(`${managerOutput}${data}`, EffectString.slice(-128 * 1024));
         });
         manager.stderr.on('data', data => {
-          managerOutput = `${managerOutput}${data}`.slice(-128 * 1024);
+          managerOutput = Effect.pipe(`${managerOutput}${data}`, EffectString.slice(-128 * 1024));
         });
         const closed = new Promise(resolve => manager.once('close', resolve));
         let evidence: Record<string, unknown> = {};
@@ -312,7 +345,7 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
             ...(sandboxPs.denied ? ['worker-identity-unavailable'] : []),
           ]).toContain(admitted.reason);
           expect(admitted.bytes ?? 0).toBe(0);
-          for (const hash of Object.values(await upgradeHomeSnapshot(join(home, 'models', 'generation'))))
+          for (const hash of EffectRecord.values(await upgradeHomeSnapshot(join(home, 'models', 'generation'))))
             expect(hash).toBe(bytesSha256(''));
           expect(await upgradeHomeSnapshot(defaultHome)).toEqual(defaultAfterUpdate);
           evidence = {
@@ -351,7 +384,11 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
             legacyChildCompletionOracle: skip
               ? 'not-invoked'
               : 'pinned-parent-success-and-completion-marker-without-failure-or-skip-messages',
-            legacyChildLogCompletions: completed.filter(entry => ['post-update', 'repair'].includes(entry.operation)),
+            legacyChildLogCompletions: EffectArray.filter(
+              completed,
+              __effectArrayValue =>
+                !!(entry => ['post-update', 'repair'].includes(entry.operation))(__effectArrayValue),
+            ),
             defaultHomeSetupJob: false,
             defaultHomeBaseline: 'manual-empty-layout-fixture-validated-against-product-contract',
             defaultHomeContentSha256: bytesSha256(JSON.stringify(defaultAfterUpdate)),

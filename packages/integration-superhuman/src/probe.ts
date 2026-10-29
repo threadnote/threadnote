@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {admittedSourceFetch} from '@threadnote/integration-core/source-coordinator';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
@@ -11,7 +12,11 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import {credentialScrubberBlocker} from '@threadnote/platform/scrubber';
 import {SystemInfo} from '@threadnote/platform/system';
-import {Data, Effect, Redacted} from 'effect';
+import {Effect, Redacted} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export const SUPERHUMAN_MCP_URL = 'https://docs.superhuman.com/apis/mcp';
 export const SUPERHUMAN_TOKEN_ENV = 'SUPERHUMAN_DOCS_API_TOKEN';
@@ -25,22 +30,26 @@ const MAX_PAGES = 8;
 const MAX_TOOLS = 128;
 const MAX_CURSOR_BYTES = 512;
 
-export type ProbeErrorCode =
-  | 'missing-credential'
-  | 'invalid-credential-reference'
-  | 'transport-rejected'
-  | 'authentication-rejected'
-  | 'response-too-large'
-  | 'catalog-invalid'
-  | 'catalog-incomplete'
-  | 'deadline-exceeded'
-  | 'provider-error'
-  | 'quota-rejected';
+export const ProbeErrorCodeSchema = Schema.Literals([
+  'missing-credential',
+  'invalid-credential-reference',
+  'transport-rejected',
+  'authentication-rejected',
+  'response-too-large',
+  'catalog-invalid',
+  'catalog-incomplete',
+  'deadline-exceeded',
+  'provider-error',
+  'quota-rejected',
+]);
+export type ProbeErrorCode = typeof ProbeErrorCodeSchema.Type;
 
-export class ProbeError extends Data.TaggedError('ProbeError')<{
-  readonly code: ProbeErrorCode;
-  readonly operation?: 'tool_guide' | 'url_convert' | 'document_outline' | 'page_describe' | 'content_read';
-}> {}
+export class ProbeError extends Schema.TaggedError<ProbeError, {readonly brand: unique symbol}>()('ProbeError', {
+  code: ProbeErrorCodeSchema,
+  operation: Schema.optional(
+    Schema.Literals(['tool_guide', 'url_convert', 'document_outline', 'page_describe', 'content_read']),
+  ),
+}) {}
 
 export interface ProbeTool {
   readonly name: string;
@@ -77,11 +86,11 @@ type ProbePolicy =
   | {readonly kind: 'selected-read'; readonly authorizeCall: (name: string, args: unknown) => boolean};
 
 function failed(code: ProbeErrorCode): never {
-  throw new ProbeError({code});
+  throw ProbeError.make({code});
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function validSchema(value: unknown): value is Record<string, unknown> {
@@ -109,7 +118,7 @@ function checkedTool(value: unknown): ProbeTool {
     name: value.name,
     inputSchema: value.inputSchema,
     ...(value.outputSchema === undefined ? {} : {outputSchema: value.outputSchema}),
-    ...(Object.keys(annotations).length === 0 ? {} : {annotations}),
+    ...(EffectRecord.keys(annotations).length === 0 ? {} : {annotations}),
   };
 }
 
@@ -128,10 +137,12 @@ function validateCatalog(catalog: ProbeCatalog, token: string): ProbeCatalog {
 }
 
 function containsSensitiveText(value: unknown, token: string): boolean {
-  if (typeof value === 'string') return value.includes(token) || credentialScrubberBlocker(value) !== undefined;
-  if (Array.isArray(value)) return value.some(item => containsSensitiveText(item, token));
+  if (typeof value === 'string')
+    return Effect2.pipe(value, EffectString.includes(token)) || credentialScrubberBlocker(value) !== undefined;
+  if (EffectArray.isArray(value)) return EffectArray.some(value, item => containsSensitiveText(item, token));
   if (!isRecord(value)) return false;
-  return Object.entries(value).some(
+  return EffectArray.some(
+    EffectRecord.toEntries(value),
     ([key, item]) => containsSensitiveText(key, token) || containsSensitiveText(item, token),
   );
 }
@@ -171,7 +182,7 @@ function boundedResponse(
       }
     }
   };
-  const onAbort = () => stop(new ProbeError({code: 'deadline-exceeded'}));
+  const onAbort = () => stop(ProbeError.make({code: 'deadline-exceeded'}));
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       output = controller;
@@ -192,12 +203,12 @@ function boundedResponse(
         count += next.value.byteLength;
         budget.bytes += next.value.byteLength;
         if (count > MAX_RESPONSE_BYTES || budget.bytes > totalByteLimit) {
-          stop(new ProbeError({code: 'response-too-large'}));
+          stop(ProbeError.make({code: 'response-too-large'}));
           return;
         }
         controller.enqueue(next.value);
       } catch {
-        stop(new ProbeError({code: 'transport-rejected'}));
+        stop(ProbeError.make({code: 'transport-rejected'}));
       }
     },
     cancel() {
@@ -219,7 +230,7 @@ async function withBoundedSession<T>(
   ) => Promise<T>,
 ): Promise<T> {
   const secret = Redacted.value(token);
-  if (secret.trim().length === 0) return failed('missing-credential');
+  if (Effect2.pipe(secret, EffectString.trim).length === 0) return failed('missing-credential');
   const endpoint = new URL(SUPERHUMAN_MCP_URL);
   if (endpoint.username || endpoint.password) return failed('transport-rejected');
   const controller = new AbortController();
@@ -244,7 +255,7 @@ async function withBoundedSession<T>(
       boundedTimeout(options.requestTimeoutMs, REQUEST_TIMEOUT_MS),
     );
     const deadline = Promise.withResolvers<never>();
-    request.signal.addEventListener('abort', () => deadline.reject(new ProbeError({code: 'deadline-exceeded'})), {
+    request.signal.addEventListener('abort', () => deadline.reject(ProbeError.make({code: 'deadline-exceeded'})), {
       once: true,
     });
     try {
@@ -302,7 +313,7 @@ async function withBoundedSession<T>(
       const next = new URL(location, requestUrl);
       if (
         next.origin !== endpoint.origin ||
-        !next.pathname.startsWith('/apis/mcp/') ||
+        !Effect2.pipe(next.pathname, EffectString.startsWith('/apis/mcp/')) ||
         next.username ||
         next.password ||
         next.search ||
@@ -349,7 +360,7 @@ async function withBoundedSession<T>(
   try {
     if (controller.signal.aborted) return failed('deadline-exceeded');
     const deadline = Promise.withResolvers<never>();
-    controller.signal.addEventListener('abort', () => deadline.reject(new ProbeError({code: 'deadline-exceeded'})), {
+    controller.signal.addEventListener('abort', () => deadline.reject(ProbeError.make({code: 'deadline-exceeded'})), {
       once: true,
     });
     return await Promise.race([
@@ -365,7 +376,7 @@ async function withBoundedSession<T>(
     ]);
   } catch (error) {
     if (boundaryFailure !== undefined) return failed(boundaryFailure);
-    if (error instanceof ProbeError) throw error;
+    if (Schema.is(ProbeError)(error)) throw error;
     return failed(controller.signal.aborted || requestTimedOut ? 'deadline-exceeded' : 'transport-rejected');
   } finally {
     clearTimeout(totalTimer);
@@ -391,7 +402,7 @@ export async function discoverSuperhumanTools(
       const page = await withDeadline(() =>
         client.request({method: 'tools/list', params: cursor === undefined ? {} : {cursor}}, ListToolsResultSchema),
       );
-      if (!Array.isArray(page.tools)) return failed('catalog-invalid');
+      if (!EffectArray.isArray(page.tools)) return failed('catalog-invalid');
       for (const item of page.tools) {
         const tool = checkedTool(item);
         if (names.has(tool.name)) return failed('catalog-invalid');
@@ -443,15 +454,19 @@ export async function probeSelectedPageContractRaw(
   } catch {
     return failed('catalog-invalid');
   }
-  const segments = selected.pathname.split('/').filter(Boolean);
+  const segments = EffectArray.filter(Effect2.pipe(selected.pathname, EffectString.split('/')), Boolean);
   if (
     selected.origin !== 'https://docs.superhuman.com' ||
     selected.username ||
     selected.password ||
     segments.length < 3 ||
     segments[0] !== 'd' ||
-    !segments[1]?.includes('_') ||
-    !segments[2]?.includes('_')
+    !Effect2.pipe(segments[1], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.includes('_')),
+    ) ||
+    !Effect2.pipe(segments[2], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.includes('_')),
+    )
   ) {
     return failed('catalog-invalid');
   }
@@ -499,13 +514,13 @@ export async function probeSelectedPageContractRaw(
           const response = await withDeadline(() =>
             client.request({method: 'tools/call', params: {name, arguments: args}}, CallToolResultSchema),
           );
-          if (response.isError) throw new ProbeError({code: 'provider-error'});
+          if (response.isError) throw ProbeError.make({code: 'provider-error'});
           const value = response.structuredContent ?? parseToolText(response.content);
           observations.push({name, value});
           return value;
         } catch (error) {
-          throw new ProbeError({
-            code: error instanceof ProbeError ? error.code : 'transport-rejected',
+          throw ProbeError.make({
+            code: Schema.is(ProbeError)(error) ? error.code : 'transport-rejected',
             operation: name,
           });
         }
@@ -527,9 +542,23 @@ export async function probeSelectedPageContractRaw(
           };
         return failed('catalog-invalid');
       }
-      const pagePath = pageUri.split('#')[0];
-      const parentUri = pagePath?.slice(0, pagePath.indexOf('/pages/'));
-      const declaredDocPath = declaredDocUri.split('#')[0];
+      const pagePath = Effect2.pipe(pageUri, EffectString.split('#'))[0];
+      const parentUri = Effect2.pipe(pagePath, effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect2.pipe(
+              effectOptionalString,
+              EffectString.slice(
+                0,
+                Effect2.pipe(
+                  pagePath,
+                  EffectString.indexOf('/pages/'),
+                  Effect2.Option.getOrElse(() => -1),
+                ),
+              ),
+            ),
+      );
+      const declaredDocPath = Effect2.pipe(declaredDocUri, EffectString.split('#'))[0];
       docUri = declaredDocUri;
       const identitySignals = {
         pageUriFound: true,
@@ -537,12 +566,26 @@ export async function probeSelectedPageContractRaw(
           declaredDocUri,
         ),
         declaredDocMatchesParentIgnoringScheme:
-          declaredDocPath?.replace(/^[^:]+:/, '') === parentUri?.replace(/^[^:]+:/, ''),
+          Effect2.pipe(declaredDocPath, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.replace(/^[^:]+:/, '')),
+          ) ===
+          Effect2.pipe(parentUri, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.replace(/^[^:]+:/, '')),
+          ),
       };
       const scopeMatched =
         identitySignals.declaredDocUriIsDoc &&
         identitySignals.declaredDocMatchesParentIgnoringScheme &&
-        (options.expectedDocumentId === undefined || parentUri?.endsWith(`/${options.expectedDocumentId}`));
+        (options.expectedDocumentId === undefined ||
+          Effect2.pipe(parentUri, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.endsWith(`/${options.expectedDocumentId}`)),
+          ));
       if (!scopeMatched && stage === 'identity')
         return {calls: observations, protocolVersion, scopeMatched: false, identitySignals};
       if (!scopeMatched) return failed('catalog-invalid');
@@ -562,7 +605,7 @@ export async function probeSelectedPageContractRaw(
 }
 
 function parseToolText(content: ReadonlyArray<{readonly type: string; readonly text?: string}>): unknown {
-  const texts = content.filter(item => item.type === 'text' && typeof item.text === 'string');
+  const texts = EffectArray.filter(content, item => item.type === 'text' && typeof item.text === 'string');
   if (texts.length !== 1) return failed('catalog-invalid');
   const text = texts[0]?.text;
   if (text === undefined) return failed('catalog-invalid');
@@ -581,29 +624,32 @@ function findPageUri(value: unknown): string | undefined {
       ? value
       : undefined;
   }
-  if (Array.isArray(value)) return value.map(findPageUri).find(Boolean);
+  if (EffectArray.isArray(value))
+    return EffectOption.getOrUndefined(EffectArray.findFirst(EffectArray.map(value, findPageUri), Boolean));
   if (!isRecord(value)) return undefined;
-  return Object.values(value).map(findPageUri).find(Boolean);
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(EffectArray.map(EffectRecord.values(value), findPageUri), Boolean),
+  );
 }
 
 export function probeSuperhumanTools(credentialEnvironmentName = SUPERHUMAN_TOKEN_ENV, options: ProbeOptions = {}) {
   return Effect.gen(function* () {
     if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(credentialEnvironmentName)) {
-      return yield* new ProbeError({code: 'invalid-credential-reference'});
+      return yield* ProbeError.make({code: 'invalid-credential-reference'});
     }
     const system = yield* SystemInfo;
     const value = system.environment()[credentialEnvironmentName];
-    if (value === undefined || value.trim().length === 0) {
-      return yield* new ProbeError({code: 'missing-credential'});
+    if (value === undefined || Effect2.pipe(value, EffectString.trim).length === 0) {
+      return yield* ProbeError.make({code: 'missing-credential'});
     }
     const token = Redacted.make(value);
     const fetch = yield* admittedSourceFetch('superhuman', token, options.fetch, options.admissionConfig).pipe(
-      Effect.mapError(() => new ProbeError({code: 'transport-rejected'})),
+      Effect.mapError(() => ProbeError.make({code: 'transport-rejected'})),
     );
     return yield* fromPromiseInterruptible(
       signal =>
         discoverSuperhumanTools(token, {...options, fetch: (input, init) => fetch(new URL(input), init ?? {}), signal}),
-      error => (error instanceof ProbeError ? error : new ProbeError({code: 'transport-rejected'})),
+      error => (Schema.is(ProbeError)(error) ? error : ProbeError.make({code: 'transport-rejected'})),
     );
   });
 }

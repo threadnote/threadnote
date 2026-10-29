@@ -1,5 +1,5 @@
 import {
-  String as EffectString,
+  Array as EffectArray,
   Clock,
   Context,
   Crypto,
@@ -10,6 +10,7 @@ import {
   PlatformError,
   Schema,
 } from 'effect';
+import * as Effect2 from 'effect';
 import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runBinaryCommandEffect, runCommandEffect, runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -31,7 +32,7 @@ import {
   readNativeCloseoutJobEpoch,
 } from './closeout_request_schema.js';
 import type {NativeWorkflowState} from '@threadnote/workflow-automations/native';
-
+import * as EffectString from 'effect/String';
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const hash = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
@@ -45,7 +46,6 @@ const workerLockOptions = {
   waitTimeoutMilliseconds: 50,
   useCanonicalProcessStartIdentity: true,
 } as const;
-
 export const nativeJobRequestSchema = Schema.Struct({
   protocolVersion: Schema.Literal(1),
   executorVersion: Schema.Literal(1),
@@ -91,13 +91,76 @@ export interface NativeJobSourceView {
   readonly closeoutAdmissionEpoch?: string;
   readonly targetRoot?: {readonly kind: 'spec' | 'plan'; readonly uri: string | null; readonly revision: string | null};
 }
-
-/** Present only while one admitted job replays its original immutable input. */
+const RetainedObjectSchema = Schema.Struct({
+  id: Schema.String,
+  type: Schema.Literals(['commit', 'tree', 'blob']),
+  sha256: hash,
+  bytes: Schema.String,
+});
+const CitationHashSchema = Schema.Struct({algorithm: Schema.Literal('sha256'), value: Schema.String});
+const CitationSpanSchema = Schema.Struct({
+  column: Schema.Finite,
+  endColumn: Schema.Finite,
+  endLine: Schema.Finite,
+  line: Schema.Finite,
+});
+const MemoryCitationSchema = Schema.Struct({
+  anchorId: Schema.optionalKey(Schema.String),
+  evidenceRetention: Schema.optionalKey(Schema.Literals(['capsule-retained', 'unavailable'])),
+  extractorSet: Schema.String,
+  fileContentHash: CitationHashSchema,
+  id: Schema.String,
+  path: Schema.String,
+  repositoryId: Schema.String,
+  repositoryIdentityKind: Schema.Literals(['local', 'remote']),
+  sourceCommit: Schema.String,
+  sourceDirty: Schema.Boolean,
+  sourceGraphContentId: Schema.optionalKey(Schema.String),
+  sourceSnapshotId: Schema.String,
+  target: Schema.Union([
+    Schema.Struct({kind: Schema.Literal('file')}),
+    Schema.Struct({
+      fragmentCanonicalization: Schema.Literal('utf8-source-span-v1'),
+      fragmentHash: CitationHashSchema,
+      kind: Schema.Literal('symbol'),
+      language: Schema.String,
+      name: Schema.String,
+      nodeId: Schema.String,
+      qualifiedName: Schema.String,
+      signatureHash: Schema.optionalKey(CitationHashSchema),
+      span: CitationSpanSchema,
+      symbolKind: Schema.String,
+    }),
+  ]),
+  version: Schema.Literal(1),
+});
+const NativeJobSourceViewSchema = Schema.Struct({
+  bindingId: Schema.String,
+  repo: Schema.String,
+  gitDir: Schema.String,
+  head: Schema.String,
+  tree: Schema.String,
+  objectFormat: Schema.Literals(['sha1', 'sha256']),
+  commitObject: RetainedObjectSchema,
+  treeObject: RetainedObjectSchema,
+  files: Schema.Array(Schema.Struct({path: Schema.String, object: RetainedObjectSchema})),
+  citations: Schema.Array(MemoryCitationSchema),
+  citationRefs: Schema.Array(Schema.String),
+  cycleDigest: Schema.optionalKey(Schema.String),
+  closeoutTransactionId: Schema.optionalKey(Schema.String),
+  closeoutAdmissionEpoch: Schema.optionalKey(Schema.String),
+  targetRoot: Schema.optionalKey(
+    Schema.Struct({
+      kind: Schema.Literals(['spec', 'plan']),
+      uri: Schema.NullOr(Schema.String),
+      revision: Schema.NullOr(Schema.String),
+    }),
+  ),
+});
 export const CurrentNativeJobSourceView = Context.Reference<NativeJobSourceView | undefined>(
   'threadnote/NativeJobSourceView',
   {defaultValue: () => undefined},
 );
-/** Set only around a ready authoring root's canonical lower write. */
 export const CurrentNativeJobReadyPromotion = Context.Reference<boolean>('threadnote/NativeJobReadyPromotion', {
   defaultValue: () => false,
 });
@@ -114,7 +177,6 @@ export const CurrentNativeJobBeforeDispatch = Context.Reference<Effect.Effect<vo
 export const CurrentNativeJobAutoLaunch = Context.Reference<boolean>('threadnote/NativeJobAutoLaunch', {
   defaultValue: () => true,
 });
-
 const envelopeSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-job'),
   version: Schema.Literal(1),
@@ -152,14 +214,15 @@ const inputSchema = Schema.Struct({
 });
 type JobInput = typeof inputSchema.Type;
 type Dispatch<R> = (work: unknown) => Effect.Effect<unknown, WorkflowAutomationError, R>;
-
 export function nativeJobId(bindingId: string, work: unknown, admissionEpoch?: string): string {
   return (
     'job-' +
-    EffectString.slice(0, 48)(sha256HexSync(stableJson({bindingId, work, ...(admissionEpoch ? {admissionEpoch} : {})})))
+    Effect2.pipe(
+      sha256HexSync(stableJson({bindingId, work, ...(admissionEpoch ? {admissionEpoch} : {})})),
+      EffectString.slice(0, 48),
+    )
   );
 }
-
 export function nativeJobStatus(
   envelope: Pick<
     Envelope,
@@ -180,10 +243,8 @@ export function nativeJobStatus(
     ...(envelope.action ? {nextAction: envelope.action} : {}),
   };
 }
-
 const decode = (value: unknown): Envelope =>
   Schema.decodeUnknownSync(envelopeSchema, {onExcessProperty: 'error'})(value);
-
 const decodeInput = (value: unknown, receipt: Envelope): JobInput => {
   const input = Schema.decodeUnknownSync(inputSchema, {onExcessProperty: 'error'})(value);
   if (
@@ -198,10 +259,13 @@ const decodeInput = (value: unknown, receipt: Envelope): JobInput => {
     throw fail('invalid-job-state', 'The exact private job request or source witness changed.');
   return input;
 };
-
 function validWitness(value: unknown, bindingId: string): value is NativeJobSourceView {
-  if (!value || typeof value !== 'object') return false;
-  const witness = value as Partial<NativeJobSourceView>;
+  let witness: typeof NativeJobSourceViewSchema.Type;
+  try {
+    witness = Schema.decodeUnknownSync(NativeJobSourceViewSchema)(value);
+  } catch {
+    return false;
+  }
   if (
     witness.bindingId !== bindingId ||
     !witness.repo ||
@@ -210,15 +274,12 @@ function validWitness(value: unknown, bindingId: string): value is NativeJobSour
     !objectId.test(witness.head) ||
     !witness.tree ||
     !objectId.test(witness.tree) ||
-    !['sha1', 'sha256'].includes(witness.objectFormat ?? '') ||
-    !Array.isArray(witness.files) ||
-    !Array.isArray(witness.citations) ||
-    !Array.isArray(witness.citationRefs)
+    !['sha1', 'sha256'].includes(witness.objectFormat ?? '')
   )
     return false;
-  const objects = [witness.commitObject, witness.treeObject, ...witness.files.map(file => file.object)];
+  const objects = [witness.commitObject, witness.treeObject, ...EffectArray.map(witness.files, file => file.object)];
   if (
-    objects.some(object => {
+    EffectArray.some(objects, object => {
       if (
         !object ||
         !objectId.test(object.id) ||
@@ -230,7 +291,7 @@ function validWitness(value: unknown, bindingId: string): value is NativeJobSour
       return (
         bytes.toString('base64') !== object.bytes ||
         sha256HexSync(bytes) !== object.sha256 ||
-        new Bun.CryptoHasher(witness.objectFormat!)
+        new Bun.CryptoHasher(witness.objectFormat)
           .update(`${object.type} ${bytes.length}\0`)
           .update(bytes)
           .digest('hex') !== object.id
@@ -239,13 +300,14 @@ function validWitness(value: unknown, bindingId: string): value is NativeJobSour
   )
     return false;
   if (
-    witness.commitObject?.id !== witness.head ||
-    witness.commitObject?.type !== 'commit' ||
-    witness.treeObject?.id !== witness.tree ||
-    witness.treeObject?.type !== 'tree'
+    witness.commitObject.id !== witness.head ||
+    witness.commitObject.type !== 'commit' ||
+    witness.treeObject.id !== witness.tree ||
+    witness.treeObject.type !== 'tree'
   )
     return false;
-  if (witness.files.some(file => !nativeCycleRelativePath(file.path) || file.object.type !== 'blob')) return false;
+  if (EffectArray.some(witness.files, file => !nativeCycleRelativePath(file.path) || file.object.type !== 'blob'))
+    return false;
   if (witness.cycleDigest !== undefined && !/^[a-f0-9]{64}$/u.test(witness.cycleDigest)) return false;
   if (witness.closeoutTransactionId !== undefined && !/^[a-f0-9]{64}$/u.test(witness.closeoutTransactionId))
     return false;
@@ -254,15 +316,24 @@ function validWitness(value: unknown, bindingId: string): value is NativeJobSour
   if (
     witness.targetRoot &&
     (!['spec', 'plan'].includes(witness.targetRoot.kind) ||
-      (witness.targetRoot.uri !== null && !witness.targetRoot.uri.startsWith('threadnote://')) ||
+      (witness.targetRoot.uri !== null &&
+        !Effect2.pipe(witness.targetRoot.uri, EffectString.startsWith('threadnote://'))) ||
       (witness.targetRoot.revision !== null && !/^[a-f0-9]{64}$/u.test(witness.targetRoot.revision)))
   )
     return false;
-  if (!Buffer.from(witness.commitObject.bytes, 'base64').toString('utf8').startsWith(`tree ${witness.tree}\n`))
+  if (
+    !Effect2.pipe(
+      Buffer.from(witness.commitObject.bytes, 'base64').toString('utf8'),
+      EffectString.startsWith(`tree ${witness.tree}\n`),
+    )
+  )
     return false;
   if (
-    witness.citations.some(citation => {
-      const file = witness.files!.find(item => item.path === citation.path);
+    EffectArray.some(witness.citations, citation => {
+      const file = Option.getOrElse(
+        EffectArray.findFirst(witness.files, item => item.path === citation.path),
+        () => undefined,
+      );
       return (
         !file ||
         citation.sourceCommit !== witness.head ||
@@ -270,7 +341,7 @@ function validWitness(value: unknown, bindingId: string): value is NativeJobSour
         citation.evidenceRetention !== 'capsule-retained' ||
         !codeGraphFileContentHashMatchesBytes(
           citation.fileContentHash.value,
-          witness.objectFormat!,
+          witness.objectFormat,
           Buffer.from(file.object.bytes, 'base64'),
         )
       );
@@ -278,20 +349,24 @@ function validWitness(value: unknown, bindingId: string): value is NativeJobSour
   )
     return false;
   try {
-    witness.citations.forEach(assertMemoryCodeCitation);
+    EffectArray.forEach(witness.citations, assertMemoryCodeCitation);
   } catch {
     return false;
   }
   return true;
 }
-
 const jobPath = Effect.fn('nativeJobs.path')(function* (
   config: RuntimeConfig,
   runId: string,
   jobId: string,
   create = false,
 ) {
-  if (!Schema.is(id)(runId) || !Schema.is(id)(jobId) || runId.includes('..') || jobId.includes('..'))
+  if (
+    !Schema.is(id)(runId) ||
+    !Schema.is(id)(jobId) ||
+    Effect2.pipe(runId, EffectString.includes('..')) ||
+    Effect2.pipe(jobId, EffectString.includes('..'))
+  )
     return yield* fail('invalid-request', 'Use bounded portable native job identifiers.');
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -310,7 +385,6 @@ const jobPath = Effect.fn('nativeJobs.path')(function* (
   }
   return path.join(directory, jobId + '.json');
 });
-
 const readAt = Effect.fn('nativeJobs.readAt')(function* (file: string) {
   const fs = yield* FileSystem.FileSystem;
   if (Option.isSome(yield* fs.readLink(file).pipe(Effect.option)))
@@ -328,13 +402,10 @@ const readAt = Effect.fn('nativeJobs.readAt')(function* (file: string) {
   });
   return {state, revision: sha256HexSync(bytes)};
 });
-
 const read = Effect.fn('nativeJobs.read')(function* (config: RuntimeConfig, runId: string, jobId: string) {
   const file = yield* jobPath(config, runId, jobId);
   return file === undefined ? undefined : yield* readAt(file);
 });
-
-/** Immutable admission bytes are separate from the small status receipt. */
 const readInput = Effect.fn('nativeJobs.readInput')(function* (config: RuntimeConfig, receipt: Envelope) {
   const file = yield* jobPath(config, receipt.runId, receipt.jobId);
   if (!file) return yield* fail('job-not-found', 'The original job input is missing.');
@@ -353,7 +424,6 @@ const readInput = Effect.fn('nativeJobs.readInput')(function* (config: RuntimeCo
     catch: () => fail('invalid-job-state', 'The exact admitted input failed independent readback.'),
   });
 });
-
 const writeInput = Effect.fn('nativeJobs.writeInput')(function* (
   config: RuntimeConfig,
   receipt: Envelope,
@@ -380,7 +450,6 @@ const writeInput = Effect.fn('nativeJobs.writeInput')(function* (
   }).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
   yield* readInput(config, receipt);
 });
-
 const write = Effect.fn('nativeJobs.write')(function* (
   config: RuntimeConfig,
   state: Envelope,
@@ -403,7 +472,6 @@ const write = Effect.fn('nativeJobs.write')(function* (
     return {state, revision: sha256HexSync(serialized)};
   }).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
 });
-
 const withJobLock = <A, E, R>(
   config: RuntimeConfig,
   runId: string,
@@ -432,12 +500,10 @@ const withJobLock = <A, E, R>(
       ),
     );
   });
-
 const gitText = (repo: string, args: readonly string[]) =>
   runCommandEffect('git', ['--no-optional-locks', '-C', repo, ...args], {timeoutMs: 30_000, maxOutputBytes: 4096}).pipe(
-    Effect.map(result => result.stdout.trim()),
+    Effect.map(result => EffectString.trim(result.stdout)),
   );
-
 const retainObject = Effect.fn('nativeJobs.retainObject')(function* (
   repo: string,
   type: RetainedObject['type'],
@@ -452,15 +518,14 @@ const retainObject = Effect.fn('nativeJobs.retainObject')(function* (
     ['--no-optional-locks', '-C', repo, 'hash-object', '-t', type, '--stdin'],
     {input: binary.stdout, timeoutMs: 30_000, maxOutputBytes: 4096},
   );
-  if (new TextDecoder().decode(actual.stdout).trim() !== id)
+  if (EffectString.trim(new TextDecoder().decode(actual.stdout)) !== id)
     return yield* fail('source-drift', 'A retained Git object changed during admission.');
   return {id, type, sha256: sha256HexSync(binary.stdout), bytes: Buffer.from(binary.stdout).toString('base64')};
 });
-
 const parseWork = (value: unknown, runId: string, generation: string): Work => {
   if (!value || typeof value !== 'object')
     throw fail('invalid-request', 'Submit one exact authoring save or closeout prepare/finish request.');
-  const candidate = value as Partial<Work>;
+  const candidate = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(value);
   if (candidate.runId !== runId || candidate.generation !== generation)
     throw fail('job-capability', 'Nested work must preserve the admitted run and generation.');
   if (candidate.action === 'authoring' && candidate.command === 'save') {
@@ -469,7 +534,7 @@ const parseWork = (value: unknown, runId: string, generation: string): Work => {
     const document = decodeNativeAuthoringDocument(work.document);
     if (work.ready && !validateNativeAuthoring(document, work).ready)
       throw fail('job-capability', 'Ready background authoring requires the exact reviewed and confirmed document.');
-    return work as Work;
+    return {...work, action: 'authoring', command: 'save', runId, generation};
   }
   if (candidate.action === 'closeout' && (candidate.command === 'prepare' || candidate.command === 'finish')) {
     const work = Schema.decodeUnknownSync(nativeCloseoutRequestSchema, {onExcessProperty: 'error'})(value);
@@ -480,11 +545,16 @@ const parseWork = (value: unknown, runId: string, generation: string): Work => {
         'job-capability',
         'Background finish uses the already prepared transaction without a new proposal or revision override.',
       );
-    return work as Work;
+    return {
+      ...work,
+      action: 'closeout',
+      command: candidate.command === 'prepare' ? 'prepare' : 'finish',
+      runId,
+      generation,
+    };
   }
   throw fail('job-capability', 'Background jobs support exact authoring save or closeout prepare/finish only.');
 };
-
 const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
   config: RuntimeConfig,
   state: NativeWorkflowState,
@@ -531,13 +601,17 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
       closeout.source.tree !== tree)
   )
     return yield* fail('job-source-drift', 'The prepared closeout transaction has a different original source.');
+  const proposal = work.proposal;
+  const proposalCodeRefs = Schema.is(
+    Schema.Struct({
+      architecture: Schema.optionalKey(Schema.Struct({codeRefs: Schema.optionalKey(Schema.Array(Schema.String))})),
+    }),
+  )(proposal)
+    ? proposal.architecture?.codeRefs
+    : undefined;
   const codeRefs =
-    work.action === 'authoring'
-      ? document!.context.codeRefs
-      : (closeout?.codeRefs ??
-        (work.proposal as {architecture?: {codeRefs?: readonly string[]}} | undefined)?.architecture?.codeRefs ??
-        []);
-  if (codeRefs.some(ref => ref.startsWith('cgr_')))
+    work.action === 'authoring' ? document!.context.codeRefs : (closeout?.codeRefs ?? proposalCodeRefs ?? []);
+  if (EffectArray.some(codeRefs, ref => Effect2.pipe(ref, EffectString.startsWith('cgr_'))))
     return yield* fail(
       'job-capability',
       'Qualified or cross-repository citations are unsupported for background admission.',
@@ -551,7 +625,8 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     return yield* fail('job-capability', 'Exact current citation evidence could not be retained before acceptance.');
   const citations = captured.citations;
   if (
-    citations.some(
+    EffectArray.some(
+      citations,
       citation =>
         citation.sourceCommit !== firstHead ||
         citation.sourceDirty ||
@@ -561,8 +636,8 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     return yield* fail('job-capability', 'Background citations require retained exact clean source evidence.');
   const paths = [
     ...new Set([
-      ...(document?.source?.files.map(file => file.path) ?? []),
-      ...citations.map(citation => citation.path),
+      ...(document?.source ? EffectArray.map(document.source.files, file => file.path) : []),
+      ...EffectArray.map(citations, citation => citation.path),
     ]),
   ];
   const files: RetainedFile[] = [];
@@ -574,10 +649,16 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
       return yield* fail('job-capability', 'Background source requires committed regular files.');
     const object = yield* retainObject(root, 'blob', entry.blob);
     const bytes = Buffer.from(object.bytes, 'base64');
-    const expected = document?.source?.files.find(file => file.path === path);
+    const expected = document?.source
+      ? Option.getOrElse(
+          EffectArray.findFirst(document.source.files, file => file.path === path),
+          () => undefined,
+        )
+      : undefined;
     if (
       (expected && expected.sha256 !== sha256HexSync(bytes)) ||
-      citations.some(
+      EffectArray.some(
+        citations,
         citation =>
           citation.path === path &&
           !codeGraphFileContentHashMatchesBytes(citation.fileContentHash.value, objectFormat, bytes),
@@ -604,11 +685,13 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     ...(document
       ? {
           targetRoot: (() => {
-            const root = [...state.operations]
-              .reverse()
-              .find(
+            const root = Option.getOrElse(
+              EffectArray.findFirst(
+                [...state.operations].reverse(),
                 item => item.status === 'verified' && item.intent.artifactKey === 'author-root-' + document.kind,
-              )?.artifact;
+              ),
+              () => undefined,
+            )?.artifact;
             return {kind: document.kind, uri: root?.uri ?? null, revision: root?.revision ?? null};
           })(),
         }
@@ -619,8 +702,6 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
   yield* assertNativeJobLiveSource(witness);
   return witness;
 });
-
-/** Call at the actual canonical promotion write and after independent readback. */
 export const assertNativeJobLiveSource = Effect.fn('nativeJobs.assertLiveSource')(function* (
   view: NativeJobSourceView,
 ) {
@@ -636,11 +717,12 @@ export const assertNativeJobLiveSource = Effect.fn('nativeJobs.assertLiveSource'
       'The original checkout HEAD, tree or worktree changed; reconcile and re-review this job.',
     );
 });
-
 const launch = Effect.fn('nativeJobs.launch')(function* (config: RuntimeConfig, runId: string, jobId: string) {
   const system = yield* SystemInfo;
   const executable = system.executablePath;
-  const name = executable.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  const name = EffectString.toLowerCase(
+    Effect2.pipe(executable, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1) ?? '',
+  );
   const args = [
     ...(name === 'bun' || name === 'bun.exe' ? [system.developmentEntrypoint] : []),
     'workflow-automation',
@@ -659,7 +741,6 @@ const launch = Effect.fn('nativeJobs.launch')(function* (config: RuntimeConfig, 
       'The admitted job remains durable; resume it after the worker is available.',
     );
 });
-
 const launchOrReport = Effect.fn('nativeJobs.launchOrReport')(function* (
   config: RuntimeConfig,
   runId: string,
@@ -678,7 +759,6 @@ const launchOrReport = Effect.fn('nativeJobs.launchOrReport')(function* (
   }));
   return nativeJobStatus(failed.state);
 });
-
 const transition = Effect.fn('nativeJobs.transition')(function* (
   config: RuntimeConfig,
   runId: string,
@@ -698,7 +778,6 @@ const transition = Effect.fn('nativeJobs.transition')(function* (
     }),
   );
 });
-
 export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
   config: RuntimeConfig,
   runId: string,
@@ -732,7 +811,7 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
         return nativeJobStatus(current.state);
       }
       const input = loaded.success;
-      const view = input.witness as NativeJobSourceView;
+      const view = yield* Schema.decodeUnknownEffect(NativeJobSourceViewSchema)(input.witness);
       const firstStart = !current.state.started;
       current = yield* transition(config, runId, jobId, state => ({
         ...state,
@@ -765,11 +844,13 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
         )
           return yield* fail('job-controller-drift', 'The admitted run binding, generation or pinned cycle changed.');
         if (view.targetRoot && firstStart) {
-          const root = [...controller.state.operations]
-            .reverse()
-            .find(
+          const root = Option.getOrElse(
+            EffectArray.findFirst(
+              [...controller.state.operations].reverse(),
               item => item.status === 'verified' && item.intent.artifactKey === 'author-root-' + view.targetRoot!.kind,
-            )?.artifact;
+            ),
+            () => undefined,
+          )?.artifact;
           if ((root?.uri ?? null) !== view.targetRoot.uri || (root?.revision ?? null) !== view.targetRoot.revision)
             return yield* fail('job-target-drift', 'The authoring target changed before this job began.');
         }
@@ -852,7 +933,6 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
     ),
   );
 });
-
 export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   config: RuntimeConfig,
   input: unknown,

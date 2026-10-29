@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {inspectCodeGraphImpactIsolated} from '@threadnote/graph/isolated/impact_query';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -17,6 +18,9 @@ import {
   projectContextCheckReportSarif,
   type ContextCheckReportV2,
 } from '@threadnote/context/check';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export interface ContextCheckOptions {
   readonly base?: string;
@@ -32,7 +36,7 @@ export const runContextCheck = Effect.fn('contextCheck.command')(function* (
   options: ContextCheckOptions,
 ) {
   const system = yield* SystemInfo;
-  const project = options.project.trim();
+  const project = Effect2.pipe(options.project, EffectString.trim);
   const formats = new Set([
     ...(options.format === undefined ? [] : [options.format]),
     ...(options.json === true ? (['json'] as const) : []),
@@ -65,18 +69,27 @@ const checkRepository = Effect.fn('contextCheck.repository')(function* (
   return yield* Effect.gen(function* () {
     const records = yield* readActiveProjectMemoryRecords(config, project);
     // Invalid citation headers cannot prove absence from this change's scope.
-    if (paths.length > 0 && records.some(record => (record.metadata.citationErrors?.length ?? 0) > 0)) {
+    if (paths.length > 0 && EffectArray.some(records, record => (record.metadata.citationErrors?.length ?? 0) > 0)) {
       return unavailableReport(project, 'affected-memory-evidence-unavailable');
     }
     const guidanceUris: readonly string[] = yield* guidanceSourceUrisForChangedPaths(config, project, repoRoot, paths);
     const direct = selectAffectedMemories(records, repositoryId, paths, caseMode);
     const directlyAffected = [
       ...new Map(
-        [...direct, ...records.filter(record => guidanceUris.includes(record.uri))].map(record => [record.uri, record]),
+        EffectArray.map(
+          [
+            ...direct,
+            ...EffectArray.filter(
+              records,
+              (record, __effectArrayIndex) => __effectArrayIndex in records && guidanceUris.includes(record.uri),
+            ),
+          ],
+          record => [record.uri, record],
+        ),
       ).values(),
     ];
     const directlyAffectedMemoryUris = [
-      ...new Set([...directlyAffected.map(record => record.uri), ...guidanceUris]),
+      ...new Set([...EffectArray.map(directlyAffected, record => record.uri), ...guidanceUris]),
     ].sort();
     const graph = yield* CodeGraphQueryService;
     const graphStatus =
@@ -166,12 +179,26 @@ export function selectAffectedMemories(
   changedPaths: readonly string[],
   caseMode: 'insensitive' | 'sensitive' = 'sensitive',
 ): readonly MemoryRecord[] {
-  const pathKey = (value: string) => (caseMode === 'insensitive' ? value.toLowerCase() : value);
-  const paths = new Set(changedPaths.map(pathKey));
-  return records.filter(record =>
-    record.metadata.codeCitations?.some(
-      citation => citation.repositoryId === repositoryId && paths.has(pathKey(citation.path)),
-    ),
+  const pathKey = (value: string) =>
+    caseMode === 'insensitive' ? Effect2.pipe(value, EffectString.toLowerCase) : value;
+  const paths = new Set(EffectArray.map(changedPaths, pathKey));
+  return EffectArray.filter(
+    records,
+    (record, __effectArrayIndex) =>
+      __effectArrayIndex in records &&
+      Boolean(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(record.metadata.codeCitations), __effectArrayReceiver =>
+            EffectArray.some(
+              __effectArrayReceiver,
+              __effectArrayValue =>
+                !!(citation => citation.repositoryId === repositoryId && paths.has(pathKey(citation.path)))(
+                  __effectArrayValue,
+                ),
+            ),
+          ),
+        ),
+      ),
   );
 }
 
@@ -184,7 +211,7 @@ const changedRepositoryPaths = Effect.fn('contextCheck.changedPaths')(function* 
     ['rev-parse', '--verify', '--end-of-options', `${base}^{commit}`],
     bounded,
   );
-  const commit = verified.stdout.trim();
+  const commit = Effect2.pipe(verified.stdout, EffectString.trim);
   if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit)) return yield* Effect.fail('invalid-base');
   const [tracked, untracked] = yield* Effect.all(
     [
@@ -194,7 +221,11 @@ const changedRepositoryPaths = Effect.fn('contextCheck.changedPaths')(function* 
     ],
     {concurrency: 2},
   );
-  const paths = [...new Set(`${tracked.stdout}\0${untracked.stdout}`.split('\0').filter(Boolean))].sort();
+  const paths = [
+    ...new Set(
+      EffectArray.filter(Effect2.pipe(`${tracked.stdout}\0${untracked.stdout}`, EffectString.split('\0')), Boolean),
+    ),
+  ].sort();
   return {
     baseCommit: commit,
     paths,
@@ -226,7 +257,7 @@ export function sameChangedPathSelection(
     left.repositoryId === right.repositoryId &&
     left.repoRoot === right.repoRoot &&
     left.paths.length === right.paths.length &&
-    left.paths.every((path, index) => path === right.paths[index])
+    EffectArray.every(left.paths, (path, index) => path === right.paths[index])
   );
 }
 
@@ -254,7 +285,8 @@ export function contextCheckReadFenceIntact(
 function renderContextCheck(report: ContextCheckReportV2): string {
   const lines = [
     `Context check: ${report.exitClassification}; ${report.findings.length} finding(s), ${report.omittedFindings} omitted.`,
-    ...report.findings.map(
+    ...EffectArray.map(
+      report.findings,
       finding =>
         `- ${finding.severity} ${finding.category}: ${finding.affectedMemoryCount} affected memory record(s) ` +
         `[${finding.fingerprint}]`,
@@ -262,7 +294,7 @@ function renderContextCheck(report: ContextCheckReportV2): string {
   ];
   if (report.evidenceReason !== undefined) lines.push(`Evidence: ${report.evidenceReason}.`);
   lines.push(`Exit ${report.exitCode}.`);
-  return lines.join('\n');
+  return EffectArray.join(lines, '\n');
 }
 
 function unavailableReport(

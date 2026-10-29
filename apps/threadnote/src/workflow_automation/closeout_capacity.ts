@@ -1,4 +1,5 @@
-import {Array as EffectArray, String as EffectString, Context, DateTime, Effect} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Context, DateTime, Effect} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
@@ -32,6 +33,7 @@ import {
 } from './store.js';
 import {NativeCloseoutSaveReservationSchema} from '@threadnote/workflow-automations/native';
 import type {NativeCloseoutPlannedDocument} from './closeout_documents.js';
+import * as EffectString from 'effect/String';
 
 /** A reservation can be abandoned only before any of its lower operation slots are consumed. */
 export const pristineCloseoutOperationPrefix = (
@@ -83,7 +85,7 @@ const archiveCapacity = Effect.fn('workflowAutomation.archiveCapacity')(function
 ) {
   let controllerGrowth = 0;
   let controllerStoredMaximum = 0;
-  for (const bindingId of new Set(owned.map(item => item.bindingId))) {
+  for (const bindingId of new Set(EffectArray.map(owned, item => item.bindingId))) {
     const growth = yield* withWorkflowLock(
       config,
       bindingId,
@@ -103,7 +105,7 @@ const archiveCapacity = Effect.fn('workflowAutomation.archiveCapacity')(function
         let projected = original;
         let maximum = workflowJournalLogicalBytes(original, true);
         let remaining = 0;
-        for (const item of owned.filter(entry => entry.bindingId === bindingId)) {
+        for (const item of EffectArray.filter(owned, entry => entry.bindingId === bindingId)) {
           const request = {
             protocolVersion: 1 as const,
             action: 'archive' as const,
@@ -249,7 +251,7 @@ export const reserveNativeCloseoutCapacity = Effect.fn('workflowAutomation.reser
         !/^[a-f0-9]{64}$/u.test(transactionId) ||
         !operationIds.length ||
         new Set(operationIds).size !== operationIds.length ||
-        (!prior && state.operations.some(operation => operation.status === 'prepared'))
+        (!prior && EffectArray.some(state.operations, operation => operation.status === 'prepared'))
       )
         return yield* fail('Closeout requires a complete unique operation plan and no pending child write.');
       const journal = yield* withWorkflowLock(config, state.bindingId, inspectWorkflowJournal(config, state.bindingId));
@@ -294,26 +296,29 @@ export const reserveNativeCloseoutCapacity = Effect.fn('workflowAutomation.reser
           const scopeUris = [
             ...new Set([
               ...sharedRoots,
-              ...state.operations.flatMap(operation => (operation.artifact ? [operation.artifact.uri] : [])),
-              ...plannedDocuments.flatMap(document => [
+              ...EffectArray.flatMap(state.operations, operation =>
+                operation.artifact ? [operation.artifact.uri] : [],
+              ),
+              ...EffectArray.flatMap(plannedDocuments, document => [
                 document.uri,
-                ...document.relations.map(relation => relation.uri),
+                ...EffectArray.map(document.relations, relation => relation.uri),
               ]),
             ]),
           ];
           const proposedBytes =
             archiveGrowth +
             nativeAuthoringSaveByteBudget({
-              contentBytes: plannedDocuments.reduce(
-                (total, document) => total + utf8.encode(document.body).byteLength,
+              contentBytes: EffectArray.reduce(
+                plannedDocuments,
                 0,
+                (total, document) => total + utf8.encode(document.body).byteLength,
               ),
               evidenceBytes: utf8.encode(stableJson(codeRefs)).byteLength,
               plannedOperations: operationIds.length,
               scopeBytes: utf8.encode(stableJson(scopeUris)).byteLength,
               maximumScopeEntryBytes: Math.max(
                 0,
-                ...scopeUris.map(uri => utf8.encode(JSON.stringify(uri)).byteLength + 1),
+                ...EffectArray.map(scopeUris, uri => utf8.encode(JSON.stringify(uri)).byteLength + 1),
               ),
               requestMetadataBytes: utf8.encode(
                 stableJson({binding: journal.state.binding, generation: state.generation, codeRefs}),

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {deferCodeGraphVectorCompletion} from '../vector/publication.js';
 import {Clock, Effect, FileSystem, Option, Path} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -361,8 +363,8 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
 ) {
   if (candidate.snapshot.id === input.logicalSnapshotId) return Option.none<ReusableCleanSnapshotAttempt>();
   if (!(yield* codeGraphScopedBaseReusable(input, candidate))) return Option.none<ReusableCleanSnapshotAttempt>();
-  const baseByPath = new Map(candidate.files.map(file => [file.path, file]));
-  if (input.inventory.files.some(file => file.source !== 'commit')) {
+  const baseByPath = new Map(EffectArray.map(candidate.files, file => [file.path, file]));
+  if (EffectArray.some(input.inventory.files, file => file.source !== 'commit')) {
     return Option.none<ReusableCleanSnapshotAttempt>();
   }
   const lease = yield* input.store
@@ -378,7 +380,7 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
             ? ({changedPackIds: [], mode: 'compatible'} as const)
             : assessCodeGraphLanguagePackDelta(
                 candidate.receipt.packProvenance,
-                input.languagePacks.activePackProvenance(input.inventory.files.map(file => file.path)),
+                input.languagePacks.activePackProvenance(EffectArray.map(input.inventory.files, file => file.path)),
               );
         if (
           packDelta.mode === 'fallback' ||
@@ -389,22 +391,28 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
           return Option.some<ReusableCleanSnapshotAttempt>({mode: 'fallback', reason: 'extractor-context-changed'});
         }
         const changedPackIds = new Set(packDelta.changedPackIds);
-        const modifiedFiles = input.inventory.files.filter(file => {
-          const base = baseByPath.get(file.path);
-          return (
-            !base ||
-            base.contentHash !== file.contentHash ||
-            base.language !== file.language ||
-            base.mode !== file.mode ||
-            base.size !== file.size ||
-            Option.match(input.languagePacks.match(file.path), {
-              onNone: () => false,
-              onSome: match => changedPackIds.has(match.pack.id),
-            })
-          );
-        });
-        const currentPaths = new Set(input.inventory.files.map(file => file.path));
-        const deletedPaths = candidate.files.filter(file => !currentPaths.has(file.path)).map(file => file.path);
+        const modifiedFiles = EffectArrayPipe(input.inventory.files, __effectArrayValues =>
+          EffectArray.filter(__effectArrayValues, (file, __effectArrayIndex) => {
+            if (!(__effectArrayIndex in __effectArrayValues)) return false;
+            const base = baseByPath.get(file.path);
+            return (
+              !base ||
+              base.contentHash !== file.contentHash ||
+              base.language !== file.language ||
+              base.mode !== file.mode ||
+              base.size !== file.size ||
+              Option.match(input.languagePacks.match(file.path), {
+                onNone: () => false,
+                onSome: match => changedPackIds.has(match.pack.id),
+              })
+            );
+          }),
+        );
+        const currentPaths = new Set(EffectArray.map(input.inventory.files, file => file.path));
+        const deletedPaths = EffectArray.map(
+          EffectArray.filter(candidate.files, file => !currentPaths.has(file.path)),
+          file => file.path,
+        );
         const aliasWorkspaceCompatible =
           candidate.receipt.workspaceFingerprint === workspace.fingerprint ||
           (candidate.receipt.inventory?.workspace !== undefined &&
@@ -442,7 +450,7 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
             currentSnapshotReusableBaseReceipt(
               input.inventory,
               workspace,
-              input.languagePacks.activePackProvenance(input.inventory.files.map(file => file.path)),
+              input.languagePacks.activePackProvenance(EffectArray.map(input.inventory.files, file => file.path)),
             ),
           );
           yield* input.onProgress?.({phase: 'activating', snapshotId: alias.id, subphase: 'promoting'}) ?? Effect.void;
@@ -805,7 +813,7 @@ export const attemptReusableDirtyBase = Effect.fn('codeGraph.attemptReusableDirt
       ? ({changedPackIds: [], mode: 'compatible'} as const)
       : assessCodeGraphLanguagePackDelta(
           candidate.receipt.packProvenance,
-          input.languagePacks.activePackProvenance(input.inventory.files.map(file => file.path)),
+          input.languagePacks.activePackProvenance(EffectArray.map(input.inventory.files, file => file.path)),
         );
   if (
     packDelta.mode === 'fallback' ||
@@ -816,15 +824,25 @@ export const attemptReusableDirtyBase = Effect.fn('codeGraph.attemptReusableDirt
   }
   const changedPackIds = new Set(packDelta.changedPackIds);
   const alignedCommitCandidate = sameInventoryPaths(candidate.files, input.inventory.files);
-  const baseByPath = alignedCommitCandidate ? undefined : new Map(candidate.files.map(file => [file.path, file]));
-  const currentPaths = alignedCommitCandidate ? undefined : new Set(input.inventory.files.map(file => file.path));
-  const modifiedFiles = input.inventory.files.filter((file, index) => {
-    const base = alignedCommitCandidate ? candidate.files[index] : baseByPath!.get(file.path);
-    return codeGraphInventoryFileChanged(base, file, input.languagePacks, changedPackIds);
-  });
+  const baseByPath = alignedCommitCandidate
+    ? undefined
+    : new Map(EffectArray.map(candidate.files, file => [file.path, file]));
+  const currentPaths = alignedCommitCandidate
+    ? undefined
+    : new Set(EffectArray.map(input.inventory.files, file => file.path));
+  const modifiedFiles = EffectArrayPipe(input.inventory.files, __effectArrayValues =>
+    EffectArray.filter(__effectArrayValues, (file, index) => {
+      if (!(index in __effectArrayValues)) return false;
+      const base = alignedCommitCandidate ? candidate.files[index] : baseByPath!.get(file.path);
+      return codeGraphInventoryFileChanged(base, file, input.languagePacks, changedPackIds);
+    }),
+  );
   const deletedPaths = alignedCommitCandidate
     ? []
-    : candidate.files.filter(file => !currentPaths!.has(file.path)).map(file => file.path);
+    : EffectArray.map(
+        EffectArray.filter(candidate.files, file => !currentPaths!.has(file.path)),
+        file => file.path,
+      );
   if (modifiedFiles.length === 0 && deletedPaths.length === 0) return Option.none();
   const assessmentInput = {
     candidate,
@@ -1034,7 +1052,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
   const totalFiles = input.sparseProjection?.totalFiles ?? input.inventory.files.length;
   const packProvenance =
     input.sparseProjection?.packProvenance ??
-    input.languagePacks.activePackProvenance(input.inventory.files.map(file => file.path));
+    input.languagePacks.activePackProvenance(EffectArray.map(input.inventory.files, file => file.path));
   const reusedFiles = totalFiles - input.inventory.parsedFiles;
   const incrementalAssessment =
     input.incrementalAssessment ??
@@ -1084,7 +1102,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       materializedFiles = incrementalAssessment.files.length;
       for (const diagnostic of [
         ...input.committedBase!.diagnostics,
-        ...incrementalAssessment.facts.flatMap(file => file.diagnostics),
+        ...EffectArray.flatMap(incrementalAssessment.facts, file => file.diagnostics),
       ]) {
         if (extractionDiagnostics.length >= 100) break;
         if (!extractionDiagnostics.includes(diagnostic)) extractionDiagnostics.push(diagnostic);
@@ -1118,7 +1136,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     );
     const repositorySemanticEnvelope = materializedShardRepositorySemanticEnvelope(input.inventory.files);
     const donorSnapshotIds = shardDonorIds(input.building.id, input.committedBase?.snapshot.id, input.existing?.id);
-    const sourceBytesTotal = input.inventory.files.reduce((total, file) => total + file.size, 0);
+    const sourceBytesTotal = EffectArray.reduce(input.inventory.files, 0, (total, file) => total + file.size);
     const cachedMetadata = yield* cachedFactsMetadata(
       input.store,
       input.layout.databasePath,
@@ -1133,11 +1151,14 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     const batches = factMaterializationBatches(input.inventory.files, cachedMetadata.bytesByPath);
     const cachedFactBytesTotal = cachedMetadata.bytes;
     const materializedShardCacheWriteAdmission = codeGraphMaterializedShardCacheWriteAdmission(cachedFactBytesTotal);
-    const committedHashesByPath = new Map(input.inventory.committedFiles.map(file => [file.path, file.contentHash]));
+    const committedHashesByPath = new Map(
+      EffectArray.map(input.inventory.committedFiles, file => [file.path, file.contentHash]),
+    );
     const changedCurrentPaths = new Set(
-      input.inventory.files
-        .filter(file => committedHashesByPath.get(file.path) !== file.contentHash)
-        .map(file => file.path),
+      EffectArray.map(
+        EffectArray.filter(input.inventory.files, file => committedHashesByPath.get(file.path) !== file.contentHash),
+        file => file.path,
+      ),
     );
     let replayMetrics = emptyMaterializationReplayMetrics();
     let changedFactBytesCompleted: number | undefined = 0;
@@ -1258,9 +1279,9 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     if (storageShortfalls.length > 0) {
       extractionDiagnostics.push(
         directPersistentMaterialization
-          ? `Available ${storageShortfalls.join(' and ')} disk space is below the advisory whole-build ` +
+          ? `Available ${EffectArray.join(storageShortfalls, ' and ')} disk space is below the advisory whole-build ` +
               'materialization estimate; indexing will continue under measured bounded-write reservations.'
-          : `Available ${storageShortfalls.join(' and ')} disk space is below the heuristic materialization ` +
+          : `Available ${EffectArray.join(storageShortfalls, ' and ')} disk space is below the heuristic materialization ` +
               'estimate; indexing will continue while reporting actual TEMP database usage.',
       );
     }
@@ -1347,12 +1368,12 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
         yield* shardWrites.flushCaches();
         if (pendingBatches.length === 0) return;
         const group = pendingBatches.splice(0, pendingBatches.length);
-        const groupByIndex = new Map(group.map(batch => [batch.batchIndex, batch]));
+        const groupByIndex = new Map(EffectArray.map(group, batch => [batch.batchIndex, batch]));
         const transactionStartedAt = yield* Clock.currentTimeMillis;
         if (directPersistentMaterialization) {
           const append = input.store.stageActivationFactBatches(
             input.layout.databasePath,
-            group.map(batch => ({
+            EffectArray.map(group, batch => ({
               batchIndex: batch.batchIndex,
               edges: batch.edges,
               finalFactBytes: batch.factBytes,
@@ -1420,7 +1441,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
         repositorySemanticEnvelope,
         files,
       );
-      const sourceBytes = files.reduce((total, file) => total + file.size, 0);
+      const sourceBytes = EffectArray.reduce(files, 0, (total, file) => total + file.size);
       yield* input.onProgress?.({
         activity: {
           batchCompleted: batchesCompleted,
@@ -1484,7 +1505,13 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       // Changed-fact bytes measure the selected representation, not every physical cache decode.
       const batchChangedFactBytes = selectedDecodedFactBytes(
         materializedShardBatchComplete ? materializedShards.bytesByPath : cached.bytesByPath,
-        files.filter(file => changedCurrentPaths.has(file.path)).map(file => file.path),
+        EffectArray.map(
+          EffectArray.filter(
+            files,
+            (file, __effectArrayIndex) => __effectArrayIndex in files && changedCurrentPaths.has(file.path),
+          ),
+          file => file.path,
+        ),
       );
       changedFactBytesCompleted =
         changedFactBytesCompleted === undefined || batchChangedFactBytes === undefined
@@ -1493,7 +1520,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       const batchLoadingMilliseconds = (yield* Clock.currentTimeMillis) - loadingStartedAt;
       loadingMilliseconds += batchLoadingMilliseconds;
       stageMilliseconds['loading-cache'] = loadingMilliseconds;
-      if (fallbackFiles.some(file => !cached.facts.has(file.path))) {
+      if (EffectArray.some(fallbackFiles, file => !cached.facts.has(file.path))) {
         return yield* CachedCodeGraphFactUnavailableDuringIndex.make({});
       }
       yield* input.onProgress?.({
@@ -1525,7 +1552,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
         Effect.sync(() =>
           materializationSubphases.measure('attributionCompute', () =>
             attributeFacts(
-              fallbackFiles.map(file =>
+              EffectArray.map(fallbackFiles, file =>
                 input.languagePacks.postprocessFile(file, materializationFacts.get(file.path)!),
               ),
             ),
@@ -1547,7 +1574,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
         materializedShardCacheBatchPlan.cacheFallback
       ) {
         const serializedFallbackFacts = materializationSubphases.measure('shardSerialization', () =>
-          attributedFallbackFacts.map(fact => serializeBoundedCodeGraphFact(fact)),
+          EffectArray.map(attributedFallbackFacts, fact => serializeBoundedCodeGraphFact(fact)),
         );
         flushShardCacheAfterAttribution = shardWrites.enqueueCache({
           derivationIdentity: shardDerivationIdentity,
@@ -1560,7 +1587,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
         const selectedShardIds = materializedShardBatchComplete
           ? materializedShards.materializedShardIdsByPath
           : new Map(
-              files.map(file => [
+              EffectArray.map(files, file => [
                 file.path,
                 materializedFileShardIdentity(
                   file.contentHash,
@@ -1583,8 +1610,8 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       } else if (directPersistentMaterialization && !materializedShardCacheBatchPlan.associationsComplete) {
         materializedShardAssociationsComplete = false;
       }
-      const attributedFallbackByPath = new Map(attributedFallbackFacts.map(fact => [fact.path, fact]));
-      const facts = files.map(file =>
+      const attributedFallbackByPath = new Map(EffectArray.map(attributedFallbackFacts, fact => [fact.path, fact]));
+      const facts = EffectArray.map(files, file =>
         materializedShardBatchComplete
           ? materializedShards.facts.get(file.path)!
           : attributedFallbackByPath.get(file.path)!,
@@ -1600,31 +1627,32 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       batchesTotal += Math.max(0, finalBatches.length - 1);
       if (extractionDiagnostics.length < 100) {
         extractionDiagnostics.push(
-          ...finalBatches
-            .flatMap(batch => batch.flatMap(value => value.facts.diagnostics))
-            .slice(0, 100 - extractionDiagnostics.length),
+          ...EffectArray.flatMap(finalBatches, batch =>
+            EffectArray.flatMap(batch, value => value.facts.diagnostics),
+          ).slice(0, 100 - extractionDiagnostics.length),
         );
       }
-      const filesByPath = new Map(files.map(file => [file.path, file]));
+      const filesByPath = new Map(EffectArray.map(files, file => [file.path, file]));
       for (let finalBatchIndex = 0; finalBatchIndex < finalBatches.length; finalBatchIndex += 1) {
         const rowPreparationStartedAt = performance.now();
         const finalBatch = finalBatches[finalBatchIndex];
-        const finalFacts = finalBatch.map(value => value.facts);
-        const batchFinalFactBytes = finalBatch.reduce((total, value) => total + value.bytes, 0);
-        const batchFiles = finalFacts.map(fact => filesByPath.get(fact.path)!);
-        const batchSourceBytes = batchFiles.reduce((total, file) => total + file.size, 0);
-        const batchCachedFactBytes = batchFiles.reduce(
-          (total, file) => total + (cachedMetadata.bytesByPath.get(file.path) ?? 0),
+        const finalFacts = EffectArray.map(finalBatch, value => value.facts);
+        const batchFinalFactBytes = EffectArray.reduce(finalBatch, 0, (total, value) => total + value.bytes);
+        const batchFiles = EffectArray.map(finalFacts, fact => filesByPath.get(fact.path)!);
+        const batchSourceBytes = EffectArray.reduce(batchFiles, 0, (total, file) => total + file.size);
+        const batchCachedFactBytes = EffectArray.reduce(
+          batchFiles,
           0,
+          (total, file) => total + (cachedMetadata.bytesByPath.get(file.path) ?? 0),
         );
-        const symbols = uniqueById(finalFacts.flatMap(file => file.symbols));
+        const symbols = uniqueById(EffectArray.flatMap(finalFacts, file => file.symbols));
         const relationships = deduplicateMaterializationRelationships(
-          finalFacts.flatMap(file => file.edges),
-          finalFacts.flatMap(file => file.references ?? []),
+          EffectArray.flatMap(finalFacts, file => file.edges),
+          EffectArray.flatMap(finalFacts, file => file.references ?? []),
         );
         const edges = relationships.edges;
         const references = relationships.references;
-        const monikers = canonicalCodeGraphMonikers(finalFacts.flatMap(file => file.monikers ?? []));
+        const monikers = canonicalCodeGraphMonikers(EffectArray.flatMap(finalFacts, file => file.monikers ?? []));
         const rows = materializationRows(symbols, edges.length, references, {
           edges: relationships.duplicateEdges,
           references: relationships.duplicateReferences,
@@ -1673,9 +1701,9 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
         }
         pendingBatches.push(candidate);
         persistentBatchCursor += 1;
-        const pendingFactsBytes = pendingBatches.reduce((total, batch) => total + batch.factBytes, 0);
-        const pendingFiles = pendingBatches.reduce((total, batch) => total + batch.fileCount, 0);
-        const pendingSourceBytes = pendingBatches.reduce((total, batch) => total + batch.sourceBytes, 0);
+        const pendingFactsBytes = EffectArray.reduce(pendingBatches, 0, (total, batch) => total + batch.factBytes);
+        const pendingFiles = EffectArray.reduce(pendingBatches, 0, (total, batch) => total + batch.fileCount);
+        const pendingSourceBytes = EffectArray.reduce(pendingBatches, 0, (total, batch) => total + batch.sourceBytes);
         if (
           !directPersistentMaterialization ||
           pendingBatches.length >= persistentTransactionBatchLimit ||

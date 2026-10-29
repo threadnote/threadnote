@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {mkdtempSync, rmSync} from '@threadnote/testing/node-fs';
@@ -14,10 +15,12 @@ import {CodeGraphStore, type CodeGraphViewRemovalResult} from '@threadnote/graph
 import {CODE_GRAPH_EXTRACTOR_GENERATION} from '@threadnote/graph/types';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const WORKTREE_IDS = ['1', '2', '3'].map(digit => digit.repeat(64));
+const WORKTREE_IDS = EffectArray.map(['1', '2', '3'], digit => Effect2.pipe(digit, EffectString.repeat(64)));
 const snapshotId = (label: string) => `cgsn_${createHash('sha1').update(label).digest('hex')}`;
-const SNAPSHOT_IDS = ['model-0', 'model-1', 'model-2'].map(snapshotId);
+const SNAPSHOT_IDS = EffectArray.map(['model-0', 'model-1', 'model-2'], snapshotId);
 const MISSING_SNAPSHOT_ID = snapshotId('model-missing');
 
 const eventArbitrary = fc.record({
@@ -39,10 +42,12 @@ describe('code graph view removal state-machine properties', () => {
               Effect.sync(() => mkdtempSync(join(tmpdir(), 'threadnote-view-removal-property-'))),
               path => Effect.sync(() => rmSync(path, {force: true, recursive: true})),
             );
-            const checkoutId = 'a'.repeat(64);
-            const repositoryId = 'b'.repeat(64);
+            const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
+            const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
             const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
-            const pointers = new Map(WORKTREE_IDS.map((worktreeId, index) => [worktreeId, SNAPSHOT_IDS[index]]));
+            const pointers = new Map(
+              EffectArray.map(WORKTREE_IDS, (worktreeId, index) => [worktreeId, SNAPSHOT_IDS[index]]),
+            );
             const tombstones = new Map<string, string>();
             const store = yield* CodeGraphStore;
             yield* store.initialize(databasePath);
@@ -74,14 +79,15 @@ describe('code graph view removal state-machine properties', () => {
               expect(databaseState.tombstones).toEqual(sortedEntries(tombstones));
               expect(databaseState.readySnapshots).toEqual([...SNAPSHOT_IDS].sort());
 
-              const expectedVisible = [...pointers]
-                .filter(([worktreeId, snapshotId]) => tombstones.get(worktreeId) !== snapshotId)
-                .sort(([left], [right]) => left.localeCompare(right));
+              const expectedVisible = EffectArray.filter(
+                [...pointers],
+                ([worktreeId, snapshotId]) => tombstones.get(worktreeId) !== snapshotId,
+              ).sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right)));
               const catalogs = yield* store.loadVisualizationCatalogs(databasePath, 'deferred', {viewLimit: 64});
               expect(
-                catalogs
-                  .map(catalog => [catalog.viewWorktreeId, catalog.snapshot.id] as const)
-                  .sort(([left], [right]) => left.localeCompare(right)),
+                EffectArray.map(catalogs, catalog => [catalog.viewWorktreeId, catalog.snapshot.id] as const).sort(
+                  ([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right)),
+                ),
               ).toEqual(expectedVisible);
               for (const worktree of WORKTREE_IDS) {
                 const pointer = pointers.get(worktree);
@@ -163,7 +169,7 @@ function seedModel(databasePath: string, repositoryId: string): void {
           snapshotId,
           repositoryId,
           WORKTREE_IDS[index],
-          `${index}`.padStart(40, '0'),
+          Effect2.pipe(`${index}`, EffectString.padStart(40, '0')),
           `content-${index}`,
           new Date(index).toISOString(),
           new Date(index + 1).toISOString(),
@@ -198,22 +204,26 @@ function readModel(databasePath: string) {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     return {
-      pointers: database
-        .query<{readonly snapshot_id: string; readonly worktree_id: string}, []>(
-          'SELECT worktree_id, snapshot_id FROM active_snapshots ORDER BY worktree_id',
-        )
-        .all()
-        .map(row => [row.worktree_id, row.snapshot_id] as const),
-      readySnapshots: database
-        .query<{readonly id: string}, []>("SELECT id FROM snapshots WHERE state = 'ready' ORDER BY id")
-        .all()
-        .map(row => row.id),
-      tombstones: database
-        .query<{readonly expected_snapshot_id: string; readonly worktree_id: string}, []>(
-          'SELECT worktree_id, expected_snapshot_id FROM removed_views ORDER BY worktree_id',
-        )
-        .all()
-        .map(row => [row.worktree_id, row.expected_snapshot_id] as const),
+      pointers: EffectArray.map(
+        database
+          .query<{readonly snapshot_id: string; readonly worktree_id: string}, []>(
+            'SELECT worktree_id, snapshot_id FROM active_snapshots ORDER BY worktree_id',
+          )
+          .all(),
+        row => [row.worktree_id, row.snapshot_id] as const,
+      ),
+      readySnapshots: EffectArray.map(
+        database.query<{readonly id: string}, []>("SELECT id FROM snapshots WHERE state = 'ready' ORDER BY id").all(),
+        row => row.id,
+      ),
+      tombstones: EffectArray.map(
+        database
+          .query<{readonly expected_snapshot_id: string; readonly worktree_id: string}, []>(
+            'SELECT worktree_id, expected_snapshot_id FROM removed_views ORDER BY worktree_id',
+          )
+          .all(),
+        row => [row.worktree_id, row.expected_snapshot_id] as const,
+      ),
     };
   } finally {
     database.close(false);
@@ -221,7 +231,7 @@ function readModel(databasePath: string) {
 }
 
 function sortedEntries(entries: ReadonlyMap<string, string>): readonly (readonly [string, string])[] {
-  return [...entries].sort(([left], [right]) => left.localeCompare(right));
+  return [...entries].sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right)));
 }
 
 function identity(root: string, checkoutId: string, repositoryId: string, worktreeId: string): RepositoryIdentity {
@@ -230,7 +240,7 @@ function identity(root: string, checkoutId: string, repositoryId: string, worktr
     checkoutId,
     displayName: 'threadnote/view-removal-property',
     gitCommonDirectory: root,
-    headCommit: 'f'.repeat(40),
+    headCommit: Effect2.pipe('f', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repositoryId,
     repoRoot: root,

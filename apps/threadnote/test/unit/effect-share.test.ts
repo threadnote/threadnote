@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {readdirSync} from '@threadnote/testing/node-fs';
 import {Clock, Effect, Fiber} from 'effect';
 import {afterEach, describe, expect, it, vi} from 'vitest';
@@ -60,13 +61,15 @@ import {
 } from '@threadnote/threadnote/effect/share';
 import {join, mkdir, mkdtemp, rm, utimes, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Effect share transaction', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
     vi.clearAllMocks();
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('pins the resolved default team for both target locking and publication', async () => {
@@ -142,8 +145,8 @@ describe('Effect share transaction', () => {
     shareMocks.runShareUnpublish.mockImplementation((_config, _sourceUri, options) =>
       Effect.sync(() => {
         unpublishedTeam = options.team;
-        lockedUriCount = readdirSync(join(agentContextHome, 'threadnote', 'memory-locks')).filter(name =>
-          name.endsWith('.lock'),
+        lockedUriCount = EffectArray.filter(readdirSync(join(agentContextHome, 'threadnote', 'memory-locks')), name =>
+          Effect2.pipe(name, EffectString.endsWith('.lock')),
         ).length;
       }),
     );

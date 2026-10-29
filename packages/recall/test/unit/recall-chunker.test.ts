@@ -1,24 +1,33 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {chunkRecallDocument, RECALL_CHUNKER_VERSION} from '@threadnote/recall/chunker';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('recall chunker', () => {
   it('preserves heading context, bounds chunks, and keeps stable identities', () => {
-    const source = [
-      '# Storage',
-      '',
-      'Canonical markdown remains authoritative.',
-      '',
-      '## Atomic writes',
-      '',
-      ...Array.from({length: 80}, (_, index) => `Paragraph ${index}: ${'safe storage '.repeat(8)}`),
-    ].join('\n\n');
+    const source = EffectArray.join(
+      [
+        '# Storage',
+        '',
+        'Canonical markdown remains authoritative.',
+        '',
+        '## Atomic writes',
+        '',
+        ...Array.from(
+          {length: 80},
+          (_, index) => `Paragraph ${index}: ${Effect.pipe('safe storage ', EffectString.repeat(8))}`,
+        ),
+      ],
+      '\n\n',
+    );
     const first = chunkRecallDocument('threadnote://resources/repos/threadnote/storage.md', source, {
       maxCharacters: 600,
       overlapCharacters: 60,
     });
     const second = chunkRecallDocument(
       'threadnote://resources/repos/threadnote/storage.md',
-      source.replaceAll('\n', '\r\n'),
+      Effect.pipe(source, EffectString.replaceAll('\n', '\r\n')),
       {
         maxCharacters: 600,
         overlapCharacters: 60,
@@ -26,10 +35,10 @@ describe('recall chunker', () => {
     );
 
     expect(first.length).toBeGreaterThan(2);
-    expect(first.every(chunk => chunk.content.length <= 600)).toBe(true);
-    expect(first.some(chunk => chunk.heading === 'Storage > Atomic writes')).toBe(true);
+    expect(EffectArray.every(first, chunk => chunk.content.length <= 600)).toBe(true);
+    expect(EffectArray.some(first, chunk => chunk.heading === 'Storage > Atomic writes')).toBe(true);
     expect(second).toEqual(first);
-    expect(new Set(first.map(chunk => chunk.id)).size).toBe(first.length);
+    expect(new Set(EffectArray.map(first, chunk => chunk.id)).size).toBe(first.length);
     expect(RECALL_CHUNKER_VERSION).toBe(3);
   });
 

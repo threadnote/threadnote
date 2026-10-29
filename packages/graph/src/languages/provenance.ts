@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphLanguagePackProvenance} from '../store/models.js';
 
 export type CodeGraphLanguagePackDelta =
@@ -20,13 +21,13 @@ export function assessCodeGraphLanguagePackDelta(
   current: readonly CodeGraphLanguagePackProvenance[],
 ): CodeGraphLanguagePackDelta {
   if (previous.length === 0 || current.length === 0) return {mode: 'fallback', reason: 'missing-provenance'};
-  const previousById = new Map(previous.map(pack => [pack.id, pack]));
-  const currentById = new Map(current.map(pack => [pack.id, pack]));
+  const previousById = new Map(EffectArray.map(previous, pack => [pack.id, pack]));
+  const currentById = new Map(EffectArray.map(current, pack => [pack.id, pack]));
   if (
     previousById.size !== previous.length ||
     currentById.size !== current.length ||
     previousById.size !== currentById.size ||
-    [...previousById.keys()].some(id => !currentById.has(id))
+    EffectArray.some([...previousById.keys()], id => !currentById.has(id))
   ) {
     return {mode: 'fallback', reason: 'pack-surface-changed'};
   }

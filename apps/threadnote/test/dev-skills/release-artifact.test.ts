@@ -1,9 +1,15 @@
+import {Schema} from 'effect';
+import {parseWatchResponse, parseWatchWorkResponse} from './release-artifact.js';
+import {Array as EffectArray} from 'effect';
 import {spawn, spawnSync} from '@threadnote/testing/node-child-process';
 import {resolve} from '@threadnote/testing/node-path';
 import {mkdir, mkdtemp, readFile, readdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 // This OS/compiled CLI boundary exercises the extracted native release.
 // The literal directory declares the copied fixture/helper closure to Bazel.
@@ -45,7 +51,10 @@ it.skipIf(!archive)(
         {encoding: 'utf8', timeout: 1_850_000},
       );
       expect(result.error, result.error?.message).toBeUndefined();
-      expect(result.status, `${result.stdout}\n${result.stderr}\nFixtures: ${nativeFixtures.join(', ')}`).toBe(0);
+      expect(
+        result.status,
+        `${result.stdout}\n${result.stderr}\nFixtures: ${EffectArray.join(nativeFixtures, ', ')}`,
+      ).toBe(0);
     } catch (error) {
       bodyFailure = {error};
     } finally {
@@ -118,7 +127,7 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
         code: result.code,
         signal: result.signal,
         stdoutBytes: result.stdout.length,
-        stderr: result.stderr.toString('utf8').slice(-4000),
+        stderr: Effect.pipe(result.stderr.toString('utf8'), EffectString.slice(-4000)),
       });
     const repositoryArgs = ['-C', repo, 'rev-parse', '--is-bare-repository'];
     const repository = await delayed(repositoryArgs);
@@ -133,16 +142,20 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
       pipeStdin: {
         code: piped.status,
         error: piped.error?.message,
-        stdout: piped.stdout?.slice(-100),
-        stderr: piped.stderr?.slice(-4000),
+        stdout: Effect.pipe(piped.stdout, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.slice(-100)),
+        ),
+        stderr: Effect.pipe(piped.stderr, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.slice(-4000)),
+        ),
       },
     });
     expect(repository.code, repositoryDiagnostic).toBe(0);
-    expect(repository.stdout.toString('utf8').trim(), repositoryDiagnostic).toBe('true');
+    expect(Effect.pipe(repository.stdout.toString('utf8'), EffectString.trim), repositoryDiagnostic).toBe('true');
     expect(repository.stderr.length, repositoryDiagnostic).toBe(0);
     expect(piped.error, repositoryDiagnostic).toBeUndefined();
     expect(piped.status, repositoryDiagnostic).toBe(0);
-    expect(piped.stdout.trim(), repositoryDiagnostic).toBe('true');
+    expect(Effect.pipe(piped.stdout, EffectString.trim), repositoryDiagnostic).toBe('true');
     expect(piped.stderr.length, repositoryDiagnostic).toBe(0);
     const empty = await delayed(['-C', repo, 'config', 'fixture.empty-output', 'true']);
     expect(empty.code, diagnostic(empty)).toBe(0);
@@ -160,7 +173,7 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
           timeout: 15_000,
         });
         expect(stored.status).toBe(0);
-        const result = await delayed(['-C', repo, 'cat-file', 'blob', stored.stdout.trim()]);
+        const result = await delayed(['-C', repo, 'cat-file', 'blob', Effect.pipe(stored.stdout, EffectString.trim)]);
         expect(result.code, diagnostic(result)).toBe(0);
         expect(result.stderr.length).toBe(0);
         expect(result.stdout.length).toBe(payload.length);
@@ -169,7 +182,7 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
       }),
       {numRuns: 3, endOnFailure: true},
     );
-    const args = ['-C', repo, 'cat-file', 'blob', '0'.repeat(40)];
+    const args = ['-C', repo, 'cat-file', 'blob', Effect.pipe('0', EffectString.repeat(40))];
     const expected = spawnSync(nativeGit, args, {timeout: 15_000});
     expect(expected.status).not.toBe(0);
     const failure = await delayed(args);
@@ -202,7 +215,10 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
           setup(builder) {
             // Bun resolves built-ins before onResolve, so redirect this import explicitly.
             builder.onLoad({filter: /release-tools-fixture\.ts$/u}, async args => ({
-              contents: (await readFile(args.path, 'utf8')).replace("from 'node:fs'", "from 'producer-fs'"),
+              contents: Effect.pipe(
+                await readFile(args.path, 'utf8'),
+                EffectString.replace("from 'node:fs'", "from 'producer-fs'"),
+              ),
               loader: 'ts',
             }));
             builder.onResolve({filter: /^producer-fs$/u}, () => ({path: 'producer-fs', namespace: 'producer-fs'}));
@@ -249,14 +265,16 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
         'fixture',
       ).status,
     ).toBe(0);
-    const sha = git('-C', repo, 'rev-parse', 'HEAD').stdout.toString('utf8').trim();
+    const sha = Effect.pipe(git('-C', repo, 'rev-parse', 'HEAD').stdout.toString('utf8'), EffectString.trim);
     const environment = (enabled: boolean) => ({
       ...process.env,
       THREADNOTE_RELEASE_FIXTURE_ROOT: temporary,
       THREADNOTE_RELEASE_PUBLICATION_TRACE: enabled ? '1' : '0',
     });
     const io = async (pid: number) =>
-      JSON.parse(await readFile(resolve(ioDirectory, `${pid}.json`), 'utf8')) as {checks: number; opens: number};
+      Schema.decodeUnknownSync(Schema.Struct({checks: Schema.Finite, opens: Schema.Finite}))(
+        JSON.parse(await readFile(resolve(ioDirectory, `${pid}.json`), 'utf8')),
+      );
     const invoke = (spec: string, enabled: boolean) =>
       spawnSync(proxy, ['-C', repo, 'show', spec], {
         env: environment(enabled),
@@ -281,14 +299,16 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
       expect(actual.stderr.equals(expected.stderr)).toBe(true);
     }
     const files = await readdir(trace);
-    const raw = (await Promise.all(files.map(file => readFile(resolve(trace, file), 'utf8')))).join('');
+    const raw = EffectArray.join(
+      await Promise.all(EffectArray.map(files, file => readFile(resolve(trace, file), 'utf8'))),
+      '',
+    );
     for (const secret of [sentinel, 'private-sentinel-content', repo, sha, 'private-missing-path']) {
       expect(raw).not.toContain(secret);
     }
-    const events = raw
-      .trim()
-      .split('\n')
-      .map(line => JSON.parse(line) as Record<string, unknown>);
+    const events = EffectArray.map(Effect.pipe(raw, EffectString.trim, EffectString.split('\n')), line =>
+      Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(JSON.parse(line)),
+    );
     const allowed = new Set([
       'version',
       'pid',
@@ -316,15 +336,20 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
       'syscall',
     ]);
     expect(events).toHaveLength(9);
-    for (const event of events) expect(Object.keys(event).every(key => allowed.has(key))).toBe(true);
+    for (const event of events) expect(EffectArray.every(EffectRecord.keys(event), key => allowed.has(key))).toBe(true);
     expect(
-      events
-        .filter(event => event.event === 'result')
-        .map(event => event.stderrCategory)
-        .sort(),
+      EffectArray.map(
+        EffectArray.filter(events, event => event.event === 'result'),
+        event => event.stderrCategory,
+      ).sort(),
     ).toEqual(['missing-object', 'missing-path', 'none']);
-    expect(events.filter(event => event.event === 'forwarded').every(event => event.complete === true)).toBe(true);
-    expect(events.some(event => event.specForm === 'SHA40')).toBe(true);
+    expect(
+      EffectArray.every(
+        EffectArray.filter(events, event => event.event === 'forwarded'),
+        event => event.complete === true,
+      ),
+    ).toBe(true);
+    expect(EffectArray.some(events, event => event.specForm === 'SHA40')).toBe(true);
     // Preserve the original sequential last-slot boundary and occupied prefix.
     for (let slot = 9; slot < 127; slot++) await writeFile(resolve(trace, `${slot}.json`), '{}\n');
     const snapshot = async () =>
@@ -396,3 +421,35 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     await rm(temporary, {recursive: true, force: true, maxRetries: 10, retryDelay: 50});
   }
 }, 60_000);
+
+// Watch mutations return common health fields; only inspect/work return their detail arrays.
+it('parses command-specific native watch details without inventing absent arrays', () => {
+  const base = {
+    status: 'ok',
+    collector: {alive: true},
+    sourceErrors: [],
+    pending: 0,
+    work: {open: 0},
+    revision: Effect.pipe('a', EffectString.repeat(64)),
+  };
+  expect(parseWatchResponse(base)).toEqual(base);
+  expect(parseWatchResponse({...base, collector: null}).collector).toBeNull();
+  expect(() => parseWatchResponse({...base, collector: undefined})).toThrow('Native watch collector');
+  expect(parseWatchResponse({...base, delivery: null})).toEqual(base);
+  expect(parseWatchResponse({...base, sources: []}).sources).toEqual([]);
+  expect(parseWatchResponse({...base, work: {open: 0, items: []}}).work.items).toEqual([]);
+  expect(() => parseWatchResponse({...base, sources: null})).toThrow('arrays are malformed');
+  expect(() => parseWatchResponse({...base, work: {open: 0, items: {}}})).toThrow('arrays are malformed');
+  expect(() => parseWatchResponse({...base, revision: 1})).toThrow('Native watch revision');
+
+  const workResponse = {
+    status: 'ok',
+    watchId: 'extracted-release',
+    revision: Effect.pipe('b', EffectString.repeat(64)),
+    work: {items: [{eventId: 'event-1', status: 'open'}], offset: 0, nextOffset: null},
+  };
+  expect(parseWatchWorkResponse(workResponse)).toEqual(workResponse);
+  expect(() => parseWatchWorkResponse({...workResponse, work: {...workResponse.work, items: null}})).toThrow(
+    'Native watch work items must be an array.',
+  );
+});

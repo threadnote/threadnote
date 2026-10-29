@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import type {
   HostedContextHealthReceiptV1,
@@ -184,13 +185,13 @@ export function setHostedContextHealthOperatorStatus(
   return requireCapability(adapter, 'manage_context_health', adapter.setContextHealthScheduleStatus)(input);
 }
 
-export class RemoteMemoryOperatorError extends Schema.TaggedError<RemoteMemoryOperatorError>()(
-  'RemoteMemoryOperatorError',
-  {
-    code: Schema.Literals(['blocked_plan', 'capability_unavailable', 'invalid_input', 'verification_failed']),
-    message: Schema.String,
-  },
-) {
+export class RemoteMemoryOperatorError extends Schema.TaggedError<
+  RemoteMemoryOperatorError,
+  {readonly brand: unique symbol}
+>()('RemoteMemoryOperatorError', {
+  code: Schema.Literals(['blocked_plan', 'capability_unavailable', 'invalid_input', 'verification_failed']),
+  message: Schema.String,
+}) {
   static of(
     code: 'blocked_plan' | 'capability_unavailable' | 'invalid_input' | 'verification_failed',
     message: string,
@@ -342,7 +343,7 @@ export async function applyGitBetaImportOperator(
 function assertApplyPlanMatchesCurrentState(planned: GitBetaImportPlanV1, current: GitBetaImportPlanV1): void {
   const matches =
     planned.entries.length === current.entries.length &&
-    planned.entries.every((entry, index) => {
+    EffectArray.every(planned.entries, (entry, index) => {
       const actual = current.entries[index];
       if (!actual) return false;
       const replayTransition = entry.classification === 'would_import' && actual.classification === 'unchanged';
@@ -368,8 +369,9 @@ export function verifyAppliedGitBetaImport(
   existing: readonly RemoteMemoryExistingRecordV1[],
 ): GitBetaImportVerificationV1 {
   verifyGitBetaImportPlan(plan);
-  const byUri = new Map(existing.map(record => [record.uri, record]));
-  const expected = plan.entries.filter(
+  const byUri = new Map(EffectArray.map(existing, record => [record.uri, record]));
+  const expected = EffectArray.filter(
+    plan.entries,
     entry => entry.classification === 'would_import' || entry.classification === 'unchanged',
   );
   const mismatches: GitBetaImportVerificationV1['mismatches'][number][] = [];

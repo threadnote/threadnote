@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
@@ -28,6 +29,9 @@ import {
   anonymousTelemetryDiagnosticFromError,
 } from '@threadnote/threadnote/telemetry/diagnostic';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph anonymous telemetry', () => {
   it('maps graph phases to the closed anonymous progress vocabulary', () => {
@@ -139,6 +143,7 @@ describe('code graph anonymous telemetry', () => {
           const projected = codeGraphAnonymousTelemetryFields(first);
 
           expect(projected).toEqual(codeGraphAnonymousTelemetryFields(second));
+          // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
           expect(Object.keys(projected)).not.toEqual(
             expect.arrayContaining(['classifier', 'degraded', 'language', 'path', 'role', 'sizeBucket']),
           );
@@ -175,7 +180,7 @@ describe('code graph anonymous telemetry', () => {
             role: 'private-role',
           }),
         );
-        const attributes = Object.fromEntries(capture.spans[0].span.attributes);
+        const attributes = EffectRecord.fromEntries(capture.spans[0].span.attributes);
         expect(attributes).toMatchObject({
           'threadnote.work.completed_bucket': expectedQuantityBucket(counters.completed),
           'threadnote.work.degraded_files_bucket': expectedQuantityBucket(counters.degradedFiles),
@@ -186,8 +191,12 @@ describe('code graph anonymous telemetry', () => {
           'threadnote.work.units_completed_bucket': expectedQuantityBucket(counters.workUnitsCompleted),
           'threadnote.work.units_total_bucket': expectedQuantityBucket(counters.workUnitsTotal),
         });
-        for (const [key, value] of Object.entries(attributes)) {
-          if (!key.endsWith('_bucket') || !key.startsWith('threadnote.work.')) continue;
+        for (const [key, value] of EffectRecord.toEntries(attributes)) {
+          if (
+            !Effect2.pipe(key, EffectString.endsWith('_bucket')) ||
+            !Effect2.pipe(key, EffectString.startsWith('threadnote.work.'))
+          )
+            continue;
           expect(typeof value).toBe('string');
           expect(value).toMatch(/^0$|^2\^\d+$/u);
         }
@@ -230,7 +239,7 @@ describe('code graph anonymous telemetry', () => {
       yield* report({phase: 'waiting', reason: 'repository-lock'});
 
       expect(capture.spans).toHaveLength(3);
-      const first = Object.fromEntries(capture.spans[0].span.attributes);
+      const first = EffectRecord.fromEntries(capture.spans[0].span.attributes);
       expect(first).toMatchObject({
         'threadnote.component': 'mcp',
         'threadnote.event': 'checkpoint',
@@ -253,7 +262,7 @@ describe('code graph anonymous telemetry', () => {
       expect(serialized).not.toContain('private-language');
       expect(serialized).not.toContain('private-role');
 
-      expect(Object.fromEntries(capture.spans[2].span.attributes)).toMatchObject({
+      expect(EffectRecord.fromEntries(capture.spans[2].span.attributes)).toMatchObject({
         'threadnote.phase': 'graph.waiting',
         'threadnote.waiting_reason': 'repository-lock',
       });
@@ -304,9 +313,10 @@ describe('code graph anonymous telemetry', () => {
       yield* reporter.terminal(Exit.succeed(summary));
       yield* reporter.terminal(Exit.succeed(summary));
 
-      const lifecycle = capture.spans
-        .map(captured => Object.fromEntries(captured.span.attributes))
-        .filter(attributes => attributes['threadnote.event'] === 'lifecycle');
+      const lifecycle = EffectArray.filter(
+        EffectArray.map(capture.spans, captured => EffectRecord.fromEntries(captured.span.attributes)),
+        attributes => attributes['threadnote.event'] === 'lifecycle',
+      );
       expect(lifecycle).toHaveLength(1);
       expect(lifecycle[0]).toMatchObject({
         'threadnote.component': 'mcp',
@@ -350,9 +360,10 @@ describe('code graph anonymous telemetry', () => {
       if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBe(failure);
       yield* reporter.terminal(Exit.fail(failure));
 
-      const lifecycle = capture.spans
-        .map(captured => Object.fromEntries(captured.span.attributes))
-        .filter(attributes => attributes['threadnote.event'] === 'lifecycle');
+      const lifecycle = EffectArray.filter(
+        EffectArray.map(capture.spans, captured => EffectRecord.fromEntries(captured.span.attributes)),
+        attributes => attributes['threadnote.event'] === 'lifecycle',
+      );
       expect(lifecycle).toHaveLength(1);
       expect(lifecycle[0]).toMatchObject({
         'error.type': 'CodeGraphStorePermissionError',
@@ -377,9 +388,10 @@ describe('code graph anonymous telemetry', () => {
       const exit = yield* Effect.exit(withCodeGraphBuildAnonymousTelemetry(reporter, Effect.interrupt));
       expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
 
-      const lifecycle = capture.spans
-        .map(captured => Object.fromEntries(captured.span.attributes))
-        .filter(attributes => attributes['threadnote.event'] === 'lifecycle');
+      const lifecycle = EffectArray.filter(
+        EffectArray.map(capture.spans, captured => EffectRecord.fromEntries(captured.span.attributes)),
+        attributes => attributes['threadnote.event'] === 'lifecycle',
+      );
       expect(lifecycle).toHaveLength(1);
       expect(lifecycle[0]).toMatchObject({
         'threadnote.component': 'mcp',
@@ -421,9 +433,12 @@ describe('code graph anonymous telemetry', () => {
         }),
       );
 
-      const terminal = capture.spans
-        .map(captured => Object.fromEntries(captured.span.attributes))
-        .find(attributes => attributes['threadnote.event'] === 'lifecycle');
+      const terminal = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          EffectArray.map(capture.spans, captured => EffectRecord.fromEntries(captured.span.attributes)),
+          attributes => attributes['threadnote.event'] === 'lifecycle',
+        ),
+      );
       expect(terminal).toMatchObject({
         'threadnote.graph.cached_fact_replay_bytes_bucket': '0',
         'threadnote.graph.efficiency_class': 'incremental',
@@ -457,7 +472,7 @@ describe('code graph anonymous telemetry', () => {
         ),
       );
 
-      const attributes = capture.spans.map(captured => Object.fromEntries(captured.span.attributes));
+      const attributes = EffectArray.map(capture.spans, captured => EffectRecord.fromEntries(captured.span.attributes));
       expect(attributes).toEqual([
         expect.objectContaining({
           'error.type': 'CodeGraphStoreError',
@@ -618,7 +633,7 @@ function dirtyFallbackSummary(): CodeGraphIndexSummary {
       checkoutId: 'checkout',
       displayName: 'private-repository',
       gitCommonDirectory: '/private/.git',
-      headCommit: 'a'.repeat(40),
+      headCommit: Effect2.pipe('a', EffectString.repeat(40)),
       objectFormat: 'sha1',
       repoRoot: '/private/repository',
       repositoryId: 'repository',
@@ -633,7 +648,7 @@ function dirtyFallbackSummary(): CodeGraphIndexSummary {
     reusedFiles: 62,
     skippedFiles: 0,
     snapshot: {
-      commit: 'a'.repeat(40),
+      commit: Effect2.pipe('a', EffectString.repeat(40)),
       dirty: true,
       edgeCount: 1,
       extractorSet: 'private-extractor-set',

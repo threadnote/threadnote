@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {expect, it} from '@effect/vitest';
 import {Effect} from 'effect';
@@ -19,20 +20,41 @@ import {
   type JevTransport,
 } from '@threadnote/threadnote/effect/ai/jev';
 import type {RecallSelectionCandidate} from '@threadnote/recall/selection';
+import {isJsonObject} from '@threadnote/platform/json';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requireJevConfiguration(value: JevConfiguration | undefined): JevConfiguration {
+  if (value === undefined) throw new Error('Expected enabled Jev configuration.');
+  return value;
+}
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Expected a string.');
+  return value;
+}
 
 const candidates: readonly RecallSelectionCandidate[] = [
   {id: 'a', summary: 'first candidate', uri: 'threadnote://a'},
   {id: 'b', summary: 'second candidate', uri: 'threadnote://b'},
 ];
 
-const enforced = jevConfiguration({
-  THREADNOTE_DECISION_PROVIDER: 'jev',
-  THREADNOTE_JEV_MODE: 'enforced',
-  THREADNOTE_JEV_MODEL: 'jev-1.13.0',
-  TYPESAFE_API_KEY: 'test-secret-never-output',
-}) as JevConfiguration;
+const enforced = requireJevConfiguration(
+  jevConfiguration({
+    THREADNOTE_DECISION_PROVIDER: 'jev',
+    THREADNOTE_JEV_MODE: 'enforced',
+    THREADNOTE_JEV_MODEL: 'jev-1.13.0',
+    TYPESAFE_API_KEY: 'test-secret-never-output',
+  }),
+);
 
 const systemOneResponse = (answers: Record<string, unknown>, model = 'jev-1.13.0') => ({
   answers,
@@ -91,12 +113,14 @@ describe('Jev recall decision client', () => {
     },
     ({lower, upper, values}) =>
       Effect.sync(() => {
-        const offered = values.map((_, index) => ({
+        const offered = EffectArray.map(values, (_, index) => ({
           id: `c${index}`,
           summary: 'candidate',
           uri: `threadnote://c${index}`,
         }));
-        const answers = Object.fromEntries(values.map((value, index) => [`c${index}`, {noul: value, type: 'noul'}]));
+        const answers = EffectRecord.fromEntries(
+          EffectArray.map(values, (value, index) => [`c${index}`, {noul: value, type: 'noul'}]),
+        );
         const low = normalizeJevRecallSelection(
           systemOneResponse(answers),
           offered,
@@ -109,7 +133,7 @@ describe('Jev recall decision client', () => {
           Math.max(lower, upper),
           enforced.model,
         );
-        expect(high.every(id => low.includes(id))).toBe(true);
+        expect(EffectArray.every(high, id => low.includes(id))).toBe(true);
       }),
     {fastCheck: {numRuns: 40}},
   );
@@ -184,7 +208,7 @@ describe('Jev recall decision client', () => {
     },
     ({query, summaries}) =>
       Effect.gen(function* () {
-        const offered = summaries.map((summary, index) => ({
+        const offered = EffectArray.map(summaries, (summary, index) => ({
           id: `c${index}`,
           summary,
           uri: `threadnote://secret-uri/${index}`,
@@ -195,11 +219,13 @@ describe('Jev recall decision client', () => {
           post: request =>
             Effect.sync(() => {
               calls += 1;
-              body = request.body as Record<string, unknown>;
+              body = requireJsonObject(request.body);
               const bounded = offered.slice(0, 24);
               return {
                 body: systemOneResponse(
-                  Object.fromEntries(bounded.map(candidate => [candidate.id, {noul: 0, type: 'noul'}])),
+                  EffectRecord.fromEntries(
+                    EffectArray.map(bounded, candidate => [candidate.id, {noul: 0, type: 'noul'}]),
+                  ),
                 ),
                 status: 200,
               };
@@ -207,16 +233,28 @@ describe('Jev recall decision client', () => {
         };
         yield* runJevRecallCandidateSelection({candidates: offered, query}, enforced, transport);
         const state = body?.state;
-        const questions = body?.questions as Record<string, unknown> | undefined;
+        const questions = body?.questions === undefined ? undefined : requireJsonObject(body.questions);
         expect(calls).toBe(1);
         expect(body?.model).toBe(enforced.model);
-        expect(Object.keys(questions ?? {})).toEqual(offered.slice(0, 24).map(candidate => candidate.id));
-        expect(Object.values(questions ?? {}).every(question => (question as {type?: unknown}).type === 'noul')).toBe(
-          true,
+        expect(EffectRecord.keys(questions ?? {})).toEqual(
+          EffectArray.map(offered.slice(0, 24), candidate => candidate.id),
         );
-        const lines = (state as string).split('\n');
-        expect((lines[0] ?? '').replace('Recall query: ', '').length).toBeLessThanOrEqual(1_024);
-        expect(lines.slice(2).every(line => line.replace(/^\[[^\]]+\] /, '').length <= 512)).toBe(true);
+        expect(
+          EffectArray.every(
+            EffectRecord.values(questions ?? {}),
+            question => isJsonObject(question) && question.type === 'noul',
+          ),
+        ).toBe(true);
+        const lines = Effect2.pipe(requireString(state), EffectString.split('\n'));
+        expect(Effect2.pipe(lines[0] ?? '', EffectString.replace('Recall query: ', '')).length).toBeLessThanOrEqual(
+          1_024,
+        );
+        expect(
+          EffectArray.every(
+            lines.slice(2),
+            line => Effect2.pipe(line, EffectString.replace(/^\[[^\]]+\] /, '')).length <= 512,
+          ),
+        ).toBe(true);
         expect(JSON.stringify(body)).not.toContain('threadnote://secret-uri');
         expect(JSON.stringify(body)).not.toContain('test-secret-never-output');
       }),
@@ -224,11 +262,13 @@ describe('Jev recall decision client', () => {
   );
 
   it.effect('emits an observable shadow receipt while preserving the baseline selection', () => {
-    const shadow = jevConfiguration({
-      THREADNOTE_DECISION_PROVIDER: 'jev',
-      THREADNOTE_JEV_MODEL: 'jev-1.13.0',
-      TYPESAFE_API_KEY: 'shadow-secret-never-output',
-    }) as JevConfiguration;
+    const shadow = requireJevConfiguration(
+      jevConfiguration({
+        THREADNOTE_DECISION_PROVIDER: 'jev',
+        THREADNOTE_JEV_MODEL: 'jev-1.13.0',
+        TYPESAFE_API_KEY: 'shadow-secret-never-output',
+      }),
+    );
     const transport: JevTransport = {
       post: () =>
         Effect.succeed({

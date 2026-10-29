@@ -1,3 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 /** The payload filename stays v2: older runtimes must reject the upgraded store. */
 export const CODE_GRAPH_VECTOR_DATABASE_VERSION = 3;
 export const CODE_GRAPH_VECTOR_DATABASE_FILENAME = 'vectors-v2.sqlite';
@@ -34,10 +38,10 @@ BEFORE UPDATE ON vector_generation_retirements
 WHEN EXISTS ${liveClaim}
 BEGIN SELECT RAISE(ABORT, 'Code graph vector generation has a live claim'); END`,
   },
-  ...(['INSERT', 'UPDATE', 'DELETE'] as const).map(operation => ({
-    name: `vector_progress_revision_${operation.toLowerCase()}`,
+  ...EffectArray.map(['INSERT', 'UPDATE', 'DELETE'] as const, operation => ({
+    name: `vector_progress_revision_${Effect.pipe(operation, EffectString.toLowerCase)}`,
     table: 'vector_generation_progress',
-    sql: `CREATE TRIGGER vector_progress_revision_${operation.toLowerCase()}
+    sql: `CREATE TRIGGER vector_progress_revision_${Effect.pipe(operation, EffectString.toLowerCase)}
 AFTER ${operation} ON vector_generation_progress
 BEGIN UPDATE vector_retirement_state SET generation_revision = generation_revision + 1,
   clean_generation_revision = NULL WHERE singleton = 1; END`,

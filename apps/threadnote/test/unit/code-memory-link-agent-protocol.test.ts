@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -28,6 +29,7 @@ import {
   projectCodeMemoryLinkExpectedCodexClientV1,
   type CodeMemoryLinkArmPacketV1,
   type CodeMemoryLinkCodexAppServerEvidenceV1,
+  type CodeMemoryLinkCodexTraceCheckpointV1,
   type CodeMemoryLinkFixtureV1,
   type CodeMemoryLinkJudgeV1,
   type CodeMemoryLinkRubricV1,
@@ -37,23 +39,37 @@ import {
   type CodeMemoryLinkTaskPacketV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
 import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
+import {isJsonObject} from '@threadnote/platform/json';
 import {parseContextBriefJsonText, parseContextBriefV1, renderContextBriefText} from '@threadnote/context/projector';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const HASH_A = 'a'.repeat(64);
-const GOLD_CITATION_ID = `tncc_${'1'.repeat(40)}`;
-const TASK_ID = `tsk_${'1'.repeat(16)}`;
-const PREDICATE_CONSTRAINT = `prd_${'1'.repeat(16)}`;
-const PREDICATE_HARM = `prd_${'2'.repeat(16)}`;
-const PREDICATE_MEMORY = `prd_${'3'.repeat(16)}`;
-const PREDICATE_ACTION = `prd_${'4'.repeat(16)}`;
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireJsonObjectArray(value: unknown): Record<string, unknown>[] {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array of JSON objects.');
+  return EffectArray.map(value, requireJsonObject);
+}
+
+const HASH_A = Effect.pipe('a', EffectString.repeat(64));
+const GOLD_CITATION_ID = `tncc_${Effect.pipe('1', EffectString.repeat(40))}`;
+const TASK_ID = `tsk_${Effect.pipe('1', EffectString.repeat(16))}`;
+const PREDICATE_CONSTRAINT = `prd_${Effect.pipe('1', EffectString.repeat(16))}`;
+const PREDICATE_HARM = `prd_${Effect.pipe('2', EffectString.repeat(16))}`;
+const PREDICATE_MEMORY = `prd_${Effect.pipe('3', EffectString.repeat(16))}`;
+const PREDICATE_ACTION = `prd_${Effect.pipe('4', EffectString.repeat(16))}`;
 const THREAD_ID = '0198-thread';
 const TURN_ID = '0198-turn';
 const ACTION_ITEM_ID = 'item-action';
-const STATIC_TEXT_ARTIFACT_ID = `art_${'a'.repeat(16)}`;
-const STATIC_JSON_ARTIFACT_ID = `art_${'b'.repeat(16)}`;
+const STATIC_TEXT_ARTIFACT_ID = `art_${Effect.pipe('a', EffectString.repeat(16))}`;
+const STATIC_JSON_ARTIFACT_ID = `art_${Effect.pipe('b', EffectString.repeat(16))}`;
 const PROXY = {server: 'code-memory-link-proxy', tool: 'context_brief'} as const;
-const ARM_PACKET_HASH = 'c'.repeat(64);
-const RUN_BINDING_HASH = 'd'.repeat(64);
+const ARM_PACKET_HASH = Effect.pipe('c', EffectString.repeat(64));
+const RUN_BINDING_HASH = Effect.pipe('d', EffectString.repeat(64));
 const CLIENT = {
   appServerVersion: '0.149.0-alpha.4.1',
   model: 'gpt-5.6-luna',
@@ -75,7 +91,7 @@ describe('Code Memory Link real-agent protocol', () => {
     ).not.toThrow();
 
     const tampered = structuredClone(corpus.suite);
-    (tampered.tasks as unknown as {packetHash: string}[])[0].packetHash = HASH_A;
+    requireJsonObjectArray(requireJsonObject(tampered).tasks)[0].packetHash = HASH_A;
     expect(() => parseCodeMemoryLinkSealedSuiteV1(tampered)).toThrow(/suite hash/u);
     expect(() => parseCodeMemoryLinkSealedSuiteV1({...corpus.suite, unexpected: true})).toThrow(
       /unsupported or missing fields/u,
@@ -141,7 +157,7 @@ describe('Code Memory Link real-agent protocol', () => {
     const request = {
       budgetTokens: 1_250,
       callerCwd: '/opaque/sandbox',
-      codeRefs: ['src/example.ts', `cgs_${'1'.repeat(32)}`],
+      codeRefs: ['src/example.ts', `cgs_${Effect.pipe('1', EffectString.repeat(32))}`],
       mode: 'brief',
       project: 'threadnote',
       task: task.prompt,
@@ -165,7 +181,7 @@ describe('Code Memory Link real-agent protocol', () => {
 
     expect(request).toEqual(original);
     expect(anchored).toMatchObject({action: 'forward', request: {codeRefs: original.codeRefs}});
-    const reordered = Object.fromEntries(Object.entries(request).reverse());
+    const reordered = EffectRecord.fromEntries(EffectRecord.toEntries(request).reverse());
     expect(
       projectCodeMemoryLinkContextBriefRequestV1({
         armPacket: armPacket(task, 'anchored', 'X'),
@@ -206,8 +222,8 @@ describe('Code Memory Link real-agent protocol', () => {
     const evidence = normalizeCodeMemoryLinkCodexAppServerEvidenceV1(input);
     const timestampedEvidence = normalizeCodeMemoryLinkCodexAppServerEvidenceV1({
       ...input,
-      events: events.map((event, index) => ({
-        ...(event as Record<string, unknown>),
+      events: EffectArray.map(events, (event, index) => ({
+        ...requireJsonObject(event),
         emittedAtMs: 1_788_307_000_000 + index,
       })),
     });
@@ -221,8 +237,8 @@ describe('Code Memory Link real-agent protocol', () => {
       staticArtifactSetHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
       staticObservationHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
     });
-    expect(evidence.checkpoints.map(checkpoint => checkpoint.ordinal)).toEqual(
-      evidence.checkpoints.map((_checkpoint, index) => index + 1),
+    expect(EffectArray.map(evidence.checkpoints, checkpoint => checkpoint.ordinal)).toEqual(
+      EffectArray.map(evidence.checkpoints, (_checkpoint, index) => index + 1),
     );
     expect(projection).toMatchObject({
       acceptedStaleOrHarmful: false,
@@ -282,8 +298,8 @@ describe('Code Memory Link real-agent protocol', () => {
     fc.assert(
       fc.property(fc.array(fc.integer({min: 1, max: 1_000}), {minLength: 4, maxLength: 4}), increments => {
         let total = 0;
-        const totals = increments.map(increment => (total += increment));
-        const events = traceEvents(totals).filter(event => !hasItemId(event, 'item-memory'));
+        const totals = EffectArray.map(increments, increment => (total += increment));
+        const events = EffectArray.filter(traceEvents(totals), event => !hasItemId(event, 'item-memory'));
         const projection = projectCodeMemoryLinkCodexAppServerTraceV1({
           approvalReceipts: actionApprovalReceipts(),
           events,
@@ -354,31 +370,44 @@ describe('Code Memory Link real-agent protocol', () => {
       /evidence hash/u,
     );
 
-    const reordered = structuredClone(evidence.checkpoints) as unknown as Array<Record<string, unknown>>;
-    const callIndex = reordered.findIndex(
-      checkpoint => checkpoint.method === 'item/completed' && checkpoint.itemType === 'mcpToolCall',
+    const reordered = [...structuredClone(evidence.checkpoints)];
+    const callIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        reordered,
+        checkpoint => checkpoint.method === 'item/completed' && checkpoint.itemType === 'mcpToolCall',
+      ),
+      () => -1,
     );
-    const actionStartIndex = reordered.findIndex(
-      checkpoint => checkpoint.method === 'item/started' && checkpoint.itemType === 'commandExecution',
+    const actionStartIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        reordered,
+        checkpoint => checkpoint.method === 'item/started' && checkpoint.itemType === 'commandExecution',
+      ),
+      () => -1,
     );
     const [actionStart] = reordered.splice(actionStartIndex, 1);
     reordered.splice(callIndex + 1, 0, actionStart);
-    reordered.forEach((checkpoint, index) => {
-      checkpoint.ordinal = index + 1;
-    });
+    const resequenced = EffectArray.map(reordered, (checkpoint, index) => ({...checkpoint, ordinal: index + 1}));
     expect(() =>
-      deriveCodeMemoryLinkCodexAppServerProjectionV1({evidence: rehashEvidence(evidence, reordered), rubric}),
+      deriveCodeMemoryLinkCodexAppServerProjectionV1({evidence: rehashEvidence(evidence, resequenced), rubric}),
     ).toThrow(/immediately followed/u);
 
-    const nonmonotone = structuredClone(evidence.checkpoints) as unknown as Array<Record<string, unknown>>;
-    const secondUsage = nonmonotone.filter(checkpoint => checkpoint.method === 'thread/tokenUsage/updated')[1];
-    secondUsage.total = {
-      cachedInputTokens: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      reasoningOutputTokens: 0,
-      totalTokens: 0,
-    };
+    let usageCount = 0;
+    let secondUsageIndex: number | undefined;
+    for (let index = 0; index < evidence.checkpoints.length; index += 1) {
+      if (evidence.checkpoints[index]?.method !== 'thread/tokenUsage/updated') continue;
+      usageCount += 1;
+      if (usageCount === 2) secondUsageIndex = index;
+    }
+    if (secondUsageIndex === undefined) throw new Error('Expected two token usage checkpoints.');
+    const nonmonotone = EffectArray.map(evidence.checkpoints, (checkpoint, index) =>
+      index === secondUsageIndex && checkpoint.method === 'thread/tokenUsage/updated'
+        ? {
+            ...checkpoint,
+            total: {cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0},
+          }
+        : checkpoint,
+    );
     expect(() =>
       deriveCodeMemoryLinkCodexAppServerProjectionV1({evidence: rehashEvidence(evidence, nonmonotone), rubric}),
     ).toThrow(/nonmonotone/u);
@@ -413,8 +442,10 @@ describe('Code Memory Link real-agent protocol', () => {
     });
 
     const unrelated = traceEvents([100, 200, 300, 400]);
-    const unrelatedDirect = contextBriefResult(unrelated).durableDecisions as Array<Record<string, unknown>>;
-    unrelatedDirect[0].citationReceipts = [{citationId: `tncc_${'2'.repeat(40)}`, reason: 'exact', status: 'exact'}];
+    const unrelatedDirect = requireJsonObjectArray(contextBriefResult(unrelated).durableDecisions);
+    unrelatedDirect[0].citationReceipts = [
+      {citationId: `tncc_${Effect.pipe('2', EffectString.repeat(40))}`, reason: 'exact', status: 'exact'},
+    ];
     sealContextBriefResult(unrelated);
     expect(projectTrace(unrelated, rubric, passingStaticArtifacts()).firstUsefulMemoryUse).toEqual({
       steps: 2,
@@ -422,12 +453,12 @@ describe('Code Memory Link real-agent protocol', () => {
     });
 
     const inconsistent = traceEvents([100, 200, 300, 400]);
-    const direct = contextBriefResult(inconsistent).durableDecisions as Array<Record<string, unknown>>;
+    const direct = requireJsonObjectArray(contextBriefResult(inconsistent).durableDecisions);
     direct[0].citationReceipts = [{citationId: GOLD_CITATION_ID, reason: 'changed', status: 'changed'}];
     expect(() => projectTrace(inconsistent, rubric, passingStaticArtifacts())).toThrow(/inconsistent/u);
 
     const conflictingRelations = contextBriefStructuredContent();
-    const conflictingMemory = (conflictingRelations.durableDecisions as Array<Record<string, unknown>>)[0];
+    const conflictingMemory = requireJsonObjectArray(conflictingRelations.durableDecisions)[0];
     conflictingMemory.codeRelations = [
       {anchorOrdinal: 0, citationId: GOLD_CITATION_ID, kind: 'file', status: 'exact'},
       {anchorOrdinal: 1, citationId: GOLD_CITATION_ID, kind: 'file', status: 'changed'},
@@ -439,8 +470,8 @@ describe('Code Memory Link real-agent protocol', () => {
     for (const version of [2, 3] as const) {
       const structured = contextBriefStructuredContent();
       structured.version = version;
-      (structured.output as Record<string, unknown>).projectorVersion = version;
-      const memory = (structured.durableDecisions as Array<Record<string, unknown>>)[0];
+      requireJsonObject(structured.output).projectorVersion = version;
+      const memory = requireJsonObjectArray(structured.durableDecisions)[0];
       memory.excerpt = `Unicode evidence survives: Łódź → 東京 (${version}).`;
       if (version === 2) {
         delete memory.codeRelations;
@@ -472,14 +503,14 @@ describe('Code Memory Link real-agent protocol', () => {
       fc.property(fc.constantFrom(2 as const, 3 as const), fc.boolean(), (version, includeCodeAnchors) => {
         const structured = contextBriefStructuredContent();
         structured.version = version;
-        (structured.output as Record<string, unknown>).projectorVersion = version;
-        const memory = (structured.durableDecisions as Array<Record<string, unknown>>)[0];
+        requireJsonObject(structured.output).projectorVersion = version;
+        const memory = requireJsonObjectArray(structured.durableDecisions)[0];
         if (version === 2) {
           delete memory.codeRelations;
           delete memory.selectionBasis;
         }
-        const coverage = structured.coverage as Record<string, unknown>;
-        const memoryCoverage = coverage.memory as Record<string, unknown>;
+        const coverage = requireJsonObject(structured.coverage);
+        const memoryCoverage = requireJsonObject(coverage.memory);
         if (includeCodeAnchors) {
           memoryCoverage.codeAnchors = {complete: true, matchedMemories: 1, requested: 1, resolved: 1};
         } else {
@@ -487,10 +518,10 @@ describe('Code Memory Link real-agent protocol', () => {
         }
 
         const canonical = canonicalizeCodeMemoryLinkContextBriefResultV1(structured, {requireAgentView: true});
-        const projected = JSON.parse(canonical.content[0].text) as Record<string, unknown>;
+        const projected = requireJsonObject(JSON.parse(canonical.content[0].text));
 
         expect(parseContextBriefJsonText(canonical.content[0].text).briefVersion).toBe(version);
-        expect(Object.hasOwn(projected, 'briefVersion')).toBe(version !== 3 || !includeCodeAnchors);
+        expect(EffectRecord.has(projected, 'briefVersion')).toBe(version !== 3 || !includeCodeAnchors);
       }),
       {numRuns: 20},
     );
@@ -541,10 +572,10 @@ describe('Code Memory Link real-agent protocol', () => {
         fc.array(receiptStatus, {maxLength: 8}),
         (relationStatus, sameCitationStatuses, unrelatedStatuses, relationStatuses, handoffStatuses) => {
           const structured = contextBriefStructuredContent();
-          const memory = (structured.durableDecisions as Array<Record<string, unknown>>)[0];
+          const memory = requireJsonObjectArray(structured.durableDecisions)[0];
           memory.codeRelations = [
             {anchorOrdinal: 0, citationId: GOLD_CITATION_ID, kind: 'file', status: relationStatus},
-            ...relationStatuses.map((status, index) => ({
+            ...EffectArray.map(relationStatuses, (status, index) => ({
               anchorOrdinal: index + 1,
               citationId: GOLD_CITATION_ID,
               kind: 'file',
@@ -552,9 +583,13 @@ describe('Code Memory Link real-agent protocol', () => {
             })),
           ];
           memory.citationReceipts = [
-            ...sameCitationStatuses.map(status => ({citationId: GOLD_CITATION_ID, reason: status, status})),
-            ...unrelatedStatuses.map((status, index) => ({
-              citationId: `tncc_${(index + 2).toString(16).padStart(40, '0')}`,
+            ...EffectArray.map(sameCitationStatuses, status => ({
+              citationId: GOLD_CITATION_ID,
+              reason: status,
+              status,
+            })),
+            ...EffectArray.map(unrelatedStatuses, (status, index) => ({
+              citationId: `tncc_${Effect.pipe((index + 2).toString(16), EffectString.padStart(40, '0'))}`,
               reason: status,
               status,
             })),
@@ -562,7 +597,7 @@ describe('Code Memory Link real-agent protocol', () => {
           if (handoffStatuses.length > 0) {
             structured.activeHandoffs = [
               {
-                codeRelations: handoffStatuses.map((status, anchorOrdinal) => ({
+                codeRelations: EffectArray.map(handoffStatuses, (status, anchorOrdinal) => ({
                   anchorOrdinal,
                   citationId: GOLD_CITATION_ID,
                   kind: 'symbol',
@@ -577,7 +612,7 @@ describe('Code Memory Link real-agent protocol', () => {
 
           const canonicalize = () => canonicalizeCodeMemoryLinkContextBriefResultV1(structured);
           const sameIdStatuses = [...sameCitationStatuses, ...relationStatuses, ...handoffStatuses];
-          if (sameIdStatuses.some(status => status !== relationStatus)) {
+          if (EffectArray.some(sameIdStatuses, status => status !== relationStatus)) {
             expect(canonicalize).toThrow(/inconsistent/u);
           } else {
             expect(canonicalize().receipt.directCurrentRelationDigests).toEqual([
@@ -635,8 +670,8 @@ describe('Code Memory Link real-agent protocol', () => {
     [
       'enabled remote control',
       (events: unknown[]) => {
-        const event = events[eventIndex(events, 'remoteControl/status/changed')] as {params: Record<string, unknown>};
-        event.params.status = 'connected';
+        const event = requireJsonObject(events[eventIndex(events, 'remoteControl/status/changed')]);
+        requireJsonObject(event.params).status = 'connected';
       },
     ],
     [
@@ -719,7 +754,7 @@ describe('Code Memory Link real-agent protocol', () => {
     });
     expect(
       projectCodeMemoryLinkExpectedCodexClientV1({
-        expectedClient: Object.fromEntries(Object.entries(CLIENT).reverse()),
+        expectedClient: EffectRecord.fromEntries(EffectRecord.toEntries(CLIENT).reverse()),
         proxyTool: {tool: PROXY.tool, server: PROXY.server},
       }),
     ).toEqual(identity);
@@ -774,8 +809,8 @@ describe('Code Memory Link real-agent protocol', () => {
         minLength: 1,
         maxLength: 64,
       })
-      .map(characters => characters.join(''))
-      .filter(prompt => prompt.trim().length > 0);
+      .map(characters => EffectArray.join(characters, ''))
+      .filter(prompt => Effect.pipe(prompt, EffectString.trim).length > 0);
     fc.assert(
       fc.property(promptText, prompt => {
         const forward = {
@@ -806,7 +841,11 @@ describe('Code Memory Link real-agent protocol', () => {
     const increments = fc.array(fc.integer({min: 1, max: 10_000}), {minLength: 4, maxLength: 4});
     fc.assert(
       fc.property(increments, deltas => {
-        const totals = deltas.reduce<number[]>((values, delta) => [...values, (values.at(-1) ?? 0) + delta], []);
+        const initialTotals: number[] = [];
+        const totals = EffectArray.reduce(deltas, initialTotals, (values, delta) => [
+          ...values,
+          (values.at(-1) ?? 0) + delta,
+        ]);
         const rubric = hiddenRubric();
         const input = {
           approvalReceipts: actionApprovalReceipts(),
@@ -852,7 +891,12 @@ describe('Code Memory Link real-agent protocol', () => {
 
 function fixture(): CodeMemoryLinkFixtureV1 {
   const input = {
-    artifacts: [{artifactId: `art_${'1'.repeat(16)}`, sha256: '1'.repeat(64)}],
+    artifacts: [
+      {
+        artifactId: `art_${Effect.pipe('1', EffectString.repeat(16))}`,
+        sha256: Effect.pipe('1', EffectString.repeat(64)),
+      },
+    ],
     version: 1 as const,
   };
   return {...input, fixtureHash: codeMemoryLinkFixtureHashV1(input)};
@@ -860,8 +904,13 @@ function fixture(): CodeMemoryLinkFixtureV1 {
 
 function judge(): CodeMemoryLinkJudgeV1 {
   const input = {
-    artifacts: [{artifactId: `art_${'2'.repeat(16)}`, sha256: '2'.repeat(64)}],
-    judgeVersion: `ver_${'1'.repeat(16)}`,
+    artifacts: [
+      {
+        artifactId: `art_${Effect.pipe('2', EffectString.repeat(16))}`,
+        sha256: Effect.pipe('2', EffectString.repeat(64)),
+      },
+    ],
+    judgeVersion: `ver_${Effect.pipe('1', EffectString.repeat(16))}`,
     version: 1 as const,
   };
   return {...input, judgeHash: codeMemoryLinkJudgeHashV1(input)};
@@ -959,15 +1008,15 @@ function suiteCorpus(): {
   readonly suite: CodeMemoryLinkSealedSuiteV1;
 } {
   const packets = Array.from({length: 28}, (_, index) => {
-    const taskId = `tsk_${(index + 1).toString(16).padStart(16, '0')}`;
+    const taskId = `tsk_${Effect.pipe((index + 1).toString(16), EffectString.padStart(16, '0'))}`;
     return taskPacket(taskId, index < 12 ? 'hidden-constraint' : 'negative-control');
   });
-  const rubrics = packets.map(packet => rubricFor(packet.taskId, packet.taskKind));
+  const rubrics = EffectArray.map(packets, packet => rubricFor(packet.taskId, packet.taskKind));
   const withoutHash = {
     fixture: fixture(),
     judge: judge(),
-    suiteId: `sui_${'1'.repeat(16)}`,
-    tasks: packets.map((packet, index) => ({
+    suiteId: `sui_${Effect.pipe('1', EffectString.repeat(16))}`,
+    tasks: EffectArray.map(packets, (packet, index) => ({
       packetHash: packet.packetHash,
       rubricHash: rubrics[index].rubricHash,
       taskId: packet.taskId,
@@ -988,13 +1037,13 @@ function armPacket(
   blindLabel: CodeMemoryLinkArmPacketV1['blindLabel'],
 ): CodeMemoryLinkArmPacketV1 {
   const withoutHash = {
-    assignmentHash: '3'.repeat(64),
+    assignmentHash: Effect.pipe('3', EffectString.repeat(64)),
     blindLabel,
     fixtureHash: task.fixtureHash,
     packetHash: task.packetHash,
     policy,
-    rubricHash: '4'.repeat(64),
-    runNonce: `run_${'1'.repeat(16)}`,
+    rubricHash: Effect.pipe('4', EffectString.repeat(64)),
+    runNonce: `run_${Effect.pipe('1', EffectString.repeat(16))}`,
     taskId: task.taskId,
     taskKind: task.taskKind,
     version: 1 as const,
@@ -1108,8 +1157,8 @@ function mcpArguments(): Record<string, unknown> {
 }
 
 function contextBriefResult(events: readonly unknown[]): Record<string, unknown> {
-  const result = eventItem(events, 'item/completed', 'item-memory').result as Record<string, unknown>;
-  return result.structuredContent as Record<string, unknown>;
+  const result = requireJsonObject(eventItem(events, 'item/completed', 'item-memory').result);
+  return requireJsonObject(result.structuredContent);
 }
 
 function contextBriefStructuredContent(): Record<string, unknown> {
@@ -1162,7 +1211,7 @@ function contextBriefStructuredContent(): Record<string, unknown> {
           id: 'cbgc_test',
           rank: 0,
           reason: 'Indexed symbol match.',
-          ref: `cgs_${'2'.repeat(32)}`,
+          ref: `cgs_${Effect.pipe('2', EffectString.repeat(32))}`,
           repositoryKey: 'threadnote',
           symbol: {
             kind: 'function',
@@ -1174,7 +1223,11 @@ function contextBriefStructuredContent(): Record<string, unknown> {
           },
         },
       ],
-      continuation: {cursor: `cgwc_${'3'.repeat(32)}`, remainingEstimate: 2, state: 'available'},
+      continuation: {
+        cursor: `cgwc_${Effect.pipe('3', EffectString.repeat(32))}`,
+        remainingEstimate: 2,
+        state: 'available',
+      },
       contracts: [],
     },
     mode: 'brief',
@@ -1226,7 +1279,7 @@ function contextBriefResultPayload(
 
 function sealContextBriefResult(events: readonly unknown[]): void {
   const item = eventItem(events, 'item/completed', 'item-memory');
-  const current = item.result as {structuredContent: unknown};
+  const current = requireJsonObject(item.result);
   item.result = contextBriefResultPayload(current.structuredContent);
 }
 
@@ -1264,12 +1317,12 @@ function projectTrace(
 
 function rehashEvidence(
   evidence: CodeMemoryLinkCodexAppServerEvidenceV1,
-  checkpoints: readonly Record<string, unknown>[],
+  checkpoints: readonly CodeMemoryLinkCodexTraceCheckpointV1[],
 ): CodeMemoryLinkCodexAppServerEvidenceV1 {
   const {evidenceHash: _evidenceHash, ...withoutHash} = evidence;
   const candidate = {
     ...withoutHash,
-    checkpoints: checkpoints as unknown as CodeMemoryLinkCodexAppServerEvidenceV1['checkpoints'],
+    checkpoints,
   };
   return {...candidate, evidenceHash: codeMemoryLinkCodexAppServerEvidenceHashV1(candidate)};
 }
@@ -1309,20 +1362,27 @@ function notification(method: string, params: Record<string, unknown>): unknown 
 }
 
 function eventIndex(events: readonly unknown[], method: string, itemId?: string): number {
-  const index = events.findIndex(event => {
-    const value = event as {method?: unknown; params?: {item?: {id?: unknown}}};
-    return value.method === method && (itemId === undefined || value.params?.item?.id === itemId);
-  });
+  const index = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(events, event => {
+      const value = requireJsonObject(event);
+      const params = isJsonObject(value.params) ? value.params : undefined;
+      const item = params && isJsonObject(params.item) ? params.item : undefined;
+      return value.method === method && (itemId === undefined || item?.id === itemId);
+    }),
+    () => -1,
+  );
   if (index < 0) throw new Error(`Missing test event ${method}/${itemId ?? ''}.`);
   return index;
 }
 
 function eventItem(events: readonly unknown[], method: string, itemId: string): Record<string, unknown> {
-  return (events[eventIndex(events, method, itemId)] as {params: {item: Record<string, unknown>}}).params.item;
+  const event = requireJsonObject(events[eventIndex(events, method, itemId)]);
+  const params = requireJsonObject(event.params);
+  return requireJsonObject(params.item);
 }
 
 function usageIndexes(events: readonly unknown[]): readonly number[] {
-  return events.flatMap((event, index) =>
-    (event as {method?: unknown}).method === 'thread/tokenUsage/updated' ? [index] : [],
+  return EffectArray.flatMap(events, (event, index) =>
+    requireJsonObject(event).method === 'thread/tokenUsage/updated' ? [index] : [],
   );
 }

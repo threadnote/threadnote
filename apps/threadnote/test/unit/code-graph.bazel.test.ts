@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -36,31 +37,34 @@ describe('Bazel/Starlark code graph language pack', () => {
       const facts = yield* runExtraction(
         bazelFile(
           '.aspect/mycmd.axl',
-          [
-            'load("//tools:defs.bzl", "helper")',
-            '',
-            'def impl(ctx: TaskContext) -> int:',
-            '    helper()',
-            '    return 0',
-            '',
-            'mycmd = task(',
-            '    implementation = impl,',
-            '    args = {',
-            '        "target_pattern": args.positional(default = ["..."]),',
-            '    },',
-            ')',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'load("//tools:defs.bzl", "helper")',
+              '',
+              'def impl(ctx: TaskContext) -> int:',
+              '    helper()',
+              '    return 0',
+              '',
+              'mycmd = task(',
+              '    implementation = impl,',
+              '    args = {',
+              '        "target_pattern": args.positional(default = ["..."]),',
+              '    },',
+              ')',
+            ],
+            '\n',
+          ),
         ),
         [],
       );
 
-      expect(facts.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+      expect(EffectArray.map(facts.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
         expect.arrayContaining([
           ['function', '//.aspect:mycmd.axl%impl'],
           ['constant', '//.aspect:mycmd.axl%mycmd'],
         ]),
       );
-      expect(facts.edges.map(edge => [edge.relation, edge.targetName])).toEqual(
+      expect(EffectArray.map(facts.edges, edge => [edge.relation, edge.targetName])).toEqual(
         expect.arrayContaining([
           ['imports', '//tools:defs.bzl'],
           ['calls', 'helper'],
@@ -117,22 +121,35 @@ describe('Bazel/Starlark code graph language pack', () => {
         });
         const attributed = createWorkspaceAttributor(workspace)(extracted);
         const resolved = createRepositoryFactResolver(attributed, files).resolve(attributed);
-        const build = resolved.find(file => file.path === 'apps/api/BUILD.bazel')!;
-        const definitions = resolved.find(file => file.path === 'tools/defs.bzl')!;
-        const core = resolved
-          .find(file => file.path === 'libs/core/BUILD')!
-          .symbols.find(symbol => symbol.qualifiedName === '//libs/core:core')!;
-        const generated = build.symbols.find(symbol => symbol.qualifiedName === '//apps/api:generated')!;
-        const appRule = definitions.symbols.find(symbol => symbol.qualifiedName === '//tools:defs.bzl%app_rule')!;
-        const api = build.symbols.find(symbol => symbol.qualifiedName === '//apps/api:api')!;
+        const build = Option.getOrUndefined(
+          EffectArray.findFirst(resolved, file => file.path === 'apps/api/BUILD.bazel'),
+        )!;
+        const definitions = Option.getOrUndefined(
+          EffectArray.findFirst(resolved, file => file.path === 'tools/defs.bzl'),
+        )!;
+        const core = Option.getOrUndefined(
+          EffectArray.findFirst(
+            Option.getOrUndefined(EffectArray.findFirst(resolved, file => file.path === 'libs/core/BUILD'))!.symbols,
+            symbol => symbol.qualifiedName === '//libs/core:core',
+          ),
+        )!;
+        const generated = Option.getOrUndefined(
+          EffectArray.findFirst(build.symbols, symbol => symbol.qualifiedName === '//apps/api:generated'),
+        )!;
+        const appRule = Option.getOrUndefined(
+          EffectArray.findFirst(definitions.symbols, symbol => symbol.qualifiedName === '//tools:defs.bzl%app_rule'),
+        )!;
+        const api = Option.getOrUndefined(
+          EffectArray.findFirst(build.symbols, symbol => symbol.qualifiedName === '//apps/api:api'),
+        )!;
 
-        expect(build.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+        expect(EffectArray.map(build.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
           expect.arrayContaining([
             ['target', '//apps/api:generated'],
             ['target', '//apps/api:api'],
           ]),
         );
-        expect(definitions.symbols.map(symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
+        expect(EffectArray.map(definitions.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
           expect.arrayContaining([
             ['function', '//tools:defs.bzl%app_rule'],
             ['function', '//tools:defs.bzl%helper'],
@@ -156,11 +173,14 @@ describe('Bazel/Starlark code graph language pack', () => {
           }),
         );
         expect(
-          build.edges.find(
-            edge =>
-              edge.sourceId === api.id &&
-              edge.targetName === '@rules_ts//ts:toolchain' &&
-              edge.relation === 'depends_on',
+          Option.getOrUndefined(
+            EffectArray.findFirst(
+              build.edges,
+              edge =>
+                edge.sourceId === api.id &&
+                edge.targetName === '@rules_ts//ts:toolchain' &&
+                edge.relation === 'depends_on',
+            ),
           )?.targetId,
         ).toBeUndefined();
       }),
@@ -184,15 +204,23 @@ describe('Bazel/Starlark code graph language pack', () => {
           bazelFile('packages/shared/BUILD', 'ts_library(name = "shared", srcs = ["index.ts"])'),
         ];
         const workspace = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.discoverWorkspace(files);
-        const mobile = workspace.projects.find(project => project.root === 'apps/mobile')!;
-        const nestedBazel = workspace.projects.find(
-          project => project.root === 'apps/mobile/vendor/tool' && project.resolutionDomain === 'bazel',
+        const mobile = Option.getOrUndefined(
+          EffectArray.findFirst(workspace.projects, project => project.root === 'apps/mobile'),
         )!;
-        const integratedBazel = workspace.projects.find(
-          project => project.root === 'packages/shared' && project.resolutionDomain === 'bazel',
+        const nestedBazel = Option.getOrUndefined(
+          EffectArray.findFirst(
+            workspace.projects,
+            project => project.root === 'apps/mobile/vendor/tool' && project.resolutionDomain === 'bazel',
+          ),
+        )!;
+        const integratedBazel = Option.getOrUndefined(
+          EffectArray.findFirst(
+            workspace.projects,
+            project => project.root === 'packages/shared' && project.resolutionDomain === 'bazel',
+          ),
         )!;
 
-        expect(workspace.projects.filter(project => project.root === 'apps/mobile')).toHaveLength(1);
+        expect(EffectArray.filter(workspace.projects, project => project.root === 'apps/mobile')).toHaveLength(1);
         expect(mobile).toMatchObject({
           buildSystem: 'node',
           name: '@acme/mobile',
@@ -211,10 +239,16 @@ describe('Bazel/Starlark code graph language pack', () => {
           ]),
         );
 
-        const mobileBuild = files.find(file => file.path === 'apps/mobile/BUILD.bazel')!;
+        const mobileBuild = Option.getOrUndefined(
+          EffectArray.findFirst(files, file => file.path === 'apps/mobile/BUILD.bazel'),
+        )!;
         const extracted = yield* runExtraction(mobileBuild, workspace.projects);
         const [attributed] = createWorkspaceAttributor(workspace)([extracted]);
-        expect(attributed.symbols.find(symbol => symbol.kind === 'target' && symbol.name === 'mobile')).toMatchObject({
+        expect(
+          Option.getOrUndefined(
+            EffectArray.findFirst(attributed.symbols, symbol => symbol.kind === 'target' && symbol.name === 'mobile'),
+          ),
+        ).toMatchObject({
           packageName: '@acme/mobile',
           resolutionDomain: 'bazel',
           resolutionScopeId: mobile.id,
@@ -236,13 +270,13 @@ describe('Bazel/Starlark code graph language pack', () => {
         [],
       );
 
-      expect(facts.symbols.map(symbol => [symbol.kind, symbol.name])).toEqual(
+      expect(EffectArray.map(facts.symbols, symbol => [symbol.kind, symbol.name])).toEqual(
         expect.arrayContaining([
           ['config', 'build:ci'],
           ['config', 'build:remote'],
         ]),
       );
-      expect(facts.edges.map(edge => [edge.relation, edge.targetName])).toEqual(
+      expect(EffectArray.map(facts.edges, edge => [edge.relation, edge.targetName])).toEqual(
         expect.arrayContaining([
           ['imports', '%workspace%/config/common.bazelrc'],
           ['configures', 'remote'],

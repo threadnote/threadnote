@@ -1,3 +1,5 @@
+import {isJsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {access, mkdir, mkdtemp, readFile, realpath, rm} from '@threadnote/testing/node-fs-promises';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -5,11 +7,56 @@ import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {afterEach, describe, expect, it} from 'vitest';
 
+type AgentCatalog = {
+  readonly version: number;
+  readonly agents: readonly {
+    readonly id: string;
+    readonly projectGuidance: {readonly status: string; readonly targetPath?: string};
+  }[];
+};
+
+type AgentStatusCatalog = {readonly agents: readonly {readonly id: string; readonly state: string}[]};
+
+function requireAgentCatalog(text: string): AgentCatalog {
+  const value: unknown = JSON.parse(text);
+  if (!isJsonObject(value) || typeof value.version !== 'number' || !EffectArray.isArray(value.agents))
+    throw new Error('Expected an agent catalog.');
+  const agents = EffectArray.map(value.agents, agent => {
+    if (
+      !isJsonObject(agent) ||
+      typeof agent.id !== 'string' ||
+      !isJsonObject(agent.projectGuidance) ||
+      typeof agent.projectGuidance.status !== 'string' ||
+      (agent.projectGuidance.targetPath !== undefined && typeof agent.projectGuidance.targetPath !== 'string')
+    )
+      throw new Error('Expected an agent entry with project guidance.');
+    return {
+      id: agent.id,
+      projectGuidance: {
+        status: agent.projectGuidance.status,
+        ...(typeof agent.projectGuidance.targetPath === 'string' ? {targetPath: agent.projectGuidance.targetPath} : {}),
+      },
+    };
+  });
+  return {version: value.version, agents};
+}
+
+function requireAgentStatusCatalog(text: string): AgentStatusCatalog {
+  const value: unknown = JSON.parse(text);
+  if (!isJsonObject(value) || !EffectArray.isArray(value.agents)) throw new Error('Expected agent status.');
+  const agents = EffectArray.map(value.agents, agent => {
+    if (!isJsonObject(agent) || typeof agent.id !== 'string' || typeof agent.state !== 'string')
+      throw new Error('Expected an agent status entry.');
+    return {id: agent.id, state: agent.state};
+  });
+  return {agents};
+}
+
 const execFilePromise = promisify(execFile);
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryDirectories.splice(0).map(path => rm(path, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryDirectories.splice(0), path => rm(path, {force: true, recursive: true})));
 });
 
 describe('agents CLI', () => {
@@ -67,28 +114,33 @@ describe('agents CLI', () => {
     expect(help.stdout).toContain('repair');
     expect(help.stdout).toContain('remove');
 
-    const catalog = JSON.parse((await runCli(['agents', 'list', '--json'], environment)).stdout) as {
-      readonly agents: readonly {
-        readonly id: string;
-        readonly projectGuidance: {readonly status: string; readonly targetPath?: string};
-      }[];
-      readonly version: number;
-    };
+    const catalog = requireAgentCatalog((await runCli(['agents', 'list', '--json'], environment)).stdout);
     expect(catalog.version).toBe(1);
     expect(catalog.agents).toHaveLength(30);
     for (const id of ['opencode', 'zeno-desktop']) {
-      expect(catalog.agents.find(agent => agent.id === id)?.projectGuidance).toEqual({
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(catalog.agents, agent => agent.id === id))?.projectGuidance,
+      ).toEqual({
         status: 'managed',
         targetPath: 'AGENTS.md',
       });
     }
-    expect(catalog.agents.find(agent => agent.id === 'codex-cloud')?.projectGuidance.status).toBe('unsupported');
-    expect(catalog.agents.some(agent => agent.id === 'gemini-cli')).toBe(true);
-    expect(catalog.agents.find(agent => agent.id === 'gemini-cli')?.projectGuidance).toEqual({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(catalog.agents, agent => agent.id === 'codex-cloud'))
+        ?.projectGuidance.status,
+    ).toBe('unsupported');
+    expect(EffectArray.some(catalog.agents, agent => agent.id === 'gemini-cli')).toBe(true);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(catalog.agents, agent => agent.id === 'gemini-cli'))
+        ?.projectGuidance,
+    ).toEqual({
       status: 'managed',
       targetPath: 'GEMINI.md',
     });
-    expect(catalog.agents.find(agent => agent.id === 'zed-native')?.projectGuidance.status).toBe('unsupported');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(catalog.agents, agent => agent.id === 'zed-native'))
+        ?.projectGuidance.status,
+    ).toBe('unsupported');
     const catalogText = (await runCli(['agents', 'list'], environment)).stdout;
     expect(catalogText).toContain('Project guidance: GEMINI.md');
     expect(catalogText).toContain('Project guidance needs first-match dynamic target selection before automation.');
@@ -106,10 +158,10 @@ describe('agents CLI', () => {
     expect(repairPreview.stdout).toContain('Would merge mcpServers.threadnote');
     expect(await readFile(settings, 'utf8')).toBe(installed);
 
-    const status = JSON.parse((await runCli(['agents', 'status', '--json'], environment)).stdout) as {
-      readonly agents: readonly {readonly id: string; readonly state: string}[];
-    };
-    expect(status.agents.find(agent => agent.id === 'gemini-cli')).toMatchObject({state: 'current'});
+    const status = requireAgentStatusCatalog((await runCli(['agents', 'status', '--json'], environment)).stdout);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(status.agents, agent => agent.id === 'gemini-cli')),
+    ).toMatchObject({state: 'current'});
     expect((await runCli(['doctor', '--dry-run'], environment)).stdout).toContain('gemini-cli agent surface: current');
 
     await runCli(['agents', 'repair', 'gemini-cli'], environment);

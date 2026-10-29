@@ -1,3 +1,8 @@
+import {
+  isManagerValueDeletionReceipt,
+  isManagerValueReport,
+  isManagerValueRetentionReceipt,
+} from './api/response_guards.js';
 import React, {useEffect, useRef, useState} from 'react';
 import type {
   ManagerValueDeletionReceipt,
@@ -5,6 +10,7 @@ import type {
   ManagerValueRetentionReceipt,
 } from '@threadnote/manager/value/contracts';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
+import type {ApiResponseGuard} from './api/response_guard.js';
 
 export function ValuePanel(props: {readonly project?: string}): React.ReactElement {
   const [period, setPeriod] = useState(30);
@@ -21,14 +27,19 @@ export function ValuePanel(props: {readonly project?: string}): React.ReactEleme
 
   useEffect(() => () => request.current?.abort(), []);
 
-  async function submit<T>(path: string, body: Record<string, unknown>, label: string): Promise<T | undefined> {
+  async function submit<T>(
+    path: string,
+    body: Record<string, unknown>,
+    label: string,
+    guard: ApiResponseGuard<T>,
+  ): Promise<T | undefined> {
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
     setBusy(label);
     setError('');
     try {
-      return await api<T>(path, body, {signal: controller.signal});
+      return await api<T>(path, body, {signal: controller.signal}, guard);
     } catch (cause) {
       if (!controller.signal.aborted) setError(errorMessage(cause));
       return undefined;
@@ -40,8 +51,10 @@ export function ValuePanel(props: {readonly project?: string}): React.ReactEleme
   async function loadReport(): Promise<void> {
     const result = await submit<ManagerValueReport>(
       '/api/value/report',
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing for the project field.
       {period, ...(props.project?.trim() ? {project: props.project.trim()} : {})},
       'report',
+      isManagerValueReport,
     );
     if (result) setReport(result);
   }
@@ -51,6 +64,7 @@ export function ValuePanel(props: {readonly project?: string}): React.ReactEleme
       '/api/value/retention',
       {apply, days: retentionDays},
       apply ? 'retention-apply' : 'retention-preview',
+      isManagerValueRetentionReceipt,
     );
     if (result) {
       setRetention(result);
@@ -63,6 +77,7 @@ export function ValuePanel(props: {readonly project?: string}): React.ReactEleme
       '/api/value/delete',
       {apply, events: deleteEvents, exports: deleteExports, feedback: deleteFeedback},
       apply ? 'delete-apply' : 'delete-preview',
+      isManagerValueDeletionReceipt,
     );
     if (result) {
       setDeletion(result);

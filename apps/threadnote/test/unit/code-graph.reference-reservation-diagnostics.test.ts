@@ -1,6 +1,7 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Effect, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect, it} from 'vitest';
 import {
@@ -9,11 +10,12 @@ import {
   enforceCodeGraphBenchmarkRatchet,
   productionProfileArtifactMetadata,
   PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS,
-  type CodeGraphBenchmarkMeasurementRatchetV1,
 } from '../../../../scripts/benchmark-code-graph.js';
 import {PRODUCTION_LARGE_CODE_GRAPH_PROFILE} from '../../../../scripts/code-graph-fixture.js';
 import {benchmarkMeasurement, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
 import {CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM} from '@threadnote/graph/materialized_shard_cache_admission';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function benchmarkArtifact(
   measurements: BenchmarkArtifactV1['measurements'],
@@ -41,7 +43,7 @@ function benchmarkArtifact(
       runner: 'threadnote-code-graph-e2e',
       runnerVersion: '1',
     },
-    measurements: measurements.map(measurement =>
+    measurements: EffectArray.map(measurements, measurement =>
       typeof metadata.releaseEvidenceRef === 'string' &&
       ['hot-exact-lexical-query', 'manager-bounded-query'].includes(measurement.name)
         ? benchmarkMeasurement(
@@ -54,14 +56,14 @@ function benchmarkArtifact(
     metadata: {
       benchmarkMeasuredExecutionMode: 'local-source-application-layer',
       benchmarkMeasuredSourceCommit: commit,
-      benchmarkMeasuredSourceLockfileSha256: 'a'.repeat(64),
-      benchmarkMeasuredSourcePackageManifestSha256: 'b'.repeat(64),
+      benchmarkMeasuredSourceLockfileSha256: Effect2.pipe('a', EffectString.repeat(64)),
+      benchmarkMeasuredSourcePackageManifestSha256: Effect2.pipe('b', EffectString.repeat(64)),
       benchmarkGithubRunnerArchitecture: 'X64',
       benchmarkGithubRunnerEnvironment: 'github-hosted',
       benchmarkGithubRunnerOperatingSystem: 'Linux',
       benchmarkSourceValidationMode: 'github-actions-clean-source',
       benchmarkValidatedManagedPayload: 'not-applicable-github-actions-clean-source',
-      ...(suite.startsWith('code-graph-production-large-')
+      ...(Effect2.pipe(suite, EffectString.startsWith('code-graph-production-large-'))
         ? {
             ...productionProfileArtifactMetadata(PRODUCTION_LARGE_CODE_GRAPH_PROFILE),
             releaseEvidenceRef: 'refs/tags/v4.0.0-beta.30',
@@ -86,31 +88,44 @@ function requiredReleaseMeasurements(
     readonly unit: BenchmarkArtifactV1['measurements'][number]['unit'];
   }[],
 ): BenchmarkArtifactV1['measurements'] {
-  return required.map(measurement =>
+  return EffectArray.map(required, measurement =>
     benchmarkMeasurement(measurement.name, measurement.unit, [
       measurement.name === 'cold-activation-observed-stages-n1'
         ? 3
-        : measurement.name.endsWith('-materialization-cached-fact-replay-bytes-n1')
+        : Effect2.pipe(measurement.name, EffectString.endsWith('-materialization-cached-fact-replay-bytes-n1'))
           ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 2
-          : measurement.name.endsWith('-materialization-cached-fact-bytes-total-n1')
+          : Effect2.pipe(measurement.name, EffectString.endsWith('-materialization-cached-fact-bytes-total-n1'))
             ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 1
-            : measurement.name.endsWith('-materialization-raw-fact-replay-bytes-n1') ||
-                measurement.name.endsWith('-materialized-shard-cache-deferred-raw-fact-bytes-n1')
+            : Effect2.pipe(measurement.name, EffectString.endsWith('-materialization-raw-fact-replay-bytes-n1')) ||
+                Effect2.pipe(
+                  measurement.name,
+                  EffectString.endsWith('-materialized-shard-cache-deferred-raw-fact-bytes-n1'),
+                )
               ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 1
               : /-materialization-subphase-shard-(?:association|persistence|serialization)-n1$/u.test(measurement.name)
                 ? 0
-                : measurement.name.startsWith('production-shape-')
+                : Effect2.pipe(measurement.name, EffectString.startsWith('production-shape-'))
                   ? 100
-                  : measurement.name.startsWith('cold-activation-copying-') && measurement.name.endsWith('-observed-n1')
+                  : Effect2.pipe(measurement.name, EffectString.startsWith('cold-activation-copying-')) &&
+                      Effect2.pipe(measurement.name, EffectString.endsWith('-observed-n1'))
                     ? 0
-                    : measurement.name.endsWith('-activation-observed-stages-n1')
+                    : Effect2.pipe(measurement.name, EffectString.endsWith('-activation-observed-stages-n1'))
                       ? 32
-                      : measurement.name.endsWith('-external-sampler-version-n1')
+                      : Effect2.pipe(measurement.name, EffectString.endsWith('-external-sampler-version-n1'))
                         ? 4
-                        : measurement.name.endsWith('-materialization-sidecar-wal-high-water-n1')
+                        : Effect2.pipe(
+                              measurement.name,
+                              EffectString.endsWith('-materialization-sidecar-wal-high-water-n1'),
+                            )
                           ? 0
-                          : measurement.name.endsWith('-external-process-tree-failures-n1') ||
-                              measurement.name.endsWith('-external-open-temp-process-tree-failures-n1')
+                          : Effect2.pipe(
+                                measurement.name,
+                                EffectString.endsWith('-external-process-tree-failures-n1'),
+                              ) ||
+                              Effect2.pipe(
+                                measurement.name,
+                                EffectString.endsWith('-external-open-temp-process-tree-failures-n1'),
+                              )
                             ? 0
                             : measurement.name === 'one-file-reindex-materialization-stage-restoring-indexes-n1'
                               ? 0
@@ -170,9 +185,9 @@ const governed = (coldIndexMilliseconds: number, sampledPhase: string): Benchmar
       effectiveParserWorkers: 4,
       oneFileReindexMaterializationMode: 'incremental-overlay',
       oneFileReindexMaterializationStorageMode: 'unreported',
-      primaryQueryStructuralDigestCold: '1'.repeat(64),
-      primaryQueryStructuralDigestIncremental: '2'.repeat(64),
-      primaryQueryStructuralDigestSameOverlayReference: '2'.repeat(64),
+      primaryQueryStructuralDigestCold: Effect2.pipe('1', EffectString.repeat(64)),
+      primaryQueryStructuralDigestIncremental: Effect2.pipe('2', EffectString.repeat(64)),
+      primaryQueryStructuralDigestSameOverlayReference: Effect2.pipe('2', EffectString.repeat(64)),
       retrievalMode: 'lexical-only',
       runnerClass: 'governed-test',
       runtimePlatform: 'darwin',
@@ -180,13 +195,43 @@ const governed = (coldIndexMilliseconds: number, sampledPhase: string): Benchmar
       sameOverlayReferenceMaterializationStorageMode: 'direct-persistent',
       sqlitePageSizeBytes: 8192,
       sqliteVersion: '3.49.1',
-      structuralGraphDigestCold: coldIndexMilliseconds.toString(16).padStart(64, '0'),
-      structuralGraphDigestIncremental: (coldIndexMilliseconds + 1).toString(16).padStart(64, '0'),
-      structuralGraphDigestSameOverlayReference: (coldIndexMilliseconds + 1).toString(16).padStart(64, '0'),
+      structuralGraphDigestCold: Effect2.pipe(coldIndexMilliseconds.toString(16), EffectString.padStart(64, '0')),
+      structuralGraphDigestIncremental: Effect2.pipe(
+        (coldIndexMilliseconds + 1).toString(16),
+        EffectString.padStart(64, '0'),
+      ),
+      structuralGraphDigestSameOverlayReference: Effect2.pipe(
+        (coldIndexMilliseconds + 1).toString(16),
+        EffectString.padStart(64, '0'),
+      ),
       vectorEnabled: false,
     },
     'code-graph-production-large-v2',
   );
+
+const ratchetMeasurementSchema = Schema.StructWithRest(
+  Schema.Struct({
+    meanMaximum: Schema.optional(Schema.Finite),
+    maximum: Schema.optional(Schema.Finite),
+    minimum: Schema.optional(Schema.Finite),
+    p50Maximum: Schema.optional(Schema.Finite),
+    p95Maximum: Schema.optional(Schema.Finite),
+    p99Maximum: Schema.optional(Schema.Finite),
+    samplesMinimum: Schema.optional(Schema.Finite),
+    unit: Schema.Union([
+      Schema.Literal('bytes'),
+      Schema.Literal('count'),
+      Schema.Literal('milliseconds'),
+      Schema.Literal('operations_per_second'),
+      Schema.Literal('percent'),
+    ]),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const pinnedRatchetSchema = Schema.StructWithRest(
+  Schema.Struct({measurements: Schema.Record(Schema.String, ratchetMeasurementSchema)}),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
 
 const stages = [
   'reference-reservation-owner-identity',
@@ -198,25 +243,29 @@ const referenceName = 'one-file-reindex-reference-resolution';
 const withReference = (artifact: BenchmarkArtifactV1, value: number): BenchmarkArtifactV1 => ({
   ...artifact,
   measurements: [
-    ...artifact.measurements.filter(item => item.name !== referenceName),
+    ...EffectArray.filter(artifact.measurements, item => item.name !== referenceName),
     benchmarkMeasurement(referenceName, 'milliseconds', [value]),
   ],
 });
-const artifacts = [100, 105, 110].map(value => withReference(governed(value, 'cold-scanning-progress'), 16));
+const artifacts = EffectArray.map([100, 105, 110], value =>
+  withReference(governed(value, 'cold-scanning-progress'), 16),
+);
 const syntheticRatchet = createCodeGraphProductionRatchet(artifacts);
-const pinned = JSON.parse(
-  readFileSync(
-    'apps/threadnote/test/evaluation/baselines/code-graph-v1/production-ratchet-github-linux-x64.json',
-    'utf8',
+const pinned = Schema.decodeUnknownSync(pinnedRatchetSchema)(
+  JSON.parse(
+    readFileSync(
+      'apps/threadnote/test/evaluation/baselines/code-graph-v1/production-ratchet-github-linux-x64.json',
+      'utf8',
+    ),
   ),
-) as {measurements: Record<string, CodeGraphBenchmarkMeasurementRatchetV1>};
+);
 const ratchet = {
   ...syntheticRatchet,
   measurements: {...syntheticRatchet.measurements, [referenceName]: pinned.measurements[referenceName]},
 };
-const diagnostics = ['cold', 'one-file-reindex', 'same-overlay-reference'].flatMap(prefix =>
-  stages.flatMap(stage =>
-    ['count', 'process-cpu-total', 'wall-maximum', 'wall-total'].map(statistic =>
+const diagnostics = EffectArray.flatMap(['cold', 'one-file-reindex', 'same-overlay-reference'], prefix =>
+  EffectArray.flatMap(stages, stage =>
+    EffectArray.map(['count', 'process-cpu-total', 'wall-maximum', 'wall-total'], statistic =>
       benchmarkMeasurement(
         `${prefix}-completion-${stage}-${statistic}-n1`,
         statistic === 'count' ? 'count' : 'milliseconds',
@@ -232,7 +281,7 @@ const withDiagnostics = (artifact: BenchmarkArtifactV1): BenchmarkArtifactV1 => 
 
 it('reference reservation diagnostics retain only the four closed subdivisions without changing assessed work', () => {
   const before = structuredClone(artifacts);
-  const observed = artifacts.map(withDiagnostics);
+  const observed = EffectArray.map(artifacts, withDiagnostics);
   expect(diagnostics).toHaveLength(48);
   expect(createCodeGraphProductionRatchet(observed)).toEqual(syntheticRatchet);
   expect(() => enforceCodeGraphBenchmarkRatchet(observed[0], ratchet)).not.toThrow();
@@ -286,12 +335,25 @@ effectIt.effect(
       expect(measurements).toHaveLength(16);
       for (const stage of stages) {
         const prefix = `one-file-reindex-completion-${stage}`;
-        expect(measurements.find(item => item.name === `${prefix}-count-n1`)?.p95).toBe(2);
-        expect(measurements.find(item => item.name === `${prefix}-wall-total-n1`)?.p95).toBe(7);
-        expect(measurements.find(item => item.name === `${prefix}-wall-maximum-n1`)?.p95).toBe(5);
-        expect(measurements.find(item => item.name === `${prefix}-process-cpu-total-n1`)?.p95).toBeGreaterThanOrEqual(
-          0,
-        );
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(measurements, item => item.name === `${prefix}-count-n1`))
+            ?.p95,
+        ).toBe(2);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(measurements, item => item.name === `${prefix}-wall-total-n1`),
+          )?.p95,
+        ).toBe(7);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(measurements, item => item.name === `${prefix}-wall-maximum-n1`),
+          )?.p95,
+        ).toBe(5);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(measurements, item => item.name === `${prefix}-process-cpu-total-n1`),
+          )?.p95,
+        ).toBeGreaterThanOrEqual(0);
       }
     }),
 );

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -41,7 +42,9 @@ const scenarioArbitrary = FC.record({
   fileCount: FC.integer({max: 7, min: 3}),
   salt: FC.integer({max: 10_000, min: 0}),
 }).map(({baseTargets, dirtyMask, dirtyTargets, fileCount, salt}) => {
-  const dirty = new Set(dirtyMask.slice(3, fileCount).flatMap((enabled, index) => (enabled ? [index + 3] : [])));
+  const dirty = new Set(
+    EffectArray.flatMap(dirtyMask.slice(3, fileCount), (enabled, index) => (enabled ? [index + 3] : [])),
+  );
   dirty.add(0);
   dirty.add(2);
   const anchoredBaseTargets = baseTargets.slice(0, fileCount);
@@ -228,9 +231,13 @@ describe('code graph incremental-overlay differential properties', () => {
             }),
           );
           const resolvedCalls = new Set(
-            result.incrementalGraph.edges
-              .filter(edge => edge.relation === 'calls' && edge.sourceId !== undefined && edge.targetId !== undefined)
-              .map(edge => `${edge.sourceName}->${edge.targetName}`),
+            EffectArray.map(
+              EffectArray.filter(
+                result.incrementalGraph.edges,
+                edge => edge.relation === 'calls' && edge.sourceId !== undefined && edge.targetId !== undefined,
+              ),
+              edge => `${edge.sourceName}->${edge.targetName}`,
+            ),
           );
           expect(resolvedCalls).toEqual(expectedCalls);
         } finally {
@@ -926,7 +933,7 @@ function applyDirtyScenario(root: string, scenario: DifferentialScenario): void 
 function commitScenarioFiles(root: string, scenario: DifferentialScenario, message: string): void {
   commitPaths(
     root,
-    [...scenario.dirty].map(source => `src/file-${source}.ts`),
+    EffectArray.map([...scenario.dirty], source => `src/file-${source}.ts`),
     message,
   );
 }
@@ -957,39 +964,48 @@ function writeSurfaceChangedSource(
   if (mutation === 'private-method') {
     writeFileSync(
       join(root, 'src', `file-${source}.ts`),
-      [
-        `import {symbol${target}} from './file-${target}.js';`,
-        `class Local${source} {`,
-        `  private privateValue${source}(): number { return symbol${target}(); }`,
-        `  value(): number { return this.privateValue${source}(); }`,
-        '}',
-        `export function symbol${source}(): number { return new Local${source}().value(); }`,
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          `import {symbol${target}} from './file-${target}.js';`,
+          `class Local${source} {`,
+          `  private privateValue${source}(): number { return symbol${target}(); }`,
+          `  value(): number { return this.privateValue${source}(); }`,
+          '}',
+          `export function symbol${source}(): number { return new Local${source}().value(); }`,
+          '',
+        ],
+        '\n',
+      ),
     );
     return;
   }
   if (mutation === 'file-local-function') {
     writeFileSync(
       join(root, 'src', `file-${source}.ts`),
-      [
-        `import {symbol${target}} from './file-${target}.js';`,
-        `function local${source}(): number { return symbol${target}(); }`,
-        `export function symbol${source}(): number { return local${source}(); }`,
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          `import {symbol${target}} from './file-${target}.js';`,
+          `function local${source}(): number { return symbol${target}(); }`,
+          `export function symbol${source}(): number { return local${source}(); }`,
+          '',
+        ],
+        '\n',
+      ),
     );
     return;
   }
   if (mutation === 'callback-argument') {
     writeFileSync(
       join(root, 'src', `file-${source}.ts`),
-      [
-        `import {symbol${target}} from './file-${target}.js';`,
-        `const callback${source} = (): number => symbol${target}();`,
-        `export function symbol${source}(): number { return callback${source}(); }`,
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          `import {symbol${target}} from './file-${target}.js';`,
+          `const callback${source} = (): number => symbol${target}();`,
+          `export function symbol${source}(): number { return callback${source}(); }`,
+          '',
+        ],
+        '\n',
+      ),
     );
     return;
   }
@@ -998,13 +1014,16 @@ function writeSurfaceChangedSource(
   const parameters = mutation === 'arity' ? 'value: number' : '';
   writeFileSync(
     join(root, 'src', `file-${source}.ts`),
-    [
-      `import {symbol${target}} from './file-${target}.js';`,
-      `${exported}function ${name}(${parameters}): number {`,
-      `  return symbol${target}();`,
-      '}',
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        `import {symbol${target}} from './file-${target}.js';`,
+        `${exported}function ${name}(${parameters}): number {`,
+        `  return symbol${target}();`,
+        '}',
+        '',
+      ],
+      '\n',
+    ),
   );
 }
 
@@ -1018,14 +1037,17 @@ function writeSource(root: string, source: number, rawTarget: number, fileCount:
   const target = differentFile(rawTarget, source, fileCount);
   writeFileSync(
     join(root, 'src', `file-${source}.ts`),
-    [
-      `import {symbol${target}} from './file-${target}.js';`,
-      `export function symbol${source}(): number {`,
-      `  // body revision ${revision}`,
-      `  return symbol${target}() + ${revision};`,
-      '}',
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        `import {symbol${target}} from './file-${target}.js';`,
+        `export function symbol${source}(): number {`,
+        `  // body revision ${revision}`,
+        `  return symbol${target}() + ${revision};`,
+        '}',
+        '',
+      ],
+      '\n',
+    ),
   );
 }
 
@@ -1065,16 +1087,18 @@ function persistedSnapshots(databasePath: string): readonly {
 }[] {
   const database = new Database(databasePath, {readonly: true});
   try {
-    return database
-      .query<
-        {readonly baseSnapshotId: unknown; readonly dirty: number; readonly id: string; readonly state: string},
-        []
-      >('SELECT id, base_snapshot_id AS baseSnapshotId, dirty, state FROM snapshots ORDER BY started_at ASC, id ASC')
-      .all()
-      .map(row => ({
+    return EffectArray.map(
+      database
+        .query<
+          {readonly baseSnapshotId: unknown; readonly dirty: number; readonly id: string; readonly state: string},
+          []
+        >('SELECT id, base_snapshot_id AS baseSnapshotId, dirty, state FROM snapshots ORDER BY started_at ASC, id ASC')
+        .all(),
+      row => ({
         ...row,
         baseSnapshotId: typeof row.baseSnapshotId === 'string' ? Option.some(row.baseSnapshotId) : Option.none(),
-      }));
+      }),
+    );
   } finally {
     database.close();
   }

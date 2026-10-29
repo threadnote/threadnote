@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -11,10 +12,20 @@ import {
   EMPTY_CODE_GRAPH_BUILD_RESOURCE_STATE,
   makeCodeGraphBuildResourceCoordinator,
 } from '@threadnote/graph/build/resources';
-import {serializeBoundedCodeGraphFact} from '@threadnote/graph/fact/budget';
+import {
+  isBoundedCodeGraphFact,
+  serializeBoundedCodeGraphFact,
+  type CodeGraphCacheFactInput,
+} from '@threadnote/graph/fact/budget';
 import {codeGraphExtractionWindowSize} from '@threadnote/graph/extraction_lanes';
-import {cacheContentBatch, type CodeGraphCacheExtractedRow} from '@threadnote/graph/indexer';
+import {
+  cacheContentBatch,
+  type CodeGraphCacheContentStore,
+  type CodeGraphCacheExtractedRow,
+} from '@threadnote/graph/indexer';
+import {classifyCodeGraphStoreFailure} from '@threadnote/graph/store/failure';
 import type {CodeGraphIndexResourceGate} from '@threadnote/graph/indexer/types';
+import type {CodeGraphBuildResourceOrderError} from '@threadnote/graph/build/resources';
 import type {CodeGraphContentBatchContext} from '@threadnote/graph/inventory';
 import {
   BUILTIN_LANGUAGE_PACK_REGISTRY,
@@ -27,21 +38,22 @@ import {
   persistGraphSharePendingSignedCandidates,
 } from '@threadnote/graph/sharing/signed/candidate';
 import type {CodeGraphParserPoolShape, CodeGraphParserResult} from '@threadnote/graph/parser_worker';
-import type {
-  CodeGraphDirectPersistentCapacityProtector,
-  CodeGraphFactCacheBatch,
-  CodeGraphStoreShape,
-} from '@threadnote/graph/store';
+import type {CodeGraphDirectPersistentCapacityProtector} from '@threadnote/graph/store';
 import type {TreeSitterRuntimeShape} from '@threadnote/graph/tree_sitter/runtime';
-import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '@threadnote/graph/types';
+import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphStoreFailure} from '@threadnote/graph/types';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class InjectedProgressError extends Schema.TaggedError<InjectedProgressError>()('InjectedProgressError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class InjectedProgressError extends Schema.TaggedError<InjectedProgressError, {readonly brand: unique symbol}>()(
+  'InjectedProgressError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 interface CacheCall {
   readonly cacheIdentity: string;
@@ -73,7 +85,13 @@ describe('code graph parser cache coalescer', () => {
       yield* harness.flush;
 
       expect(harness.calls).toHaveLength(1);
-      expect(harness.calls[0]?.facts[0]?.facts.symbols.some(symbol => symbol.name === 'bounded-manifest')).toBe(true);
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(harness.calls[0]?.facts[0]?.facts.symbols), __effectOptionalArrayReceiver =>
+            EffectArray.some(__effectOptionalArrayReceiver, symbol => symbol.name === 'bounded-manifest'),
+          ),
+        ),
+      ).toBe(true);
     }),
   );
 
@@ -84,15 +102,15 @@ describe('code graph parser cache coalescer', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-cache-journal-quota-'});
-        const repositoryId = 'b'.repeat(64);
+        const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
         const manifestPath = pendingCandidateQueuePath(path, home, repositoryId);
         yield* fs.makeDirectory(path.dirname(manifestPath), {recursive: true});
-        const commit = 'c'.repeat(40);
+        const commit = Effect2.pipe('c', EffectString.repeat(40));
         const candidate = {
-          actionKey: 'a'.repeat(64),
+          actionKey: Effect2.pipe('a', EffectString.repeat(64)),
           batchId: commit,
           casRoot: '/private/cas',
-          extractorSet: 'd'.repeat(64),
+          extractorSet: Effect2.pipe('d', EffectString.repeat(64)),
           organization: 'acme',
           platform: {architecture: 'arm64' as const, os: 'darwin' as const},
           profileDigest: sha256Digest('profile'),
@@ -106,7 +124,7 @@ describe('code graph parser cache coalescer', () => {
         yield* fs.makeDirectory(`${manifestPath}.d`, {recursive: true});
         const segments = [];
         for (let index = 0; index < 2_048; index++) {
-          const bytes = `${JSON.stringify({candidates: [{...candidate, actionKey: index.toString(16).padStart(64, '0')}], schemaVersion: 1})}\n`;
+          const bytes = `${JSON.stringify({candidates: [{...candidate, actionKey: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0'))}], schemaVersion: 1})}\n`;
           const id = sha256HexSync(bytes);
           yield* fs.writeFileString(path.join(`${manifestPath}.d`, `${id}.json`), bytes);
           segments.push({count: 1, id, size: new TextEncoder().encode(bytes).byteLength});
@@ -145,7 +163,7 @@ describe('code graph parser cache coalescer', () => {
         for (let offset = 0; offset < files.length; offset += 128) {
           const batch = files.slice(offset, offset + 128);
           yield* harness.acceptExtracted(
-            batch.map(file => extractedRow(file)),
+            EffectArray.map(batch, file => extractedRow(file)),
             cacheContext(batch.length),
           );
         }
@@ -153,9 +171,9 @@ describe('code graph parser cache coalescer', () => {
         yield* harness.flush;
 
         expect(harness.calls).toHaveLength(143);
-        expect(harness.calls.slice(0, -1).every(call => call.files.length === 512)).toBe(true);
+        expect(EffectArray.every(harness.calls.slice(0, -1), call => call.files.length === 512)).toBe(true);
         expect(harness.calls.at(-1)?.files.length).toBe(296);
-        expect(harness.calls.reduce((total, call) => total + call.files.length, 0)).toBe(73_000);
+        expect(EffectArray.reduce(harness.calls, 0, (total, call) => total + call.files.length)).toBe(73_000);
         expect(harness.calls[0]?.files[0]?.path).toBe('src/alpha/file-000000.ts');
         expect(harness.calls.at(-1)?.files.at(-1)?.path).toBe('src/alpha/file-072999.ts');
         assertCacheCallsBounded(harness.calls);
@@ -169,7 +187,16 @@ describe('code graph parser cache coalescer', () => {
         cacheFile(index, index % 2 === 0 ? 'src/alpha' : 'src/beta'),
       );
       const facts = (file: CodeGraphInventoryFile): CodeGraphParserResult => ({
-        degraded: Number(file.path.match(/(\d+)\.ts$/u)?.[1] ?? 0) % 5 === 0,
+        degraded:
+          Number(
+            Effect2.pipe(
+              file.path,
+              EffectString.match(/(\d+)\.ts$/u),
+              Effect2.Option.getOrElse(() => null),
+            )?.[1] ?? 0,
+          ) %
+            5 ===
+          0,
         facts: emptyFacts(file.path),
         parseMilliseconds: 0,
       });
@@ -198,26 +225,43 @@ describe('code graph parser cache coalescer', () => {
       yield* second.flush;
 
       expect(cacheCallIdentity(first.calls)).toEqual(cacheCallIdentity(second.calls));
-      expect(first.calls.reduce((total, call) => total + call.files.length, 0)).toBe(files.length);
+      expect(EffectArray.reduce(first.calls, 0, (total, call) => total + call.files.length)).toBe(files.length);
       for (const call of first.calls) {
-        const baseIdentities = new Set(call.files.map(file => cacheIdentityForPath(file.path)));
+        const baseIdentities = new Set(EffectArray.map(call.files, file => cacheIdentityForPath(file.path)));
         const degradationStates = new Set(
-          call.files.map(file => (Number(file.path.match(/(\d+)\.ts$/u)?.[1] ?? 0) % 5 === 0 ? 'degraded' : 'durable')),
+          EffectArray.map(call.files, file =>
+            Number(
+              Effect2.pipe(
+                file.path,
+                EffectString.match(/(\d+)\.ts$/u),
+                Effect2.Option.getOrElse(() => null),
+              )?.[1] ?? 0,
+            ) %
+              5 ===
+            0
+              ? 'degraded'
+              : 'durable',
+          ),
         );
         expect(baseIdentities.size).toBe(1);
         expect(degradationStates.size).toBe(1);
       }
       assertCacheCallsBounded(first.calls);
       expect(persistenceProgress).toEqual(
-        first.calls.flatMap(call => [
+        EffectArray.flatMap(first.calls, call => [
           {completed: 0, total: call.files.length},
           {completed: call.files.length, total: call.files.length},
         ]),
       );
-      expect(persistenceProgress.every(value => value.completed >= 0 && value.completed <= value.total)).toBe(true);
-      expect(persistenceProgress.reduce((total, value) => total + value.completed, 0)).toBe(files.length);
       expect(
-        persistenceProgress.filter(value => value.completed > 0).every(value => value.completed === value.total),
+        EffectArray.every(persistenceProgress, value => value.completed >= 0 && value.completed <= value.total),
+      ).toBe(true);
+      expect(EffectArray.reduce(persistenceProgress, 0, (total, value) => total + value.completed)).toBe(files.length);
+      expect(
+        EffectArray.every(
+          EffectArray.filter(persistenceProgress, value => value.completed > 0),
+          value => value.completed === value.total,
+        ),
       ).toBe(true);
     }),
   );
@@ -293,7 +337,7 @@ describe('code graph parser cache coalescer', () => {
     () =>
       Effect.gen(function* () {
         const resources = yield* makeCodeGraphBuildResourceCoordinator(() => Effect.void);
-        const diagnostic = '界'.repeat(650_000);
+        const diagnostic = Effect2.pipe('界', EffectString.repeat(650_000));
         const windowSize = codeGraphExtractionWindowSize(1);
         let admissions = 0;
         let writes = 0;
@@ -341,7 +385,7 @@ describe('code graph parser cache coalescer', () => {
         expect(harness.calls[0]?.files.length).toBeLessThanOrEqual(windowSize);
         expect(yield* resources.current).toEqual(EMPTY_CODE_GRAPH_BUILD_RESOURCE_STATE);
         yield* harness.flush;
-        expect(harness.calls.reduce((total, call) => total + call.files.length, 0)).toBe(files.length);
+        expect(EffectArray.reduce(harness.calls, 0, (total, call) => total + call.files.length)).toBe(files.length);
       }),
     30_000,
   );
@@ -350,7 +394,7 @@ describe('code graph parser cache coalescer', () => {
     'keeps an exact committed prefix when interrupted after a payload flush and converges on retry',
     () =>
       Effect.gen(function* () {
-        const diagnostic = '界'.repeat(2_300_000);
+        const diagnostic = Effect2.pipe('界', EffectString.repeat(2_300_000));
         const files = Array.from({length: 5}, (_, index) => cacheFile(index, 'src/payload'));
         const secondWriterEntered = yield* Deferred.make<void>();
         const committed = new Map<string, string>();
@@ -405,7 +449,7 @@ describe('code graph parser cache coalescer', () => {
         yield* retry.run(files, cacheContext(files.length));
         yield* retry.flush;
 
-        expect([...committed.keys()].sort()).toEqual(files.map(file => file.path));
+        expect([...committed.keys()].sort()).toEqual(EffectArray.map(files, file => file.path));
         expect(retry.calls).toHaveLength(2);
         assertCacheCallsBounded(retry.calls);
       }),
@@ -426,7 +470,7 @@ describe('code graph parser cache coalescer', () => {
       for (let offset = 0; offset < files.length; offset += 128) {
         const batch = files.slice(offset, offset + 128);
         yield* harness.acceptExtracted(
-          batch.map(file => extractedRow(file)),
+          EffectArray.map(batch, file => extractedRow(file)),
           cacheContext(batch.length),
         );
       }
@@ -434,17 +478,27 @@ describe('code graph parser cache coalescer', () => {
       yield* harness.flush;
 
       expect(harness.calls).toHaveLength(2);
-      expect(harness.calls.every(call => call.files.every(file => !('bytes' in file) && !('content' in file)))).toBe(
-        true,
-      );
-      expect(harness.calls.reduce((total, call) => total + call.files.length, 0)).toBe(files.length);
+      expect(
+        EffectArray.every(harness.calls, call =>
+          EffectArray.every(call.files, file => !('bytes' in file) && !('content' in file)),
+        ),
+      ).toBe(true);
+      expect(EffectArray.reduce(harness.calls, 0, (total, call) => total + call.files.length)).toBe(files.length);
     }),
   );
 
   effectIt.effect('flushes a committed path before accepting its dirty-overlay hash', () =>
     Effect.gen(function* () {
-      const committed = {...cacheFile(1, 'src/duplicate'), contentHash: 'a'.repeat(64), source: 'commit' as const};
-      const overlay = {...committed, contentHash: 'b'.repeat(64), source: 'worktree' as const};
+      const committed = {
+        ...cacheFile(1, 'src/duplicate'),
+        contentHash: Effect2.pipe('a', EffectString.repeat(64)),
+        source: 'commit' as const,
+      };
+      const overlay = {
+        ...committed,
+        contentHash: Effect2.pipe('b', EffectString.repeat(64)),
+        source: 'worktree' as const,
+      };
       const harness = coalescerHarness({capacity: 2});
 
       yield* harness.acceptExtracted([extractedRow(committed)], cacheContext(1));
@@ -454,11 +508,11 @@ describe('code graph parser cache coalescer', () => {
       yield* harness.flush;
 
       expect(harness.calls).toHaveLength(2);
-      expect(harness.calls.map(call => call.files.map(file => file.contentHash))).toEqual([
-        ['a'.repeat(64)],
-        ['b'.repeat(64)],
+      expect(EffectArray.map(harness.calls, call => EffectArray.map(call.files, file => file.contentHash))).toEqual([
+        [Effect2.pipe('a', EffectString.repeat(64))],
+        [Effect2.pipe('b', EffectString.repeat(64))],
       ]);
-      expect(harness.calls.every(call => call.files[0]?.path === committed.path)).toBe(true);
+      expect(EffectArray.every(harness.calls, call => call.files[0]?.path === committed.path)).toBe(true);
     }),
   );
 
@@ -488,7 +542,9 @@ describe('code graph parser cache coalescer', () => {
 
       expect(extractions).toBe(1);
       const cachedFacts = new Map(
-        harness.calls.flatMap(call => call.facts.map(fact => [fact.facts.path, fact.facts] as const)),
+        EffectArray.flatMap(harness.calls, call =>
+          EffectArray.map(call.facts, fact => [fact.facts.path, fact.facts] as const),
+        ),
       );
       expect(cachedFacts.get(donor.path)).toEqual(
         extractStructuredSchemaFacts(donor, {packageName: Option.none(), project: Option.none()}),
@@ -534,11 +590,14 @@ describe('code graph parser cache coalescer', () => {
       yield* harness.run([file], cacheContext(1));
       yield* harness.flush;
 
-      const completed = observed.find(
-        value =>
-          value.phase === 'scanning' &&
-          value.activity?.stage === 'extracting' &&
-          value.activity.parseMilliseconds !== undefined,
+      const completed = Option.getOrUndefined(
+        EffectArray.findFirst(
+          observed,
+          value =>
+            value.phase === 'scanning' &&
+            value.activity?.stage === 'extracting' &&
+            value.activity.parseMilliseconds !== undefined,
+        ),
       );
       expect(completed).toMatchObject({
         activity: {
@@ -578,7 +637,12 @@ describe('code graph parser cache coalescer', () => {
       yield* harness.flush;
 
       expect(extractions).toBe(2);
-      expect(harness.calls.flatMap(call => call.files).every(file => file.blobId === '')).toBe(true);
+      expect(
+        EffectArray.every(
+          EffectArray.flatMap(harness.calls, call => call.files),
+          file => file.blobId === '',
+        ),
+      ).toBe(true);
     }),
   );
 
@@ -620,7 +684,7 @@ describe('code graph parser cache coalescer', () => {
         onProgress: progress =>
           progress.phase === 'scanning' &&
           progress.activity?.stage === 'extracting' &&
-          progress.activity.path.endsWith('000002.ts')
+          Effect2.pipe(progress.activity.path, EffectString.endsWith('000002.ts'))
             ? Effect.fail(InjectedProgressError.make({message: 'injected later-window progress failure'}))
             : Effect.void,
       });
@@ -692,7 +756,7 @@ function checkCacheGroupCheckpoint(firstRows: number, secondRows: number, stop: 
           return yield* Effect.never;
         }),
     });
-    yield* harness.acceptExtracted(files.map(extractedRow), cacheContext(files.length));
+    yield* harness.acceptExtracted(EffectArray.map(files, extractedRow), cacheContext(files.length));
     expect(harness.calls).toEqual([]);
     const flushing = harness.flush.pipe(Effect.ensuring(harness.discard));
     if (stop === 'failure') {
@@ -706,7 +770,7 @@ function checkCacheGroupCheckpoint(firstRows: number, secondRows: number, stop: 
 
     expect(harness.calls).toHaveLength(1);
     expect(sources).toEqual([cacheIdentityForPath(first[0].path)]);
-    expect([...committed.keys()]).toEqual(first.map(file => file.path));
+    expect([...committed.keys()]).toEqual(EffectArray.map(first, file => file.path));
     expect(receipts).toEqual([
       {completed: 0, total: firstRows},
       {completed: firstRows, total: firstRows},
@@ -716,12 +780,15 @@ function checkCacheGroupCheckpoint(firstRows: number, secondRows: number, stop: 
 
     const retry = coalescerHarness({capacity: 2, onCache: persist});
     yield* retry.acceptExtracted(
-      files.filter(file => !committed.has(file.path)).map(extractedRow),
+      EffectArray.map(
+        EffectArray.filter(files, file => !committed.has(file.path)),
+        extractedRow,
+      ),
       cacheContext(secondRows),
     );
     yield* retry.flush;
     expect(retry.calls).toHaveLength(1);
-    expect([...committed.keys()]).toEqual(files.map(file => file.path));
+    expect([...committed.keys()]).toEqual(EffectArray.map(files, file => file.path));
     for (const file of files)
       expect(committed.get(file.path)).toBe(serializeBoundedCodeGraphFact(emptyFacts(file.path)).json);
   });
@@ -733,7 +800,7 @@ function coalescerHarness(options: {
     file: CodeGraphInventoryFile,
   ) => CodeGraphParserResult | Effect.Effect<CodeGraphParserResult, never>;
   readonly languagePacks?: CodeGraphLanguagePackRegistryShape;
-  readonly onCache?: (call: CacheCall) => Effect.Effect<void, unknown>;
+  readonly onCache?: (call: CacheCall) => Effect.Effect<void, CodeGraphStoreFailure | CodeGraphBuildResourceOrderError>;
   readonly onSource?: Parameters<typeof cacheContentBatch>[0]['onSourceParserBatch'];
   readonly onProgress?: Parameters<typeof cacheContentBatch>[0]['onProgress'];
   readonly preparationGate?: CodeGraphIndexResourceGate;
@@ -759,35 +826,41 @@ function coalescerHarness(options: {
       const call = {cacheIdentity, facts, files};
       calls.push(call);
       return call;
-    }).pipe(Effect.flatMap(call => options.onCache?.(call) ?? Effect.void));
+    }).pipe(
+      Effect.flatMap(call => options.onCache?.(call) ?? Effect.void),
+      Effect.mapError(error => classifyCodeGraphStoreFailure('cache code graph facts', error)),
+    );
   const store = {
-    cacheFactBatches: (_databasePath: string, batches: readonly CodeGraphFactCacheBatch[]) =>
-      Effect.forEach(
-        batches,
-        batch => recordCache(batch.files, batch.facts as CacheCall['facts'], batch.extractorSet),
-        {discard: true},
-      ),
     cacheFacts: (
       _databasePath: string,
       files: readonly CodeGraphInventoryFile[],
-      facts: CacheCall['facts'],
+      facts: readonly CodeGraphCacheFactInput[],
       cacheIdentity: string,
-    ) => recordCache(files, facts, cacheIdentity),
-  } as unknown as CodeGraphStoreShape;
+      _persistentCapacityProtector: CodeGraphDirectPersistentCapacityProtector,
+    ) =>
+      recordCache(
+        files,
+        EffectArray.map(facts, fact => {
+          const bounded = isBoundedCodeGraphFact(fact) ? fact : serializeBoundedCodeGraphFact(fact);
+          return {facts: bounded.facts, json: bounded.json};
+        }),
+        cacheIdentity,
+      ),
+  } satisfies CodeGraphCacheContentStore;
   const coalescer = cacheContentBatch({
     databasePath: '/bounded/cache.sqlite',
     languagePacks:
       options.languagePacks ??
       ({
-        cacheIdentityForPath: path => Option.some(cacheIdentityForPath(path)),
+        ...BUILTIN_LANGUAGE_PACK_REGISTRY,
+        cacheIdentityForPath: path =>
+          Option.map(BUILTIN_LANGUAGE_PACK_REGISTRY.match(path), () => cacheIdentityForPath(path)),
         match: path =>
-          Option.some({
+          Option.map(BUILTIN_LANGUAGE_PACK_REGISTRY.match(path), match => ({
+            ...match,
             cacheIdentity: cacheIdentityForPath(path),
-            language: path.endsWith('.json') ? 'json' : 'typescript',
-            pack: {id: path.endsWith('.json') ? 'schemas' : 'typescript'},
-            role: 'source',
-          }),
-      } as CodeGraphLanguagePackRegistryShape),
+          })),
+      } satisfies CodeGraphLanguagePackRegistryShape),
     onProgress: options.onProgress,
     onSourceParserBatch: options.onSource,
     parserPool,
@@ -795,16 +868,18 @@ function coalescerHarness(options: {
     persistentCapacityProtector: unprotectedCacheWrite,
     store,
     threadnoteHome: '/bounded/home',
-    treeSitter: {} as TreeSitterRuntimeShape,
+    treeSitter: {
+      withParsedSource: () => Effect.die(new Error('Parser fixture does not use Tree-sitter.')),
+    } satisfies TreeSitterRuntimeShape,
   });
   return {...coalescer, calls, run: coalescer.onContentBatch};
 }
 
 function cacheFile(index: number, directory: string): CodeGraphInventoryFile {
-  const suffix = index.toString().padStart(6, '0');
+  const suffix = Effect2.pipe(index.toString(), EffectString.padStart(6, '0'));
   return {
-    blobId: index.toString(16).padStart(40, '0'),
-    contentHash: index.toString(16).padStart(64, '0'),
+    blobId: Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
+    contentHash: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
     language: 'typescript',
     mode: '100644',
     path: `${directory}/file-${suffix}.ts`,
@@ -815,9 +890,9 @@ function cacheFile(index: number, directory: string): CodeGraphInventoryFile {
 
 function structuredCacheFile(path: string, content: string): CodeGraphInventoryFile {
   return {
-    blobId: 'a'.repeat(40),
+    blobId: Effect2.pipe('a', EffectString.repeat(40)),
     content,
-    contentHash: 'b'.repeat(64),
+    contentHash: Effect2.pipe('b', EffectString.repeat(64)),
     language: 'json',
     mode: '100644',
     path,
@@ -827,7 +902,7 @@ function structuredCacheFile(path: string, content: string): CodeGraphInventoryF
 }
 
 function cacheIdentityForPath(path: string): string {
-  return path.includes('/beta/') ? 'cache-beta-v1' : 'cache-alpha-v1';
+  return Effect2.pipe(path, EffectString.includes('/beta/')) ? 'cache-beta-v1' : 'cache-alpha-v1';
 }
 
 function emptyFacts(path: string): CodeGraphFileFacts {
@@ -859,12 +934,17 @@ function plannedCacheContext(total: number): CodeGraphContentBatchContext {
 }
 
 function cacheCallIdentity(calls: readonly CacheCall[]) {
-  return calls.map(call => ({cacheIdentity: call.cacheIdentity, paths: call.files.map(file => file.path)}));
+  return EffectArray.map(calls, call => ({
+    cacheIdentity: call.cacheIdentity,
+    paths: EffectArray.map(call.files, file => file.path),
+  }));
 }
 
 function assertCacheCallsBounded(calls: readonly CacheCall[]) {
   for (const call of calls) {
-    const payloadBytes = call.files.reduce(
+    const payloadBytes = EffectArray.reduce(
+      call.files,
+      0,
       (total, file, index) =>
         total +
         codeGraphFileBlobCapacityBytes({
@@ -874,7 +954,6 @@ function assertCacheCallsBounded(calls: readonly CacheCall[]) {
           factsJson: call.facts[index].json,
           path: file.path,
         }),
-      0,
     );
     expect(call.files.length).toBeGreaterThan(0);
     expect(call.files.length).toBeLessThanOrEqual(CODE_GRAPH_CACHE_TRANSACTION_LIMITS.rows);

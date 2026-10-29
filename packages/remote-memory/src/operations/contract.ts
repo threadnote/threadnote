@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 
 export const OPERATIONS_CHECKS = [
@@ -137,15 +138,18 @@ export const OPERATIONS_CHECK_SPECIFICATIONS: Readonly<
   },
   'post-rollback-reconciliation': reconciliation,
   'alert-delivery': {
-    facts: OPERATIONS_ALERTS.flatMap(kind =>
-      [
-        'namedOwnersResolved',
-        'operatorAcknowledged',
-        'supportAcknowledged',
-        'escalationTested',
-        'safeActionTested',
-        'rollbackTested',
-      ].map(fact => `${kind}:${fact}`),
+    facts: EffectArray.flatMap(OPERATIONS_ALERTS, kind =>
+      EffectArray.map(
+        [
+          'namedOwnersResolved',
+          'operatorAcknowledged',
+          'supportAcknowledged',
+          'escalationTested',
+          'safeActionTested',
+          'rollbackTested',
+        ],
+        fact => `${kind}:${fact}`,
+      ),
     ),
     metrics: [],
   },

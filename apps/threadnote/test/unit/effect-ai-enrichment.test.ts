@@ -11,6 +11,8 @@ import {
   normalizeMemoryKeywords,
 } from '@threadnote/threadnote/effect/ai/enrichment';
 import type {MemoryMetadata} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const input = {
   body: 'The coordinator schedules replacement work when a heartbeat expires.',
@@ -74,7 +76,7 @@ describe('Effect AI memory enrichment', () => {
         '/Users/alice/private/file.md',
         'expired task ownership renewal',
         'automatic task rescheduling',
-        'x'.repeat(81),
+        Effect2.pipe('x', EffectString.repeat(81)),
         'one two three four five six seven eight nine',
       ]),
     ).toEqual(['resume jobs after stalled heartbeat', 'expired task ownership renewal', 'automatic task rescheduling']);

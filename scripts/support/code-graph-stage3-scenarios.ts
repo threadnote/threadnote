@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {
   assertStage3,
   scanStage3Observations,
@@ -7,13 +8,16 @@ import {
   type Stage3Phase,
 } from './code-graph-stage3-contract.js';
 import {Stage3Driver, type Stage3Host, type Stage3Lock, type Stage3Worktree} from './code-graph-stage3-driver.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 type GraphOperation = NonNullable<Stage3Observation['operation']>;
 const discovery: readonly GraphOperation[] = ['query', 'node', 'neighbors', 'explain'];
 
 function nodes(data: Record<string, unknown>) {
-  assertStage3(Array.isArray(data.nodes), 'graph-nodes');
-  return data.nodes.map(stage3Record);
+  assertStage3(EffectArray.isArray(data.nodes), 'graph-nodes');
+  return EffectArray.map(data.nodes, stage3Record);
 }
 
 function selectors(operation: GraphOperation, entry: string, leaf: string) {
@@ -65,7 +69,7 @@ export function assertStage3StrictStateEnvelope(operation: 'path' | 'impact', va
         ? new Set(['failure', 'operation', 'refresh', 'state', 'type', 'version'])
         : new Set(['operation', 'retryAfterMilliseconds', 'state', 'type', 'version']);
   assertStage3(
-    Object.keys(response).every(key => allowed.has(key)),
+    EffectArray.every(EffectRecord.keys(response), key => allowed.has(key)),
     'strict-stale-leak',
   );
   return state;
@@ -73,8 +77,12 @@ export function assertStage3StrictStateEnvelope(operation: 'path' | 'impact', va
 
 async function anchors(driver: Stage3Driver, host: Stage3Host, tree: Stage3Worktree) {
   const response = await driver.call(host, tree, {operation: 'query', query: 'stage3'});
-  const entry = nodes(response).find(node => node.name === 'stage3Entry')?.id;
-  const leaf = nodes(response).find(node => node.name === 'stage3Leaf')?.id;
+  const entry = EffectOption.getOrUndefined(
+    EffectArray.findFirst(nodes(response), node => node.name === 'stage3Entry'),
+  )?.id;
+  const leaf = EffectOption.getOrUndefined(
+    EffectArray.findFirst(nodes(response), node => node.name === 'stage3Leaf'),
+  )?.id;
   const snapshot = stage3Record(response.snapshot).id;
   assertStage3(typeof entry === 'string' && typeof leaf === 'string' && typeof snapshot === 'string', 'seed-anchors');
   return {entry, leaf, snapshot};
@@ -86,11 +94,14 @@ async function adopted(driver: Stage3Driver, tree: Stage3Worktree, ownerHost: St
     const demand = await driver.demand(tree);
     const active = demand?.active;
     if (!active || active.phase === 'claimed' || active.claimOwner?.processId === ownerHost.processId) return undefined;
-    const status = (await driver.statuses(tree)).find(
-      candidate =>
-        candidate.request?.key === active.targetKey &&
-        candidate.owner.processId === active.claimOwner?.processId &&
-        candidate.observation.liveness === 'active',
+    const status = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        await driver.statuses(tree),
+        candidate =>
+          candidate.request?.key === active.targetKey &&
+          candidate.owner.processId === active.claimOwner?.processId &&
+          candidate.observation.liveness === 'active',
+      ),
     );
     return status?.phase === 'waiting' && status.subphase === 'database-writer' ? {active, status} : undefined;
   }, 'adoption-not-observed');
@@ -109,9 +120,12 @@ async function current(
   let nextRequest = 0;
   const ready = await driver.until(async () => {
     const statuses = await driver.statuses(tree);
-    const completed = statuses.find(
-      status =>
-        status.request?.key === key && status.observation.liveness === 'completed' && status.result !== undefined,
+    const completed = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        statuses,
+        status =>
+          status.request?.key === key && status.observation.liveness === 'completed' && status.result !== undefined,
+      ),
     );
     const demand = await driver.demand(tree);
     if (completed && !demand?.active && !demand?.desired) return completed;
@@ -126,16 +140,20 @@ async function current(
   assertStage3(exact.type === 'code-graph-inspection' && exact.freshness === 'current', 'final-strict-current');
   assertStage3(stage3Record(exact.snapshot).id === ready.result?.snapshotId, 'final-snapshot-binding');
   assertStage3(
-    nodes(exact).some(node => node.id === entry) && nodes(exact).some(node => node.id === leaf),
+    EffectArray.some(nodes(exact), node => node.id === entry) &&
+      EffectArray.some(nodes(exact), node => node.id === leaf),
     'final-path-evidence',
   );
   const query = await driver.call(host, tree, {
     operation: 'query',
-    query: `stage3Target_${target.replaceAll('-', '_')}`,
+    query: `stage3Target_${Effect.pipe(target, EffectString.replaceAll('-', '_'))}`,
   });
   assertStage3(stage3Record(query.snapshot).id === ready.result?.snapshotId, 'final-query-binding');
   assertStage3(
-    nodes(query).some(node => node.name === `stage3Target_${target.replaceAll('-', '_')}`),
+    EffectArray.some(
+      nodes(query),
+      node => node.name === `stage3Target_${Effect.pipe(target, EffectString.replaceAll('-', '_'))}`,
+    ),
     'final-target-evidence',
   );
   return ready;
@@ -156,17 +174,21 @@ async function primeBackgroundRefreshEligibility(
   const snapshot = stage3Record(exact.snapshot).id;
   assertStage3(typeof snapshot === 'string', 'eligibility-prime-snapshot');
   assertStage3(
-    nodes(exact).some(node => node.id === entry) && nodes(exact).some(node => node.id === leaf),
+    EffectArray.some(nodes(exact), node => node.id === entry) &&
+      EffectArray.some(nodes(exact), node => node.id === leaf),
     'eligibility-prime-path-evidence',
   );
   const query = await driver.call(host, tree, {operation: 'query', query: 'stage3Target_eligibility'});
   assertStage3(stage3Record(query.snapshot).id === snapshot, 'eligibility-prime-query-binding');
   assertStage3(
-    nodes(query).some(node => node.name === 'stage3Target_eligibility'),
+    EffectArray.some(nodes(query), node => node.name === 'stage3Target_eligibility'),
     'eligibility-prime-target-evidence',
   );
-  const status = (await driver.statuses(tree)).find(
-    candidate => candidate.observation.liveness === 'completed' && candidate.result?.snapshotId === snapshot,
+  const status = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      await driver.statuses(tree),
+      candidate => candidate.observation.liveness === 'completed' && candidate.result?.snapshotId === snapshot,
+    ),
   );
   assertStage3(status?.result?.overlayAssessment?.outcome === 'overlay-success', 'eligibility-prime-assessment');
   return snapshot;
@@ -223,11 +245,11 @@ export async function runStage3Scenarios(driver: Stage3Driver) {
       );
       assertStage3(stage3Record(response.snapshot).id === churnAnchor.snapshot, 'stale-snapshot-continuity');
       assertStage3(
-        nodes(response).some(node => node.id === churnAnchor.entry),
+        EffectArray.some(nodes(response), node => node.id === churnAnchor.entry),
         'stale-symbol-continuity',
       );
       if (operation === 'neighbors')
-        assertStage3(Array.isArray(response.edges) && response.edges.length > 0, 'stale-neighbor-evidence');
+        assertStage3(EffectArray.isArray(response.edges) && response.edges.length > 0, 'stale-neighbor-evidence');
       const refresh = stage3Refresh(response.refresh);
       assertStage3(refresh.currentTargetToken === f1.active.targetToken, 'cross-host-continuity-token');
       observations.push({phase: 'blocked-writer-discovery', state: 'stale', operation, host: host.label, refresh});
@@ -303,8 +325,12 @@ export async function runStage3Scenarios(driver: Stage3Driver) {
   await driver.statuses(churn);
   await driver.release(writer);
   await current(driver, hostA, churn, f3Key, 'f3', churnAnchor.entry, churnAnchor.leaf);
-  assertStage3(![...driver.history.values()].some(status => status.request?.key === f2Key), 'obsolete-target-built');
-  const churnHistory = [...driver.history.values()].filter(
+  assertStage3(
+    !EffectArray.some([...driver.history.values()], status => status.request?.key === f2Key),
+    'obsolete-target-built',
+  );
+  const churnHistory = EffectArray.filter(
+    [...driver.history.values()],
     status =>
       status.identity.worktreeId === churn.identity.worktreeId &&
       [f1.active.targetKey, f3Key].includes(status.request?.key ?? ''),
@@ -334,7 +360,7 @@ export async function runStage3Scenarios(driver: Stage3Driver) {
       : undefined;
   }, 'pre-spawn-claim');
   assertStage3(
-    !(await driver.statuses(recovery)).some(status => status.request?.key === before.targetKey),
+    !EffectArray.some(await driver.statuses(recovery), status => status.request?.key === before.targetKey),
     'pre-spawn-child-exists',
   );
   await driver.killHost(hostA);
@@ -364,12 +390,13 @@ export async function runStage3Scenarios(driver: Stage3Driver) {
   await driver.call(hostB, seed, selectors('query', seedAnchor.entry, seedAnchor.leaf));
   const child = await adopted(driver, seed, hostB, adoptedWriter);
   const parent = await driver.command('ps', ['-o', 'ppid=', '-p', String(child.status.owner.processId)]);
-  assertStage3(Number(parent.stdout.trim()) === hostB.processId, 'adopted-child-parent');
+  assertStage3(Number(Effect.pipe(parent.stdout, EffectString.trim)) === hostB.processId, 'adopted-child-parent');
   await driver.killHost(hostB);
   const attached = await driver.call(hostA, seed, selectors('query', seedAnchor.entry, seedAnchor.leaf));
   const attachedRefresh = stage3Refresh(attached.refresh);
   assertStage3(attachedRefresh.currentTargetToken === child.active.targetToken, 'adopted-token-changed');
-  const reattached = (await driver.statuses(seed)).filter(
+  const reattached = EffectArray.filter(
+    await driver.statuses(seed),
     status => status.request?.key === child.active.targetKey && status.observation.liveness === 'active',
   );
   assertStage3(
@@ -407,7 +434,8 @@ export async function runStage3Scenarios(driver: Stage3Driver) {
     seedAnchor.leaf,
   );
   assertStage3(
-    [...driver.history.values()].filter(
+    EffectArray.filter(
+      [...driver.history.values()],
       status => status.request?.key === child.active.targetKey && status.result !== undefined,
     ).length <= 1,
     'duplicate-adopted-publication',
@@ -415,7 +443,7 @@ export async function runStage3Scenarios(driver: Stage3Driver) {
   observations.push({phase: 'adopted-child-recovery', state: 'current'});
   observations.push({phase: 'privacy-scan', state: 'observed'});
   scanStage3Observations(observations, [...driver.forbidden]);
-  const phases = new Set<Stage3Phase>(observations.map(observation => observation.phase));
+  const phases = new Set<Stage3Phase>(EffectArray.map(observations, observation => observation.phase));
   assertStage3(phases.size === 7, 'missing-phase');
   return observations;
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -28,42 +29,44 @@ import type {CodeGraphWorksetCatalogPublishedMemberV1} from '@threadnote/graph/w
 
 import type {ResolvedWorkset} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const SOURCE_HASH = 'a'.repeat(64);
-const CHANGED_HASH = 'b'.repeat(64);
+const SOURCE_HASH = Effect2.pipe('a', EffectString.repeat(64));
+const CHANGED_HASH = Effect2.pipe('b', EffectString.repeat(64));
 const OBSERVED_AT = '2026-08-26T00:00:00.000Z';
 const citation = createMemoryCodeCitation({
   extractorSet: 'native-code-graph-13',
   fileContentHash: {algorithm: 'sha256', value: SOURCE_HASH},
   path: 'src/original.ts',
-  repositoryId: 'c'.repeat(64),
+  repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
   repositoryIdentityKind: 'remote',
-  sourceCommit: 'd'.repeat(40),
+  sourceCommit: Effect2.pipe('d', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceSnapshotId: `cgsn_${'e'.repeat(40)}`,
+  sourceSnapshotId: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`,
   target: {kind: 'file'},
   version: 1,
 });
 const snapshot: CodeGraphSnapshot = {
-  commit: 'f'.repeat(40),
+  commit: Effect2.pipe('f', EffectString.repeat(40)),
   dirty: false,
   edgeCount: 0,
   extractorSet: 'native-code-graph-13',
   fileCount: 1,
-  id: `cgsn_${'1'.repeat(40)}`,
+  id: `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`,
   repositoryId: citation.repositoryId,
   state: 'ready',
   symbolCount: 0,
-  worktreeId: '2'.repeat(64),
+  worktreeId: Effect2.pipe('2', EffectString.repeat(64)),
 };
 const published: CodeGraphWorksetCatalogPublishedMemberV1 = {
-  checkoutId: '3'.repeat(64),
+  checkoutId: Effect2.pipe('3', EffectString.repeat(64)),
   commitId: snapshot.commit,
   ordinal: 0,
-  projectionDigest: '4'.repeat(64),
+  projectionDigest: Effect2.pipe('4', EffectString.repeat(64)),
   repositoryId: snapshot.repositoryId,
   repositoryKey: 'threadnote',
-  snapshotDigest: '5'.repeat(64),
+  snapshotDigest: Effect2.pipe('5', EffectString.repeat(64)),
   snapshotId: snapshot.id,
   symbolCount: snapshot.symbolCount,
   worktreeId: snapshot.worktreeId,
@@ -110,16 +113,16 @@ describe('Context Brief code-citation classification', () => {
           const identity = {
             ...before.identity,
             ...(mutation === 'checkout' ? {checkoutId: 'changed-checkout'} : {}),
-            ...(mutation === 'repository' ? {repositoryId: '9'.repeat(64)} : {}),
+            ...(mutation === 'repository' ? {repositoryId: Effect2.pipe('9', EffectString.repeat(64))} : {}),
             ...(mutation === 'worktree' ? {worktreeId: 'changed-worktree'} : {}),
-            ...(mutation === 'head' ? {headCommit: '9'.repeat(40)} : {}),
+            ...(mutation === 'head' ? {headCommit: Effect2.pipe('9', EffectString.repeat(40))} : {}),
           };
           const overlay = mutation === 'dirty' ? undefined : clean;
           const active = {
             ...snapshot,
-            ...(mutation === 'snapshot' ? {id: `cgsn_${'9'.repeat(40)}`} : {}),
-            ...(mutation === 'commit' ? {commit: '9'.repeat(40)} : {}),
-            ...(mutation === 'snapshot-repository' ? {repositoryId: '9'.repeat(64)} : {}),
+            ...(mutation === 'snapshot' ? {id: `cgsn_${Effect2.pipe('9', EffectString.repeat(40))}`} : {}),
+            ...(mutation === 'commit' ? {commit: Effect2.pipe('9', EffectString.repeat(40))} : {}),
+            ...(mutation === 'snapshot-repository' ? {repositoryId: Effect2.pipe('9', EffectString.repeat(64))} : {}),
             ...(mutation === 'snapshot-worktree' ? {worktreeId: 'changed-worktree'} : {}),
           };
           expect(cleanPublishedCitationFenceMatches(before, identity, overlay, active)).toBe(false);
@@ -140,7 +143,7 @@ describe('Context Brief code-citation classification', () => {
     expect(
       cleanPublishedCatalogFenceMatches(published, snapshot, identity, {
         ...snapshot,
-        worktreeId: 'shared-clean-row'.padEnd(64, '0'),
+        worktreeId: Effect2.pipe('shared-clean-row', EffectString.padEnd(64, '0')),
       }),
     ).toBe(true);
 
@@ -171,29 +174,29 @@ describe('Context Brief code-citation classification', () => {
     for (const mutation of mutations) {
       const selected: CodeGraphSnapshot = {
         ...snapshot,
-        ...(mutation === 'selected-id' ? {id: `cgsn_${'9'.repeat(40)}`} : {}),
-        ...(mutation === 'selected-repository' ? {repositoryId: '9'.repeat(64)} : {}),
-        ...(mutation === 'selected-commit' ? {commit: '9'.repeat(40)} : {}),
+        ...(mutation === 'selected-id' ? {id: `cgsn_${Effect2.pipe('9', EffectString.repeat(40))}`} : {}),
+        ...(mutation === 'selected-repository' ? {repositoryId: Effect2.pipe('9', EffectString.repeat(64))} : {}),
+        ...(mutation === 'selected-commit' ? {commit: Effect2.pipe('9', EffectString.repeat(40))} : {}),
         ...(mutation === 'selected-symbols' ? {symbolCount: snapshot.symbolCount + 1} : {}),
         ...(mutation === 'selected-dirty' ? {dirty: true} : {}),
         ...(mutation === 'selected-state' ? {state: 'retired' as const} : {}),
       };
       const observedIdentity = {
         ...identity,
-        ...(mutation === 'identity-checkout' ? {checkoutId: '9'.repeat(64)} : {}),
-        ...(mutation === 'identity-repository' ? {repositoryId: '9'.repeat(64)} : {}),
-        ...(mutation === 'identity-worktree' ? {worktreeId: '9'.repeat(64)} : {}),
-        ...(mutation === 'identity-head' ? {headCommit: '9'.repeat(40)} : {}),
+        ...(mutation === 'identity-checkout' ? {checkoutId: Effect2.pipe('9', EffectString.repeat(64))} : {}),
+        ...(mutation === 'identity-repository' ? {repositoryId: Effect2.pipe('9', EffectString.repeat(64))} : {}),
+        ...(mutation === 'identity-worktree' ? {worktreeId: Effect2.pipe('9', EffectString.repeat(64))} : {}),
+        ...(mutation === 'identity-head' ? {headCommit: Effect2.pipe('9', EffectString.repeat(40))} : {}),
       };
       const active: CodeGraphSnapshot = {
         ...snapshot,
-        ...(mutation === 'active-id' ? {id: `cgsn_${'9'.repeat(40)}`} : {}),
-        ...(mutation === 'active-repository' ? {repositoryId: '9'.repeat(64)} : {}),
-        ...(mutation === 'active-commit' ? {commit: '9'.repeat(40)} : {}),
+        ...(mutation === 'active-id' ? {id: `cgsn_${Effect2.pipe('9', EffectString.repeat(40))}`} : {}),
+        ...(mutation === 'active-repository' ? {repositoryId: Effect2.pipe('9', EffectString.repeat(64))} : {}),
+        ...(mutation === 'active-commit' ? {commit: Effect2.pipe('9', EffectString.repeat(40))} : {}),
         ...(mutation === 'active-symbols' ? {symbolCount: snapshot.symbolCount + 1} : {}),
         ...(mutation === 'active-extractor' ? {extractorSet: 'changed-extractor'} : {}),
-        ...(mutation === 'active-content' ? {graphContentId: `cgc_${'9'.repeat(40)}`} : {}),
-        ...(mutation === 'active-base' ? {baseSnapshotId: `cgsn_${'9'.repeat(40)}`} : {}),
+        ...(mutation === 'active-content' ? {graphContentId: `cgc_${Effect2.pipe('9', EffectString.repeat(40))}`} : {}),
+        ...(mutation === 'active-base' ? {baseSnapshotId: `cgsn_${Effect2.pipe('9', EffectString.repeat(40))}`} : {}),
         ...(mutation === 'active-files' ? {fileCount: snapshot.fileCount + 1} : {}),
         ...(mutation === 'active-edges' ? {edgeCount: snapshot.edgeCount + 1} : {}),
         ...(mutation === 'active-overlay' ? {overlayFingerprint: 'changed-overlay'} : {}),
@@ -280,7 +283,7 @@ describe('Context Brief code-citation classification', () => {
         }),
         fc.constantFrom<ContextBriefPreciseEvidenceStatus>('changed', 'deleted', 'unknown'),
         (safe, unsafe) => {
-          const aggregate = aggregatePreciseStatus([...safe, unsafe].map(status => ({status})));
+          const aggregate = aggregatePreciseStatus(EffectArray.map([...safe, unsafe], status => ({status})));
           expect(aggregate).toBe(unsafe);
         },
       ),
@@ -296,11 +299,11 @@ describe('Context Brief code-citation classification', () => {
       contentHash: sha256HexSync(movedSource),
       id: cited.target.kind === 'symbol' ? cited.target.nodeId : '',
       path: cited.path,
-      span: {column: 1, endColumn: source.trimEnd().length + 1, endLine: 2, line: 2},
+      span: {column: 1, endColumn: Effect2.pipe(source, EffectString.trimEnd).length + 1, endLine: 2, line: 2},
     });
 
     return validateContextBriefSymbolCitation(
-      cited as typeof cited & {readonly target: Extract<typeof cited.target, {readonly kind: 'symbol'}>},
+      cited,
       current,
       undefined,
       {file: file(cited.path, current.contentHash), path: cited.path},
@@ -327,7 +330,7 @@ describe('Context Brief code-citation classification', () => {
     const source = 'export function target() {}\n';
     const cited = symbolCitation(source);
     return validateContextBriefSymbolCitation(
-      cited as typeof cited & {readonly target: Extract<typeof cited.target, {readonly kind: 'symbol'}>},
+      cited,
       undefined,
       undefined,
       {file: file(cited.path, cited.fileContentHash.value), path: cited.path},
@@ -352,10 +355,14 @@ describe('Context Brief code-citation classification', () => {
     const cited = symbolCitation(source);
     const matching = symbol({
       contentHash: cited.fileContentHash.value,
-      id: `cgs_${'7'.repeat(32)}`,
+      id: `cgs_${Effect2.pipe('7', EffectString.repeat(32))}`,
       path: 'src/moved.ts',
     });
-    const unread = symbol({contentHash: '8'.repeat(64), id: `cgs_${'9'.repeat(32)}`, path: 'src/unread.ts'});
+    const unread = symbol({
+      contentHash: Effect2.pipe('8', EffectString.repeat(64)),
+      id: `cgs_${Effect2.pipe('9', EffectString.repeat(32))}`,
+      path: 'src/unread.ts',
+    });
     const locator = {
       kind: matching.kind,
       language: matching.language,
@@ -364,7 +371,7 @@ describe('Context Brief code-citation classification', () => {
       version: 1 as const,
     };
     return validateContextBriefSymbolCitation(
-      cited as typeof cited & {readonly target: Extract<typeof cited.target, {readonly kind: 'symbol'}>},
+      cited,
       undefined,
       {locator, symbols: [matching, unread], truncated: false},
       {path: cited.path},
@@ -386,8 +393,16 @@ describe('Context Brief code-citation classification', () => {
   effectIt.effect('abstains on duplicate semantic candidates even when the old source path is occupied', () => {
     const source = 'export function target() {}\n';
     const cited = symbolCitation(source);
-    const first = symbol({contentHash: cited.fileContentHash.value, id: `cgs_${'7'.repeat(32)}`, path: 'src/a.ts'});
-    const second = symbol({contentHash: cited.fileContentHash.value, id: `cgs_${'8'.repeat(32)}`, path: 'src/b.ts'});
+    const first = symbol({
+      contentHash: cited.fileContentHash.value,
+      id: `cgs_${Effect2.pipe('7', EffectString.repeat(32))}`,
+      path: 'src/a.ts',
+    });
+    const second = symbol({
+      contentHash: cited.fileContentHash.value,
+      id: `cgs_${Effect2.pipe('8', EffectString.repeat(32))}`,
+      path: 'src/b.ts',
+    });
     const locator = {
       kind: first.kind,
       language: first.language,
@@ -396,7 +411,7 @@ describe('Context Brief code-citation classification', () => {
       version: 1 as const,
     };
     return validateContextBriefSymbolCitation(
-      cited as typeof cited & {readonly target: Extract<typeof cited.target, {readonly kind: 'symbol'}>},
+      cited,
       undefined,
       {locator, symbols: [first, second], truncated: false},
       {file: file(cited.path, CHANGED_HASH), path: cited.path},
@@ -417,7 +432,7 @@ describe('Context Brief code-citation classification', () => {
     const cited = symbolCitation(source);
     const moved = symbol({
       contentHash: cited.fileContentHash.value,
-      id: `cgs_${'7'.repeat(32)}`,
+      id: `cgs_${Effect2.pipe('7', EffectString.repeat(32))}`,
       path: 'src/moved.ts',
     });
     const locator = {
@@ -428,7 +443,7 @@ describe('Context Brief code-citation classification', () => {
       version: 1 as const,
     };
     return validateContextBriefSymbolCitation(
-      cited as typeof cited & {readonly target: Extract<typeof cited.target, {readonly kind: 'symbol'}>},
+      cited,
       undefined,
       {locator, symbols: [moved], truncated: false},
       {file: file(cited.path, CHANGED_HASH), path: cited.path},
@@ -452,11 +467,15 @@ describe('Context Brief code-citation classification', () => {
     const cited = symbolCitation(source);
     const original = symbol({
       contentHash: sha256HexSync(changedSource),
-      id: `cgs_${'7'.repeat(32)}`,
+      id: `cgs_${Effect2.pipe('7', EffectString.repeat(32))}`,
       path: cited.path,
       span: cited.target.kind === 'symbol' ? cited.target.span : undefined,
     });
-    const copy = symbol({contentHash: cited.fileContentHash.value, id: `cgs_${'8'.repeat(32)}`, path: 'src/copy.ts'});
+    const copy = symbol({
+      contentHash: cited.fileContentHash.value,
+      id: `cgs_${Effect2.pipe('8', EffectString.repeat(32))}`,
+      path: 'src/copy.ts',
+    });
     const locator = {
       kind: original.kind,
       language: original.language,
@@ -465,7 +484,7 @@ describe('Context Brief code-citation classification', () => {
       version: 1 as const,
     };
     return validateContextBriefSymbolCitation(
-      cited as typeof cited & {readonly target: Extract<typeof cited.target, {readonly kind: 'symbol'}>},
+      cited,
       undefined,
       {locator, symbols: [original, copy], truncated: false},
       {file: file(cited.path, original.contentHash), path: cited.path},
@@ -488,7 +507,7 @@ describe('Context Brief code-citation classification', () => {
     const source = 'export function target() {}\n';
     const cited = symbolCitation(source);
     return validateContextBriefSymbolCitation(
-      cited as typeof cited & {readonly target: Extract<typeof cited.target, {readonly kind: 'symbol'}>},
+      cited,
       undefined,
       undefined,
       {file: file(cited.path, CHANGED_HASH), path: cited.path},
@@ -508,7 +527,7 @@ describe('Context Brief code-citation classification', () => {
     const source = 'export function target() {}\n';
     const cited = symbolCitation(source);
     return validateContextBriefSymbolCitation(
-      cited as typeof cited & {readonly target: Extract<typeof cited.target, {readonly kind: 'symbol'}>},
+      cited,
       undefined,
       undefined,
       {path: cited.path},
@@ -536,7 +555,7 @@ describe('Context Brief code-citation classification', () => {
       path: forged.path,
     });
     return validateContextBriefSymbolCitation(
-      forged as typeof forged & {readonly target: Extract<typeof forged.target, {readonly kind: 'symbol'}>},
+      forged,
       current,
       undefined,
       {file: file(forged.path, forged.fileContentHash.value), path: forged.path},
@@ -560,23 +579,25 @@ describe('Context Brief code-citation classification', () => {
       uri: `threadnote://projects/project-${index}`,
     }));
     const workset: ResolvedWorkset = {name: 'large', projects, unresolvedProjects: []};
-    const repositoryIds = projects.map((_, index) => index.toString(16).padStart(64, '0'));
+    const repositoryIds = EffectArray.map(projects, (_, index) =>
+      Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+    );
     const admitted = new Set(repositoryIds.slice(0, 32));
     const published = {
       digest: 'generation',
       id: 'generation-id',
       manifestDigest: codeGraphWorksetManifestDigest(workset),
-      members: projects.map((project, index) => ({
+      members: EffectArray.map(projects, (project, index) => ({
         checkoutId: `checkout-${index}`,
-        commitId: 'a'.repeat(40),
+        commitId: Effect2.pipe('a', EffectString.repeat(40)),
         ordinal: index,
         projectionDigest: `projection-${index}`,
         repositoryId: repositoryIds[index],
         repositoryKey: project.name,
         snapshotDigest: `snapshot-digest-${index}`,
-        snapshotId: `cgsn_${index.toString(16).padStart(40, '0')}`,
+        snapshotId: `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`,
         symbolCount: 1,
-        worktreeId: index.toString(16).padStart(64, 'f'),
+        worktreeId: Effect2.pipe(index.toString(16), EffectString.padStart(64, 'f')),
       })),
       worksetName: workset.name,
     } as const;
@@ -585,7 +606,7 @@ describe('Context Brief code-citation classification', () => {
     expect(route.stale).toBe(false);
     expect(route.ambiguousRepositoryIds.size).toBe(0);
     expect(route.members).toHaveLength(32);
-    expect(new Set(route.members.map(member => member.published.repositoryId))).toEqual(admitted);
+    expect(new Set(EffectArray.map(route.members, member => member.published.repositoryId))).toEqual(admitted);
     expect(
       routeContextBriefWorksetValidation(workset, published, admitted, {
         digest: 'different-generation',
@@ -611,8 +632,8 @@ function symbolCitation(
   source: string,
   overrides: Partial<Extract<ReturnType<typeof createMemoryCodeCitation>['target'], {readonly kind: 'symbol'}>> = {},
 ) {
-  const text = source.trimEnd();
-  return createMemoryCodeCitation({
+  const text = Effect2.pipe(source, EffectString.trimEnd);
+  const result = createMemoryCodeCitation({
     extractorSet: snapshot.extractorSet,
     fileContentHash: {algorithm: 'sha256', value: sha256HexSync(source)},
     path: 'src/original.ts',
@@ -627,7 +648,7 @@ function symbolCitation(
       kind: 'symbol',
       language: 'typescript',
       name: 'target',
-      nodeId: `cgs_${'6'.repeat(32)}`,
+      nodeId: `cgs_${Effect2.pipe('6', EffectString.repeat(32))}`,
       qualifiedName: 'target',
       signatureHash: {algorithm: 'sha256', value: sha256HexSync('export function target(): void')},
       span: {column: 1, endColumn: text.length + 1, endLine: 1, line: 1},
@@ -636,6 +657,8 @@ function symbolCitation(
     },
     version: 1,
   });
+  if (result.target.kind !== 'symbol') throw new Error('Expected a symbol citation.');
+  return {...result, target: result.target};
 }
 
 function symbol(

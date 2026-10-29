@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -9,6 +10,9 @@ import {
   STORAGE_LAYOUT_MIGRATION_ID,
   StorageLayoutMigrationConflict,
 } from '@threadnote/threadnote/migration/layout';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface MergeableTree {
   readonly account: string;
@@ -185,7 +189,7 @@ function writeMergeableTree(
 
 function writeEntry(fs: FileSystem.FileSystem, path: Path.Path, root: string, relative: string, bytes: Uint8Array) {
   return Effect.gen(function* () {
-    const target = path.join(root, ...relative.split('/'));
+    const target = path.join(root, ...Effect2.pipe(relative, EffectString.split('/')));
     yield* fs.makeDirectory(path.dirname(target), {recursive: true});
     yield* fs.writeFile(target, bytes);
   });
@@ -200,28 +204,31 @@ function snapshotTree(fs: FileSystem.FileSystem, path: Path.Path, root: string) 
       const info = yield* fs.stat(absolute);
       entries.push({
         ...(info.type === 'File' ? {bytes: bytesHex(yield* fs.readFile(absolute))} : {}),
-        relative: relative.split(path.sep).join('/'),
+        relative: EffectArray.join(Effect2.pipe(relative, EffectString.split(path.sep)), '/'),
         type: info.type,
       });
     }
-    return entries.sort((left, right) => left.relative.localeCompare(right.relative));
+    return entries.sort((left, right) => Effect2.pipe(left.relative, EffectString.localeCompare(right.relative)));
   });
 }
 
 function fileTree(fs: FileSystem.FileSystem, path: Path.Path, root: string) {
   return Effect.gen(function* () {
     const entries = yield* snapshotTree(fs, path, root);
-    return Object.fromEntries(
-      entries.filter(entry => entry.type === 'File').map(entry => [entry.relative, entry.bytes]),
+    return EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectArray.filter(entries, entry => entry.type === 'File'),
+        entry => [entry.relative, entry.bytes],
+      ),
     );
   });
 }
 
 function expectedMergedFiles(tree: MergeableTree): Record<string, string> {
-  return Object.fromEntries([
-    ...tree.sourceOnly.map((bytes, index) => [sourceOnlyPath(index), bytesHex(bytes)] as const),
-    ...tree.targetOnly.map((bytes, index) => [targetOnlyPath(index), bytesHex(bytes)] as const),
-    ...tree.identical.map((bytes, index) => [identicalPath(index), bytesHex(bytes)] as const),
+  return EffectRecord.fromEntries([
+    ...EffectArray.map(tree.sourceOnly, (bytes, index) => [sourceOnlyPath(index), bytesHex(bytes)] as const),
+    ...EffectArray.map(tree.targetOnly, (bytes, index) => [targetOnlyPath(index), bytesHex(bytes)] as const),
+    ...EffectArray.map(tree.identical, (bytes, index) => [identicalPath(index), bytesHex(bytes)] as const),
   ]);
 }
 

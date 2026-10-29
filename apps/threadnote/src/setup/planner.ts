@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type {AgentAdapter} from '../agent_integration/adapters/contract.js';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
@@ -137,8 +138,8 @@ export function renderSetupPlan(plan: SetupPlanV1, displayName: string): string 
   ];
   for (const [index, operation] of plan.operations.entries()) {
     lines.push(
-      `${index + 1}. ${operation.kind}${operation.dependsOn.length === 0 ? '' : ` (after ${operation.dependsOn.join(', ')})`}`,
+      `${index + 1}. ${operation.kind}${operation.dependsOn.length === 0 ? '' : ` (after ${EffectArray.join(operation.dependsOn, ', ')})`}`,
     );
   }
-  return lines.join('\n');
+  return EffectArray.join(lines, '\n');
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, FileSystem, Option, Path} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {runCommandEffect, runBinaryCommandEffect} from '@threadnote/platform/command';
@@ -10,6 +11,9 @@ import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {nativeWorkflowError} from './memory.js';
 import {nativeCycleHasControl} from '@threadnote/workflow-automations/cycle';
 import {readPathFileSystemAuthority, sameFileSystemIdentity} from '@threadnote/platform/system';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -21,8 +25,11 @@ export function nativeCycleRelativePath(value: string): boolean {
     new TextEncoder().encode(value).byteLength <= 4096 &&
     !/[\\:]/u.test(value) &&
     !nativeCycleHasControl(value) &&
-    !value.startsWith('/') &&
-    !value.split('/').some(segment => !segment || segment === '.' || segment === '..')
+    !Effect2.pipe(value, EffectString.startsWith('/')) &&
+    !EffectArray.some(
+      Effect2.pipe(value, EffectString.split('/')),
+      segment => !segment || segment === '.' || segment === '..',
+    )
   );
 }
 
@@ -49,9 +56,12 @@ const resolveObject = Effect.fn('workflowAutomation.cycle.resolveObject')(functi
   reference: string,
   kind: 'tree' | 'commit',
 ) {
-  if (!reference.trim() || reference.length > 512 || nativeCycleHasControl(reference))
+  if (!Effect2.pipe(reference, EffectString.trim) || reference.length > 512 || nativeCycleHasControl(reference))
     return yield* fail('invalid-snapshot', 'Use one bounded Git revision.');
-  const value = (yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `${reference}^{${kind}}`])).trim();
+  const value = Effect2.pipe(
+    yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `${reference}^{${kind}}`]),
+    EffectString.trim,
+  );
   if (!objectId.test(value)) return yield* fail('invalid-snapshot', 'Git did not return a complete object identity.');
   return value;
 });
@@ -66,14 +76,19 @@ export const readNativeCycleTreeEntry = Effect.fn('workflowAutomation.cycle.read
   const root = yield* canonicalRepo(repo);
   const tree = yield* resolveObject(root, reference, 'tree');
   const records = yield* git(root, ['ls-tree', '-r', '-z', tree, '--', `:(literal)${file}`]);
-  const entries = records.split('\0').filter(Boolean);
+  const entries = EffectArray.filter(Effect2.pipe(records, EffectString.split('\0')), Boolean);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   if (!entries.length) return {mode: absentTreeMode, blob: '0'.repeat(tree.length)};
   let entry: {mode: string; blob: string} | undefined;
   for (const record of entries) {
-    const tab = record.indexOf('\t');
+    const tab = Effect2.pipe(
+      record,
+      EffectString.indexOf('\t'),
+      Effect2.Option.getOrElse(() => -1),
+    );
     if (tab < 0) return yield* fail('invalid-snapshot', 'Git returned an unsupported tree entry.');
-    const [mode, type, blob] = record.slice(0, tab).split(' ');
-    const path = record.slice(tab + 1);
+    const [mode, type, blob] = Effect2.pipe(record, EffectString.slice(0, tab), EffectString.split(' '));
+    const path = Effect2.pipe(record, EffectString.slice(tab + 1));
     if (path !== file) continue;
     if (
       !mode ||
@@ -86,13 +101,14 @@ export const readNativeCycleTreeEntry = Effect.fn('workflowAutomation.cycle.read
     if (entry) return yield* fail('invalid-snapshot', 'Git returned duplicate exact tree entries.');
     entry = {mode, blob};
   }
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   return entry ?? {mode: absentTreeMode, blob: '0'.repeat(tree.length)};
 });
 
 const canonicalRepo = Effect.fn('workflowAutomation.cycle.canonicalRepo')(function* (repo: string) {
   const fs = yield* FileSystem.FileSystem;
   const root = yield* fs.realPath(repo);
-  const reported = (yield* git(root, ['rev-parse', '--show-toplevel'])).trim();
+  const reported = Effect2.pipe(yield* git(root, ['rev-parse', '--show-toplevel']), EffectString.trim);
   const canonicalReported = yield* fs.realPath(reported);
   if (canonicalReported !== root) {
     const requestedAuthority = yield* readPathFileSystemAuthority(root, 'Directory');
@@ -120,18 +136,24 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
   if ((yield* git(root, ['ls-files', '--unmerged', '-z'])).length)
     return yield* fail('unmerged-index', 'Resolve index conflicts before taking a cycle snapshot.');
   const status = yield* git(root, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none']);
-  const statusRecords = status.split('\0');
+  const statusRecords = Effect2.pipe(status, EffectString.split('\0'));
   for (let index = 0; index < statusRecords.length; index++) {
     const record = statusRecords[index];
     if (!record) continue;
-    const renamed = record.startsWith('2 ');
+    const renamed = Effect2.pipe(record, EffectString.startsWith('2 '));
     if (renamed) index++; // porcelain-v2 -z stores the original path in the next NUL record
-    if (!record.startsWith('1 ') && !renamed) continue;
+    if (!Effect2.pipe(record, EffectString.startsWith('1 ')) && !renamed) continue;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
     const submodule = record.split(' ', 4)[2];
-    if (submodule?.startsWith('S') && submodule.slice(2) !== '..')
+    if (
+      Effect2.pipe(submodule, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.startsWith('S')),
+      ) &&
+      Effect2.pipe(submodule, EffectString.slice(2)) !== '..'
+    )
       return yield* fail('dirty-submodule', 'Run a separate cycle for dirty submodule content.');
   }
-  const indexName = (yield* git(root, ['rev-parse', '--git-path', 'index'])).trim();
+  const indexName = Effect2.pipe(yield* git(root, ['rev-parse', '--git-path', 'index']), EffectString.trim);
   const realIndex = path.isAbsolute(indexName) ? indexName : path.resolve(root, indexName);
   if (Option.isSome(yield* fs.readLink(realIndex).pipe(Effect.option)))
     return yield* fail('unsafe-index', 'Cycle snapshots do not follow a symbolic contributor index.');
@@ -143,17 +165,21 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
       if (originalIndex) yield* fs.writeFile(index, originalIndex, {mode: 0o600, flag: 'wx'});
       yield* git(root, ['add', '--all', '--', '.'], index);
       yield* git(root, ['add', '--renormalize', '--all', '--', '.'], index);
-      const tree = (yield* git(root, ['write-tree'], index)).trim();
+      const tree = Effect2.pipe(yield* git(root, ['write-tree'], index), EffectString.trim);
       if (!objectId.test(tree)) return yield* fail('invalid-snapshot', 'Git did not return a snapshot tree.');
-      const raw = (yield* git(root, ['diff', '--raw', '--no-renames', '--abbrev=64', '-z', baseTree, tree, '--']))
-        .split('\0')
-        .filter(Boolean);
+      const raw = EffectArray.filter(
+        Effect2.pipe(
+          yield* git(root, ['diff', '--raw', '--no-renames', '--abbrev=64', '-z', baseTree, tree, '--']),
+          EffectString.split('\0'),
+        ),
+        Boolean,
+      );
       if (raw.length % 2 !== 0 || raw.length > 16_384)
         return yield* fail('snapshot-capacity', 'Snapshot changes exceed the bounded file manifest.');
       const files: Record<string, string> = Object.create(null);
       const entries: Record<string, {mode: string; blob: string}> = Object.create(null);
       for (let index = 0; index < raw.length; index += 2) {
-        const header = raw[index].split(' ');
+        const header = Effect2.pipe(raw[index], EffectString.split(' '));
         const file = raw[index + 1];
         const newMode = header[1];
         const blob = header[3];
@@ -163,7 +189,7 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
           (newMode !== absentTreeMode && !cycleTreeModes.has(newMode)) ||
           !blob ||
           !objectId.test(blob) ||
-          Object.hasOwn(files, file)
+          EffectRecord.has(files, file)
         )
           return yield* fail('invalid-snapshot', 'Git returned an unsupported changed path or blob identity.');
         files[file] = blob;
@@ -200,12 +226,13 @@ export const pinNativeCycleTree = Effect.fn('workflowAutomation.cycle.pinTree')(
     {allowFailure: true, timeoutMs: 10_000, maxOutputBytes: 4096},
   );
   if (existing.exitCode === 0) {
-    if (existing.stdout.trim() !== tree)
+    if (Effect2.pipe(existing.stdout, EffectString.trim) !== tree)
       return yield* fail('snapshot-conflict', 'This immutable snapshot ID already pins another tree.');
     return reference;
   }
   if (existing.exitCode !== 1 && existing.exitCode !== 128)
     return yield* fail('invalid-snapshot', 'The snapshot reference could not be inspected.');
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   yield* git(repo, ['update-ref', reference, tree, '0'.repeat(tree.length)]);
   return reference;
 });
@@ -232,7 +259,11 @@ export const makeWorkflowGitAdapter = Effect.fn('workflowAutomation.cycle.gitAda
             return yield* fail('invalid-scope', 'Source inspection requires regular files.');
           const actual = yield* fs.realPath(target);
           const stat = yield* fs.stat(actual);
-          if (!actual.startsWith(root + path.sep) || stat.type !== 'File' || Number(stat.size) > 1_000_000)
+          if (
+            !Effect2.pipe(actual, EffectString.startsWith(root + path.sep)) ||
+            stat.type !== 'File' ||
+            Number(stat.size) > 1_000_000
+          )
             return yield* fail('invalid-scope', 'Source inspection requires bounded files inside the checkout.');
           const bytes = yield* fs.readFile(actual);
           if (bytes.byteLength > 1_000_000)

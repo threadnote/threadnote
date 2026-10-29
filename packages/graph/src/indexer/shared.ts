@@ -1,15 +1,16 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Option, Schema} from 'effect';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
 import {compareCodeUnits} from '../ordering.js';
 import type {CodeGraphInventoryFile} from '../types.js';
 
-export class CodeGraphIndexOperationError extends Schema.TaggedError<CodeGraphIndexOperationError>()(
-  'CodeGraphIndexOperationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphIndexOperationError extends Schema.TaggedError<
+  CodeGraphIndexOperationError,
+  {readonly brand: unique symbol}
+>()('CodeGraphIndexOperationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 export function sameOverlayState(
   left: {readonly dirty: boolean; readonly fingerprint?: string},
   right: {readonly dirty: boolean; readonly fingerprint?: string},
@@ -21,7 +22,7 @@ export function sameInventoryPaths(
   left: readonly CodeGraphInventoryFile[],
   right: readonly CodeGraphInventoryFile[],
 ): boolean {
-  return left.length === right.length && left.every((file, index) => file.path === right[index]?.path);
+  return left.length === right.length && EffectArray.every(left, (file, index) => file.path === right[index]?.path);
 }
 
 /**
@@ -34,14 +35,14 @@ export function sameEffectiveCodeGraphInventory(
   right: readonly CodeGraphInventoryFile[],
 ): boolean {
   if (
-    new Set(left.map(file => file.path)).size !== left.length ||
-    new Set(right.map(file => file.path)).size !== right.length
+    new Set(EffectArray.map(left, file => file.path)).size !== left.length ||
+    new Set(EffectArray.map(right, file => file.path)).size !== right.length
   ) {
     return false;
   }
   return (
     left.length === right.length &&
-    left.every((file, index) => {
+    EffectArray.every(left, (file, index) => {
       const other = right[index];
       return (
         other !== undefined &&
@@ -90,45 +91,45 @@ export function inventoryFilesForPaths(
   return selected;
 }
 
-export class WorktreeChangedDuringIndex extends Schema.TaggedError<WorktreeChangedDuringIndex>()(
-  'WorktreeChangedDuringIndex',
-  {
-    message: Schema.String.pipe(
-      Schema.withConstructorDefault(
-        Effect.succeed('Worktree files changed during code graph indexing; retry the operation.'),
-      ),
+export class WorktreeChangedDuringIndex extends Schema.TaggedError<
+  WorktreeChangedDuringIndex,
+  {readonly brand: unique symbol}
+>()('WorktreeChangedDuringIndex', {
+  message: Schema.String.pipe(
+    Schema.withConstructorDefault(
+      Effect.succeed('Worktree files changed during code graph indexing; retry the operation.'),
     ),
-  },
-) {}
+  ),
+}) {}
 
-export class CachedCodeGraphFactUnavailableDuringIndex extends Schema.TaggedError<CachedCodeGraphFactUnavailableDuringIndex>()(
-  'CachedCodeGraphFactUnavailableDuringIndex',
-  {
-    message: Schema.String.pipe(
-      Schema.withConstructorDefault(
-        Effect.succeed('A cached code graph fact disappeared during indexing; retry with a full rebuild.'),
-      ),
+export class CachedCodeGraphFactUnavailableDuringIndex extends Schema.TaggedError<
+  CachedCodeGraphFactUnavailableDuringIndex,
+  {readonly brand: unique symbol}
+>()('CachedCodeGraphFactUnavailableDuringIndex', {
+  message: Schema.String.pipe(
+    Schema.withConstructorDefault(
+      Effect.succeed('A cached code graph fact disappeared during indexing; retry with a full rebuild.'),
     ),
-  },
-) {}
+  ),
+}) {}
 
-export class RepositoryRegistrationLost extends Schema.TaggedError<RepositoryRegistrationLost>()(
-  'RepositoryRegistrationLost',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String.pipe(
-      Schema.withConstructorDefault(Effect.succeed('Repository registration was lost during code graph indexing.')),
-    ),
-  },
-) {}
+export class RepositoryRegistrationLost extends Schema.TaggedError<
+  RepositoryRegistrationLost,
+  {readonly brand: unique symbol}
+>()('RepositoryRegistrationLost', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String.pipe(
+    Schema.withConstructorDefault(Effect.succeed('Repository registration was lost during code graph indexing.')),
+  ),
+}) {}
 
-export class RepositoryMaintenanceInterrupted extends Schema.TaggedError<RepositoryMaintenanceInterrupted>()(
-  'RepositoryMaintenanceInterrupted',
-  {
-    message: Schema.String.pipe(
-      Schema.withConstructorDefault(
-        Effect.succeed('Code graph indexing was superseded by repair or purge; retry the operation.'),
-      ),
+export class RepositoryMaintenanceInterrupted extends Schema.TaggedError<
+  RepositoryMaintenanceInterrupted,
+  {readonly brand: unique symbol}
+>()('RepositoryMaintenanceInterrupted', {
+  message: Schema.String.pipe(
+    Schema.withConstructorDefault(
+      Effect.succeed('Code graph indexing was superseded by repair or purge; retry the operation.'),
     ),
-  },
-) {}
+  ),
+}) {}

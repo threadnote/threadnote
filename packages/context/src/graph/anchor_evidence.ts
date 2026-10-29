@@ -1,5 +1,9 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphQueryResult} from '@threadnote/graph/types';
 import type {ContextBriefPlanV1} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface ContextBriefAnchoredRepositoryGraphRequestV1 {
   readonly depth: 0 | 1;
@@ -41,8 +45,8 @@ export function contextBriefAnchoredRepositoryGraphRequests(
   if (plan.codeRefs.length === 0) {
     return [];
   }
-  return plan.codeRefs.map(ref => {
-    const stableId = ref.startsWith('cgs_');
+  return EffectArray.map(plan.codeRefs, ref => {
+    const stableId = Effect.pipe(ref, EffectString.startsWith('cgs_'));
     return plan.mode === 'impact'
       ? {
           depth: 1,
@@ -99,14 +103,12 @@ export function contextBriefResolvedPathTraceSeed(
   result: CodeGraphQueryResult,
   path: string,
 ): CodeGraphQueryNode | undefined {
-  return result.nodes
-    .filter(node => node.path === path)
-    .sort(
-      (left, right) =>
-        Number(right.kind === 'module') - Number(left.kind === 'module') ||
-        right.score - left.score ||
-        compareText(left.id, right.id),
-    )[0];
+  return EffectArray.filter(result.nodes, node => node.path === path).sort(
+    (left, right) =>
+      Number(right.kind === 'module') - Number(left.kind === 'module') ||
+      right.score - left.score ||
+      compareText(left.id, right.id),
+  )[0];
 }
 
 /**
@@ -124,14 +126,14 @@ export function mergeContextBriefAnchoredRepositoryGraphResults(
   const nodes = rankAnchoredNodes(plan, results);
   const edges = rankAnchoredEdges(results, nodes);
   const warnings = stableUnique([
-    ...results.flatMap(result => result.warnings),
+    ...EffectArray.flatMap(results, result => result.warnings),
     ...(warningCount === 0
       ? []
       : [`${warningCount} anchored graph traversal(s) were unavailable; results are partial.`]),
   ]);
-  const freshness = results.some(result => result.freshness === 'stale')
+  const freshness = EffectArray.some(results, result => result.freshness === 'stale')
     ? 'stale'
-    : results.every(result => result.freshness === 'current')
+    : EffectArray.every(results, result => result.freshness === 'current')
       ? 'current'
       : 'deferred';
   return {
@@ -153,7 +155,7 @@ export function contextBriefAnchoredRepositoryGraphResultMatches(
   result: CodeGraphQueryResult,
 ): boolean {
   if (result.operation !== request.operation) return false;
-  if (request.operation === 'neighbors') return result.nodes.some(node => node.id === request.nodeId);
+  if (request.operation === 'neighbors') return EffectArray.some(result.nodes, node => node.id === request.nodeId);
   const exactStableId = request.query !== undefined && /^cgs_[a-f0-9]{32}$/u.test(request.query);
   const exactPathSeed =
     request.query !== undefined &&
@@ -161,7 +163,7 @@ export function contextBriefAnchoredRepositoryGraphResultMatches(
     request.seedQueries?.length === 1 &&
     request.seedQueries[0] === request.query;
   if (!exactStableId && !exactPathSeed) return false;
-  if (request.phase === 'path-resolution') return result.nodes.some(node => node.path === request.query);
+  if (request.phase === 'path-resolution') return EffectArray.some(result.nodes, node => node.path === request.query);
   return result.nodes.length > 0;
 }
 
@@ -169,8 +171,18 @@ function rankAnchoredNodes(
   plan: ContextBriefPlanV1['graph'],
   results: readonly CodeGraphQueryResult[],
 ): readonly CodeGraphQueryNode[] {
-  const anchorIds = new Set(plan.codeRefs.filter(ref => ref.startsWith('cgs_')));
-  const anchorPaths = new Set(plan.codeRefs.filter(ref => !ref.startsWith('cgs_')));
+  const anchorIds = new Set(
+    EffectArrayPipe(plan.codeRefs, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (ref, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && Effect.pipe(ref, EffectString.startsWith('cgs_')),
+      ),
+    ),
+  );
+  const anchorPaths = new Set(
+    EffectArray.filter(plan.codeRefs, ref => !Effect.pipe(ref, EffectString.startsWith('cgs_'))),
+  );
   const relationshipPriorities = strongestRelationshipPriorityByNodeId(results);
   const byId = new Map<string, RankedNode>();
   for (const [requestRank, result] of results.entries()) {
@@ -185,7 +197,7 @@ function rankAnchoredNodes(
       if (current === undefined || compareRankedNode(ranked, current) < 0) byId.set(node.id, ranked);
     }
   }
-  return [...byId.values()].sort(compareRankedNode).map(item => item.node);
+  return EffectArray.map([...byId.values()].sort(compareRankedNode), item => item.node);
 }
 
 function anchoredNodePriority(
@@ -224,7 +236,7 @@ function anchoredNodePriority(
  */
 function strongestRelationshipPriorityByNodeId(results: readonly CodeGraphQueryResult[]): ReadonlyMap<string, number> {
   const priorities = new Map<string, number>();
-  for (const edge of results.flatMap(result => result.edges)) {
+  for (const edge of EffectArray.flatMap(results, result => result.edges)) {
     const priority = anchoredEdgePriority(edge);
     for (const nodeId of [edge.sourceId, edge.targetId]) {
       if (nodeId === undefined) continue;
@@ -239,7 +251,7 @@ function rankAnchoredEdges(
   results: readonly CodeGraphQueryResult[],
   rankedNodes: readonly CodeGraphQueryNode[],
 ): readonly CodeGraphEdge[] {
-  const nodeRanks = new Map(rankedNodes.map((node, rank) => [node.id, rank] as const));
+  const nodeRanks = new Map(EffectArray.map(rankedNodes, (node, rank) => [node.id, rank] as const));
   const byId = new Map<string, RankedEdge>();
   for (const [requestRank, result] of results.entries()) {
     for (const [edgeRank, edge] of result.edges.entries()) {
@@ -254,7 +266,7 @@ function rankAnchoredEdges(
       if (current === undefined || compareRankedEdge(ranked, current) < 0) byId.set(edge.id, ranked);
     }
   }
-  return [...byId.values()].sort(compareRankedEdge).map(item => item.edge);
+  return EffectArray.map([...byId.values()].sort(compareRankedEdge), item => item.edge);
 }
 
 function anchoredEdgePriority(edge: CodeGraphEdge): number {

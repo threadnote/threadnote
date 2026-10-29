@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {chmod, mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -7,12 +8,14 @@ import {afterEach, describe, expect, it} from 'vitest';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {formatMemoryDocument} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execute = promisify(execFile);
 const standalone = join(process.cwd(), 'apps', 'threadnote', 'src', 'standalone.ts');
 const roots: string[] = [];
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, {recursive: true, force: true})));
+  await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {recursive: true, force: true})));
 });
 
 describe('context check CLI', () => {
@@ -72,7 +75,7 @@ describe('context check CLI', () => {
     const wrapperDirectory = join(home, 'git-wrapper');
     const statePath = join(wrapperDirectory, 'diff-count');
     const racedPath = join(repository, 'source.ts');
-    const actualGit = (await execute('which', ['git'])).stdout.trim();
+    const actualGit = Effect.pipe((await execute('which', ['git'])).stdout, EffectString.trim);
     await mkdir(wrapperDirectory);
     await writeFile(
       join(wrapperDirectory, 'git'),
@@ -149,9 +152,12 @@ exec '${actualGit}' "$@"
       path: 'source.ts',
       repositoryId: sha256HexSync('repository-v1\ngithub.com/example/context-cli-test'),
       repositoryIdentityKind: 'remote',
-      sourceCommit: (await execute('git', ['rev-parse', 'HEAD'], {cwd: repository})).stdout.trim(),
+      sourceCommit: Effect.pipe(
+        (await execute('git', ['rev-parse', 'HEAD'], {cwd: repository})).stdout,
+        EffectString.trim,
+      ),
       sourceDirty: false,
-      sourceSnapshotId: `cgsn_${'a'.repeat(40)}`,
+      sourceSnapshotId: `cgsn_${Effect.pipe('a', EffectString.repeat(40))}`,
       target: {kind: 'file'},
       version: 1,
     });
@@ -314,6 +320,14 @@ async function runCli(
     });
     return {...output, code: 0};
   } catch (error) {
-    return error as {code: number; stdout: string; stderr: string};
+    if (
+      !Predicate.isObject(error) ||
+      typeof error.code !== 'number' ||
+      typeof error.stdout !== 'string' ||
+      typeof error.stderr !== 'string'
+    ) {
+      throw error;
+    }
+    return {code: error.code, stdout: error.stdout, stderr: error.stderr};
   }
 }

@@ -6,6 +6,8 @@ import {Cause, Effect, Exit} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {TestClock} from 'effect/testing';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const repoRoot = new URL('../../../..', import.meta.url).pathname;
 const awaitedCancellationFixture = `
@@ -208,7 +210,7 @@ function captureOutput(stream: ReadableStream<Uint8Array>): {
       new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => finish(() => reject(new Error(`Child did not emit ${expected}.`))), 5_000);
         const observe = () => {
-          if (output.includes(expected)) finish(resolve);
+          if (Effect2.pipe(output, EffectString.includes(expected))) finish(resolve);
         };
         const finish = (settle: () => void) => {
           clearTimeout(timeout);

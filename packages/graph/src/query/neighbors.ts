@@ -1,9 +1,13 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, Effect} from 'effect';
 import type {CodeGraphStoreShape} from '../store.js';
 import type {CodeGraphEdge, CodeGraphProvenance, CodeGraphQueryNode, CodeGraphQueryResult} from '../types.js';
 import {QUERY_TRAVERSAL_TIME_BUDGET_MILLISECONDS} from './path.js';
 
 type SearchCoverage = NonNullable<CodeGraphQueryResult['searchCoverage']>;
+
+export type CodeGraphExactNodeQueryStore = Pick<CodeGraphStoreShape, 'symbolsByIds'>;
+export type CodeGraphNeighborQueryStore = Pick<CodeGraphStoreShape, 'edgesForNodes' | 'symbolsByIds'>;
 
 export function adjacentNodeIds(
   edge: CodeGraphEdge,
@@ -21,13 +25,13 @@ export function adjacentNodeIds(
 }
 
 export const exactNodeQuery = Effect.fn('codeGraph.exactNodeQuery')(function* (
-  store: CodeGraphStoreShape,
+  store: CodeGraphExactNodeQueryStore,
   databasePath: string,
   snapshotId: string,
   nodeId: string,
 ) {
   const symbols = yield* store.symbolsByIds(databasePath, snapshotId, [nodeId]);
-  const symbol = symbols.find(candidate => candidate.id === nodeId);
+  const symbol = EffectOption.getOrUndefined(EffectArray.findFirst(symbols, candidate => candidate.id === nodeId));
   return symbol
     ? {edges: [], nodes: [{...symbol, score: 1}], warnings: []}
     : {edges: [], nodes: [], warnings: [`Code graph node "${nodeId}" was not found in the selected snapshot.`]};
@@ -38,7 +42,7 @@ const deadlineReached = Effect.fn('codeGraph.neighborDeadlineReached')(function*
 });
 
 export const neighborQuery = Effect.fn('codeGraph.neighborQuery')(function* (
-  store: CodeGraphStoreShape,
+  store: CodeGraphNeighborQueryStore,
   databasePath: string,
   snapshotId: string,
   nodeId: string,
@@ -82,11 +86,14 @@ export const neighborQuery = Effect.fn('codeGraph.neighborQuery')(function* (
       break;
     }
 
-    unresolvedEdges += adjacent.filter(edge => !edge.sourceId || !edge.targetId).length;
-    const frontierDepths = new Map(frontier.map(id => [id, currentDepth] as const));
+    unresolvedEdges += EffectArray.filter(adjacent, edge => !edge.sourceId || !edge.targetId).length;
+    const frontierDepths = new Map(EffectArray.map(frontier, id => [id, currentDepth] as const));
     const candidateIds = [
       ...new Set(
-        adjacent.flatMap(edge => adjacentNodeIds(edge, direction, frontierDepths)).filter(id => !visited.has(id)),
+        EffectArray.filter(
+          EffectArray.flatMap(adjacent, edge => adjacentNodeIds(edge, direction, frontierDepths)),
+          id => !visited.has(id),
+        ),
       ),
     ];
     const remainingNodes = nodeLimit - nodes.size;
@@ -101,8 +108,12 @@ export const neighborQuery = Effect.fn('codeGraph.neighborQuery')(function* (
       break;
     }
     const selectedIdSet = new Set(selectedIds);
-    const next = hydrated.filter(symbol => selectedIdSet.has(symbol.id) && !visited.has(symbol.id));
-    missingNodes += selectedIds.length - new Set(next.map(symbol => symbol.id)).size;
+    const next = EffectArray.filter(
+      hydrated,
+      (symbol, __effectArrayIndex) =>
+        __effectArrayIndex in hydrated && selectedIdSet.has(symbol.id) && !visited.has(symbol.id),
+    );
+    missingNodes += selectedIds.length - new Set(EffectArray.map(next, symbol => symbol.id)).size;
     for (const symbol of next) {
       visited.add(symbol.id);
       nodes.set(symbol.id, {...symbol, score: 1 / (currentDepth + 2)});
@@ -113,7 +124,7 @@ export const neighborQuery = Effect.fn('codeGraph.neighborQuery')(function* (
     }
     if (limitsReached.size || missingNodes || unresolvedEdges) break;
     completedDepth = currentDepth + 1;
-    frontier = next.map(symbol => symbol.id);
+    frontier = EffectArray.map(next, symbol => symbol.id);
   }
 
   if (timedOut) limitsReached.add('time-budget');

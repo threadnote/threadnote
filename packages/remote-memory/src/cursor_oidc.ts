@@ -1,8 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {createRemoteJWKSet, jwtVerify, type JWTPayload} from 'jose';
 import type {AuthorizedRemotePrincipal} from './authorization.js';
 import {remoteMemoryError} from './errors.js';
 import {randomUuidV4} from '@threadnote/platform/uuid';
 import type {RemoteMemoryRequestExecution} from './request_execution.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const CHALLENGE_LIFETIME_MILLISECONDS = 2 * 60_000;
 const MAX_CURSOR_TOKEN_BYTES = 16 * 1024;
@@ -198,13 +202,19 @@ export function authorizeCursorClaims(
   if (principal.cursorOwnerIds.size > 0 && (!claims.ownerId || !principal.cursorOwnerIds.has(claims.ownerId))) {
     throw remoteMemoryError('forbidden', 'The Cursor workload owner does not match the member policy.');
   }
-  const repositoryClaims = claims.repositoryUrls?.map(canonicalRepositoryClaim);
+  const repositoryClaims = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(claims.repositoryUrls), __effectArrayReceiver2 =>
+      EffectArray.map(__effectArrayReceiver2, canonicalRepositoryClaim),
+    ),
+  );
   if (principal.repositoryBindings.size > 0) {
     if (!repositoryClaims || repositoryClaims.length === 0) {
       throw remoteMemoryError('forbidden', 'Complete Cursor repository claims are required by the share policy.');
     }
-    const allowedRepositories = new Set([...principal.repositoryBindings].map(canonicalCursorRepositoryBinding));
-    if (repositoryClaims.some(repository => !allowedRepositories.has(repository))) {
+    const allowedRepositories = new Set(
+      EffectArray.map([...principal.repositoryBindings], canonicalCursorRepositoryBinding),
+    );
+    if (EffectArray.some(repositoryClaims, repository => !allowedRepositories.has(repository))) {
       throw remoteMemoryError('forbidden', 'The Cursor workload includes a repository outside the share policy.');
     }
   }
@@ -213,8 +223,17 @@ export function authorizeCursorClaims(
     if (!projectRepositories || projectRepositories.size === 0) {
       throw remoteMemoryError('forbidden', 'The project has no repository binding for managed-cloud writes.');
     }
-    const allowedForProject = new Set([...projectRepositories].map(canonicalCursorRepositoryBinding));
-    if (!repositoryClaims?.some(repository => allowedForProject.has(repository))) {
+    const allowedForProject = new Set(EffectArray.map([...projectRepositories], canonicalCursorRepositoryBinding));
+    if (
+      !EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(repositoryClaims), __effectArrayReceiver =>
+          EffectArray.some(
+            __effectArrayReceiver,
+            __effectArrayValue => !!(repository => allowedForProject.has(repository))(__effectArrayValue),
+          ),
+        ),
+      )
+    ) {
       throw remoteMemoryError('forbidden', 'The Cursor workload does not include a repository bound to the project.');
     }
   }
@@ -235,7 +254,11 @@ function parseCursorClaims(payload: JWTPayload, expectedNonce: string): CursorWo
     throw remoteMemoryError('forbidden', 'The Cursor workload is not running in a managed Cloud Agent VM.');
   }
   const rawRepositoryUrls = stringArrayClaim(payload, 'repo_urls');
-  const repositoryUrls = rawRepositoryUrls?.map(canonicalRepositoryClaim);
+  const repositoryUrls = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(rawRepositoryUrls), __effectArrayReceiver2 =>
+      EffectArray.map(__effectArrayReceiver2, canonicalRepositoryClaim),
+    ),
+  );
   if (repositoryUrls) {
     const count = payload.repo_count;
     if (
@@ -303,13 +326,16 @@ function stringArrayClaim(payload: JWTPayload, name: string): readonly string[] 
   const value = payload[name];
   if (value === undefined) return undefined;
   if (
-    !Array.isArray(value) ||
+    !EffectArray.isArray(value) ||
     value.length > 32 ||
-    value.some(item => typeof item !== 'string' || item.length === 0 || item.length > 2048)
+    !EffectArray.every(
+      value,
+      (item): item is string => typeof item === 'string' && item.length > 0 && item.length <= 2048,
+    )
   ) {
     throw remoteMemoryError('forbidden', `The Cursor workload ${name} claim is invalid.`);
   }
-  return value as readonly string[];
+  return value;
 }
 
 function randomNonce(): string {
@@ -318,19 +344,27 @@ function randomNonce(): string {
 }
 
 function canonicalRepositoryClaim(value: string): string {
-  if (!CURSOR_REPOSITORY_IDENTITY.test(value) || value.endsWith('.git') || value.includes('//')) {
+  if (
+    !CURSOR_REPOSITORY_IDENTITY.test(value) ||
+    Effect.pipe(value, EffectString.endsWith('.git')) ||
+    Effect.pipe(value, EffectString.includes('//'))
+  ) {
     throw remoteMemoryError('forbidden', 'The Cursor workload repository identity is invalid.');
   }
-  const slash = value.indexOf('/');
-  const hostname = value.slice(0, slash);
-  if (hostname !== hostname.toLowerCase() || !validRepositoryHostname(hostname)) {
+  const slash = Effect.pipe(
+    value,
+    EffectString.indexOf('/'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const hostname = Effect.pipe(value, EffectString.slice(0, slash));
+  if (hostname !== Effect.pipe(hostname, EffectString.toLowerCase) || !validRepositoryHostname(hostname)) {
     throw remoteMemoryError('forbidden', 'The Cursor workload repository identity is invalid.');
   }
   return value;
 }
 
 export function canonicalCursorRepositoryBinding(value: string): string {
-  if (!value.includes('://')) return canonicalRepositoryClaim(value);
+  if (!Effect.pipe(value, EffectString.includes('://'))) return canonicalRepositoryClaim(value);
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -347,8 +381,8 @@ export function canonicalCursorRepositoryBinding(value: string): string {
   ) {
     throw remoteMemoryError('forbidden', 'The Cursor workload repository URL is invalid.');
   }
-  const pathname = parsed.pathname.replace(/\/+$/u, '').replace(/\.git$/u, '');
-  return canonicalRepositoryClaim(`${parsed.hostname.toLowerCase()}${pathname}`);
+  const pathname = Effect.pipe(parsed.pathname, EffectString.replace(/\/+$/u, ''), EffectString.replace(/\.git$/u, ''));
+  return canonicalRepositoryClaim(`${Effect.pipe(parsed.hostname, EffectString.toLowerCase)}${pathname}`);
 }
 
 function cursorOwnerSubject(value: string | undefined): string {
@@ -367,5 +401,7 @@ function decimalIdentifierClaim(payload: JWTPayload, name: string): string | und
 }
 
 function validRepositoryHostname(value: string): boolean {
-  return value.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label));
+  return EffectArray.every(Effect.pipe(value, EffectString.split('.')), label =>
+    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label),
+  );
 }

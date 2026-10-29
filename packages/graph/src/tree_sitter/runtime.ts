@@ -5,6 +5,8 @@ import {fromPromise} from '@threadnote/platform/errors';
 import {SystemInfo} from '@threadnote/platform/system';
 import {toolRoot} from '@threadnote/workspace/installation';
 import type {VerifiedLanguageAsset} from '../languages/types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const RUNTIME_RELATIVE_PATH = 'runtime/web-tree-sitter.wasm';
 const RUNTIME_SHA256 = 'beca80e44cccbf2299ed4d1e3fa6462a9a6fe818aeebf847547a392227ce4acc';
@@ -33,7 +35,11 @@ export class TreeSitterRuntime extends Context.Service<TreeSitterRuntime, TreeSi
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const system = yield* SystemInfo;
-      const configuredRoot = system.environment().THREADNOTE_CODE_GRAPH_ASSET_ROOT?.trim();
+      const configuredRoot = Effect2.pipe(
+        system.environment().THREADNOTE_CODE_GRAPH_ASSET_ROOT,
+        effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
       const root = yield* toolRoot();
       const assetRoot = configuredRoot ? path.resolve(configuredRoot) : path.join(root, 'assets', 'code-graph');
       const runtimePath = path.join(assetRoot, RUNTIME_RELATIVE_PATH);
@@ -144,7 +150,10 @@ export class TreeSitterRuntime extends Context.Service<TreeSitterRuntime, TreeSi
   );
 }
 
-export class TreeSitterRuntimeError extends Schema.TaggedError<TreeSitterRuntimeError>()('TreeSitterRuntimeError', {
+export class TreeSitterRuntimeError extends Schema.TaggedError<
+  TreeSitterRuntimeError,
+  {readonly brand: unique symbol}
+>()('TreeSitterRuntimeError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}

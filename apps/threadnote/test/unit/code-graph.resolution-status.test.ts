@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Path} from 'effect';
 import {afterEach, describe, expect, it} from 'vitest';
 import {
@@ -9,11 +10,13 @@ import {codeGraphLayout} from '@threadnote/graph/layout';
 import type {CodeGraphResolutionActivity, RepositoryIdentity} from '@threadnote/graph/types';
 import {mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const homes: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('code graph reference-resolution status', () => {
@@ -37,8 +40,8 @@ describe('code graph reference-resolution status', () => {
       }),
     );
 
-    expect(statuses.map(status => status.counters.completed)).toEqual([0, 500, 1_000, 1_201]);
-    expect(statuses.map(status => status.resolution?.activity.pageCompleted)).toEqual([0, 1, 2, 3]);
+    expect(EffectArray.map(statuses, status => status.counters.completed)).toEqual([0, 500, 1_000, 1_201]);
+    expect(EffectArray.map(statuses, status => status.resolution?.activity.pageCompleted)).toEqual([0, 1, 2, 3]);
     expect(statuses.at(-1)).toMatchObject({
       counters: {completed: 1_201, resolved: 317, total: 1_201, unit: 'references'},
       phase: 'resolving',
@@ -125,13 +128,13 @@ function resolutionActivity(completed: number): CodeGraphResolutionActivity {
 function fixtureIdentity(root: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'b'.repeat(64),
+    checkoutId: Effect2.pipe('b', EffectString.repeat(64)),
     displayName: 'resolution-status-fixture',
     gitCommonDirectory: root,
-    headCommit: 'c'.repeat(40),
+    headCommit: Effect2.pipe('c', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'd'.repeat(64),
-    worktreeId: 'e'.repeat(64),
+    repositoryId: Effect2.pipe('d', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('e', EffectString.repeat(64)),
   };
 }

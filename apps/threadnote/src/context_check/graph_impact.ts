@@ -1,7 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphQueryResult} from '@threadnote/graph/types';
 import {UNAVAILABLE_IMPACT_BASE_WARNING} from '@threadnote/graph/query/impact_base';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {MemoryRecord} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export const MAXIMUM_CONTEXT_CHECK_CAPTURE_ADVISORIES = 8 as const;
 
@@ -31,23 +35,36 @@ export function selectContextCheckGraphImpact(
   }
 
   const changed = new Set(changedPaths);
-  const indirectlyImpactedNodes = result.nodes.filter(node => !changed.has(node.path));
-  const impactedNodeIds = new Set(indirectlyImpactedNodes.map(node => node.id));
-  const impactedPaths = new Set(indirectlyImpactedNodes.map(node => node.path));
+  const indirectlyImpactedNodes = EffectArray.filter(result.nodes, node => !changed.has(node.path));
+  const impactedNodeIds = new Set(EffectArray.map(indirectlyImpactedNodes, node => node.id));
+  const impactedPaths = new Set(EffectArray.map(indirectlyImpactedNodes, node => node.path));
   const directUris = new Set(directlyAffectedMemoryUris);
-  const impactedRecords = records.filter(
+  const impactedRecords = EffectArray.filter(
+    records,
     record =>
       !directUris.has(record.uri) &&
-      record.metadata.codeCitations?.some(
-        citation =>
-          citation.repositoryId === repositoryId &&
-          (impactedPaths.has(citation.path) ||
-            (citation.target.kind === 'symbol' && impactedNodeIds.has(citation.target.nodeId))),
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(record.metadata.codeCitations), __effectArrayReceiver =>
+          EffectArray.some(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(citation =>
+                citation.repositoryId === repositoryId &&
+                (impactedPaths.has(citation.path) ||
+                  (citation.target.kind === 'symbol' && impactedNodeIds.has(citation.target.nodeId))))(
+                __effectArrayValue,
+              ),
+          ),
+        ),
       ) === true,
   );
   const citedNodeIds = new Set<string>();
   const citedPaths = new Set<string>();
-  const coveredRecords = records.filter(record => directUris.has(record.uri) || impactedRecords.includes(record));
+  const coveredRecords = EffectArray.filter(
+    records,
+    (record, __effectArrayIndex2) =>
+      __effectArrayIndex2 in records && (directUris.has(record.uri) || impactedRecords.includes(record)),
+  );
   for (const record of coveredRecords) {
     for (const citation of record.metadata.codeCitations ?? []) {
       if (citation.repositoryId !== repositoryId) continue;
@@ -57,17 +74,17 @@ export function selectContextCheckGraphImpact(
   }
   const uncitedImpactKeys = [
     ...new Set(
-      result.nodes.flatMap(node =>
+      EffectArray.flatMap(result.nodes, node =>
         citedPaths.has(node.path) || citedNodeIds.has(node.id) ? [] : [`${node.path}\u0000${node.id}`],
       ),
     ),
   ].sort(compareText);
 
   return {
-    captureAdvisoryIds: uncitedImpactKeys
-      .slice(0, MAXIMUM_CONTEXT_CHECK_CAPTURE_ADVISORIES)
-      .map(value => sha256HexSync(`threadnote-context-check-capture-v1\u0000${value}`)),
-    impactedMemoryUris: [...new Set(impactedRecords.map(record => record.uri))].sort(compareText),
+    captureAdvisoryIds: EffectArray.map(uncitedImpactKeys.slice(0, MAXIMUM_CONTEXT_CHECK_CAPTURE_ADVISORIES), value =>
+      sha256HexSync(`threadnote-context-check-capture-v1\u0000${value}`),
+    ),
+    impactedMemoryUris: [...new Set(EffectArray.map(impactedRecords, record => record.uri))].sort(compareText),
     status: 'complete',
   };
 }
@@ -78,25 +95,28 @@ export function citedDocumentCitationUris(
   affectedMemoryUris: readonly string[],
 ): readonly string[] {
   const affected = new Set(affectedMemoryUris);
-  return records
-    .filter(record => affected.has(record.uri))
-    .flatMap(record =>
-      (record.metadata.codeCitations ?? []).flatMap(citation =>
+  return EffectArray.flatMap(
+    EffectArray.filter(
+      records,
+      (record: (typeof records)[number], __effectArrayIndex) =>
+        __effectArrayIndex in records && affected.has(record.uri),
+    ),
+    (record: (typeof records)[number]) =>
+      EffectArray.flatMap(record.metadata.codeCitations ?? [], citation =>
         citation.repositoryId === repositoryId && documentationPath(citation.path)
           ? [`${record.uri}#${citation.id}`]
           : [],
       ),
-    )
-    .sort(compareText);
+  ).sort(compareText);
 }
 
 function completeImpactResult(result: CodeGraphQueryResult, changedPaths: readonly string[]): boolean {
   if (result.freshness !== 'current') return false;
-  const warnings = result.warnings.filter(warning => warning !== UNAVAILABLE_IMPACT_BASE_WARNING);
+  const warnings = EffectArray.filter(result.warnings, warning => warning !== UNAVAILABLE_IMPACT_BASE_WARNING);
   if (warnings.length > 0) return false;
   if (
     result.warnings.includes(UNAVAILABLE_IMPACT_BASE_WARNING) &&
-    !changedPaths.every(path => result.nodes.some(node => node.path === path))
+    !EffectArray.every(changedPaths, path => EffectArray.some(result.nodes, node => node.path === path))
   ) {
     return false;
   }
@@ -108,9 +128,9 @@ function completeImpactResult(result: CodeGraphQueryResult, changedPaths: readon
 }
 
 function documentationPath(path: string): boolean {
-  const normalized = path.toLowerCase();
+  const normalized = Effect.pipe(path, EffectString.toLowerCase);
   return (
-    normalized.startsWith('docs/') ||
+    Effect.pipe(normalized, EffectString.startsWith('docs/')) ||
     /(?:^|\/)(?:agents|claude|readme)\.md$/u.test(normalized) ||
     /\.(?:adoc|md|mdx|rst|txt)$/u.test(normalized)
   );

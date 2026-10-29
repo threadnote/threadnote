@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -14,6 +15,8 @@ import {
 } from '@threadnote/inference/engine/node-llama-cpp';
 import {localModelRuntimeLayer, LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface EmbeddingContextCreationOptions {
   readonly contextSize?: number;
@@ -100,7 +103,14 @@ function embeddingHarness(options: {
                   return Promise.resolve();
                 },
                 gpuLayers: options.gpuLayers,
-                tokenize: (text: string) => [...text].map(character => character.codePointAt(0)!),
+                tokenize: (text: string) =>
+                  EffectArray.map([...text], character =>
+                    Effect2.pipe(
+                      character,
+                      EffectString.codePointAt(0),
+                      Effect2.Option.getOrElse(() => undefined),
+                    )!,
+                  ),
               });
             },
           });
@@ -178,23 +188,28 @@ describe('native embedding context pool', () => {
     },
     ({cpuMathCores, requestedContexts}) => {
       const plan = nativeEmbeddingContextPlan({cpuMathCores, modelGpuLayers: 0, requestedContexts});
-      const expectedContexts = ([8, 4, 2, 1] as const).find(
-        candidate => candidate <= cpuMathCores && candidate <= requestedContexts,
+      const expectedContexts = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [8, 4, 2, 1] as const,
+          candidate => candidate <= cpuMathCores && candidate <= requestedContexts,
+        ),
       )!;
       expect(plan.contexts).toBe(expectedContexts);
       if (requestedContexts === 1) {
         expect(plan.threadCounts).toEqual([undefined]);
         return;
       }
-      const threadCounts = plan.threadCounts.filter((threads): threads is number => threads !== undefined);
+      const threadCounts = EffectArray.filter(plan.threadCounts, (threads): threads is number => threads !== undefined);
       expect(threadCounts).toHaveLength(expectedContexts);
-      expect(threadCounts.reduce((total, threads) => total + threads, 0)).toBe(cpuMathCores);
+      expect(EffectArray.reduce(threadCounts, 0, (total, threads) => total + threads)).toBe(cpuMathCores);
       expect(Math.max(...threadCounts) - Math.min(...threadCounts)).toBeLessThanOrEqual(1);
     },
   );
 
   it.effect('uses the available CPU core budget when the graph session requests the benchmarked cap', () => {
-    const manifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'embedding')!;
+    const manifest = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'embedding'),
+    )!;
     const {layer, state} = embeddingHarness({
       context: () => immediateContext(input => Array(manifest.dimensions).fill(input.length)),
       cpuMathCores: 6,
@@ -210,7 +225,7 @@ describe('native embedding context pool', () => {
           modelPath: '/models/auto-cpu.gguf',
         });
         expect(vectors[0]).toHaveLength(manifest.dimensions);
-        expect(state.contextCalls.map(call => call.threads)).toEqual([2, 2, 1, 1]);
+        expect(EffectArray.map(state.contextCalls, call => call.threads)).toEqual([2, 2, 1, 1]);
         expect((yield* runtime.diagnostics).embeddingContextPlan).toEqual({
           effectiveContexts: 4,
           modelGpuLayers: 0,
@@ -237,7 +252,7 @@ describe('native embedding context pool', () => {
           modelPath: '/models/serial.gguf',
         });
         expect(yield* session.embedMany(['serial'])).toEqual([[6]]);
-        expect(state.contextCalls.map(call => call.threads)).toEqual([undefined]);
+        expect(EffectArray.map(state.contextCalls, call => call.threads)).toEqual([undefined]);
         expect(engine.diagnostics.embeddingContextPlan).toEqual({
           effectiveContexts: 1,
           modelGpuLayers: 0,
@@ -249,7 +264,9 @@ describe('native embedding context pool', () => {
   });
 
   it.effect('isolates and reuses default and graph-cap sessions while reporting the active plan', () => {
-    const manifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'embedding')!;
+    const manifest = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'embedding'),
+    )!;
     const {layer, state} = embeddingHarness({
       context: () => immediateContext(input => Array(manifest.dimensions).fill(input.length)),
       gpuLayers: 0,
@@ -295,7 +312,7 @@ describe('native embedding context pool', () => {
                 input,
                 resolve: () => {
                   active -= 1;
-                  resolve({vector: [Number(input.slice(5))]});
+                  resolve({vector: [Number(Effect2.pipe(input, EffectString.slice(5)))]});
                 },
               });
             });
@@ -320,7 +337,7 @@ describe('native embedding context pool', () => {
         expect(vectors).toEqual([[0], [1], [2], [3]]);
         expect(maximumActive).toBe(4);
         expect(state.contextCalls).toHaveLength(4);
-        expect(state.contextCalls.map(call => call.threads)).toEqual([2, 2, 2, 2]);
+        expect(EffectArray.map(state.contextCalls, call => call.threads)).toEqual([2, 2, 2, 2]);
         expect(engine.diagnostics.embeddingContextPlan).toEqual({
           effectiveContexts: 4,
           modelGpuLayers: 0,
@@ -394,7 +411,9 @@ describe('native embedding context pool', () => {
   });
 
   it.effect('treats rejection with undefined as failure, disposes the whole pool, and reloads', () => {
-    const manifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'embedding')!;
+    const manifest = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'embedding'),
+    )!;
     const {layer, state} = embeddingHarness({
       context: ({contextIndex, modelIndex}) => {
         let disposed = false;
@@ -439,7 +458,9 @@ describe('native embedding context pool', () => {
   });
 
   it.effect('poisons and reloads the pooled session after an invalid native vector', () => {
-    const manifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'embedding')!;
+    const manifest = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'embedding'),
+    )!;
     const {layer, state} = embeddingHarness({
       context: ({contextIndex, modelIndex}) => {
         let disposed = false;
@@ -477,7 +498,9 @@ describe('native embedding context pool', () => {
   });
 
   it.effect('awaits interrupted-pool teardown before loading a replacement model', () => {
-    const manifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'embedding')!;
+    const manifest = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'embedding'),
+    )!;
     const rejectPending = new Map<number, (cause: unknown) => void>();
     let releaseDisposals = () => {};
     const disposalGate = new Promise<void>(resolve => {
@@ -562,7 +585,8 @@ describe('native embedding context pool', () => {
               return Promise.resolve();
             },
             getEmbeddingFor: input => {
-              const inputIndex = Number(input.slice(5).split(':', 1)[0]);
+              // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+              const inputIndex = Number(Effect2.pipe(input, EffectString.slice(5)).split(':', 1)[0]);
               calls.push(inputIndex);
               active += 1;
               maximumActive = Math.max(maximumActive, active);
@@ -586,7 +610,7 @@ describe('native embedding context pool', () => {
         gpuLayers: 0,
         poolSize,
       });
-      const inputs = priorities.map((priority, index) => `item-${index}:${priority}`);
+      const inputs = EffectArray.map(priorities, (priority, index) => `item-${index}:${priority}`);
       return Effect.scoped(
         Effect.gen(function* () {
           const engine = yield* LlamaCppEngine;
@@ -606,8 +630,8 @@ describe('native embedding context pool', () => {
             yield* Effect.yieldNow;
           }
           const vectors = yield* Fiber.join(fiber);
-          expect(vectors).toEqual(inputs.map((input, index) => [index, input.length]));
-          expect([...calls].sort((left, right) => left - right)).toEqual(inputs.map((_, index) => index));
+          expect(vectors).toEqual(EffectArray.map(inputs, (input, index) => [index, input.length]));
+          expect([...calls].sort((left, right) => left - right)).toEqual(EffectArray.map(inputs, (_, index) => index));
           expect(maximumActive).toBeLessThanOrEqual(poolSize);
           expect(perContextOverlap).toBe(false);
         }).pipe(provideTestLayer(layer)),

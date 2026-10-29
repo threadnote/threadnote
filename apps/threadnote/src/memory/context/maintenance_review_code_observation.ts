@@ -3,10 +3,10 @@ import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote
 import {codeGraphQueryScopeReceipt} from '@threadnote/graph/query/scope';
 import type {CodeGraphStatus} from '@threadnote/graph/types';
 
-class AutomaticReviewCodeObservationChanged extends Schema.TaggedError<AutomaticReviewCodeObservationChanged>()(
-  'AutomaticReviewCodeObservationChanged',
-  {message: Schema.String},
-) {}
+class AutomaticReviewCodeObservationChanged extends Schema.TaggedError<
+  AutomaticReviewCodeObservationChanged,
+  {readonly brand: unique symbol}
+>()('AutomaticReviewCodeObservationChanged', {message: Schema.String}) {}
 
 function identity(status: CodeGraphStatus) {
   const observation = observationFromCodeGraphStatus(status);

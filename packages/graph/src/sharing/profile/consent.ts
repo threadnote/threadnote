@@ -1,7 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {effectiveGraphShareContributionPolicy} from '../contribution.js';
-import {SHA256_DIGEST, type Sha256Digest} from '../digest.js';
+import {parseSha256Digest, SHA256_DIGEST, type Sha256Digest} from '../digest.js';
 import {graphSharingFailure} from '../errors.js';
 import {
   parseGraphShareCoordinatorUrl,
@@ -73,7 +74,7 @@ export const promptGraphShareOciTrustRoot = Effect.fn('codeGraph.sharing.promptO
   if (fingerprint !== input.enrollment.publisherKeyFingerprint)
     return yield* graphSharingFailure('OCI graph publisher fingerprint was not independently confirmed.');
   return {
-    publisherKeyFingerprint: fingerprint as Sha256Digest,
+    publisherKeyFingerprint: parseSha256Digest(fingerprint),
     registryCanonical: pointer.registryReference,
   } satisfies GraphShareOciRootApproval;
 });
@@ -107,32 +108,35 @@ export const promptGraphShareOciProfileAccess = Effect.fn('codeGraph.sharing.pro
       : joinPolicy.deliveryPausedReason === 'organization-upload-disabled'
         ? 'passive: ordinary graph indexing/use may build results; the organization profile disables contribution uploads'
         : 'passive: ordinary graph indexing/use may build results and the MCP monitor delivers them automatically';
-  const prompt = [
-    'Verified organization graph profile:',
-    `  Organization: ${profile.organization}`,
-    `  Effective coordinator: ${coordinatorUrl ?? '(none)'}`,
-    `  Canonical registry: ${profile.registry.canonical}`,
-    `  Worker registry: ${profile.registry.worker}`,
-    `  Source remote: ${profile.source.canonicalRemote}`,
-    `  Source branches: ${profile.source.branches.join(', ')}`,
-    `  Declared default contribution mode: ${profile.contribution.defaultMode}`,
-    `  Actual join behavior: ${contributionBehavior}`,
-    ...(profile.contribution.defaultMode === 'idle' || profile.contribution.defaultMode === 'dedicated'
-      ? ['  Idle and dedicated currently map to passive work on graph use; no idle/dedicated scheduler is active.']
-      : []),
-    '  AC/idle/CPU/memory settings are declared; no active scheduler enforces them:',
-    `    AC power only: ${profile.contribution.activeOnlyOnAcPower}`,
-    `    Idle only: ${profile.contribution.activeOnlyWhenIdle}`,
-    `    Maximum CPUs: ${profile.contribution.maximumCpus}`,
-    `    Maximum memory bytes: ${profile.contribution.maximumMemoryBytes}`,
-    profile.contribution.maximumUploadBytesPerSecond === 0
-      ? '  Upload limit 0 bytes/second disables contribution delivery.'
-      : `  Positive upload limit ${profile.contribution.maximumUploadBytesPerSecond} bytes/second is declared but not enforced.`,
-    '  Read-only disables contributions. Join permits the actual behavior above.',
-    input.readOnly === true
-      ? 'Type read-only to approve this profile, or anything else to deny: '
-      : 'Type read-only or join to approve this profile, or anything else to deny: ',
-  ].join('\n');
+  const prompt = EffectArray.join(
+    [
+      'Verified organization graph profile:',
+      `  Organization: ${profile.organization}`,
+      `  Effective coordinator: ${coordinatorUrl ?? '(none)'}`,
+      `  Canonical registry: ${profile.registry.canonical}`,
+      `  Worker registry: ${profile.registry.worker}`,
+      `  Source remote: ${profile.source.canonicalRemote}`,
+      `  Source branches: ${EffectArray.join(profile.source.branches, ', ')}`,
+      `  Declared default contribution mode: ${profile.contribution.defaultMode}`,
+      `  Actual join behavior: ${contributionBehavior}`,
+      ...(profile.contribution.defaultMode === 'idle' || profile.contribution.defaultMode === 'dedicated'
+        ? ['  Idle and dedicated currently map to passive work on graph use; no idle/dedicated scheduler is active.']
+        : []),
+      '  AC/idle/CPU/memory settings are declared; no active scheduler enforces them:',
+      `    AC power only: ${profile.contribution.activeOnlyOnAcPower}`,
+      `    Idle only: ${profile.contribution.activeOnlyWhenIdle}`,
+      `    Maximum CPUs: ${profile.contribution.maximumCpus}`,
+      `    Maximum memory bytes: ${profile.contribution.maximumMemoryBytes}`,
+      profile.contribution.maximumUploadBytesPerSecond === 0
+        ? '  Upload limit 0 bytes/second disables contribution delivery.'
+        : `  Positive upload limit ${profile.contribution.maximumUploadBytesPerSecond} bytes/second is declared but not enforced.`,
+      '  Read-only disables contributions. Join permits the actual behavior above.',
+      input.readOnly === true
+        ? 'Type read-only to approve this profile, or anything else to deny: '
+        : 'Type read-only or join to approve this profile, or anything else to deny: ',
+    ],
+    '\n',
+  );
   const answer = yield* promptLine(system, prompt);
   if (answer === 'read-only') return 'read-only' as const satisfies GraphShareAccessMode;
   if (answer !== 'join' || input.readOnly === true)

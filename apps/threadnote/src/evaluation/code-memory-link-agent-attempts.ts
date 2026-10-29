@@ -1,7 +1,11 @@
-import {Data, Effect, FileSystem, Option, Path, Predicate} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Predicate} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {CodeMemoryLinkAgentAbManifestV1, CodeMemoryLinkAgentAbTrialV1} from './code-memory-link-agent-ab.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_MEMORY_LINK_AGENT_ATTEMPT_VERSION = 1 as const;
 export const CODE_MEMORY_LINK_AGENT_RETRY_REASONS = [
@@ -72,9 +76,10 @@ export interface CodeMemoryLinkAgentLedgerLayout {
   readonly trialsPath: string;
 }
 
-export class CodeMemoryLinkAgentLedgerError extends Data.TaggedError('CodeMemoryLinkAgentLedgerError')<{
-  readonly message: string;
-}> {}
+export class CodeMemoryLinkAgentLedgerError extends Schema.TaggedError<
+  CodeMemoryLinkAgentLedgerError,
+  {readonly brand: unique symbol}
+>()('CodeMemoryLinkAgentLedgerError', {message: Schema.String}) {}
 
 const HASH = /^[0-9a-f]{64}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
@@ -103,7 +108,7 @@ export const resolveCodeMemoryLinkAgentLedgerLayout = Effect.fn('codeMemoryLinkA
     path.dirname(trialsResolved) !== path.dirname(attemptsResolved) ||
     path.dirname(trialsResolved) !== path.dirname(evidenceResolved)
   ) {
-    return yield* new CodeMemoryLinkAgentLedgerError({
+    return yield* CodeMemoryLinkAgentLedgerError.make({
       message: 'The attempts and evidence ledgers must be beside the trials ledger.',
     });
   }
@@ -113,12 +118,12 @@ export const resolveCodeMemoryLinkAgentLedgerLayout = Effect.fn('codeMemoryLinkA
   const attemptsPath = path.join(canonicalParent, path.basename(attemptsResolved));
   const evidencePath = path.join(canonicalParent, path.basename(evidenceResolved));
   if (attemptsPath !== `${trialsPath}.attempts.jsonl`) {
-    return yield* new CodeMemoryLinkAgentLedgerError({
+    return yield* CodeMemoryLinkAgentLedgerError.make({
       message: 'The explicit attempts ledger must be named <canonical-trials-path>.attempts.jsonl.',
     });
   }
   if (evidencePath !== `${trialsPath}.evidence.jsonl`) {
-    return yield* new CodeMemoryLinkAgentLedgerError({
+    return yield* CodeMemoryLinkAgentLedgerError.make({
       message: 'The explicit evidence ledger must be named <canonical-trials-path>.evidence.jsonl.',
     });
   }
@@ -196,8 +201,8 @@ export function codeMemoryLinkAgentAttemptEventDigest(value: unknown): string {
 
 export function parseCodeMemoryLinkAgentAttemptsJsonl(input: string): readonly CodeMemoryLinkAgentAttemptEventV1[] {
   if (new TextEncoder().encode(input).byteLength > 16 * 1024 * 1024) invalid('attempt JSONL input exceeds 16 MiB');
-  return input.split(/\r?\n/u).flatMap((line, index) => {
-    if (!line.trim()) return [];
+  return EffectArray.flatMap(Effect2.pipe(input, EffectString.split(/\r?\n/u)), (line, index) => {
+    if (!Effect2.pipe(line, EffectString.trim)) return [];
     try {
       return [parseCodeMemoryLinkAgentAttemptEventV1(JSON.parse(line) as unknown)];
     } catch (cause) {
@@ -210,7 +215,12 @@ export function parseCodeMemoryLinkAgentAttemptsJsonl(input: string): readonly C
 export function serializeCodeMemoryLinkAgentAttemptsJsonl(
   events: readonly CodeMemoryLinkAgentAttemptEventV1[],
 ): string {
-  return events.length === 0 ? '' : `${events.map(event => JSON.stringify(event)).join('\n')}\n`;
+  return events.length === 0
+    ? ''
+    : `${EffectArray.join(
+        EffectArray.map(events, event => JSON.stringify(event)),
+        '\n',
+      )}\n`;
 }
 
 /**
@@ -226,8 +236,10 @@ export function assertCodeMemoryLinkAgentAttemptLedgerV1(input: {
   readonly trials: readonly CodeMemoryLinkAgentAbTrialV1[];
 }): CodeMemoryLinkAgentAttemptLedgerStateV1 {
   const approvalCommit = matching(input.approvalCommit, COMMIT, 'attempt approval commit');
-  const events = input.events.map(parseCodeMemoryLinkAgentAttemptEventV1);
-  const trialsByInvocation = new Map(input.trials.map(trial => [trial.attestation.invocationNonce, trial]));
+  const events = EffectArray.map(input.events, parseCodeMemoryLinkAgentAttemptEventV1);
+  const trialsByInvocation = new Map(
+    EffectArray.map(input.trials, trial => [trial.attestation.invocationNonce, trial]),
+  );
   if (trialsByInvocation.size !== input.trials.length) invalid('trial invocation nonces must be unique');
   const attemptIds = new Set<string>();
   const matchedTrialNonces = new Set<string>();
@@ -256,7 +268,9 @@ export function assertCodeMemoryLinkAgentAttemptLedgerV1(input: {
     if (attemptIds.has(event.attemptId)) invalid('attempt ids must be unique');
     attemptIds.add(event.attemptId);
     const scheduled = input.manifest.schedule[event.runOrder];
-    const client = input.manifest.clients.find(candidate => candidate.clientId === event.clientId);
+    const client = Option.getOrUndefined(
+      EffectArray.findFirst(input.manifest.clients, candidate => candidate.clientId === event.clientId),
+    );
     if (
       event.approvalCommit !== approvalCommit ||
       event.assignmentHash !== input.manifest.assignmentHash ||
@@ -405,19 +419,19 @@ function assertRegularLedgerTarget(fs: FileSystem.FileSystem, target: string) {
   return Effect.gen(function* () {
     if (!(yield* fs.exists(target))) return;
     if (Option.isSome(yield* fs.readLink(target).pipe(Effect.option))) {
-      return yield* new CodeMemoryLinkAgentLedgerError({
+      return yield* CodeMemoryLinkAgentLedgerError.make({
         message: 'Code Memory Link ledger targets must not be symbolic links.',
       });
     }
     const info = yield* fs.stat(target);
     if (info.type !== 'File') {
-      return yield* new CodeMemoryLinkAgentLedgerError({
+      return yield* CodeMemoryLinkAgentLedgerError.make({
         message: 'Code Memory Link ledger targets must be regular files.',
       });
     }
     const linkCount = Option.getOrUndefined(info.nlink);
     if (linkCount !== undefined && linkCount > 1) {
-      return yield* new CodeMemoryLinkAgentLedgerError({
+      return yield* CodeMemoryLinkAgentLedgerError.make({
         message: 'Code Memory Link ledger targets must not have hard-link aliases.',
       });
     }
@@ -430,7 +444,7 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const expected = [...keys].sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected)) invalid(`${label} fields do not match schema`);
 }

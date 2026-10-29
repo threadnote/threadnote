@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {writeFileSync} from '@threadnote/testing/node-fs';
@@ -23,10 +24,12 @@ import {
   recordCodeGraphSnapshotAdmission,
 } from '@threadnote/graph/admission_freshness';
 import type {ProjectManifest} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const fixturePackProvenance = BUILTIN_LANGUAGE_PACK_REGISTRY.activePackProvenance(['main.ts']);
-const incompatiblePackProvenance = fixturePackProvenance.map((pack, index) =>
-  index === 0 ? {...pack, cacheIdentity: 'f'.repeat(64)} : pack,
+const incompatiblePackProvenance = EffectArray.map(fixturePackProvenance, (pack, index) =>
+  index === 0 ? {...pack, cacheIdentity: Effect2.pipe('f', EffectString.repeat(64))} : pack,
 );
 
 describe('shared ready view attachment locking', () => {
@@ -374,14 +377,10 @@ describe('shared ready view attachment locking', () => {
       const graph = yield* CodeGraphQueryService;
       const store = yield* CodeGraphStore;
       const identity = yield* resolveRepositoryIdentity(repositoryRoot);
-      const branch = (yield* runCommandEffect('git', [
-        '-C',
-        repositoryRoot,
-        'symbolic-ref',
-        '--quiet',
-        '--short',
-        'HEAD',
-      ])).stdout.trim();
+      const branch = Effect2.pipe(
+        (yield* runCommandEffect('git', ['-C', repositoryRoot, 'symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout,
+        EffectString.trim,
+      );
       const layout = codeGraphLayout(path, threadnoteHome, identity.checkoutId, identity.worktreeId);
       const snapshot = readySnapshot(identity);
       yield* store.activate(layout.databasePath, identity, snapshot, [], [], [], fixturePackProvenance);
@@ -653,18 +652,21 @@ describe('shared ready view attachment locking', () => {
         } satisfies ProjectManifest;
         yield* fs.writeFileString(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: docs',
-            `    path: ${sourceWorktree}`,
-            '    seed: []',
-            '    uri: threadnote://resources/repos/docs',
-            '    graph:',
-            '      closure: dependencies',
-            '      roots: [apps/docs]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: docs',
+              `    path: ${sourceWorktree}`,
+              '    seed: []',
+              '    uri: threadnote://resources/repos/docs',
+              '    graph:',
+              '      closure: dependencies',
+              '      roots: [apps/docs]',
+              '',
+            ],
+            '\n',
+          ),
         );
 
         const indexer = yield* CodeGraphIndexer;
@@ -721,23 +723,26 @@ describe('shared ready view attachment locking', () => {
           projectCoverage: {kind: 'project', project: 'docs'},
           snapshot: {id: indexed.snapshot.id},
         });
-        expect(found.nodes.some(node => node.name === 'scopedDocs')).toBe(true);
-        expect(found.nodes.some(node => node.name === 'freshOnly')).toBe(false);
+        expect(EffectArray.some(found.nodes, node => node.name === 'scopedDocs')).toBe(true);
+        expect(EffectArray.some(found.nodes, node => node.name === 'freshOnly')).toBe(false);
 
         yield* fs.writeFileString(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: docs',
-            `    path: ${sourceWorktree}`,
-            '    seed: []',
-            '    uri: threadnote://resources/repos/docs',
-            '    graph:',
-            '      closure: dependencies',
-            '      roots: [apps/other]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: docs',
+              `    path: ${sourceWorktree}`,
+              '    seed: []',
+              '    uri: threadnote://resources/repos/docs',
+              '    graph:',
+              '      closure: dependencies',
+              '      roots: [apps/other]',
+              '',
+            ],
+            '\n',
+          ),
         );
         const changedDefinition = yield* graph.status(threadnoteHome, freshWorktree, {
           manifestPath,
@@ -787,10 +792,13 @@ function createNextCommit(repositoryRoot: string): string {
 }
 
 function git(repositoryRoot: string, args: readonly string[]): string {
-  return execFileSync('git', ['-C', repositoryRoot, ...args], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  }).trim();
+  return Effect2.pipe(
+    execFileSync('git', ['-C', repositoryRoot, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }),
+    EffectString.trim,
+  );
 }
 
 function readySnapshot(identity: RepositoryIdentity): CodeGraphSnapshot {

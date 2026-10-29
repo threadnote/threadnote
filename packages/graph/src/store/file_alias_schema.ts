@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {normalizeSchemaDefinition} from './schema/normalization.js';
@@ -22,6 +23,8 @@ import {
   codeGraphPersistentSchemaProfile,
   codeGraphPersistentSchemaSupports,
 } from './schema/revision.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface CodeGraphReferenceIndex {
   readonly columns: readonly string[];
@@ -216,17 +219,18 @@ export const codeGraphCacheReferenceIndexState = Effect.fn('codeGraph.cacheRefer
     readonly name: unknown;
     readonly seqno: unknown;
   }>(`SELECT seqno, name, desc, coll, key FROM pragma_index_xinfo(?) LIMIT 8`, [index.name]);
-  const keyColumns = xinfo
-    .filter(column => Number(column.key) === 1)
-    .sort((left, right) => Number(left.seqno) - Number(right.seqno));
+  const keyColumns = EffectArray.filter(xinfo, column => Number(column.key) === 1).sort(
+    (left, right) => Number(left.seqno) - Number(right.seqno),
+  );
   return xinfo.length > 0 &&
     xinfo.length < 8 &&
     keyColumns.length === index.columns.length &&
-    keyColumns.every(
+    EffectArray.every(
+      keyColumns,
       (column, columnIndex) =>
         column.name === index.columns[columnIndex] &&
         typeof column.coll === 'string' &&
-        column.coll.toUpperCase() === 'BINARY' &&
+        Effect2.pipe(column.coll, EffectString.toUpperCase) === 'BINARY' &&
         column.desc === 0,
     )
     ? ('ready' as const)
@@ -247,7 +251,8 @@ const snapshotAuthorityState = Effect.fn('codeGraph.snapshotAuthorityState')(fun
   );
   if (
     objects.length > (includeSnapshotFiles ? 3 : 2) ||
-    objects.some(
+    EffectArray.some(
+      objects,
       object =>
         object.type !== 'table' ||
         (object.name !== 'snapshots' &&
@@ -262,7 +267,7 @@ const snapshotAuthorityState = Effect.fn('codeGraph.snapshotAuthorityState')(fun
     'active_snapshots',
     ...(includeSnapshotFiles ? (['snapshot_files'] as const) : []),
   ] as const) {
-    if (!objects.some(object => object.name === table)) continue;
+    if (!EffectArray.some(objects, object => object.name === table)) continue;
     const authority = yield* sql.unsafe<{readonly present: unknown}>(`SELECT 1 AS present FROM ${table} LIMIT 1`);
     if (authority.length > 0) return 'present' as const;
   }
@@ -376,7 +381,7 @@ const snapshotFileSchemaObjectsExact = Effect.fn('codeGraph.snapshotFileSchemaOb
   ]);
   if (
     indexes.length >= 5 ||
-    indexes.some(index => {
+    EffectArray.some(indexes, index => {
       if (typeof index.name !== 'string') return true;
       const contract = expected.get(index.name);
       return (
@@ -386,7 +391,7 @@ const snapshotFileSchemaObjectsExact = Effect.fn('codeGraph.snapshotFileSchemaOb
         index.unique !== contract.unique
       );
     }) ||
-    !indexes.some(index => index.name === 'sqlite_autoindex_snapshot_files_1')
+    !EffectArray.some(indexes, index => index.name === 'sqlite_autoindex_snapshot_files_1')
   ) {
     return false;
   }
@@ -436,10 +441,10 @@ export const inspectCodeGraphSnapshotFileCitationSchema = Effect.fn('codeGraph.i
     }
     const normalizedTable = normalizeSchemaDefinition(table.bounded_sql);
     const releasedTable = normalizedTable === normalizeSchemaDefinition(CODE_GRAPH_SNAPSHOT_FILES_RELEASED_TABLE_SQL);
-    const currentTable = [
-      CODE_GRAPH_SNAPSHOT_FILES_CURRENT_TABLE_SQL,
-      CODE_GRAPH_SNAPSHOT_FILES_MIGRATED_TABLE_SQL,
-    ].some(definition => normalizedTable === normalizeSchemaDefinition(definition));
+    const currentTable = EffectArray.some(
+      [CODE_GRAPH_SNAPSHOT_FILES_CURRENT_TABLE_SQL, CODE_GRAPH_SNAPSHOT_FILES_MIGRATED_TABLE_SQL],
+      definition => normalizedTable === normalizeSchemaDefinition(definition),
+    );
     if (!releasedTable && !currentTable) return citationSchemaInspection('incompatible', 'incompatible');
 
     const columns = yield* sql.unsafe<{
@@ -503,9 +508,9 @@ export const inspectCodeGraphSnapshotFileCitationSchema = Effect.fn('codeGraph.i
       return citationSchemaInspection('incompatible', 'incompatible');
     }
     return citationSchemaInspection(
-      baseIndexes.some(state => state === 'incompatible')
+      EffectArray.some(baseIndexes, state => state === 'incompatible')
         ? 'incompatible'
-        : baseIndexes.some(state => state === 'missing')
+        : EffectArray.some(baseIndexes, state => state === 'missing')
           ? authorityState === 'present'
             ? 'incompatible'
             : 'missing'
@@ -605,13 +610,18 @@ export const ensureCodeGraphSnapshotFileCitationSchema = Effect.fn('codeGraph.en
       return yield* CodeGraphStoreError.of('Code graph snapshot file citation schema is incompatible.');
     }
     yield* sql.unsafe(
-      CODE_GRAPH_SNAPSHOT_FILES_CURRENT_TABLE_SQL.replace('CREATE TABLE', 'CREATE TABLE IF NOT EXISTS'),
+      Effect2.pipe(
+        CODE_GRAPH_SNAPSHOT_FILES_CURRENT_TABLE_SQL,
+        EffectString.replace('CREATE TABLE', 'CREATE TABLE IF NOT EXISTS'),
+      ),
     );
     for (const index of [
       CODE_GRAPH_SNAPSHOT_FILE_BLOB_REFERENCE_INDEX,
       CODE_GRAPH_SNAPSHOT_FILE_CONTENT_REFERENCE_INDEX,
     ]) {
-      yield* sql.unsafe(index.definition.replace('CREATE INDEX', 'CREATE INDEX IF NOT EXISTS'));
+      yield* sql.unsafe(
+        Effect2.pipe(index.definition, EffectString.replace('CREATE INDEX', 'CREATE INDEX IF NOT EXISTS')),
+      );
     }
     const alias = before.state === 'table-absent' ? 'column-only' : before.state;
     if (

@@ -1,12 +1,16 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from './system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from './effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Effect, FileSystem, Layer} from 'effect';
 import {runCodeGraphOrdinaryVectorMaintenanceUnit} from '@threadnote/graph/vector/maintenance';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const [threadnoteHome, checkoutId, markerPath] = process.argv.slice(2);
-const validPath = (value: string | undefined) => value !== undefined && value.length > 0 && !value.includes('\0');
+const validPath = (value: string | undefined) =>
+  value !== undefined && value.length > 0 && !Effect2.pipe(value, EffectString.includes('\0'));
 if (!validPath(threadnoteHome) || !validPath(markerPath) || !/^[0-9a-f]{64}$/u.test(checkoutId ?? '')) {
   process.stderr.write('invalid vector-retirement child arguments\n');
   process.exit(2);
@@ -42,13 +46,13 @@ const program = Effect.gen(function* () {
     if (result.state === 'complete') break;
   }
   return yield* TestError.make({
-    message: `Vector child completed without a database commit barrier: ${observations.join(',')}`,
+    message: `Vector child completed without a database commit barrier: ${EffectArray.join(observations, ',')}`,
   });
 }).pipe(provideTestLayer(childLayer));
 
 Effect.runPromise(program).catch(cause => {
   process.stderr.write(
-    `vector-retirement child failed: ${cause instanceof Error ? cause.message.slice(0, 512) : 'unknown'}\n`,
+    `vector-retirement child failed: ${cause instanceof Error ? Effect2.pipe(cause.message, EffectString.slice(0, 512)) : 'unknown'}\n`,
   );
   process.exitCode = 1;
 });

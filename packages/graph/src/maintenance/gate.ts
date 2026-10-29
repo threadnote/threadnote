@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -13,6 +14,8 @@ import {
 } from '../layout.js';
 import {classifyCodeGraphStoreFailure} from '../store/failure.js';
 import {CodeGraphStoreBusyError, CodeGraphMaintenanceActiveError} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {CodeGraphMaintenanceActiveError};
 
@@ -23,13 +26,13 @@ interface MaintenanceIntentOwner {
   readonly token: string;
 }
 
-class CodeGraphMaintenanceGateError extends Schema.TaggedError<CodeGraphMaintenanceGateError>()(
-  'CodeGraphMaintenanceGateError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphMaintenanceGateError extends Schema.TaggedError<
+  CodeGraphMaintenanceGateError,
+  {readonly brand: unique symbol}
+>()('CodeGraphMaintenanceGateError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export const CODE_GRAPH_MAINTENANCE_PROGRESS_PHASES = [
   'acquiring-gates',
@@ -200,7 +203,10 @@ export const observeCodeGraphMaintenanceStatus = Effect.fn('codeGraph.observeMai
   ) {
     return {...generic, phase: 'status-unavailable'} as const;
   }
-  const parsed = parseMaintenanceStatus(content.value.trim(), sha256HexSync(observedOwner.token));
+  const parsed = parseMaintenanceStatus(
+    Effect2.pipe(content.value, EffectString.trim),
+    sha256HexSync(observedOwner.token),
+  );
   return parsed ?? ({...generic, phase: 'status-unavailable'} as const);
 });
 
@@ -353,10 +359,14 @@ function codeGraphWorktreeLockFiles(
     if ((yield* fs.stat(root)).type !== 'Directory') {
       return yield* CodeGraphMaintenanceGateError.make({message: 'Code graph worktree lock root is not a directory.'});
     }
-    return (yield* fs.readDirectory(root))
-      .filter(name => /^[0-9a-f]{64}(?:\.scope-[0-9a-f]{64})?\.lock$/u.test(name))
-      .sort()
-      .map(name => path.join(root, name));
+    return EffectArray.map(
+      EffectArray.filter(
+        yield* fs.readDirectory(root),
+        __effectArrayValue =>
+          !!(name => /^[0-9a-f]{64}(?:\.scope-[0-9a-f]{64})?\.lock$/u.test(name))(__effectArrayValue),
+      ).sort(),
+      name => path.join(root, name),
+    );
   });
 }
 
@@ -383,7 +393,7 @@ const observeMaintenanceIntentOwner = Effect.fn('codeGraph.observeMaintenanceInt
   const system = yield* SystemInfo;
   const intent = codeGraphMaintenanceIntentPath(path, threadnoteHome);
   if (!(yield* fs.exists(intent))) return undefined;
-  const token = (yield* fs.readFileString(intent)).trim();
+  const token = Effect2.pipe(yield* fs.readFileString(intent), EffectString.trim);
   const owner = parseMaintenanceIntentOwner(token);
   if (
     owner &&
@@ -441,11 +451,11 @@ const writeMaintenanceStatus = Effect.fn('codeGraph.writeMaintenanceStatus')(fun
   }
   const temporary = path.join(
     path.dirname(statusPath),
-    `.maintenance-status-${ownerDigest.slice(0, 16)}-${sequence}.tmp`,
+    `.maintenance-status-${Effect2.pipe(ownerDigest, EffectString.slice(0, 16))}-${sequence}.tmp`,
   );
   yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});
   yield* Effect.gen(function* () {
-    if ((yield* fs.readFileString(intentPath)).trim() !== ownerToken) {
+    if (Effect2.pipe(yield* fs.readFileString(intentPath), EffectString.trim) !== ownerToken) {
       return yield* CodeGraphMaintenanceGateError.make({
         message: 'Code graph maintenance owner changed before progress publication.',
       });
@@ -569,7 +579,7 @@ function parseMaintenanceIntentOwner(value: string): MaintenanceIntentOwner | un
 function removeOwnedIntent(fs: FileSystem.FileSystem, intent: string, token: string): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     if (!(yield* fs.exists(intent))) return;
-    if ((yield* fs.readFileString(intent)).trim() === token) {
+    if (Effect2.pipe(yield* fs.readFileString(intent), EffectString.trim) === token) {
       yield* fs.remove(intent, {force: true});
     }
   }).pipe(Effect.ignore);

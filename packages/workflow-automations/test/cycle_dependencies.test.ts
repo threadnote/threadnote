@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
@@ -13,9 +14,12 @@ import {
   validateNativeCyclePhase,
   type NativeCycleState,
 } from '../src/cycle.js';
-const head = 'a'.repeat(40),
-  tree = 'b'.repeat(40),
-  digest = 'c'.repeat(64);
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+const head = Effect.pipe('a', EffectString.repeat(40)),
+  tree = Effect.pipe('b', EffectString.repeat(40)),
+  digest = Effect.pipe('c', EffectString.repeat(64));
 const phase = (id: string, baseBranch = 'main', dependsOn: string[] = []) => ({
   id,
   title: id,
@@ -59,7 +63,7 @@ const validate = (s: NativeCycleState, id: string) =>
     },
   );
 const receipt = (s: NativeCycleState, id: string, merged = false) => {
-  const p = s.plan.phases.find(p => p.id === id)!;
+  const p = EffectOption.getOrUndefined(EffectArray.findFirst(s.plan.phases, p => p.id === id))!;
   return {
     phaseId: id,
     phaseHash: s.phases[id].phaseHash,

@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {Result} from 'effect';
 import {Base64Url} from 'effect/encoding';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const VECTOR_DATABASE_LIMIT = 64;
 export const MODEL_ID = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/;
@@ -88,14 +91,15 @@ export function setOrdinaryVectorModelCursor(
 }
 
 export function encodeOrdinaryVectorPhaseCursor(cursor: OrdinaryVectorPhaseCursor): string {
-  const models = [...cursor.models.entries()]
-    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-    .map(([modelName, state]) => [
+  const models = EffectArray.map(
+    [...cursor.models.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+    ([modelName, state]) => [
       modelName,
       state.phase === 'admission' ? 'a' : state.phase === 'marker' ? 'm' : 'v',
       state.admissionWrapped ? 1 : 0,
       state.afterGeneration,
-    ]);
+    ],
+  );
   const payload = Base64Url.encode(
     JSON.stringify({
       v: 1,
@@ -129,7 +133,7 @@ export function parseOrdinaryVectorPhaseCursor(cursorToken: string | undefined):
 }
 
 function decodeOrdinaryVectorCursorPayload(raw: unknown): OrdinaryVectorPhaseCursor | undefined {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  if (typeof raw !== 'object' || raw === null || EffectArray.isArray(raw)) return undefined;
   const candidate = raw as {
     readonly d?: unknown;
     readonly m?: unknown;
@@ -148,11 +152,11 @@ function decodeOrdinaryVectorCursorPayload(raw: unknown): OrdinaryVectorPhaseCur
     return undefined;
   }
   if (candidate.n !== undefined && (typeof candidate.n !== 'string' || !MODEL_ID.test(candidate.n))) return undefined;
-  if (!Array.isArray(candidate.m) || candidate.m.length > VECTOR_DATABASE_LIMIT) return undefined;
+  if (!EffectArray.isArray(candidate.m) || candidate.m.length > VECTOR_DATABASE_LIMIT) return undefined;
   const models = new Map<string, OrdinaryVectorModelCursor>();
   let previous = '';
   for (const entry of candidate.m) {
-    if (!Array.isArray(entry) || entry.length !== 4) return undefined;
+    if (!EffectArray.isArray(entry) || entry.length !== 4) return undefined;
     const [modelName, phase, wrapped, afterGeneration] = entry;
     if (
       typeof modelName !== 'string' ||
@@ -187,5 +191,7 @@ function decodeOrdinaryVectorCursorPayload(raw: unknown): OrdinaryVectorPhaseCur
 
 function validOrdinaryVectorGeneration(generation: string): boolean {
   const bytes = new TextEncoder().encode(generation).byteLength;
-  return bytes > 0 && bytes <= ORDINARY_VECTOR_GENERATION_BYTES && !generation.includes('\0');
+  return (
+    bytes > 0 && bytes <= ORDINARY_VECTOR_GENERATION_BYTES && !Effect.pipe(generation, EffectString.includes('\0'))
+  );
 }

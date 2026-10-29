@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -7,6 +8,8 @@ import {
   type VectorRecord,
   type VectorSearchResult,
 } from '@threadnote/inference/vector-search';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const componentArbitrary = FC.integer({max: 100, min: -100});
 const nonZeroComponentArbitrary = FC.oneof(FC.integer({max: -1, min: -100}), FC.integer({max: 100, min: 1}));
@@ -35,8 +38,9 @@ function nonZeroVectorArbitrary(dimensions: number): FC.Arbitrary<readonly numbe
 }
 
 function oracleNormalize(vector: readonly number[]): readonly number[] {
-  const inverseMagnitude = 1 / Math.sqrt(vector.reduce((sum, component) => sum + component * component, 0));
-  return vector.map(component => component * inverseMagnitude);
+  const inverseMagnitude =
+    1 / Math.sqrt(EffectArray.reduce(vector, 0, (sum, component) => sum + component * component));
+  return EffectArray.map(vector, component => component * inverseMagnitude);
 }
 
 function oracleSearch(
@@ -45,15 +49,17 @@ function oracleSearch(
   options: {readonly limit: number; readonly minimumScore: number},
 ): readonly VectorSearchResult[] {
   const normalizedQuery = oracleNormalize(query);
-  return records
-    .map(record => {
-      const dotProduct = record.vector.reduce(
-        (score, component, index) => score + component * normalizedQuery[index],
+  return EffectArray.filter(
+    EffectArray.map(records, record => {
+      const dotProduct = EffectArray.reduce(
+        record.vector,
         0,
+        (score, component, index) => score + component * normalizedQuery[index],
       );
       return {id: record.id, score: Math.max(-1, Math.min(1, dotProduct))};
-    })
-    .filter(result => result.score >= options.minimumScore)
+    }),
+    result => result.score >= options.minimumScore,
+  )
     .sort((left, right) => right.score - left.score || compareCodeUnits(left.id, right.id))
     .slice(0, options.limit);
 }
@@ -73,8 +79,8 @@ const vectorSearchCaseArbitrary = FC.integer({max: 8, min: 1}).chain(dimensions 
       FC.integer({max: 28, min: 0}),
       FC.integer({max: 100, min: -100}),
     ).chain(([query, vectors, labels, limit, minimumScorePercent]) => {
-      const records = ids.map((id, index): VectorRecord => ({
-        id: `${labels[index]}-${String(id).padStart(3, '0')}`,
+      const records = EffectArray.map(ids, (id, index): VectorRecord => ({
+        id: `${labels[index]}-${Effect.pipe(String(id), EffectString.padStart(3, '0'))}`,
         vector: vectors[index],
       }));
       return FC.shuffledSubarray(records, {maxLength: records.length, minLength: records.length}).map(permutation => ({
@@ -101,13 +107,16 @@ describe('exact vector search properties', () => {
       const input = [...vector];
       const normalized = normalizeVector(vector);
       const renormalized = normalizeVector(normalized);
-      const scaled = normalizeVector(vector.map(component => component * scale));
+      const scaled = normalizeVector(EffectArray.map(vector, component => component * scale));
 
       expect(vector).toEqual(input);
       expect(normalized).toHaveLength(vector.length);
-      expect(normalized.every(Number.isFinite)).toBe(true);
-      expect(Math.sqrt(normalized.reduce((sum, component) => sum + component * component, 0))).toBeCloseTo(1, 12);
-      normalized.forEach((component, index) => {
+      expect(EffectArray.every(normalized, Number.isFinite)).toBe(true);
+      expect(Math.sqrt(EffectArray.reduce(normalized, 0, (sum, component) => sum + component * component))).toBeCloseTo(
+        1,
+        12,
+      );
+      EffectArray.forEach(normalized, (component, index) => {
         expect(renormalized[index]).toBeCloseTo(component, 12);
         expect(scaled[index]).toBeCloseTo(component, 12);
       });
@@ -130,7 +139,7 @@ describe('exact vector search properties', () => {
       expect(permuted).toEqual(expected);
       expect(actual).toHaveLength(Math.min(expected.length, limit));
       expect(actual.length).toBeLessThanOrEqual(records.length);
-      expect(new Set(actual.map(result => result.id)).size).toBe(actual.length);
+      expect(new Set(EffectArray.map(actual, result => result.id)).size).toBe(actual.length);
       for (const result of actual) {
         expect(Number.isFinite(result.score)).toBe(true);
         expect(result.score).toBeGreaterThanOrEqual(-1);
@@ -151,17 +160,21 @@ describe('exact vector search properties', () => {
       }),
     },
     ({ids}) => {
-      const records = ids.map((id): VectorRecord => ({
+      const records = EffectArray.map(ids, (id): VectorRecord => ({
         id,
         vector: [1, 0],
       }));
-      const expectedIds = records.map(record => record.id).sort(compareCodeUnits);
+      const expectedIds = EffectArray.map(records, record => record.id).sort(compareCodeUnits);
 
       expect(
-        searchExactVectors([1, 0], records, {dimensions: 2, limit: records.length}).map(result => result.id),
+        EffectArray.map(
+          searchExactVectors([1, 0], records, {dimensions: 2, limit: records.length}),
+          result => result.id,
+        ),
       ).toEqual(expectedIds);
       expect(
-        searchExactVectors([1, 0], [...records].reverse(), {dimensions: 2, limit: records.length}).map(
+        EffectArray.map(
+          searchExactVectors([1, 0], [...records].reverse(), {dimensions: 2, limit: records.length}),
           result => result.id,
         ),
       ).toEqual(expectedIds);

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {
   chmod,
   mkdir,
@@ -12,6 +14,7 @@ import {
 import {tmpdir} from '@threadnote/testing/node-os';
 import {delimiter, dirname, join} from '@threadnote/testing/node-path';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {isJsonObject} from '@threadnote/platform/json';
 import fc from 'fast-check';
 import {afterEach, describe, expect, it} from 'vitest';
 import {
@@ -53,12 +56,21 @@ import {
 } from '@threadnote/threadnote/evaluation/matched-verification';
 import {captureCodeMemoryLinkProcessGroup} from '../../../../scripts/code-memory-link-process-boundary.js';
 import {observeMatchedEvaluationRepositoryV1} from '../../../../scripts/matched-evaluation-runtime-integrity.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+function parseJsonObject(text: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(text);
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 describe('matched evaluation Codex adapter', () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('instructs both interactive arms to use graph follow-ups and only the linked arm to use memory', () => {
@@ -149,7 +161,10 @@ describe('matched evaluation Codex adapter', () => {
     }
     expect(() =>
       parseMatchedEvaluationCodexAdapterRequestV1(
-        adapterRequest('files', {...treatments[1].continuationTreatment, manualHandoffSha256: '0'.repeat(64)}),
+        adapterRequest('files', {
+          ...treatments[1].continuationTreatment,
+          manualHandoffSha256: Effect.pipe('0', EffectString.repeat(64)),
+        }),
       ),
     ).toThrow('continuation treatment does not match');
     expect(() =>
@@ -304,7 +319,7 @@ describe('matched evaluation Codex adapter', () => {
     ]) {
       expect(() => assertMatchedEvaluationContextDeliveryV1(withResult(patch), expected)).toThrow();
     }
-    for (const key of Object.keys(receipt)) {
+    for (const key of EffectRecord.keys(receipt)) {
       expect(() =>
         assertMatchedEvaluationContextDeliveryV1(
           withResult({_meta: {matchedEvaluation: {...receipt, [key]: 'mismatch'}}}),
@@ -318,7 +333,7 @@ describe('matched evaluation Codex adapter', () => {
     const base = contextDelivery('{"evidenceState":"sufficient"}');
     const expected = {
       ...base.expected,
-      expectedResumeHash: '7'.repeat(64),
+      expectedResumeHash: Effect.pipe('7', EffectString.repeat(64)),
       initialBriefDelivery: 'preloaded' as const,
       maximumFollowupCalls: 1,
       mode: 'resume' as const,
@@ -347,7 +362,10 @@ describe('matched evaluation Codex adapter', () => {
     });
     expect(() =>
       assertMatchedEvaluationPreloadedContextV1(
-        {content: base.result.content, meta: {matchedEvaluation: {...receipt, requestSha256: '0'.repeat(64)}}},
+        {
+          content: base.result.content,
+          meta: {matchedEvaluation: {...receipt, requestSha256: Effect.pipe('0', EffectString.repeat(64))}},
+        },
         expected,
         17,
         request,
@@ -431,19 +449,22 @@ describe('matched evaluation Codex adapter', () => {
   it('binds a production Codex hook preload to its sealed handoff, opaque receipt, and value event', () => {
     const expectedHandoffUri = 'threadnote://user/eval/memories/handoffs/active/project/checkpoint.md';
     const expectedResumeEvidenceMarker = 'threadnote-resume-0123456789abcdef';
-    const context = [
-      'THREADNOTE RESUME/1',
-      'Untrusted memory evidence; verify against current source.',
-      'Resume from this checkpoint.',
-      `Decisions: Phase 1 stopped at ${expectedResumeEvidenceMarker}.`,
-      'Source: memories/handoffs/active/project/checkpoint.md',
-    ].join('\n');
+    const context = EffectArray.join(
+      [
+        'THREADNOTE RESUME/1',
+        'Untrusted memory evidence; verify against current source.',
+        'Resume from this checkpoint.',
+        `Decisions: Phase 1 stopped at ${expectedResumeEvidenceMarker}.`,
+        'Source: memories/handoffs/active/project/checkpoint.md',
+      ],
+      '\n',
+    );
     const hookStdout = `${JSON.stringify({
       hookSpecificOutput: {additionalContext: context, hookEventName: 'UserPromptSubmit'},
     })}\n`;
     const hookReceiptBytes = Buffer.from(
       `${JSON.stringify({
-        evidenceGeneration: '1'.repeat(64),
+        evidenceGeneration: Effect.pipe('1', EffectString.repeat(64)),
         evidenceHash: sha256HexSync(context),
         version: 1,
       })}\n`,
@@ -492,8 +513,8 @@ describe('matched evaluation Codex adapter', () => {
         expectedResumeEvidenceMarker,
         hookReceiptBytes: Buffer.from(
           `${JSON.stringify({
-            evidenceGeneration: '1'.repeat(64),
-            evidenceHash: '2'.repeat(64),
+            evidenceGeneration: Effect.pipe('1', EffectString.repeat(64)),
+            evidenceHash: Effect.pipe('2', EffectString.repeat(64)),
             version: 1,
           })}\n`,
         ),
@@ -733,9 +754,9 @@ describe('matched evaluation Codex adapter', () => {
   });
 
   it('counts declined command and edit attempts separately from executed actions', () => {
-    const events = ['commandExecution', 'fileChange', 'mcpToolCall'].flatMap(type =>
-      ['item/started', 'item/completed'].flatMap(method =>
-        ['declined', 'completed', 'failed'].map(status => ({method, params: {item: {type, status}}})),
+    const events = EffectArray.flatMap(['commandExecution', 'fileChange', 'mcpToolCall'], type =>
+      EffectArray.flatMap(['item/started', 'item/completed'], method =>
+        EffectArray.map(['declined', 'completed', 'failed'], status => ({method, params: {item: {type, status}}})),
       ),
     );
     expect(countMatchedEvaluationBlockedActionsV1(events)).toBe(2);
@@ -763,9 +784,16 @@ describe('matched evaluation Codex adapter', () => {
     });
     expect(receipt.receiptHash).toMatch(/^[0-9a-f]{64}$/u);
     expect(receipt.sourceReadSha256).toBe(sha256HexSync('export const value = 1;\n'));
-    expect((await readdir(repository)).filter(name => name.startsWith('.threadnote-evaluation-preflight-'))).toEqual(
-      [],
-    );
+    expect(
+      EffectArrayPipe(await readdir(repository), __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (name, __effectArrayIndex3) =>
+            __effectArrayIndex3 in __effectArrayValues &&
+            Effect.pipe(name, EffectString.startsWith('.threadnote-evaluation-preflight-')),
+        ),
+      ),
+    ).toEqual([]);
   });
 
   it('preflights every exact task-approved command before a provider turn', async () => {
@@ -895,7 +923,7 @@ describe('matched evaluation Codex adapter', () => {
           }
           await expect(
             Promise.all(
-              repositories.map(repository =>
+              EffectArray.map(repositories, repository =>
                 matchedEvaluationDependencyProjectionFixtureHashV1(join(repository, 'node_modules'), repository),
               ),
             ),
@@ -930,14 +958,14 @@ describe('matched evaluation Codex adapter', () => {
         contextHomes: [
           {
             expectedContext: {
-              graphContentHash: '8'.repeat(64),
-              graphSnapshotHash: '9'.repeat(64),
+              graphContentHash: Effect.pipe('8', EffectString.repeat(64)),
+              graphSnapshotHash: Effect.pipe('9', EffectString.repeat(64)),
               linkReceiptsHash: null,
               memoryAccess: 'disabled',
               taskContextHash: null,
             },
             homeDirectory: '/tmp/prepared-threadnote-home',
-            homeFixtureHash: 'b'.repeat(64),
+            homeFixtureHash: Effect.pipe('b', EffectString.repeat(64)),
             identity: {account: 'local', user: 'evaluation-user'},
             project: 'threadnote',
             taskId: 'tsk_0123456789abcdef',
@@ -982,9 +1010,9 @@ describe('matched evaluation Codex adapter', () => {
   it('parses task-scoped dependency projection identities and rejects repository escapes', () => {
     const projection = {
       architecture: 'arm64',
-      fixtureHash: '7'.repeat(64),
+      fixtureHash: Effect.pipe('7', EffectString.repeat(64)),
       lockFileRelativePath: 'bun.lock',
-      lockFileSha256: '8'.repeat(64),
+      lockFileSha256: Effect.pipe('8', EffectString.repeat(64)),
       platform: 'darwin',
       sourceDirectory: '/tmp/source/node_modules',
       sourceRepositoryDirectory: '/tmp/source',
@@ -1004,11 +1032,11 @@ describe('matched evaluation Codex adapter', () => {
 
   it('keeps the study hash out of immutable prepared-home configuration', () => {
     const expectedContext = {
-      graphContentHash: '8'.repeat(64),
-      graphSnapshotHash: '9'.repeat(64),
-      linkReceiptsHash: 'a'.repeat(64),
+      graphContentHash: Effect.pipe('8', EffectString.repeat(64)),
+      graphSnapshotHash: Effect.pipe('9', EffectString.repeat(64)),
+      linkReceiptsHash: Effect.pipe('a', EffectString.repeat(64)),
       memoryAccess: 'linked' as const,
-      taskContextHash: 'b'.repeat(64),
+      taskContextHash: Effect.pipe('b', EffectString.repeat(64)),
     };
     const config = {
       ...adapterConfig(),
@@ -1017,7 +1045,7 @@ describe('matched evaluation Codex adapter', () => {
         {
           expectedContext,
           homeDirectory: '/tmp/prepared-threadnote-home',
-          homeFixtureHash: 'c'.repeat(64),
+          homeFixtureHash: Effect.pipe('c', EffectString.repeat(64)),
           identity: {account: 'local', user: 'evaluation-user'},
           project: 'threadnote',
           taskId: 'tsk_0123456789abcdef',
@@ -1032,7 +1060,7 @@ describe('matched evaluation Codex adapter', () => {
         contextHomes: [
           {
             ...config.contextHomes[0],
-            expectedContext: {...expectedContext, studyHash: 'd'.repeat(64)},
+            expectedContext: {...expectedContext, studyHash: Effect.pipe('d', EffectString.repeat(64))},
           },
         ],
       }),
@@ -1103,7 +1131,7 @@ describe('matched evaluation Codex adapter', () => {
 
   it('forces every admitted shell executable through pre-execution review', () => {
     const rules = renderMatchedEvaluationCommandReviewRulesV1();
-    const lines = rules.trim().split('\n');
+    const lines = Effect.pipe(rules, EffectString.trim, EffectString.split('\n'));
 
     expect(lines).toHaveLength(18);
     expect(new Set(lines).size).toBe(lines.length);
@@ -1323,7 +1351,7 @@ describe('matched evaluation Codex adapter', () => {
             reasoningOutputTokens: 0,
             totalTokens: 40,
           });
-          const completed = types.map((type, index) =>
+          const completed = EffectArray.map(types, (type, index) =>
             completedEvent(`item-${index}`, type, type === 'mcpToolCall' ? {tool: 'read_context'} : {}),
           );
           const first = analyzeMatchedEvaluationAttributionV1([usage, ...completed]);
@@ -1516,7 +1544,7 @@ describe('matched evaluation Codex adapter', () => {
               },
             },
           };
-          const commandEvents = commands.map((command, index) => ({
+          const commandEvents = EffectArray.map(commands, (command, index) => ({
             method: 'item/completed',
             params: {
               completedAtMs: command.after ? 130 + index : 110,
@@ -1528,9 +1556,18 @@ describe('matched evaluation Codex adapter', () => {
             context,
             ...commandEvents,
           ]).postSufficientEvidence;
-          expect(observation?.commandExecutions).toBe(commands.filter(command => command.after).length);
+          expect(observation?.commandExecutions).toBe(
+            EffectArray.filter(
+              commands,
+              (command, __effectArrayIndex2) => __effectArrayIndex2 in commands && command.after,
+            ).length,
+          );
           expect(observation?.declinedCommandExecutions).toBe(
-            commands.filter(command => command.after && command.status === 'declined').length,
+            EffectArray.filter(
+              commands,
+              (command, __effectArrayIndex) =>
+                __effectArrayIndex in commands && command.after && command.status === 'declined',
+            ).length,
           );
         },
       ),
@@ -1554,7 +1591,7 @@ describe('matched evaluation Codex adapter', () => {
           let inputTokens = 0;
           let outputTokens = 0;
           let cacheWriteTokens = 0;
-          const events = increments.map(([input, output, cacheWrite]) => {
+          const events = EffectArray.map(increments, ([input, output, cacheWrite]) => {
             inputTokens += input;
             cachedInputTokens += Math.floor(input / 2);
             outputTokens += output;
@@ -1577,7 +1614,7 @@ describe('matched evaluation Codex adapter', () => {
             totalTokens: inputTokens + outputTokens,
           });
           expect(attribution.lastTwoModelCallTokens.totalTokens).toBe(
-            attribution.modelCalls.slice(-2).reduce((total, call) => total + call.totalTokens, 0),
+            EffectArray.reduce(attribution.modelCalls.slice(-2), 0, (total, call) => total + call.totalTokens),
           );
         },
       ),
@@ -1683,14 +1720,14 @@ describe('matched evaluation Codex adapter', () => {
       tasks: [
         {
           calibration: createMatchedEvaluationVerificationCalibrationV1({
-            baseDiagnosticHash: '1'.repeat(64),
+            baseDiagnosticHash: Effect.pipe('1', EffectString.repeat(64)),
             baseExitCode: 1,
-            baseRepositoryFixtureHash: '2'.repeat(64),
-            baseRevision: '3'.repeat(40),
-            fixDiagnosticHash: '4'.repeat(64),
+            baseRepositoryFixtureHash: Effect.pipe('2', EffectString.repeat(64)),
+            baseRevision: Effect.pipe('3', EffectString.repeat(40)),
+            fixDiagnosticHash: Effect.pipe('4', EffectString.repeat(64)),
             fixExitCode: 0,
-            fixRepositoryFixtureHash: '5'.repeat(64),
-            fixRevision: '6'.repeat(40),
+            fixRepositoryFixtureHash: Effect.pipe('5', EffectString.repeat(64)),
+            fixRevision: Effect.pipe('6', EffectString.repeat(40)),
           }),
           selector,
           taskId,
@@ -1714,7 +1751,7 @@ describe('matched evaluation Codex adapter', () => {
 
     await expect(
       runMatchedEvaluationDeterministicVerifierV1({
-        artifactHash: '7'.repeat(64),
+        artifactHash: Effect.pipe('7', EffectString.repeat(64)),
         plan,
         repositoryRoot: passRepository,
         root: join(root, 'pass-runtime'),
@@ -1723,7 +1760,7 @@ describe('matched evaluation Codex adapter', () => {
     ).resolves.toMatchObject({exitCode: 0, status: 'passed'});
     await expect(
       runMatchedEvaluationDeterministicVerifierV1({
-        artifactHash: '8'.repeat(64),
+        artifactHash: Effect.pipe('8', EffectString.repeat(64)),
         plan,
         repositoryRoot: failRepository,
         root: join(root, 'fail-runtime'),
@@ -1732,7 +1769,7 @@ describe('matched evaluation Codex adapter', () => {
     ).resolves.toMatchObject({exitCode: 1, status: 'task-failed'});
     await expect(
       runMatchedEvaluationDeterministicVerifierV1({
-        artifactHash: '9'.repeat(64),
+        artifactHash: Effect.pipe('9', EffectString.repeat(64)),
         plan,
         repositoryRoot: deniedRepository,
         root: join(root, 'denied-runtime'),
@@ -1741,7 +1778,7 @@ describe('matched evaluation Codex adapter', () => {
     ).rejects.toThrow('invalid diagnostic protocol');
     await expect(
       runMatchedEvaluationDeterministicVerifierV1({
-        artifactHash: 'a'.repeat(64),
+        artifactHash: Effect.pipe('a', EffectString.repeat(64)),
         plan,
         repositoryRoot: setupRepository,
         root: setupRoot,
@@ -1749,7 +1786,16 @@ describe('matched evaluation Codex adapter', () => {
       }),
     ).rejects.toMatchObject({code: 'EEXIST'});
     for (const repository of [passRepository, failRepository, deniedRepository, setupRepository]) {
-      expect((await readdir(repository)).filter(entry => entry.startsWith('.threadnote-verifier-tmp-'))).toEqual([]);
+      expect(
+        EffectArrayPipe(await readdir(repository), __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (entry, __effectArrayIndex3) =>
+              __effectArrayIndex3 in __effectArrayValues &&
+              Effect.pipe(entry, EffectString.startsWith('.threadnote-verifier-tmp-')),
+          ),
+        ),
+      ).toEqual([]);
     }
   });
 
@@ -1820,7 +1866,7 @@ describe('matched evaluation Codex adapter', () => {
       git: {executable: gitExecutable, executableSha256: sha256HexSync(await readFile(gitExecutable))},
       judgeModel: {...adapterConfig().judgeModel, reasoningEffort: 'medium'},
       safeBinaries: [{path: selfExecutable, sha256: sha256HexSync(await readFile(selfExecutable))}],
-      safeExecutablePath: [dirname(bunExecutable), dirname(gitExecutable)].join(delimiter),
+      safeExecutablePath: EffectArray.join([dirname(bunExecutable), dirname(gitExecutable)], delimiter),
       temporaryRoot: root,
     };
     const configPath = join(root, 'adapter-config.json');
@@ -1852,7 +1898,7 @@ describe('matched evaluation Codex adapter', () => {
         rubric: {completion: 'The task is complete.', criteria: ['The answer is correct.'], requiredEvidenceIds: []},
         sourceGold: [],
       },
-      manifestHash: '6'.repeat(64),
+      manifestHash: Effect.pipe('6', EffectString.repeat(64)),
       model: {model: config.model.id, parametersHash: config.model.parametersHash, provider: config.model.provider},
       preparedContext: null,
       repository: observed,
@@ -1879,10 +1925,7 @@ describe('matched evaluation Codex adapter', () => {
       process.chdir(originalCwd);
     }
 
-    const response = JSON.parse(await readFile(responsePath, 'utf8')) as {
-      readonly artifactHash: string;
-      readonly transcriptHash: string;
-    };
+    const response = parseJsonObject(await readFile(responsePath, 'utf8'));
     expect(response).toMatchObject({
       metrics: {
         completion: {completed: true},
@@ -1952,9 +1995,7 @@ describe('matched evaluation Codex adapter', () => {
     } finally {
       process.chdir(originalCwd);
     }
-    const budgetResponse = JSON.parse(await readFile(budgetResponsePath, 'utf8')) as {
-      readonly metrics: {readonly completion: {readonly completed: boolean}};
-    };
+    const budgetResponse = parseJsonObject(await readFile(budgetResponsePath, 'utf8'));
     expect(budgetResponse).toMatchObject({
       metrics: {
         completion: {completed: false},
@@ -1965,7 +2006,11 @@ describe('matched evaluation Codex adapter', () => {
       },
       version: 5,
     });
-    const [budgetAgentTranscript] = (await readFile(budgetTranscriptPath, 'utf8')).trim().split('\n');
+    const [budgetAgentTranscript] = Effect.pipe(
+      await readFile(budgetTranscriptPath, 'utf8'),
+      EffectString.trim,
+      EffectString.split('\n'),
+    );
     expect(JSON.parse(budgetAgentTranscript ?? 'null') as unknown).toMatchObject({
       kind: 'agent',
       terminal: 'provider-token-budget',
@@ -1975,8 +2020,8 @@ describe('matched evaluation Codex adapter', () => {
     const contextHome = join(root, 'prepared-home');
     await mkdir(contextHome);
     const expectedContext = {
-      graphContentHash: '8'.repeat(64),
-      graphSnapshotHash: '9'.repeat(64),
+      graphContentHash: Effect.pipe('8', EffectString.repeat(64)),
+      graphSnapshotHash: Effect.pipe('9', EffectString.repeat(64)),
       linkReceiptsHash: null,
       memoryAccess: 'disabled' as const,
       taskContextHash: null,
@@ -2012,7 +2057,11 @@ describe('matched evaluation Codex adapter', () => {
         artifactPath: failedArtifactPath,
         transcriptPath: failedTranscriptPath,
         runNonce: 'run_123456789abcdef0123456789abcdef0',
-        preparedContext: {memoryAccess: 'disabled', graphContext: expectedContext, studyHash: '7'.repeat(64)},
+        preparedContext: {
+          memoryAccess: 'disabled',
+          graphContext: expectedContext,
+          studyHash: Effect.pipe('7', EffectString.repeat(64)),
+        },
         tool: {
           ...request.tool,
           artifactHash: request.adapterArtifactHash,
@@ -2020,7 +2069,7 @@ describe('matched evaluation Codex adapter', () => {
           detail: 'graph-only',
           name: 'threadnote',
           version: '5.0.6',
-          lockIdentityHash: 'a'.repeat(64),
+          lockIdentityHash: Effect.pipe('a', EffectString.repeat(64)),
         },
       })}\n`,
     );
@@ -2038,29 +2087,38 @@ describe('matched evaluation Codex adapter', () => {
       process.chdir(originalCwd);
     }
     await expect(readFile(failedResponsePath)).rejects.toMatchObject({code: 'ENOENT'});
-    const failedTranscript = (await readFile(failedTranscriptPath, 'utf8'))
-      .trim()
-      .split('\n')
-      .map(line => JSON.parse(line) as Record<string, unknown>);
-    expect(failedTranscript.map(row => row.kind)).toEqual(['agent', 'context-delivery-failure']);
+    const failedTranscript = EffectArray.map(
+      Effect.pipe(await readFile(failedTranscriptPath, 'utf8'), EffectString.trim, EffectString.split('\n')),
+      parseJsonObject,
+    );
+    expect(EffectArray.map(failedTranscript, row => row.kind)).toEqual(['agent', 'context-delivery-failure']);
     expect(failedTranscript[0]).toMatchObject({usage: {inputTokens: 100, outputTokens: 50, totalTokens: 150}});
-    expect(JSON.parse(await readFile(failedArtifactPath, 'utf8')) as unknown).toMatchObject({
+    expect(parseJsonObject(await readFile(failedArtifactPath, 'utf8'))).toMatchObject({
       arm: 'threadnote-graph',
       patchSha256: sha256HexSync(''),
     });
     expect(await readFile(`${failedTranscriptPath}.agent.jsonl`, 'utf8')).toContain('"totalTokens":150');
-    expect((await readdir(root)).filter(name => name.startsWith('matched-evaluation-codex-'))).toEqual([]);
+    expect(
+      EffectArrayPipe(await readdir(root), __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (name, __effectArrayIndex3) =>
+            __effectArrayIndex3 in __effectArrayValues &&
+            Effect.pipe(name, EffectString.startsWith('matched-evaluation-codex-')),
+        ),
+      ),
+    ).toEqual([]);
   }, 30_000);
 });
 
 function contextDelivery(text = '{"answer":"Relevant evidence","graph":{"cards":[{"path":"service.ts"}]}}') {
   const expected: MatchedEvaluationExpectedContextDeliveryV1 = {
-    graphContentHash: '1'.repeat(64),
-    graphSnapshotHash: '2'.repeat(64),
-    linkReceiptsHash: '3'.repeat(64),
+    graphContentHash: Effect.pipe('1', EffectString.repeat(64)),
+    graphSnapshotHash: Effect.pipe('2', EffectString.repeat(64)),
+    linkReceiptsHash: Effect.pipe('3', EffectString.repeat(64)),
     memoryAccess: 'linked',
-    studyHash: '4'.repeat(64),
-    taskContextHash: '5'.repeat(64),
+    studyHash: Effect.pipe('4', EffectString.repeat(64)),
+    taskContextHash: Effect.pipe('5', EffectString.repeat(64)),
     detail: 'compact',
     mode: 'brief',
     frozenPromptSha256: sha256HexSync('Task with `formatting` and trailing space. '),
@@ -2068,7 +2126,7 @@ function contextDelivery(text = '{"answer":"Relevant evidence","graph":{"cards":
     maximumFollowupCalls: 4,
     requiredGraphQuery: null,
     runNonce: 'run_0123456789abcdef0123456789abcdef',
-    runtimeManifestSha256: '6'.repeat(64),
+    runtimeManifestSha256: Effect.pipe('6', EffectString.repeat(64)),
     expectedResumeHash: null,
   };
   const receipt = {
@@ -2153,14 +2211,14 @@ function contextFollowup(
 function adapterRequest(arm: 'files' | 'threadnote-graph' | 'threadnote-compact', continuationTreatment: unknown) {
   const detail = arm === 'files' ? null : arm === 'threadnote-graph' ? 'graph-only' : 'compact';
   return {
-    adapterArtifactHash: '1'.repeat(64),
-    adapterConfigurationHash: '2'.repeat(64),
+    adapterArtifactHash: Effect.pipe('1', EffectString.repeat(64)),
+    adapterConfigurationHash: Effect.pipe('2', EffectString.repeat(64)),
     adapterProtocol: 'matched-evaluation-adapter-v5',
     agentTask: {
       category: 'architecture-discovery',
       memoryFixtures: [],
       prompt: 'Complete phase two in the isolated repository.',
-      repositoryFixtureHash: '3'.repeat(64),
+      repositoryFixtureHash: Effect.pipe('3', EffectString.repeat(64)),
       taskId: 'tsk_0123456789abcdef',
       variant: 'implementation',
     },
@@ -2168,16 +2226,21 @@ function adapterRequest(arm: 'files' | 'threadnote-graph' | 'threadnote-compact'
     artifactPath: '/tmp/artifact.json',
     blindLabel: 'A',
     continuationTreatment,
-    environmentPolicyHash: '4'.repeat(64),
+    environmentPolicyHash: Effect.pipe('4', EffectString.repeat(64)),
     judgeTask: {
       negativeControls: [],
       rubric: {completion: 'Complete.', criteria: ['Correct.'], requiredEvidenceIds: []},
       sourceGold: [],
     },
-    manifestHash: '5'.repeat(64),
-    model: {model: 'agent-model', parametersHash: '6'.repeat(64), provider: 'openai'},
+    manifestHash: Effect.pipe('5', EffectString.repeat(64)),
+    model: {model: 'agent-model', parametersHash: Effect.pipe('6', EffectString.repeat(64)), provider: 'openai'},
     preparedContext: null,
-    repository: {dirty: false, fixtureHash: '3'.repeat(64), identityHash: '7'.repeat(64), revision: '8'.repeat(40)},
+    repository: {
+      dirty: false,
+      fixtureHash: Effect.pipe('3', EffectString.repeat(64)),
+      identityHash: Effect.pipe('7', EffectString.repeat(64)),
+      revision: Effect.pipe('8', EffectString.repeat(40)),
+    },
     runNonce: 'run_0123456789abcdef0123456789abcdef',
     runOrder: 0,
     tool: {artifactHash: null, detail, executable: null, lockIdentityHash: null, name: 'fixture', version: '1'},
@@ -2194,7 +2257,7 @@ function adapterConfig() {
       argumentsAfterSubcommand: [],
       argumentsBeforeSubcommand: [],
       executable: '/usr/bin/codex',
-      executableSha256: '1'.repeat(64),
+      executableSha256: Effect.pipe('1', EffectString.repeat(64)),
       version: 'codex-cli 1.0.0',
     },
     arm: 'files' as const,
@@ -2203,11 +2266,21 @@ function adapterConfig() {
     contextHomes: [],
     dependencyProjections: [],
     environmentPolicyHash: matchedEvaluationCodexEnvironmentPolicyHashV1(),
-    git: {executable: '/usr/bin/git', executableSha256: '3'.repeat(64)},
-    judgeModel: {id: 'judge-model', parametersHash: '4'.repeat(64), provider: 'openai', reasoningEffort: 'low'},
-    model: {id: 'agent-model', parametersHash: '5'.repeat(64), provider: 'openai', reasoningEffort: 'medium'},
+    git: {executable: '/usr/bin/git', executableSha256: Effect.pipe('3', EffectString.repeat(64))},
+    judgeModel: {
+      id: 'judge-model',
+      parametersHash: Effect.pipe('4', EffectString.repeat(64)),
+      provider: 'openai',
+      reasoningEffort: 'low',
+    },
+    model: {
+      id: 'agent-model',
+      parametersHash: Effect.pipe('5', EffectString.repeat(64)),
+      provider: 'openai',
+      reasoningEffort: 'medium',
+    },
     pricingMicrosPerMillionTokens: {cachedInput: 100_000, input: 1_000_000, output: 2_000_000},
-    safeBinaries: [{path: '/usr/bin/git', sha256: '3'.repeat(64)}],
+    safeBinaries: [{path: '/usr/bin/git', sha256: Effect.pipe('3', EffectString.repeat(64))}],
     safeExecutablePath: '/usr/bin:/bin',
     taskBudget: {steps: 100, tokens: 100_000},
     temporaryRoot: '/tmp',

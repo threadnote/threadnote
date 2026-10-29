@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Clock, Effect, Exit} from 'effect';
 import {
   emitAnonymousTelemetryEvent,
@@ -18,6 +19,7 @@ import {
   type CodeGraphAnonymousTelemetryComponent,
   type CodeGraphBuildAnonymousTelemetryReporter,
 } from '@threadnote/graph/runtime_ports';
+
 export {
   codeGraphAnonymousTelemetryComponent,
   withCodeGraphBuildAnonymousTelemetry,
@@ -189,14 +191,19 @@ export const makeCodeGraphBuildAnonymousTelemetryReporter = Effect.fn('codeGraph
 );
 
 function codeGraphInventoryDelta(inventory: CodeGraphInventory): {changedFiles: number; deletedFiles: number} {
-  const committedByPath = new Map(inventory.committedFiles.map(file => [file.path, file.contentHash]));
-  const currentPaths = new Set(inventory.files.map(file => file.path));
+  const committedByPath = new Map(EffectArray.map(inventory.committedFiles, file => [file.path, file.contentHash]));
+  const currentPaths = new Set(EffectArray.map(inventory.files, file => file.path));
   return {
-    changedFiles: inventory.files.reduce(
-      (total, file) => total + (committedByPath.get(file.path) === file.contentHash ? 0 : 1),
+    changedFiles: EffectArray.reduce(
+      inventory.files,
       0,
+      (total, file) => total + (committedByPath.get(file.path) === file.contentHash ? 0 : 1),
     ),
-    deletedFiles: inventory.committedFiles.reduce((total, file) => total + (currentPaths.has(file.path) ? 0 : 1), 0),
+    deletedFiles: EffectArray.reduce(
+      inventory.committedFiles,
+      0,
+      (total, file) => total + (currentPaths.has(file.path) ? 0 : 1),
+    ),
   };
 }
 

@@ -1,3 +1,6 @@
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 /** Replace terminal controls and bidi overrides while preserving code-point length. */
 export function sanitizeCodeGraphPresentationText(value: string, maximumCharacters = Number.MAX_SAFE_INTEGER): string {
   const limit = Number.isFinite(maximumCharacters)
@@ -7,7 +10,12 @@ export function sanitizeCodeGraphPresentationText(value: string, maximumCharacte
   let length = 0;
   for (const character of value) {
     if (length >= limit) break;
-    const codePoint = character.codePointAt(0) ?? 0;
+    const codePoint =
+      Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      ) ?? 0;
     output +=
       codePoint <= 0x1f ||
       (codePoint >= 0x7f && codePoint <= 0x9f) ||
@@ -18,14 +26,4 @@ export function sanitizeCodeGraphPresentationText(value: string, maximumCharacte
     length += 1;
   }
   return output;
-}
-
-/** Defensive projection for bounded public result objects assembled outside the analysis service. */
-export function sanitizeCodeGraphPresentationValue<Value>(value: Value): Value {
-  if (typeof value === 'string') return sanitizeCodeGraphPresentationText(value) as Value;
-  if (Array.isArray(value)) return value.map(item => sanitizeCodeGraphPresentationValue(item)) as Value;
-  if (value === null || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [key, sanitizeCodeGraphPresentationValue(item)]),
-  ) as Value;
 }

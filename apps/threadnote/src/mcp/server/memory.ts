@@ -1,3 +1,5 @@
+import * as MigrationSchema from 'effect/Schema';
+import {Array as EffectArray} from 'effect';
 import {validateTopicDependencyExpansionPreview} from '@threadnote/memory/topic-maintenance-expansion';
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {DateTime, Effect, FileSystem, Path, Result} from 'effect';
@@ -36,7 +38,7 @@ import {
   publishShareGitChangeVerified,
   type ShareGitCommitReceipt,
 } from '../../share/git.js';
-import {EffectMcpServerAdapter, McpInput} from '../../effect/ai/mcp.js';
+import {EffectMcpServerRegistry, McpInput} from '../../effect/ai/mcp.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
@@ -103,7 +105,13 @@ import {
 import {memoryReadErrorResult} from './memory_read_recovery.js';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
-export function registerCompactTool(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
+
+export type CompactToolRegistrar = Pick<EffectMcpServerRegistry, 'registerTool'>;
+
+export function registerCompactTool(server: CompactToolRegistrar, config: RuntimeConfig): void {
   server.registerTool(
     'compact_context',
     {
@@ -141,28 +149,32 @@ export function registerCompactTool(server: EffectMcpServerAdapter, config: Runt
           topic: normalizeOptionalMetadata(topic),
         });
         const shouldApply = apply === true;
-        const planText = [
-          formatCompactPlan(plan, {apply: shouldApply}),
-          '',
-          formatSharedCompactAudit(sharedAudit),
-        ].join('\n');
+        const planText = EffectArray.join(
+          [formatCompactPlan(plan, {apply: shouldApply}), '', formatSharedCompactAudit(sharedAudit)],
+          '\n',
+        );
         if (!shouldApply) {
           return {content: [{type: 'text', text: planText}]};
         }
 
         const plannedActions = [...plan.keepUpdates, ...plan.archives, ...plan.forgets];
         const currentByUri = new Map(
-          (yield* readMemoryRecordsByUri(
-            config,
-            plannedActions.map(action => action.uri),
-          )).map(record => [record.uri, record.content]),
+          EffectArray.map(
+            yield* readMemoryRecordsByUri(
+              config,
+              EffectArray.map(plannedActions, action => action.uri),
+            ),
+            record => [record.uri, record.content],
+          ),
         );
-        const changed = plannedActions.find(action => currentByUri.get(action.uri) !== action.expectedContent);
+        const changed = EffectOption.getOrUndefined(
+          EffectArray.findFirst(plannedActions, action => currentByUri.get(action.uri) !== action.expectedContent),
+        );
         if (changed) {
           return argumentError(`Memory ${changed.uri} changed after compact_context planned it. Re-run the plan.`);
         }
 
-        const invalidatedUris = plannedActions.map(action => action.uri);
+        const invalidatedUris = EffectArray.map(plannedActions, action => action.uri);
         return yield* Effect.gen(function* () {
           const ov = 'threadnote-native';
           const appliedMessages: string[] = [];
@@ -171,7 +183,10 @@ export function registerCompactTool(server: EffectMcpServerAdapter, config: Runt
           for (const uri of exactDuplicateApply.updatedSurvivorUris) {
             appliedMessages.push(`Updated kept memory: ${uri}`);
           }
-          for (const action of plan.keepUpdates.filter(candidate => !atomicallyUpdatedUris.has(candidate.uri))) {
+          for (const action of EffectArray.filter(
+            plan.keepUpdates,
+            candidate => !atomicallyUpdatedUris.has(candidate.uri),
+          )) {
             const keepResult = yield* writeMemoryContentWithExpectedHash(
               config,
               ov,
@@ -204,7 +219,10 @@ export function registerCompactTool(server: EffectMcpServerAdapter, config: Runt
             content: [
               {
                 type: 'text',
-                text: [planText, '', 'Applied actions:', ...appliedMessages.map(message => `- ${message}`)].join('\n'),
+                text: EffectArray.join(
+                  [planText, '', 'Applied actions:', ...EffectArray.map(appliedMessages, message => `- ${message}`)],
+                  '\n',
+                ),
               },
             ],
           };
@@ -243,7 +261,10 @@ export function archiveMemoryForCompact(
           return argumentError(schemaRewriteError.message);
         }
         if (source.metadata.citationErrors && source.metadata.citationErrors.length > 0) {
-          const reasons = [...new Set(source.metadata.citationErrors.map(error => error.reason))].sort().join(', ');
+          const reasons = EffectArray.join(
+            [...new Set(EffectArray.map(source.metadata.citationErrors, error => error.reason))].sort(),
+            ', ',
+          );
           return argumentError(
             `Cannot archive ${action.uri}: malformed code citation metadata (${reasons}) must be repaired or recaptured first.`,
           );
@@ -333,19 +354,25 @@ const syncSharedMemoriesForCompact = Effect.fn('mcpServer.syncSharedMemoriesForC
 });
 
 function formatSharedCompactAudit(audit: CompactSharedAudit): string {
-  return [
-    'Shared audit source:',
-    '- bounded auto-sync attempted before scanning local canonical mirrors',
-    audit.syncedTeams.length > 0 ? `- refreshed teams: ${audit.syncedTeams.join(', ')}` : '- refreshed teams: none',
-    '- freshness note: repository contention may defer refresh; hygiene actions never mutate shared memories',
-    ...audit.warnings.map(warning => `- warning: ${warning}`),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Shared audit source:',
+      '- bounded auto-sync attempted before scanning local canonical mirrors',
+      audit.syncedTeams.length > 0
+        ? `- refreshed teams: ${EffectArray.join(audit.syncedTeams, ', ')}`
+        : '- refreshed teams: none',
+      '- freshness note: repository contention may defer refresh; hygiene actions never mutate shared memories',
+      ...EffectArray.map(audit.warnings, warning => `- warning: ${warning}`),
+    ],
+    '\n',
+  );
 }
 
 function memoryUriFromWriteResult(result: unknown): string | undefined {
   if (typeof result !== 'object' || result === null) return undefined;
-  const structuredContent = Reflect.get(result, 'structuredContent') as {readonly memoryUri?: unknown} | undefined;
-  const memoryUri = structuredContent?.memoryUri;
+  const structuredContent: unknown = Reflect.get(result, 'structuredContent');
+  if (typeof structuredContent !== 'object' || structuredContent === null) return undefined;
+  const memoryUri = Reflect.get(structuredContent, 'memoryUri');
   return typeof memoryUri === 'string' ? memoryUri : undefined;
 }
 
@@ -371,7 +398,7 @@ const scopedCompactRecords = Effect.fn('mcpServer.scopedCompactRecords')(functio
         continue;
       }
       for (const entry of entries.value) {
-        if (entry.startsWith('.') || !entry.endsWith('.md')) {
+        if (Effect2.pipe(entry, EffectString.startsWith('.')) || !Effect2.pipe(entry, EffectString.endsWith('.md'))) {
           continue;
         }
         const entryPath = path.join(directory, entry);
@@ -408,13 +435,13 @@ const sharedMemoryDirectoriesForCompact = Effect.fn('mcpServer.sharedMemoryDirec
   const baseUri = `threadnote://user/${uriSegment(config.user)}/memories/shared`;
   const directories: Array<{readonly directory: string; readonly uriDirectory: string}> = [];
   for (const team of [...teamEntries.value].sort()) {
-    if (team.startsWith('.')) continue;
+    if (Effect2.pipe(team, EffectString.startsWith('.'))) continue;
     const teamRoot = path.join(sharedRoot, team);
     const teamInfo = yield* fs.stat(teamRoot).pipe(Effect.option);
     if (teamInfo._tag === 'None' || teamInfo.value.type !== 'Directory') continue;
     directories.push({
       directory: path.join(teamRoot, ...relativeParts),
-      uriDirectory: `${baseUri}/${team}/${relativeParts.join('/')}`,
+      uriDirectory: `${baseUri}/${team}/${EffectArray.join(relativeParts, '/')}`,
     });
   }
   return directories;
@@ -424,7 +451,7 @@ export const readMemoryRecordsByUri = Effect.fn('mcpServer.readMemoryRecordsByUr
   config: RuntimeConfig,
   uris: readonly string[],
 ) {
-  return (yield* readMemoryRecordsByUriWithSourceHash(config, uris)).map(item => item.record);
+  return EffectArray.map(yield* readMemoryRecordsByUriWithSourceHash(config, uris), item => item.record);
 });
 
 export const readMemoryRecordsByUriWithSourceHash = Effect.fn('mcpServer.readMemoryRecordsByUriWithSourceHash')(
@@ -442,7 +469,10 @@ export const readMemoryRecordsByUriWithSourceHash = Effect.fn('mcpServer.readMem
         }),
       {concurrency: 16},
     );
-    return records.filter((item): item is {record: MemoryRecord; sourceHash: string} => item !== undefined);
+    return EffectArray.filter(
+      records,
+      (item): item is {record: MemoryRecord; sourceHash: string} => item !== undefined,
+    );
   },
 );
 
@@ -460,7 +490,7 @@ const localMemoryDirectoryForCompact = Effect.fn('mcpServer.localMemoryDirectory
 function memoryUriDirectoryForCompact(config: RuntimeConfig, kind: CompactableMemoryKind, project: string): string {
   const base = `threadnote://user/${uriSegment(config.user)}/memories`;
   const projectSegment = uriSegment(project);
-  return `${base}/${compactMemoryDirectoryParts(kind, projectSegment).join('/')}`;
+  return `${base}/${EffectArray.join(compactMemoryDirectoryParts(kind, projectSegment), '/')}`;
 }
 
 function compactMemoryDirectoryParts(kind: CompactableMemoryKind, projectSegment: string): readonly string[] {
@@ -585,10 +615,13 @@ export function writeDurableMemory(config: RuntimeConfig, inputParams: WriteDura
           : {...inputParams.metadata, memoryId: replacementMemoryId},
       replaceUri: replacement?.canonicalUri ?? inputParams.replaceUri,
     };
-    const result = (yield* writeDurableMemoryResolved(config, params)) as CallToolResult;
+    const result = yield* writeDurableMemoryResolved(config, params);
     if (result.isError !== true && !params.deferRecallIndexRefresh) {
       const memoryUri = memoryUriFromWriteResult(result);
-      const invalidatedUris = [memoryUri, params.replaceUri].filter((uri): uri is string => uri !== undefined);
+      const invalidatedUris = EffectArray.filter(
+        [memoryUri, params.replaceUri],
+        (uri): uri is string => uri !== undefined,
+      );
       if (invalidatedUris.length > 0) {
         yield* refreshRecallDerivedIndexesAfterCanonicalMutation(config, invalidatedUris);
       }
@@ -596,7 +629,9 @@ export function writeDurableMemory(config: RuntimeConfig, inputParams: WriteDura
     return result;
   }).pipe(
     Effect.catch(error =>
-      Effect.succeed(error instanceof MemoryRelationWriteError ? argumentError(error.message) : mcpErrorResult(error)),
+      Effect.succeed(
+        MigrationSchema.is(MemoryRelationWriteError)(error) ? argumentError(error.message) : mcpErrorResult(error),
+      ),
     ),
   );
 }
@@ -608,7 +643,7 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
     const uris = [
       params.replaceUri,
       prepared.memoryUri,
-      ...(params.expectedSourceContent ?? []).map(source => source.uri),
+      ...EffectArray.map(params.expectedSourceContent ?? [], source => source.uri),
       ...(params.skipMemoryIdentityLock === true
         ? []
         : memoryIdentityWriteLockKeys(prepared.finalMetadata.memoryId, params.expectedSourceContent ?? [])),
@@ -627,7 +662,7 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
           return argumentError(`Memory ${params.replaceUri} no longer exists.`);
         }
         const maintenanceError = topicMaintenanceReplacementError(currentReplaceTarget, {
-          body: params.bodyText.trim(),
+          body: Effect2.pipe(params.bodyText, EffectString.trim),
           metadata: params.metadata,
         });
         if (maintenanceError) return argumentError(maintenanceError);
@@ -777,10 +812,11 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
       } else if (isInPlaceUpdate) {
         messages.push(`Updated existing memory in place: ${memoryUri}`);
       }
-      return {
-        content: [{type: 'text' as const, text: messages.join('\n')}],
+      const result: CallToolResult = {
+        content: [{type: 'text', text: EffectArray.join(messages, '\n')}],
         structuredContent: {memoryUri, replacementCleanupPending},
       };
+      return result;
     });
     return yield* params.deferredCodeAnchor
       ? withDeferredCodeAnchorMutationLocks(fs, config, uris, mutation)
@@ -833,7 +869,7 @@ export function writeCursorCloudSharedMemory(
         config.agentContextHome,
         [
           targetUri,
-          ...(params.expectedSourceContent ?? []).map(source => source.uri),
+          ...EffectArray.map(params.expectedSourceContent ?? [], source => source.uri),
           ...memoryIdentityWriteLockKeys(prepared.finalMetadata.memoryId, params.expectedSourceContent ?? []),
         ],
         Effect.gen(function* () {
@@ -889,7 +925,7 @@ export function writeCursorCloudSharedMemory(
           if (!projected || projected.metadata.topicMaintenanceError)
             return argumentError('Topic maintenance shared projection is malformed or stale.');
           if (
-            projected.body !== params.bodyText.trim() ||
+            projected.body !== Effect2.pipe(params.bodyText, EffectString.trim) ||
             projected.metadata.memoryId !== prepared.finalMetadata.memoryId ||
             projected.metadata.kind !== 'durable' ||
             projected.metadata.visibility !== 'shared' ||
@@ -961,7 +997,7 @@ export function writeCursorCloudSharedMemory(
                 version: 2,
               },
             },
-            content: [{type: 'text' as const, text: messages.join('\n')}],
+            content: [{type: 'text' as const, text: EffectArray.join(messages, '\n')}],
             structuredContent: {
               memoryUri: targetUri,
               persistence: 'shared-git-pushed',
@@ -1019,7 +1055,7 @@ const preparePersonalMemoryWriteResolved = Effect.fn('mcpServer.preparePersonalM
     const schemaRewriteError = memorySchemaRewriteError(replaced.content);
     if (schemaRewriteError) return yield* Effect.fail(schemaRewriteError);
     const maintenanceError = topicMaintenanceReplacementError(replaced, {
-      body: params.bodyText.trim(),
+      body: Effect2.pipe(params.bodyText, EffectString.trim),
       metadata: params.metadata,
     });
     if (maintenanceError) return yield* McpServerOperationError.make({message: maintenanceError});
@@ -1039,17 +1075,27 @@ const preparePersonalMemoryWriteResolved = Effect.fn('mcpServer.preparePersonalM
     memoryId:
       params.metadata.memoryId ??
       replaced?.metadata.memoryId ??
-      `tn_${(yield* sha256Hex(
-        params.metadata.candidateId ??
-          `${params.metadata.project ?? ''}\n${params.metadata.topic ?? ''}\n${params.bodyText}`,
-      )).slice(0, 20)}`,
+      `tn_${Effect2.pipe(
+        yield* sha256Hex(
+          params.metadata.candidateId ??
+            `${params.metadata.project ?? ''}\n${params.metadata.topic ?? ''}\n${params.bodyText}`,
+        ),
+        EffectString.slice(0, 20),
+      )}`,
     schemaVersion: Math.max(MEMORY_SCHEMA_VERSION, params.metadata.schemaVersion ?? 0),
     updatedAt: params.metadata.updatedAt ?? params.metadata.timestamp,
     visibility: 'personal',
   };
   if (
     metadata.memoryId !== undefined &&
-    metadata.relations?.some(relation => memoryIdFromIdentityAlias(relation.uri) === metadata.memoryId)
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(metadata.relations), __effectArrayReceiver =>
+        EffectArray.some(
+          __effectArrayReceiver,
+          relation => memoryIdFromIdentityAlias(relation.uri) === metadata.memoryId,
+        ),
+      ),
+    )
   ) {
     return yield* McpServerOperationError.make({message: 'A memory cannot relate to itself.'});
   }
@@ -1154,7 +1200,8 @@ const writeSharedMemoryReplacement = Effect.fn('mcp_server.writeSharedMemoryRepl
   messages.push(
     ...(yield* publishShareGitChange(resolved.config.worktree, relativePath, `share: update ${relativePath}`)),
   );
-  return {content: [{type: 'text', text: messages.join('\n')}]};
+  const result: CallToolResult = {content: [{type: 'text', text: EffectArray.join(messages, '\n')}]};
+  return result;
 });
 
 export const resourceExists = Effect.fn('mcp_server.resourceExists')(function* (
@@ -1218,7 +1265,7 @@ const memoryUriFor = Effect.fn('mcpServer.memoryUriFor')(function* (
 ) {
   const filename = shouldUseStableMemoryUri(metadata)
     ? `${uriSegment(metadata.topic ?? 'current')}.md`
-    : `threadnote-${safeTimestamp()}-${(yield* sha256(memory)).slice(0, 12)}.md`;
+    : `threadnote-${safeTimestamp()}-${Effect2.pipe(yield* sha256(memory), EffectString.slice(0, 12))}.md`;
   return `${memoryDirectoryUri(config, metadata)}/${filename}`;
 });
 
@@ -1273,15 +1320,22 @@ export const runNativeAddResourceTool = Effect.fn('mcp_server.runNativeAddResour
   toolName: string,
   params: NativeAddResourceParams,
 ) {
-  const tempFileId = params.tempFileId?.trim();
-  const source = params.path?.trim();
+  const tempFileId = Effect2.pipe(params.tempFileId, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
+  const source = Effect2.pipe(params.path, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (!source && !tempFileId) {
     return argumentError(
-      [
-        `Threadnote MCP tool "${toolName}" needs a non-empty "path" argument.`,
-        'Pass JSON arguments to the tool call.',
-        `Example: ${toolName}(${JSON.stringify({path: '/path/to/README.md', to: 'threadnote://resources/my-repo/README.md'})})`,
-      ].join('\n'),
+      EffectArray.join(
+        [
+          `Threadnote MCP tool "${toolName}" needs a non-empty "path" argument.`,
+          'Pass JSON arguments to the tool call.',
+          `Example: ${toolName}(${JSON.stringify({path: '/path/to/README.md', to: 'threadnote://resources/my-repo/README.md'})})`,
+        ],
+        '\n',
+      ),
     );
   }
   if (source) {
@@ -1332,14 +1386,20 @@ export const runNativeAddResourceTool = Effect.fn('mcp_server.runNativeAddResour
   if (info.success.type === 'File') {
     const target = checkedTo.value
       ? resourceIdWithoutAnchor(parseResourceId(checkedTo.value)).canonicalUri
-      : canonicalResourceUri('resources', ['imports', path.basename(resolvedSource).normalize('NFC')]);
+      : canonicalResourceUri('resources', [
+          'imports',
+          Effect2.pipe(path.basename(resolvedSource), EffectString.normalize('NFC')),
+        ]);
     yield* store.write(location, target, yield* fs.readFileString(resolvedSource), {mode: 'upsert'});
     imported.push(target);
   } else if (info.success.type === 'Directory') {
     const root = resourceIdWithoutAnchor(
       parseResourceId(
         checkedTo.value ??
-          canonicalResourceUri('resources', ['imports', path.basename(resolvedSource).normalize('NFC')]),
+          canonicalResourceUri('resources', [
+            'imports',
+            Effect2.pipe(path.basename(resolvedSource), EffectString.normalize('NFC')),
+          ]),
       ),
     );
     const planned: Array<{readonly filePath: string; readonly target: string}> = [];
@@ -1348,10 +1408,10 @@ export const runNativeAddResourceTool = Effect.fn('mcp_server.runNativeAddResour
       if ((yield* fs.readLink(filePath).pipe(Effect.option))._tag === 'Some') continue;
       const fileInfo = yield* fs.stat(filePath);
       if (fileInfo.type !== 'File') continue;
-      const relativeSegments = path
-        .relative(resolvedSource, filePath)
-        .split(path.sep)
-        .map(segment => segment.normalize('NFC'));
+      const relativeSegments = EffectArray.map(
+        Effect2.pipe(path.relative(resolvedSource, filePath), EffectString.split(path.sep)),
+        segment => Effect2.pipe(segment, EffectString.normalize('NFC')),
+      );
       planned.push({
         filePath,
         target: canonicalResourceUri(root.namespace, [...root.segments, ...relativeSegments]),
@@ -1359,7 +1419,11 @@ export const runNativeAddResourceTool = Effect.fn('mcp_server.runNativeAddResour
     }
     const destinations = new Set<string>();
     for (const plannedImport of planned) {
-      const collisionKey = plannedImport.target.normalize('NFC').toLocaleLowerCase();
+      const collisionKey = Effect2.pipe(
+        plannedImport.target,
+        EffectString.normalize('NFC'),
+        EffectString.toLocaleLowerCase(),
+      );
       if (destinations.has(collisionKey)) {
         return argumentError(`Local import paths collide at destination URI: ${plannedImport.target}`);
       }
@@ -1383,7 +1447,7 @@ export const runNativeAddResourceTool = Effect.fn('mcp_server.runNativeAddResour
     content: [
       {
         type: 'text',
-        text: `Imported ${imported.length} canonical resource(s).${params.description ? ` ${params.description.trim()}` : ''}`,
+        text: `Imported ${imported.length} canonical resource(s).${params.description ? ` ${Effect2.pipe(params.description, EffectString.trim)}` : ''}`,
       },
     ],
     structuredContent: {imported},
@@ -1424,16 +1488,33 @@ export function runNativeListTool(
           ]
         : yield* listOne(options.uri);
     const visible =
-      options.all === true ? entries : entries.filter(entry => !entry.uri.split('/').at(-1)?.startsWith('.'));
+      options.all === true
+        ? entries
+        : EffectArray.filter(
+            entries,
+            entry =>
+              !Effect2.pipe(Effect2.pipe(entry.uri, EffectString.split('/')).at(-1), effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect2.pipe(effectOptionalString, EffectString.startsWith('.')),
+              ),
+          );
     const limited = visible.slice(0, options.nodeLimit ?? 1000);
     const text =
       limited.length === 0
         ? `(nothing found at ${options.uri})`
         : options.simple === true
-          ? limited.map(entry => entry.uri).join('\n')
-          : limited
-              .map(entry => `${entry.type === 'directory' ? 'directory' : 'file'}\t${entry.size}\t${entry.uri}`)
-              .join('\n');
+          ? EffectArray.join(
+              EffectArray.map(limited, entry => entry.uri),
+              '\n',
+            )
+          : EffectArray.join(
+              EffectArray.map(
+                limited,
+                entry => `${entry.type === 'directory' ? 'directory' : 'file'}\t${entry.size}\t${entry.uri}`,
+              ),
+              '\n',
+            );
     return {
       content: [{type: 'text' as const, text}],
       structuredContent: {entries: limited},
@@ -1456,7 +1537,10 @@ export function runNativeGrepTool(
     const text =
       matches.length === 0
         ? `(nothing found at ${options.uri})`
-        : matches.map(match => `${match.uri}:${match.line}:${match.text}`).join('\n');
+        : EffectArray.join(
+            EffectArray.map(matches, match => `${match.uri}:${match.line}:${match.text}`),
+            '\n',
+          );
     return {
       content: [{type: 'text' as const, text}],
       structuredContent: {matches},
@@ -1476,7 +1560,13 @@ export function runNativeGlobTool(
       content: [
         {
           type: 'text' as const,
-          text: limited.length === 0 ? `(nothing found at ${options.uri})` : limited.map(entry => entry.uri).join('\n'),
+          text:
+            limited.length === 0
+              ? `(nothing found at ${options.uri})`
+              : EffectArray.join(
+                  EffectArray.map(limited, entry => entry.uri),
+                  '\n',
+                ),
         },
       ],
       structuredContent: {entries: limited},
@@ -1531,7 +1621,7 @@ export function runNativeReadTool(
             uris,
             options.allowedUriScopes ?? [`threadnote://user/${uriSegment(config.user)}/memories`],
           )
-        : uris.map(requestedUri => ({canonicalUri: requestedUri, requestedUri}));
+        : EffectArray.map(uris, requestedUri => ({canonicalUri: requestedUri, requestedUri}));
     const content: Array<{readonly text: string; readonly type: 'text'}> = [];
     const resources: Array<{
       readonly canonicalUri: string;
@@ -1594,10 +1684,13 @@ export function runNativeReadTool(
 }
 
 export function textFromCallToolResult(result: CallToolResult): string {
-  return result.content
-    .map(content => (content.type === 'text' ? content.text : ''))
-    .join('\n')
-    .trim();
+  return Effect2.pipe(
+    EffectArray.join(
+      EffectArray.map(result.content, content => (content.type === 'text' ? content.text : '')),
+      '\n',
+    ),
+    EffectString.trim,
+  );
 }
 
 export function writeMemoryContentWithExpectedHash<E = never, R = never>(

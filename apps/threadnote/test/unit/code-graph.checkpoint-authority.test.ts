@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Layer} from 'effect';
@@ -18,6 +19,8 @@ import {
   codeGraphExtractorSetIdentityFromPackProvenance,
 } from '@threadnote/graph/graph_identity';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const authorityLayer = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
 
@@ -31,9 +34,9 @@ describe('code graph checkpoint authority', () => {
         source: {
           ...header.source,
           graphContentId: codeGraphContentIdentity(header.source.extractorSet, records, {
-            scopeKey: `code-graph-scope:${'a'.repeat(64)}`,
-            definitionDigest: 'b'.repeat(64),
-            closureDigest: 'c'.repeat(64),
+            scopeKey: `code-graph-scope:${Effect2.pipe('a', EffectString.repeat(64))}`,
+            definitionDigest: Effect2.pipe('b', EffectString.repeat(64)),
+            closureDigest: Effect2.pipe('c', EffectString.repeat(64)),
           }),
         },
       };
@@ -46,12 +49,15 @@ describe('code graph checkpoint authority', () => {
   effectIt.effect('orders the private SQLite spool canonically across its Unicode keyset boundary', () =>
     Effect.gen(function* () {
       const paths = [
-        ...Array.from({length: 999}, (_, index) => `src/a${index.toString().padStart(4, '0')}.ts`),
+        ...Array.from(
+          {length: 999},
+          (_, index) => `src/a${Effect2.pipe(index.toString(), EffectString.padStart(4, '0'))}.ts`,
+        ),
         'src/\ue000.ts',
         'src/\u{10000}.ts',
       ];
-      const files = paths.map(fileRecord);
-      const records = files.flatMap(file => [file, factRecord(file.path)]);
+      const files = EffectArray.map(paths, fileRecord);
+      const records = EffectArray.flatMap(files, file => [file, factRecord(file.path)]);
 
       expect(
         yield* withCodeGraphCheckpointAuthorityVerification(headerFor(files), accept =>
@@ -86,24 +92,24 @@ function headerFor(records: readonly CodeGraphCheckpointFileRecordV1[]) {
       caseMode: 'sensitive',
       displayName: 'authority-ordering-fixture',
       objectFormat: 'sha1',
-      repositoryId: '0'.repeat(64),
+      repositoryId: Effect2.pipe('0', EffectString.repeat(64)),
     },
     source: {
-      commit: '0'.repeat(40),
+      commit: Effect2.pipe('0', EffectString.repeat(40)),
       extractorSet,
       graphContentId: codeGraphContentIdentity(extractorSet, records),
     },
   };
   return encodeCodeGraphCheckpointPackV1(
     metadata,
-    records.flatMap(record => [record, factRecord(record.path)]),
+    EffectArray.flatMap(records, record => [record, factRecord(record.path)]),
   ).header;
 }
 
 function fileRecord(path: string): CodeGraphCheckpointFileRecordV1 {
   const contentHash = sha256HexSync(path);
   return {
-    blobId: contentHash.slice(0, 40),
+    blobId: Effect2.pipe(contentHash, EffectString.slice(0, 40)),
     contentHash,
     kind: 'file',
     language: 'typescript',

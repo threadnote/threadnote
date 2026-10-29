@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {Deferred, Effect, Queue, Schema, Stream} from 'effect';
 import * as ChildProcess from 'effect/process/ChildProcess';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -11,16 +12,18 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {findExecutable} from '../utils.js';
 import {resolveEffectAiConfiguration} from '../effect/ai/consolidator.js';
 import {telemetryChildEnvironmentPolicy} from '../telemetry/session.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ConsolidationModel extends ConsolidationModelOption {
   readonly reasoningEffort?: string;
 }
-export class ConsolidationModelsError extends Schema.TaggedError<ConsolidationModelsError>()(
-  'ConsolidationModelsError',
-  {
-    message: Schema.String,
-  },
-) {}
+export class ConsolidationModelsError extends Schema.TaggedError<
+  ConsolidationModelsError,
+  {readonly brand: unique symbol}
+>()('ConsolidationModelsError', {
+  message: Schema.String,
+}) {}
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_MODEL_PAGES = 8;
 const MAX_MODELS = 256;
@@ -28,21 +31,33 @@ const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', '
 const error = (message: string) => ConsolidationModelsError.make({message});
 
 function record(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
+  return Predicate.isObject(value) ? value : undefined;
 }
 function validModelId(value: unknown): value is string {
   return (
     typeof value === 'string' &&
     value.length <= 256 &&
-    value.trim().length > 0 &&
-    [...value].every(character => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127)
+    Effect2.pipe(value, EffectString.trim).length > 0 &&
+    EffectArray.every(
+      [...value],
+      character =>
+        Effect2.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect2.Option.getOrElse(() => NaN),
+        ) >= 32 &&
+        Effect2.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect2.Option.getOrElse(() => NaN),
+        ) !== 127,
+    )
   );
 }
 export function normalizeCodexModelPage(value: unknown): {models: ConsolidationModel[]; nextCursor?: string} {
   const page = record(value);
-  if (!page || !Array.isArray(page.data)) throw error('Codex returned an invalid model catalog. Reload model choices.');
+  if (!page || !EffectArray.isArray(page.data))
+    throw error('Codex returned an invalid model catalog. Reload model choices.');
   const models: ConsolidationModel[] = [];
   const ids = new Set<string>();
   for (const value of page.data) {
@@ -53,7 +68,9 @@ export function normalizeCodexModelPage(value: unknown): {models: ConsolidationM
     models.push({
       id: entry.model,
       label:
-        typeof entry.displayName === 'string' && entry.displayName.trim() && entry.displayName.length <= 256
+        typeof entry.displayName === 'string' &&
+        Effect2.pipe(entry.displayName, EffectString.trim) &&
+        entry.displayName.length <= 256
           ? entry.displayName
           : entry.model,
       isDefault: entry.isDefault === true,
@@ -68,7 +85,7 @@ export function normalizeCodexModelPage(value: unknown): {models: ConsolidationM
 }
 export function selectConsolidationModel(value: unknown, models: readonly ConsolidationModel[]): ConsolidationModel {
   if (!validModelId(value)) throw error('Choose a model before generating a consolidation draft.');
-  const selected = models.find(model => model.id === value);
+  const selected = EffectOption.getOrUndefined(EffectArray.findFirst(models, model => model.id === value));
   if (!selected) throw error('This model is no longer available. Reload model choices and select a model again.');
   return selected;
 }
@@ -138,10 +155,16 @@ export const discoverConsolidationModels = Effect.fn('manager.discoverConsolidat
               return yield* error('Codex model catalog exceeded the response limit.');
             buffer += decoder.decode(chunk, {stream: true});
             let newline: number;
-            while ((newline = buffer.indexOf('\n')) !== -1) {
-              const line = buffer.slice(0, newline);
-              buffer = buffer.slice(newline + 1);
-              if (!line.trim()) continue;
+            while (
+              (newline = Effect2.pipe(
+                buffer,
+                EffectString.indexOf('\n'),
+                Effect2.Option.getOrElse(() => -1),
+              )) !== -1
+            ) {
+              const line = Effect2.pipe(buffer, EffectString.slice(0, newline));
+              buffer = Effect2.pipe(buffer, EffectString.slice(newline + 1));
+              if (!Effect2.pipe(line, EffectString.trim)) continue;
               const message = yield* Effect.try({
                 try: () => record(JSON.parse(line)),
                 catch: () => error('Codex returned an invalid model catalog response.'),

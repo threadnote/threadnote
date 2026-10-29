@@ -1,3 +1,5 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Predicate} from 'effect';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed isolation builder owns disposable OS filesystem and process boundaries. */
 import {createHash} from 'node:crypto';
 import {
@@ -17,6 +19,9 @@ import {basename, delimiter, dirname, isAbsolute, join, relative, resolve} from 
 import {spawn} from 'node:child_process';
 import {type CodeMemoryLinkAppServerCommand} from './code-memory-link-app-server-client.js';
 import {randomUuidV4} from '@threadnote/threadnote/crypto/uuid';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_CODEX_CONFIG_VERSION = 1 as const;
 export const CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION = 'codex-cli 0.149.0-alpha.4.1' as const;
@@ -194,7 +199,7 @@ export function parseCodeMemoryLinkCodexClientConfigV1(value: unknown): CodeMemo
   if (parsed.model.id !== 'gpt-5.6-luna' && parsed.model.id !== 'gpt-5.6-terra') {
     invalid('model id must be one of the two reviewed gate clients');
   }
-  if (parsed.safeBinaries.some(binary => dirname(binary.path) !== parsed.safeExecutablePath)) {
+  if (EffectArray.some(parsed.safeBinaries, binary => dirname(binary.path) !== parsed.safeExecutablePath)) {
     invalid('every safe binary must live directly in the reviewed private PATH');
   }
   return parsed;
@@ -213,7 +218,7 @@ export function projectCodeMemoryLinkCodexClientConfigV1(config: CodeMemoryLinkC
       tool: 'context_brief',
       version: 1,
     },
-    safeBinaries: config.safeBinaries.map(({name, sha256}) => ({name, sha256})),
+    safeBinaries: EffectArray.map(config.safeBinaries, ({name, sha256}) => ({name, sha256})),
     sealedSuiteLayoutArtifactId: config.sealedSuite.layoutArtifactId,
     version: CODE_MEMORY_LINK_CODEX_CONFIG_VERSION,
   } as const;
@@ -225,7 +230,10 @@ export async function assertCodeMemoryLinkCodexArtifacts(config: CodeMemoryLinkC
     [config.git.executable, config.git.executableSha256, 'Git executable'],
     [config.proxy.bunExecutable, config.proxy.bunExecutableSha256, 'proxy Bun executable'],
     [config.proxy.bundlePath, config.proxy.bundleSha256, 'proxy bundle'],
-    ...config.safeBinaries.map(binary => [binary.path, binary.sha256, `safe ${binary.name} executable`] as const),
+    ...EffectArray.map(
+      config.safeBinaries,
+      binary => [binary.path, binary.sha256, `safe ${binary.name} executable`] as const,
+    ),
   ] as const;
   for (const [path, expectedHash, label] of checks) {
     const canonical = await realpath(path);
@@ -247,7 +255,8 @@ export async function assertCodeMemoryLinkCodexArtifacts(config: CodeMemoryLinkC
     throw new Error('Codex auth source must be canonical.');
   }
   const version = await captureCommand(config.appServer.executable, ['--version'], 10_000);
-  if (version.stdout.trim() !== config.appServer.version) throw new Error('Codex app-server version is not pinned.');
+  if (Effect.pipe(version.stdout, EffectString.trim) !== config.appServer.version)
+    throw new Error('Codex app-server version is not pinned.');
 }
 
 export async function createCodeMemoryLinkCodexIsolation(input: {
@@ -344,69 +353,72 @@ export function buildCodeMemoryLinkCodexConfig(input: {
   readonly repositoryRoot: string;
 }): string {
   const {config} = input;
-  return [
-    `model = ${toml(config.model.id)}`,
-    `model_provider = ${toml(config.model.provider)}`,
-    `model_reasoning_effort = ${toml(config.model.reasoningEffort)}`,
-    'approval_policy = "on-request"',
-    'approvals_reviewer = "user"',
-    'sandbox_mode = "workspace-write"',
-    'allow_login_shell = false',
-    'file_opener = "none"',
-    'hide_agent_reasoning = true',
-    'show_raw_agent_reasoning = false',
-    'suppress_unstable_features_warning = true',
-    'project_doc_max_bytes = 0',
-    'project_doc_fallback_filenames = []',
-    '',
-    '[analytics]',
-    'enabled = false',
-    '',
-    '[feedback]',
-    'enabled = false',
-    '',
-    '[history]',
-    'persistence = "none"',
-    '',
-    '[shell_environment_policy]',
-    'inherit = "none"',
-    'ignore_default_excludes = false',
-    `include_only = ["PATH", "LANG", "LC_ALL", "NO_COLOR"]`,
-    `set = { PATH = ${toml(config.safeExecutablePath)}, LANG = "C.UTF-8", LC_ALL = "C.UTF-8", NO_COLOR = "1" }`,
-    '',
-    '[tools]',
-    'web_search = false',
-    '',
-    '[features]',
-    'apps = false',
-    'code_mode = true',
-    'code_mode_only = true',
-    'plugins = false',
-    'hooks = false',
-    'multi_agent = false',
-    'browser_use = false',
-    'computer_use = false',
-    'image_generation = false',
-    'non_prefixed_mcp_tool_names = true',
-    'skill_mcp_dependency_install = false',
-    'shell_snapshot = false',
-    'tool_suggest = false',
-    '',
-    `[projects.${toml(input.repositoryRoot)}]`,
-    'trust_level = "untrusted"',
-    '',
-    `[mcp_servers.${CODE_MEMORY_LINK_PROXY_SERVER_NAME}]`,
-    `command = ${toml(config.proxy.bunExecutable)}`,
-    `args = [${toml(config.proxy.bundlePath)}]`,
-    'enabled = true',
-    'required = true',
-    'enabled_tools = ["context_brief"]',
-    `env_vars = [${toml(input.proxyPacketEnvironmentName)}]`,
-    'startup_timeout_sec = 20',
-    'tool_timeout_sec = 120',
-    'default_tools_approval_mode = "approve"',
-    '',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `model = ${toml(config.model.id)}`,
+      `model_provider = ${toml(config.model.provider)}`,
+      `model_reasoning_effort = ${toml(config.model.reasoningEffort)}`,
+      'approval_policy = "on-request"',
+      'approvals_reviewer = "user"',
+      'sandbox_mode = "workspace-write"',
+      'allow_login_shell = false',
+      'file_opener = "none"',
+      'hide_agent_reasoning = true',
+      'show_raw_agent_reasoning = false',
+      'suppress_unstable_features_warning = true',
+      'project_doc_max_bytes = 0',
+      'project_doc_fallback_filenames = []',
+      '',
+      '[analytics]',
+      'enabled = false',
+      '',
+      '[feedback]',
+      'enabled = false',
+      '',
+      '[history]',
+      'persistence = "none"',
+      '',
+      '[shell_environment_policy]',
+      'inherit = "none"',
+      'ignore_default_excludes = false',
+      `include_only = ["PATH", "LANG", "LC_ALL", "NO_COLOR"]`,
+      `set = { PATH = ${toml(config.safeExecutablePath)}, LANG = "C.UTF-8", LC_ALL = "C.UTF-8", NO_COLOR = "1" }`,
+      '',
+      '[tools]',
+      'web_search = false',
+      '',
+      '[features]',
+      'apps = false',
+      'code_mode = true',
+      'code_mode_only = true',
+      'plugins = false',
+      'hooks = false',
+      'multi_agent = false',
+      'browser_use = false',
+      'computer_use = false',
+      'image_generation = false',
+      'non_prefixed_mcp_tool_names = true',
+      'skill_mcp_dependency_install = false',
+      'shell_snapshot = false',
+      'tool_suggest = false',
+      '',
+      `[projects.${toml(input.repositoryRoot)}]`,
+      'trust_level = "untrusted"',
+      '',
+      `[mcp_servers.${CODE_MEMORY_LINK_PROXY_SERVER_NAME}]`,
+      `command = ${toml(config.proxy.bunExecutable)}`,
+      `args = [${toml(config.proxy.bundlePath)}]`,
+      'enabled = true',
+      'required = true',
+      'enabled_tools = ["context_brief"]',
+      `env_vars = [${toml(input.proxyPacketEnvironmentName)}]`,
+      'startup_timeout_sec = 20',
+      'tool_timeout_sec = 120',
+      'default_tools_approval_mode = "approve"',
+      '',
+    ],
+    '\n',
+  );
 }
 
 export async function copyFixtureTree(
@@ -440,7 +452,8 @@ async function copyDirectory(
       await copyDirectory(sourcePath, destinationPath, fixtureRoot, allowAgentControlFiles);
     } else if (metadata.isFile()) {
       const relativePath = relative(fixtureRoot, sourcePath);
-      if (relativePath.startsWith('..') || isAbsolute(relativePath)) throw new Error('Fixture path escaped its root.');
+      if (Effect.pipe(relativePath, EffectString.startsWith('..')) || isAbsolute(relativePath))
+        throw new Error('Fixture path escaped its root.');
       await copyFile(sourcePath, destinationPath);
       await chmod(destinationPath, 0o600);
     } else throw new Error('Fixture contains a non-regular filesystem entry.');
@@ -466,8 +479,8 @@ async function captureCommand(executable: string, args: readonly string[], timeo
       if (code !== 0) reject(new Error('Could not verify the pinned Codex version.'));
       else
         resolvePromise({
-          stderr: Buffer.concat(stderr).toString('utf8').slice(-4096),
-          stdout: Buffer.concat(stdout).toString('utf8').slice(-4096),
+          stderr: Effect.pipe(Buffer.concat(stderr).toString('utf8'), EffectString.slice(-4096)),
+          stdout: Effect.pipe(Buffer.concat(stdout).toString('utf8'), EffectString.slice(-4096)),
         });
     });
   });
@@ -480,7 +493,12 @@ async function sha256File(path: string): Promise<string> {
 }
 
 function absolutePath(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !isAbsolute(value) || resolve(value) !== value || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    !isAbsolute(value) ||
+    resolve(value) !== value ||
+    Effect.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} must be a normalized absolute path`);
   }
   return value;
@@ -488,8 +506,14 @@ function absolutePath(value: unknown, label: string): string {
 
 function absolutePathList(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0) invalid(`${label} must be non-empty`);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   const entries = value.split(delimiter);
-  if (entries.some(entry => !isAbsolute(entry) || resolve(entry) !== entry || entry.includes('\0'))) {
+  if (
+    EffectArray.some(
+      entries,
+      entry => !isAbsolute(entry) || resolve(entry) !== entry || Effect.pipe(entry, EffectString.includes('\0')),
+    )
+  ) {
     invalid(`${label} must contain only normalized absolute paths`);
   }
   if (entries.length !== 1) invalid(`${label} must name one private reviewed directory`);
@@ -497,19 +521,16 @@ function absolutePathList(value: unknown, label: string): string {
 }
 
 function parseSafeBinaries(value: unknown): CodeMemoryLinkCodexClientConfigV1['safeBinaries'] {
-  if (!Array.isArray(value)) invalid('safeBinaries must be an array');
+  if (!EffectArray.isArray(value)) invalid('safeBinaries must be an array');
   const expectedNames = [...CODE_MEMORY_LINK_SAFE_EXECUTABLE_NAMES];
   if (value.length !== expectedNames.length) invalid('safeBinaries must contain the complete reviewed command set');
-  return value.map((entry, index) => {
+  return EffectArray.map(value, (entry, index) => {
     const binary = object(entry, `safe binary ${index + 1}`);
     exactKeys(binary, ['name', 'path', 'sha256']);
-    if (
-      typeof binary.name !== 'string' ||
-      !(CODE_MEMORY_LINK_SAFE_EXECUTABLE_NAMES as readonly string[]).includes(binary.name)
-    ) {
+    if (typeof binary.name !== 'string' || !isCodeMemoryLinkSafeExecutableName(binary.name)) {
       invalid(`safe binary ${index + 1} name is invalid`);
     }
-    const name = binary.name as (typeof CODE_MEMORY_LINK_SAFE_EXECUTABLE_NAMES)[number];
+    const name = binary.name;
     if (name !== expectedNames[index]) invalid('safeBinaries must use canonical name order');
     const path = absolutePath(binary.path, `safe ${name} executable`);
     if (basename(path) !== name) invalid(`safe ${name} executable must use its reviewed basename`);
@@ -517,10 +538,16 @@ function parseSafeBinaries(value: unknown): CodeMemoryLinkCodexClientConfigV1['s
   });
 }
 
+function isCodeMemoryLinkSafeExecutableName(
+  value: string,
+): value is (typeof CODE_MEMORY_LINK_SAFE_EXECUTABLE_NAMES)[number] {
+  return EffectArray.some(CODE_MEMORY_LINK_SAFE_EXECUTABLE_NAMES, name => name === value);
+}
+
 function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid('object has unsupported or missing fields');
   }
 }
@@ -530,10 +557,10 @@ function hash(value: unknown, label: string): string {
 }
 
 function integer(value: unknown, label: string, minimum: number, maximum: number): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+  if (!checkedIsSafeInteger(value) || value < minimum || value > maximum) {
     invalid(`${label} is out of range`);
   }
-  return value as number;
+  return value;
 }
 
 function literal<T extends string | number>(value: unknown, expected: T, label: string): T {
@@ -547,8 +574,8 @@ function matchingText(value: unknown, pattern: RegExp, label: string): string {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function toml(value: string): string {

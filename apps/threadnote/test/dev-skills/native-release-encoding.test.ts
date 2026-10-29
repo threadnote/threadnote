@@ -5,21 +5,27 @@ import {join} from '@threadnote/testing/node-path';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
 import {ReleaseCommandError, runReleaseCommand} from './native-release-process.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 // Real binary pipes through a tiny host-runtime producer; no release build needed.
 const producer = (program: string, ...args: string[]) => [process.execPath, '-e', program, ...args];
 const run = (command: readonly string[], options: Parameters<typeof runReleaseCommand>[3] = {}) =>
-  runReleaseCommand(command, {...process.env}, process.cwd(), {timeoutMs: 5000, ...options});
+  runReleaseCommand(command, {...process.env}, process.cwd(), {
+    timeoutMs: 5000,
+    ...options,
+  });
 const digest = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
-const normalize = (text: string) => text.replace(/\r\n?/g, '\n');
+const normalize = (text: string) => Effect.pipe(text, EffectString.replace(/\r\n?/g, '\n'));
 const echo = producer("const fs = require('fs'); process.stdout.write(fs.readFileSync(0));");
 const captureError = (command: readonly string[], options?: Parameters<typeof runReleaseCommand>[3]) => {
   try {
     run(command, options);
     throw new Error('Expected a process failure');
   } catch (error) {
-    expect(error).toBeInstanceOf(ReleaseCommandError);
-    return error as ReleaseCommandError;
+    if (!(error instanceof ReleaseCommandError)) throw error;
+    return error;
   }
 };
 
@@ -34,7 +40,7 @@ it('roundtrips UTF-8 stdin and binary document/JSON stdout with explicit newline
   const reader = producer(
     "const fs=require('fs'); const body=fs.readFileSync(0,'utf8'); process.stdout.write(JSON.stringify({body}));",
   );
-  const durable = `${JSON.parse(run(reader, {input: run(echo, {input: body.replace(/\n/g, '\r\n')})})).body.trim()}\n`;
+  const durable = `${JSON.parse(run(reader, {input: run(echo, {input: Effect.pipe(body, EffectString.replace(/\n/g, '\r\n'))})})).body.trim()}\n`;
   expect(durable).toBe(body);
   expect(digest(durable)).toBe(digest(body));
   expect(run(echo, {input: 'café\r\nline\rlast\n'})).toBe('café\nline\nlast\n');
@@ -45,7 +51,7 @@ it('roundtrips bounded Unicode and newline combinations through real UTF-8 pipes
     fc.property(
       fc.array(fc.constantFrom('é', '—', 'λ', '測', '🧪', '\n', '\r\n', '\r', 'a'), {minLength: 1, maxLength: 12}),
       values => {
-        const body = values.join('');
+        const body = EffectArray.join(values, '');
         const actual = run(echo, {input: body});
         expect(actual).toBe(normalize(body));
         expect(digest(actual)).toBe(digest(normalize(body)));
@@ -60,7 +66,11 @@ it('rejects malformed UTF-8 independently on either successful pipe and retains 
   try {
     for (const stream of ['stdout', 'stderr']) {
       const path = join(directory, `${stream}.log`);
-      expect(() => run(producer(`process.${stream}.write(Buffer.from([255]));`), {evidencePath: path})).toThrow();
+      expect(() =>
+        run(producer(`process.${stream}.write(Buffer.from([255]));`), {
+          evidencePath: path,
+        }),
+      ).toThrow();
       expect(readFileSync(`${path}.${stream}.bin`)).toEqual(Buffer.from([255]));
       expect(readFileSync(path, 'utf8')).toContain('�');
     }

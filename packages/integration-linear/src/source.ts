@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   SourceCoordinator,
   SourceCoordinatorError,
@@ -84,11 +85,35 @@ export interface LinearSyncResult {
   readonly warnings: readonly string[];
   readonly progress?: {readonly completed: number; readonly total: number};
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
+function isLinearSyncResult(value: unknown): value is LinearSyncResult {
+  if (!isRecord(value)) return false;
+  if (
+    typeof value.sourceId !== 'string' ||
+    !EffectArray.isArray(value.syncedDocuments) ||
+    !EffectArray.every(value.syncedDocuments, item => typeof item === 'string') ||
+    !EffectArray.isArray(value.warnings) ||
+    !EffectArray.every(value.warnings, item => typeof item === 'string')
+  )
+    return false;
+  const progress = value.progress;
+  if (progress === undefined) return true;
+  if (!isRecord(progress)) return false;
+  return typeof progress.completed === 'number' && typeof progress.total === 'number';
+}
 import {LinearSourceError} from './storage.js';
-export class LinearSourceConflictError extends Schema.TaggedError<LinearSourceConflictError>()(
-  'LinearSourceConflictError',
-  {},
-) {}
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+export class LinearSourceConflictError extends Schema.TaggedError<
+  LinearSourceConflictError,
+  {readonly brand: unique symbol}
+>()('LinearSourceConflictError', {}) {}
 const error = (message: string) => LinearSourceError.make({message});
 const loc = (config: RuntimeConfig) => ({account: config.account, home: config.agentContextHome, user: config.user});
 const root = (id: string) => `threadnote://resources/external/linear/${id}`;
@@ -100,7 +125,9 @@ const configFence = Effect.fn('linear.configFence')(function* (
   fingerprint: string,
   enabled = true,
 ) {
-  const source = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+  const source = Option.getOrUndefined(
+    EffectArray.findFirst((yield* readSourceConfiguration(config)).sources, item => item.id === id),
+  );
   if (
     !source ||
     !isLinearSource(source) ||
@@ -110,10 +137,12 @@ const configFence = Effect.fn('linear.configFence')(function* (
     return yield* error('Linear source configuration changed during refresh.');
 });
 function containsCredential(value: unknown, secret: string): boolean {
-  if (typeof value === 'string') return value.includes(secret);
-  if (Array.isArray(value)) return value.some(item => containsCredential(item, secret));
+  if (typeof value === 'string') return Effect2.pipe(value, EffectString.includes(secret));
+  if (EffectArray.isArray(value)) return EffectArray.some(value, item => containsCredential(item, secret));
   return (
-    value !== null && typeof value === 'object' && Object.values(value).some(item => containsCredential(item, secret))
+    value !== null &&
+    typeof value === 'object' &&
+    EffectArray.some(EffectRecord.values(value), item => containsCredential(item, secret))
   );
 }
 const checkCredentialSafety = Effect.fn('linear.checkCredentialSafety')(function* (
@@ -180,7 +209,7 @@ export const runLinearSourceAdd = Effect.fn('linear.add')(function* (
   if (options.apiToken !== undefined && !validLinearApiToken(options.apiToken))
     return yield* error('Invalid Linear API key.');
   const initialConfiguration = yield* readSourceConfiguration(config);
-  const initial = initialConfiguration.sources.find(item => item.id === id);
+  const initial = Option.getOrUndefined(EffectArray.findFirst(initialConfiguration.sources, item => item.id === id));
   const previewReuse =
     initial === undefined && options.apiToken === undefined && options.credentialEnv === undefined
       ? yield* reusableExternalCredential(config, initialConfiguration.sources, 'linear', id)
@@ -218,7 +247,9 @@ export const runLinearSourceAdd = Effect.fn('linear.add')(function* (
     id,
     Effect.gen(function* () {
       const currentConfiguration = yield* readSourceConfiguration(config);
-      const existing = currentConfiguration.sources.find(item => item.id === id);
+      const existing = Option.getOrUndefined(
+        EffectArray.findFirst(currentConfiguration.sources, item => item.id === id),
+      );
       yield* Effect.try({try: () => expected(existing), catch: () => LinearSourceConflictError.make({})});
       if (existing && !isLinearSource(existing)) return yield* error(`Source "${id}" already has another type.`);
       const reuse =
@@ -263,7 +294,7 @@ export const runLinearSourceAdd = Effect.fn('linear.add')(function* (
         yield* storeLinearCredential(config, id, reuse.token);
       else if (source.credentialStorage !== 'local') yield* removeLinearCredential(config, id);
       yield* mutateSourceConfiguration(config, current => {
-        const latest = current.sources.find(item => item.id === id);
+        const latest = Option.getOrUndefined(EffectArray.findFirst(current.sources, item => item.id === id));
         if (
           (latest !== undefined && isLinearSource(latest) ? sourceConfigurationFingerprint(latest) : undefined) !==
           previousFingerprint
@@ -318,7 +349,9 @@ export const runLinearSourceSync = Effect.fn('linear.sync')(function* (
     const reply = yield* coordinator.value.sync(config, source.id);
     if (reply.value === undefined)
       return yield* SourceCoordinatorError.make({message: 'Source sync reply expired. Retry the source sync.'});
-    coordinatedResult = reply.value as LinearSyncResult;
+    if (!isLinearSyncResult(reply.value))
+      return yield* SourceCoordinatorError.make({message: 'Source sync reply is invalid. Retry the source sync.'});
+    coordinatedResult = reply.value;
   }
   const result = coordinatedResult ?? (yield* syncLinearSource(config, source.id, options.clientOptions));
   yield* Console.log(`Linear source "${source.id}": ${result.syncedDocuments.length} object(s) refreshed.`);
@@ -344,7 +377,7 @@ export const runLinearSourceInventory = Effect.fn('linear.inventory')(function* 
           : now - state.fetchedAt > source.maxStaleHours * 3_600_000
             ? 'stale'
             : state.status,
-      chunks: Object.keys(state?.chunks ?? {}).length,
+      chunks: EffectRecord.keys(state?.chunks ?? {}).length,
       ...(state?.nextAttemptAt ? {nextAttemptAt: state.nextAttemptAt} : {}),
     });
   }
@@ -419,7 +452,7 @@ export const runLinearSourceRemove = Effect.fn('linear.remove')(function* (
       yield* mutateSourceConfiguration(config, configuration => ({
         version: 2,
         projections: configuration.projections,
-        sources: configuration.sources.filter(item => item.id !== source.id),
+        sources: EffectArray.filter(configuration.sources, item => item.id !== source.id),
       }));
       yield* removeSourceEvidencePins(loc(config), 'linear', source.id);
     }),
@@ -433,7 +466,8 @@ export const syncLinearSourcesBeforeRecall = Effect.fn('linear.beforeRecall')(fu
 ) {
   const syncedSources: string[] = [];
   const warnings: string[] = [];
-  const sources = (yield* readSourceConfiguration(config)).sources.filter(
+  const sources = EffectArray.filter(
+    (yield* readSourceConfiguration(config)).sources,
     (source): source is LinearSourceConfig => isLinearSource(source) && source.enabled,
   );
   const budget = makeLinearClientBudget(10_000, 8);
@@ -473,7 +507,8 @@ export const linearSourceWork = {
   provider: 'linear',
   admission: {limit: 8, windowMs: 10000},
   list: Effect.fn('linear.workDescriptors')(function* (config: RuntimeConfig) {
-    const sources = (yield* readSourceConfiguration(config)).sources.filter(
+    const sources = EffectArray.filter(
+      (yield* readSourceConfiguration(config)).sources,
       (source): source is LinearSourceConfig => isLinearSource(source) && source.enabled,
     );
     return yield* Effect.forEach(sources, source =>
@@ -507,7 +542,7 @@ export const linearSourceWork = {
         );
         const inventory = yield* runLinearSourceInventory(config, sourceId);
         const now = yield* Clock.currentTimeMillis;
-        const retryTimes = inventory.entries.flatMap(entry =>
+        const retryTimes = EffectArray.flatMap(inventory.entries, entry =>
           entry.nextAttemptAt !== undefined && entry.nextAttemptAt > now ? [entry.nextAttemptAt] : [],
         );
         const nextAttemptAt =

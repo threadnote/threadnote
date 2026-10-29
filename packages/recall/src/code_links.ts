@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -15,6 +16,8 @@ import {
   type RecallWorkspaceScopeMode,
 } from './index/scope.js';
 import {recallProjectMatches, recallProjectPredicate} from './index/selection.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const MAX_RECALL_CODE_LINK_ANCHORS = 8;
 export const MAX_RECALL_CODE_LINK_RESULTS = 24;
@@ -114,8 +117,8 @@ const MATCH_KIND_RANK: Readonly<Record<RecallCodeLinkMatchKind, number>> = {
 export function deriveIndexedRecallCodeLinks(
   citations: readonly MemoryCodeCitationV1[],
 ): readonly IndexedRecallCodeLink[] {
-  return citations.flatMap((citation, citationOrdinal) =>
-    selectorsForCitation(citation).map(selector => ({citationOrdinal, ...selector})),
+  return EffectArray.flatMap(citations, (citation, citationOrdinal) =>
+    EffectArray.map(selectorsForCitation(citation), selector => ({citationOrdinal, ...selector})),
   );
 }
 
@@ -155,7 +158,7 @@ export const selectRecallCodeLinks = Effect.fn('recall.selectCodeLinks')(functio
     recallProjectPredicate('document', options.project),
     recallWorkspaceScopePredicate('document', options.workspaceScope, options.workspaceScopeMode),
   );
-  const selectorParameters = selectors.flatMap(selector => [
+  const selectorParameters = EffectArray.flatMap(selectors, selector => [
     selector.selectorKind,
     selector.selectorDigest,
     selector.anchorId,
@@ -174,13 +177,19 @@ export const selectRecallCodeLinks = Effect.fn('recall.selectCodeLinks')(functio
     if (boundedRawRows.length === 0) continue;
     const selectorRows = yield* sql.unsafe<RecallCodeLinkSelectionRow>(
       `WITH query_selectors(selector_kind, selector_digest, anchor_id, anchor_ordinal, match_rank) AS (
-         VALUES ${selectors.map(() => '(?, ?, ?, ?, ?)').join(', ')}
+         VALUES ${EffectArray.join(
+           EffectArray.map(selectors, () => '(?, ?, ?, ?, ?)'),
+           ', ',
+         )}
        ),
        current_selector(selector_kind, selector_digest, anchor_id, anchor_ordinal, match_rank) AS (
          VALUES (?, ?, ?, ?, ?)
        ),
        candidate_links(document_id, document_uri, citation_ordinal) AS (
-         VALUES ${boundedRawRows.map(() => '(?, ?, ?)').join(', ')}
+         VALUES ${EffectArray.join(
+           EffectArray.map(boundedRawRows, () => '(?, ?, ?)'),
+           ', ',
+         )}
        )
        SELECT
          document.uri,
@@ -237,7 +246,7 @@ export const selectRecallCodeLinks = Effect.fn('recall.selectCodeLinks')(functio
         selector.anchorId,
         selector.anchorOrdinal,
         MATCH_KIND_RANK[selector.selectorKind],
-        ...boundedRawRows.flatMap(row => [row.document_id, row.document_uri, row.citation_ordinal]),
+        ...EffectArray.flatMap(boundedRawRows, row => [row.document_id, row.document_uri, row.citation_ordinal]),
         ...scope.params,
         remaining,
       ],
@@ -247,14 +256,13 @@ export const selectRecallCodeLinks = Effect.fn('recall.selectCodeLinks')(functio
     rowsByAnchor.set(selector.anchorOrdinal, anchorRows);
   }
   if (truncatedSelectorCount > 0) options.onSearchTruncated?.(truncatedSelectorCount);
-  const rows = [...rowsByAnchor.values()]
-    .flatMap(rowsForAnchor =>
-      rowsForAnchor.map((row, anchorRank): RecallCodeLinkFairSelectionRow => ({
-        ...row,
-        anchor_rank: anchorRank + 1,
-        match_rank: MATCH_KIND_RANK[row.match_kind],
-      })),
-    )
+  const rows = EffectArray.flatMap([...rowsByAnchor.values()], rowsForAnchor =>
+    EffectArray.map(rowsForAnchor, (row, anchorRank): RecallCodeLinkFairSelectionRow => ({
+      ...row,
+      anchor_rank: anchorRank + 1,
+      match_rank: MATCH_KIND_RANK[row.match_kind],
+    })),
+  )
     .sort(compareFairSelectionRows)
     .slice(0, scanLimit);
   const fs = yield* FileSystem.FileSystem;
@@ -268,7 +276,8 @@ export const selectRecallCodeLinks = Effect.fn('recall.selectCodeLinks')(functio
           const citation = record.metadata.codeCitations?.[row.citation_ordinal];
           const citationStillMatches =
             citation !== undefined &&
-            deriveIndexedRecallCodeLinks([citation]).some(
+            EffectArray.some(
+              deriveIndexedRecallCodeLinks([citation]),
               selector => selector.selectorKind === row.match_kind && selector.selectorDigest === row.selector_digest,
             );
           return citationStillMatches
@@ -285,7 +294,7 @@ export const selectRecallCodeLinks = Effect.fn('recall.selectCodeLinks')(functio
       ),
     {concurrency: 4},
   );
-  const selected = matches.filter((match): match is RecallCodeLinkMatch => match !== undefined);
+  const selected = EffectArray.filter(matches, (match): match is RecallCodeLinkMatch => match !== undefined);
   const canonicalMismatchCount = matches.length - selected.length;
   if (canonicalMismatchCount > 0) options.onCanonicalMismatch?.(canonicalMismatchCount);
   return selected.slice(0, limit);
@@ -331,7 +340,7 @@ export function buildBoundedRecallCodeLinkRawQueries(
     ];
   }
   const scopes = minimalRecallUriScopes(normalizeRecallUriScopes(allowedUriScopes));
-  return scopes.flatMap(scope => [
+  return EffectArray.flatMap(scopes, scope => [
     {
       params: [selector.selectorKind, selector.selectorDigest, scope, boundedLimit],
       sql: `${select}\n      AND code_link.document_uri = ?\n    ${order}`,
@@ -381,17 +390,15 @@ function selectorsForCitation(
       ],
     );
   }
-  return selectorInputs
-    .map(([selectorKind, value]) => ({
-      selectorDigest: deriveRecallCodeLinkSelectorDigest({
-        repositoryId: citation.repositoryId,
-        repositoryIdentityKind: citation.repositoryIdentityKind,
-        selectorKind,
-        value,
-      }),
+  return EffectArray.map(selectorInputs, ([selectorKind, value]) => ({
+    selectorDigest: deriveRecallCodeLinkSelectorDigest({
+      repositoryId: citation.repositoryId,
+      repositoryIdentityKind: citation.repositoryIdentityKind,
       selectorKind,
-    }))
-    .sort(compareIndexedSelectors);
+      value,
+    }),
+    selectorKind,
+  })).sort(compareIndexedSelectors);
 }
 
 /** Derive the stable opaque selector digest used by rebuildable backlink indexes. */
@@ -414,8 +421,13 @@ function boundedRecallCodeLinkLimit(limit: number | undefined): number {
 
 function minimalRecallUriScopes(scopes: readonly string[]): readonly string[] {
   const ordered = [...scopes].sort((left, right) => left.length - right.length || compareText(left, right));
-  return ordered.filter(
-    scope => !ordered.some(candidate => candidate.length < scope.length && scope.startsWith(`${candidate}/`)),
+  return EffectArray.filter(
+    ordered,
+    scope =>
+      !EffectArray.some(
+        ordered,
+        candidate => candidate.length < scope.length && Effect2.pipe(scope, EffectString.startsWith(`${candidate}/`)),
+      ),
   );
 }
 

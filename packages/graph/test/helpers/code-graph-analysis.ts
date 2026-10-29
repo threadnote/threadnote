@@ -1,13 +1,16 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type {
   CodeGraphAnalysisEdgeAggregate,
   CodeGraphAnalysisEdgeAggregatePage,
   CodeGraphAnalysisSymbolAggregatePage,
   CodeGraphEdgeCursor,
-  CodeGraphStoreShape,
   CodeGraphSymbolCursor,
 } from '@threadnote/graph/store';
+import type {CodeGraphAnalysisStore} from '@threadnote/graph/analysis';
 import type {CodeGraphEdge, CodeGraphSnapshot, CodeGraphSymbol} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface AnalysisPagingObservation {
   readonly aggregateEdgePageLimits?: number[];
@@ -20,7 +23,7 @@ export function pagedAnalysisStore(
   inputSymbols: readonly CodeGraphSymbol[],
   inputEdges: readonly CodeGraphEdge[],
   observation: AnalysisPagingObservation = {edgePageLimits: [], symbolPageLimits: []},
-): CodeGraphStoreShape {
+): CodeGraphAnalysisStore {
   const symbols = [...inputSymbols].sort(compareSymbols);
   const edges = [...inputEdges].sort(compareEdges);
   const symbolsById = [...inputSymbols].sort((left, right) => compareText(left.id, right.id));
@@ -71,7 +74,7 @@ export function pagedAnalysisStore(
         observation.symbolPageLimits.push(limit);
         return symbols.slice(firstSymbolAfter(symbols, cursor), firstSymbolAfter(symbols, cursor) + limit);
       }),
-  } as unknown as CodeGraphStoreShape;
+  } satisfies CodeGraphAnalysisStore;
 }
 
 function symbolAggregatePage(symbols: readonly CodeGraphSymbol[]): CodeGraphAnalysisSymbolAggregatePage {
@@ -174,12 +177,12 @@ export function analysisSnapshot(
   edges: readonly CodeGraphEdge[],
 ): CodeGraphSnapshot {
   return {
-    commit: '1'.repeat(40),
+    commit: Effect2.pipe('1', EffectString.repeat(40)),
     completedAt: '2026-07-31T00:00:00.000Z',
     dirty: false,
     edgeCount: edges.length,
     extractorSet: 'analysis-fixture',
-    fileCount: new Set(symbols.map(symbol => symbol.path)).size,
+    fileCount: new Set(EffectArray.map(symbols, symbol => symbol.path)).size,
     id: 'analysis-snapshot',
     repositoryId: 'analysis-repository',
     state: 'ready',
@@ -252,34 +255,34 @@ function firstAfter<Value>(values: readonly Value[], compareToCursor: (value: Va
 
 function compareSymbols(left: CodeGraphSymbol, right: CodeGraphSymbol): number {
   return (
-    left.path.localeCompare(right.path) ||
-    left.qualifiedName.localeCompare(right.qualifiedName) ||
-    left.id.localeCompare(right.id)
+    Effect2.pipe(left.path, EffectString.localeCompare(right.path)) ||
+    Effect2.pipe(left.qualifiedName, EffectString.localeCompare(right.qualifiedName)) ||
+    Effect2.pipe(left.id, EffectString.localeCompare(right.id))
   );
 }
 
 function compareSymbolToCursor(symbol: CodeGraphSymbol, cursor: CodeGraphSymbolCursor): number {
   return (
-    symbol.path.localeCompare(cursor.path) ||
-    symbol.qualifiedName.localeCompare(cursor.qualifiedName) ||
-    symbol.id.localeCompare(cursor.id)
+    Effect2.pipe(symbol.path, EffectString.localeCompare(cursor.path)) ||
+    Effect2.pipe(symbol.qualifiedName, EffectString.localeCompare(cursor.qualifiedName)) ||
+    Effect2.pipe(symbol.id, EffectString.localeCompare(cursor.id))
   );
 }
 
 function compareEdges(left: CodeGraphEdge, right: CodeGraphEdge): number {
   return (
-    left.sourceName.localeCompare(right.sourceName) ||
-    left.relation.localeCompare(right.relation) ||
-    left.targetName.localeCompare(right.targetName) ||
-    left.id.localeCompare(right.id)
+    Effect2.pipe(left.sourceName, EffectString.localeCompare(right.sourceName)) ||
+    Effect2.pipe(left.relation, EffectString.localeCompare(right.relation)) ||
+    Effect2.pipe(left.targetName, EffectString.localeCompare(right.targetName)) ||
+    Effect2.pipe(left.id, EffectString.localeCompare(right.id))
   );
 }
 
 function compareEdgeToCursor(edge: CodeGraphEdge, cursor: CodeGraphEdgeCursor): number {
   return (
-    edge.sourceName.localeCompare(cursor.sourceName) ||
-    edge.relation.localeCompare(cursor.relation) ||
-    edge.targetName.localeCompare(cursor.targetName) ||
-    edge.id.localeCompare(cursor.id)
+    Effect2.pipe(edge.sourceName, EffectString.localeCompare(cursor.sourceName)) ||
+    Effect2.pipe(edge.relation, EffectString.localeCompare(cursor.relation)) ||
+    Effect2.pipe(edge.targetName, EffectString.localeCompare(cursor.targetName)) ||
+    Effect2.pipe(edge.id, EffectString.localeCompare(cursor.id))
   );
 }

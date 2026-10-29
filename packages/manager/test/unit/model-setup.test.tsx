@@ -6,13 +6,22 @@ import fc from 'fast-check';
 import {ModelSetupIndicator, ModelSetupPanel, useModelSetup} from '../../src/model_setup.js';
 import {ModelSetupProvider} from '../../src/model_setup_live.js';
 import type {ModelSetupStatus} from '../../src/model_setup_contracts.js';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 let root: Root | undefined;
 let state: ModelSetupStatus;
 let calls: {body?: Record<string, unknown>; signal?: AbortSignal | null}[];
 let failure = false;
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
   state = {
     version: 1,
@@ -32,14 +41,20 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (_url: string, init: RequestInit) => {
-      const body = init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+      const parsed: unknown = init.body ? JSON.parse(String(init.body)) : undefined;
+      const body = parsed === undefined ? undefined : requireJsonObject(parsed);
       calls.push({body, signal: init.signal});
       if (failure) throw new Error('private unsafe network diagnostic');
       if (body?.action === 'policy')
         state = {
           ...state,
           intentEpoch: state.intentEpoch + 1,
-          policy: body.policy as 'automatic' | 'off',
+          policy:
+            body.policy === 'automatic' || body.policy === 'off'
+              ? body.policy
+              : (() => {
+                  throw new Error('Invalid model policy.');
+                })(),
           phase: body.policy === 'off' ? 'off' : 'pending',
         };
       if (body?.action === 'setup' || body?.action === 'retry') state = {...state, phase: 'pending'};
@@ -63,7 +78,16 @@ async function render(children: React.ReactNode): Promise<void> {
   await act(async () => root?.render(<ModelSetupProvider>{children}</ModelSetupProvider>));
 }
 function button(text: string): HTMLButtonElement {
-  const result = [...document.querySelectorAll('button')].find(item => item.textContent?.includes(text));
+  const result = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(text)),
+          ))(__effectArrayValue),
+    ),
+  );
   if (!result) throw new Error(`Missing button ${text}`);
   return result;
 }
@@ -147,7 +171,7 @@ it('uses explicit epoch-fenced actions and exposes durable off and environment-m
   await render(<ModelSetupPanel />);
   await act(async () => button('Set up local model').click());
   expect(calls[1]?.body).toEqual({action: 'setup', confirm: true, expectedEpoch: 7});
-  const toggle = document.querySelector('[role=switch]') as HTMLButtonElement;
+  const toggle = document.querySelector<HTMLButtonElement>('button[role=switch]')!;
   // Stop remains available while a transfer is active.
   expect(toggle.disabled).toBe(false);
   await act(async () => toggle.click());
@@ -205,7 +229,7 @@ it('fences duplicate action clicks and refreshes after a rejected stale action',
   await render(<ModelSetupPanel />);
   const deferred = Promise.withResolvers<Response>();
   vi.mocked(fetch).mockImplementationOnce((_url, init) => {
-    calls.push({body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal});
+    calls.push({body: requireJsonObject(JSON.parse(String(init?.body))), signal: init?.signal});
     return deferred.promise;
   });
   await act(async () => {
@@ -267,12 +291,12 @@ it('fences a late manual fallback refresh behind a successful policy command', a
   await act(async () => button('Read setup').click());
   expect(calls.at(-1)?.body).toBeUndefined();
   const readSignal = calls.at(-1)?.signal;
-  await act(async () => (document.querySelector('[role=switch]') as HTMLButtonElement).click());
+  await act(async () => document.querySelector<HTMLButtonElement>('button[role=switch]')!.click());
   expect(readSignal?.aborted).toBe(true);
   expect(document.body.textContent).toContain('Automatic setup is off');
   await act(async () => delayed.resolve(new Response(JSON.stringify(old))));
   expect(document.body.textContent).toContain('Automatic setup is off');
-  await act(async () => (document.querySelector('[role=switch]') as HTMLButtonElement).click());
+  await act(async () => document.querySelector<HTMLButtonElement>('button[role=switch]')!.click());
   expect(calls.at(-1)?.body).toEqual({action: 'policy', policy: 'automatic', confirm: true, expectedEpoch: 8});
 });
 
@@ -280,10 +304,10 @@ it('resumes fallback progress polling after a rejected command recovers as pendi
   state = {...state, phase: 'pending'};
   await render(<ModelSetupPanel />);
   vi.mocked(fetch).mockImplementationOnce((_url, init) => {
-    calls.push({body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal});
+    calls.push({body: requireJsonObject(JSON.parse(String(init?.body))), signal: init?.signal});
     return Promise.resolve(new Response(JSON.stringify({error: 'Changed elsewhere'}), {status: 409}));
   });
-  await act(async () => (document.querySelector('[role=switch]') as HTMLButtonElement).click());
+  await act(async () => document.querySelector<HTMLButtonElement>('button[role=switch]')!.click());
   expect(document.querySelector('[role=alert]')?.textContent).toContain('Refreshing its current status');
   const beforeRecovery = calls.length;
   await act(async () => vi.advanceTimersByTimeAsync(1_500));
@@ -298,7 +322,7 @@ it('resumes fallback progress polling after a rejected command recovers as pendi
 it('cancels old recovery before a newer held command and preserves its accepted epoch', async () => {
   await render(<ModelSetupPanel />);
   vi.mocked(fetch).mockImplementationOnce((_url, init) => {
-    calls.push({body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal});
+    calls.push({body: requireJsonObject(JSON.parse(String(init?.body))), signal: init?.signal});
     return Promise.resolve(new Response(JSON.stringify({error: 'Changed elsewhere'}), {status: 409}));
   });
   await act(async () => button('Set up local model').click());
@@ -307,10 +331,10 @@ it('cancels old recovery before a newer held command and preserves its accepted 
   const staleRead = Promise.withResolvers<Response>();
   const original = vi.mocked(fetch).getMockImplementation();
   vi.mocked(fetch).mockImplementationOnce((_url, init) => {
-    calls.push({body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal});
+    calls.push({body: requireJsonObject(JSON.parse(String(init?.body))), signal: init?.signal});
     return newer.promise;
   });
-  await act(async () => (document.querySelector('[role=switch]') as HTMLButtonElement).click());
+  await act(async () => document.querySelector<HTMLButtonElement>('button[role=switch]')!.click());
   const beforeDeadline = calls.length;
   vi.mocked(fetch).mockImplementation((_url, init) => {
     calls.push({signal: init?.signal});
@@ -326,6 +350,6 @@ it('cancels old recovery before a newer held command and preserves its accepted 
   });
   expect(document.body.textContent).toContain('Automatic setup is off');
   vi.mocked(fetch).mockImplementation(original!);
-  await act(async () => (document.querySelector('[role=switch]') as HTMLButtonElement).click());
+  await act(async () => document.querySelector<HTMLButtonElement>('button[role=switch]')!.click());
   expect(calls.at(-1)?.body).toEqual({action: 'policy', policy: 'automatic', confirm: true, expectedEpoch: 8});
 });

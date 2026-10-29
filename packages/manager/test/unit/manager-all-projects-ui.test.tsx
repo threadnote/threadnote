@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {ManagerHomePanel} from '../../src/home_view.js';
 import {ContextHealthPanel, ReviewsPanel} from '../../src/attention_view.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 vi.mock('../../src/attention_details.js', () => ({
   ReviewDetail: (props: {project: string; reviewId: string}) => (
@@ -89,7 +92,10 @@ it('shows project inspection destinations in All Health without issuing scans or
   expect(document.body.textContent).toContain('Context health across projects');
   expect(document.body.textContent).toContain('Health checks and repairs are scoped to one project.');
   const tiles = document.querySelectorAll<HTMLButtonElement>('.health-project-grid > button');
-  expect([...tiles].map(tile => tile.getAttribute('aria-label'))).toEqual(['Inspect alpha', 'Inspect beta']);
+  expect(EffectArray.map([...tiles], tile => tile.getAttribute('aria-label'))).toEqual([
+    'Inspect alpha',
+    'Inspect beta',
+  ]);
   expect(tiles[1].querySelector('strong')?.textContent).toBe('beta');
   expect(tiles[1].querySelector('button')).toBeNull();
   const inspect = tiles[1];
@@ -118,7 +124,7 @@ it('aborts an old review request and rejects its delayed result after switching 
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).includes('project=alpha')) {
+      if (Effect.pipe(String(input), EffectString.includes('project=alpha'))) {
         oldSignal = init?.signal ?? undefined;
         return delayed.promise;
       }
@@ -157,6 +163,8 @@ function review(project: string) {
     candidates: [
       {
         candidateId: 'one',
+        categories: ['decision'],
+        comparison: 'new',
         state: 'pending',
         recommendation: 'create',
         confidence: 0.9,

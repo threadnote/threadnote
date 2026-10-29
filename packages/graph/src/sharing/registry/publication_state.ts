@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {readBoundedPrivateBytes, writePrivateJsonFile} from '../atomic.js';
 import {sha256Digest, sha256HexFromDigest, SHA256_DIGEST, type Sha256Digest} from '../digest.js';
@@ -127,7 +128,8 @@ function validateReceipt(receipt: GraphSharePublicationReceipt, authority: Sha25
     try: () => {
       if (
         receipt.authority !== authority ||
-        [receipt.pending, receipt.acknowledged].some(
+        EffectArray.some(
+          [receipt.pending, receipt.acknowledged],
           item => item !== undefined && item.historyFloor.generation > item.generation,
         )
       )

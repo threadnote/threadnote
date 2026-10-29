@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../../index_scope.js';
 import {DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -120,10 +121,10 @@ const recordSnapshotAnalysisReceipt = Effect.fn('codeGraph.recordSnapshotAnalysi
     ],
     {concurrency: 1},
   );
-  const symbols = symbolRows.map(analysisSymbolAggregateFromRow);
-  const edges = edgeRows.map(analysisEdgeAggregateFromRow);
-  const symbolCount = symbols.reduce((total, row) => total + row.count, 0);
-  const edgeCount = edges.reduce((total, row) => total + row.count, 0);
+  const symbols = EffectArray.map(symbolRows, analysisSymbolAggregateFromRow);
+  const edges = EffectArray.map(edgeRows, analysisEdgeAggregateFromRow);
+  const symbolCount = EffectArray.reduce(symbols, 0, (total, row) => total + row.count);
+  const edgeCount = EffectArray.reduce(edges, 0, (total, row) => total + row.count);
   if (symbolCount !== snapshot.symbolCount || edgeCount !== snapshot.edgeCount) {
     return yield* CodeGraphStoreError.of(
       `Code graph analysis totals do not match the snapshot (${symbolCount}/${snapshot.symbolCount} symbols, ` +
@@ -678,7 +679,8 @@ const activatePersistedFullSnapshot = Effect.fn('codeGraph.activatePersistedFull
     termCount: Number(counts[0]?.terms ?? -1),
   } satisfies CompactLexicalFormatReceipt;
   if (
-    [compactLexicalReceipt.postingCount, compactLexicalReceipt.symbolCount, compactLexicalReceipt.termCount].some(
+    EffectArray.some(
+      [compactLexicalReceipt.postingCount, compactLexicalReceipt.symbolCount, compactLexicalReceipt.termCount],
       count => !Number.isSafeInteger(count) || count < 0,
     )
   ) {
@@ -798,7 +800,7 @@ const exactSnapshotFilesMatch = Effect.fn('codeGraph.exactSnapshotFilesMatch')(f
   snapshotId: string,
   files: NonNullable<CodeGraphCleanSnapshotAliasOptions['exactBaseFiles']>,
 ) {
-  const paths = new Set(files.map(file => file.path));
+  const paths = new Set(EffectArray.map(files, file => file.path));
   if (paths.size !== files.length) return false;
   for (let offset = 0; offset < files.length; offset += 256) {
     const batch = files.slice(offset, offset + 256);
@@ -824,9 +826,9 @@ function sameCodeGraphPackProvenance(
   right: readonly CodeGraphLanguagePackProvenance[],
 ): boolean {
   if (left.length !== right.length) return false;
-  const rightById = new Map(right.map(pack => [pack.id, pack]));
+  const rightById = new Map(EffectArray.map(right, pack => [pack.id, pack]));
   if (rightById.size !== right.length) return false;
-  return left.every(pack => {
+  return EffectArray.every(left, pack => {
     const other = rightById.get(pack.id);
     return (
       other !== undefined &&

@@ -1,9 +1,12 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {canonicalJson} from '../../checkpoint/canonical_json.js';
 import {compareCodeUnits} from '../../ordering.js';
 import {sha256Digest, SHA256_DIGEST, SHA256_HEX} from '../digest.js';
 import type {GraphWorkerResultAnnouncement} from './announcement.js';
 import type {GraphWorkerResultAuthority} from './result.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const GRAPH_WORKER_ADMISSION_MAX_RECEIPTS = 1024;
 export const GRAPH_WORKER_ADMISSION_MAX_STATE_BYTES = 2_097_152;
@@ -153,7 +156,7 @@ export function admitGraphWorkerAnnouncement(
     authority.expiresAt <= nowSeconds ||
     !SHA256_HEX.test(authority.graphAbi) ||
     !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(input.sourceCommit) ||
-    signed.body.batchId !== input.sourceCommit.slice(0, 40) ||
+    signed.body.batchId !== Effect.pipe(input.sourceCommit, EffectString.slice(0, 40)) ||
     signed.publicKey !== authority.signingPublicKey ||
     signed.body.workerId !== authority.workerId ||
     signed.body.principalId !== authority.principalId ||
@@ -163,7 +166,9 @@ export function admitGraphWorkerAnnouncement(
     return {status: 'invalid-authority', store};
 
   const announcementDigest = sha256Digest(canonicalJson(signed));
-  const prior = store.receipts.find(item => item.announcement.body.idempotencyKey === signed.body.idempotencyKey);
+  const prior = EffectOption.getOrUndefined(
+    EffectArray.findFirst(store.receipts, item => item.announcement.body.idempotencyKey === signed.body.idempotencyKey),
+  );
   if (prior !== undefined) {
     if (
       prior.announcementDigest !== announcementDigest ||
@@ -194,7 +199,8 @@ export function admitGraphWorkerAnnouncement(
     receipts,
     schemaVersion: GRAPH_WORKER_ADMISSION_SCHEMA_VERSION,
   };
-  const quarantined = next.quarantine.some(
+  const quarantined = EffectArray.some(
+    next.quarantine,
     item => item.repositoryId === signed.body.repositoryId && item.actionKey === signed.body.actionKey,
   );
   return {status: quarantined ? 'quarantined' : 'accepted', receipt: admitted, store: next};
@@ -213,9 +219,9 @@ export function retireGraphWorkerAdmissionsForPublishedSources(
   store: GraphWorkerAdmissionStoreV2,
   sourceCommits: ReadonlySet<string>,
 ): GraphWorkerAdmissionStoreV2 {
-  if ([...sourceCommits].some(source => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(source)))
+  if (EffectArray.some([...sourceCommits], source => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(source)))
     throw new Error('Published source commit is invalid.');
-  const receipts = store.receipts.filter(receipt => !sourceCommits.has(receipt.sourceCommit));
+  const receipts = EffectArray.filter(store.receipts, receipt => !sourceCommits.has(receipt.sourceCommit));
   if (receipts.length === store.receipts.length) return store;
   return {
     ...(store.archiveStarted === true ? {archiveStarted: true as const} : {}),
@@ -226,7 +232,7 @@ export function retireGraphWorkerAdmissionsForPublishedSources(
 }
 
 function quarantineFor(receipts: readonly GraphWorkerAdmissionReceiptV2[]): GraphWorkerAdmissionQuarantineV2[] {
-  return graphWorkerAdmissionQuarantineForSummaries(receipts.map(item => item.announcement.body));
+  return graphWorkerAdmissionQuarantineForSummaries(EffectArray.map(receipts, item => item.announcement.body));
 }
 
 export function graphWorkerAdmissionQuarantineForSummaries(
@@ -239,33 +245,34 @@ export function graphWorkerAdmissionQuarantineForSummaries(
     entry.digests.add(semanticDigest);
     byAction.set(key, entry);
   }
-  return [...byAction.values()]
-    .filter(item => item.digests.size > 1)
-    .map(item => ({
+  return EffectArray.map(
+    EffectArray.filter([...byAction.values()], item => item.digests.size > 1),
+    item => ({
       actionKey: item.actionKey,
       repositoryId: item.repositoryId,
       semanticDigests: [...item.digests].sort(compareCodeUnits),
-    }))
-    .sort(
-      (left, right) =>
-        compareCodeUnits(left.repositoryId, right.repositoryId) || compareCodeUnits(left.actionKey, right.actionKey),
-    );
+    }),
+  ).sort(
+    (left, right) =>
+      compareCodeUnits(left.repositoryId, right.repositoryId) || compareCodeUnits(left.actionKey, right.actionKey),
+  );
 }
 
 function strictlySorted(values: readonly string[]): boolean {
-  return values.every((value, index) => index === 0 || compareCodeUnits(values[index - 1], value) < 0);
+  return EffectArray.every(values, (value, index) => index === 0 || compareCodeUnits(values[index - 1], value) < 0);
 }
 
 function validReceipts(receipts: readonly GraphWorkerAdmissionReceiptV2[]): boolean {
   return (
-    !receipts.some(
+    !EffectArray.some(
+      receipts,
       item =>
         item.authorityExpiresAt <= item.admittedAt ||
         item.signedBodyDigest !== sha256Digest(canonicalJson(item.announcement.body)) ||
         item.announcementDigest !== sha256Digest(canonicalJson(item.announcement)) ||
         item.announcement.body.idempotencyKey !== operationId(item.announcement.body) ||
-        item.announcement.body.batchId !== item.sourceCommit.slice(0, 40),
-    ) && strictlySorted(receipts.map(item => item.announcement.body.idempotencyKey))
+        item.announcement.body.batchId !== Effect.pipe(item.sourceCommit, EffectString.slice(0, 40)),
+    ) && strictlySorted(EffectArray.map(receipts, item => item.announcement.body.idempotencyKey))
   );
 }
 

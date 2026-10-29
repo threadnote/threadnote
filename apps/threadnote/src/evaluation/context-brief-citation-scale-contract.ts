@@ -1,6 +1,10 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {benchmarkMeasurement, type BenchmarkMeasurementV1} from '@threadnote/evidence/benchmark';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CONTEXT_BRIEF_CITATION_SCALE_VERSION = 1 as const;
 export const CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS = ['local-100k', 'workset-50', 'workset-128'] as const;
@@ -88,7 +92,7 @@ export interface ContextBriefCitationRssSampleGapSummaryV1 {
 export function contextBriefCitationRssSampleGapSummary(
   maximumGapsMilliseconds: readonly number[],
 ): ContextBriefCitationRssSampleGapSummaryV1 {
-  if (maximumGapsMilliseconds.some(gap => !Number.isSafeInteger(gap) || gap < 0)) {
+  if (EffectArray.some(maximumGapsMilliseconds, gap => !Number.isSafeInteger(gap) || gap < 0)) {
     invalid('RSS sample gaps must be non-negative safe integers');
   }
   let consecutiveBreaches = 0;
@@ -117,22 +121,25 @@ export function contextBriefCitationRssSampleGapFailures(
   summary: ContextBriefCitationRssSampleGapSummaryV1,
   observationCount: number,
 ): readonly string[] {
-  return [
-    summary.sampleGapBreachRate <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate
-      ? ''
-      : `external RSS observer sample-gap breach rate ${summary.sampleGapBreachCount}/${observationCount} (${(
-          summary.sampleGapBreachRate * 100
-        ).toFixed(
-          1,
-        )}%) exceeds ${(CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate * 100).toFixed(1)}%`,
-    summary.maximumConsecutiveSampleGapBreaches <=
-    CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches
-      ? ''
-      : `external RSS observer recorded ${summary.maximumConsecutiveSampleGapBreaches} consecutive sample-gap breaches; maximum ${CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches}`,
-    summary.maximumSampleGapMilliseconds <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds
-      ? ''
-      : `external RSS observer maximum sample gap ${summary.maximumSampleGapMilliseconds}ms exceeds hard maximum ${CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds}ms`,
-  ].filter(Boolean);
+  return EffectArray.filter(
+    [
+      summary.sampleGapBreachRate <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate
+        ? ''
+        : `external RSS observer sample-gap breach rate ${summary.sampleGapBreachCount}/${observationCount} (${(
+            summary.sampleGapBreachRate * 100
+          ).toFixed(
+            1,
+          )}%) exceeds ${(CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate * 100).toFixed(1)}%`,
+      summary.maximumConsecutiveSampleGapBreaches <=
+      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches
+        ? ''
+        : `external RSS observer recorded ${summary.maximumConsecutiveSampleGapBreaches} consecutive sample-gap breaches; maximum ${CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches}`,
+      summary.maximumSampleGapMilliseconds <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds
+        ? ''
+        : `external RSS observer maximum sample gap ${summary.maximumSampleGapMilliseconds}ms exceeds hard maximum ${CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds}ms`,
+    ],
+    Boolean,
+  );
 }
 
 export interface ContextBriefCitationScaleProfileV1 {
@@ -282,10 +289,17 @@ export function contextBriefCitationScaleCandidateBinding(
     invalid('candidate package version must be an explicit version');
   }
   const packageManager = boundedString(manifest.packageManager, 'candidate package manager');
-  if (!packageManager.startsWith('bun@') || !CANDIDATE_PACKAGE_VERSION.test(packageManager.slice('bun@'.length))) {
+  if (
+    !Effect.pipe(packageManager, EffectString.startsWith('bun@')) ||
+    !CANDIDATE_PACKAGE_VERSION.test(Effect.pipe(packageManager, EffectString.slice('bun@'.length)))
+  ) {
     invalid('candidate package manager must pin an explicit Bun version');
   }
-  return {commit, runtime: `bun/${packageManager.slice('bun@'.length)}`, sourceVersion: `threadnote-${version}`};
+  return {
+    commit,
+    runtime: `bun/${Effect.pipe(packageManager, EffectString.slice('bun@'.length))}`,
+    sourceVersion: `threadnote-${version}`,
+  };
 }
 
 export type ContextBriefCitationScaleEvidenceClass = 'development-smoke' | 'release-scale';
@@ -354,17 +368,17 @@ export function contextBriefCitationScaleFixturePlan(
   const requestedMemoryCandidates = positiveInteger(memoryCandidates, 'reviewed fixture memory candidates');
   const runsPerProfile = measuredWarmups + measuredSamples * 2;
   if (!Number.isSafeInteger(runsPerProfile)) invalid('reviewed fixture run count must be a safe integer');
-  const profilesById = new Map(budget.profiles.map(profile => [profile.id, profile]));
+  const profilesById = new Map(EffectArray.map(budget.profiles, profile => [profile.id, profile]));
   if (profilesById.size !== CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS.length) {
     invalid('reviewed fixture profiles must have unique ids');
   }
   const selectedProfileIds = new Set(profileIds);
   if (selectedProfileIds.size !== profileIds.length) invalid('reviewed fixture selected profiles must be unique');
-  const selectedProfiles = CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS.filter(profileId =>
+  const selectedProfiles = EffectArray.filter(CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS, profileId =>
     selectedProfileIds.has(profileId),
   );
   if (selectedProfiles.length !== profileIds.length) invalid('reviewed fixture selected profile is unknown');
-  const profiles = CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS.map(profileId => {
+  const profiles = EffectArray.map(CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS, profileId => {
     const profile = profilesById.get(profileId);
     if (!profile) invalid(`reviewed fixture is missing ${profileId}`);
     const citationCount = positiveInteger(profile.citationCount, `${profileId} citation count`);
@@ -386,9 +400,14 @@ export function contextBriefCitationScaleFixturePlan(
       worksetMembers,
     };
   });
-  const selectedMemoryCandidates = profiles
-    .filter(profile => selectedProfileIds.has(profile.id))
-    .reduce((total, profile) => total + profile.selectedRecordsPerRun * runsPerProfile, 0);
+  const selectedMemoryCandidates = EffectArray.reduce(
+    EffectArray.filter(
+      profiles,
+      (profile, __effectArrayIndex) => __effectArrayIndex in profiles && selectedProfileIds.has(profile.id),
+    ),
+    0,
+    (total, profile) => total + profile.selectedRecordsPerRun * runsPerProfile,
+  );
   if (!Number.isSafeInteger(selectedMemoryCandidates) || selectedMemoryCandidates > requestedMemoryCandidates) {
     invalid('reviewed fixture selected memories exceed the reviewed corpus');
   }
@@ -513,12 +532,16 @@ export function parseContextBriefCitationScaleBudgetV1(value: unknown): ContextB
   if (budget.maximumObservedAddedProcessTreeRssBytes !== 64 * 1_024 * 1_024) {
     invalid('maximumObservedAddedProcessTreeRssBytes must be 64 MiB');
   }
-  if (!Array.isArray(budget.profiles) || budget.profiles.length !== CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS.length) {
+  if (
+    !EffectArray.isArray(budget.profiles) ||
+    budget.profiles.length !== CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS.length
+  ) {
     invalid('profiles must contain the three reviewed profiles');
   }
-  const profiles = budget.profiles.map(parseProfile);
+  const profiles = EffectArray.map(budget.profiles, parseProfile);
   for (const id of CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS) {
-    if (profiles.filter(profile => profile.id === id).length !== 1) invalid(`profile ${id} must appear exactly once`);
+    if (EffectArray.filter(profiles, profile => profile.id === id).length !== 1)
+      invalid(`profile ${id} must appear exactly once`);
   }
   return {
     corpusMemoryCandidates: 100_000,
@@ -526,7 +549,9 @@ export function parseContextBriefCitationScaleBudgetV1(value: unknown): ContextB
     maximumObservedAddedProcessTreeRssBytes: 64 * 1_024 * 1_024,
     maximumCitationsPerBrief: 96,
     maximumEstimatedTokens: 1_500,
-    profiles: CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS.map(id => profiles.find(profile => profile.id === id)!),
+    profiles: EffectArray.map(CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS, id =>
+      EffectOption.getOrUndefined(EffectArray.findFirst(profiles, profile => profile.id === id))!,
+    ),
     version: 1,
   };
 }
@@ -538,43 +563,46 @@ export function evaluateContextBriefCitationScaleProfile(
   coldReadyGraphObservation: ContextBriefCitationScaleObservationV2,
   observations: readonly ContextBriefCitationScaleMeasuredObservationV2[],
 ): {readonly failures: readonly string[]; readonly result: ContextBriefCitationScaleProfileResultV2} {
-  const profile = budget.profiles.find(candidate => candidate.id === profileId);
+  const profile = EffectOption.getOrUndefined(
+    EffectArray.findFirst(budget.profiles, candidate => candidate.id === profileId),
+  );
   if (!profile) throw new Error(`Unknown scale profile ${profileId}`);
   if (observations.length === 0) throw new Error(`Scale profile ${profileId} requires measured samples.`);
   const all = [coldReadyGraphObservation, ...observations];
-  const memoryOrdinals = observations
-    .map(observation => observation.memory.ordinal)
-    .sort((left, right) => left - right);
-  const expectedMemoryOrdinals = observations.map((_, index) => index);
-  const memoryObservationIds = observations.map(observation => observation.memory.observationId);
+  const memoryOrdinals = EffectArray.map(observations, observation => observation.memory.ordinal).sort(
+    (left, right) => left - right,
+  );
+  const expectedMemoryOrdinals = EffectArray.map(observations, (_, index) => index);
+  const memoryObservationIds = EffectArray.map(observations, observation => observation.memory.observationId);
   const measurements = {
     boundaryAddedRssBytes: measurement(
       'boundary-added-rss-diagnostic',
-      observations.map(observation => observation.memoryWorkload.boundaryAddedRssBytes),
+      EffectArray.map(observations, observation => observation.memoryWorkload.boundaryAddedRssBytes),
       'bytes',
     ),
     contextBriefMilliseconds: measurement(
       'context-brief-total',
-      observations.map(observation => observation.contextBriefMilliseconds),
+      EffectArray.map(observations, observation => observation.contextBriefMilliseconds),
       'milliseconds',
     ),
     memoryRetrievalMilliseconds: measurement(
       'memory-retrieval',
-      observations.map(observation => observation.memoryRetrievalMilliseconds),
+      EffectArray.map(observations, observation => observation.memoryRetrievalMilliseconds),
       'milliseconds',
     ),
     validationMilliseconds: measurement(
       'citation-validation',
-      observations.map(observation => observation.validationMilliseconds),
+      EffectArray.map(observations, observation => observation.validationMilliseconds),
       'milliseconds',
     ),
     observedAddedProcessTreeRssBytes: measurement(
       'observed-added-process-tree-rss',
-      observations.map(observation => observation.memory.observedAddedProcessTreeRssBytes),
+      EffectArray.map(observations, observation => observation.memory.observedAddedProcessTreeRssBytes),
       'bytes',
     ),
   };
-  const descendantObservationCount = observations.filter(
+  const descendantObservationCount = EffectArray.filter(
+    observations,
     observation => observation.memory.peakProcessCount >= 2,
   ).length;
   const minimumDescendantObservations = profile.worksetMembers === 1 ? 1 : Math.ceil(observations.length * 0.8);
@@ -583,8 +611,10 @@ export function evaluateContextBriefCitationScaleProfile(
   const memoryCoverage = {
     descendantObservationCount,
     descendantObservationRate: descendantObservationCount / observations.length,
-    maximumPeakProcessCount: Math.max(...observations.map(observation => observation.memory.peakProcessCount)),
-    minimumSuccessfulSamples: Math.min(...observations.map(observation => observation.memory.samples)),
+    maximumPeakProcessCount: Math.max(
+      ...EffectArray.map(observations, observation => observation.memory.peakProcessCount),
+    ),
+    minimumSuccessfulSamples: Math.min(...EffectArray.map(observations, observation => observation.memory.samples)),
   };
   const counters = {
     maximumActiveViewFenceObservations: maximum(all, observation => observation.counters.activeViewFenceObservations),
@@ -596,38 +626,44 @@ export function evaluateContextBriefCitationScaleProfile(
     maximumProductionStoreSessionCalls: maximum(all, observation => observation.counters.productionStoreSessionCalls),
     maximumStatusObservations: maximum(all, observation => observation.counters.statusObservations),
   };
-  const failures = [
-    ...all.flatMap((observation, index) =>
-      contextBriefCitationScaleObservationFailures(profile, budget, observation, index),
-    ),
-    ...observations.flatMap((observation, index) => memoryObservationFailures(profile, observation, index)),
-    ...observations.flatMap((observation, index) =>
-      contextBriefCitationScaleObservationFailures(profile, budget, observation.memoryWorkload, index).map(
-        failure => `${failure} during the external RSS pass`,
+  const failures = EffectArray.filter(
+    [
+      ...EffectArray.flatMap(all, (observation, index) =>
+        contextBriefCitationScaleObservationFailures(profile, budget, observation, index),
       ),
-    ),
-    JSON.stringify(memoryOrdinals) === JSON.stringify(expectedMemoryOrdinals)
-      ? ''
-      : `${profile.id} memory ordinals are not the complete measured range`,
-    new Set(memoryObservationIds).size === memoryObservationIds.length
-      ? ''
-      : `${profile.id} memory observation IDs are not unique`,
-    descendantObservationCount >= minimumDescendantObservations
-      ? ''
-      : `${profile.id} observed workload descendants in ${descendantObservationCount}/${observations.length} memory observations; ${descendantCoverageRequirement}`,
-    coldReadyGraphObservation.counters.effectiveEvidenceBatches === profile.citedRepositories
-      ? ''
-      : `${profile.id} cold ready-graph evidence batches ${coldReadyGraphObservation.counters.effectiveEvidenceBatches}; expected ${profile.citedRepositories}`,
-    measurements.validationMilliseconds.p95 <= profile.maximumValidationP95Milliseconds
-      ? ''
-      : `${profile.id} validation p95 ${measurements.validationMilliseconds.p95.toFixed(1)}ms exceeds ${profile.maximumValidationP95Milliseconds}ms`,
-    measurements.contextBriefMilliseconds.p95 <= profile.maximumBriefP95Milliseconds
-      ? ''
-      : `${profile.id} brief p95 ${measurements.contextBriefMilliseconds.p95.toFixed(1)}ms exceeds ${profile.maximumBriefP95Milliseconds}ms`,
-    measurements.observedAddedProcessTreeRssBytes.maximum <= budget.maximumObservedAddedProcessTreeRssBytes
-      ? ''
-      : `${profile.id} observed added process-tree RSS ${measurements.observedAddedProcessTreeRssBytes.maximum} exceeds ${budget.maximumObservedAddedProcessTreeRssBytes}`,
-  ].filter(Boolean);
+      ...EffectArray.flatMap(observations, (observation, index) =>
+        memoryObservationFailures(profile, observation, index),
+      ),
+      ...EffectArray.flatMap(observations, (observation, index) =>
+        EffectArray.map(
+          contextBriefCitationScaleObservationFailures(profile, budget, observation.memoryWorkload, index),
+          failure => `${failure} during the external RSS pass`,
+        ),
+      ),
+      JSON.stringify(memoryOrdinals) === JSON.stringify(expectedMemoryOrdinals)
+        ? ''
+        : `${profile.id} memory ordinals are not the complete measured range`,
+      new Set(memoryObservationIds).size === memoryObservationIds.length
+        ? ''
+        : `${profile.id} memory observation IDs are not unique`,
+      descendantObservationCount >= minimumDescendantObservations
+        ? ''
+        : `${profile.id} observed workload descendants in ${descendantObservationCount}/${observations.length} memory observations; ${descendantCoverageRequirement}`,
+      coldReadyGraphObservation.counters.effectiveEvidenceBatches === profile.citedRepositories
+        ? ''
+        : `${profile.id} cold ready-graph evidence batches ${coldReadyGraphObservation.counters.effectiveEvidenceBatches}; expected ${profile.citedRepositories}`,
+      measurements.validationMilliseconds.p95 <= profile.maximumValidationP95Milliseconds
+        ? ''
+        : `${profile.id} validation p95 ${measurements.validationMilliseconds.p95.toFixed(1)}ms exceeds ${profile.maximumValidationP95Milliseconds}ms`,
+      measurements.contextBriefMilliseconds.p95 <= profile.maximumBriefP95Milliseconds
+        ? ''
+        : `${profile.id} brief p95 ${measurements.contextBriefMilliseconds.p95.toFixed(1)}ms exceeds ${profile.maximumBriefP95Milliseconds}ms`,
+      measurements.observedAddedProcessTreeRssBytes.maximum <= budget.maximumObservedAddedProcessTreeRssBytes
+        ? ''
+        : `${profile.id} observed added process-tree RSS ${measurements.observedAddedProcessTreeRssBytes.maximum} exceeds ${budget.maximumObservedAddedProcessTreeRssBytes}`,
+    ],
+    Boolean,
+  );
   return {
     failures,
     result: {
@@ -696,17 +732,17 @@ export function parseContextBriefCitationScaleArtifactV2(
       invalid('release artifact legacy memory candidates do not match the reviewed fixture');
     }
   }
-  if (!Array.isArray(artifact.profiles) || artifact.profiles.length === 0 || artifact.profiles.length > 3) {
+  if (!EffectArray.isArray(artifact.profiles) || artifact.profiles.length === 0 || artifact.profiles.length > 3) {
     invalid('artifact profiles must contain between one and three profiles');
   }
-  const evaluatedProfiles = artifact.profiles.map((profile, index) =>
+  const evaluatedProfiles = EffectArray.map(artifact.profiles, (profile, index) =>
     parseArtifactProfileResult(profile, budget, index),
   );
   assertUnique(
-    evaluatedProfiles.map(evaluated => evaluated.result.profile.id),
+    EffectArray.map(evaluatedProfiles, evaluated => evaluated.result.profile.id),
     'artifact profile ids',
   );
-  const profiles = evaluatedProfiles.map(evaluated => evaluated.result);
+  const profiles = EffectArray.map(evaluatedProfiles, evaluated => evaluated.result);
   for (const profile of profiles) {
     if (profile.samples !== samples) invalid(`${profile.profile.id} samples do not match artifact samples`);
   }
@@ -720,7 +756,7 @@ export function parseContextBriefCitationScaleArtifactV2(
     execution,
     fixture,
     memoryObserver,
-    profileFailures: evaluatedProfiles.flatMap(evaluated => evaluated.failures),
+    profileFailures: EffectArray.flatMap(evaluatedProfiles, evaluated => evaluated.failures),
     profiles,
     samples,
     warmups,
@@ -790,8 +826,8 @@ function parseArtifactEnvironment(value: unknown): ContextBriefCitationScaleEnvi
 
 function parseArtifactExecution(value: unknown): ContextBriefCitationScaleExecutionV2 {
   const execution = record(value, 'artifact execution');
-  exactKeys(execution, ['builtArtifactSha256', ...Object.keys(CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2)]);
-  for (const [key, expected] of Object.entries(CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2)) {
+  exactKeys(execution, ['builtArtifactSha256', ...EffectRecord.keys(CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2)]);
+  for (const [key, expected] of EffectRecord.toEntries(CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2)) {
     if (execution[key] !== expected) invalid(`artifact execution ${key} does not match the reviewed path`);
   }
   return {
@@ -812,11 +848,11 @@ function parseArtifactFixture(value: unknown): ContextBriefCitationScaleFixtureV
     'worksetGenerationDigests',
     'worksetRepositoryIdentities',
   ]);
-  if (!Array.isArray(fixture.worksetGenerationDigests) || fixture.worksetGenerationDigests.length !== 2) {
+  if (!EffectArray.isArray(fixture.worksetGenerationDigests) || fixture.worksetGenerationDigests.length !== 2) {
     invalid('fixture workset generation digests must contain the 50- and 128-member generations');
   }
   if (
-    !Array.isArray(fixture.worksetRepositoryIdentities) ||
+    !EffectArray.isArray(fixture.worksetRepositoryIdentities) ||
     fixture.worksetRepositoryIdentities.length !== 2 ||
     fixture.worksetRepositoryIdentities[0] !== 50 ||
     fixture.worksetRepositoryIdentities[1] !== 128
@@ -961,8 +997,11 @@ function parseMemoryObserverFinalSample(value: unknown): ContextBriefCitationSca
 function parseArtifactGate(value: unknown): ContextBriefCitationScaleGateV1 {
   const gate = record(value, 'artifact gate');
   exactKeys(gate, ['failures', 'passed']);
-  if (!Array.isArray(gate.failures) || gate.failures.length > 1_024) invalid('artifact gate failures are invalid');
-  const failures = gate.failures.map((failure, index) => boundedString(failure, `gate failure ${index}`, 4_096));
+  if (!EffectArray.isArray(gate.failures) || gate.failures.length > 1_024)
+    invalid('artifact gate failures are invalid');
+  const failures = EffectArray.map(gate.failures, (failure, index) =>
+    boundedString(failure, `gate failure ${index}`, 4_096),
+  );
   const stableFailures = [...new Set(failures)].sort();
   if (JSON.stringify(failures) !== JSON.stringify(stableFailures)) {
     invalid('artifact gate failures must be sorted and unique');
@@ -988,10 +1027,14 @@ function parseArtifactProfileResult(
     'samples',
   ]);
   const profile = parseProfile(result.profile);
-  if (!Array.isArray(result.observations) || result.observations.length === 0 || result.observations.length > 256) {
+  if (
+    !EffectArray.isArray(result.observations) ||
+    result.observations.length === 0 ||
+    result.observations.length > 256
+  ) {
     invalid(`${profile.id} observations must contain between one and 256 samples`);
   }
-  const observations = result.observations.map((observation, index) =>
+  const observations = EffectArray.map(result.observations, (observation, index) =>
     parseMeasuredObservation(observation, profile.id, index),
   );
   const claimed: ContextBriefCitationScaleProfileResultV2 = {
@@ -1358,31 +1401,33 @@ function validateMemoryObserverSummary(
   observer: ContextBriefCitationScaleMemoryObserverV2,
   profiles: readonly ContextBriefCitationScaleProfileResultV2[],
 ): void {
-  const observations = profiles.flatMap(profile => profile.observations.map(observation => observation.memory));
+  const observations = EffectArray.flatMap(profiles, profile =>
+    EffectArray.map(profile.observations, observation => observation.memory),
+  );
   if (observer.observationCount !== observations.length) {
     invalid('memory observer observation count does not match the retained profile observations');
   }
   const expectedSampleGapSummary = contextBriefCitationRssSampleGapSummary(
-    observations.map(observation => observation.maximumSampleGapMilliseconds),
+    EffectArray.map(observations, observation => observation.maximumSampleGapMilliseconds),
   );
   const expectedPeakProcessCount = Math.max(
     observer.finalSample.processCount,
-    ...observations.map(observation => observation.peakProcessCount),
+    ...EffectArray.map(observations, observation => observation.peakProcessCount),
   );
   const expectedAttempts = safeSum(
-    [...observations.map(observation => observation.sampleAttempts), observer.finalSample.sampleAttempts],
+    [...EffectArray.map(observations, observation => observation.sampleAttempts), observer.finalSample.sampleAttempts],
     'memory observer sample attempts',
   );
   const expectedFailures = safeSum(
-    [...observations.map(observation => observation.sampleFailures), observer.finalSample.sampleFailures],
+    [...EffectArray.map(observations, observation => observation.sampleFailures), observer.finalSample.sampleFailures],
     'memory observer sample failures',
   );
   const expectedSuccessfulSamples = safeSum(
-    [...observations.map(observation => observation.samples), 1],
+    [...EffectArray.map(observations, observation => observation.samples), 1],
     'memory observer successful samples',
   );
   const expectedRetainedGrowth = contextBriefCitationScaleRetainedRootRssGrowthBytes([
-    ...observations.map(observation => observation.observedRootRssBaselineBytes),
+    ...EffectArray.map(observations, observation => observation.observedRootRssBaselineBytes),
     observer.finalSample.rootRssBytes,
   ]);
   for (const key of [
@@ -1450,8 +1495,8 @@ function rederiveArtifactFailures(input: {
     ...contextBriefCitationRssSampleGapFailures(input.memoryObserver, input.memoryObserver.observationCount),
     ...input.profileFailures,
     sameJson(
-      input.profiles.map(profile => profile.profile.id),
-      input.budget.profiles.map(profile => profile.id),
+      EffectArray.map(input.profiles, profile => profile.profile.id),
+      EffectArray.map(input.budget.profiles, profile => profile.id),
     )
       ? ''
       : 'reviewed scale evidence must execute local-100k, workset-50, and workset-128 in order',
@@ -1480,7 +1525,7 @@ function rederiveArtifactFailures(input: {
       );
     }
   }
-  return failures.filter(Boolean);
+  return EffectArray.filter(failures, Boolean);
 }
 
 /** Measure retained root growth independently from each request's transient peak. */
@@ -1498,54 +1543,59 @@ export function contextBriefCitationScaleReleaseIdentityFailures(
   // artifact contract. New releases must supply a candidate-bound expectation.
   const expectedSourceVersion = candidate?.sourceVersion ?? CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SOURCE_VERSION;
   const expectedRuntime = candidate?.runtime ?? CONTEXT_BRIEF_CITATION_SCALE_RELEASE_RUNTIME;
-  return [
-    candidate === undefined || /^[0-9a-f]{40}$/u.test(candidate.commit)
-      ? ''
-      : 'candidate binding commit is not exact lowercase Git SHA-1',
-    candidate === undefined ||
-    (typeof candidate.sourceVersion === 'string' &&
-      candidate.sourceVersion.startsWith('threadnote-') &&
-      CANDIDATE_PACKAGE_VERSION.test(candidate.sourceVersion.slice('threadnote-'.length)))
-      ? ''
-      : 'candidate binding source version must name an explicit package version',
-    candidate === undefined ||
-    (typeof candidate.runtime === 'string' &&
-      candidate.runtime.startsWith('bun/') &&
-      CANDIDATE_PACKAGE_VERSION.test(candidate.runtime.slice('bun/'.length)))
-      ? ''
-      : 'candidate binding runtime must name an explicit Bun version',
-    candidate === undefined || identity.candidateCommit === candidate.commit
-      ? ''
-      : `claimed candidate ${identity.candidateCommit}; required reviewed candidate ${candidate.commit}`,
-    /^[0-9a-f]{40}$/u.test(identity.candidateCommit) ? '' : 'release candidate commit is not exact lowercase Git SHA-1',
-    identity.commit === identity.candidateCommit
-      ? ''
-      : `observed commit ${identity.commit}; required candidate ${identity.candidateCommit}`,
-    identity.dirty ? 'release candidate checkout is dirty' : '',
-    identity.gitStatusObserved ? '' : 'release candidate Git status could not be observed',
-    identity.githubActions ? '' : 'release evidence was not produced by GitHub Actions',
-    identity.runnerClass === CONTEXT_BRIEF_CITATION_SCALE_RELEASE_RUNNER_CLASS
-      ? ''
-      : `runner class ${identity.runnerClass}; required ${CONTEXT_BRIEF_CITATION_SCALE_RELEASE_RUNNER_CLASS}`,
-    identity.runnerArchitecture === 'ARM64'
-      ? ''
-      : `runner architecture label ${identity.runnerArchitecture}; required ARM64`,
-    identity.runnerEnvironment === 'github-hosted'
-      ? ''
-      : `runner environment ${identity.runnerEnvironment}; required github-hosted`,
-    identity.runnerOperatingSystem === 'macOS'
-      ? ''
-      : `runner operating system label ${identity.runnerOperatingSystem}; required macOS`,
-    identity.architecture === 'arm64' ? '' : `runner architecture ${identity.architecture}; required arm64`,
-    /^Apple M1(?:$|\s)/u.test(identity.cpu) ? '' : `runner CPU ${identity.cpu}; required Apple M1 class`,
-    identity.operatingSystem.startsWith('macOS ')
-      ? ''
-      : `runner operating system ${identity.operatingSystem}; required macOS`,
-    identity.runtime === expectedRuntime ? '' : `runtime ${identity.runtime}; required ${expectedRuntime}`,
-    identity.sourceVersion === expectedSourceVersion
-      ? ''
-      : `source version ${identity.sourceVersion}; required ${expectedSourceVersion}`,
-  ].filter(Boolean);
+  return EffectArray.filter(
+    [
+      candidate === undefined || /^[0-9a-f]{40}$/u.test(candidate.commit)
+        ? ''
+        : 'candidate binding commit is not exact lowercase Git SHA-1',
+      candidate === undefined ||
+      (typeof candidate.sourceVersion === 'string' &&
+        Effect.pipe(candidate.sourceVersion, EffectString.startsWith('threadnote-')) &&
+        CANDIDATE_PACKAGE_VERSION.test(Effect.pipe(candidate.sourceVersion, EffectString.slice('threadnote-'.length))))
+        ? ''
+        : 'candidate binding source version must name an explicit package version',
+      candidate === undefined ||
+      (typeof candidate.runtime === 'string' &&
+        Effect.pipe(candidate.runtime, EffectString.startsWith('bun/')) &&
+        CANDIDATE_PACKAGE_VERSION.test(Effect.pipe(candidate.runtime, EffectString.slice('bun/'.length))))
+        ? ''
+        : 'candidate binding runtime must name an explicit Bun version',
+      candidate === undefined || identity.candidateCommit === candidate.commit
+        ? ''
+        : `claimed candidate ${identity.candidateCommit}; required reviewed candidate ${candidate.commit}`,
+      /^[0-9a-f]{40}$/u.test(identity.candidateCommit)
+        ? ''
+        : 'release candidate commit is not exact lowercase Git SHA-1',
+      identity.commit === identity.candidateCommit
+        ? ''
+        : `observed commit ${identity.commit}; required candidate ${identity.candidateCommit}`,
+      identity.dirty ? 'release candidate checkout is dirty' : '',
+      identity.gitStatusObserved ? '' : 'release candidate Git status could not be observed',
+      identity.githubActions ? '' : 'release evidence was not produced by GitHub Actions',
+      identity.runnerClass === CONTEXT_BRIEF_CITATION_SCALE_RELEASE_RUNNER_CLASS
+        ? ''
+        : `runner class ${identity.runnerClass}; required ${CONTEXT_BRIEF_CITATION_SCALE_RELEASE_RUNNER_CLASS}`,
+      identity.runnerArchitecture === 'ARM64'
+        ? ''
+        : `runner architecture label ${identity.runnerArchitecture}; required ARM64`,
+      identity.runnerEnvironment === 'github-hosted'
+        ? ''
+        : `runner environment ${identity.runnerEnvironment}; required github-hosted`,
+      identity.runnerOperatingSystem === 'macOS'
+        ? ''
+        : `runner operating system label ${identity.runnerOperatingSystem}; required macOS`,
+      identity.architecture === 'arm64' ? '' : `runner architecture ${identity.architecture}; required arm64`,
+      /^Apple M1(?:$|\s)/u.test(identity.cpu) ? '' : `runner CPU ${identity.cpu}; required Apple M1 class`,
+      Effect.pipe(identity.operatingSystem, EffectString.startsWith('macOS '))
+        ? ''
+        : `runner operating system ${identity.operatingSystem}; required macOS`,
+      identity.runtime === expectedRuntime ? '' : `runtime ${identity.runtime}; required ${expectedRuntime}`,
+      identity.sourceVersion === expectedSourceVersion
+        ? ''
+        : `source version ${identity.sourceVersion}; required ${expectedSourceVersion}`,
+    ],
+    Boolean,
+  );
 }
 
 function parseProfile(value: unknown): ContextBriefCitationScaleProfileV1 {
@@ -1583,44 +1633,47 @@ export function contextBriefCitationScaleObservationFailures(
   const counters = observation.counters;
   const expectedStatusObservations = profile.citedRepositories * (profile.id === 'local-100k' ? 2 : 1);
   const expectedActiveViewFenceObservations = profile.id === 'local-100k' ? 0 : profile.citedRepositories * 2;
-  return [
-    observation.profile === profile.id ? '' : `${prefix} has wrong profile ${observation.profile}`,
-    observation.selectedMemories === profile.selectedMemories
-      ? ''
-      : `${prefix} selected ${observation.selectedMemories}/${profile.selectedMemories} memories`,
-    observation.validationReceipts === profile.citationCount
-      ? ''
-      : `${prefix} returned ${observation.validationReceipts}/${profile.citationCount} validation receipts`,
-    observation.exactValidationReceipts === profile.citationCount
-      ? ''
-      : `${prefix} returned ${observation.exactValidationReceipts}/${profile.citationCount} exact validation receipts`,
-    observation.estimatedTokens <= budget.maximumEstimatedTokens
-      ? ''
-      : `${prefix} emitted ${observation.estimatedTokens}/${budget.maximumEstimatedTokens} estimated tokens`,
-    counters.productionStoreSessionCalls === profile.citedRepositories
-      ? ''
-      : `${prefix} opened ${counters.productionStoreSessionCalls} production graph-store sessions; expected ${profile.citedRepositories} (one per cited repository)`,
-    counters.distinctGraphDatabasePaths === profile.citedRepositories
-      ? ''
-      : `${prefix} touched ${counters.distinctGraphDatabasePaths}/${profile.citedRepositories} cited graph databases`,
-    counters.effectiveEvidenceBatches === profile.citedRepositories
-      ? ''
-      : `${prefix} issued ${counters.effectiveEvidenceBatches}/${profile.citedRepositories} repository evidence batches`,
-    counters.statusObservations === expectedStatusObservations
-      ? ''
-      : `${prefix} made ${counters.statusObservations}/${expectedStatusObservations} snapshot status observations`,
-    counters.activeViewFenceObservations === expectedActiveViewFenceObservations
-      ? ''
-      : `${prefix} made ${counters.activeViewFenceObservations}/${expectedActiveViewFenceObservations} active-view fence observations`,
-    counters.snapshotLeaseAcquisitions === profile.citedRepositories &&
-    counters.snapshotLeaseReleases === profile.citedRepositories &&
-    counters.leaseBalance === 0
-      ? ''
-      : `${prefix} acquired/released ${counters.snapshotLeaseAcquisitions}/${counters.snapshotLeaseReleases} snapshot leases; expected ${profile.citedRepositories}/${profile.citedRepositories}`,
-    counters.peakLeaseBalance <= 4 ? '' : `${prefix} exceeded validator concurrency 4`,
-    counters.coldGraphBuilds === 0 ? '' : `${prefix} started cold graph indexing`,
-    counters.maintenanceRequests === 0 ? '' : `${prefix} requested graph maintenance`,
-  ].filter(Boolean);
+  return EffectArray.filter(
+    [
+      observation.profile === profile.id ? '' : `${prefix} has wrong profile ${observation.profile}`,
+      observation.selectedMemories === profile.selectedMemories
+        ? ''
+        : `${prefix} selected ${observation.selectedMemories}/${profile.selectedMemories} memories`,
+      observation.validationReceipts === profile.citationCount
+        ? ''
+        : `${prefix} returned ${observation.validationReceipts}/${profile.citationCount} validation receipts`,
+      observation.exactValidationReceipts === profile.citationCount
+        ? ''
+        : `${prefix} returned ${observation.exactValidationReceipts}/${profile.citationCount} exact validation receipts`,
+      observation.estimatedTokens <= budget.maximumEstimatedTokens
+        ? ''
+        : `${prefix} emitted ${observation.estimatedTokens}/${budget.maximumEstimatedTokens} estimated tokens`,
+      counters.productionStoreSessionCalls === profile.citedRepositories
+        ? ''
+        : `${prefix} opened ${counters.productionStoreSessionCalls} production graph-store sessions; expected ${profile.citedRepositories} (one per cited repository)`,
+      counters.distinctGraphDatabasePaths === profile.citedRepositories
+        ? ''
+        : `${prefix} touched ${counters.distinctGraphDatabasePaths}/${profile.citedRepositories} cited graph databases`,
+      counters.effectiveEvidenceBatches === profile.citedRepositories
+        ? ''
+        : `${prefix} issued ${counters.effectiveEvidenceBatches}/${profile.citedRepositories} repository evidence batches`,
+      counters.statusObservations === expectedStatusObservations
+        ? ''
+        : `${prefix} made ${counters.statusObservations}/${expectedStatusObservations} snapshot status observations`,
+      counters.activeViewFenceObservations === expectedActiveViewFenceObservations
+        ? ''
+        : `${prefix} made ${counters.activeViewFenceObservations}/${expectedActiveViewFenceObservations} active-view fence observations`,
+      counters.snapshotLeaseAcquisitions === profile.citedRepositories &&
+      counters.snapshotLeaseReleases === profile.citedRepositories &&
+      counters.leaseBalance === 0
+        ? ''
+        : `${prefix} acquired/released ${counters.snapshotLeaseAcquisitions}/${counters.snapshotLeaseReleases} snapshot leases; expected ${profile.citedRepositories}/${profile.citedRepositories}`,
+      counters.peakLeaseBalance <= 4 ? '' : `${prefix} exceeded validator concurrency 4`,
+      counters.coldGraphBuilds === 0 ? '' : `${prefix} started cold graph indexing`,
+      counters.maintenanceRequests === 0 ? '' : `${prefix} requested graph maintenance`,
+    ],
+    Boolean,
+  );
 }
 
 function memoryObservationFailures(
@@ -1630,33 +1683,36 @@ function memoryObservationFailures(
 ): readonly string[] {
   const prefix = `${profile.id} memory observation ${index}`;
   const memory = observation.memory;
-  return [
-    memory.profile === profile.id ? '' : `${prefix} has wrong profile ${memory.profile}`,
-    memory.observationId.length > 0 ? '' : `${prefix} has no observation ID`,
-    memory.rootStartIdentity.length > 0 ? '' : `${prefix} has no root start identity`,
-    memory.sampleIntervalMilliseconds >= 10 ? '' : `${prefix} sampling interval is below 10ms`,
-    memory.samples >= 3 ? '' : `${prefix} has fewer than three successful samples`,
-    memory.sampleAttempts === memory.samples + memory.sampleFailures
-      ? ''
-      : `${prefix} sample accounting is inconsistent`,
-    memory.sampleFailures === 0 ? '' : `${prefix} has ${memory.sampleFailures} failed samples`,
-    memory.baselineProcessCount === 1
-      ? ''
-      : `${prefix} baseline process count ${memory.baselineProcessCount}; expected root only`,
-    memory.observedRootRssBaselineBytes <= memory.observedProcessTreeRssBaselineBytes &&
-    memory.observedRootRssPeakBytes <= memory.observedProcessTreeRssPeakBytes
-      ? ''
-      : `${prefix} root RSS exceeds process-tree RSS`,
-    memory.observedRootRssPeakBytes >= memory.observedRootRssBaselineBytes &&
-    memory.observedAddedRootRssBytes === memory.observedRootRssPeakBytes - memory.observedRootRssBaselineBytes
-      ? ''
-      : `${prefix} has inconsistent root RSS evidence`,
-    memory.observedProcessTreeRssPeakBytes >= memory.observedProcessTreeRssBaselineBytes &&
-    memory.observedAddedProcessTreeRssBytes ===
-      memory.observedProcessTreeRssPeakBytes - memory.observedProcessTreeRssBaselineBytes
-      ? ''
-      : `${prefix} has inconsistent process-tree RSS evidence`,
-  ].filter(Boolean);
+  return EffectArray.filter(
+    [
+      memory.profile === profile.id ? '' : `${prefix} has wrong profile ${memory.profile}`,
+      memory.observationId.length > 0 ? '' : `${prefix} has no observation ID`,
+      memory.rootStartIdentity.length > 0 ? '' : `${prefix} has no root start identity`,
+      memory.sampleIntervalMilliseconds >= 10 ? '' : `${prefix} sampling interval is below 10ms`,
+      memory.samples >= 3 ? '' : `${prefix} has fewer than three successful samples`,
+      memory.sampleAttempts === memory.samples + memory.sampleFailures
+        ? ''
+        : `${prefix} sample accounting is inconsistent`,
+      memory.sampleFailures === 0 ? '' : `${prefix} has ${memory.sampleFailures} failed samples`,
+      memory.baselineProcessCount === 1
+        ? ''
+        : `${prefix} baseline process count ${memory.baselineProcessCount}; expected root only`,
+      memory.observedRootRssBaselineBytes <= memory.observedProcessTreeRssBaselineBytes &&
+      memory.observedRootRssPeakBytes <= memory.observedProcessTreeRssPeakBytes
+        ? ''
+        : `${prefix} root RSS exceeds process-tree RSS`,
+      memory.observedRootRssPeakBytes >= memory.observedRootRssBaselineBytes &&
+      memory.observedAddedRootRssBytes === memory.observedRootRssPeakBytes - memory.observedRootRssBaselineBytes
+        ? ''
+        : `${prefix} has inconsistent root RSS evidence`,
+      memory.observedProcessTreeRssPeakBytes >= memory.observedProcessTreeRssBaselineBytes &&
+      memory.observedAddedProcessTreeRssBytes ===
+        memory.observedProcessTreeRssPeakBytes - memory.observedProcessTreeRssBaselineBytes
+        ? ''
+        : `${prefix} has inconsistent process-tree RSS evidence`,
+    ],
+    Boolean,
+  );
 }
 
 function measurement(
@@ -1671,7 +1727,7 @@ function maximum(
   values: readonly ContextBriefCitationScaleObservationV2[],
   select: (value: ContextBriefCitationScaleObservationV2) => number,
 ): number {
-  return Math.max(0, ...values.map(select));
+  return Math.max(0, ...EffectArray.map(values, select));
 }
 
 function positiveInteger(value: unknown, label: string): number {
@@ -1702,7 +1758,7 @@ function boundedRate(value: unknown, label: string): number {
 }
 
 function safeSum(values: readonly number[], label: string): number {
-  const result = values.reduce((total, value) => total + value, 0);
+  const result = EffectArray.reduce(values, 0, (total, value) => total + value);
   if (!Number.isSafeInteger(result)) invalid(`${label} total exceeds the safe integer range`);
   return result;
 }
@@ -1765,7 +1821,7 @@ function sameJson(left: unknown, right: unknown): boolean {
 }
 
 function exactKeys(value: Readonly<Record<string, unknown>>, expected: readonly string[]): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
   if (JSON.stringify(actual) !== JSON.stringify(wanted)) invalid('contains unsupported or missing fields');
 }

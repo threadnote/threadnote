@@ -1,20 +1,41 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {join} from '@threadnote/testing/node-path';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {expect, it} from '@effect/vitest';
-import {Effect, FileSystem} from 'effect';
+import {Effect, FileSystem, Schema} from 'effect';
 import {describe} from 'vitest';
 import {SystemInfo} from '@threadnote/platform/system';
 import {handleManagerProcessRequest} from '@threadnote/threadnote/manager/processes';
 import {readThreadnoteProcessDiagnostics} from '@threadnote/threadnote/process/diagnostics';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const ProcessListSchema = Schema.Struct({
+  processes: Schema.Array(
+    Schema.Struct({
+      processId: Schema.Finite,
+      processRef: Schema.optionalKey(Schema.String),
+    }),
+  ),
+  truncated: Schema.optionalKey(Schema.Boolean),
+});
+
+function parseProcessList(value: unknown): {
+  readonly processes: readonly {readonly processId: number; readonly processRef?: string}[];
+  readonly truncated?: boolean;
+} {
+  if (!Schema.is(ProcessListSchema)(value)) throw new Error('Invalid Manager process list response.');
+  return value;
+}
 
 describe('Manager process API', () => {
   it.effect('requires explicit confirmation before process termination', () =>
     Effect.gen(function* () {
       const response = yield* handleManagerProcessRequest({
-        body: Effect.succeed({processId: 123, processRef: `tnp_${'a'.repeat(64)}`}),
+        body: Effect.succeed({processId: 123, processRef: `tnp_${Effect2.pipe('a', EffectString.repeat(64))}`}),
         config: testConfig('/unused'),
         method: 'POST',
         url: new URL('http://localhost/api/processes/terminate'),
@@ -47,7 +68,11 @@ describe('Manager process API', () => {
         },
       });
       const response = yield* handleManagerProcessRequest({
-        body: Effect.succeed({confirm: true, processId, processRef: `tnp_${'a'.repeat(64)}`}),
+        body: Effect.succeed({
+          confirm: true,
+          processId,
+          processRef: `tnp_${Effect2.pipe('a', EffectString.repeat(64))}`,
+        }),
         config: testConfig(home),
         method: 'POST',
         url: new URL('http://localhost/api/processes/terminate'),
@@ -88,7 +113,8 @@ describe('Manager process API', () => {
       const serialized = JSON.stringify(listed!.body);
       expect(serialized).not.toContain(token);
       expect(serialized).not.toContain(home);
-      const process = (listed!.body as {processes: readonly {processId: number; processRef?: string}[]}).processes[0];
+      const listBody = parseProcessList(listed!.body);
+      const process = listBody.processes[0];
       expect(process).toMatchObject({processId, processRef: expect.stringMatching(/^tnp_[0-9a-f]{64}$/u)});
 
       const terminated = yield* handleManagerProcessRequest({
@@ -133,21 +159,18 @@ describe('Manager process API', () => {
         method: 'GET',
         url: new URL('http://localhost/api/processes'),
       }).pipe(Effect.provideService(SystemInfo, testSystem));
-      const managerInventory = listed!.body as {
-        readonly processes: readonly {readonly processId: number}[];
-        readonly truncated: boolean;
-      };
+      const managerInventory = parseProcessList(listed!.body);
       expect(managerInventory.truncated).toBe(true);
       expect(managerInventory.processes).toHaveLength(100);
       expect(managerInventory.processes[0]?.processId).toBe(activeProcessId);
-      expect(managerInventory.processes.some(process => process.processId === activeProcessId)).toBe(true);
+      expect(EffectArray.some(managerInventory.processes, process => process.processId === activeProcessId)).toBe(true);
 
       const chronological = yield* readThreadnoteProcessDiagnostics({agentContextHome: home}).pipe(
         Effect.provideService(SystemInfo, testSystem),
       );
       expect(chronological.truncated).toBe(true);
       expect(chronological.processes).toHaveLength(100);
-      expect(chronological.processes.some(process => process.processId === activeProcessId)).toBe(false);
+      expect(EffectArray.some(chronological.processes, process => process.processId === activeProcessId)).toBe(false);
     }).pipe(provideTestLayer(TestSystemInfoLayer), provideTestLayer(BunServices.layer), Effect.scoped),
   );
 });

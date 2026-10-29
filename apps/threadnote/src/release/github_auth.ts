@@ -1,6 +1,8 @@
 import {Effect, Option} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const LEGACY_GITHUB_RELEASES_URL =
   'https://api.github.com/repos/Kashkovsky/threadnote/releases?per_page=100' as const;
@@ -55,6 +57,8 @@ export function isOfficialGitHubReleasesUrl(source: string): boolean {
 }
 
 function validToken(value: string | undefined): string | undefined {
-  const token = value?.trim();
+  const token = Effect2.pipe(value, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   return token && token.length <= 4096 && /^[\x21-\x7e]+$/.test(token) ? token : undefined;
 }

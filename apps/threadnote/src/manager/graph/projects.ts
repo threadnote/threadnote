@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
 import {runIsolatedCodeGraphIndexSnapshot} from '@threadnote/graph/isolated/index';
@@ -13,6 +14,8 @@ import {requireString} from '@threadnote/manager/request_inputs';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {ProjectManifest, RuntimeConfig, SeedManifest} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const UTF8 = new TextEncoder();
 const MANAGER_GRAPH_PROJECT_MAXIMUM = 4_096;
@@ -33,21 +36,21 @@ interface ManagerGraphManifestCatalog {
   readonly revision: string;
 }
 
-class ManagerGraphProjectCatalogError extends Schema.TaggedError<ManagerGraphProjectCatalogError>()(
-  'ManagerGraphProjectCatalogError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class ManagerGraphProjectCatalogError extends Schema.TaggedError<
+  ManagerGraphProjectCatalogError,
+  {readonly brand: unique symbol}
+>()('ManagerGraphProjectCatalogError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
-export class ManagerGraphProjectActionError extends Schema.TaggedError<ManagerGraphProjectActionError>()(
-  'ManagerGraphProjectActionError',
-  {
-    code: Schema.Literals(['graph-project-stale', 'graph-project-unavailable']),
-    message: Schema.String,
-  },
-) {
+export class ManagerGraphProjectActionError extends Schema.TaggedError<
+  ManagerGraphProjectActionError,
+  {readonly brand: unique symbol}
+>()('ManagerGraphProjectActionError', {
+  code: Schema.Literals(['graph-project-stale', 'graph-project-unavailable']),
+  message: Schema.String,
+}) {
   static of(
     code: 'graph-project-stale' | 'graph-project-unavailable',
     message: string,
@@ -72,12 +75,12 @@ export const managerGraphProjectCatalog = Effect.fn('managerGraphProjects.catalo
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   const graphCatalog: GraphCatalog = catalog;
-  const readyWorktreePaths = graphCatalog.repositories.flatMap(repository =>
-    repository.views.flatMap(view =>
+  const readyWorktreePaths = EffectArray.flatMap(graphCatalog.repositories, repository =>
+    EffectArray.flatMap(repository.views, view =>
       view.localAssociation.state === 'verified' && view.localAssociation.path ? [view.localAssociation.path] : [],
     ),
   );
-  const readinessMayBeTruncated = graphCatalog.repositories.some(repository => repository.viewsTruncated);
+  const readinessMayBeTruncated = EffectArray.some(graphCatalog.repositories, repository => repository.viewsTruncated);
   const configuredProjects = yield* Effect.forEach(
     manifestCatalog.value.projects,
     project =>
@@ -133,8 +136,13 @@ export const runManagerManifestProjectGraphIndex = Effect.fn('managerGraphProjec
         'Configured projects changed. Refresh Manager before choosing a project to index.',
       );
     }
-    const project = catalog.projects.find(
-      candidate => candidate.manifest.name.toLowerCase() === projectName.toLowerCase(),
+    const project = Option.getOrUndefined(
+      EffectArray.findFirst(
+        catalog.projects,
+        candidate =>
+          Effect2.pipe(candidate.manifest.name, EffectString.toLowerCase) ===
+          Effect2.pipe(projectName, EffectString.toLowerCase),
+      ),
     );
     if (!project) {
       return yield* ManagerGraphProjectActionError.of(
@@ -252,7 +260,7 @@ const readManagerGraphManifestCatalog = Effect.fn('managerGraphProjects.readMani
   });
   const observed = yield* observeManagerManifestProjects(manifest.projects, 0);
   return {
-    projects: observed.map((display, index) => ({
+    projects: EffectArray.map(observed, (display, index) => ({
       display: {folder: display.folder, name: display.name, path: display.path},
       manifest: manifest.projects[index],
     })),
@@ -300,11 +308,14 @@ export function canonicalConfiguredProjectHasReadyGraph(
   projectPath: string,
   readyWorktreePaths: readonly string[],
 ): boolean {
-  return readyWorktreePaths.some(worktreePath => {
+  return EffectArray.some(readyWorktreePaths, worktreePath => {
     if (!path.isAbsolute(projectPath) || !path.isAbsolute(worktreePath)) return false;
     const relative = path.relative(worktreePath, projectPath);
     return (
-      relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`))
+      relative === '' ||
+      (!path.isAbsolute(relative) &&
+        relative !== '..' &&
+        !Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)))
     );
   });
 }
@@ -318,7 +329,7 @@ function assertManagerGraphProjectManifest(manifest: SeedManifest): void {
     if (!managerGraphProjectNameIsSafe(project.name) || !managerGraphProjectPathIsSafe(project.path)) {
       throw ManagerGraphProjectCatalogError.make({message: 'A configured project name or path is invalid.'});
     }
-    const key = project.name.toLowerCase();
+    const key = Effect2.pipe(project.name, EffectString.toLowerCase);
     if (names.has(key))
       throw ManagerGraphProjectCatalogError.make({message: 'Configured project names must be unique.'});
     names.add(key);
@@ -328,7 +339,7 @@ function assertManagerGraphProjectManifest(manifest: SeedManifest): void {
 function managerGraphProjectNameIsSafe(value: string): boolean {
   return (
     value.length > 0 &&
-    value === value.trim() &&
+    value === Effect2.pipe(value, EffectString.trim) &&
     UTF8.encode(value).byteLength <= MANAGER_GRAPH_PROJECT_NAME_BYTES_MAXIMUM &&
     !hasControlCharacter(value)
   );
@@ -343,8 +354,13 @@ function managerGraphProjectPathIsSafe(value: string): boolean {
 }
 
 function hasControlCharacter(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect2.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect2.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code <= 31 || code === 127;
   });
 }

@@ -1,5 +1,7 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Effect} from 'effect';
 import {TestClock} from 'effect/testing';
 import {it as effectIt} from '@effect/vitest';
@@ -10,11 +12,132 @@ import {
   hasPackedWorkflowScopes,
   workflowJournalStorageImage,
 } from '../../src/workflow_memory/journal_storage.js';
-import {stableJson, type WorkflowJournal} from '../../src/workflow_memory/protocol.js';
+import {stableJson, type WorkflowJournal, type WorkflowOperation} from '../../src/workflow_memory/protocol.js';
 import {withWorkflowReadCache} from '../../src/workflow_memory/read_cache.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 // This fixture tests storage fidelity, not native journal admission.
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const PackedTextReferenceSchema = withRest(Schema.Struct({text: Schema.mutableKey(Schema.Finite)}));
+const PackedStorageSchema = withRest(
+  Schema.Struct({
+    journalStorage: Schema.String,
+    scopeSets: Schema.mutable(Schema.Array(Schema.mutable(Schema.Array(Schema.String)))),
+    textValues: Schema.mutable(Schema.Array(Schema.String)),
+    journal: withRest(
+      Schema.Struct({
+        binding: Schema.Unknown,
+        operations: Schema.Record(
+          Schema.String,
+          withRest(
+            Schema.Struct({
+              before: Schema.optionalKey(PackedTextReferenceSchema),
+              desired: PackedTextReferenceSchema,
+              relations: Schema.Array(
+                withRest(
+                  Schema.Struct({
+                    allowedUriScopes: Schema.optionalKey(
+                      withRest(Schema.Struct({scopeSet: Schema.mutableKey(Schema.Finite)})),
+                    ),
+                    content: PackedTextReferenceSchema,
+                    uri: Schema.optionalKey(Schema.String),
+                  }),
+                ),
+              ),
+              request: Schema.optionalKey(
+                withRest(Schema.Struct({body: Schema.optionalKey(PackedTextReferenceSchema)})),
+              ),
+            }),
+          ),
+        ),
+      }),
+    ),
+  }),
+);
+const packedStorage = Schema.decodeUnknownSync(PackedStorageSchema);
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+const isWorkflowBinding = (value: unknown): value is WorkflowJournal['binding'] =>
+  isRecord(value) &&
+  typeof value.bindingId === 'string' &&
+  typeof value.workflowRunId === 'string' &&
+  (value.profile === 'desktop' ||
+    value.profile === 'codex-cloud-personal' ||
+    value.profile === 'cursor-cloud-personal') &&
+  typeof value.project === 'string' &&
+  typeof value.featureId === 'string' &&
+  typeof value.generation === 'string' &&
+  typeof value.home === 'string' &&
+  typeof value.repo === 'string' &&
+  typeof value.account === 'string' &&
+  typeof value.user === 'string' &&
+  typeof value.agentId === 'string' &&
+  EffectArray.isArray(value.sharedRoots) &&
+  EffectArray.every(value.sharedRoots, root => typeof root === 'string') &&
+  (value.artifactLifetime === 'local-home' || value.artifactLifetime === 'possibly-ephemeral-workspace');
+
+interface ExpandedJournalView {
+  readonly binding: WorkflowJournal['binding'];
+  readonly operations: Readonly<
+    Record<
+      string,
+      {
+        readonly relations: readonly {readonly allowedUriScopes?: readonly string[]}[];
+      }
+    >
+  >;
+}
+const isExpandedJournalView = (value: unknown): value is ExpandedJournalView => {
+  if (!isRecord(value) || !isWorkflowBinding(value.binding) || !isRecord(value.operations)) return false;
+  return EffectArray.every(
+    EffectRecord.values(value.operations),
+    operation =>
+      isRecord(operation) &&
+      EffectArray.isArray(operation.relations) &&
+      EffectArray.every(
+        operation.relations,
+        relation =>
+          isRecord(relation) &&
+          (relation.allowedUriScopes === undefined ||
+            (EffectArray.isArray(relation.allowedUriScopes) &&
+              EffectArray.every(relation.allowedUriScopes, uri => typeof uri === 'string'))),
+      ),
+  );
+};
+
+function storageOperation(
+  index: string,
+  desired: string,
+  relations: WorkflowOperation['relations'],
+  requestBody?: string,
+  before?: string,
+): WorkflowOperation {
+  return {
+    request: {protocolVersion: 1, action: 'create', ...(requestBody === undefined ? {} : {body: requestBody})},
+    intentDigest: sha256HexSync(`intent:${index}`),
+    desired,
+    ...(before === undefined ? {} : {before}),
+    artifact: {
+      artifactKey: `artifact-${index}`,
+      sourceRunId: 'fixture-run',
+      role: 'fixture',
+      canonicalUri: `threadnote://fixture/${index}`,
+      memoryId: `tn_fixture_${index}`,
+      revision: sha256HexSync(`revision:${index}`),
+      bodySha256: sha256HexSync(desired),
+      storageKind: 'durable',
+      state: 'active',
+    },
+    relations,
+    status: 'prepared',
+  };
+}
+
 interface JournalTexts {
   readonly manifestContent: string;
   readonly previousManifestContent?: string;
@@ -34,31 +157,45 @@ const image = (
     before: 'complete previous bytes',
     relationContent: 'complete target bytes',
   },
-): WorkflowJournal =>
-  ({
-    protocolVersion: 1,
-    binding: {bindingId: 'fixture'},
-    artifacts: {},
-    manifestCommitted: true,
-    manifestUri: 'threadnote://fixture/manifest',
-    manifestContent: texts.manifestContent,
-    ...(texts.previousManifestContent === undefined ? {} : {previousManifestContent: texts.previousManifestContent}),
-    operations: Object.fromEntries(
-      scopes.map((set, index) => [
-        'operation-' + index,
-        {
-          request: texts.requestBody === undefined ? {} : {body: texts.requestBody},
-          desired: texts.desired,
-          ...(texts.before === undefined ? {} : {before: texts.before}),
-          relations: Array.from({length: 4}, () => ({
-            uri: 'threadnote://fixture/target',
-            content: texts.relationContent,
-            allowedUriScopes: [...set],
-          })),
-        },
-      ]),
-    ),
-  }) as unknown as WorkflowJournal;
+): WorkflowJournal => ({
+  protocolVersion: 1,
+  binding: {
+    bindingId: 'fixture',
+    workflowRunId: 'fixture-run',
+    profile: 'desktop',
+    project: 'threadnote',
+    featureId: 'storage-fixture',
+    generation: 'generation-v1',
+    home: '/private/fixture',
+    repo: '/private/fixture',
+    account: 'local',
+    user: 'tester',
+    agentId: 'fixture-agent',
+    sharedRoots: [],
+    artifactLifetime: 'local-home',
+  },
+  artifacts: {},
+  manifestCommitted: true,
+  manifestUri: 'threadnote://fixture/manifest',
+  manifestContent: texts.manifestContent,
+  ...(texts.previousManifestContent === undefined ? {} : {previousManifestContent: texts.previousManifestContent}),
+  operations: EffectRecord.fromEntries(
+    EffectArray.map(scopes, (set, index) => [
+      'operation-' + index,
+      storageOperation(
+        `operation-${index}`,
+        texts.desired,
+        Array.from({length: 4}, () => ({
+          uri: 'threadnote://fixture/target',
+          content: texts.relationContent,
+          allowedUriScopes: [...set],
+        })),
+        texts.requestBody,
+        texts.before,
+      ),
+    ]),
+  ),
+});
 
 describe('workflow journal scope-set storage', () => {
   it('preserves every scope and text byte without changing ordinary storage', async () => {
@@ -90,7 +227,7 @@ describe('workflow journal scope-set storage', () => {
           expect(stableJson(original)).toBe(before);
           const reordered = {
             ...original,
-            operations: Object.fromEntries(Object.entries(original.operations).reverse()),
+            operations: EffectRecord.fromEntries(EffectRecord.toEntries(original.operations).reverse()),
           };
           expect(stableJson(workflowJournalStorageImage(reordered, true))).toBe(stableJson(packed));
         },
@@ -101,31 +238,25 @@ describe('workflow journal scope-set storage', () => {
 
   it('shares repeated scope sets and rejects malformed, unused or out-of-range references', () => {
     const original = image([['threadnote://fixture/a', 'threadnote://fixture/b']]);
-    const packed = workflowJournalStorageImage(original, true) as {
-      scopeSets: string[][];
-      textValues: string[];
-      journal: {
-        operations: Record<
-          string,
-          {
-            request: {body: {text: number}};
-            relations: {allowedUriScopes: {scopeSet: number}; content: {text: number}}[];
-          }
-        >;
-      };
-    };
+    const packed = packedStorage(workflowJournalStorageImage(original, true));
     expect(packed.scopeSets).toHaveLength(1);
     expect(packed.textValues).toBeDefined();
-    const decoded = decodeWorkflowJournalStorageImage(JSON.parse(stableJson(packed))) as WorkflowJournal;
+    const decoded = decodeWorkflowJournalStorageImage(JSON.parse(stableJson(packed)));
+    if (!isExpandedJournalView(decoded)) throw new Error('Expected the packed journal to decode.');
     const targets = decoded.operations['operation-0'].relations;
     expect(targets[0].allowedUriScopes).toBe(targets[1].allowedUriScopes);
+    if (!isWorkflowBinding(decoded.binding)) throw new Error('Expected a packed binding.');
     expect(hasPackedWorkflowScopes(decoded.binding)).toBe(true);
     for (const mutate of [
       (value: typeof packed) => {
-        value.journal.operations['operation-0'].relations[0].allowedUriScopes.scopeSet = 2;
+        const reference = value.journal.operations['operation-0'].relations[0]?.allowedUriScopes;
+        if (!reference) throw new Error('Expected packed scope-set reference.');
+        Object.assign(reference, {scopeSet: 2});
       },
       (value: typeof packed) => {
-        value.journal.operations['operation-0'].relations[0].allowedUriScopes.scopeSet = -1;
+        const reference = value.journal.operations['operation-0'].relations[0]?.allowedUriScopes;
+        if (!reference) throw new Error('Expected packed scope-set reference.');
+        Object.assign(reference, {scopeSet: -1});
       },
       (value: typeof packed) => {
         value.scopeSets.push(['unused']);
@@ -140,26 +271,29 @@ describe('workflow journal scope-set storage', () => {
         value.textValues.push('unused');
       },
       (value: typeof packed) => {
-        const reference = value.journal.operations['operation-0'].request.body;
+        const reference = value.journal.operations['operation-0'].request?.body;
+        if (!reference) throw new Error('Expected packed request body reference.');
         Object.assign(reference, {extra: true});
       },
       (value: typeof packed) => {
-        const reference = value.journal.operations['operation-0'].request.body;
+        const reference = value.journal.operations['operation-0'].request?.body;
+        if (!reference) throw new Error('Expected packed request body reference.');
         reference.text = 0.5;
       },
       (value: typeof packed) => {
-        const reference = value.journal.operations['operation-0'].request.body;
+        const reference = value.journal.operations['operation-0'].request?.body;
+        if (!reference) throw new Error('Expected packed request body reference.');
         reference.text = value.textValues.length;
       },
     ]) {
-      const corrupt = JSON.parse(stableJson(packed)) as typeof packed;
+      const corrupt = packedStorage(JSON.parse(stableJson(packed)));
       mutate(corrupt);
       expect(() => decodeWorkflowJournalStorageImage(corrupt)).toThrow();
     }
   });
 
   it('packs repeated large known text fields while preserving every decoded byte', () => {
-    const repeated = '雪🙂\nrepeated payload\n'.repeat(6000);
+    const repeated = Effect2.pipe('雪🙂\nrepeated payload\n', EffectString.repeat(6000));
     const original = image([['one-scope']], {
       manifestContent: 'manifest',
       previousManifestContent: 'previous',
@@ -176,20 +310,16 @@ describe('workflow journal scope-set storage', () => {
     );
     expect(stableJson(decodeWorkflowJournalStorageImage(JSON.parse(packedJson)))).toBe(stableJson(original));
 
-    const fullNativeReceiptBudget = image([]) as unknown as Record<string, unknown>;
-    const operations = Object.fromEntries(
-      Array.from({length: 4096}, (_, index) => [
-        `operation-${index}`,
-        {
-          request: {body: `request-${index}`},
-          desired: `desired-${index}`,
-          before: `before-${index}`,
-          relations: [],
-        },
-      ]),
-    );
-    fullNativeReceiptBudget.operations = operations;
-    const fullImage = workflowJournalStorageImage(fullNativeReceiptBudget as unknown as WorkflowJournal, true);
+    const fullNativeReceiptBudget: WorkflowJournal = {
+      ...image([]),
+      operations: EffectRecord.fromEntries(
+        Array.from({length: 4096}, (_, index) => [
+          `operation-${index}`,
+          storageOperation(`operation-${index}`, `desired-${index}`, [], `request-${index}`, `before-${index}`),
+        ]),
+      ),
+    };
+    const fullImage = workflowJournalStorageImage(fullNativeReceiptBudget, true);
     expect(stableJson(decodeWorkflowJournalStorageImage(JSON.parse(stableJson(fullImage))))).toBe(
       stableJson(fullNativeReceiptBudget),
     );
@@ -239,7 +369,8 @@ describe('workflow journal scope-set storage', () => {
       fc.property(fc.integer({min: 1, max: 2000}), inventoryCount => {
         const uri = (kind: string, index: number) => {
           const prefix = 'threadnote://user/tester/memories/durable/projects/fixture/';
-          const unique = `${kind}-${String(index).padStart(4, '0')}-`;
+          const unique = `${kind}-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}-`;
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           return prefix + unique + 'x'.repeat(250 - prefix.length - unique.length);
         };
         const ownedScopes = Array.from({length: inventoryCount}, (_, index) => uri('owned', index));
@@ -253,7 +384,10 @@ describe('workflow journal scope-set storage', () => {
         const beforeBytes = utf8.encode(stableJson(workflowJournalStorageImage(before, true))).byteLength;
         const afterBytes = utf8.encode(stableJson(workflowJournalStorageImage(after, true))).byteLength;
         const maxEntryBytes = Math.max(
-          ...ownedScopes.concat(nextScopes.flat()).map(value => utf8.encode(JSON.stringify(value)).byteLength + 1),
+          ...EffectArray.map(
+            ownedScopes.concat(nextScopes.flat()),
+            value => utf8.encode(JSON.stringify(value)).byteLength + 1,
+          ),
         );
         const allowance = nativeAuthoringSaveByteBudget({
           contentBytes: plannedOperations * utf8.encode(stableJson(texts)).byteLength,
@@ -278,7 +412,8 @@ describe('workflow journal scope-set storage', () => {
     const utf8 = new TextEncoder();
     const uri = (kind: string, index: number) => {
       const prefix = 'threadnote://user/tester/memories/durable/projects/fixture/';
-      const unique = `${kind}-${String(index).padStart(2, '0')}-`;
+      const unique = `${kind}-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}-`;
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       return prefix + unique + 'x'.repeat(4096 - prefix.length - unique.length);
     };
     const ownedUris = Array.from({length: 16}, (_, index) => uri('owned', index));
@@ -286,12 +421,13 @@ describe('workflow journal scope-set storage', () => {
     const citation = (index: number) => {
       const reference = {
         uri: ownedUris[index],
-        memoryId: `tn_authoring_${String(index).padStart(2, '0')}`,
-        revision: 'a'.repeat(64),
+        memoryId: `tn_authoring_${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+        revision: Effect2.pipe('a', EffectString.repeat(64)),
       };
       const baseBytes = utf8.encode(JSON.stringify({...reference, body: ''})).byteLength;
       const remaining = 64 * 1024 - baseBytes;
       const pattern = '"\\\n雪🙂x';
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       const body = pattern.repeat(Math.floor(remaining / 14)) + 'x'.repeat(remaining % 14);
       const completeContent = JSON.stringify({...reference, body});
       expect(utf8.encode(completeContent).byteLength).toBe(64 * 1024);
@@ -300,26 +436,26 @@ describe('workflow journal scope-set storage', () => {
     const citations = Array.from({length: ownedUris.length}, (_, index) => citation(index));
     const priorManifest = JSON.stringify({
       version: 1,
-      artifacts: ownedUris.map((canonicalUri, index) => ({
+      artifacts: EffectArray.map(ownedUris, (canonicalUri, index) => ({
         uri: canonicalUri,
-        memoryId: `tn_authoring_${String(index).padStart(2, '0')}`,
-        revision: 'a'.repeat(64),
+        memoryId: `tn_authoring_${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+        revision: Effect2.pipe('a', EffectString.repeat(64)),
         state: 'active',
       })),
     });
     const nextManifest = JSON.stringify({
       version: 2,
       artifacts: [
-        ...ownedUris.map((canonicalUri, index) => ({
+        ...EffectArray.map(ownedUris, (canonicalUri, index) => ({
           uri: canonicalUri,
-          memoryId: `tn_authoring_${String(index).padStart(2, '0')}`,
-          revision: 'a'.repeat(64),
+          memoryId: `tn_authoring_${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+          revision: Effect2.pipe('a', EffectString.repeat(64)),
           state: 'active',
         })),
-        ...childCandidates.slice(0, 4).map((canonicalUri, index) => ({
+        ...EffectArray.map(childCandidates.slice(0, 4), (canonicalUri, index) => ({
           uri: canonicalUri,
-          memoryId: `tn_child_${String(index).padStart(2, '0')}`,
-          revision: 'b'.repeat(64),
+          memoryId: `tn_child_${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+          revision: Effect2.pipe('b', EffectString.repeat(64)),
           state: 'active',
         })),
       ],
@@ -337,26 +473,22 @@ describe('workflow journal scope-set storage', () => {
       });
       const targetBytes = 64 * 1024;
       const emptyBodyBytes = utf8.encode(JSON.stringify({metadata, body: ''})).byteLength;
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       const body = 'm'.repeat(targetBytes - emptyBodyBytes);
       const value = JSON.stringify({metadata, body});
       expect(utf8.encode(value).byteLength).toBe(targetBytes);
       return value;
     };
     const childData = Array.from({length: 4}, (_, index) => authoredChildData(index));
-    const operations: Record<string, unknown> = {};
+    const operations: Record<string, WorkflowOperation> = {};
     for (let index = 0; index < ownedUris.length; index++)
-      operations[`owned-${String(index).padStart(2, '0')}`] = {
-        request: {body: citations[index]},
-        desired: citations[index],
-        before: citations[index],
-        relations: [
-          {
-            uri: ownedUris[index],
-            content: citations[index],
-            allowedUriScopes: ownedUris,
-          },
-        ],
-      };
+      operations[`owned-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`] = storageOperation(
+        `owned-${index}`,
+        citations[index],
+        [{uri: ownedUris[index], content: citations[index], allowedUriScopes: ownedUris}],
+        citations[index],
+        citations[index],
+      );
     const postOperations = {...operations};
     for (let index = 0; index < 4; index++) {
       const previousChildren = childCandidates.slice(0, index);
@@ -365,45 +497,42 @@ describe('workflow journal scope-set storage', () => {
       const requestBody = authoredRequestBody;
       const desired = childData[index];
       const before = citations[index];
-      const relations = targets.map((canonicalUri, targetIndex) => ({
+      const relations = EffectArray.map(targets, (canonicalUri, targetIndex) => ({
         uri: canonicalUri,
         content: citations[targetIndex % citations.length],
         allowedUriScopes,
       }));
-      postOperations[`child-${index}`] = {request: {body: requestBody}, desired, before, relations};
+      postOperations[`child-${index}`] = storageOperation(`child-${index}`, desired, relations, requestBody, before);
     }
     const manifestUri = 'threadnote://user/tester/memories/workflow/manifest.json';
-    const baseline = {
-      protocolVersion: 1,
-      binding: {bindingId: 'fixture', repo: '/private/fixture'},
-      manifestCommitted: true,
+    const baseline: WorkflowJournal = {
+      ...image([]),
       manifestUri,
       manifestContent: priorManifest,
-      artifacts: {},
       operations,
-    } as unknown as WorkflowJournal;
-    const postimage = {
+    };
+    const postimage: WorkflowJournal = {
       ...baseline,
       manifestContent: nextManifest,
       previousManifestContent: priorManifest,
       operations: postOperations,
-    } as unknown as WorkflowJournal;
+    };
     const beforeJson = stableJson(workflowJournalStorageImage(baseline, true));
     const afterJson = stableJson(workflowJournalStorageImage(postimage, true));
     const actualGrowth = utf8.encode(afterJson).byteLength - utf8.encode(beforeJson).byteLength;
     const exactScopeBytes = utf8.encode(JSON.stringify(ownedUris)).byteLength;
     const maximumScopeEntryBytes = Math.max(
-      ...ownedUris.concat(childCandidates).map(value => utf8.encode(JSON.stringify(value)).byteLength + 1),
+      ...EffectArray.map(ownedUris.concat(childCandidates), value => utf8.encode(JSON.stringify(value)).byteLength + 1),
     );
     const requestMetadataBytes = utf8.encode(
       stableJson({
         binding: baseline.binding,
         generation: 'generation-v1',
         codeRefs: ['src/authoring.ts'],
-        evidenceRefs: ownedUris.map((canonicalUri, index) => ({
+        evidenceRefs: EffectArray.map(ownedUris, (canonicalUri, index) => ({
           uri: canonicalUri,
-          memoryId: `tn_authoring_${String(index).padStart(2, '0')}`,
-          revision: 'a'.repeat(64),
+          memoryId: `tn_authoring_${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+          revision: Effect2.pipe('a', EffectString.repeat(64)),
         })),
       }),
     ).byteLength;
@@ -415,25 +544,17 @@ describe('workflow journal scope-set storage', () => {
       maximumScopeEntryBytes,
       requestMetadataBytes,
     });
-    const packed = workflowJournalStorageImage(postimage, true) as {
-      scopeSets: string[][];
-      textValues: string[];
-      journal: {
-        operations: Record<
-          string,
-          {relations: {uri: string; content: {text: number}; allowedUriScopes: {scopeSet: number}}[]}
-        >;
-      };
-    };
-    const packedOperations = Object.values(packed.journal.operations);
-    const relationTextReferences = packedOperations.flatMap(operation =>
-      operation.relations.map(item => item.content.text),
+    const packed = packedStorage(workflowJournalStorageImage(postimage, true));
+    const packedOperations = EffectRecord.values(packed.journal.operations);
+    const relationTextReferences = EffectArray.flatMap(packedOperations, operation =>
+      EffectArray.map(operation.relations, item => item.content.text),
     );
-    const decoded = decodeWorkflowJournalStorageImage(JSON.parse(afterJson)) as WorkflowJournal;
+    const decoded = decodeWorkflowJournalStorageImage(JSON.parse(afterJson));
+    if (!isExpandedJournalView(decoded)) throw new Error('Expected the packed journal to decode.');
 
     expect(maximumScopeEntryBytes).toBe(4099);
     expect(childData).toHaveLength(4);
-    expect(new Set([...citations, ...childData].map(value => JSON.stringify(value))).size).toBe(20);
+    expect(new Set(EffectArray.map([...citations, ...childData], value => JSON.stringify(value))).size).toBe(20);
     expect(actualGrowth).toBeGreaterThan(0);
     expect(actualGrowth).toBeLessThanOrEqual(allowance);
     expect(packed.scopeSets).toHaveLength(4);
@@ -464,21 +585,7 @@ describe('workflow journal scope-set storage', () => {
         const journalFile = f.journalPath(initialized.bindingId);
         const original = yield* f.fs.readFileString(journalFile);
         const journalText = yield* Effect.promise(() => decodeWorkflowJournal(original));
-        const packed = JSON.parse(journalText) as {
-          journalStorage: string;
-          scopeSets: string[][];
-          textValues: string[];
-          journal: {
-            operations: Record<
-              string,
-              {
-                request: {body?: {text: number}};
-                desired: {text: number};
-                relations: {content: {text: number}; allowedUriScopes?: {scopeSet: number}}[];
-              }
-            >;
-          };
-        };
+        const packed = packedStorage(JSON.parse(journalText));
         expect(packed.journalStorage).toBe('threadnote-workflow-journal-shared-values-v1');
         expect(packed.scopeSets.length).toBeGreaterThan(0);
         expect(packed.textValues.length).toBeGreaterThan(0);
@@ -486,9 +593,12 @@ describe('workflow journal scope-set storage', () => {
         const inspected = yield* f.call(f.base('inspect'));
         expect(inspected).toHaveProperty('operations');
         expect(yield* f.fs.readFileString(journalFile)).toBe(original);
-        const target = Object.values(packed.journal.operations).flatMap(operation => operation.relations)[0];
+        const target = EffectArray.flatMap(
+          EffectRecord.values(packed.journal.operations),
+          operation => operation.relations,
+        )[0];
         if (!target.allowedUriScopes) throw new Error('Expected a packed scope-set reference.');
-        target.allowedUriScopes.scopeSet = packed.scopeSets.length + 1;
+        Object.assign(target.allowedUriScopes, {scopeSet: packed.scopeSets.length + 1});
         const corrupt = stableJson(packed) + '\n';
         yield* f.fs.writeFileString(journalFile, corrupt);
         const rejected = yield* f.call(f.base('inspect')).pipe(Effect.result);
@@ -499,12 +609,16 @@ describe('workflow journal scope-set storage', () => {
         yield* f.call(f.base('inspect'));
         expect(yield* f.fs.readFileString(journalFile)).toBe(original);
 
-        const textCorruption = JSON.parse(journalText) as typeof packed;
-        const operationWithBody = Object.values(textCorruption.journal.operations).find(
-          operation => operation.request.body !== undefined,
+        const textCorruption = packedStorage(JSON.parse(journalText));
+        const operationWithBody = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            EffectRecord.values(textCorruption.journal.operations),
+            operation => operation.request?.body !== undefined,
+          ),
         );
-        if (!operationWithBody?.request.body) throw new Error('Expected a packed request body reference.');
-        Object.assign(operationWithBody.request.body, {extra: true});
+        const requestBody = operationWithBody?.request?.body;
+        if (!requestBody) throw new Error('Expected a packed request body reference.');
+        Object.assign(requestBody, {extra: true});
         const corruptText = stableJson(textCorruption) + '\n';
         yield* f.fs.writeFileString(journalFile, corruptText);
         const rejectedText = yield* f.call(f.base('inspect')).pipe(Effect.result);

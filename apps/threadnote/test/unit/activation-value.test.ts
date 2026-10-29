@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {DateTime, Effect, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -15,6 +16,8 @@ import {captureThreadnote5ActivationTrialV1} from '@threadnote/threadnote/evalua
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {readLocalValueEvents, summarizeLocalValueEvents} from '@threadnote/threadnote/value_report/events';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('activation value events', () => {
   effectIt.effect('captures a completed production chain and zero-attempt offline observer for readiness replay', () =>
@@ -23,15 +26,15 @@ describe('activation value events', () => {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-activation-capture-'});
         const plan = createActivationPlanV1({
-          catalogSnapshotHash: 'a'.repeat(64),
+          catalogSnapshotHash: Effect2.pipe('a', EffectString.repeat(64)),
           primarySurfaceId: 'codex-cli',
           publicationMode: 'direct',
-          repositoryIdentityHash: 'b'.repeat(64),
+          repositoryIdentityHash: Effect2.pipe('b', EffectString.repeat(64)),
           secondarySurfaceId: 'claude-code',
-          selectedSourceSetHash: 'c'.repeat(64),
-          taskHash: 'd'.repeat(64),
+          selectedSourceSetHash: Effect2.pipe('c', EffectString.repeat(64)),
+          taskHash: Effect2.pipe('d', EffectString.repeat(64)),
           teamId: 'default',
-          teamShareStateHash: 'e'.repeat(64),
+          teamShareStateHash: Effect2.pipe('e', EffectString.repeat(64)),
           threadnoteVersion: '5.0.0-test',
         });
         const {approvals, receipt, receiptChain} = completedActivation(plan);
@@ -75,15 +78,15 @@ describe('activation value events', () => {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-activation-value-'});
         const plan = createActivationPlanV1({
-          catalogSnapshotHash: 'a'.repeat(64),
+          catalogSnapshotHash: Effect2.pipe('a', EffectString.repeat(64)),
           primarySurfaceId: 'codex-cli',
           publicationMode: 'direct',
-          repositoryIdentityHash: 'b'.repeat(64),
+          repositoryIdentityHash: Effect2.pipe('b', EffectString.repeat(64)),
           secondarySurfaceId: 'claude-code',
-          selectedSourceSetHash: 'c'.repeat(64),
-          taskHash: 'd'.repeat(64),
+          selectedSourceSetHash: Effect2.pipe('c', EffectString.repeat(64)),
+          taskHash: Effect2.pipe('d', EffectString.repeat(64)),
           teamId: 'default',
-          teamShareStateHash: 'e'.repeat(64),
+          teamShareStateHash: Effect2.pipe('e', EffectString.repeat(64)),
           threadnoteVersion: '5.0.0-test',
         });
         const receipt = completedActivation(plan).receipt;
@@ -97,12 +100,9 @@ describe('activation value events', () => {
         yield* reconcileActivationValueEventsV1({agentContextHome: home}, state);
         const events = yield* readLocalValueEvents(home);
         expect(events).toHaveLength(4);
-        expect(events.map(event => (event.kind === 'activation' ? event.phase : 'unexpected')).sort()).toEqual([
-          'completed',
-          'first-evidence',
-          'second-surface-proof',
-          'started',
-        ]);
+        expect(
+          EffectArray.map(events, event => (event.kind === 'activation' ? event.phase : 'unexpected')).sort(),
+        ).toEqual(['completed', 'first-evidence', 'second-surface-proof', 'started']);
         expect(
           summarizeLocalValueEvents(events, {
             from: DateTime.toDateUtc(DateTime.makeUnsafe('2026-09-18T00:00:00.000Z')),
@@ -137,7 +137,7 @@ function completedActivation(plan: ReturnType<typeof createActivationPlanV1>): {
     const approval =
       operation.approvalKind === undefined
         ? undefined
-        : bindActivationApprovalV1(plan, receipt, operation.id, 'f'.repeat(64));
+        : bindActivationApprovalV1(plan, receipt, operation.id, Effect2.pipe('f', EffectString.repeat(64)));
     if (approval !== undefined) approvals.push(approval);
     const transition = recordActivationOutcomeV1({
       approval,
@@ -146,7 +146,7 @@ function completedActivation(plan: ReturnType<typeof createActivationPlanV1>): {
       outcome: {
         ownership: operation.reversible ? 'activation-created' : 'preexisting',
         status: operation.expectedOutcome,
-        subsystemReceiptHash: (index + 1).toString(16).padStart(64, '0'),
+        subsystemReceiptHash: Effect2.pipe((index + 1).toString(16), EffectString.padStart(64, '0')),
         undoEligible: operation.reversible,
       },
       plan,

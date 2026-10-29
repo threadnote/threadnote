@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
 
@@ -145,15 +146,19 @@ describe('hosted Windows native query quantile calibration', () => {
   it('binds the failure to unique retained artifacts and an identical-tree passing control', () => {
     const candidate = calibration.candidateFailure;
     const controls = calibration.recentHostedControls;
-    const identicalTreeControl = required(controls.find(control => control.role === 'identical-tree-control'));
+    const identicalTreeControl = required(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(controls, control => control.role === 'identical-tree-control'),
+      ),
+    );
     const allNative = [candidate, ...controls];
 
     expect(controls).toHaveLength(calibration.recentHostedSummary.observationCount);
-    expect(new Set(allNative.map(observation => observation.runId)).size).toBe(allNative.length);
-    expect(new Set(allNative.map(observation => observation.jobId)).size).toBe(allNative.length);
-    expect(new Set(allNative.map(observation => observation.artifactId)).size).toBe(allNative.length);
-    expect(new Set(allNative.map(observation => observation.archiveDigest)).size).toBe(allNative.length);
-    expect(new Set(allNative.map(observation => observation.rawJsonSha256)).size).toBe(allNative.length);
+    expect(new Set(EffectArray.map(allNative, observation => observation.runId)).size).toBe(allNative.length);
+    expect(new Set(EffectArray.map(allNative, observation => observation.jobId)).size).toBe(allNative.length);
+    expect(new Set(EffectArray.map(allNative, observation => observation.artifactId)).size).toBe(allNative.length);
+    expect(new Set(EffectArray.map(allNative, observation => observation.archiveDigest)).size).toBe(allNative.length);
+    expect(new Set(EffectArray.map(allNative, observation => observation.rawJsonSha256)).size).toBe(allNative.length);
     expect(candidate.headSha).toBe('1ce43969b08a772cb19e712eb71d7d34c38b7b66');
     expect(identicalTreeControl.headSha).toBe('a4969ac636e905ea4cb6f03529ff2a132c5d5eb5');
     expect(candidate.sourceTreeSha).toBe(identicalTreeControl.sourceTreeSha);
@@ -171,23 +176,27 @@ describe('hosted Windows native query quantile calibration', () => {
     const guardedWallP95Maximum =
       governed.hotQueryP95MillisecondsMaximum * (1 + governed.hotQueryWallP95ToleranceRatioMaximum);
 
-    expect(summary(controls.map(control => control.measurements.hotQueryP50Milliseconds))).toEqual(
+    expect(summary(EffectArray.map(controls, control => control.measurements.hotQueryP50Milliseconds))).toEqual(
       calibration.recentHostedSummary.hotQueryP50Milliseconds,
     );
-    expect(summary(controls.map(control => control.measurements.hotQueryP95Milliseconds))).toEqual(
+    expect(summary(EffectArray.map(controls, control => control.measurements.hotQueryP95Milliseconds))).toEqual(
       calibration.recentHostedSummary.hotQueryP95Milliseconds,
     );
-    expect(summary(controls.map(control => control.measurements.hotQueryProcessCpuP95Milliseconds))).toEqual(
-      calibration.recentHostedSummary.hotQueryProcessCpuP95Milliseconds,
-    );
     expect(
-      controls.every(
+      summary(EffectArray.map(controls, control => control.measurements.hotQueryProcessCpuP95Milliseconds)),
+    ).toEqual(calibration.recentHostedSummary.hotQueryProcessCpuP95Milliseconds);
+    expect(
+      EffectArray.every(
+        controls,
         control => control.measurements.hotQueryP50Milliseconds <= governed.hotQueryP50MillisecondsMaximum,
       ),
     ).toBe(true);
-    expect(controls.every(control => control.measurements.hotQueryP95Milliseconds <= guardedWallP95Maximum)).toBe(true);
     expect(
-      controls.every(
+      EffectArray.every(controls, control => control.measurements.hotQueryP95Milliseconds <= guardedWallP95Maximum),
+    ).toBe(true);
+    expect(
+      EffectArray.every(
+        controls,
         control =>
           control.measurements.hotQueryProcessCpuP95Milliseconds <= governed.hotQueryProcessCpuP95MillisecondsMaximum,
       ),

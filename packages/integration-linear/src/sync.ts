@@ -1,3 +1,5 @@
+import * as MigrationSchema from 'effect/Schema';
+import {Array as EffectArray} from 'effect';
 import {admittedSourceFetch, cooldownSourceAccount} from '@threadnote/integration-core/source-coordinator';
 import {Clock, Effect, Random, Redacted, Result} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -20,6 +22,7 @@ import {
   sourceError,
   writeObject,
 } from './storage.js';
+
 export interface LinearSyncResult {
   readonly sourceId: string;
   readonly syncedDocuments: readonly string[];
@@ -28,7 +31,7 @@ export interface LinearSyncResult {
 }
 export const call = <A>(f: () => Promise<A>) =>
   fromPromiseInterruptible(f, error =>
-    error instanceof LinearClientError ? error : new LinearClientError({code: 'transport-rejected'}),
+    MigrationSchema.is(LinearClientError)(error) ? error : LinearClientError.make({code: 'transport-rejected'}),
   );
 export const syncLinearSource = Effect.fn('linear.syncSource')(function* (
   config: RuntimeConfig,
@@ -166,12 +169,12 @@ export const syncLinearSource = Effect.fn('linear.syncSource')(function* (
           identity.success.organizationId !== source.organizationId ||
           identity.success.principalId !== source.principalId
         )
-          return yield* failure(new LinearClientError({code: 'scope-rejected'}));
+          return yield* failure(LinearClientError.make({code: 'scope-rejected'}));
         for (const teamId of source.teamIds) {
           const team = yield* call(() => client.team(teamId)).pipe(Effect.result);
           if (Result.isFailure(team)) return yield* failure(team.failure);
           if (team.success.organizationId !== source.organizationId)
-            return yield* failure(new LinearClientError({code: 'scope-rejected'}));
+            return yield* failure(LinearClientError.make({code: 'scope-rejected'}));
         }
         yield* saveReceipt(config, source, {...access, status: 'active', nextAttemptAt: undefined});
         while (!current.enumerated && current.projectIndex < source.projectIds.length) {
@@ -179,9 +182,9 @@ export const syncLinearSource = Effect.fn('linear.syncSource')(function* (
             client.listProjectIssues(source, source.projectIds[current.projectIndex]),
           ).pipe(Effect.result);
           if (Result.isFailure(listed)) return yield* failure(listed.failure);
-          const issueIds = [...new Set([...current.issueIds, ...listed.success.map(i => i.id)])].sort();
+          const issueIds = [...new Set([...current.issueIds, ...EffectArray.map(listed.success, i => i.id)])].sort();
           if (issueIds.length > LINEAR_MAX_COLLECTION_ITEMS)
-            return yield* failure(new LinearClientError({code: 'contract-incomplete'}));
+            return yield* failure(LinearClientError.make({code: 'contract-incomplete'}));
           current = {...current, issueIds, projectIndex: current.projectIndex + 1};
           yield* writeLinearSyncState(config, id, current, fence);
         }
@@ -203,7 +206,7 @@ export const syncLinearSource = Effect.fn('linear.syncSource')(function* (
           ).pipe(Effect.result);
           if (Result.isFailure(hydrated)) {
             const error = hydrated.failure;
-            const failureCode = error instanceof LinearClientError ? error.code : 'contract-invalid';
+            const failureCode = MigrationSchema.is(LinearClientError)(error) ? error.code : 'contract-invalid';
             if (issueId && ['scope-rejected', 'not-found', 'access-rejected'].includes(failureCode)) {
               yield* quarantineObject(config, source, linearDocumentId(source.organizationId, 'issue', issueId));
               warnings.push(`Linear issue ${issueId}: ${failureCode}.`);
@@ -212,7 +215,7 @@ export const syncLinearSource = Effect.fn('linear.syncSource')(function* (
               continue;
             }
             return yield* failure(
-              error instanceof LinearClientError ? error : new LinearClientError({code: 'contract-invalid'}),
+              MigrationSchema.is(LinearClientError)(error) ? error : LinearClientError.make({code: 'contract-invalid'}),
             );
           }
           for (const object of hydrated.success) {
@@ -222,7 +225,9 @@ export const syncLinearSource = Effect.fn('linear.syncSource')(function* (
           current = {
             ...current,
             offset: current.offset + 1,
-            retained: [...new Set([...current.retained, ...hydrated.success.map(o => o.documentId)])].sort(),
+            retained: [
+              ...new Set([...current.retained, ...EffectArray.map(hydrated.success, o => o.documentId)]),
+            ].sort(),
           };
           yield* writeLinearSyncState(config, id, current, fence);
         }

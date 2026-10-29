@@ -15,6 +15,8 @@ import {withCodeGraphMaintenanceIntent} from '@threadnote/graph/maintenance/gate
 import {assertManagerSourceAssets} from '../../src/manager/source_assets.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 vi.mock('@threadnote/workspace/installation', async importOriginal => {
   const actual = await importOriginal<typeof import('@threadnote/workspace/installation')>();
@@ -124,7 +126,7 @@ effectIt.effect('rejects missing source UI assets before binding, printing a Man
         Effect.provideService(Console.Console, {
           ...parent,
           log: (...args) => {
-            urlPrinted ||= String(args[0]).startsWith('Threadnote manager:');
+            urlPrinted ||= Effect2.pipe(String(args[0]), EffectString.startsWith('Threadnote manager:'));
           },
         }),
         Effect.timeout('2 seconds'),

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect} from 'effect';
 import {Command} from 'effect/cli';
 import {applicationError, fromSync} from '@threadnote/platform/errors';
@@ -10,15 +11,17 @@ import {
 } from '../manager/worksets.js';
 import {runCodeGraphWorksetPrepare, runCodeGraphWorksetStatus} from '../code_graph/commands.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {CliRuntimeRunner} from './cli.js';
 import {argument, boolean, describeFlag, integerFlag, optional, optionalString, repeatedString} from './cli/flags.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 interface JsonOption {
   readonly json: boolean;
 }
 
-export function makeWorksetCommand(
-  withRuntime: <E, R>(body: (config: RuntimeConfig) => Effect.Effect<void, E, R>) => Effect.Effect<void, E, R>,
-) {
+export function makeWorksetCommand(withRuntime: CliRuntimeRunner) {
   const list = Command.make('list', {json: boolean('json', 'Emit versioned machine-readable JSON')}, options =>
     withRuntime(config => runWorksetListCommand(config, options)),
   ).pipe(Command.withDescription('List and inspect local Workset definitions'));
@@ -192,12 +195,18 @@ export function runWorksetUpdateCommand(
       expectedRevision: catalog.revision,
       name: options.name ?? current.name,
       operation: 'update',
-      projects: options.projects.length === 0 ? current.members.map(member => member.project) : options.projects,
+      projects:
+        options.projects.length === 0 ? EffectArray.map(current.members, member => member.project) : options.projects,
       workset,
     });
     const destination = options.name ?? current.name;
-    const canonicalDestination = result.catalog.definitions.find(
-      definition => definition.name.toLowerCase() === normalizeManagerWorksetName(destination).toLowerCase(),
+    const canonicalDestination = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        result.catalog.definitions,
+        definition =>
+          Effect2.pipe(definition.name, EffectString.toLowerCase) ===
+          Effect2.pipe(normalizeManagerWorksetName(destination), EffectString.toLowerCase),
+      ),
     )?.name;
     yield* renderWorksetMutation(result, options.json, canonicalDestination ?? current.name);
   });

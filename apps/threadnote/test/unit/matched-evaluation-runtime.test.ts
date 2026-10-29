@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -43,7 +44,6 @@ import {
   verifyMatchedEvaluationContinuationArtifactV1,
   hashMatchedEvaluationPayloadV1,
   selectMatchedEvaluationPilotRowsV1,
-  type MatchedEvaluationContinuationPilotPlanV2,
   type MatchedEvaluationRuntimeV1,
 } from '../../../../scripts/run-matched-evaluation.js';
 import {parseMatchedEvaluationObservationV1} from '@threadnote/threadnote/evaluation/matched-evaluation-runner';
@@ -60,26 +60,31 @@ import {
   matchedEvaluationDependencyProjectionFixtureHashV1,
   matchedEvaluationPreparedHomeFixtureHashV1,
 } from '../../../../scripts/matched-evaluation-codex-adapter.js';
-import type {MatchedTokenEfficiencyStudyV1} from '@threadnote/threadnote/evaluation/matched-token-efficiency';
+
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('matched evaluation runtime integrity', () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('seals one unique attempt per continuation treatment and the common checkpoint', () => {
-    const handoff = [
-      'Task: continue the frozen implementation.',
-      'Decisions: keep the parser branch local.',
-      'Constraints: preserve public behavior.',
-      'Rationale: marker checkpoint-evidence-7f4c selects the verified path.',
-      'Verification: focused regression still needs to run.',
-      'Blockers: none.',
-      'Risks: adjacent callers may encode the old shape.',
-      'Next step: finish the branch and run the verifier.',
-    ].join('\n');
+    const handoff = EffectArray.join(
+      [
+        'Task: continue the frozen implementation.',
+        'Decisions: keep the parser branch local.',
+        'Constraints: preserve public behavior.',
+        'Rationale: marker checkpoint-evidence-7f4c selects the verified path.',
+        'Verification: focused regression still needs to run.',
+        'Blockers: none.',
+        'Risks: adjacent callers may encode the old shape.',
+        'Next step: finish the branch and run the verifier.',
+      ],
+      '\n',
+    );
     const base = {
       attempts: [
         {
@@ -107,10 +112,10 @@ describe('matched evaluation runtime integrity', () => {
           variant: 'threadnote-graph',
         },
       ],
-      baseTaskPromptSha256: '1'.repeat(64),
-      candidate: {toolArtifactHash: '2'.repeat(64), toolVersion: '5.1.0-beta.1.local.gabc'},
+      baseTaskPromptSha256: Effect.pipe('1', EffectString.repeat(64)),
+      candidate: {toolArtifactHash: Effect.pipe('2', EffectString.repeat(64)), toolVersion: '5.1.0-beta.1.local.gabc'},
       checkpoint: {
-        automaticHandoffReadSha256: '5'.repeat(64),
+        automaticHandoffReadSha256: Effect.pipe('5', EffectString.repeat(64)),
         automaticHandoffUri: 'threadnote://user/evaluation/memories/handoffs/active/project/pilot.md',
         handoff,
         handoffSha256: sha256HexSync(Buffer.from(handoff)),
@@ -125,8 +130,8 @@ describe('matched evaluation runtime integrity', () => {
             totalTokens: 15,
           },
         },
-        repositoryFixtureHash: '3'.repeat(64),
-        repositoryRevision: '4'.repeat(40),
+        repositoryFixtureHash: Effect.pipe('3', EffectString.repeat(64)),
+        repositoryRevision: Effect.pipe('4', EffectString.repeat(40)),
         resumeEvidenceMarker: 'checkpoint-evidence-7f4c',
       },
       retries: 0,
@@ -134,12 +139,9 @@ describe('matched evaluation runtime integrity', () => {
       version: 1,
     } as const;
 
-    expect(parseMatchedEvaluationContinuationPilotPlanV1(base).attempts.map(attempt => attempt.variant)).toEqual([
-      'files-bare',
-      'manual-handoff',
-      'threadnote-graph',
-      'threadnote-resume',
-    ]);
+    expect(
+      EffectArray.map(parseMatchedEvaluationContinuationPilotPlanV1(base).attempts, attempt => attempt.variant),
+    ).toEqual(['files-bare', 'manual-handoff', 'threadnote-graph', 'threadnote-resume']);
     const withPreloadedResume = parseMatchedEvaluationContinuationPilotPlanV1({
       ...base,
       attempts: [
@@ -152,7 +154,9 @@ describe('matched evaluation runtime integrity', () => {
         },
       ],
     });
-    expect(withPreloadedResume.attempts.map(attempt => attempt.variant)).toContain('threadnote-preloaded-resume');
+    expect(EffectArray.map(withPreloadedResume.attempts, attempt => attempt.variant)).toContain(
+      'threadnote-preloaded-resume',
+    );
     const matchedContext = parseMatchedEvaluationContinuationPilotPlanV1({
       ...base,
       attempts: [
@@ -166,7 +170,7 @@ describe('matched evaluation runtime integrity', () => {
         },
       ],
     });
-    expect(matchedContext.attempts.map(attempt => attempt.variant)).toEqual([
+    expect(EffectArray.map(matchedContext.attempts, attempt => attempt.variant)).toEqual([
       'files-bare',
       'manual-handoff',
       'threadnote-preloaded-resume',
@@ -174,7 +178,7 @@ describe('matched evaluation runtime integrity', () => {
     expect(() =>
       parseMatchedEvaluationContinuationPilotPlanV1({
         ...base,
-        attempts: matchedContext.attempts.map((attempt, index) =>
+        attempts: EffectArray.map(matchedContext.attempts, (attempt, index) =>
           index === 2 ? {...attempt, variant: 'threadnote-graph'} : attempt,
         ),
       }),
@@ -182,7 +186,7 @@ describe('matched evaluation runtime integrity', () => {
     expect(() =>
       parseMatchedEvaluationContinuationPilotPlanV1({
         ...base,
-        attempts: base.attempts.map(attempt => ({...attempt, variant: 'files-bare'})),
+        attempts: EffectArray.map(base.attempts, attempt => ({...attempt, variant: 'files-bare'})),
       }),
     ).toThrow('one unique attempt per variant');
     expect(() =>
@@ -222,10 +226,10 @@ describe('matched evaluation runtime integrity', () => {
         variants => {
           const parsed = parseMatchedEvaluationContinuationPilotPlanV1({
             ...base,
-            attempts: base.attempts.map((attempt, index) => ({...attempt, variant: variants[index]})),
+            attempts: EffectArray.map(base.attempts, (attempt, index) => ({...attempt, variant: variants[index]})),
           });
-          expect(new Set(parsed.attempts.map(attempt => attempt.variant))).toEqual(new Set(variants));
-          expect(parsed.attempts.map(attempt => attempt.runOrder)).toEqual([1, 2, 3, 4]);
+          expect(new Set(EffectArray.map(parsed.attempts, attempt => attempt.variant))).toEqual(new Set(variants));
+          expect(EffectArray.map(parsed.attempts, attempt => attempt.runOrder)).toEqual([1, 2, 3, 4]);
         },
       ),
       {numRuns: 24},
@@ -240,42 +244,48 @@ describe('matched evaluation runtime integrity', () => {
       checkpoint: {
         ...base.checkpoint,
         adapterConfigurations: {
-          threadnoteCompactSha256: 'a'.repeat(64),
-          threadnoteGraphSha256: 'b'.repeat(64),
+          threadnoteCompactSha256: Effect.pipe('a', EffectString.repeat(64)),
+          threadnoteGraphSha256: Effect.pipe('b', EffectString.repeat(64)),
         },
         phaseOneExecution: {
-          adapterArtifactHash: 'f'.repeat(64),
-          adapterConfigurationFileSha256: '0'.repeat(64),
-          adapterConfigurationHash: '1'.repeat(64),
+          adapterArtifactHash: Effect.pipe('f', EffectString.repeat(64)),
+          adapterConfigurationFileSha256: Effect.pipe('0', EffectString.repeat(64)),
+          adapterConfigurationHash: Effect.pipe('1', EffectString.repeat(64)),
           adapterProtocol: 'matched-evaluation-adapter-v5',
-          appServerExecutableSha256: '2'.repeat(64),
+          appServerExecutableSha256: Effect.pipe('2', EffectString.repeat(64)),
           appServerVersion: 'codex-cli 0.144.5',
-          artifactSha256: '3'.repeat(64),
-          environmentPolicyHash: '4'.repeat(64),
+          artifactSha256: Effect.pipe('3', EffectString.repeat(64)),
+          environmentPolicyHash: Effect.pipe('4', EffectString.repeat(64)),
           model: {
             id: 'gpt-5.6-luna',
-            parametersHash: '5'.repeat(64),
+            parametersHash: Effect.pipe('5', EffectString.repeat(64)),
             provider: 'openai',
             reasoningEffort: 'low',
           },
-          requestSha256: '6'.repeat(64),
-          responseSha256: '7'.repeat(64),
+          requestSha256: Effect.pipe('6', EffectString.repeat(64)),
+          responseSha256: Effect.pipe('7', EffectString.repeat(64)),
           runNonce: 'run_11111111111111111111111111111111',
-          transcriptHash: '8'.repeat(64),
-          transcriptSha256: '9'.repeat(64),
+          transcriptHash: Effect.pipe('8', EffectString.repeat(64)),
+          transcriptSha256: Effect.pipe('9', EffectString.repeat(64)),
         },
-        phaseOnePatchSha256: '6'.repeat(64),
+        phaseOnePatchSha256: Effect.pipe('6', EffectString.repeat(64)),
         phaseOnePrompt,
         phaseOnePromptSha256: sha256HexSync(Buffer.from(phaseOnePrompt)),
         preparedContext: {
-          graphContentHash: '9'.repeat(64),
-          graphSnapshotHash: 'a'.repeat(64),
-          linkReceiptsHash: 'b'.repeat(64),
-          taskContextHash: 'c'.repeat(64),
+          graphContentHash: Effect.pipe('9', EffectString.repeat(64)),
+          graphSnapshotHash: Effect.pipe('a', EffectString.repeat(64)),
+          linkReceiptsHash: Effect.pipe('b', EffectString.repeat(64)),
+          taskContextHash: Effect.pipe('c', EffectString.repeat(64)),
         },
-        preparedGraphHome: {fixtureHash: 'f'.repeat(64), identitySha256: '0'.repeat(64)},
-        preparedHome: {fixtureHash: 'd'.repeat(64), identitySha256: 'e'.repeat(64)},
-        repositoryRevision: '7'.repeat(40),
+        preparedGraphHome: {
+          fixtureHash: Effect.pipe('f', EffectString.repeat(64)),
+          identitySha256: Effect.pipe('0', EffectString.repeat(64)),
+        },
+        preparedHome: {
+          fixtureHash: Effect.pipe('d', EffectString.repeat(64)),
+          identitySha256: Effect.pipe('e', EffectString.repeat(64)),
+        },
+        repositoryRevision: Effect.pipe('7', EffectString.repeat(40)),
       },
       phaseTwoPrompt,
       phaseTwoPromptSha256: sha256HexSync(Buffer.from(phaseTwoPrompt)),
@@ -283,7 +293,7 @@ describe('matched evaluation runtime integrity', () => {
       sourceTask: {
         prompt: sourcePrompt,
         promptSha256: matchedEvaluationPromptHashV1(sourcePrompt),
-        repositoryFixtureHash: '8'.repeat(64),
+        repositoryFixtureHash: Effect.pipe('8', EffectString.repeat(64)),
         repositoryRevision: base.checkpoint.repositoryRevision,
         taskId: base.taskId,
       },
@@ -410,7 +420,9 @@ describe('matched evaluation runtime integrity', () => {
         sourceTask: {...versionTwo.sourceTask, repositoryFixtureHash: versionTwo.checkpoint.repositoryFixtureHash},
       }),
     ).toThrow('checkpoint fixture must differ from the source fixture');
-    const prompt = fc.string({minLength: 1, maxLength: 48}).filter(value => !value.includes('\0'));
+    const prompt = fc
+      .string({minLength: 1, maxLength: 48})
+      .filter(value => !Effect.pipe(value, EffectString.includes('\0')));
     fc.assert(
       fc.property(prompt, prompt, prompt, (phaseOneSuffix, phaseTwo, source) => {
         const phaseOne = `${source}\n\n${phaseOneSuffix}`;
@@ -456,7 +468,7 @@ describe('matched evaluation runtime integrity', () => {
         },
       ],
     });
-    const rows = supplementPlan.attempts.slice(0, 4).map((attempt, index) => ({
+    const rows = EffectArray.map(supplementPlan.attempts.slice(0, 4), (attempt, index) => ({
       arm:
         attempt.variant === 'threadnote-graph'
           ? 'threadnote-graph'
@@ -475,14 +487,14 @@ describe('matched evaluation runtime integrity', () => {
       candidate: supplementPlan.candidate,
       checkpoint: projectMatchedEvaluationContinuationSelectionCheckpointV1(supplementPlan),
       comparativeClaimsEligible: false,
-      identities: {planFileHash: 'a'.repeat(64)},
+      identities: {planFileHash: Effect.pipe('a', EffectString.repeat(64))},
       rows,
       taskId: supplementPlan.taskId,
       version: 1,
     };
     const parentReport = {
       ...parentSelection,
-      attempts: rows.map(row => ({
+      attempts: EffectArray.map(rows, row => ({
         arm: row.arm,
         runNonce: row.runNonce,
         runOrder: row.runOrder,
@@ -493,33 +505,33 @@ describe('matched evaluation runtime integrity', () => {
     };
     expect(
       assertMatchedEvaluationContinuationSupplementV1({
-        adapterArtifactSha256: 'd'.repeat(64),
+        adapterArtifactSha256: Effect.pipe('d', EffectString.repeat(64)),
         parentReport,
-        parentReportSha256: 'b'.repeat(64),
+        parentReportSha256: Effect.pipe('b', EffectString.repeat(64)),
         parentSelection,
-        parentSelectionSha256: 'c'.repeat(64),
+        parentSelectionSha256: Effect.pipe('c', EffectString.repeat(64)),
         plan: supplementPlan,
       }),
     ).toEqual({
-      adapterArtifactSha256: 'd'.repeat(64),
-      parentReportSha256: 'b'.repeat(64),
-      parentSelectionSha256: 'c'.repeat(64),
-      parentVariants: rows.map(row => row.variant),
+      adapterArtifactSha256: Effect.pipe('d', EffectString.repeat(64)),
+      parentReportSha256: Effect.pipe('b', EffectString.repeat(64)),
+      parentSelectionSha256: Effect.pipe('c', EffectString.repeat(64)),
+      parentVariants: EffectArray.map(rows, row => row.variant),
       variant: 'threadnote-preloaded-resume',
       version: 1,
     });
     expect(() =>
       assertMatchedEvaluationContinuationSupplementV1({
-        adapterArtifactSha256: 'd'.repeat(64),
+        adapterArtifactSha256: Effect.pipe('d', EffectString.repeat(64)),
         parentReport: {
           ...parentReport,
-          attempts: parentReport.attempts.map((attempt, index) =>
+          attempts: EffectArray.map(parentReport.attempts, (attempt, index) =>
             index === 0 ? {...attempt, status: 'failed'} : attempt,
           ),
         },
-        parentReportSha256: 'b'.repeat(64),
+        parentReportSha256: Effect.pipe('b', EffectString.repeat(64)),
         parentSelection,
-        parentSelectionSha256: 'c'.repeat(64),
+        parentSelectionSha256: Effect.pipe('c', EffectString.repeat(64)),
         plan: supplementPlan,
       }),
     ).toThrow('differs from its sealed completed row');
@@ -534,7 +546,7 @@ describe('matched evaluation runtime integrity', () => {
       phaseTwoFocusedChecks: ['PYTHONPATH=src {python} -m pytest -q tests/test_regression.py'],
       phaseTwoPrompt: 'Continue from the checkpoint and implement the production correction.',
       repositoryName: 'example',
-      sourceRevision: 'a'.repeat(40),
+      sourceRevision: Effect.pipe('a', EffectString.repeat(40)),
       sourceTaskPrompt,
       status: 'draft-unsealed',
       taskKey: 'example-regression',
@@ -545,10 +557,10 @@ describe('matched evaluation runtime integrity', () => {
       repositoryRevision: packet.sourceRevision,
       task: {
         promptHash: matchedEvaluationPromptHashV1(sourceTaskPrompt),
-        repositoryFixtureHash: 'b'.repeat(64),
+        repositoryFixtureHash: Effect.pipe('b', EffectString.repeat(64)),
         taskId: 'tsk_1234567890abcdef',
-      } as MatchedEvaluationManifestV1['tasks'][number],
-      taskPacketSha256: 'c'.repeat(64),
+      } satisfies Pick<MatchedEvaluationManifestV1['tasks'][number], 'promptHash' | 'repositoryFixtureHash' | 'taskId'>,
+      taskPacketSha256: Effect.pipe('c', EffectString.repeat(64)),
       taskPrompt: sourceTaskPrompt,
     };
 
@@ -556,6 +568,7 @@ describe('matched evaluation runtime integrity', () => {
     const second = createMatchedEvaluationContinuationPhaseOneSelectionV1(input);
     expect(second).toEqual(first);
     expect(parseMatchedEvaluationContinuationPhaseOneSelectionV1(JSON.parse(JSON.stringify(first)))).toEqual(first);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     const reorderedPacket = Object.fromEntries(Object.entries(first.taskPacket).reverse());
     expect(() =>
       assertMatchedEvaluationContinuationPhaseOnePreregistrationV1({...first, taskPacket: reorderedPacket}, first),
@@ -564,18 +577,18 @@ describe('matched evaluation runtime integrity', () => {
       assertMatchedEvaluationContinuationPhaseOnePreregistrationV1(
         {
           ...first,
-          continuationAttempts: first.continuationAttempts.map((attempt, index) =>
-            index === 0 ? {...attempt, runNonce: `run_${'f'.repeat(32)}`} : attempt,
+          continuationAttempts: EffectArray.map(first.continuationAttempts, (attempt, index) =>
+            index === 0 ? {...attempt, runNonce: `run_${Effect.pipe('f', EffectString.repeat(32))}`} : attempt,
           ),
         },
         first,
       ),
     ).toThrow('differs from the sealed preregistration');
-    expect(first.continuationAttempts.map(attempt => attempt.runOrder)).toEqual([1, 2, 3, 4, 5]);
-    expect(new Set(first.continuationAttempts.map(attempt => attempt.variant))).toEqual(
+    expect(EffectArray.map(first.continuationAttempts, attempt => attempt.runOrder)).toEqual([1, 2, 3, 4, 5]);
+    expect(new Set(EffectArray.map(first.continuationAttempts, attempt => attempt.variant))).toEqual(
       new Set(['files-bare', 'manual-handoff', 'threadnote-graph', 'threadnote-resume', 'threadnote-preloaded-resume']),
     );
-    expect(new Set(first.continuationAttempts.map(attempt => attempt.runNonce))).toHaveProperty('size', 5);
+    expect(new Set(EffectArray.map(first.continuationAttempts, attempt => attempt.runNonce))).toHaveProperty('size', 5);
     expect(first.phaseOnePrompt).toBe(
       `${sourceTaskPrompt}\n\n${packet.phaseOneDirective}\n\nRequired focused check (run exactly as written; do not change its flags or selector):\nPYTHONPATH=src python -m pytest -q tests/test_regression.py`,
     );
@@ -596,21 +609,27 @@ describe('matched evaluation runtime integrity', () => {
     fc.assert(
       fc.property(fc.stringMatching(/^[0-9a-f]{64}$/u), taskPacketSha256 => {
         const selection = createMatchedEvaluationContinuationPhaseOneSelectionV1({...input, taskPacketSha256});
-        expect(selection.continuationAttempts.map(attempt => attempt.runOrder)).toEqual([1, 2, 3, 4, 5]);
-        expect(new Set(selection.continuationAttempts.map(attempt => attempt.variant))).toHaveProperty('size', 5);
-        expect(new Set(selection.continuationAttempts.map(attempt => attempt.runNonce))).toHaveProperty('size', 5);
+        expect(EffectArray.map(selection.continuationAttempts, attempt => attempt.runOrder)).toEqual([1, 2, 3, 4, 5]);
+        expect(new Set(EffectArray.map(selection.continuationAttempts, attempt => attempt.variant))).toHaveProperty(
+          'size',
+          5,
+        );
+        expect(new Set(EffectArray.map(selection.continuationAttempts, attempt => attempt.runNonce))).toHaveProperty(
+          'size',
+          5,
+        );
         expect(createMatchedEvaluationContinuationPhaseOneSelectionV1({...input, taskPacketSha256})).toEqual(selection);
       }),
       {numRuns: 8},
     );
 
     const evidenceSha256 = {
-      adapterArtifactHash: '1'.repeat(64),
-      adapterConfigurationFileSha256: '2'.repeat(64),
-      artifactSha256: '3'.repeat(64),
-      requestSha256: '4'.repeat(64),
-      responseSha256: '5'.repeat(64),
-      transcriptSha256: '6'.repeat(64),
+      adapterArtifactHash: Effect.pipe('1', EffectString.repeat(64)),
+      adapterConfigurationFileSha256: Effect.pipe('2', EffectString.repeat(64)),
+      artifactSha256: Effect.pipe('3', EffectString.repeat(64)),
+      requestSha256: Effect.pipe('4', EffectString.repeat(64)),
+      responseSha256: Effect.pipe('5', EffectString.repeat(64)),
+      transcriptSha256: Effect.pipe('6', EffectString.repeat(64)),
     };
     const metrics = {
       auditability: {citations: 0, resolvableCitations: 0},
@@ -647,7 +666,7 @@ describe('matched evaluation runtime integrity', () => {
       validity: {failureCount: 0, valid: true},
       verification: null,
     };
-    const selectionSha256 = '7'.repeat(64);
+    const selectionSha256 = Effect.pipe('7', EffectString.repeat(64));
     const receipt = parseMatchedEvaluationContinuationPhaseOneReceiptV1({
       continuationAttempts: first.continuationAttempts,
       evidenceSha256,
@@ -677,7 +696,7 @@ describe('matched evaluation runtime integrity', () => {
     ).not.toThrow();
     expect(() =>
       assertMatchedEvaluationContinuationPhaseOneReceiptV1({
-        evidenceSha256: {...evidenceSha256, responseSha256: '8'.repeat(64)},
+        evidenceSha256: {...evidenceSha256, responseSha256: Effect.pipe('8', EffectString.repeat(64))},
         receipt,
         responseObservation,
         selection: first,
@@ -693,17 +712,17 @@ describe('matched evaluation runtime integrity', () => {
 
     const verification = createMatchedEvaluationVerificationReceiptV1({
       artifactHash: evidenceSha256.artifactSha256,
-      diagnosticHash: '8'.repeat(64),
+      diagnosticHash: Effect.pipe('8', EffectString.repeat(64)),
       durationMilliseconds: 1,
-      environmentHash: '9'.repeat(64),
+      environmentHash: Effect.pipe('9', EffectString.repeat(64)),
       exitCode: 1,
-      interpreterHash: 'a'.repeat(64),
-      planHash: 'b'.repeat(64),
-      runnerHash: 'c'.repeat(64),
-      sandboxExecutableHash: 'd'.repeat(64),
+      interpreterHash: Effect.pipe('a', EffectString.repeat(64)),
+      planHash: Effect.pipe('b', EffectString.repeat(64)),
+      runnerHash: Effect.pipe('c', EffectString.repeat(64)),
+      sandboxExecutableHash: Effect.pipe('d', EffectString.repeat(64)),
       status: 'task-failed',
       taskId: first.sourceTask.taskId,
-      verificationId: 'e'.repeat(64),
+      verificationId: Effect.pipe('e', EffectString.repeat(64)),
     });
     const expectedFailureObservation = {
       artifactHash: evidenceSha256.artifactSha256,
@@ -749,7 +768,7 @@ describe('matched evaluation runtime integrity', () => {
       phaseTwoFocusedChecks: ['PYTHONPATH=src {python} -m pytest -q tests/test_regression.py'],
       phaseTwoPrompt: 'Continue from the checkpoint and implement the production correction.',
       repositoryName: 'example',
-      sourceRevision: 'a'.repeat(40),
+      sourceRevision: Effect.pipe('a', EffectString.repeat(40)),
       sourceTaskPrompt,
       status: 'draft-unsealed',
       taskKey: 'example-regression',
@@ -761,17 +780,17 @@ describe('matched evaluation runtime integrity', () => {
       repositoryRevision: packet.sourceRevision,
       task: {
         promptHash: matchedEvaluationPromptHashV1(sourceTaskPrompt),
-        repositoryFixtureHash: 'b'.repeat(64),
+        repositoryFixtureHash: Effect.pipe('b', EffectString.repeat(64)),
         taskId: 'tsk_1234567890abcdef',
-      } as MatchedEvaluationManifestV1['tasks'][number],
-      taskPacketSha256: 'c'.repeat(64),
+      } satisfies Pick<MatchedEvaluationManifestV1['tasks'][number], 'promptHash' | 'repositoryFixtureHash' | 'taskId'>,
+      taskPacketSha256: Effect.pipe('c', EffectString.repeat(64)),
       taskPrompt: sourceTaskPrompt,
     };
     const selection = createMatchedEvaluationContinuationPhaseOneSelectionV1(selectionInput);
 
     expect(selection.continuationAttempts).toHaveLength(3);
-    expect(selection.continuationAttempts.map(attempt => attempt.runOrder)).toEqual([1, 2, 3]);
-    expect(new Set(selection.continuationAttempts.map(attempt => attempt.variant))).toEqual(
+    expect(EffectArray.map(selection.continuationAttempts, attempt => attempt.runOrder)).toEqual([1, 2, 3]);
+    expect(new Set(EffectArray.map(selection.continuationAttempts, attempt => attempt.variant))).toEqual(
       new Set(['files-bare', 'manual-handoff', 'threadnote-preloaded-resume']),
     );
     expect(parseMatchedEvaluationContinuationPhaseOneSelectionV1(selection)).toEqual(selection);
@@ -791,7 +810,7 @@ describe('matched evaluation runtime integrity', () => {
       fc.property(
         fc.uniqueArray(fc.stringMatching(/^[a-z][a-z0-9_-]{0,20}$/u), {minLength: 1, maxLength: 4}),
         segments => {
-          const paths = segments.map(segment => `tests/${segment}`);
+          const paths = EffectArray.map(segments, segment => `tests/${segment}`);
           expect(
             parseMatchedEvaluationContinuationPhaseOneTaskPacketV1({
               ...packet,
@@ -816,11 +835,14 @@ describe('matched evaluation runtime integrity', () => {
           ...selectionInput,
           taskPacketSha256,
         });
-        expect(candidate.continuationAttempts.map(attempt => attempt.runOrder)).toEqual([1, 2, 3]);
-        expect(new Set(candidate.continuationAttempts.map(attempt => attempt.variant))).toEqual(
+        expect(EffectArray.map(candidate.continuationAttempts, attempt => attempt.runOrder)).toEqual([1, 2, 3]);
+        expect(new Set(EffectArray.map(candidate.continuationAttempts, attempt => attempt.variant))).toEqual(
           new Set(['files-bare', 'manual-handoff', 'threadnote-preloaded-resume']),
         );
-        expect(new Set(candidate.continuationAttempts.map(attempt => attempt.runNonce))).toHaveProperty('size', 3);
+        expect(new Set(EffectArray.map(candidate.continuationAttempts, attempt => attempt.runNonce))).toHaveProperty(
+          'size',
+          3,
+        );
         expect(createMatchedEvaluationContinuationPhaseOneSelectionV1({...selectionInput, taskPacketSha256})).toEqual(
           candidate,
         );
@@ -839,7 +861,7 @@ describe('matched evaluation runtime integrity', () => {
       phaseTwoFocusedChecks: ['PYTHONPATH=src {python} -m pytest -q tests/test_regression.py'],
       phaseTwoPrompt: 'Continue from the checkpoint and implement the production correction.',
       repositoryName: 'example',
-      sourceRevision: 'a'.repeat(40),
+      sourceRevision: Effect.pipe('a', EffectString.repeat(40)),
       sourceTaskPrompt,
       status: 'draft-unsealed',
       taskKey: 'example-regression',
@@ -851,25 +873,28 @@ describe('matched evaluation runtime integrity', () => {
       repositoryRevision: packet.sourceRevision,
       task: {
         promptHash: matchedEvaluationPromptHashV1(sourceTaskPrompt),
-        repositoryFixtureHash: 'b'.repeat(64),
+        repositoryFixtureHash: Effect.pipe('b', EffectString.repeat(64)),
         taskId: 'tsk_1234567890abcdef',
-      } as MatchedEvaluationManifestV1['tasks'][number],
-      taskPacketSha256: 'c'.repeat(64),
+      } satisfies Pick<MatchedEvaluationManifestV1['tasks'][number], 'promptHash' | 'repositoryFixtureHash' | 'taskId'>,
+      taskPacketSha256: Effect.pipe('c', EffectString.repeat(64)),
       taskPrompt: sourceTaskPrompt,
     };
 
     const selection = createMatchedEvaluationContinuationPhaseOneSelectionV1(input);
 
     expect(selection.continuationAttempts).toHaveLength(2);
-    expect(selection.continuationAttempts.map(attempt => attempt.runOrder)).toEqual([1, 2]);
-    expect(new Set(selection.continuationAttempts.map(attempt => attempt.variant))).toEqual(
+    expect(EffectArray.map(selection.continuationAttempts, attempt => attempt.runOrder)).toEqual([1, 2]);
+    expect(new Set(EffectArray.map(selection.continuationAttempts, attempt => attempt.variant))).toEqual(
       new Set(['files-bare', 'threadnote-preloaded-resume']),
     );
     expect(parseMatchedEvaluationContinuationPhaseOneSelectionV1(selection)).toEqual(selection);
     fc.assert(
       fc.property(fc.stringMatching(/^[0-9a-f]{64}$/u), taskPacketSha256 => {
         const candidate = createMatchedEvaluationContinuationPhaseOneSelectionV1({...input, taskPacketSha256});
-        expect(new Set(candidate.continuationAttempts.map(attempt => attempt.runNonce))).toHaveProperty('size', 2);
+        expect(new Set(EffectArray.map(candidate.continuationAttempts, attempt => attempt.runNonce))).toHaveProperty(
+          'size',
+          2,
+        );
         expect(createMatchedEvaluationContinuationPhaseOneSelectionV1({...input, taskPacketSha256})).toEqual(candidate);
       }),
       {numRuns: 8},
@@ -886,7 +911,7 @@ describe('matched evaluation runtime integrity', () => {
       phaseTwoFocusedChecks: ['PYTHONPATH=src {python} -m pytest -q tests/test_regression.py'],
       phaseTwoPrompt: 'Continue from the checkpoint and implement the production correction.',
       repositoryName: 'example',
-      sourceRevision: 'a'.repeat(40),
+      sourceRevision: Effect.pipe('a', EffectString.repeat(40)),
       sourceTaskPrompt,
       status: 'draft-unsealed',
       taskKey: 'example-regression',
@@ -898,14 +923,14 @@ describe('matched evaluation runtime integrity', () => {
       repositoryRevision: packet.sourceRevision,
       task: {
         promptHash: matchedEvaluationPromptHashV1(sourceTaskPrompt),
-        repositoryFixtureHash: 'b'.repeat(64),
+        repositoryFixtureHash: Effect.pipe('b', EffectString.repeat(64)),
         taskId: 'tsk_1234567890abcdef',
-      } as MatchedEvaluationManifestV1['tasks'][number],
-      taskPacketSha256: 'c'.repeat(64),
+      },
+      taskPacketSha256: Effect.pipe('c', EffectString.repeat(64)),
       taskPrompt: sourceTaskPrompt,
     });
 
-    expect(selection.continuationAttempts.map(attempt => attempt.variant).sort()).toEqual([
+    expect(EffectArray.map(selection.continuationAttempts, attempt => attempt.variant).sort()).toEqual([
       'files-bare',
       'threadnote-preloaded-resume',
     ]);
@@ -935,21 +960,21 @@ describe('matched evaluation runtime integrity', () => {
     const phaseOne = join(root, 'phase-one');
     await mkdir(phaseOne);
     const taskId = 'tsk_1234567890abcdef';
-    const sourceFixtureHash = 'a'.repeat(64);
-    const sourceRevision = 'b'.repeat(40);
+    const sourceFixtureHash = Effect.pipe('a', EffectString.repeat(64));
+    const sourceRevision = Effect.pipe('b', EffectString.repeat(40));
     const prompt = 'Add the regression test and stop before the production fix.';
     const runNonce = 'run_22222222222222222222222222222222';
     const model = {
       id: 'gpt-5.6-luna',
-      parametersHash: 'c'.repeat(64),
+      parametersHash: Effect.pipe('c', EffectString.repeat(64)),
       provider: 'openai',
       reasoningEffort: 'low',
     };
     const adapter = Buffer.from('sealed adapter');
     const config = Buffer.from(
       `${JSON.stringify({
-        appServer: {executableSha256: 'd'.repeat(64), version: 'codex-cli 0.144.5'},
-        environmentPolicyHash: 'e'.repeat(64),
+        appServer: {executableSha256: Effect.pipe('d', EffectString.repeat(64)), version: 'codex-cli 0.144.5'},
+        environmentPolicyHash: Effect.pipe('e', EffectString.repeat(64)),
         model,
       })}\n`,
     );
@@ -959,7 +984,7 @@ describe('matched evaluation runtime integrity', () => {
         adapterConfigurationHash: sha256HexSync(config),
         adapterProtocol: 'matched-evaluation-adapter-v5',
         agentTask: {prompt, repositoryFixtureHash: sourceFixtureHash, taskId},
-        environmentPolicyHash: 'e'.repeat(64),
+        environmentPolicyHash: Effect.pipe('e', EffectString.repeat(64)),
         model: {model: model.id, parametersHash: model.parametersHash, provider: model.provider},
         runNonce,
       })}\n`,
@@ -982,7 +1007,7 @@ describe('matched evaluation runtime integrity', () => {
       totalTokens: 15,
     };
     const transcript = Buffer.from('{"kind":"agent"}\n');
-    const transcriptHash = 'f'.repeat(64);
+    const transcriptHash = Effect.pipe('f', EffectString.repeat(64));
     const response = Buffer.from(
       `${JSON.stringify({
         metrics: {
@@ -1010,10 +1035,10 @@ describe('matched evaluation runtime integrity', () => {
           adapterConfigurationFileSha256: sha256HexSync(config),
           adapterConfigurationHash: sha256HexSync(config),
           adapterProtocol: 'matched-evaluation-adapter-v5',
-          appServerExecutableSha256: 'd'.repeat(64),
+          appServerExecutableSha256: Effect.pipe('d', EffectString.repeat(64)),
           appServerVersion: 'codex-cli 0.144.5',
           artifactSha256: sha256HexSync(artifact),
-          environmentPolicyHash: 'e'.repeat(64),
+          environmentPolicyHash: Effect.pipe('e', EffectString.repeat(64)),
           model,
           requestSha256: sha256HexSync(request),
           responseSha256: sha256HexSync(response),
@@ -1104,17 +1129,20 @@ describe('matched evaluation runtime integrity', () => {
     const marker = 'threadnote-resume-0123456789abcdef';
     const segment = fc
       .array(fc.constantFrom('a', 'b', 'c', '0', '1', '-'), {minLength: 1, maxLength: 12})
-      .map(characters => characters.join(''));
+      .map(characters => EffectArray.join(characters, ''));
     fc.assert(
       fc.property(segment, segment, (user, topic) => {
         const automaticHandoffUri = `threadnote://user/${user}/memories/handoffs/active/project/${topic}.md`;
-        const text = [
-          'THREADNOTE BRIEF',
-          `Answer: Resume from the exact current handoff. ${marker}`,
-          'State: sufficient | mode resume | scope fresh | ready 1/1',
-          'Handoffs',
-          `- memories/handoffs/active/project/${topic}.md [fresh; code-citations; exact]`,
-        ].join('\n');
+        const text = EffectArray.join(
+          [
+            'THREADNOTE BRIEF',
+            `Answer: Resume from the exact current handoff. ${marker}`,
+            'State: sufficient | mode resume | scope fresh | ready 1/1',
+            'Handoffs',
+            `- memories/handoffs/active/project/${topic}.md [fresh; code-citations; exact]`,
+          ],
+          '\n',
+        );
         expect(() =>
           assertMatchedEvaluationContinuationAgentBriefV1({automaticHandoffUri, resumeEvidenceMarker: marker, text}),
         ).not.toThrow();
@@ -1122,12 +1150,15 @@ describe('matched evaluation runtime integrity', () => {
       {numRuns: 32},
     );
     const automaticHandoffUri = 'threadnote://user/test/memories/handoffs/active/project/pilot.md';
-    const valid = [
-      'THREADNOTE BRIEF',
-      `Answer: ${marker}`,
-      'State: sufficient | mode resume | scope fresh | ready 1/1',
-      '- memories/handoffs/active/project/pilot.md [fresh]',
-    ].join('\n');
+    const valid = EffectArray.join(
+      [
+        'THREADNOTE BRIEF',
+        `Answer: ${marker}`,
+        'State: sufficient | mode resume | scope fresh | ready 1/1',
+        '- memories/handoffs/active/project/pilot.md [fresh]',
+      ],
+      '\n',
+    );
     expect(parseMatchedEvaluationContinuationAgentBriefResultV1({content: [{type: 'text', text: valid}]})).toBe(valid);
     const requiredGraphQuery = 'find callers from normalizeNode to renderSuggestion';
     expect(() =>
@@ -1156,7 +1187,7 @@ describe('matched evaluation runtime integrity', () => {
       assertMatchedEvaluationContinuationAgentBriefV1({
         automaticHandoffUri,
         resumeEvidenceMarker: marker,
-        text: valid.replace('State: sufficient', 'State: partial'),
+        text: Effect.pipe(valid, EffectString.replace('State: sufficient', 'State: partial')),
       }),
     ).toThrow('does not surface the exact automatic handoff');
     expect(() =>
@@ -1178,7 +1209,7 @@ describe('matched evaluation runtime integrity', () => {
     await writeFile(join(source, 'tests', 'test_marker.py'), 'def test_marker():\n    assert False\n');
     await git(source, ['add', 'tests/test_marker.py']);
     await git(source, ['commit', '-qm', 'add regression fixture']);
-    const baseRevision = (await gitOutput(source, ['rev-parse', 'HEAD'])).trim();
+    const baseRevision = Effect.pipe(await gitOutput(source, ['rev-parse', 'HEAD']), EffectString.trim);
     await git(source, ['worktree', 'add', '--detach', checkpoint, baseRevision]);
     await writeFile(join(source, 'tests', 'test_marker.py'), 'def test_marker():\n    assert True\n');
     await mkdir(join(source, 'pytest-of-root'));
@@ -1246,15 +1277,15 @@ describe('matched evaluation runtime integrity', () => {
     const input = {
       allowedPaths: ['tests/expected.txt'],
       calibration: {
-        baseDiagnosticHash: '1'.repeat(64),
+        baseDiagnosticHash: Effect.pipe('1', EffectString.repeat(64)),
         baseExitCode: 1 as const,
         baseRepositoryFixtureHash: base.fixtureHash,
         baseRevision: base.revision,
-        fixDiagnosticHash: '2'.repeat(64),
+        fixDiagnosticHash: Effect.pipe('2', EffectString.repeat(64)),
         fixExitCode: 0 as const,
         fixRepositoryFixtureHash: accepted.fixtureHash,
         fixRevision: accepted.revision,
-        receiptHash: '3'.repeat(64),
+        receiptHash: Effect.pipe('3', EffectString.repeat(64)),
       },
       checkpointRepositoryDirectory: checkpoint,
       commandTokens: ['/bin/sh', '-c', 'test "$(cat tests/expected.txt)" = "$(cat service.ts)"'],
@@ -1302,14 +1333,20 @@ describe('matched evaluation runtime integrity', () => {
     await expect(
       assertMatchedEvaluationContinuationCheckpointV2({
         ...input,
-        agentPatch: agentPatch.replace('phase-one', 'different'),
+        agentPatch: Effect.pipe(agentPatch, EffectString.replace('phase-one', 'different')),
       }),
     ).rejects.toThrow('checkpoint differs from the preserved phase-one agent patch');
     await expect(
-      assertMatchedEvaluationContinuationCheckpointV2({...input, patchSha256: 'f'.repeat(64)}),
+      assertMatchedEvaluationContinuationCheckpointV2({
+        ...input,
+        patchSha256: Effect.pipe('f', EffectString.repeat(64)),
+      }),
     ).rejects.toThrow('phase-one patch differs');
     await expect(
-      assertMatchedEvaluationContinuationCheckpointV2({...input, baseFixtureHash: 'e'.repeat(64)}),
+      assertMatchedEvaluationContinuationCheckpointV2({
+        ...input,
+        baseFixtureHash: Effect.pipe('e', EffectString.repeat(64)),
+      }),
     ).rejects.toThrow('source repository differs');
     await git(repository, ['commit', '--allow-empty', '-qm', 'second phase-one commit']);
     const secondCheckpoint = await observeMatchedEvaluationRepositoryV1(repository);
@@ -1329,24 +1366,27 @@ describe('matched evaluation runtime integrity', () => {
     await writeFile(join(repository, 'solution.txt'), 'bad\n');
     await git(repository, ['add', '.']);
     await git(repository, ['commit', '-qm', 'checkpoint']);
-    const checkpointRevision = (await gitOutput(repository, ['rev-parse', 'HEAD'])).trim();
+    const checkpointRevision = Effect.pipe(await gitOutput(repository, ['rev-parse', 'HEAD']), EffectString.trim);
     const verifier = join(root, 'verify.sh');
     await writeFile(
       verifier,
-      [
-        '#!/bin/sh',
-        'if [ "$1" = "target" ]; then',
-        '  if [ "$(cat solution.txt)" = "good" ]; then exit 0; fi',
-        '  echo "FAILED tests/test_target.py::test_target - AssertionError"',
-        '  exit 1',
-        'fi',
-        'echo "FAILED tests/test_full.py::test_baseline - AssertionError"',
-        'if [ "$(cat solution.txt)" != "good" ]; then',
-        '  echo "FAILED tests/test_full.py::test_new_regression - AssertionError"',
-        'fi',
-        'exit 1',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          '#!/bin/sh',
+          'if [ "$1" = "target" ]; then',
+          '  if [ "$(cat solution.txt)" = "good" ]; then exit 0; fi',
+          '  echo "FAILED tests/test_target.py::test_target - AssertionError"',
+          '  exit 1',
+          'fi',
+          'echo "FAILED tests/test_full.py::test_baseline - AssertionError"',
+          'if [ "$(cat solution.txt)" != "good" ]; then',
+          '  echo "FAILED tests/test_full.py::test_new_regression - AssertionError"',
+          'fi',
+          'exit 1',
+          '',
+        ],
+        '\n',
+      ),
     );
     await chmod(verifier, 0o700);
     const taskId = 'tsk_1234567890abcdef';
@@ -1404,38 +1444,46 @@ describe('matched evaluation runtime integrity', () => {
       negativeControls: [],
       pairId: null,
       prompt: 'Original public issue prompt.',
-      repositoryFixtureHash: '1'.repeat(64),
+      repositoryFixtureHash: Effect.pipe('1', EffectString.repeat(64)),
       rubric: {completion: 'behavior passes', criteria: ['passes'], requiredEvidenceIds: []},
       sourceGold: [],
       taskId: 'tsk_1234567890abcdef',
       variant: 'historical-as-issued',
     } as const;
     const study = {
-      studyHash: '2'.repeat(64),
+      studyHash: Effect.pipe('2', EffectString.repeat(64)),
       taskContexts: [
         {
+          asIssuedContext: {
+            assessmentHash: Effect.pipe('c', EffectString.repeat(64)),
+            contentHash: null,
+            sufficiency: 'sufficient' as const,
+            suppliedBytes: 0,
+          },
           clusterId: 'cluster_1234567890abcdef',
-          graphContentHash: '3'.repeat(64),
-          graphSnapshotHash: '4'.repeat(64),
-          linkReceiptsHash: '5'.repeat(64),
+          graphContentHash: Effect.pipe('3', EffectString.repeat(64)),
+          graphSnapshotHash: Effect.pipe('4', EffectString.repeat(64)),
+          linkReceipts: [],
+          linkReceiptsHash: Effect.pipe('5', EffectString.repeat(64)),
+          memoryFixtureHash: Effect.pipe('d', EffectString.repeat(64)),
           repositoryFixtureHash: task.repositoryFixtureHash,
-          taskContextHash: '6'.repeat(64),
+          taskContextHash: Effect.pipe('6', EffectString.repeat(64)),
           taskId: task.taskId,
         },
       ],
-    } as unknown as MatchedTokenEfficiencyStudyV1;
+    };
     const plan = {
       checkpoint: {
         preparedContext: {
-          graphContentHash: '7'.repeat(64),
-          graphSnapshotHash: '8'.repeat(64),
-          linkReceiptsHash: '9'.repeat(64),
-          taskContextHash: 'a'.repeat(64),
+          graphContentHash: Effect.pipe('7', EffectString.repeat(64)),
+          graphSnapshotHash: Effect.pipe('8', EffectString.repeat(64)),
+          linkReceiptsHash: Effect.pipe('9', EffectString.repeat(64)),
+          taskContextHash: Effect.pipe('a', EffectString.repeat(64)),
         },
-        repositoryFixtureHash: 'b'.repeat(64),
+        repositoryFixtureHash: Effect.pipe('b', EffectString.repeat(64)),
       },
       phaseTwoPrompt: 'Implement the production fix from the committed regression test.',
-    } as Parameters<typeof projectMatchedEvaluationContinuationAdapterTaskV2>[2];
+    };
 
     const compact = projectMatchedEvaluationContinuationAdapterTaskV2({arm: 'threadnote-compact', task}, study, plan);
     expect(compact.agentTask).toMatchObject({
@@ -1466,40 +1514,44 @@ describe('matched evaluation runtime integrity', () => {
     const taskId = 'tsk_1234567890abcdef';
     const sourceTask = {
       prompt: 'Original issue.',
-      promptSha256: '1'.repeat(64),
-      repositoryFixtureHash: '2'.repeat(64),
-      repositoryRevision: '3'.repeat(40),
+      promptSha256: Effect.pipe('1', EffectString.repeat(64)),
+      repositoryFixtureHash: Effect.pipe('2', EffectString.repeat(64)),
+      repositoryRevision: Effect.pipe('3', EffectString.repeat(40)),
       taskId,
     };
     const preparedContext = {
-      graphContentHash: '4'.repeat(64),
-      graphSnapshotHash: '5'.repeat(64),
-      linkReceiptsHash: '6'.repeat(64),
-      taskContextHash: '7'.repeat(64),
+      graphContentHash: Effect.pipe('4', EffectString.repeat(64)),
+      graphSnapshotHash: Effect.pipe('5', EffectString.repeat(64)),
+      linkReceiptsHash: Effect.pipe('6', EffectString.repeat(64)),
+      taskContextHash: Effect.pipe('7', EffectString.repeat(64)),
     };
     const checkpoint = {
       preparedContext,
-      repositoryFixtureHash: '8'.repeat(64),
-      repositoryRevision: '9'.repeat(40),
-    } as unknown as Parameters<typeof continuationCheckpointStudyV2>[2];
+      repositoryFixtureHash: Effect.pipe('8', EffectString.repeat(64)),
+      repositoryRevision: Effect.pipe('9', EffectString.repeat(40)),
+    };
     const study = {
       clusters: [
         {
           clusterId,
           repositoryFixtureHash: sourceTask.repositoryFixtureHash,
-          repositoryIdentityHash: 'a'.repeat(64),
+          repositoryIdentityHash: Effect.pipe('a', EffectString.repeat(64)),
           revision: sourceTask.repositoryRevision,
         },
       ],
-      taskContexts: [{clusterId, graphSnapshotHash: 'b'.repeat(64), taskId}],
-    } as unknown as MatchedTokenEfficiencyStudyV1;
+      taskContexts: [{clusterId, graphSnapshotHash: Effect.pipe('b', EffectString.repeat(64)), taskId}],
+    };
 
     expect(continuationCheckpointStudyV2(study, sourceTask, checkpoint).clusters[0]).toMatchObject({
       repositoryFixtureHash: checkpoint.repositoryFixtureHash,
       revision: checkpoint.repositoryRevision,
     });
     expect(() =>
-      continuationCheckpointStudyV2(study, {...sourceTask, repositoryFixtureHash: 'c'.repeat(64)}, checkpoint),
+      continuationCheckpointStudyV2(
+        study,
+        {...sourceTask, repositoryFixtureHash: Effect.pipe('c', EffectString.repeat(64))},
+        checkpoint,
+      ),
     ).toThrow('source repository differs');
     expect(() =>
       continuationCheckpointStudyV2(study, sourceTask, {
@@ -1538,17 +1590,17 @@ describe('matched evaluation runtime integrity', () => {
     ]);
     const taskId = 'tsk_1234567890abcdef';
     const graphContext = {
-      graphContentHash: '1'.repeat(64),
-      graphSnapshotHash: '2'.repeat(64),
+      graphContentHash: Effect.pipe('1', EffectString.repeat(64)),
+      graphSnapshotHash: Effect.pipe('2', EffectString.repeat(64)),
       linkReceiptsHash: null,
       memoryAccess: 'disabled' as const,
       taskContextHash: null,
     };
     const compactContext = {
       ...graphContext,
-      linkReceiptsHash: '3'.repeat(64),
+      linkReceiptsHash: Effect.pipe('3', EffectString.repeat(64)),
       memoryAccess: 'linked' as const,
-      taskContextHash: '4'.repeat(64),
+      taskContextHash: Effect.pipe('4', EffectString.repeat(64)),
     };
     const graphPreparedHome = continuationPreparedHome(taskId, graphHome, graphFixtureHash, graphContext, 'graph');
     const compactPreparedHome = continuationPreparedHome(
@@ -1572,7 +1624,7 @@ describe('matched evaluation runtime integrity', () => {
       [checkpointGraphPath, checkpointGraph],
       [checkpointCompactPath, checkpointCompact],
     ] as const;
-    await Promise.all(files.map(([path, value]) => writeFile(path, `${JSON.stringify(value)}\n`)));
+    await Promise.all(EffectArray.map(files, ([path, value]) => writeFile(path, `${JSON.stringify(value)}\n`)));
     const sourceGraphHash = sha256HexSync(Buffer.from(`${JSON.stringify(sourceGraph)}\n`));
     const sourceCompactHash = sha256HexSync(Buffer.from(`${JSON.stringify(sourceCompact)}\n`));
     const checkpointGraphHash = sha256HexSync(Buffer.from(`${JSON.stringify(checkpointGraph)}\n`));
@@ -1599,19 +1651,19 @@ describe('matched evaluation runtime integrity', () => {
         },
       },
       taskId,
-    } as unknown as MatchedEvaluationContinuationPilotPlanV2;
+    };
     const manifest = {
       arms: [
-        {adapterConfigurationHash: sourceGraphHash, arm: 'threadnote-graph'},
-        {adapterConfigurationHash: sourceCompactHash, arm: 'threadnote-compact'},
+        {adapterConfigurationHash: sourceGraphHash, arm: 'threadnote-graph' as const},
+        {adapterConfigurationHash: sourceCompactHash, arm: 'threadnote-compact' as const},
       ],
-    } as unknown as MatchedEvaluationManifestV1;
+    };
     const runtime = {
       arms: [
-        {adapterConfigFile: sourceGraphPath, arm: 'threadnote-graph'},
-        {adapterConfigFile: sourceCompactPath, arm: 'threadnote-compact'},
+        {adapterConfigFile: sourceGraphPath, arm: 'threadnote-graph' as const},
+        {adapterConfigFile: sourceCompactPath, arm: 'threadnote-compact' as const},
       ],
-    } as unknown as MatchedEvaluationRuntimeV1;
+    };
 
     const overrides = await assertMatchedEvaluationContinuationAdapterConfigurationsV2({
       manifest,
@@ -1786,25 +1838,37 @@ describe('matched evaluation runtime integrity', () => {
           {adapterConfigurationHash: sha256HexSync(Buffer.from(filesBytes)), arm: 'files'},
           {adapterConfigurationHash: sha256HexSync(Buffer.from(compactBytes)), arm: 'threadnote-compact'},
         ],
-      } as unknown as MatchedEvaluationManifestV1,
+      },
       outputDirectory: join(root, 'runtime-output'),
       plan: {
         checkpoint: {repositoryFixtureHash: checkpoint.fixtureHash, repositoryRevision: checkpoint.revision},
         taskId,
-      } as unknown as MatchedEvaluationContinuationPilotPlanV2,
+      },
       runtime: {
         arms: [
           {adapterConfigFile: filesConfigPath, arm: 'files'},
           {adapterConfigFile: compactConfigPath, arm: 'threadnote-compact'},
         ],
-      } as unknown as MatchedEvaluationRuntimeV1,
+      },
     });
 
     for (const arm of ['files', 'threadnote-compact'] as const) {
-      const runtimeConfig = JSON.parse(
-        await readFile(overrides.get(arm)!.adapterConfigFile, 'utf8'),
-      ) as typeof filesConfig;
-      const rebound = runtimeConfig.dependencyProjections.find(candidate => candidate.taskId === taskId)!;
+      const runtimeConfigJson: unknown = JSON.parse(await readFile(overrides.get(arm)!.adapterConfigFile, 'utf8'));
+      const runtimeConfig = Schema.decodeUnknownSync(
+        Schema.Struct({
+          dependencyProjections: Schema.Array(
+            Schema.Struct({
+              fixtureHash: Schema.String,
+              sourceDirectory: Schema.String,
+              sourceRepositoryDirectory: Schema.String,
+              taskId: Schema.String,
+            }),
+          ),
+        }),
+      )(runtimeConfigJson);
+      const rebound = EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtimeConfig.dependencyProjections, candidate => candidate.taskId === taskId),
+      )!;
       expect(rebound.sourceRepositoryDirectory).toBe(checkpointRepository);
       expect(rebound.sourceDirectory).toBe(checkpointDependency);
       expect(rebound.fixtureHash).toBe(projection.fixtureHash);
@@ -1852,7 +1916,7 @@ describe('matched evaluation runtime integrity', () => {
       adapterConfigurationHash: sourceConfigHash,
       adapterProtocol: 'matched-evaluation-adapter-v5',
       arm: 'files',
-      environmentPolicyHash: 'a'.repeat(64),
+      environmentPolicyHash: Effect.pipe('a', EffectString.repeat(64)),
       tool: {artifactHash: null, lockIdentityHash: null, name: 'none', version: 'none'},
     } as const satisfies Parameters<typeof resolveRuntimeArm>[2];
 
@@ -1913,9 +1977,9 @@ describe('matched evaluation runtime integrity', () => {
         },
       ],
     } as const;
-    expect(selectMatchedEvaluationPilotRowsV1(manifest, 'tsk_1234567890abcdef').map(row => row.runOrder)).toEqual([
-      7, 8, 9,
-    ]);
+    expect(
+      EffectArray.map(selectMatchedEvaluationPilotRowsV1(manifest, 'tsk_1234567890abcdef'), row => row.runOrder),
+    ).toEqual([7, 8, 9]);
     expect(() =>
       selectMatchedEvaluationPilotRowsV1(
         {...manifest, activeArms: ['files', 'threadnote-graph', 'threadnote-source']},
@@ -2069,7 +2133,7 @@ describe('matched evaluation runtime integrity', () => {
           revision: second.revision,
         },
       ],
-    } as unknown as MatchedTokenEfficiencyStudyV1;
+    };
     const runtime = {
       arms: [],
       artifactDirectory: join(root, 'artifacts'),
@@ -2078,7 +2142,7 @@ describe('matched evaluation runtime integrity', () => {
         {clusterId: firstCluster, repositoryDirectory: firstDirectory, repositoryIdentityHash: first.identityHash},
       ],
       timeoutMilliseconds: 60_000,
-      verificationPlanHash: 'f'.repeat(64),
+      verificationPlanHash: Effect.pipe('f', EffectString.repeat(64)),
       version: 4 as const,
     };
 
@@ -2091,7 +2155,7 @@ describe('matched evaluation runtime integrity', () => {
       resolveMatchedEvaluationRuntimeRepositoriesV1(
         {
           ...runtime,
-          repositories: runtime.repositories.map(repository =>
+          repositories: EffectArray.map(runtime.repositories, repository =>
             repository.clusterId === firstCluster
               ? {...repository, repositoryIdentityHash: second.identityHash}
               : repository,
@@ -2134,7 +2198,7 @@ function continuationAdapterConfig(
       argumentsAfterSubcommand: [],
       argumentsBeforeSubcommand: [],
       executable: '/usr/bin/codex',
-      executableSha256: '1'.repeat(64),
+      executableSha256: Effect.pipe('1', EffectString.repeat(64)),
       version: 'codex-cli 1.0.0',
     },
     arm,
@@ -2142,9 +2206,19 @@ function continuationAdapterConfig(
     contextBudgetTokens: 800,
     contextHomes,
     environmentPolicyHash: matchedEvaluationCodexEnvironmentPolicyHashV1(),
-    git: {executable: '/usr/bin/git', executableSha256: '2'.repeat(64)},
-    judgeModel: {id: 'judge-model', parametersHash: '3'.repeat(64), provider: 'openai', reasoningEffort: 'low'},
-    model: {id: 'agent-model', parametersHash: '4'.repeat(64), provider: 'openai', reasoningEffort: 'low'},
+    git: {executable: '/usr/bin/git', executableSha256: Effect.pipe('2', EffectString.repeat(64))},
+    judgeModel: {
+      id: 'judge-model',
+      parametersHash: Effect.pipe('3', EffectString.repeat(64)),
+      provider: 'openai',
+      reasoningEffort: 'low',
+    },
+    model: {
+      id: 'agent-model',
+      parametersHash: Effect.pipe('4', EffectString.repeat(64)),
+      provider: 'openai',
+      reasoningEffort: 'low',
+    },
     pricingMicrosPerMillionTokens: null,
     safeBinaries: [],
     safeExecutablePath: '/usr/bin:/bin',

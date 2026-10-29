@@ -1,4 +1,9 @@
+import {isOneOf as checkedIsOneOf, isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MATCHED_EVALUATION_VERSION = 1 as const;
 export const MATCHED_EVALUATION_ADAPTER_PROTOCOL = 'matched-evaluation-adapter-v5' as const;
@@ -12,6 +17,7 @@ export const MATCHED_EVALUATION_ARMS = [
   'reference-scope',
 ] as const;
 export const MATCHED_EVALUATION_BLIND_LABELS = ['A', 'B', 'C', 'D', 'E'] as const;
+const MATCHED_EVALUATION_POSITIONS = [1, 2, 3, 4, 5] as const;
 export const MATCHED_EVALUATION_TASK_CATEGORIES = [
   'unfamiliar-call-path',
   'hidden-architectural-constraint',
@@ -177,19 +183,19 @@ export function parseMatchedEvaluationCorpusV1(value: unknown): MatchedEvaluatio
   const corpus = object(value, 'corpus');
   exactKeys(corpus, ['corpusId', 'tasks', 'version'], 'corpus');
   if (corpus.version !== MATCHED_EVALUATION_VERSION) invalid('corpus version must be 1');
-  const tasks = array(corpus.tasks, 'corpus tasks').map((task, index) => parseCorpusTask(task, index));
+  const tasks = EffectArray.map(array(corpus.tasks, 'corpus tasks'), (task, index) => parseCorpusTask(task, index));
   if (tasks.length < 5 || tasks.length > 64) invalid('corpus must contain between 5 and 64 tasks');
   unique(
-    tasks.map(task => task.taskId),
+    EffectArray.map(tasks, task => task.taskId),
     'corpus task ids',
   );
   for (const category of MATCHED_EVALUATION_TASK_CATEGORIES) {
-    if (!tasks.some(task => task.category === category)) invalid(`corpus does not cover ${category}`);
+    if (!EffectArray.some(tasks, task => task.category === category)) invalid(`corpus does not cover ${category}`);
   }
   assertVariantDesign(tasks);
   return {
     corpusId: matchingString(corpus.corpusId, CORPUS_ID, 'corpus id'),
-    tasks: [...tasks].sort((left, right) => left.taskId.localeCompare(right.taskId)),
+    tasks: [...tasks].sort((left, right) => Effect.pipe(left.taskId, EffectString.localeCompare(right.taskId))),
     version: MATCHED_EVALUATION_VERSION,
   };
 }
@@ -211,7 +217,7 @@ export function createMatchedEvaluationManifestV1(input: {
   const arms = parseArmDefinitions(input.arms);
   const repetitions = repetitionsValue(input.repetitions);
   const scheduleSeed = matchingString(input.scheduleSeed, HASH, 'schedule seed');
-  const tasks = corpus.tasks.map(projectManifestTask);
+  const tasks = EffectArray.map(corpus.tasks, projectManifestTask);
   const activeArms = canonicalActiveArms(input.activeArms);
   const blindAssignment = deriveMatchedEvaluationBlindAssignmentV1(scheduleSeed);
   const schedule = deriveMatchedEvaluationScheduleV1({activeArms, blindAssignment, repetitions, scheduleSeed, tasks});
@@ -273,10 +279,12 @@ export function parseMatchedEvaluationManifestV1(value: unknown): MatchedEvaluat
   }
   const repetitions = repetitionsValue(manifest.repetitions);
   const scheduleSeed = matchingString(manifest.scheduleSeed, HASH, 'manifest schedule seed');
-  const tasks = array(manifest.tasks, 'manifest tasks').map((task, index) => parseManifestTask(task, index));
+  const tasks = EffectArray.map(array(manifest.tasks, 'manifest tasks'), (task, index) =>
+    parseManifestTask(task, index),
+  );
   if (tasks.length < 5 || tasks.length > 64) invalid('manifest must contain between 5 and 64 tasks');
   canonicalUnique(
-    tasks.map(task => task.taskId),
+    EffectArray.map(tasks, task => task.taskId),
     'manifest task ids',
   );
   const blindAssignment = parseBlindAssignment(manifest.blindAssignment);
@@ -284,7 +292,7 @@ export function parseMatchedEvaluationManifestV1(value: unknown): MatchedEvaluat
   if (JSON.stringify(blindAssignment) !== JSON.stringify(expectedAssignment)) {
     invalid('blind assignment does not match the schedule seed');
   }
-  const schedule = array(manifest.schedule, 'manifest schedule').map((entry, index) =>
+  const schedule = EffectArray.map(array(manifest.schedule, 'manifest schedule'), (entry, index) =>
     parseScheduleEntry(entry, index),
   );
   const expectedSchedule = deriveMatchedEvaluationScheduleV1({
@@ -349,13 +357,15 @@ export function deriveMatchedEvaluationScheduleV1(input: {
   if (repetitions % activeArms.length !== 0) {
     invalid(`repetitions must be divisible by selected arm count (${activeArms.length})`);
   }
-  const tasks = [...input.tasks].sort((left, right) => left.taskId.localeCompare(right.taskId));
+  const tasks = [...input.tasks].sort((left, right) =>
+    Effect.pipe(left.taskId, EffectString.localeCompare(right.taskId)),
+  );
   canonicalUnique(
-    tasks.map(task => matchingString(task.taskId, TASK_ID, 'schedule task id')),
+    EffectArray.map(tasks, task => matchingString(task.taskId, TASK_ID, 'schedule task id')),
     'schedule task ids',
   );
   const armToLabel = new Map<MatchedEvaluationArm, MatchedEvaluationBlindLabel>(
-    MATCHED_EVALUATION_BLIND_LABELS.map(label => [input.blindAssignment[label], label]),
+    EffectArray.map(MATCHED_EVALUATION_BLIND_LABELS, label => [input.blindAssignment[label], label]),
   );
   if (armToLabel.size !== MATCHED_EVALUATION_ARMS.length) invalid('blind assignment must map every arm exactly once');
   const entries: MatchedEvaluationScheduleEntryV1[] = [];
@@ -367,21 +377,26 @@ export function deriveMatchedEvaluationScheduleV1(input: {
       const rotation = (offset + repetition) % activeArms.length;
       const order = [...base.slice(rotation), ...base.slice(0, rotation)];
       for (let position = 0; position < order.length; position += 1) {
+        const numberedPosition = MATCHED_EVALUATION_POSITIONS[position];
+        if (numberedPosition === undefined) invalid('matched evaluation has more positions than blind labels');
         const arm = order[position];
         const blindLabel = armToLabel.get(arm);
         if (blindLabel === undefined) invalid('blind assignment omitted a scheduled arm');
         const runOrder = entries.length;
         entries.push({
           blindLabel,
-          position: (position + 1) as 1 | 2 | 3 | 4 | 5,
+          position: numberedPosition,
           repetition,
-          runNonce: `run_${digest('matched-evaluation-run-v1', {
-            manifestSeed: scheduleSeed,
-            position: position + 1,
-            repetition,
-            runOrder,
-            taskId: task.taskId,
-          }).slice(0, 32)}`,
+          runNonce: `run_${Effect.pipe(
+            digest('matched-evaluation-run-v1', {
+              manifestSeed: scheduleSeed,
+              position: numberedPosition,
+              repetition,
+              runOrder,
+              taskId: task.taskId,
+            }),
+            EffectString.slice(0, 32),
+          )}`,
           runOrder,
           taskId: task.taskId,
         });
@@ -432,34 +447,38 @@ function parseCorpusTask(value: unknown, index: number): MatchedEvaluationCorpus
     ],
     `corpus task ${index}`,
   );
-  const sourceGold = array(task.sourceGold, `corpus task ${index} source gold`).map((entry, entryIndex) =>
+  const sourceGold = EffectArray.map(array(task.sourceGold, `corpus task ${index} source gold`), (entry, entryIndex) =>
     parseSourceGold(entry, index, entryIndex),
   );
   if (sourceGold.length === 0 || sourceGold.length > 16) invalid(`corpus task ${index} source gold is unbounded`);
   canonicalUnique(
-    sourceGold.map(entry => entry.evidenceId),
+    EffectArray.map(sourceGold, entry => entry.evidenceId),
     `corpus task ${index} source evidence ids`,
   );
-  const memoryFixtures = array(task.memoryFixtures, `corpus task ${index} memory fixtures`).map((entry, entryIndex) =>
-    parseMemoryFixture(entry, index, entryIndex),
+  const memoryFixtures = EffectArray.map(
+    array(task.memoryFixtures, `corpus task ${index} memory fixtures`),
+    (entry, entryIndex) => parseMemoryFixture(entry, index, entryIndex),
   );
   if (memoryFixtures.length > 32) invalid(`corpus task ${index} has too many memory fixtures`);
   canonicalUnique(
-    memoryFixtures.map(entry => entry.memoryId),
+    EffectArray.map(memoryFixtures, entry => entry.memoryId),
     `corpus task ${index} memory fixture ids`,
   );
-  const negativeControls = array(task.negativeControls, `corpus task ${index} negative controls`).map(
+  const negativeControls = EffectArray.map(
+    array(task.negativeControls, `corpus task ${index} negative controls`),
     (entry, entryIndex) => parseNegativeControl(entry, index, entryIndex),
   );
   if (negativeControls.length === 0 || negativeControls.length > 16) {
     invalid(`corpus task ${index} must have bounded negative controls`);
   }
   canonicalUnique(
-    negativeControls.map(entry => entry.controlId),
+    EffectArray.map(negativeControls, entry => entry.controlId),
     `corpus task ${index} negative control ids`,
   );
   const rubric = parseRubric(task.rubric, index);
-  if (rubric.requiredEvidenceIds.some(id => !sourceGold.some(entry => entry.evidenceId === id))) {
+  if (
+    EffectArray.some(rubric.requiredEvidenceIds, id => !EffectArray.some(sourceGold, entry => entry.evidenceId === id))
+  ) {
     invalid(`corpus task ${index} rubric names evidence outside source gold`);
   }
   return {
@@ -531,7 +550,8 @@ function parseRubric(value: unknown, taskIndex: number): MatchedEvaluationRubric
   const rubric = object(value, `corpus task ${taskIndex} rubric`);
   exactKeys(rubric, ['completion', 'criteria', 'requiredEvidenceIds'], `corpus task ${taskIndex} rubric`);
   const criteria = stringArray(rubric.criteria, 1, 16, 1_000, `corpus task ${taskIndex} rubric criteria`);
-  const requiredEvidenceIds = array(rubric.requiredEvidenceIds, `corpus task ${taskIndex} required evidence ids`).map(
+  const requiredEvidenceIds = EffectArray.map(
+    array(rubric.requiredEvidenceIds, `corpus task ${taskIndex} required evidence ids`),
     value => matchingString(value, EVIDENCE_ID, `corpus task ${taskIndex} required evidence id`),
   );
   canonicalUnique(requiredEvidenceIds, `corpus task ${taskIndex} required evidence ids`);
@@ -586,7 +606,7 @@ function parseManifestTask(value: unknown, index: number): MatchedEvaluationMani
 
 function parseArmDefinitions(value: readonly unknown[]): readonly MatchedEvaluationArmDefinitionV1[] {
   if (value.length !== MATCHED_EVALUATION_ARMS.length) invalid('manifest must define every arm');
-  const parsed = value.map((entry, index) => {
+  const parsed = EffectArray.map(value, (entry, index) => {
     const arm = object(entry, `arm definition ${index}`);
     exactKeys(
       arm,
@@ -631,10 +651,12 @@ function parseArmDefinitions(value: readonly unknown[]): readonly MatchedEvaluat
     return definition;
   });
   unique(
-    parsed.map(arm => arm.arm),
+    EffectArray.map(parsed, arm => arm.arm),
     'arm definition ids',
   );
-  return MATCHED_EVALUATION_ARMS.map(requiredArm => parsed.find(arm => arm.arm === requiredArm)!);
+  return EffectArray.map(MATCHED_EVALUATION_ARMS, requiredArm =>
+    EffectOption.getOrUndefined(EffectArray.findFirst(parsed, arm => arm.arm === requiredArm))!,
+  );
 }
 
 function assertArmDefinition(definition: MatchedEvaluationArmDefinitionV1): void {
@@ -675,7 +697,7 @@ function parseBlindAssignment(value: unknown): Readonly<Record<MatchedEvaluation
     D: literal(assignment.D, MATCHED_EVALUATION_ARMS, 'blind assignment D'),
     E: literal(assignment.E, MATCHED_EVALUATION_ARMS, 'blind assignment E'),
   };
-  unique(Object.values(parsed), 'blind assignment arms');
+  unique(EffectRecord.values(parsed), 'blind assignment arms');
   return parsed;
 }
 
@@ -686,14 +708,14 @@ function parseScheduleEntry(value: unknown, index: number): MatchedEvaluationSch
     ['blindLabel', 'position', 'repetition', 'runNonce', 'runOrder', 'taskId'],
     `schedule entry ${index}`,
   );
-  if (![1, 2, 3, 4, 5].includes(entry.position as number)) {
+  if (!checkedIsOneOf([1, 2, 3, 4, 5], entry.position)) {
     invalid(`schedule entry ${index} position is invalid`);
   }
   const runOrder = nonNegativeInteger(entry.runOrder, `schedule entry ${index} order`);
   if (runOrder !== index) invalid(`schedule entry ${index} is not in canonical run order`);
   return {
     blindLabel: literal(entry.blindLabel, MATCHED_EVALUATION_BLIND_LABELS, `schedule entry ${index} label`),
-    position: entry.position as 1 | 2 | 3 | 4 | 5,
+    position: entry.position,
     repetition: nonNegativeInteger(entry.repetition, `schedule entry ${index} repetition`),
     runNonce: matchingString(entry.runNonce, RUN_NONCE, `schedule entry ${index} nonce`),
     runOrder,
@@ -724,28 +746,28 @@ function parseRepository(value: unknown): MatchedEvaluationManifestV1['repositor
 }
 
 function assertVariantDesign(tasks: readonly MatchedEvaluationCorpusTaskV1[]): void {
-  const historical = tasks.filter(task => task.variant === 'historical-as-issued');
+  const historical = EffectArray.filter(tasks, task => task.variant === 'historical-as-issued');
   if (historical.length > 0) {
     if (historical.length !== tasks.length) invalid('historical-as-issued tasks cannot mix with synthetic variants');
-    if (historical.some(task => task.pairId !== null))
+    if (EffectArray.some(historical, task => task.pairId !== null))
       invalid('historical-as-issued tasks cannot declare synthetic pairs');
     return;
   }
   for (const variant of MATCHED_EVALUATION_TASK_VARIANTS) {
-    if (variant !== 'historical-as-issued' && !tasks.some(task => task.variant === variant)) {
+    if (variant !== 'historical-as-issued' && !EffectArray.some(tasks, task => task.variant === variant)) {
       invalid(`corpus does not cover ${variant}`);
     }
   }
-  const exact = tasks.filter(task => task.variant === 'exact-name');
-  const paraphrases = tasks.filter(task => task.variant === 'paraphrase');
+  const exact = EffectArray.filter(tasks, task => task.variant === 'exact-name');
+  const paraphrases = EffectArray.filter(tasks, task => task.variant === 'paraphrase');
   if (exact.length === 0 || paraphrases.length === 0) invalid('corpus requires exact-name and paraphrase pairs');
   for (const task of [...exact, ...paraphrases]) {
     if (task.pairId === null) invalid('exact-name and paraphrase tasks require a pair id');
-    const peers = tasks.filter(candidate => candidate.pairId === task.pairId);
+    const peers = EffectArray.filter(tasks, candidate => candidate.pairId === task.pairId);
     if (
       peers.length !== 2 ||
-      !peers.some(peer => peer.variant === 'exact-name') ||
-      !peers.some(peer => peer.variant === 'paraphrase')
+      !EffectArray.some(peers, peer => peer.variant === 'exact-name') ||
+      !EffectArray.some(peers, peer => peer.variant === 'paraphrase')
     ) {
       invalid(`pair ${task.pairId} must contain exactly one exact-name and one paraphrase task`);
     }
@@ -764,7 +786,9 @@ function canonicalActiveArms(value: unknown): readonly MatchedEvaluationArm[] {
   const arms =
     value === undefined
       ? [...MATCHED_EVALUATION_ARMS]
-      : array(value, 'active arms').map((arm, index) => literal(arm, MATCHED_EVALUATION_ARMS, `active arm ${index}`));
+      : EffectArray.map(array(value, 'active arms'), (arm, index) =>
+          literal(arm, MATCHED_EVALUATION_ARMS, `active arm ${index}`),
+        );
   if (arms.length === 0 || arms.length > MATCHED_EVALUATION_ARMS.length)
     invalid('active arms must select at least one arm');
   unique(arms, 'active arms');
@@ -775,13 +799,13 @@ function canonicalActiveArms(value: unknown): readonly MatchedEvaluationArm[] {
 
 function hashOrder<T>(values: readonly T[], key: (value: T) => string): T[] {
   return [...values].sort((left, right) => {
-    const comparison = sha256HexSync(key(left)).localeCompare(sha256HexSync(key(right)));
-    return comparison === 0 ? String(left).localeCompare(String(right)) : comparison;
+    const comparison = Effect.pipe(sha256HexSync(key(left)), EffectString.localeCompare(sha256HexSync(key(right))));
+    return comparison === 0 ? Effect.pipe(String(left), EffectString.localeCompare(String(right))) : comparison;
   });
 }
 
 function digestInteger(input: string): number {
-  return Number.parseInt(sha256HexSync(input).slice(0, 8), 16);
+  return Number.parseInt(Effect.pipe(sha256HexSync(input), EffectString.slice(0, 8)), 16);
 }
 
 function digest(label: string, value: unknown): string {
@@ -789,19 +813,19 @@ function digest(label: string, value: unknown): string {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
@@ -812,7 +836,12 @@ function matchingString(value: unknown, pattern: RegExp, label: string): string 
 }
 
 function boundedString(value: unknown, minimum: number, maximum: number, label: string): string {
-  if (typeof value !== 'string' || value.length < minimum || value.length > maximum || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.length < minimum ||
+    value.length > maximum ||
+    Effect.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} is invalid`);
   }
   return value;
@@ -825,7 +854,7 @@ function positiveInteger(value: unknown, label: string): number {
 }
 
 function nonNegativeInteger(value: unknown, label: string): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+  if (typeof value !== 'number' || !checkedIsSafeInteger(value) || value < 0) {
     invalid(`${label} must be a non-negative integer`);
   }
   return value;
@@ -849,16 +878,19 @@ function stringArray(
 ): readonly string[] {
   const values = array(value, label);
   if (values.length < minimum || values.length > maximum) invalid(`${label} has invalid bounds`);
-  return values.map((entry, index) => boundedString(entry, 1, maximumLength, `${label} ${index}`));
+  return EffectArray.map(values, (entry, index) => boundedString(entry, 1, maximumLength, `${label} ${index}`));
 }
 
 function relativePath(value: unknown, label: string): string {
   const path = boundedString(value, 1, 4_096, label);
   if (
-    path.includes('\\') ||
-    path.startsWith('/') ||
-    path.endsWith('/') ||
-    path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect.pipe(path, EffectString.includes('\\')) ||
+    Effect.pipe(path, EffectString.startsWith('/')) ||
+    Effect.pipe(path, EffectString.endsWith('/')) ||
+    EffectArray.some(
+      Effect.pipe(path, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     invalid(`${label} must be a normalized repository-relative file`);
   }
@@ -871,7 +903,8 @@ function unique(values: readonly string[], label: string): void {
 
 function canonicalUnique(values: readonly string[], label: string): void {
   unique(values, label);
-  if (values.some((value, index) => value !== [...values].sort()[index])) invalid(`${label} must be sorted`);
+  if (EffectArray.some(values, (value, index) => value !== [...values].sort()[index]))
+    invalid(`${label} must be sorted`);
 }
 
 function invalid(message: string): never {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Database} from 'bun:sqlite';
@@ -13,8 +14,10 @@ import {
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {CODE_GRAPH_SCHEMA_VERSION} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 
 describe('code graph repair process signals', () => {
   effectIt.effect(
@@ -71,7 +74,9 @@ describe('code graph repair process signals', () => {
             }),
           );
 
-          yield* Effect.promise(() => waitFor(() => Promise.all(locks.map(lock => Bun.file(lock).exists()))));
+          yield* Effect.promise(() =>
+            waitFor(() => Promise.all(EffectArray.map(locks, lock => Bun.file(lock).exists()))),
+          );
           // Give the repair process time to enter the synchronous SQLite call.
           // A timer cannot advance reliably while this fixture owns an exclusive
           // SQLite transaction in the same Bun process, so use a bounded wait.
@@ -99,7 +104,7 @@ describe('code graph repair process signals', () => {
 });
 
 async function anyExists(paths: readonly string[]): Promise<boolean> {
-  return (await Promise.all(paths.map(path => Bun.file(path).exists()))).some(Boolean);
+  return EffectArray.some(await Promise.all(EffectArray.map(paths, path => Bun.file(path).exists())), Boolean);
 }
 
 async function boundedExit(child: Bun.Subprocess, timeoutMilliseconds: number): Promise<number | 'timeout'> {
@@ -123,7 +128,7 @@ async function waitFor(
   const startedAt = performance.now();
   while (performance.now() - startedAt < timeoutMilliseconds) {
     const observed = await observe();
-    if (Array.isArray(observed) ? observed.every(Boolean) : observed) return;
+    if (EffectArray.isArray(observed) ? EffectArray.every(observed, Boolean) : observed) return;
     await Bun.sleep(25);
   }
   throw TestError.make({message: 'Timed out waiting for the repair signal fixture.'});

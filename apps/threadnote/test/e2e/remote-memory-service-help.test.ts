@@ -1,14 +1,23 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {promisify} from '@threadnote/testing/node-util';
 import {describe, expect, it} from 'vitest';
 import {join} from '@threadnote/testing/node-path';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execute = promisify(execFile);
 const root = process.cwd();
 const sourceEntry = join(root, 'apps', 'threadnote', 'src', 'standalone.ts');
 
 function serviceEnvironment(): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('THREADNOTE_REMOTE_')));
+  return EffectRecord.fromEntries(
+    EffectArray.filter(
+      EffectRecord.toEntries(process.env),
+      ([name]) => !Effect.pipe(name, EffectString.startsWith('THREADNOTE_REMOTE_')),
+    ),
+  );
 }
 
 describe('remote memory service standalone entrypoint', () => {
@@ -22,14 +31,17 @@ describe('remote memory service standalone entrypoint', () => {
 
     expect(result.stderr).toBe('');
     expect(result.stdout).toBe(
-      [
-        'Threadnote remote memory service',
-        '',
-        'Usage: threadnote remote-memory-service',
-        '',
-        'Starts the remote memory HTTP service using THREADNOTE_REMOTE_* environment variables.',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'Threadnote remote memory service',
+          '',
+          'Usage: threadnote remote-memory-service',
+          '',
+          'Starts the remote memory HTTP service using THREADNOTE_REMOTE_* environment variables.',
+          '',
+        ],
+        '\n',
+      ),
     );
     expect(result.stdout.length).toBeLessThan(2048);
   });
@@ -40,7 +52,14 @@ describe('remote memory service standalone entrypoint', () => {
       env: serviceEnvironment(),
       encoding: 'utf8',
       maxBuffer: 8 * 1024,
-    }).catch(error => error as {code: number; stderr: string; stdout: string});
+    }).catch(error => {
+      if (!Predicate.isObject(error)) return {code: undefined, stderr: undefined, stdout: undefined};
+      return {
+        code: Predicate.hasProperty(error, 'code') && typeof error.code === 'number' ? error.code : undefined,
+        stderr: Predicate.hasProperty(error, 'stderr') && typeof error.stderr === 'string' ? error.stderr : undefined,
+        stdout: Predicate.hasProperty(error, 'stdout') && typeof error.stdout === 'string' ? error.stdout : undefined,
+      };
+    });
 
     expect(result).toMatchObject({
       code: 1,

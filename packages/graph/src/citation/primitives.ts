@@ -1,5 +1,7 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {CodeGraphInventoryFile, CodeGraphSpan, CodeGraphSymbol} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_CITATION_QUERY_MAX_TARGETS = 400 as const;
 export const CODE_GRAPH_CITATION_QUERY_MAX_MATCHES_PER_TARGET = 64 as const;
@@ -163,7 +165,11 @@ function codeGraphSourceSpanFragmentWithLines(
     return {ok: false, reason: 'split-surrogate'};
   }
 
-  const text = source.slice(start, end).replace(/\r\n|\r|\u2028|\u2029/gu, '\n');
+  const text = Effect.pipe(
+    source,
+    EffectString.slice(start, end),
+    EffectString.replace(/\r\n|\r|\u2028|\u2029/gu, '\n'),
+  );
   const bytes = new TextEncoder().encode(text);
   return {
     fragment: {
@@ -217,7 +223,15 @@ function sourceOffsetAt(
 
 function splitsSurrogatePair(source: string, offset: number): boolean {
   if (offset <= 0 || offset >= source.length) return false;
-  const previous = source.charCodeAt(offset - 1);
-  const current = source.charCodeAt(offset);
+  const previous = Effect.pipe(
+    source,
+    EffectString.charCodeAt(offset - 1),
+    Effect.Option.getOrElse(() => NaN),
+  );
+  const current = Effect.pipe(
+    source,
+    EffectString.charCodeAt(offset),
+    Effect.Option.getOrElse(() => NaN),
+  );
   return previous >= 0xd800 && previous <= 0xdbff && current >= 0xdc00 && current <= 0xdfff;
 }

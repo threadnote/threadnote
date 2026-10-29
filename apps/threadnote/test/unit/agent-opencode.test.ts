@@ -17,9 +17,16 @@ import {
 import {readAgentIntegrationRegistry} from '@threadnote/threadnote/agent_integration/registry';
 import {planAgentSurface} from '@threadnote/threadnote/agent_integration/surfaces';
 import {SystemInfo} from '@threadnote/platform/system';
-import type {JsonObject} from '@threadnote/platform/json';
+import {isJsonObject, type JsonObject} from '@threadnote/platform/json';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requireJsonObject(value: unknown): JsonObject {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 const commandLayer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(BunServices.layer),
@@ -50,7 +57,7 @@ describe('OpenCode and Zeno integration', () => {
             JSON.stringify(
               hasParent ? {mcp: {...metadata, ...(hasServers ? {servers: {other: {command: ['other']}}} : {})}} : {},
             ),
-          ) as JsonObject;
+          );
           const before = JSON.stringify(original);
           const raw = `// retain comment\n${JSON.stringify(original, undefined, 2)}\n`;
           const container = ['mcp', 'servers'];
@@ -119,9 +126,9 @@ describe('OpenCode and Zeno integration', () => {
           expect((yield* agentAdapterStatus(config, zeno)).state).toBe('current');
           const installed = yield* fs.readFileString(file);
           const settings = parseAgentJson(installed, 'jsonc');
-          const servers = agentServerContainer(settings, receipt.strategy.container) as JsonObject;
+          const servers = requireJsonObject(agentServerContainer(settings, receipt.strategy.container));
           const disabledEntry = {
-            ...(servers.threadnote as JsonObject),
+            ...requireJsonObject(servers.threadnote),
             ...(legacy ? {enabled: false} : {disabled: true}),
           };
           yield* fs.writeFileString(
@@ -143,7 +150,7 @@ describe('OpenCode and Zeno integration', () => {
           const entry = agentServerContainer(
             parseAgentJson(yield* fs.readFileString(file), 'jsonc'),
             receipt.strategy.container,
-          ) as JsonObject;
+          );
           yield* fs.writeFileString(
             file,
             writeAgentServer(
@@ -151,7 +158,12 @@ describe('OpenCode and Zeno integration', () => {
               'jsonc',
               receipt.strategy.container,
               'threadnote',
-              mergeAgentServer(original, receipt.strategy.container, 'threadnote', entry.threadnote as JsonObject),
+              mergeAgentServer(
+                original,
+                receipt.strategy.container,
+                'threadnote',
+                requireJsonObject(requireJsonObject(entry).threadnote),
+              ),
             ),
           );
           yield* zeno.actions.remove(config, zeno, {apply: true});
@@ -206,8 +218,8 @@ describe('OpenCode and Zeno integration', () => {
           fc.jsonValue(),
         ),
         (settings, servers) => {
-          const original = JSON.parse(JSON.stringify({...settings, mcp: servers})) as JsonObject;
-          const raw = `// keep user configuration\r\n${JSON.stringify(original, undefined, 2).replaceAll('\n', '\r\n')}\r\n`;
+          const original = parseAgentJson(JSON.stringify({...settings, mcp: servers}));
+          const raw = `// keep user configuration\r\n${Effect2.pipe(JSON.stringify(original, undefined, 2), EffectString.replaceAll('\n', '\r\n'))}\r\n`;
           const entry = {
             type: 'local',
             command: ['threadnote-mcp-server'],

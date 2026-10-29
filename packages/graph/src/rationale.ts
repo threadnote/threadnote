@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {
   CodeGraphEdge,
@@ -6,6 +7,8 @@ import type {
   CodeGraphRationaleInput,
   CodeGraphSymbol,
 } from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_RATIONALE_INPUT_VERSION = 'rationale-input-v1' as const;
 export const CODE_GRAPH_RATIONALE_EXTRACTOR_VERSION = 'rationale-v1' as const;
@@ -49,26 +52,27 @@ function rationaleCandidates(content: string): readonly CodeGraphRationaleInput[
   let lineNumber = 1;
   let offset = 0;
   while (offset <= content.length) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const newline = content.indexOf('\n', offset);
     const end = newline < 0 ? content.length : newline;
-    const line = content.slice(offset, end);
+    const line = Effect.pipe(content, EffectString.slice(offset, end));
     const marker = RATIONALE_MARKER.exec(line);
     if (marker) {
-      const name = marker[1].toUpperCase();
-      const documentation = marker[2].trim();
+      const name = Effect.pipe(marker[1], EffectString.toUpperCase);
+      const documentation = Effect.pipe(marker[2], EffectString.trim);
       const key = `${lineNumber}\0${name}\0${documentation}`;
       if (!seen.has(key)) {
         seen.add(key);
         output.push({documentation, line: lineNumber, marker: name, name: `${name}: ${shortName(documentation)}`});
       }
     }
-    for (const reference of line.matchAll(DESIGN_REFERENCE)) {
-      const name = reference[0].replace(/[ #:-]+/, '-').toUpperCase();
+    for (const reference of Effect.pipe(line, EffectString.matchAll(DESIGN_REFERENCE))) {
+      const name = Effect.pipe(reference[0], EffectString.replace(/[ #:-]+/, '-'), EffectString.toUpperCase);
       const key = `${lineNumber}\0REFERENCE\0${name}`;
       if (seen.has(key)) continue;
       seen.add(key);
       output.push({
-        documentation: line.trim(),
+        documentation: Effect.pipe(line, EffectString.trim),
         line: lineNumber,
         marker: 'REFERENCE',
         name,
@@ -91,7 +95,7 @@ function rationaleSymbol(
     contentHash: file.contentHash,
     documentation: candidate.documentation,
     exported: false,
-    id: `cgs_${sha256HexSync(`${qualifiedName}\0${candidate.marker}\0${candidate.documentation}`).slice(0, 40)}`,
+    id: `cgs_${Effect.pipe(sha256HexSync(`${qualifiedName}\0${candidate.marker}\0${candidate.documentation}`), EffectString.slice(0, 40))}`,
     kind: 'rationale',
     language: file.language,
     lookupKeys: [candidate.name, candidate.marker, qualifiedName],
@@ -108,16 +112,16 @@ function rationaleOwners(
   symbols: readonly CodeGraphSymbol[],
   candidate: CodeGraphRationaleInput,
 ): readonly CodeGraphSymbol[] {
-  const enclosing = symbols
-    .filter(
-      symbol =>
-        symbol.kind !== 'rationale' && symbol.span.line <= candidate.line && symbol.span.endLine >= candidate.line,
-    )
-    .sort((left, right) => spanSize(left) - spanSize(right));
+  const enclosing = EffectArray.filter(
+    symbols,
+    symbol =>
+      symbol.kind !== 'rationale' && symbol.span.line <= candidate.line && symbol.span.endLine >= candidate.line,
+  ).sort((left, right) => spanSize(left) - spanSize(right));
   if (enclosing[0]) return [enclosing[0]];
-  const preceding = symbols
-    .filter(symbol => symbol.kind !== 'rationale' && symbol.span.line <= candidate.line)
-    .sort((left, right) => right.span.line - left.span.line);
+  const preceding = EffectArray.filter(
+    symbols,
+    symbol => symbol.kind !== 'rationale' && symbol.span.line <= candidate.line,
+  ).sort((left, right) => right.span.line - left.span.line);
   if (preceding[0]) return [preceding[0]];
   return symbols.length > 0 ? [symbols[0]] : [];
 }
@@ -132,7 +136,7 @@ function rationaleEdge(
     confidence: 1,
     evidencePath: file.path,
     evidenceSpan: {column: 1, endColumn: 1, endLine: line, line},
-    id: `cge_${sha256HexSync(`${rationale.id}\0documents\0${owner.id}`).slice(0, 40)}`,
+    id: `cge_${Effect.pipe(sha256HexSync(`${rationale.id}\0documents\0${owner.id}`), EffectString.slice(0, 40))}`,
     provenance: 'declared',
     relation: 'documents',
     sourceId: rationale.id,
@@ -147,6 +151,6 @@ function spanSize(symbol: CodeGraphSymbol): number {
 }
 
 function shortName(value: string): string {
-  const normalized = value.replace(/\s+/g, ' ').trim();
-  return normalized.length <= 80 ? normalized : `${normalized.slice(0, 77)}…`;
+  const normalized = Effect.pipe(value, EffectString.replace(/\s+/g, ' '), EffectString.trim);
+  return normalized.length <= 80 ? normalized : `${Effect.pipe(normalized, EffectString.slice(0, 77))}…`;
 }

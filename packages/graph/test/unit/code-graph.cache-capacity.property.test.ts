@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import fc from 'fast-check';
@@ -7,6 +8,8 @@ import {
   codeGraphMaterializedShardCapacityBytes,
   planCodeGraphCacheCapacityChunks,
 } from '@threadnote/graph/cache_capacity';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph persistent cache capacity planning', () => {
   fcProp(
@@ -31,7 +34,7 @@ describe('code graph persistent cache capacity planning', () => {
         reuseClass: `reuse-${unicode}`,
       };
       const independent = (...parts: readonly string[]) =>
-        parts.reduce((total, part) => total + encoder.encode(part).byteLength, 0);
+        EffectArray.reduce(parts, 0, (total, part) => total + encoder.encode(part).byteLength);
 
       expect(codeGraphFileBlobCapacityBytes(fields)).toBe(
         independent(
@@ -70,8 +73,8 @@ describe('code graph persistent cache capacity planning', () => {
     'canonically partitions cache mutations by both row and payload ceilings',
     {
       rows: fc.array(fc.integer({max: 512 * 1_024, min: 1}), {maxLength: 1_500}).map(payloads =>
-        payloads.map((payloadBytes, index) => ({
-          key: `row-${index.toString().padStart(4, '0')}`,
+        EffectArray.map(payloads, (payloadBytes, index) => ({
+          key: `row-${Effect.pipe(index.toString(), EffectString.padStart(4, '0'))}`,
           payloadBytes,
         })),
       ),
@@ -83,12 +86,14 @@ describe('code graph persistent cache capacity planning', () => {
       const canonical = [...rows].sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
 
       expect(planned).toEqual(reversed);
-      expect(planned.flatMap(chunk => chunk.rows)).toEqual(canonical);
+      expect(EffectArray.flatMap(planned, chunk => chunk.rows)).toEqual(canonical);
       for (const chunk of planned) {
         expect(chunk.rows.length).toBeGreaterThan(0);
         expect(chunk.boundary.rowCount).toBe(chunk.rows.length);
         expect(chunk.boundary.rowCount).toBeLessThanOrEqual(CODE_GRAPH_CACHE_TRANSACTION_LIMITS.rows);
-        expect(chunk.boundary.finalFactBytes).toBe(chunk.rows.reduce((total, row) => total + row.payloadBytes, 0));
+        expect(chunk.boundary.finalFactBytes).toBe(
+          EffectArray.reduce(chunk.rows, 0, (total, row) => total + row.payloadBytes),
+        );
         expect(chunk.boundary.finalFactBytes).toBeLessThanOrEqual(CODE_GRAPH_CACHE_TRANSACTION_LIMITS.payloadBytes);
       }
     },
@@ -99,13 +104,13 @@ describe('code graph persistent cache capacity planning', () => {
     const chunks = planCodeGraphCacheCapacityChunks(
       'cache code graph file facts',
       Array.from({length: 73_000}, (_, index) => ({
-        key: `src/file-${index.toString().padStart(5, '0')}.ts`,
+        key: `src/file-${Effect.pipe(index.toString(), EffectString.padStart(5, '0'))}.ts`,
         payloadBytes: 256,
       })),
     );
 
     expect(chunks).toHaveLength(143);
-    expect(chunks.slice(0, -1).every(chunk => chunk.boundary.rowCount === 512)).toBe(true);
+    expect(EffectArray.every(chunks.slice(0, -1), chunk => chunk.boundary.rowCount === 512)).toBe(true);
     expect(chunks.at(-1)?.boundary.rowCount).toBe(296);
   });
 

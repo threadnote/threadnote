@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, Path} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -24,6 +26,9 @@ import {
   type RefreshMember,
   type RefreshState,
 } from './refresh_state.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {previewDevSkillsRefresh, prepareDevSkillsRefresh} from './refresh_preview.js';
 export type {DevSkillsRefreshCandidate} from './refresh_preview.js';
@@ -58,7 +63,9 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
   // waiting cannot make this process silently use another release's bytes.
   const captured = yield* loadDevSkillsBundle().pipe(Effect.result);
   if (captured._tag === 'Failure')
-    return refreshResult(initial.state, [{code: 'invalid-bundle', message: String(captured.failure).slice(0, 512)}]);
+    return refreshResult(initial.state, [
+      {code: 'invalid-bundle', message: Effect2.pipe(String(captured.failure), EffectString.slice(0, 512))},
+    ]);
   const capabilities = yield* readDevSkillsRuntimeCapabilities();
   return yield* withStandaloneInstallationLock(
     Effect.gen(function* () {
@@ -126,12 +133,22 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
           // A new enabled consumer needs fresh intent authority, including its own
           // retained-generation compatibility proof; never append it to this request.
           const preparedEnabled = new Set(
-            state.request.members
-              .filter(member => member.enrollment.state === 'enrolled' && member.enrollment.enabled)
-              .map(member => member.consumerId),
+            EffectArray.map(
+              EffectArrayPipe(state.request.members, __effectArrayValues =>
+                EffectArray.filter(
+                  __effectArrayValues,
+                  (member, __effectArrayIndex) =>
+                    __effectArrayIndex in __effectArrayValues &&
+                    member.enrollment.state === 'enrolled' &&
+                    member.enrollment.enabled,
+                ),
+              ),
+              member => member.consumerId,
+            ),
           );
           const currentMembers = (yield* enrollmentContext(config)).runtimeIndex.enrollments;
-          const added = Object.entries(currentMembers).filter(
+          const added = EffectArray.filter(
+            EffectRecord.toEntries(currentMembers),
             ([id, entry]) => entry.state === 'enrolled' && entry.enabled && !preparedEnabled.has(id),
           );
           if (added.length) {
@@ -144,8 +161,8 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
             // Unattempted outcomes need a durable timestamp too: the parent must
             // read back exactly the same result returned by this child.
             for (const id of [
-              ...state.request.members.map(member => member.consumerId),
-              ...state.request.affected.map(consumerId),
+              ...EffectArray.map(state.request.members, member => member.consumerId),
+              ...EffectArray.map(state.request.affected, consumerId),
             ])
               if (!state.outcomes[id]) yield* checkpoint(id, 'pending', issues);
             yield* persist({...state, issues});
@@ -157,7 +174,9 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
             const root = member.enrollment.target.skillRoot;
             groups.set(root, [...(groups.get(root) ?? []), member]);
           }
-          for (const [root, unsorted] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
+          for (const [root, unsorted] of [...groups].sort(([a], [b]) =>
+            Effect2.pipe(a, EffectString.localeCompare(b)),
+          )) {
             const original = yield* readTransactionConsumer(root).pipe(Effect.result);
             const originalId =
               original._tag === 'Success' && original.success ? consumerId(original.success) : undefined;
@@ -166,7 +185,8 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
                 ? -1
                 : b.consumerId === originalId
                   ? 1
-                  : a.enrollment.home.localeCompare(b.enrollment.home) || a.consumerId.localeCompare(b.consumerId),
+                  : Effect2.pipe(a.enrollment.home, EffectString.localeCompare(b.enrollment.home)) ||
+                    Effect2.pipe(a.consumerId, EffectString.localeCompare(b.consumerId)),
             );
             for (const member of members) {
               const attempt = yield* Effect.gen(function* () {
@@ -261,7 +281,7 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
                             'preimage-conflict',
                             'A different generation replaced the prepared target; preserve it and preview again.',
                           );
-                        for (const manifest of Object.values(receipt.generations)) {
+                        for (const manifest of EffectRecord.values(receipt.generations)) {
                           const incompatible = requirementsIssues(installedSummary(manifest), capabilities);
                           if (incompatible.length) return yield* fail('incompatible', incompatible[0].message);
                         }
@@ -286,7 +306,10 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
                         if (inspection.issues.length)
                           return yield* fail(
                             'readback-conflict',
-                            inspection.issues.map(issue => issue.message).join(' '),
+                            EffectArray.join(
+                              EffectArray.map(inspection.issues, issue => issue.message),
+                              ' ',
+                            ),
                           );
                         return 'current' as const;
                       }),
@@ -304,7 +327,7 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
                 );
               else
                 yield* checkpoint(member.consumerId, 'pending', [
-                  {code: 'refresh-pending', message: String(attempt.failure).slice(0, 512)},
+                  {code: 'refresh-pending', message: Effect2.pipe(String(attempt.failure), EffectString.slice(0, 512))},
                 ]);
             }
           }

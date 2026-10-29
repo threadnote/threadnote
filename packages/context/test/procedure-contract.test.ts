@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -10,12 +11,14 @@ import {
   procedureManifestSha256,
   procedureStatus,
 } from '@threadnote/context/procedure/contract';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const manifest = {
   artifact: {
     id: 'team.example/review',
     semanticVersion: '1.2.3',
-    sha256: 'a'.repeat(64),
+    sha256: Effect.pipe('a', EffectString.repeat(64)),
   },
   compatible: {
     capabilities: ['filesystem.read', 'git.read'],
@@ -37,8 +40,8 @@ const manifest = {
       {argv: ['bun', 'run', 'typecheck'], id: 'types'},
     ],
     fixtures: [
-      {id: 'minimal', sha256: 'b'.repeat(64)},
-      {id: 'regression', sha256: 'c'.repeat(64)},
+      {id: 'minimal', sha256: Effect.pipe('b', EffectString.repeat(64))},
+      {id: 'regression', sha256: Effect.pipe('c', EffectString.repeat(64))},
     ],
   },
 } as const;
@@ -80,8 +83,11 @@ describe('verified procedure contract', () => {
 
     expect(parsed.compatible.capabilities).toEqual(['filesystem.read', 'git.read']);
     expect(parsed.compatible.surfaceIds).toEqual(['terminal', 'workspace']);
-    expect(parsed.dependencies.map(value => value.artifactId)).toEqual(['team.example/lint', 'team.example/test']);
-    expect(parsed.verification.commands.map(value => value.id)).toEqual(['types', 'unit']);
+    expect(EffectArray.map(parsed.dependencies, value => value.artifactId)).toEqual([
+      'team.example/lint',
+      'team.example/test',
+    ]);
+    expect(EffectArray.map(parsed.verification.commands, value => value.id)).toEqual(['types', 'unit']);
     expect(canonicalProcedureManifest(parsed)).not.toBe(canonicalProcedureManifest(parseProcedureManifest(manifest)));
   });
 
@@ -135,7 +141,7 @@ describe('verified procedure contract', () => {
     expect(
       procedureStatus(parsed, {
         capabilities: ['filesystem.read', 'git.read'],
-        localArtifactSha256: 'd'.repeat(64),
+        localArtifactSha256: Effect.pipe('d', EffectString.repeat(64)),
         receipt,
         surfaceIds: ['terminal', 'workspace'],
       }),
@@ -186,7 +192,7 @@ describe('verified procedure contract', () => {
       });
       const status = procedureStatus(parsed, {
         capabilities,
-        localArtifactSha256: 'd'.repeat(64),
+        localArtifactSha256: Effect.pipe('d', EffectString.repeat(64)),
         receipt,
         surfaceIds: ['terminal', 'workspace'],
       });

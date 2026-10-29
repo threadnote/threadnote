@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import {
   compileThreadnoteIgnore,
@@ -81,12 +82,13 @@ export const inventoryRepositoryFromReusableCleanBaseSlice = Effect.fn(
   ) {
     return Option.none<CodeGraphReusableOverlayAdmission>();
   }
-  const baseByPath = new Map(base.files.map(file => [file.path, file]));
+  const baseByPath = new Map(EffectArray.map(base.files, file => [file.path, file]));
   const requestedChanged = new Set(observation.changedPaths);
   if (
     requestedChanged.size !== observation.changedPaths.length ||
     baseByPath.size !== requestedChanged.size ||
-    [...requestedChanged].some(
+    EffectArray.some(
+      [...requestedChanged],
       relative =>
         !baseByPath.has(relative) ||
         isOverlayAdmissionControlPath(relative) ||
@@ -95,10 +97,10 @@ export const inventoryRepositoryFromReusableCleanBaseSlice = Effect.fn(
   ) {
     return Option.none<CodeGraphReusableOverlayAdmission>();
   }
-  const observedFiles = new Map(observation.files.map(file => [file.path, file]));
+  const observedFiles = new Map(EffectArray.map(observation.files, file => [file.path, file]));
   if (
     observedFiles.size !== observation.changedPaths.length ||
-    observation.changedPaths.some(relative => {
+    EffectArray.some(observation.changedPaths, relative => {
       const file = observedFiles.get(relative);
       return file === undefined || codeGraphInventoryExclusionReason(relative, file.size) !== undefined;
     })
@@ -113,15 +115,15 @@ export const inventoryRepositoryFromReusableCleanBaseSlice = Effect.fn(
   }
   const projectRoots = [
     ...new Set([
-      ...receipt.workspace.projects.map(project => project.root),
-      ...receipt.workspace.workspaces.map(workspace => workspace.root),
+      ...EffectArray.map(receipt.workspace.projects, project => project.root),
+      ...EffectArray.map(receipt.workspace.workspaces, workspace => workspace.root),
     ]),
   ].sort(compareCodeUnits);
-  const sourceRoots = [...new Set(receipt.workspace.projects.flatMap(project => project.sourceRoots))].sort(
-    compareCodeUnits,
-  );
+  const sourceRoots = [
+    ...new Set(EffectArray.flatMap(receipt.workspace.projects, project => project.sourceRoots)),
+  ].sort(compareCodeUnits);
   const committedTreeEntries = new Map(
-    base.files.map(file => [
+    EffectArray.map(base.files, file => [
       file.path,
       {blobId: file.blobId, mode: file.mode, path: file.path, size: file.size} satisfies GitTreeEntry,
     ]),
@@ -150,7 +152,7 @@ export const inventoryRepositoryFromReusableCleanBaseSlice = Effect.fn(
     overlay.skipped !== 0 ||
     overlay.policySkippedDelta !== 0 ||
     overlay.files.length !== requestedChanged.size ||
-    overlay.files.some(file => observedFiles.get(file.path)?.contentHash !== file.contentHash)
+    EffectArray.some(overlay.files, file => observedFiles.get(file.path)?.contentHash !== file.contentHash)
   ) {
     return Option.none<CodeGraphReusableOverlayAdmission>();
   }

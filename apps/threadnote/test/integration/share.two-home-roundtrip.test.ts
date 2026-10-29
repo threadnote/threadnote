@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
@@ -11,6 +12,8 @@ import {sharedUriFor} from '@threadnote/threadnote/share/index';
 import type {ShareRuntime, ShareTeamsFile} from '@threadnote/threadnote/types';
 import {runCommand} from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const runSharePublish = (...args: Parameters<typeof runSharePublishEffect>) =>
   runEffect(runSharePublishEffect(...args));
@@ -23,7 +26,16 @@ async function git(args: readonly string[], cwd?: string): Promise<void> {
 }
 
 function canonicalResourceFile(home: string, uri: string): string {
-  return join(home, 'data', 'local', ...uri.slice('threadnote://'.length).split('/'));
+  return join(
+    home,
+    'data',
+    'local',
+    ...Effect.pipe(uri, __effectPipeInput => {
+      const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.slice('threadnote://'.length));
+      const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.split('/'));
+      return __effectPipeStage1;
+    }),
+  );
 }
 
 async function writeCanonicalResource(home: string, uri: string, content: string): Promise<void> {
@@ -70,7 +82,7 @@ async function cloneShareHome(
 
 describe('share two-home round trip', () => {
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(path => rm(path, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), path => rm(path, {force: true, recursive: true})));
   });
 
   it('publishes from one home and recalls the same canonical identity after sync on another', async () => {

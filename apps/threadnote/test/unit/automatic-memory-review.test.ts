@@ -1,20 +1,29 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestClock} from 'effect/testing';
+import {TestError} from '@threadnote/testing/test-error';
 import {createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
-import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
+import {
+  assertAutomaticMaintenanceAssessment,
+  assertAutomaticMaintenanceSource,
+  automaticMaintenanceEvidenceId,
+  type AutomaticMaintenanceSourceV1,
+} from '@threadnote/memory/automatic-maintenance';
 import {it as effectIt} from '@effect/vitest';
 import fc from 'fast-check';
 import {describe, expect, it, vi} from 'vitest';
-import {Effect, FileSystem, Path, Ref, Result} from 'effect';
+import {Effect, FileSystem, Path, Predicate, Ref, Result, Schema} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import * as memoryIdentity from '@threadnote/recall/memory/identity';
 import * as modelDiscovery from '../../src/manager/consolidation_models.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import {assertApprovedSourceDescriptor, validateReviewedMemorySupport} from '@threadnote/memory/reviewed-support';
 import {loadCandidateReview} from '@threadnote/memory/candidate';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {prepareMemoryMaintenanceBasis} from '@threadnote/context/memory_maintenance';
-import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {EffectMcpServerAdapter, EffectMcpServerRegistry} from '../../src/effect/ai/mcp.js';
 import {registerStoreTool} from '../../src/mcp/server/store.js';
 import {registerReadTool} from '../../src/mcp/server/recall.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -25,11 +34,11 @@ import {
   requestAutomaticMemoryDraft,
   automaticReviewPacket,
 } from '../../src/memory/context/maintenance_draft.js';
-import {projectAutomaticMemoryReview} from '../../src/memory/context/maintenance_review_projection.js';
 import {
-  applyTopicMaintenanceReview,
-  prepareTopicMaintenanceReview,
-} from '../../src/memory/context/maintenance_review.js';
+  projectAutomaticMemoryReview,
+  projectTopicReviewDecisionAcknowledgement,
+} from '../../src/memory/context/maintenance_review_projection.js';
+import {applyTopicMaintenanceReview} from '../../src/memory/context/maintenance_review.js';
 import {
   prepareAutomaticMemory,
   readLiveAutomaticPreparation,
@@ -38,6 +47,7 @@ import {
   parseAutomaticMaintenanceDraft,
   validateAutomaticMaintenanceDraftBasis,
   validateAutomaticMaintenanceReview,
+  type AutomaticMaintenanceDraftBasisV3,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {preparePersonalMemoryWrite} from '../../src/mcp/server/memory.js';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
@@ -52,13 +62,337 @@ import type {runSelectedDraft} from '../../src/manager/selected_draft.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {readDraftQueueStatus} from '../../src/memory/context/maintenance_draft_queue.js';
 import {compactAutomaticTopicDraftFixture} from '../helpers/topic-draft-wire.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function encodeMcpInput(input: Record<string, unknown>): Record<string, unknown> {
+  const encoded = JSON.stringify(input);
+  if (encoded === undefined) throw TestError.make({message: 'MCP test input is not a JSON object.'});
+  const decoded: unknown = JSON.parse(encoded);
+  if (!Predicate.isObject(decoded) || EffectArray.isArray(decoded))
+    throw TestError.make({message: 'MCP test input is not a JSON object.'});
+  return decoded;
+}
 
 function structuredObject(value: unknown): Record<string, unknown> {
-  expect(value).not.toBeNull();
-  expect(typeof value).toBe('object');
-  expect(Array.isArray(value)).toBe(false);
-  return value as Record<string, unknown>;
+  expect(Predicate.isObject(value) && !EffectArray.isArray(value)).toBe(true);
+  if (!Predicate.isObject(value) || EffectArray.isArray(value)) {
+    throw new Error('Expected an object MCP response.');
+  }
+  return value;
 }
+
+type AutomaticReviewPacket = ReturnType<typeof automaticReviewPacket>;
+type PublicAutomaticReview = NonNullable<ReturnType<typeof projectAutomaticMemoryReview>>;
+type ReviewDecisionAcknowledgement = NonNullable<ReturnType<typeof projectTopicReviewDecisionAcknowledgement>>;
+type CompleteAutomaticReview = PublicAutomaticReview & {
+  readonly approval: NonNullable<PublicAutomaticReview['approval']>;
+};
+
+function isAutomaticSource(value: unknown): value is AutomaticMaintenanceSourceV1 {
+  try {
+    assertAutomaticMaintenanceSource(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const AutomaticSourceSchema = Schema.declare<AutomaticMaintenanceSourceV1>(isAutomaticSource);
+const SourceDescriptorSchema = Schema.Struct({
+  id: Schema.String,
+  source: AutomaticSourceSchema,
+  scope: Schema.Literals(['personal', 'shared', 'external', 'repository']),
+  locator: Schema.optionalKey(Schema.Struct({repositoryId: Schema.String, teamId: Schema.String, path: Schema.String})),
+});
+const ReviewEvidenceSchema = Schema.Struct({
+  handleId: Schema.String,
+  descriptor: SourceDescriptorSchema,
+  content: Schema.String,
+  contentHash: Schema.String,
+  codeExcerpt: Schema.optionalKey(
+    Schema.Struct({startLine: Schema.Finite, endLine: Schema.Finite, fileBytesHash: Schema.String}),
+  ),
+});
+const AutomaticDraftProposalSchema = Schema.Struct({
+  version: Schema.Literal(2),
+  kind: Schema.Literal('automatic'),
+  draft: Schema.Struct({
+    version: Schema.Literal(2),
+    kind: Schema.Literal('automatic'),
+    purpose: Schema.Literals(['automatic', 'manual-edit']),
+    targetHash: Schema.String,
+    observationRevision: Schema.String,
+    packetDigest: Schema.String,
+    outcome: Schema.Literals(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence']),
+    operations: Schema.Array(
+      Schema.Struct({
+        ordinal: Schema.Finite,
+        beforeHash: Schema.String,
+        text: Schema.String,
+        supportHandles: Schema.Array(Schema.String),
+        rationale: Schema.String,
+      }),
+    ),
+    reviewedHandles: Schema.Array(Schema.String),
+    rationale: Schema.String,
+    unresolvedQuestions: Schema.Array(Schema.String),
+    removedClaims: Schema.Array(Schema.String),
+    paragraphDecisions: Schema.Array(
+      Schema.Struct({
+        ordinal: Schema.Finite,
+        beforeHash: Schema.String,
+        role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
+        support: Schema.Literals(['direct', 'contextual', 'unresolved']),
+        evidenceIds: Schema.Array(Schema.String),
+      }),
+    ),
+    desiredBody: Schema.optionalKey(Schema.String),
+  }),
+  body: Schema.String,
+  finalBodyHash: Schema.String,
+  changedOrdinals: Schema.Array(Schema.Finite),
+});
+const CoverageSchema = Schema.Struct({
+  outcome: Schema.Literals(['complete', 'partial', 'unknown']),
+  scope: Schema.Literals(['recorded-only', 'bounded-search', 'none']),
+  searchedScopes: Schema.Array(Schema.String),
+  omittedSources: Schema.Finite,
+  omittedParagraphs: Schema.NullOr(Schema.Finite),
+});
+const OwnerProposalSchema = Schema.Struct({
+  operation: Schema.Literal('context_maintenance_review'),
+  action: Schema.Literal('automatic-preview'),
+  reviewId: Schema.String,
+  revision: Schema.Finite,
+  uri: Schema.String,
+  authority: Schema.Literal('shared-owner'),
+  publicationApprovalRequired: Schema.Literal(true),
+  instructions: Schema.String,
+});
+const ReviewDecisionAcknowledgementSchema = Schema.Struct({
+  version: Schema.Literal(1),
+  kind: Schema.Literal('topic-maintenance-recovery'),
+  project: Schema.String,
+  reviewId: Schema.String,
+  revision: Schema.Finite,
+  state: Schema.Literals(['applied', 'applying', 'conflict', 'deferred', 'pending', 'rejected']),
+  caseId: Schema.optionalKey(Schema.String),
+  recovery: Schema.optionalKey(Schema.Struct({action: Schema.Literal('reject')})),
+});
+
+const AutomaticReviewProjectionEnvelopeSchema = Schema.Struct({
+  version: Schema.Literal(1),
+  kind: Schema.Literal('automatic-memory-review'),
+  reviewId: Schema.String,
+  revision: Schema.Finite,
+  state: Schema.Literals(['applied', 'applying', 'conflict', 'deferred', 'pending', 'rejected']),
+  targetUri: Schema.String,
+  targetHash: Schema.String,
+  purpose: Schema.Literals(['automatic', 'manual-edit']),
+  acceptedBody: Schema.String,
+  proposal: Schema.Unknown,
+  sourceEvidence: Schema.Array(ReviewEvidenceSchema),
+  coverage: CoverageSchema,
+  approval: Schema.optionalKey(
+    Schema.Struct({
+      stage: Schema.Literals(['preview', 'parked', 'prepared', 'written', 'conflict']),
+      reviewRevision: Schema.Finite,
+      approvalDigest: Schema.String,
+      content: Schema.String,
+      contentHash: Schema.String,
+      metadataDiff: Schema.Array(
+        Schema.Struct({field: Schema.String, beforeHash: Schema.String, afterHash: Schema.String}),
+      ),
+      reviewedSupport: Schema.Unknown,
+    }),
+  ),
+  canApply: Schema.Boolean,
+  ownerProposal: Schema.optionalKey(OwnerProposalSchema),
+});
+
+const AutomaticBasisWireSchema = Schema.Struct({
+  version: Schema.Literal(3),
+  kind: Schema.Literal('automatic'),
+  targetUri: Schema.String,
+  targetHash: Schema.String,
+  observationRevision: Schema.String,
+  packetDigest: Schema.String,
+  body: Schema.String,
+  assessment: Schema.Unknown,
+  reads: Schema.Array(Schema.Struct({uri: Schema.String, hash: Schema.String})),
+  scopeRevision: Schema.String,
+  paragraphs: Schema.Array(Schema.Unknown),
+  additionalDependencies: Schema.Tuple([]),
+  handles: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      citationId: Schema.String,
+      variant: Schema.Literals(['accepted', 'current']),
+    }),
+  ),
+});
+
+const PacketEnvelopeSchema = Schema.Struct({
+  version: Schema.Literal(3),
+  kind: Schema.Literal('automatic'),
+  basis: Schema.Unknown,
+  reviewEvidence: Schema.Array(ReviewEvidenceSchema),
+  omissions: Schema.Array(Schema.String),
+  capabilities: Schema.Unknown,
+  draftRequest: Schema.Struct({
+    operation: Schema.Literal('context_maintenance_draft'),
+    uri: Schema.String,
+    expectedContentHash: Schema.String,
+    available: Schema.Boolean,
+    waitingReason: Schema.optionalKey(Schema.Literal('draft-basis-boundary')),
+    instructions: Schema.optionalKey(Schema.String),
+    requires: Schema.Tuple([Schema.Literal('backend'), Schema.Literal('modelId')]),
+    roleDecisions: Schema.Literal('provisional-until-final-approval'),
+  }),
+  manualRequest: Schema.optionalKey(
+    Schema.Struct({
+      operation: Schema.Literal('context_maintenance_review'),
+      action: Schema.Literal('manual-preview'),
+      uri: Schema.String,
+      expectedContentHash: Schema.String,
+      available: Schema.Boolean,
+      desiredBodyRequired: Schema.Literal(true),
+    }),
+  ),
+  ownerProposal: Schema.optionalKey(
+    Schema.Struct({
+      operation: Schema.Literal('context_maintenance_review'),
+      action: Schema.Literal('automatic-preview'),
+      uri: Schema.String,
+      expectedContentHash: Schema.String,
+      publicationOperation: Schema.Literal('share_propose'),
+      publicationApprovalRequired: Schema.Literal(true),
+      instructions: Schema.String,
+    }),
+  ),
+});
+
+function decodeAutomaticReviewPacket(value: unknown): AutomaticReviewPacket {
+  const envelope = decodeResult(value, PacketEnvelopeSchema);
+  const basisWire = decodeResult(envelope.basis, AutomaticBasisWireSchema);
+  assertAutomaticMaintenanceAssessment(basisWire.assessment);
+  if (JSON.stringify(basisWire.paragraphs) !== JSON.stringify(basisWire.assessment.paragraphs))
+    throw TestError.make({message: 'Automatic review packet paragraphs differ from their assessment.'});
+  const basis = {
+    ...basisWire,
+    assessment: basisWire.assessment,
+    paragraphs: basisWire.assessment.paragraphs,
+  } satisfies AutomaticMaintenanceDraftBasisV3;
+  for (const entry of envelope.reviewEvidence) {
+    assertApprovedSourceDescriptor(entry.descriptor);
+    if (entry.contentHash !== sha256HexSync(entry.content))
+      throw TestError.make({message: 'Automatic review packet evidence hash does not match its content.'});
+  }
+  if (
+    envelope.draftRequest.uri !== basis.targetUri ||
+    envelope.draftRequest.expectedContentHash !== basis.targetHash ||
+    JSON.stringify(envelope.capabilities) !== JSON.stringify(basis.assessment.capabilities) ||
+    envelope.reviewEvidence.length !== basis.handles.length ||
+    !EffectArray.every(envelope.reviewEvidence, item =>
+      EffectArray.some(
+        basis.handles,
+        handle => handle.id === item.handleId && handle.citationId === item.descriptor.id,
+      ),
+    ) ||
+    (envelope.manualRequest !== undefined &&
+      (envelope.manualRequest.uri !== basis.targetUri ||
+        envelope.manualRequest.expectedContentHash !== basis.targetHash)) ||
+    (envelope.ownerProposal !== undefined &&
+      (envelope.ownerProposal.uri !== basis.targetUri ||
+        envelope.ownerProposal.expectedContentHash !== basis.targetHash))
+  )
+    throw TestError.make({message: 'Automatic review packet fields differ from the validated basis.'});
+  const packet = {
+    ...envelope,
+    basis,
+    reviewEvidence: Array.from(envelope.reviewEvidence),
+    draftRequest: {...envelope.draftRequest, requires: Array.from(envelope.draftRequest.requires)},
+    omissions: Array.from(envelope.omissions),
+    capabilities: basis.assessment.capabilities,
+  } satisfies AutomaticReviewPacket;
+  if (JSON.stringify(packet) !== JSON.stringify(value))
+    throw TestError.make({message: 'Automatic review packet differs from its validated wire representation.'});
+  return packet;
+}
+
+function decodePublicAutomaticReview(value: unknown): PublicAutomaticReview {
+  if (!Schema.is(AutomaticReviewProjectionEnvelopeSchema)(value))
+    throw TestError.make({message: 'Automatic review projection does not match its public result schema.'});
+  const envelope = value;
+  if (!Schema.is(AutomaticDraftProposalSchema)(envelope.proposal))
+    throw TestError.make({message: 'Automatic review proposal does not match its versioned schema.'});
+  const proposal = envelope.proposal;
+  const sourceEvidence = envelope.sourceEvidence;
+  for (const entry of sourceEvidence) {
+    assertApprovedSourceDescriptor(entry.descriptor);
+    if (entry.contentHash !== sha256HexSync(entry.content))
+      throw TestError.make({message: 'Automatic review evidence hash does not match its content.'});
+  }
+  let approval: PublicAutomaticReview['approval'];
+  if (envelope.approval !== undefined) {
+    const record = parseMemoryDocument(envelope.targetUri, envelope.approval.content);
+    if (!record) throw TestError.make({message: 'Automatic review approval content is not a memory document.'});
+    const reviewedSupport = validateReviewedMemorySupport(envelope.approval.reviewedSupport, record.body);
+    approval = {...envelope.approval, reviewedSupport};
+  }
+  const projection = {
+    ...envelope,
+    proposal,
+    sourceEvidence: Array.from(sourceEvidence),
+    approval,
+  } satisfies PublicAutomaticReview;
+  if (JSON.stringify(projection) !== JSON.stringify(value))
+    throw TestError.make({message: 'Automatic review projection differs from its validated wire representation.'});
+  return projection;
+}
+
+function decodeReviewDecisionAcknowledgement(value: unknown): ReviewDecisionAcknowledgement | PublicAutomaticReview {
+  if (Schema.is(ReviewDecisionAcknowledgementSchema)(value)) return value;
+  return decodePublicAutomaticReview(value);
+}
+
+function decodeCompleteAutomaticReview(value: unknown): CompleteAutomaticReview {
+  const projection = decodePublicAutomaticReview(value);
+  const approval = projection.approval;
+  if (approval === undefined) throw TestError.make({message: 'Automatic review projection has no approval preview.'});
+  return {...projection, approval};
+}
+
+function decodeResult<T>(value: unknown, schema: Schema.Schema<T>): T {
+  if (!Schema.is(schema)(value))
+    throw TestError.make({message: 'MCP review response does not match its versioned result contract.'});
+  return value;
+}
+
+const McpResultEnvelopeSchema = Schema.Struct({
+  content: Schema.Array(Schema.Unknown),
+  structuredContent: Schema.Unknown,
+});
+
+const MaintenanceStateSchema = Schema.StructWithRest(
+  Schema.Struct({
+    cases: Schema.Array(
+      Schema.StructWithRest(
+        Schema.Struct({
+          caseId: Schema.String,
+          citationId: Schema.optionalKey(Schema.String),
+          memoryId: Schema.String,
+          family: Schema.String,
+          disposition: Schema.String,
+          reason: Schema.String,
+        }),
+        [Schema.Record(Schema.String, Schema.Unknown)],
+      ),
+    ),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
 
 const fixture = Effect.fn('automaticReview.fixture')(function* (
   kind: MemoryKind = 'durable',
@@ -100,40 +434,47 @@ const fixture = Effect.fn('automaticReview.fixture')(function* (
   yield* fs.makeDirectory(path.dirname(sourcePath), {recursive: true});
   yield* fs.writeFileString(targetPath, content);
   yield* fs.writeFileString(sourcePath, source);
-  type PublicReview = NonNullable<ReturnType<typeof projectAutomaticMemoryReview>>;
-  type CompleteReview = PublicReview & {readonly approval: NonNullable<PublicReview['approval']>};
-  type Packet = ReturnType<typeof automaticReviewPacket>;
-  type Services =
-    | Effect.Services<ReturnType<typeof applyTopicMaintenanceReview>>
-    | Effect.Services<ReturnType<typeof requestAutomaticMemoryReview>>
-    | Effect.Services<ReturnType<typeof prepareTopicMaintenanceReview>>;
-  type Output<T> = {
-    readonly isError?: boolean;
-    readonly structuredContent: T;
-    readonly content?: readonly {readonly text?: string}[];
-  };
-  const handlers = new Map<
-    string,
-    (input: Record<string, unknown>) => Effect.Effect<Output<unknown>, never, Services>
-  >();
-  registerContextMaintenanceTools(
-    {
-      registerTool: (name: string, _definition: unknown, handle: unknown) =>
-        handlers.set(
-          name,
-          handle as (input: Record<string, unknown>) => Effect.Effect<Output<unknown>, never, Services>,
-        ),
-    } as unknown as EffectMcpServerAdapter,
-    config,
-  );
+  type Packet = AutomaticReviewPacket;
+  type CompleteReview = CompleteAutomaticReview;
+  type ReviewEnvironment = Effect.Services<ReturnType<typeof server.invokeTool>>;
+  type Output<T> = {readonly isError?: boolean; readonly structuredContent: T; readonly content: readonly unknown[]};
+  const server = new EffectMcpServerRegistry();
+  registerContextMaintenanceTools(server, config);
+  function rawReview(input: Record<string, unknown>) {
+    return server.invokeTool('context_maintenance_review', encodeMcpInput(input));
+  }
+  function review(
+    input: Record<string, unknown> & {readonly action: 'reject'},
+  ): Effect.Effect<Output<ReviewDecisionAcknowledgement | PublicAutomaticReview>, never, ReviewEnvironment>;
   function review(
     input: Record<string, unknown> & {readonly action: 'automatic-preview'; readonly draftJson?: undefined},
-  ): Effect.Effect<Output<Packet>, never, Services>;
-  function review(input: Record<string, unknown>): Effect.Effect<Output<CompleteReview>, never, Services>;
-  function review(input: Record<string, unknown>): Effect.Effect<Output<unknown>, never, Services> {
-    return handlers.get('context_maintenance_review')!(input);
+  ): Effect.Effect<Output<Packet>, never, ReviewEnvironment>;
+  function review(input: Record<string, unknown>): Effect.Effect<Output<CompleteReview>, never, ReviewEnvironment>;
+  function review(input: Record<string, unknown>): Effect.Effect<Output<unknown>, never, ReviewEnvironment> {
+    return rawReview(input).pipe(
+      Effect.flatMap(result => {
+        if (result.isError === true || result.structuredContent === undefined)
+          return Effect.fail(
+            TestError.make({message: 'Expected a successful review projection; use rawReview for error cases.'}),
+          );
+        return Effect.try({
+          try: () => {
+            const envelope = decodeResult(result, McpResultEnvelopeSchema);
+            const structuredContent =
+              input.action === 'automatic-preview' && input.draftJson === undefined
+                ? decodeAutomaticReviewPacket(envelope.structuredContent)
+                : input.action === 'reject'
+                  ? decodeReviewDecisionAcknowledgement(envelope.structuredContent)
+                  : decodeCompleteAutomaticReview(envelope.structuredContent);
+            return {content: envelope.content, structuredContent};
+          },
+          catch: () => TestError.make({message: 'MCP review response could not be decoded.'}),
+        });
+      }),
+      Effect.orDie,
+    );
   }
-  return {config, uri, sourceUri, targetPath, sourcePath, content, review, fs, path, home};
+  return {config, uri, sourceUri, targetPath, sourcePath, content, review, rawReview, fs, path, home};
 });
 
 const publicRelatedFixture = Effect.fn('automaticReview.publicRelatedFixture')(function* () {
@@ -263,7 +604,14 @@ describe('ordinary memory exact public review', () => {
           uri: f.sourceUri,
           memoryId: f.sourceId,
         });
-        expect(packet.basis.reads.filter(read => read.uri === f.sourceUri)).toHaveLength(1);
+        expect(
+          EffectArrayPipe(packet.basis.reads, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (read, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && read.uri === f.sourceUri,
+            ),
+          ),
+        ).toHaveLength(1);
         const proposed = yield* f.review({
           action: 'automatic-preview',
           uri: f.uri,
@@ -302,8 +650,23 @@ describe('ordinary memory exact public review', () => {
         expect(rebuilt.omissions).not.toContain('related-source-unreadable');
         expect(rebuilt.basis.assessment.coverage.omittedSources).toBe(0);
         expect(rebuilt.basis.reads).toHaveLength(2);
-        expect(rebuilt.basis.reads.filter(read => read.uri === f.sourceUri)).toHaveLength(1);
-        expect(rebuilt.basis.assessment.evidence.filter(entry => entry.source.kind === 'memory')).toHaveLength(1);
+        expect(
+          EffectArrayPipe(rebuilt.basis.reads, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (read, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && read.uri === f.sourceUri,
+            ),
+          ),
+        ).toHaveLength(1);
+        expect(
+          EffectArrayPipe(rebuilt.basis.assessment.evidence, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (entry, __effectArrayIndex) =>
+                __effectArrayIndex in __effectArrayValues && entry.source.kind === 'memory',
+            ),
+          ),
+        ).toHaveLength(1);
         const manualResult = yield* f.review({
           action: 'manual-preview',
           uri: f.uri,
@@ -333,8 +696,8 @@ describe('ordinary memory exact public review', () => {
         else
           yield* f.store.write(
             location,
-            f.sourceUri.replace('/source.md', '/duplicate.md'),
-            f.source.replace('topic: source', 'topic: duplicate'),
+            Effect2.pipe(f.sourceUri, EffectString.replace('/source.md', '/duplicate.md')),
+            Effect2.pipe(f.source, EffectString.replace('topic: source', 'topic: duplicate')),
             {mode: 'create'},
           );
         const inspected = yield* f.review({
@@ -359,7 +722,10 @@ describe('ordinary memory exact public review', () => {
       const f = yield* publicRelatedFixture();
       const changed = yield* Ref.make(false);
       const resolve = memoryIdentity.resolveMemoryIdentityAliases;
-      const raced = f.source.replace(`memory_id: ${f.sourceId}`, 'memory_id: tn_reused_source_identity');
+      const raced = Effect2.pipe(
+        f.source,
+        EffectString.replace(`memory_id: ${f.sourceId}`, 'memory_id: tn_reused_source_identity'),
+      );
       yield* Effect.acquireUseRelease(
         Effect.sync(() =>
           vi
@@ -367,7 +733,7 @@ describe('ordinary memory exact public review', () => {
             .mockImplementation((...args) =>
               resolve(...args).pipe(
                 Effect.tap(routes =>
-                  routes.some(route => route.requestedUri === f.alias)
+                  EffectArray.some(routes, route => route.requestedUri === f.alias)
                     ? Ref.getAndSet(changed, true).pipe(
                         Effect.flatMap(alreadyChanged =>
                           alreadyChanged
@@ -429,17 +795,17 @@ describe('ordinary memory exact public review', () => {
       expect(proposed.isError).not.toBe(true);
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- In-process MCP response fields are verified by this integration fixture.
       const preview = proposed.structuredContent as NonNullable<ReturnType<typeof projectAutomaticMemoryReview>>;
-      const duplicateUri = f.sourceUri.replace('/source.md', '/duplicate.md');
+      const duplicateUri = Effect2.pipe(f.sourceUri, EffectString.replace('/source.md', '/duplicate.md'));
       yield* f.store.write(
         {account: f.config.account, home: f.home, user: f.config.user},
         duplicateUri,
-        f.source.replace('topic: source', 'topic: duplicate'),
+        Effect2.pipe(f.source, EffectString.replace('topic: source', 'topic: duplicate')),
         {mode: 'create'},
       );
       const ambiguous = yield* f.server.invokeTool('read_context', {uri: f.alias, responseFormat: 'dual'});
       expect(ambiguous.isError).toBe(true);
       expect(yield* f.fs.readFileString(f.sourcePath)).toBe(f.source);
-      const applied = yield* f.review({
+      const applied = yield* f.server.invokeTool('context_maintenance_review', {
         action: 'apply',
         reviewId: preview.reviewId,
         revision: preview.revision,
@@ -498,13 +864,13 @@ describe('ordinary memory exact public review', () => {
           const roots = yield* captureMemoryCodeCitations(f.config, {callerCwd: repository, refs});
           const metadata = {...parseMemoryDocument(f.uri, f.content)!.metadata, codeCitations: roots};
           const baseline = formatMemoryDocument('MEMORY', metadata, 'The timeout is 30 seconds.');
-          const currentRefs = overflow ? refs.map(ref => `active-${ref}`) : refs;
+          const currentRefs = overflow ? EffectArray.map(refs, ref => `active-${ref}`) : refs;
           for (const ref of currentRefs)
             yield* f.fs.writeFileString(f.path.join(repository, ref), 'export const timeoutSeconds = 60;\n');
           yield* commit('current');
           yield* index();
           const current = yield* captureMemoryCodeCitations(f.config, {callerCwd: repository, refs: currentRefs});
-          const sources = current.map(citation => {
+          const sources = EffectArray.map(current, citation => {
             const source = {kind: 'code' as const, citation};
             return {id: automaticMaintenanceEvidenceId(source), source, scope: 'repository' as const};
           });
@@ -519,7 +885,7 @@ describe('ordinary memory exact public review', () => {
                 hash: sha256HexSync(body),
                 role: 'descriptive',
                 support: 'direct',
-                evidenceIds: sources.map(source => source.id),
+                evidenceIds: EffectArray.map(sources, source => source.id),
               },
             ],
             sources,
@@ -548,7 +914,15 @@ describe('ordinary memory exact public review', () => {
           expect(p.basis.assessment.version).toBe(2);
           if (overflow) {
             expect(p.reviewEvidence).toHaveLength(25);
-            expect(p.reviewEvidence.filter(entry => entry.descriptor.source.kind === 'code')).toHaveLength(24);
+            expect(
+              EffectArrayPipe(p.reviewEvidence, __effectArrayValues =>
+                EffectArray.filter(
+                  __effectArrayValues,
+                  (entry, __effectArrayIndex) =>
+                    __effectArrayIndex in __effectArrayValues && entry.descriptor.source.kind === 'code',
+                ),
+              ),
+            ).toHaveLength(24);
             expect(p.draftRequest.available).toBe(false);
             const discovery = vi
               .spyOn(modelDiscovery, 'availableConsolidationModels')
@@ -590,15 +964,44 @@ describe('ordinary memory exact public review', () => {
             return;
           }
           expect(p.reviewEvidence).toHaveLength(17);
-          expect(p.reviewEvidence.filter(entry => entry.handleId.startsWith('accepted:'))).toHaveLength(8);
-          expect(p.reviewEvidence.filter(entry => entry.descriptor.source.kind === 'memory')).toHaveLength(1);
-          const selected = p.reviewEvidence.filter(
-            entry => entry.handleId.startsWith('current:') && entry.descriptor.source.kind === 'code',
+          expect(
+            EffectArrayPipe(p.reviewEvidence, __effectArrayValues2 =>
+              EffectArray.filter(
+                __effectArrayValues2,
+                (entry, __effectArrayIndex2) =>
+                  __effectArrayIndex2 in __effectArrayValues2 &&
+                  Effect2.pipe(entry.handleId, EffectString.startsWith('accepted:')),
+              ),
+            ),
+          ).toHaveLength(8);
+          expect(
+            EffectArrayPipe(p.reviewEvidence, __effectArrayValues =>
+              EffectArray.filter(
+                __effectArrayValues,
+                (entry, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues && entry.descriptor.source.kind === 'memory',
+              ),
+            ),
+          ).toHaveLength(1);
+          const selected = EffectArrayPipe(p.reviewEvidence, __effectArrayValues2 =>
+            EffectArray.filter(
+              __effectArrayValues2,
+              (entry, __effectArrayIndex2) =>
+                __effectArrayIndex2 in __effectArrayValues2 &&
+                Effect2.pipe(entry.handleId, EffectString.startsWith('current:')) &&
+                entry.descriptor.source.kind === 'code',
+            ),
           );
           expect(selected).toHaveLength(8);
-          expect(selected.every(entry => entry.content.trim() === 'export const timeoutSeconds = 60;')).toBe(true);
           expect(
-            selected.every(
+            EffectArray.every(
+              selected,
+              entry => Effect2.pipe(entry.content, EffectString.trim) === 'export const timeoutSeconds = 60;',
+            ),
+          ).toBe(true);
+          expect(
+            EffectArray.every(
+              selected,
               entry => entry.codeExcerpt?.fileBytesHash === sha256HexSync('export const timeoutSeconds = 60;\n'),
             ),
           ).toBe(true);
@@ -619,9 +1022,9 @@ describe('ordinary memory exact public review', () => {
           const proposal = JSON.parse(draft(p, body));
           const raw = JSON.stringify({
             ...proposal,
-            reviewedHandles: selected.map(entry => entry.handleId),
+            reviewedHandles: EffectArray.map(selected, entry => entry.handleId),
             paragraphDecisions: [
-              {...proposal.paragraphDecisions[0], evidenceIds: selected.map(entry => entry.descriptor.id)},
+              {...proposal.paragraphDecisions[0], evidenceIds: EffectArray.map(selected, entry => entry.descriptor.id)},
             ],
           });
           const preview = yield* f.review({
@@ -646,7 +1049,12 @@ describe('ordinary memory exact public review', () => {
               expect(() =>
                 validateAutomaticMaintenanceReview({
                   ...payload,
-                  reviewEvidence: p.reviewEvidence.filter((_, index) => index !== ordinal),
+                  reviewEvidence: EffectArrayPipe(p.reviewEvidence, __effectArrayValues2 =>
+                    EffectArray.filter(
+                      __effectArrayValues2,
+                      (_, index) => index in __effectArrayValues2 && index !== ordinal,
+                    ),
+                  ),
                 }),
               ).toThrow();
               expect(() =>
@@ -712,34 +1120,28 @@ describe('ordinary memory exact public review', () => {
           yield* commit('current');
           yield* index();
           const state = () =>
-            f.fs.readFileString(f.path.join(f.home, 'context-maintenance/state-v2.json')).pipe(
-              Effect.map(
-                text =>
-                  JSON.parse(text) as {
-                    cases: {
-                      caseId: string;
-                      citationId?: string;
-                      memoryId: string;
-                      family: string;
-                      disposition: string;
-                      reason: string;
-                    }[];
-                  },
-              ),
-            );
+            f.fs
+              .readFileString(f.path.join(f.home, 'context-maintenance/state-v2.json'))
+              .pipe(Effect.flatMap(text => Schema.decodeUnknownEffect(MaintenanceStateSchema)(JSON.parse(text))));
           const activeCitationCases = () =>
             state().pipe(
               Effect.map(current =>
-                current.cases.filter(
-                  item =>
-                    item.memoryId === 'tn_target' &&
-                    (item.family === 'citation' || item.family === 'citation-coverage') &&
-                    item.disposition !== 'resolved',
+                EffectArrayPipe(current.cases, __effectArrayValues =>
+                  EffectArray.filter(
+                    __effectArrayValues,
+                    (item, __effectArrayIndex) =>
+                      __effectArrayIndex in __effectArrayValues &&
+                      item.memoryId === 'tn_target' &&
+                      (item.family === 'citation' || item.family === 'citation-coverage') &&
+                      item.disposition !== 'resolved',
+                  ),
                 ),
               ),
             );
           for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(f.config, {cwd: repository});
-          expect((yield* activeCitationCases()).some(item => item.disposition === 'needs-decision')).toBe(true);
+          expect(EffectArray.some(yield* activeCitationCases(), item => item.disposition === 'needs-decision')).toBe(
+            true,
+          );
           const packet = yield* f.review({
             action: 'automatic-preview',
             uri: f.uri,
@@ -768,7 +1170,9 @@ describe('ordinary memory exact public review', () => {
             },
           );
           expect(
-            proof.excerpts.find(excerpt => excerpt.provenance === 'current-verified'),
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(proof.excerpts, excerpt => excerpt.provenance === 'current-verified'),
+            ),
             JSON.stringify(proof),
           ).toMatchObject({
             supportsCitation: true,
@@ -787,7 +1191,7 @@ describe('ordinary memory exact public review', () => {
           expect(preview.isError, JSON.stringify(preview)).not.toBe(true);
           const p = preview.structuredContent;
           yield* f.fs.writeFileString(source, 'export const requestTimeoutSeconds = 90;\n');
-          const raced = yield* f.review({
+          const raced = yield* f.rawReview({
             action: 'apply',
             reviewId: p.reviewId,
             revision: p.revision,
@@ -831,10 +1235,14 @@ describe('ordinary memory exact public review', () => {
           yield* index();
           for (let tick = 0; tick < 12; tick++) {
             yield* runContextMaintenance(f.config, {cwd: repository});
-            if ((yield* activeCitationCases()).some(item => item.disposition === 'needs-decision')) break;
+            if (EffectArray.some(yield* activeCitationCases(), item => item.disposition === 'needs-decision')) break;
           }
-          expect((yield* activeCitationCases()).some(item => item.disposition === 'needs-decision')).toBe(true);
-          const newer = (yield* activeCitationCases()).find(item => item.disposition === 'needs-decision')!;
+          expect(EffectArray.some(yield* activeCitationCases(), item => item.disposition === 'needs-decision')).toBe(
+            true,
+          );
+          const newer = EffectOption.getOrUndefined(
+            EffectArray.findFirst(yield* activeCitationCases(), item => item.disposition === 'needs-decision'),
+          )!;
           const activeSource = p.approval.reviewedSupport.active.sources[0].source;
           if (activeSource.kind !== 'code') throw new Error('Expected approved code source.');
           expect(newer.citationId).toBe(activeSource.citation.id);
@@ -850,8 +1258,17 @@ describe('ordinary memory exact public review', () => {
           });
           expect(healthPacket.allowedOperations).not.toContain('context_health_repair_apply');
           expect(
-            healthPacket.evidence?.excerpts.some(
-              excerpt => excerpt.provenance === 'current-verified' && excerpt.content.includes('90'),
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(healthPacket.evidence?.excerpts), __effectOptionalArray =>
+                Boolean(
+                  EffectArray.some(
+                    __effectOptionalArray,
+                    excerpt =>
+                      excerpt.provenance === 'current-verified' &&
+                      Effect2.pipe(excerpt.content, EffectString.includes('90')),
+                  ),
+                ),
+              ),
             ),
           ).toBe(true);
           const refreshed = yield* f.review({
@@ -860,7 +1277,11 @@ describe('ordinary memory exact public review', () => {
             draftJson: undefined,
           });
           expect(refreshed.isError).not.toBe(true);
-          expect(refreshed.structuredContent.reviewEvidence.some(entry => entry.content.includes('90'))).toBe(true);
+          expect(
+            EffectArray.some(refreshed.structuredContent.reviewEvidence, entry =>
+              Effect2.pipe(entry.content, EffectString.includes('90')),
+            ),
+          ).toBe(true);
           expect(yield* f.fs.readFileString(f.targetPath)).toBe(accepted);
         }),
       ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
@@ -894,7 +1315,7 @@ describe('ordinary memory exact public review', () => {
             Effect.sync(() => {
               calls++;
               if (!basis || basis.version !== 3) throw new Error('Expected automatic source basis.');
-              const packet = JSON.parse(prompt.split('\n').at(-1)!);
+              const packet = JSON.parse(Effect2.pipe(prompt, EffectString.split('\n')).at(-1)!);
               return {
                 text: JSON.stringify(
                   compactAutomaticTopicDraftFixture(
@@ -958,7 +1379,10 @@ describe('ordinary memory exact public review', () => {
           ).toBe(true);
           expect(calls).toBe(1);
           const source = yield* f.fs.readFileString(f.sourcePath);
-          yield* f.fs.writeFileString(f.sourcePath, source.replace('60 seconds', '90 seconds'));
+          yield* f.fs.writeFileString(
+            f.sourcePath,
+            Effect2.pipe(source, EffectString.replace('60 seconds', '90 seconds')),
+          );
           const refreshed = yield* requestAutomaticMemoryDraft(f.config, input, generator).pipe(
             Effect.provideService(LocalModelStore, installed),
           );
@@ -1049,7 +1473,7 @@ describe('ordinary memory exact public review', () => {
                     .pipe(Effect.provideContext(reviewContext));
                   expect(decision.isError).not.toBe(true);
                 }
-                const current = JSON.parse(prompt.split('\n').at(-1)!);
+                const current = JSON.parse(Effect2.pipe(prompt, EffectString.split('\n')).at(-1)!);
                 return {
                   text: JSON.stringify(
                     compactAutomaticTopicDraftFixture(
@@ -1076,7 +1500,7 @@ describe('ordinary memory exact public review', () => {
               );
             expect(Result.isFailure(yield* run())).toBe(true);
             expect(calls).toBe(0);
-            const changedTarget = f.content.replace('30 seconds', '31 seconds');
+            const changedTarget = Effect2.pipe(f.content, EffectString.replace('30 seconds', '31 seconds'));
             yield* f.fs.writeFileString(f.targetPath, changedTarget);
             expect(
               Result.isFailure(
@@ -1090,7 +1514,10 @@ describe('ordinary memory exact public review', () => {
             expect((yield* loadCandidateReview(f.home, initial.reviewId)).revision).toBe(initial.revision);
             yield* f.fs.writeFileString(f.targetPath, f.content);
             const source = yield* f.fs.readFileString(f.sourcePath);
-            yield* f.fs.writeFileString(f.sourcePath, source.replace('60 seconds', '90 seconds'));
+            yield* f.fs.writeFileString(
+              f.sourcePath,
+              Effect2.pipe(source, EffectString.replace('60 seconds', '90 seconds')),
+            );
             const result = yield* run();
             expect(calls).toBe(1);
             const saved = yield* loadCandidateReview(f.home, initial.reviewId);
@@ -1109,7 +1536,10 @@ describe('ordinary memory exact public review', () => {
               const preview = yield* f.review({action: 'preview', reviewId: saved.reviewId, revision: saved.revision});
               expect(preview.isError).not.toBe(true);
               const owned = yield* loadCandidateReview(f.home, saved.reviewId);
-              yield* f.fs.writeFileString(f.sourcePath, source.replace('60 seconds', '120 seconds'));
+              yield* f.fs.writeFileString(
+                f.sourcePath,
+                Effect2.pipe(source, EffectString.replace('60 seconds', '120 seconds')),
+              );
               expect(Result.isFailure(yield* run())).toBe(true);
               expect(calls).toBe(1);
               expect((yield* loadCandidateReview(f.home, initial.reviewId)).revision).toBe(owned.revision);
@@ -1143,7 +1573,7 @@ describe('ordinary memory exact public review', () => {
             approvalDigest: p.approval.approvalDigest,
             approved: true,
           });
-          const large = 'User-authored sentence. '.repeat(1800);
+          const large = Effect2.pipe('User-authored sentence. ', EffectString.repeat(1800));
           const before = yield* f.fs.readFileString(f.targetPath);
           const manual = (yield* f.review({
             action: 'manual-preview',
@@ -1151,7 +1581,7 @@ describe('ordinary memory exact public review', () => {
             expectedContentHash: sha256HexSync(before),
             desiredBody: large,
           })).structuredContent;
-          expect(manual.proposal.body).toBe(large.trim());
+          expect(manual.proposal.body).toBe(Effect2.pipe(large, EffectString.trim));
           const revised = (yield* f.review({
             action: 'manual-preview',
             uri: f.uri,
@@ -1178,7 +1608,7 @@ describe('ordinary memory exact public review', () => {
             approved: true,
           });
           const saved = yield* f.fs.readFileString(f.targetPath);
-          expect(parseMemoryDocument(f.uri, saved)!.body).toBe(large.trim());
+          expect(parseMemoryDocument(f.uri, saved)!.body).toBe(Effect2.pipe(large, EffectString.trim));
           const next = yield* f.review({
             action: 'manual-preview',
             uri: f.uri,
@@ -1195,7 +1625,7 @@ describe('ordinary memory exact public review', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const f = yield* fixture();
-        const body = f.content.replace(/^memory_id:.*\n/mu, '');
+        const body = Effect2.pipe(f.content, EffectString.replace(/^memory_id:.*\n/mu, ''));
         yield* f.fs.writeFileString(f.targetPath, body);
         const packet = yield* f.review({
           action: 'automatic-preview',
@@ -1214,7 +1644,7 @@ describe('ordinary memory exact public review', () => {
   it('bounded duplicate-paragraph replacements preserve every other ordinal and never mutate their basis', () => {
     fc.assert(
       fc.property(fc.array(fc.constantFrom('red', 'blue', 'green', 'orange'), {minLength: 1, maxLength: 20}), words => {
-        const text = words.join(' ') + '.';
+        const text = EffectArray.join(words, ' ') + '.';
         const uri = 'threadnote://user/tester/memories/durable/projects/fixture/target.md';
         const sourceUri = 'threadnote://user/tester/memories/durable/projects/fixture/source.md';
         const metadata = {
@@ -1235,7 +1665,10 @@ describe('ordinary memory exact public review', () => {
           sourceUri,
           formatMemoryDocument('MEMORY', {...metadata, memoryId: 'tn_source'}, text),
         )!;
-        const prepared = prepareAutomaticMemory(record, {sources: [source], scopeRevision: 'a'.repeat(64)});
+        const prepared = prepareAutomaticMemory(record, {
+          sources: [source],
+          scopeRevision: Effect2.pipe('a', EffectString.repeat(64)),
+        });
         const packet = automaticReviewPacket(record, prepared);
         const snapshot = JSON.stringify(packet);
         const h = packet.reviewEvidence[0];
@@ -1260,7 +1693,7 @@ describe('ordinary memory exact public review', () => {
           rationale: 'Review.',
           unresolvedQuestions: [],
           removedClaims: [],
-          paragraphDecisions: packet.basis.paragraphs.map((paragraph, ordinal) => ({
+          paragraphDecisions: EffectArray.map(packet.basis.paragraphs, (paragraph, ordinal) => ({
             ordinal,
             beforeHash: paragraph.hash,
             role: ordinal === 1 ? 'descriptive' : 'unknown',
@@ -1269,7 +1702,7 @@ describe('ordinary memory exact public review', () => {
           })),
         };
         const proposal = parseAutomaticMaintenanceDraft(packet.basis, JSON.stringify(raw));
-        expect(proposal.body.split('\n\n')).toEqual(['Duplicate.', text, 'Protected.']);
+        expect(Effect2.pipe(proposal.body, EffectString.split('\n\n'))).toEqual(['Duplicate.', text, 'Protected.']);
         expect(proposal.changedOrdinals).toEqual([1]);
         expect(JSON.stringify(packet)).toBe(snapshot);
       }),
@@ -1443,7 +1876,10 @@ describe('ordinary memory exact public review', () => {
             approved: true,
           };
           const source = yield* f.fs.readFileString(f.sourcePath);
-          yield* f.fs.writeFileString(f.sourcePath, source.replace('60 seconds', '90 seconds'));
+          yield* f.fs.writeFileString(
+            f.sourcePath,
+            Effect2.pipe(source, EffectString.replace('60 seconds', '90 seconds')),
+          );
           expect(Result.isFailure(yield* applyTopicMaintenanceReview(f.config, input).pipe(Effect.result))).toBe(true);
           expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
           yield* f.fs.writeFileString(f.sourcePath, source);
@@ -1475,8 +1911,8 @@ describe('ordinary memory exact public review', () => {
               Effect.gen(function* () {
                 if (
                   !failed &&
-                  to.endsWith(`${p.reviewId}.json`) &&
-                  (yield* f.fs.readFileString(f.targetPath)).includes('reviewed_support:')
+                  Effect2.pipe(to, EffectString.endsWith(`${p.reviewId}.json`)) &&
+                  Effect2.pipe(yield* f.fs.readFileString(f.targetPath), EffectString.includes('reviewed_support:'))
                 ) {
                   failed = true;
                   return yield* f.fs.rename(`${from}.missing`, to);
@@ -1501,7 +1937,12 @@ describe('ordinary memory exact public review', () => {
           expect(retry.candidates[0].state).toBe('applied');
           expect(yield* readCanonicalMutationGeneration(f.fs, f.path, f.home, 'local')).toBe(generation);
           expect(
-            (yield* loadCandidateReview(f.home, p.reviewId)).auditEvents.filter(event => event.action === 'apply'),
+            EffectArrayPipe((yield* loadCandidateReview(f.home, p.reviewId)).auditEvents, __effectArrayValues =>
+              EffectArray.filter(
+                __effectArrayValues,
+                (event, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && event.action === 'apply',
+              ),
+            ),
           ).toHaveLength(1);
         }),
       ).pipe(provideTestLayer(ApplicationLayer)),

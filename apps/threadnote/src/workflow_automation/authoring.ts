@@ -1,3 +1,5 @@
+import {isJsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -60,6 +62,9 @@ import {
   type AuthoringRoot,
   type NativeAuthoringCall,
 } from './authoring_artifacts.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
@@ -78,15 +83,66 @@ const authoringIndexPage = Schema.Struct({
 });
 type Request = typeof nativeAuthoringRequestSchema.Type;
 const utf8 = new TextEncoder();
+const NATIVE_AUTHORING_DOCUMENT_KEYS = [
+  'format',
+  'schemaVersion',
+  'id',
+  'project',
+  'title',
+  'objective',
+  'requirements',
+  'context',
+  'source',
+  'sourceFreeReason',
+  'kind',
+  'actors',
+  'inScope',
+  'outOfScope',
+  'constraints',
+  'observations',
+  'scenarios',
+  'assumptions',
+  'questions',
+  'artifacts',
+  'review',
+  'current',
+  'target',
+  'phases',
+  'decisions',
+  'openQuestions',
+  'spec',
+] as const;
+
+function isNativeAuthoringDocumentKey(value: string): boolean {
+  return EffectArray.some(NATIVE_AUTHORING_DOCUMENT_KEYS, key => key === value);
+}
+
 const hasControl = (value: string) =>
-  [...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
+  EffectArray.some(
+    [...value],
+    character =>
+      Effect2.pipe(
+        character,
+        EffectString.charCodeAt(0),
+        Effect2.Option.getOrElse(() => NaN),
+      ) < 32 ||
+      Effect2.pipe(
+        character,
+        EffectString.charCodeAt(0),
+        Effect2.Option.getOrElse(() => NaN),
+      ) === 127,
+  );
 const compact = (text: string, maximum = 400) => {
   const characters = [...text];
   return characters.length <= maximum
     ? text
-    : characters.slice(0, maximum).join('') + '… (complete content in linked structured data)';
+    : EffectArray.join(characters.slice(0, maximum), '') + '… (complete content in linked structured data)';
 };
-const bullets = (items: readonly string[]) => items.map(item => '- ' + item).join('\n');
+const bullets = (items: readonly string[]) =>
+  EffectArray.join(
+    EffectArray.map(items, item => '- ' + item),
+    '\n',
+  );
 
 const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(function* (
   repo: string,
@@ -99,7 +155,7 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
       return yield* fail('invalid-scope', 'Admitted source view differs from the original bound source scope.');
     const files = [] as {path: string; sha256: string}[];
     for (const relative of paths) {
-      const file = admitted.files.find(item => item.path === relative);
+      const file = EffectOption.getOrUndefined(EffectArray.findFirst(admitted.files, item => item.path === relative));
       if (!file) return yield* fail('invalid-scope', 'Admitted source view lacks a required file.');
       files.push({path: relative, sha256: file.object.sha256});
     }
@@ -114,15 +170,18 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
   for (const relative of paths) {
     if (
       relative.length > 4096 ||
-      relative.includes('\\') ||
-      relative.includes(':') ||
+      Effect2.pipe(relative, EffectString.includes('\\')) ||
+      Effect2.pipe(relative, EffectString.includes(':')) ||
       hasControl(relative) ||
       path.isAbsolute(relative) ||
-      relative.split('/').some(segment => !segment || segment === '.' || segment === '..')
+      EffectArray.some(
+        Effect2.pipe(relative, EffectString.split('/')),
+        segment => !segment || segment === '.' || segment === '..',
+      )
     )
       return yield* fail('invalid-scope', 'Source paths must be canonical repository-relative files.');
     const actual = yield* fs.realPath(path.join(root, relative));
-    if (!actual.startsWith(root + path.sep))
+    if (!Effect2.pipe(actual, EffectString.startsWith(root + path.sep)))
       return yield* fail('invalid-scope', 'Source files cannot escape the bound checkout.');
     const stat = yield* fs.stat(actual);
     if (stat.type !== 'File' || Number(stat.size) > 1_000_000)
@@ -132,7 +191,10 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
       return yield* fail('invalid-scope', 'Source file changed beyond its admitted byte bound.');
     files.push({path: relative, sha256: sha256HexSync(bytes)});
   }
-  const head = (yield* runCommandEffect('git', ['-C', root, 'rev-parse', 'HEAD'], {timeoutMs: 10_000})).stdout.trim();
+  const head = Effect2.pipe(
+    (yield* runCommandEffect('git', ['-C', root, 'rev-parse', 'HEAD'], {timeoutMs: 10_000})).stdout,
+    EffectString.trim,
+  );
   if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head))
     return yield* fail('invalid-scope', 'Source inspection requires an existing Git commit.');
   return {head, files};
@@ -146,7 +208,7 @@ const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(func
   if (!document.source) return;
   const source = yield* inspectSource(
     repo,
-    document.source.files.map(file => file.path),
+    EffectArray.map(document.source.files, file => file.path),
     live,
   );
   if (stableJson(source) !== stableJson(document.source))
@@ -158,8 +220,8 @@ const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(func
 
 /** Small semantic views link to the complete separately indexed structured data. */
 function createViewDocument(input: Parameters<typeof createNativeDocument>[0]): NativeDocumentEnvelope {
-  const sections = Object.fromEntries(
-    Object.entries(input.sections).map(([id, body]) => {
+  const sections = EffectRecord.fromEntries(
+    EffectArray.map(EffectRecord.toEntries(input.sections), ([id, body]) => {
       const bytes = utf8.encode(body);
       const limit = id === 'diagram' ? 10000 : 2000;
       if (bytes.byteLength <= limit) return [id, body];
@@ -185,18 +247,24 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
           title: document.title,
           sections: {
             summary: document.objective,
-            problem: bullets(document.inScope.map(item => compact(item))),
+            problem: bullets(EffectArray.map(document.inScope, item => compact(item))),
             requirements: compact(
-              bullets(document.requirements.map(item => item.id + ': ' + compact(item.behavior, 120))),
+              bullets(EffectArray.map(document.requirements, item => item.id + ': ' + compact(item.behavior, 120))),
               3500,
             ),
             acceptance: compact(
-              bullets(document.scenarios.map(item => item.id + ': ' + compact(item.then, 120))),
+              bullets(EffectArray.map(document.scenarios, item => item.id + ': ' + compact(item.then, 120))),
               3500,
             ),
-            domain: compact(bullets(document.artifacts.map(item => item.title + ': ' + compact(item.summary))), 1600),
+            domain: compact(
+              bullets(EffectArray.map(document.artifacts, item => item.title + ': ' + compact(item.summary))),
+              1600,
+            ),
             contracts: compact(bullets(document.constraints), 1600),
-            questions: compact(bullets(document.questions.map(item => item.id + ': ' + item.question)), 1600),
+            questions: compact(
+              bullets(EffectArray.map(document.questions, item => item.id + ': ' + item.question)),
+              1600,
+            ),
           },
         }),
       },
@@ -207,7 +275,7 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
       title:
         compact(document.title, 180) +
         ' — ' +
-        (kind.endsWith('current') ? 'Current architecture' : 'Target architecture'),
+        (Effect2.pipe(kind, EffectString.endsWith('current')) ? 'Current architecture' : 'Target architecture'),
       sections: {
         summary: value.summary,
         components: compact(bullets(value.components), 3000),
@@ -223,11 +291,15 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
         title: document.title,
         sections: {
           summary: document.objective,
-          phases: compact(bullets(document.phases.map(item => item.id + ': ' + compact(item.outcome, 120))), 3500),
+          phases: compact(
+            bullets(EffectArray.map(document.phases, item => item.id + ': ' + compact(item.outcome, 120))),
+            3500,
+          ),
           validation: compact(
             bullets(
-              document.phases.flatMap(item =>
-                item.acceptance.map(
+              EffectArray.flatMap(document.phases, item =>
+                EffectArray.map(
+                  item.acceptance,
                   acceptance => item.id + '/' + acceptance.id + ': ' + compact(acceptance.verification, 120),
                 ),
               ),
@@ -235,7 +307,10 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
             3500,
           ),
           decisions: document.decisions.length
-            ? compact(bullets(document.decisions.map(item => item.id + ': ' + compact(item.selected, 120))), 2000)
+            ? compact(
+                bullets(EffectArray.map(document.decisions, item => item.id + ': ' + compact(item.selected, 120))),
+                2000,
+              )
             : 'Design decision remains unresolved; this is a durable draft.',
         },
       }),
@@ -249,14 +324,15 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
         title: compact(document.title, 180) + ' — Design decisions',
         sections: {
           decision: document.decisions.length
-            ? compact(bullets(document.decisions.map(item => item.id + ': ' + item.selected)), 3000)
+            ? compact(bullets(EffectArray.map(document.decisions, item => item.id + ': ' + item.selected)), 3000)
             : 'Pending orchestrator decision.',
           alternatives: document.decisions.length
             ? compact(
                 bullets(
-                  document.decisions.flatMap(item =>
+                  EffectArray.flatMap(document.decisions, item =>
                     item.alternatives.length
-                      ? item.alternatives.map(
+                      ? EffectArray.map(
+                          item.alternatives,
                           alternative =>
                             item.id + '/' + alternative.id + ': ' + alternative.design + '; ' + alternative.tradeoffs,
                         )
@@ -267,10 +343,15 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
               )
             : 'Alternatives have not yet been judged.',
           rationale: document.decisions.length
-            ? compact(bullets(document.decisions.map(item => item.id + ': ' + item.rationale)), 5000)
+            ? compact(bullets(EffectArray.map(document.decisions, item => item.id + ': ' + item.rationale)), 5000)
             : 'A ready plan requires the orchestrator’s justification.',
           consequences: compact(
-            bullets(document.decisions.map(item => item.id + ': affects ' + item.affectedPhases.join(', '))),
+            bullets(
+              EffectArray.map(
+                document.decisions,
+                item => item.id + ': affects ' + EffectArray.join(item.affectedPhases, ', '),
+              ),
+            ),
             2000,
           ),
         },
@@ -279,16 +360,23 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
   ];
 }
 
+function isWorkflowArtifact(value: unknown): value is WorkflowArtifact {
+  return (
+    isJsonObject(value) &&
+    typeof value.uri === 'string' &&
+    typeof value.memoryId === 'string' &&
+    typeof value.revision === 'string' &&
+    typeof value.body === 'string' &&
+    (value.storageKind === 'durable' || value.storageKind === 'handoff') &&
+    (value.state === 'active' || value.state === 'archived')
+  );
+}
+
 const asArtifact = (value: unknown): WorkflowArtifact => {
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    !('artifact' in value) ||
-    typeof value.artifact !== 'object' ||
-    !value.artifact
-  )
+  if (!isJsonObject(value) || !isWorkflowArtifact(value.artifact)) {
     throw fail('invalid-readback', 'Native authoring expected a verified memory artifact.');
-  return value.artifact as WorkflowArtifact;
+  }
+  return value.artifact;
 };
 const rootSummary = (root: AuthoringRoot, artifact: WorkflowArtifact) => ({
   root: artifactReference(artifact),
@@ -303,7 +391,7 @@ const rootSummary = (root: AuthoringRoot, artifact: WorkflowArtifact) => ({
 });
 
 const ownedAuthoringUris = (state: NativeWorkflowState) =>
-  state.operations.flatMap(operation =>
+  EffectArray.flatMap(state.operations, operation =>
     operation.status === 'verified' && operation.artifact?.state === 'active' ? [operation.artifact.uri] : [],
   );
 
@@ -451,7 +539,12 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
             visited++;
             const child = yield* readExact(reference);
             const payload = yield* Effect.try({
-              try: () => decodeAuthoringArtifact(child.body, Schema.Unknown) as Record<string, unknown>,
+              try: () => {
+                const decoded = decodeAuthoringArtifact(child.body, Schema.Unknown);
+                if (!isJsonObject(decoded))
+                  throw fail('invalid-readback', 'The linked authoring page must be an object.');
+                return decoded;
+              },
               catch: nativeWorkflowError,
             });
             if (payload.format === 'threadnote-native-authoring-index') {
@@ -474,7 +567,13 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
                   const binary = atob(page.content);
                   if (btoa(binary) !== page.content) throw new Error('Noncanonical base64');
                   return new TextDecoder('utf-8', {fatal: true}).decode(
-                    Uint8Array.from(binary, character => character.charCodeAt(0)),
+                    Uint8Array.from(binary, character =>
+                      Effect2.pipe(
+                        character,
+                        EffectString.charCodeAt(0),
+                        Effect2.Option.getOrElse(() => NaN),
+                      ),
+                    ),
                   );
                 },
                 catch: () => fail('invalid-readback', 'The linked specification data page encoding is invalid.'),
@@ -488,7 +587,7 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
             }
           }).pipe(Effect.ensuring(Effect.sync(() => active.delete(reference.uri))));
         yield* visit(root.data);
-        const text = chunks.join('');
+        const text = EffectArray.join(chunks, '');
         if (sha256HexSync(text) !== root.dataHash)
           return yield* fail('invalid-readback', 'The linked specification data differs from its root digest.');
         const linked = yield* Effect.try({
@@ -526,7 +625,9 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
           const full = yield* loadDocument(loaded.root);
           if (full.kind !== 'plan')
             return yield* fail('artifact-not-found', 'Only a plan has orchestrator design decisions.');
-          const decision = full.decisions.find(item => item.id === request.decisionId);
+          const decision = EffectOption.getOrUndefined(
+            EffectArray.findFirst(full.decisions, item => item.id === request.decisionId),
+          );
           if (!decision) return yield* fail('artifact-not-found', 'The requested stable decision ID does not exist.');
           const envelope = yield* Effect.try({
             try: () =>
@@ -536,9 +637,13 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
                 sections: {
                   decision: decision.question + '\n\n' + decision.selected,
                   alternatives: decision.alternatives.length
-                    ? decision.alternatives
-                        .map(item => item.id + ': ' + item.design + '\n\nTradeoffs: ' + item.tradeoffs)
-                        .join('\n\n')
+                    ? EffectArray.join(
+                        EffectArray.map(
+                          decision.alternatives,
+                          item => item.id + ': ' + item.design + '\n\nTradeoffs: ' + item.tradeoffs,
+                        ),
+                        '\n\n',
+                      )
                     : 'No better alternative identified.',
                   rationale: decision.rationale,
                 },
@@ -551,14 +656,17 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
               documentHash: loaded.root.documentHash,
               outline: outlineNativeDocument(envelope),
             };
-          if (!request.sectionId)
+          const sectionId = request.sectionId;
+          if (sectionId === undefined)
             return yield* fail('invalid-request', 'Select a stable decision section ID from the outline.');
           return yield* Effect.try({
-            try: () => readNativeDocumentSection(envelope, request.sectionId!, request),
+            try: () => readNativeDocumentSection(envelope, sectionId, request),
             catch: nativeWorkflowError,
           });
         }
-        const selected = loaded.root.documents.find(item => item.id === (request.artifactId ?? loaded.root.kind));
+        const selected = EffectOption.getOrUndefined(
+          EffectArray.findFirst(loaded.root.documents, item => item.id === (request.artifactId ?? loaded.root.kind)),
+        );
         if (!selected) return yield* fail('artifact-not-found', 'Select one of the root’s existing document IDs.');
         const artifact = yield* reader.read(selected.reference);
         const document = yield* Effect.try({
@@ -568,9 +676,11 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
         const envelope = yield* Effect.try({try: () => decodeNativeDocument(document), catch: nativeWorkflowError});
         if (request.detail !== 'section')
           return {reference: selected.reference, outline: outlineNativeDocument(envelope)};
-        if (!request.sectionId) return yield* fail('invalid-request', 'Provide a stable section ID from the outline.');
+        const sectionId = request.sectionId;
+        if (sectionId === undefined)
+          return yield* fail('invalid-request', 'Provide a stable section ID from the outline.');
         return yield* Effect.try({
-          try: () => readNativeDocumentSection(envelope, request.sectionId!, request),
+          try: () => readNativeDocumentSection(envelope, sectionId, request),
           catch: nativeWorkflowError,
         });
       }
@@ -616,7 +726,7 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
         packet.document.kind !== 'spec' ||
         typeof request.document !== 'object' ||
         request.document === null ||
-        Array.isArray(request.document)
+        EffectArray.isArray(request.document)
       )
         return yield* fail('invalid-request', 'Provide a native plan draft and a verified spec export packet.');
       const draft = request.document;
@@ -664,12 +774,16 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
         try: () => decodeNativeAuthoringDocument(request.after),
         catch: nativeWorkflowError,
       });
+      const beforeFields: Record<string, unknown> = {...before};
+      const afterFields: Record<string, unknown> = {...after};
       return {
         beforeHash: nativeAuthoringDigest(before),
         afterHash: nativeAuthoringDigest(after),
         intentChanged: nativeSpecIntentDigest(before) !== nativeSpecIntentDigest(after),
-        changedFields: Object.keys(after).filter(
-          key => stableJson(before[key as keyof typeof before]) !== stableJson(after[key as keyof typeof after]),
+        changedFields: EffectArray.filter(
+          // oxlint-disable-next-line effecttsgo/prefer-effect-record -- These discriminated schema values are heterogeneous records, so the typed Effect Record API does not model their keys.
+          Object.keys(after),
+          key => isNativeAuthoringDocumentKey(key) && stableJson(beforeFields[key]) !== stableJson(afterFields[key]),
         ),
       };
     }
@@ -691,15 +805,27 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
         summary: {
           title: document.title,
           objective: document.objective,
-          requirements: document.requirements.map(item => ({id: item.id, behavior: compact(item.behavior, 100)})),
+          requirements: EffectArray.map(document.requirements, item => ({
+            id: item.id,
+            behavior: compact(item.behavior, 100),
+          })),
         },
-        views: documentViews(document).map(item => ({id: item.id, outline: outlineNativeDocument(item.document)})),
+        views: EffectArray.map(documentViews(document), item => ({
+          id: item.id,
+          outline: outlineNativeDocument(item.document),
+        })),
         approvalInstruction:
           'Present all material behavior/scenario/domain/contract details before asking for approval; fetch explicit detail where needed.',
         ...(request.detail === 'document' ? {document} : {}),
       };
     if (request.command === 'confirm') {
-      if (document.kind !== 'spec' || !request.userResponse?.trim() || !request.userDecision)
+      if (
+        document.kind !== 'spec' ||
+        !Effect2.pipe(request.userResponse, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) ||
+        !request.userDecision
+      )
         return yield* fail(
           'confirmation-required',
           'Record the actual human response to the displayed spec acceptance packet.',
@@ -729,11 +855,12 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
           : {
               packet: {
                 objective: compact(document.objective, 1000),
-                requirements: document.requirements
-                  .slice(0, 6)
-                  .map(item => ({id: item.id, behavior: compact(item.behavior, 150)})),
+                requirements: EffectArray.map(document.requirements.slice(0, 6), item => ({
+                  id: item.id,
+                  behavior: compact(item.behavior, 150),
+                })),
                 initialDesign: compact(document.target.summary, 1800),
-                contracts: document.target.contracts.slice(0, 6).map(item => compact(item, 200)),
+                contracts: EffectArray.map(document.target.contracts.slice(0, 6), item => compact(item, 200)),
                 codeRefs: document.context.codeRefs,
                 decisionRule:
                   'Return up to two high-level alternatives and tradeoffs, without a separate plan. The orchestrator records its decision and rationale.',
@@ -745,7 +872,10 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
       return {
         documentHash: validation.documentHash,
         summary: {title: document.title, objective: document.objective, kind: document.kind},
-        views: documentViews(document).map(item => ({id: item.id, outline: outlineNativeDocument(item.document)})),
+        views: EffectArray.map(documentViews(document), item => ({
+          id: item.id,
+          outline: outlineNativeDocument(item.document),
+        })),
         ...(request.detail === 'document' ? {document} : {}),
         validation,
         scope: 'native-authoring-review',
@@ -753,7 +883,7 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
     if (request.command === 'render')
       return {
         documentHash: validation.documentHash,
-        documents: documentViews(document).map(item => ({
+        documents: EffectArray.map(documentViews(document), item => ({
           id: item.id,
           outline: outlineNativeDocument(item.document),
           ...(request.detail === 'document' ? {markdown: renderNativeDocument(item.document)} : {}),
@@ -795,18 +925,20 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
   }).pipe(
     program => withWorkflowReadCache(program, {compactJournal: true}),
     program => withWorkflowRecallRefreshBatch(config, program),
-    Effect.map(payload => ({
-      protocolVersion: 1 as const,
-      executorVersion: 1 as const,
-      status: 'ok' as const,
-      authoring: payload,
-    })),
-    Effect.mapError(nativeWorkflowError),
+    Effect.mapBoth({
+      onSuccess: payload => ({
+        protocolVersion: 1 as const,
+        executorVersion: 1 as const,
+        status: 'ok' as const,
+        authoring: payload,
+      }),
+      onFailure: nativeWorkflowError,
+    }),
   );
 
 const boundedView = (document: NativeDocumentEnvelope): NativeDocumentEnvelope => ({
   ...document,
-  sections: document.sections.map(section => {
+  sections: EffectArray.map(document.sections, section => {
     const bytes = utf8.encode(section.body);
     const limit = section.id === 'diagram' ? 10_000 : 2_000;
     if (bytes.byteLength <= limit) return section;
@@ -848,8 +980,8 @@ const clearAuthoringSave = (config: RuntimeConfig, runId: string, intentDigest: 
         current.state.bindingId,
         inspectWorkflowJournal(config, current.state.bindingId),
       );
-      const receiptIds = new Set(current.state.operations.map(operation => operation.intent.operationId));
-      if (Object.keys(journal.state.operations).some(id => !receiptIds.has(id)))
+      const receiptIds = new Set(EffectArray.map(current.state.operations, operation => operation.intent.operationId));
+      if (EffectArray.some(EffectRecord.keys(journal.state.operations), id => !receiptIds.has(id)))
         return yield* fail(
           'invalid-state',
           'The authoring save cannot finalize while native intent receipts are missing.',
@@ -878,12 +1010,13 @@ const saveAuthoring = <R>(
       if (state.closeoutSave) return yield* fail('pending-operation', 'Finish the admitted closeout before authoring.');
       const priorRootUri = state.authoringSave
         ? state.authoringSave.rootUri
-        : ([...state.operations]
-            .reverse()
-            .find(
+        : (EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              [...state.operations].reverse(),
               operation =>
                 operation.status === 'verified' && operation.intent.artifactKey === 'author-root-' + document.kind,
-            )?.artifact?.uri ?? null);
+            ),
+          )?.artifact?.uri ?? null);
       const rootUri = request.uri ?? priorRootUri;
       const readiness = request.ready ? 'ready' : 'draft';
       const metadata = {
@@ -913,7 +1046,9 @@ const saveAuthoring = <R>(
         evidenceRefs: document.context.evidenceRefs,
         ownedUris: ownedAuthoringUris(state),
       });
-      const pending = state.operations.find(operation => operation.status === 'prepared');
+      const pending = EffectOption.getOrUndefined(
+        EffectArray.findFirst(state.operations, operation => operation.status === 'prepared'),
+      );
       const key = 'author-root-' + document.kind;
       if (pending?.intent.artifactKey === key && pending.intent.role === 'authoring-root') {
         const intent = pending.intent;
@@ -959,15 +1094,19 @@ const saveAuthoring = <R>(
           Boolean(root.previous) !== (request.expectedRevision != null)
         )
           return yield* fail('pending-operation', 'The prepared root does not match the exact current save intent.');
-        const expectedViews = documentViews(document).map(item => ({...item, document: boundedView(item.document)}));
+        const expectedViews = EffectArray.map(documentViews(document), item => ({
+          ...item,
+          document: boundedView(item.document),
+        }));
         if (
           root.documents.length !== expectedViews.length ||
-          stableJson(root.documents.map(item => item.id)) !== stableJson(expectedViews.map(item => item.id))
+          stableJson(EffectArray.map(root.documents, item => item.id)) !==
+            stableJson(EffectArray.map(expectedViews, item => item.id))
         )
           return yield* fail('pending-operation', 'The prepared root has a different child document set.');
         const links = [
           root.data,
-          ...root.documents.map(item => item.reference),
+          ...EffectArray.map(root.documents, item => item.reference),
           ...(root.previous ? [root.previous] : []),
         ];
         const contextRelations =
@@ -992,7 +1131,10 @@ const saveAuthoring = <R>(
           '\n\nReadiness: ' +
           readiness +
           '. Complete structured data and decision history are linked below.\n\n' +
-          links.map(reference => '- [Artifact](' + reference.uri + ')').join('\n');
+          EffectArray.join(
+            EffectArray.map(links, reference => '- [Artifact](' + reference.uri + ')'),
+            '\n',
+          );
         const expectedBody = yield* Effect.try({
           try: () => encodeAuthoringArtifact(document.title, summary, root),
           catch: nativeWorkflowError,
@@ -1025,7 +1167,12 @@ const saveAuthoring = <R>(
         const recoveredState = yield* readNativeWorkflowState(config, request.runId);
         if (!recoveredState)
           return yield* fail('run-not-found', 'The original native run disappeared during recovery.');
-        const receipt = recoveredState.state.operations.find(item => item.intent.operationId === intent.operationId);
+        const receipt = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            recoveredState.state.operations,
+            item => item.intent.operationId === intent.operationId,
+          ),
+        );
         if (
           receipt?.status !== 'verified' ||
           !receipt.artifact ||
@@ -1057,12 +1204,13 @@ const saveAuthoring = <R>(
         return {...rootSummary(verifiedRoot, verified), changed: false, recovered: true};
       }
       yield* admitLinkedSpec(document);
-      const priorOperation = [...state.operations]
-        .reverse()
-        .find(
+      const priorOperation = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...state.operations].reverse(),
           operation =>
             operation.status === 'verified' && operation.intent.artifactKey === 'author-root-' + document.kind,
-        );
+        ),
+      );
       const prior = priorOperation?.artifact
         ? yield* artifacts.read(artifactReference(priorOperation.artifact))
         : undefined;
@@ -1098,10 +1246,10 @@ const saveAuthoring = <R>(
           'Resolve the document’s structural/coverage/source issues before saving; readiness-only questions remain draftable.',
         );
       const text = canonicalAuthoringJson(document);
-      const views = documentViews(document).map(item => ({...item, document: boundedView(item.document)}));
+      const views = EffectArray.map(documentViews(document), item => ({...item, document: boundedView(item.document)}));
       const encodedViews = yield* Effect.try({
         try: () =>
-          views.map(item => ({
+          EffectArray.map(views, item => ({
             ...item,
             body: encodeAuthoringDocument(item.document),
           })),
@@ -1122,7 +1270,7 @@ const saveAuthoring = <R>(
         state.authoringSave?.operationStart ?? state.operations.length,
       );
       const originalUris = new Set(
-        originalOperations.flatMap(operation =>
+        EffectArray.flatMap(originalOperations, operation =>
           operation.status === 'verified' && operation.artifact?.state === 'active' ? [operation.artifact.uri] : [],
         ),
       );
@@ -1143,26 +1291,39 @@ const saveAuthoring = <R>(
         evidenceBytes += utf8.encode(JSON.stringify(content)).byteLength;
       }
       const candidate = workflowArtifactUri(journal.state.binding, {
-        artifactKey: 'author-' + '0'.repeat(64),
+        artifactKey: 'author-' + Effect2.pipe('0', EffectString.repeat(64)),
         storageKind: state.profile === 'desktop' ? 'durable' : 'handoff',
         ...(state.naming ? {naming: {role: 'source', version: 1}} : {}),
       });
       // Naming limits each generated filename to200 ASCII bytes. Retain its
       // actual canonical user/project prefix instead of assuming a short URI.
       const generatedScopeBytes =
-        utf8.encode(JSON.stringify(candidate.slice(0, candidate.lastIndexOf('/') + 1) + 'x'.repeat(200))).byteLength +
-        1;
+        utf8.encode(
+          JSON.stringify(
+            Effect2.pipe(
+              candidate,
+              EffectString.slice(
+                0,
+                Effect2.pipe(
+                  candidate,
+                  EffectString.lastIndexOf('/'),
+                  Effect2.Option.getOrElse(() => -1),
+                ) + 1,
+              ),
+            ) + Effect2.pipe('x', EffectString.repeat(200)),
+          ),
+        ).byteLength + 1;
       const scopes = [...sharedRoots, ...originalUris];
       const proposedBytes = nativeAuthoringSaveByteBudget({
         contentBytes:
           utf8.encode(text).byteLength +
-          encodedViews.reduce((total, item) => total + utf8.encode(item.body).byteLength, 0),
+          EffectArray.reduce(encodedViews, 0, (total, item) => total + utf8.encode(item.body).byteLength),
         evidenceBytes,
         plannedOperations: plannedCount,
         scopeBytes: utf8.encode(JSON.stringify(scopes)).byteLength,
         maximumScopeEntryBytes: Math.max(
           generatedScopeBytes,
-          ...document.context.evidenceRefs.map(ref => utf8.encode(JSON.stringify(ref.uri)).byteLength + 1),
+          ...EffectArray.map(document.context.evidenceRefs, ref => utf8.encode(JSON.stringify(ref.uri)).byteLength + 1),
         ),
         requestMetadataBytes: utf8.encode(
           stableJson({
@@ -1252,7 +1413,7 @@ const saveAuthoring = <R>(
               relations: priorRoot
                 ? [
                     priorRoot.data,
-                    ...priorRoot.documents.map(item => item.reference),
+                    ...EffectArray.map(priorRoot.documents, item => item.reference),
                     ...(priorRoot.previous ? [priorRoot.previous] : []),
                   ]
                 : [],
@@ -1281,13 +1442,16 @@ const saveAuthoring = <R>(
         ...(previous ? {previous} : {}),
         ...metadata,
       };
-      const links = [data, ...documents.map(item => item.reference), ...(previous ? [previous] : [])];
+      const links = [data, ...EffectArray.map(documents, item => item.reference), ...(previous ? [previous] : [])];
       const summary =
         document.objective +
         '\n\nReadiness: ' +
         readiness +
         '. Complete structured data and decision history are linked below.\n\n' +
-        links.map(reference => '- [Artifact](' + reference.uri + ')').join('\n');
+        EffectArray.join(
+          EffectArray.map(links, reference => '- [Artifact](' + reference.uri + ')'),
+          '\n',
+        );
       const body = yield* Effect.try({
         try: () => encodeAuthoringArtifact(document.title, summary, root),
         catch: nativeWorkflowError,
@@ -1391,9 +1555,12 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
       spec: document.spec,
       requirements: document.requirements,
       phases: document.phases,
-      decisions: root.documents.find(item => item.id === 'decisions')?.reference,
-      current: root.documents.find(item => item.id === 'current')?.reference,
-      target: root.documents.find(item => item.id === 'target')?.reference,
+      decisions: EffectOption.getOrUndefined(EffectArray.findFirst(root.documents, item => item.id === 'decisions'))
+        ?.reference,
+      current: EffectOption.getOrUndefined(EffectArray.findFirst(root.documents, item => item.id === 'current'))
+        ?.reference,
+      target: EffectOption.getOrUndefined(EffectArray.findFirst(root.documents, item => item.id === 'target'))
+        ?.reference,
       history: root.previous,
       required:
         'Bind verified current code refs and phase acceptance to implemented architecture before retiring owned drafts.',
@@ -1404,19 +1571,16 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
       'Provide the already-authorized delivery mode and an exact branch/base binding for every phase.',
     );
   if (
-    Object.keys(request.bindings).sort().join('\n') !==
-    document.phases
-      .map(phase => phase.id)
-      .sort()
-      .join('\n')
+    EffectArray.join(EffectRecord.keys(request.bindings).sort(), '\n') !==
+    EffectArray.join(EffectArray.map(document.phases, phase => phase.id).sort(), '\n')
   )
     return yield* fail('invalid-request', 'Branch bindings must cover exactly the approved phase IDs.');
   const phases = [];
   for (const phase of document.phases) {
     const branch = request.bindings[phase.id];
     if (
-      !branch.branch.trim() ||
-      !branch.baseBranch.trim() ||
+      !Effect2.pipe(branch.branch, EffectString.trim) ||
+      !Effect2.pipe(branch.baseBranch, EffectString.trim) ||
       branch.branch.length > 256 ||
       branch.baseBranch.length > 256 ||
       hasControl(branch.branch + branch.baseBranch)
@@ -1428,12 +1592,12 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
       title: phase.title,
       dependsOn: phase.dependsOn,
       allowedPaths: [...phase.affectedPaths, ...phase.newPaths],
-      acceptanceCriteria: phase.acceptance.map(item => item.criterion),
+      acceptanceCriteria: EffectArray.map(phase.acceptance, item => item.criterion),
       safeToMergeReason: phase.safeBoundary,
       branch: branch.branch,
       baseBranch: branch.baseBranch,
       status: 'pending',
-      acceptanceRefs: phase.acceptance.map(item => ({
+      acceptanceRefs: EffectArray.map(phase.acceptance, item => ({
         id: item.id,
         criterion: item.criterion,
         requirements: item.requirementIds,
@@ -1451,7 +1615,8 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
     source: {root: artifactReference(artifact), binding, documentHash: root.documentHash},
     spec: document.spec,
     phases,
-    decisions: root.documents.find(item => item.id === 'decisions')?.reference,
+    decisions: EffectOption.getOrUndefined(EffectArray.findFirst(root.documents, item => item.id === 'decisions'))
+      ?.reference,
     completion: {
       root: artifactReference(artifact),
       specRoot: document.spec?.root,

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect, Exit} from 'effect';
@@ -8,15 +9,17 @@ import {graphShareParseActionKey} from '@threadnote/graph/sharing/action';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {graphShareParseResultArtifact} from '@threadnote/graph/sharing/parse/result';
 import {makeGraphShareSourceVerification} from '@threadnote/graph/sharing/source_verification';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const repositoryId = 'a'.repeat(64),
-  sourceCommit = 'b'.repeat(40),
-  extractorSet = 'c'.repeat(64);
+const repositoryId = Effect2.pipe('a', EffectString.repeat(64)),
+  sourceCommit = Effect2.pipe('b', EffectString.repeat(40)),
+  extractorSet = Effect2.pipe('c', EffectString.repeat(64));
 function fixture(path: string, diagnostics: readonly string[] = []) {
   const file: CodeGraphInventoryFile = {
     path,
-    blobId: 'd'.repeat(40),
-    contentHash: 'e'.repeat(64),
+    blobId: Effect2.pipe('d', EffectString.repeat(40)),
+    contentHash: Effect2.pipe('e', EffectString.repeat(64)),
     language: 'typescript',
     mode: '100644',
     source: 'commit',
@@ -66,11 +69,15 @@ describe('source-verified original contribution assembly', () => {
     },
     ({values}) =>
       Effect.gen(function* () {
-        const rows = values.map((value, i) => fixture(`src/file-${i}.ts`, [value]));
-        const selected = rows.filter((_, i) => i % 2 === 0);
+        const rows = EffectArray.map(values, (value, i) => fixture(`src/file-${i}.ts`, [value]));
+        const selected = EffectArray.filter(rows, (_, i) => i % 2 === 0);
         const before = JSON.stringify(rows);
         const make = () =>
-          makeGraphShareSourceVerification({repositoryId, sourceCommit, verified: selected.map(row => row.item)});
+          makeGraphShareSourceVerification({
+            repositoryId,
+            sourceCommit,
+            verified: EffectArray.map(selected, row => row.item),
+          });
         const left = make(),
           right = make();
         for (const row of rows) yield* left.hooks.observeParserBatch(row.group);
@@ -90,7 +97,7 @@ describe('source-verified original contribution assembly', () => {
         expect(evidence.consumedActions).toBe(selected.length);
         expect(evidence.sourceVerifiedFiles).toBe(rows.length);
         expect(evidence.consumedResultManifestDigests).toEqual(
-          selected.map(row => row.item.announcement.resultManifestDigest).sort(),
+          EffectArray.map(selected, row => row.item.announcement.resultManifestDigest).sort(),
         );
         expect(JSON.stringify(rows)).toBe(before);
       }),
@@ -103,12 +110,15 @@ describe('source-verified original contribution assembly', () => {
         const row = fixture('src/a.ts');
         const item = {
           ...row.item,
-          announcement: {...row.item.announcement, ...(changed === 'commit' ? {batchId: 'f'.repeat(40)} : {})},
+          announcement: {
+            ...row.item.announcement,
+            ...(changed === 'commit' ? {batchId: Effect2.pipe('f', EffectString.repeat(40))} : {}),
+          },
           parsed: {
             ...row.item.parsed,
             ...(changed === 'facts' ? {facts: {...row.facts, diagnostics: ['forged']}} : {}),
-            ...(changed === 'blob' ? {gitBlobId: 'f'.repeat(40)} : {}),
-            ...(changed === 'extractor' ? {extractorSet: 'f'.repeat(64)} : {}),
+            ...(changed === 'blob' ? {gitBlobId: Effect2.pipe('f', EffectString.repeat(40))} : {}),
+            ...(changed === 'extractor' ? {extractorSet: Effect2.pipe('f', EffectString.repeat(64))} : {}),
             ...(changed === 'path' ? {normalizedPath: 'src/missing.ts'} : {}),
             ...(changed === 'language' ? {languageAndRole: 'javascript:source'} : {}),
           },
@@ -130,7 +140,7 @@ describe('source-verified original contribution assembly', () => {
     'matches a signed SHA-256 source commit without treating its 40-character batch prefix as the full commit',
     () =>
       Effect.gen(function* () {
-        const fullCommit = `${sourceCommit}${'f'.repeat(24)}`;
+        const fullCommit = `${sourceCommit}${Effect2.pipe('f', EffectString.repeat(24))}`;
         const row = fixture('src/sha256.ts');
         const signed = {...row.item, sourceCommit: fullCommit};
         const proof = makeGraphShareSourceVerification({repositoryId, sourceCommit: fullCommit, verified: [signed]});
@@ -139,8 +149,8 @@ describe('source-verified original contribution assembly', () => {
         expect((yield* proof.complete()).consumedActions).toBe(1);
 
         for (const tampered of [
-          {...signed, sourceCommit: `${sourceCommit}${'e'.repeat(24)}`},
-          {...signed, announcement: {...signed.announcement, batchId: 'e'.repeat(40)}},
+          {...signed, sourceCommit: `${sourceCommit}${Effect2.pipe('e', EffectString.repeat(24))}`},
+          {...signed, announcement: {...signed.announcement, batchId: Effect2.pipe('e', EffectString.repeat(40))}},
         ]) {
           const rejected = makeGraphShareSourceVerification({
             repositoryId,

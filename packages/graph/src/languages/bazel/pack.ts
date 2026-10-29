@@ -3,6 +3,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {discoverBazelWorkspace} from '../../workspace.js';
 import {CodeGraphLanguagePackError, type CodeGraphFileMatcher, type CodeGraphLanguagePack} from '../types.js';
 import {extractBazelFacts} from './extractor.js';
+import {Array as EffectArray} from 'effect';
 
 const FILES = [
   {kind: 'basename', language: 'bazel-build', role: 'manifest', value: 'BUILD'},
@@ -35,7 +36,7 @@ export const codeGraphLanguagePack: CodeGraphLanguagePack = {
   resolutionStrategy: {domain: 'bazel', version: 'bazel-labels-static-v1'},
   version: '1.1.0',
   workspaceDetector: Option.some({
-    contextFiles: FILES.filter(file => file.role === 'workspace' || file.role === 'manifest'),
+    contextFiles: EffectArray.filter(FILES, file => file.role === 'workspace' || file.role === 'manifest'),
     detect: files => Effect.succeed(discoverBazelWorkspace(files)),
   }),
 };

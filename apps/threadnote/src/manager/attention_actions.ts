@@ -1,5 +1,6 @@
 import {refreshContextMaintenanceCase} from '../memory/context/maintenance_refresh.js';
 import {ContextMaintenanceBusy, contextMaintenanceBusyResult} from '../memory/context/maintenance_contracts.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {isManagerProjectName} from './project/name.js';
 import {Cause, Clock, Crypto, DateTime, Effect, Exit, Fiber, Result, Schema, Scope} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -46,8 +47,11 @@ import {handleManagerTopicReview, managerTopicPacketReviewId} from './topic_revi
 import {handleManagerTopicEnrollment} from './topic_enrollment.js';
 import {handleManagerTopicExpansion} from './topic_expansion.js';
 import {ManagerLiveConsumerChangeHints} from './live_consumer_observation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CITATION_FINDING_CATEGORIES = ['citation-changed', 'citation-missing', 'citation-unknown'] as const;
+const CITATION_FINDING_CATEGORY_VALUES: readonly string[] = CITATION_FINDING_CATEGORIES;
 const MAXIMUM_MANAGER_BULK_CITATION_REPAIRS = 100;
 const MAXIMUM_BACKGROUND_CITATION_REPAIR_BATCHES = 25;
 const MAXIMUM_BACKGROUND_CITATION_SCAN_RESTARTS = 3;
@@ -66,10 +70,10 @@ interface ManagerCitationRepairJobRegistry {
 
 const CITATION_REPAIR_JOB_REGISTRIES = new WeakMap<object, ManagerCitationRepairJobRegistry>();
 
-class ManagerCitationRepairJobError extends Schema.TaggedError<ManagerCitationRepairJobError>()(
-  'ManagerCitationRepairJobError',
-  {message: Schema.String},
-) {}
+class ManagerCitationRepairJobError extends Schema.TaggedError<
+  ManagerCitationRepairJobError,
+  {readonly brand: unique symbol}
+>()('ManagerCitationRepairJobError', {message: Schema.String}) {}
 
 /** Auth is enforced by the Manager router before these revision-bound adapters run. */
 export const handleManagerAttentionAction = Effect.fn('managerAttention.action')(function* (request: {
@@ -213,27 +217,23 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   const project = typeof body.project === 'string' ? body.project : '';
   if (!isManagerProjectName(project)) return invalid('Select a valid project.');
   if (route === '/api/context-health/semantic/preview' || route === '/api/context-health/semantic/refresh') {
-    if (route.endsWith('/preview') && body.choice !== 'left' && body.choice !== 'right' && body.choice !== 'both')
+    if (
+      Effect2.pipe(route, EffectString.endsWith('/preview')) &&
+      body.choice !== 'left' &&
+      body.choice !== 'right' &&
+      body.choice !== 'both'
+    )
       return invalid('Choose which memory to keep, or keep both.');
     if (typeof body.contradictionId !== 'string' || !/^[a-f0-9]{64}$/u.test(body.contradictionId))
       return invalid('Select an exact semantic comparison.');
-    const sources = [body.left, body.right];
-    if (
-      !sources.every(
-        value =>
-          typeof value === 'object' &&
-          value !== null &&
-          typeof (value as Record<string, unknown>).recordUri === 'string' &&
-          typeof (value as Record<string, unknown>).recordContentFingerprint === 'string',
-      )
-    )
+    if (!isSemanticReviewSource(body.left) || !isSemanticReviewSource(body.right))
       return invalid('Select both source revisions.');
-    if (route.endsWith('/refresh')) {
+    if (Effect2.pipe(route, EffectString.endsWith('/refresh'))) {
       const result = yield* refreshSemanticComparison(request.config, {
         project,
         contradictionId: body.contradictionId,
-        left: body.left as ManagerSemanticReviewInputV1['left'],
-        right: body.right as ManagerSemanticReviewInputV1['right'],
+        left: body.left,
+        right: body.right,
       }).pipe(Effect.result);
       if (Result.isSuccess(result)) return {status: 200, body: result.success};
       if (Schema.is(ResourceAccessDenied)(result.failure))
@@ -247,12 +247,14 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
         body: {error: 'The selected memories could not be checked right now. Check current evidence to try again.'},
       };
     }
+    if (body.choice !== 'left' && body.choice !== 'right' && body.choice !== 'both')
+      return invalid('Choose which memory to keep, or keep both.');
     const result = yield* previewSemanticReview(request.config, {
       project,
       contradictionId: body.contradictionId,
-      choice: body.choice as ManagerSemanticReviewInputV1['choice'],
-      left: body.left as ManagerSemanticReviewInputV1['left'],
-      right: body.right as ManagerSemanticReviewInputV1['right'],
+      choice: body.choice,
+      left: body.left,
+      right: body.right,
     }).pipe(Effect.result);
     return Result.isSuccess(result)
       ? {status: 200, body: {preview: result.success}}
@@ -277,10 +279,10 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
       ? {status: 200, body: {result: result.success}}
       : semanticReviewFailureResponse(result.failure);
   }
-  if (route.startsWith('/api/reviews/')) {
+  if (Effect2.pipe(route, EffectString.startsWith('/api/reviews/'))) {
     if (typeof body.reviewId !== 'string' || !/^review-[a-zA-Z0-9_-]+$/u.test(body.reviewId))
       return invalid('Invalid review identifier.');
-    if (route.endsWith('/refresh-safety')) {
+    if (Effect2.pipe(route, EffectString.endsWith('/refresh-safety'))) {
       if (typeof body.candidateId !== 'string') return invalid('Select a candidate from this review.');
       if (typeof body.revision !== 'number' || !Number.isSafeInteger(body.revision))
         return invalid('Select an exact review revision.');
@@ -305,7 +307,9 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
             );
           if (review.revision !== revision)
             return conflict('The review changed. Close and reopen it before refreshing replacement safety.');
-          const candidate = review.candidates.find(item => item.candidateId === candidateId);
+          const candidate = EffectOption.getOrUndefined(
+            EffectArray.findFirst(review.candidates, item => item.candidateId === candidateId),
+          );
           if (!candidate) return invalid('Select a candidate from this review.');
           if (candidate.state !== 'pending')
             return conflict('This candidate is no longer pending. Refresh the review inbox.');
@@ -360,8 +364,12 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
         'Open this topic in the maintenance review. Use /api/attention/topic-review.',
         'topic-review-route-required',
       );
-    if (route.endsWith('/preview')) return {status: 200, body: {review, delta: projectKnowledgeDeltaV1(review)}};
-    if (typeof body.candidateId !== 'string' || !review.candidates.some(item => item.candidateId === body.candidateId))
+    if (Effect2.pipe(route, EffectString.endsWith('/preview')))
+      return {status: 200, body: {review, delta: projectKnowledgeDeltaV1(review)}};
+    if (
+      typeof body.candidateId !== 'string' ||
+      !EffectArray.some(review.candidates, item => item.candidateId === body.candidateId)
+    )
       return invalid('Select a candidate from this review.');
     if (!Number.isSafeInteger(body.revision) || body.revision !== review.revision)
       return {status: 409, body: {error: 'The review changed. Close and reopen it before deciding.'}};
@@ -381,15 +389,22 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
         ? {
             operation: body.operation,
             ...(body.operation === 'replace'
-              ? {replaceUri: review.candidates.find(item => item.candidateId === body.candidateId)?.targetUri}
+              ? {
+                  replaceUri: EffectOption.getOrUndefined(
+                    EffectArray.findFirst(review.candidates, item => item.candidateId === body.candidateId),
+                  )?.targetUri,
+                }
               : {}),
           }
         : {}),
     });
-    const message = result.content
-      .filter(item => item.type === 'text')
-      .map(item => item.text)
-      .join('\n');
+    const message = EffectArray.join(
+      EffectArray.map(
+        EffectArray.filter(result.content, item => item.type === 'text'),
+        item => item.text,
+      ),
+      '\n',
+    );
     if ('isError' in result && result.isError) return {status: 409, body: {error: message}};
     return {status: 200, body: {message, result: result.structuredContent}};
   }
@@ -412,13 +427,10 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   }
   if (route === '/api/context-health/citations/preview') {
     if (body.findingCategory !== undefined) {
-      if (
-        typeof body.findingCategory !== 'string' ||
-        !CITATION_FINDING_CATEGORIES.some(category => category === body.findingCategory)
-      ) {
+      if (!isCitationFindingCategory(body.findingCategory)) {
         return invalid('Select a citation finding category.');
       }
-      const findingCategory = body.findingCategory as (typeof CITATION_FINDING_CATEGORIES)[number];
+      const findingCategory = body.findingCategory;
       const after = typeof body.after === 'string' ? body.after : undefined;
       const plan = yield* previewContextHealthRepairs(request.config, project, cwd, {
         findingCategory,
@@ -437,13 +449,15 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
     };
   }
   if (route === '/api/context-health/citations/apply') {
-    if (body.approved !== true || !Array.isArray(body.items)) {
+    if (body.approved !== true || !EffectArray.isArray(body.items)) {
       return invalid('Bulk citation repair requires explicit approval of the previewed items.');
     }
     const items = parseBulkCitationRepairItems(body.items);
     if (items === undefined) return invalid('Bulk citation repair items are invalid or exceed the limit.');
     const collected = yield* collectCitationRepairProposals(request.config, project, cwd);
-    const currentByFindingId = new Map(collected.proposals.map(proposal => [proposal.findingId, proposal] as const));
+    const currentByFindingId = new Map(
+      EffectArray.map(collected.proposals, proposal => [proposal.findingId, proposal] as const),
+    );
     const matched: ContextHealthRepairProposalV1[] = [];
     const results: Array<{readonly findingId: string; readonly status: string; readonly error?: string}> = [];
     for (const item of items) {
@@ -473,9 +487,11 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
     return {
       status: 200,
       body: {
-        appliedCount: results.filter(result => result.status === 'applied' || result.status === 'already-applied')
-          .length,
-        failedCount: results.filter(result => result.status === 'conflict').length,
+        appliedCount: EffectArray.filter(
+          results,
+          result => result.status === 'applied' || result.status === 'already-applied',
+        ).length,
+        failedCount: EffectArray.filter(results, result => result.status === 'conflict').length,
         project,
         results,
         version: 1,
@@ -493,17 +509,23 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
     }),
   ).pipe(Effect.result);
   if (Result.isFailure(selector)) return invalid('Invalid context-health scope. Refresh and select a finding again.');
-  if (route.endsWith('/preview')) {
+  if (Effect2.pipe(route, EffectString.endsWith('/preview'))) {
     if (typeof body.findingId !== 'string') return invalid('Select a health finding.');
     const records = yield* readActiveProjectMemoryRecords(request.config, project);
-    const subject = records.find(record => record.uri === body.subjectUri);
+    const subject = EffectOption.getOrUndefined(
+      EffectArray.findFirst(records, record => record.uri === body.subjectUri),
+    );
     const scope = {findingCategory, ...(subject ? {topic: subject.metadata.topic, kind: subject.metadata.kind} : {})};
     let plan = yield* previewContextHealthRepairs(request.config, project, cwd, {...scope, after});
-    let proposal = plan.proposals.find(item => item.findingId === body.findingId);
+    let proposal = EffectOption.getOrUndefined(
+      EffectArray.findFirst(plan.proposals, item => item.findingId === body.findingId),
+    );
     // A single long memory may produce more than one page of citations or relations.
     for (let page = 1; !proposal && plan.nextCursor && page < 20; page += 1) {
       plan = yield* previewContextHealthRepairs(request.config, project, cwd, {...scope, after: plan.nextCursor});
-      proposal = plan.proposals.find(item => item.findingId === body.findingId);
+      proposal = EffectOption.getOrUndefined(
+        EffectArray.findFirst(plan.proposals, item => item.findingId === body.findingId),
+      );
     }
     if (!proposal)
       return {
@@ -559,7 +581,9 @@ function startBackgroundCitationRepair(
 ) {
   return Effect.gen(function* () {
     const registry = citationRepairRegistry(request);
-    const active = [...registry.jobs.values()].find(entry => entry.job.status === 'running');
+    const active = EffectOption.getOrUndefined(
+      EffectArray.findFirst([...registry.jobs.values()], entry => entry.job.status === 'running'),
+    );
     if (active !== undefined) {
       return active.job.project === project
         ? {status: 202, body: {job: active.job}}
@@ -571,7 +595,7 @@ function startBackgroundCitationRepair(
       trimCitationRepairJobs(registry);
       const crypto = yield* Crypto.Crypto;
       const createdAt = managerTimestamp(yield* Clock.currentTimeMillis);
-      const id = `mcrj_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
+      const id = `mcrj_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
       const hints = yield* ManagerLiveConsumerChangeHints;
       const entry: InternalManagerCitationRepairJob = {
         onChange: hints.publish({topic: 'citation-repair-jobs', project}),
@@ -659,7 +683,7 @@ const runBackgroundCitationRepair = Effect.fn('managerAttention.runBackgroundCit
             }),
       };
     }
-    const recordCount = new Set(repairable.map(proposal => proposal.mutation.subjectUri)).size;
+    const recordCount = new Set(EffectArray.map(repairable, proposal => proposal.mutation.subjectUri)).size;
     yield* updateCitationRepairJob(entry, {
       batch,
       failedCount,
@@ -673,7 +697,7 @@ const runBackgroundCitationRepair = Effect.fn('managerAttention.runBackgroundCit
     });
     const currentGraph = yield* runManagerExplicitCwdGraphIndex(config, {cwd, full: false});
     const capturedSnapshotIds = new Set(
-      repairable.flatMap(proposal =>
+      EffectArray.flatMap(repairable, proposal =>
         typeof proposal.mutation.replacement.sourceSnapshotId === 'string'
           ? [proposal.mutation.replacement.sourceSnapshotId]
           : [],
@@ -710,7 +734,7 @@ const runBackgroundCitationRepair = Effect.fn('managerAttention.runBackgroundCit
       unresolvedCount: scan.unresolvedCount,
     });
     const results = yield* applyContextHealthCitationRepairBatch(config, {project, proposals: repairable});
-    const appliedThisBatch = results.filter(result => result.status === 'applied').length;
+    const appliedThisBatch = EffectArray.filter(results, result => result.status === 'applied').length;
     failedCount += results.length - appliedThisBatch;
     repairedCount += appliedThisBatch;
     if (appliedThisBatch === 0) {
@@ -770,7 +794,10 @@ const scanBackgroundCitationRepairs = Effect.fn('managerAttention.scanBackground
       if (Exit.isFailure(planExit)) {
         if (
           after !== undefined &&
-          errorMessage(Cause.squash(planExit.cause)).includes(STALE_CONTEXT_HEALTH_CURSOR_MESSAGE) &&
+          Effect2.pipe(
+            errorMessage(Cause.squash(planExit.cause)),
+            EffectString.includes(STALE_CONTEXT_HEALTH_CURSOR_MESSAGE),
+          ) &&
           restartCount < MAXIMUM_BACKGROUND_CITATION_SCAN_RESTARTS
         ) {
           yield* updateCitationRepairJob(entry, {
@@ -793,7 +820,8 @@ const scanBackgroundCitationRepairs = Effect.fn('managerAttention.scanBackground
       proposals.push(...plan.proposals);
       batchPagesScanned += 1;
       pagesScanned += 1;
-      unresolvedCount = proposals.filter(
+      unresolvedCount = EffectArray.filter(
+        proposals,
         proposal => proposal.mutation.kind === 'review-only' && proposal.mutation.repairKind === 'repair-citation',
       ).length;
       yield* updateCitationRepairJob(entry, {
@@ -822,13 +850,30 @@ type CitationReplacementProposal = ContextHealthRepairProposalV1 & {
   readonly mutation: Extract<ContextHealthRepairProposalV1['mutation'], {readonly kind: 'replace-citation'}>;
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
+function isCitationFindingCategory(value: unknown): value is (typeof CITATION_FINDING_CATEGORIES)[number] {
+  return typeof value === 'string' && CITATION_FINDING_CATEGORY_VALUES.includes(value);
+}
+
+function isSemanticReviewSource(value: unknown): value is ManagerSemanticReviewInputV1['left'] {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.recordUri === 'string' &&
+    typeof value.recordContentFingerprint === 'string' &&
+    (value.claimFingerprint === undefined || typeof value.claimFingerprint === 'string')
+  );
+}
+
 function uniqueCitationReplacementProposals(
   proposals: readonly ContextHealthRepairProposalV1[],
 ): readonly CitationReplacementProposal[] {
   const unique = new Map<string, CitationReplacementProposal>();
   for (const proposal of proposals) {
     if (proposal.mutation.kind === 'replace-citation')
-      unique.set(proposal.proposalId, proposal as CitationReplacementProposal);
+      unique.set(proposal.proposalId, {...proposal, mutation: proposal.mutation});
   }
   return [...unique.values()];
 }
@@ -909,15 +954,15 @@ function citationRepairRegistry(request: {
 }
 
 function latestCitationRepairJob(registry: ManagerCitationRepairJobRegistry, project: string) {
-  return [...registry.jobs.values()]
-    .filter(entry => entry.job.project === project)
-    .sort((left, right) => right.job.createdAt.localeCompare(left.job.createdAt))[0];
+  return EffectArray.filter([...registry.jobs.values()], entry => entry.job.project === project).sort((left, right) =>
+    Effect2.pipe(right.job.createdAt, EffectString.localeCompare(left.job.createdAt)),
+  )[0];
 }
 
 function trimCitationRepairJobs(registry: ManagerCitationRepairJobRegistry): void {
-  const finished = [...registry.jobs.values()]
-    .filter(entry => entry.job.status !== 'running')
-    .sort((left, right) => left.job.createdAt.localeCompare(right.job.createdAt));
+  const finished = EffectArray.filter([...registry.jobs.values()], entry => entry.job.status !== 'running').sort(
+    (left, right) => Effect2.pipe(left.job.createdAt, EffectString.localeCompare(right.job.createdAt)),
+  );
   while (registry.jobs.size >= 16 && finished.length > 0) registry.jobs.delete(finished.shift()!.job.id);
 }
 
@@ -963,8 +1008,9 @@ function citationRepairPreviewBody(
   nextCursor?: string,
   records: readonly import('@threadnote/memory/document').MemoryRecord[] = [],
 ) {
-  const recordsByUri = new Map(records.map(record => [record.uri, record] as const));
-  const allRepairable = proposals.filter(
+  const recordsByUri = new Map(EffectArray.map(records, record => [record.uri, record] as const));
+  const allRepairable = EffectArray.filter(
+    proposals,
     (
       proposal,
     ): proposal is ContextHealthRepairProposalV1 & {
@@ -973,7 +1019,7 @@ function citationRepairPreviewBody(
   );
   const repairable = allRepairable.slice(0, MAXIMUM_MANAGER_BULK_CITATION_REPAIRS);
   return {
-    items: repairable.map(proposal => {
+    items: EffectArray.map(repairable, proposal => {
       const record = recordsByUri.get(proposal.mutation.subjectUri);
       return {
         category: proposal.category,
@@ -997,7 +1043,8 @@ function citationRepairPreviewBody(
     ...(nextCursor === undefined ? {} : {nextCursor}),
     project,
     repairableCount: repairable.length,
-    requiresGraphCount: proposals.filter(
+    requiresGraphCount: EffectArray.filter(
+      proposals,
       proposal => proposal.mutation.kind === 'review-only' && proposal.mutation.repairKind === 'repair-citation',
     ).length,
     truncated: enumerationTruncated || repairable.length < allRepairable.length,
@@ -1006,23 +1053,49 @@ function citationRepairPreviewBody(
 }
 
 function managerMemoryTitle(record: import('@threadnote/memory/document').MemoryRecord): string {
-  const heading = record.body.split(/\r?\n/u).find(line => /^#{1,6}\s+\S/u.test(line));
+  const heading = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      Effect2.pipe(record.body, EffectString.split(/\r?\n/u)),
+      __effectArrayValue => !!(line => /^#{1,6}\s+\S/u.test(line))(__effectArrayValue),
+    ),
+  );
   return (
-    heading?.replace(/^#{1,6}\s+/u, '').trim() ??
+    Effect2.pipe(
+      heading,
+      effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect2.pipe(effectOptionalString, EffectString.replace(/^#{1,6}\s+/u, '')),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) ??
     record.metadata.topic ??
-    record.uri
-      .slice(record.uri.lastIndexOf('/') + 1)
-      .replace(/\.md$/u, '')
-      .replaceAll('-', ' ')
+    Effect2.pipe(record.uri, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(
+        __effectPipeInput,
+        EffectString.slice(
+          Effect2.pipe(
+            record.uri,
+            EffectString.lastIndexOf('/'),
+            Effect2.Option.getOrElse(() => -1),
+          ) + 1,
+        ),
+      );
+      const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\.md$/u, ''));
+      const __effectPipeStage2 = Effect2.pipe(__effectPipeStage1, EffectString.replaceAll('-', ' '));
+      return __effectPipeStage2;
+    })
   );
 }
 
 function managerMemoryExcerpt(body: string): string {
-  const plain = body
-    .replace(/^#{1,6}\s+.*$/gmu, '')
-    .replace(/\s+/gu, ' ')
-    .trim();
-  return plain.length > 220 ? `${plain.slice(0, 217).trimEnd()}…` : plain;
+  const plain = Effect2.pipe(
+    body,
+    EffectString.replace(/^#{1,6}\s+.*$/gmu, ''),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
+  return plain.length > 220 ? `${Effect2.pipe(plain, EffectString.slice(0, 217), EffectString.trimEnd)}…` : plain;
 }
 
 const collectCitationRepairProposals = Effect.fn('managerAttention.collectCitationRepairs')(function* (
@@ -1052,10 +1125,10 @@ function parseBulkCitationRepairItems(values: readonly unknown[]) {
     readonly subjectUri: string;
   }> = [];
   for (const value of values) {
-    if (typeof value !== 'object' || value === null) return undefined;
-    const item = value as Record<string, unknown>;
+    if (!isRecord(value)) return undefined;
+    const item = value;
     if (
-      !CITATION_FINDING_CATEGORIES.some(category => category === item.category) ||
+      !isCitationFindingCategory(item.category) ||
       typeof item.findingId !== 'string' ||
       item.findingId.length === 0 ||
       typeof item.proposalId !== 'string' ||
@@ -1063,7 +1136,7 @@ function parseBulkCitationRepairItems(values: readonly unknown[]) {
       typeof item.revision !== 'string' ||
       !/^[0-9a-f]{64}$/u.test(item.revision) ||
       typeof item.subjectUri !== 'string' ||
-      !item.subjectUri.startsWith('threadnote://') ||
+      !Effect2.pipe(item.subjectUri, EffectString.startsWith('threadnote://')) ||
       typeof item.citationId !== 'string' ||
       !/^tncc_[0-9a-f]{40}$/u.test(item.citationId) ||
       typeof item.replacementId !== 'string' ||
@@ -1072,7 +1145,7 @@ function parseBulkCitationRepairItems(values: readonly unknown[]) {
       return undefined;
     }
     parsed.push({
-      category: item.category as (typeof CITATION_FINDING_CATEGORIES)[number],
+      category: item.category,
       citationId: item.citationId,
       findingId: item.findingId,
       proposalId: item.proposalId,

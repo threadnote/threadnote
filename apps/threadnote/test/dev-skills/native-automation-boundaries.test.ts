@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Result, Stdio, Stream} from 'effect';
+import {Effect, FileSystem, Result, Schema, Stdio, Stream} from 'effect';
 import {describe, expect} from 'vitest';
 import {nativeWorkflowIntentDigest} from '@threadnote/workflow-automations/native';
 import {readNativeWorkflowInput} from '../../src/effect/workflow_automation_cli.js';
@@ -10,6 +10,8 @@ import {
 } from '../../src/workflow_automation/store.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('native workflow automation boundaries', () => {
   effectIt.effect('decodes UTF-8 across stdin chunks and rejects malformed or truncated input', () =>
@@ -58,19 +60,33 @@ describe('native workflow automation boundaries', () => {
       const canonicalJournal = yield* f.fs.readFileString(journalFile);
       const cases = [
         '{"protocolVersion":1,"binding":{},"operations":{}}\n',
-        JSON.stringify({format: 'threadnote-native-workflow', stateVersion: 2, executorVersion: 1}),
-        JSON.stringify({format: 'python-workflow-run', stateVersion: 1, executorVersion: 1}),
+        JSON.stringify({
+          format: 'threadnote-native-workflow',
+          stateVersion: 2,
+          executorVersion: 1,
+        }),
+        JSON.stringify({
+          format: 'python-workflow-run',
+          stateVersion: 1,
+          executorVersion: 1,
+        }),
       ];
       for (const bytes of cases) {
         yield* f.fs.writeFileString(stateFile, bytes);
         const inspect = yield* f.call(f.base('inspect')).pipe(Effect.result);
         expect(Result.isFailure(inspect)).toBe(true);
-        if (Result.isFailure(inspect)) expect(inspect.failure).toMatchObject({code: 'unsupported-state'});
+        if (Result.isFailure(inspect))
+          expect(inspect.failure).toMatchObject({
+            code: 'unsupported-state',
+          });
         expect(yield* f.fs.readFileString(stateFile)).toBe(bytes);
         expect(yield* f.fs.readFileString(journalFile)).toBe(canonicalJournal);
         const initialize = yield* f.init().pipe(Effect.result);
         expect(Result.isFailure(initialize)).toBe(true);
-        if (Result.isFailure(initialize)) expect(initialize.failure).toMatchObject({code: 'unsupported-state'});
+        if (Result.isFailure(initialize))
+          expect(initialize.failure).toMatchObject({
+            code: 'unsupported-state',
+          });
         expect(yield* f.fs.readFileString(stateFile)).toBe(bytes);
         const write = yield* f.call(f.write()).pipe(Effect.result);
         expect(Result.isFailure(write)).toBe(true);
@@ -139,7 +155,10 @@ describe('native workflow automation boundaries', () => {
       const journalFile = f.journalPath(initialized.bindingId);
       const stateBefore = yield* f.fs.readFileString(stateFile);
       const journalBefore = yield* f.fs.readFileString(journalFile);
-      const competingState = stateBefore.replace('skill-generation-v1', 'competing-generation');
+      const competingState = Effect2.pipe(
+        stateBefore,
+        EffectString.replace('skill-generation-v1', 'competing-generation'),
+      );
       const originalFs = yield* FileSystem.FileSystem;
       let reads = 0;
       let injected = false;
@@ -169,9 +188,9 @@ describe('native workflow automation boundaries', () => {
       const f = yield* nativeFixture();
       const initialized = yield* f.init();
       const runId = 'native-run';
-      const body = `Large native receipt payload — ${'evidence remains deterministic. '.repeat(96)}\n`;
+      const body = `Large native receipt payload — ${Effect2.pipe('evidence remains deterministic. ', EffectString.repeat(96))}\n`;
       const operations = Array.from({length: 400}, (_, index) => {
-        const operationId = `op-${String(index).padStart(3, '0')}`;
+        const operationId = `op-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}`;
         const intent = {
           bindingId: initialized.bindingId,
           operationId,
@@ -181,7 +200,11 @@ describe('native workflow automation boundaries', () => {
           body,
           expectedRevision: null,
         };
-        return {status: 'prepared' as const, intent, intentDigest: nativeWorkflowIntentDigest(intent)};
+        return {
+          status: 'prepared' as const,
+          intent,
+          intentDigest: nativeWorkflowIntentDigest(intent),
+        };
       });
       const payload = yield* withNativeWorkflowLock(
         f.config,
@@ -197,8 +220,15 @@ describe('native workflow automation boundaries', () => {
         }),
       );
       const bytes = yield* f.fs.readFileString(f.statePath());
-      const envelope = JSON.parse(bytes) as {format: string; expandedBytes: number};
-      expect(envelope).toMatchObject({format: 'threadnote-native-workflow-state-gzip-v1'});
+      const envelope = yield* Schema.decodeUnknownEffect(
+        Schema.Struct({
+          format: Schema.String,
+          expandedBytes: Schema.Int,
+        }),
+      )(JSON.parse(bytes));
+      expect(envelope).toMatchObject({
+        format: 'threadnote-native-workflow-state-gzip-v1',
+      });
       expect(envelope.expandedBytes).toBeGreaterThan(1_000_000);
       const reread = yield* readNativeWorkflowState(f.config, runId);
       expect(reread?.state).toEqual(payload);

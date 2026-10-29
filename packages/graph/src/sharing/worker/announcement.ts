@@ -37,6 +37,9 @@ const encode = (value: unknown) => new TextEncoder().encode(canonicalJson(value)
 export type GraphWorkerResultAnnouncement = typeof Announcement.Type;
 export type GraphWorkerResultAnnouncementBody = typeof Body.Type;
 
+export const decodeGraphWorkerResultAnnouncement = (value: unknown) =>
+  Schema.decodeUnknownEffect(Announcement, STRICT)(value).pipe(Effect.mapError(failure));
+
 export const signGraphWorkerResultAnnouncement = Effect.fn('codeGraph.sharing.signWorkerResultAnnouncement')(
   function* (input: {
     readonly artifact: Effect.Success<ReturnType<typeof createGraphWorkerResultArtifact>>;

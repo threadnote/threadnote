@@ -1,3 +1,6 @@
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 export interface WebsiteArticle {
   readonly author: string;
   readonly authorUrl?: string;
@@ -67,12 +70,13 @@ export function filterWebsiteUpdatesByKind<T extends Readonly<{kind: WebsiteUpda
   updates: readonly T[],
   kind: WebsiteUpdateKind,
 ): readonly T[] {
-  return updates.filter(update => update.kind === kind);
+  return EffectArray.filter(updates, update => update.kind === kind);
 }
 
 export function orderWebsiteUpdatesDescending<T extends WebsiteUpdateOrderRef>(updates: readonly T[]): readonly T[] {
   return [...updates].sort(
     (left, right) =>
-      Date.parse(right.publishedAt) - Date.parse(left.publishedAt) || left.stableId.localeCompare(right.stableId),
+      Date.parse(right.publishedAt) - Date.parse(left.publishedAt) ||
+      Effect.pipe(left.stableId, EffectString.localeCompare(right.stableId)),
   );
 }

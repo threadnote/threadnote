@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 
@@ -46,6 +47,8 @@ import {
 } from './context-brief-citation-rss-observer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {atomicWrite, printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_BUDGET = 'apps/threadnote/test/evaluation/baselines/context-brief-citations-v1/scale-budgets.json';
 const RSS_OBSERVER_BARRIER_TIMEOUT_MILLISECONDS = 30_000;
@@ -106,7 +109,7 @@ export const readContextBriefCitationScaleCandidate = Effect.fn('contextBriefCit
   }
   const options = {cwd, maxOutputBytes: 128 * 1024, timeoutMs: 10_000};
   const head = yield* runCommandEffect('git', ['rev-parse', 'HEAD'], options);
-  if (head.stdout.trim() !== candidateCommit) {
+  if (Effect2.pipe(head.stdout, EffectString.trim) !== candidateCommit) {
     return yield* ScriptError.make({message: 'Release-scale evidence requires the exact candidate checkout.'});
   }
   const status = yield* runCommandEffect(
@@ -124,7 +127,7 @@ export const readContextBriefCitationScaleCandidate = Effect.fn('contextBriefCit
     ],
     options,
   );
-  if (status.stdout.trim()) {
+  if (Effect2.pipe(status.stdout, EffectString.trim)) {
     return yield* ScriptError.make({message: 'Release-scale evidence requires an exact clean candidate checkout.'});
   }
   const manifest = yield* runCommandEffect('git', ['show', `${candidateCommit}:package.json`], options);
@@ -181,7 +184,7 @@ const program = Effect.scoped(
     }
     yield* printJson(artifact);
     if (options.failOnBudget && !artifact.gate.passed) {
-      return yield* ScriptError.make({message: artifact.gate.failures.join('\n')});
+      return yield* ScriptError.make({message: EffectArray.join(artifact.gate.failures, '\n')});
     }
   }),
 );
@@ -230,19 +233,21 @@ export function parseContextBriefCitationScaleBenchmarkArguments(
 }
 
 function profiles(value: string): readonly ContextBriefCitationScaleProfileId[] {
-  const selected = value.split(',').filter(Boolean);
+  const selected = EffectArray.filter(Effect2.pipe(value, EffectString.split(',')), Boolean);
   if (
     selected.length === 0 ||
     new Set(selected).size !== selected.length ||
-    selected.some(
-      profile => !CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS.includes(profile as ContextBriefCitationScaleProfileId),
-    )
+    EffectArray.some(selected, profile => !isContextBriefCitationScaleProfileId(profile))
   ) {
     throw ScriptError.make({
       message: '--profiles must be a unique comma-separated subset of local-100k,workset-50,workset-128.',
     });
   }
-  return selected as ContextBriefCitationScaleProfileId[];
+  return EffectArray.filter(selected, isContextBriefCitationScaleProfileId);
+}
+
+function isContextBriefCitationScaleProfileId(value: string): value is ContextBriefCitationScaleProfileId {
+  return EffectArray.some(CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS, profile => profile === value);
 }
 
 function positiveInteger(value: string | undefined, option: string): number {
@@ -260,6 +265,7 @@ function nonNegativeInteger(value: string | undefined, option: string): number {
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
@@ -570,7 +576,7 @@ const boundedObserverStderr = Effect.fn('contextBriefCitationScale.boundedRssObs
   stderr: Promise<string>,
 ) {
   const text = yield* Effect.promise(() => stderr);
-  return text.trim().slice(0, 4_096) || 'no diagnostic';
+  return Effect2.pipe(text, EffectString.trim, EffectString.slice(0, 4_096)) || 'no diagnostic';
 });
 
 const systemLayer = ScriptSystemInfoLayer;

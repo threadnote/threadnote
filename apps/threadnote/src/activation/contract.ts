@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const ACTIVATION_PLAN_VERSION = 1 as const;
 export const ACTIVATION_RECEIPT_VERSION = 1 as const;
@@ -169,8 +172,13 @@ const BoundedVersion = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(128),
   Schema.makeFilter(value =>
-    [...value].some(character => {
-      const code = character.codePointAt(0) ?? 0;
+    EffectArray.some([...value], character => {
+      const code =
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        ) ?? 0;
       return code < 0x20 || code === 0x7f;
     })
       ? 'Expected text without control characters.'
@@ -296,7 +304,7 @@ export function parseActivationPlanV1(value: unknown): ActivationPlanV1 {
   const ids = new Set<string>();
   for (const operation of plan.operations) {
     if (ids.has(operation.id)) throw new Error('Activation operation IDs must be unique.');
-    if (operation.dependsOn.some(dependency => !ids.has(dependency))) {
+    if (EffectArray.some(operation.dependsOn, dependency => !ids.has(dependency))) {
       throw new Error(`Activation operation ${operation.id} has an unordered dependency.`);
     }
     ids.add(operation.id);
@@ -310,7 +318,7 @@ export function parseActivationPlanV1(value: unknown): ActivationPlanV1 {
 
 export function parseActivationReceiptV1(value: unknown): ActivationReceiptV1 {
   const receipt = Schema.decodeUnknownSync(ActivationReceiptV1Schema, STRICT_PARSE_OPTIONS)(value);
-  if (new Set(receipt.operations.map(operation => operation.id)).size !== receipt.operations.length) {
+  if (new Set(EffectArray.map(receipt.operations, operation => operation.id)).size !== receipt.operations.length) {
     throw new Error('Activation receipt operation IDs must be unique.');
   }
   for (const operation of receipt.operations) validateReceiptOperation(operation);
@@ -319,7 +327,8 @@ export function parseActivationReceiptV1(value: unknown): ActivationReceiptV1 {
   if ((receipt.status === 'completed') !== (receipt.completedAt !== undefined)) {
     throw new Error('Only completed activation receipts include completion time.');
   }
-  const briefComplete = receipt.operations.some(
+  const briefComplete = EffectArray.some(
+    receipt.operations,
     operation => operation.kind === 'brief.verify' && operation.status === 'verified',
   );
   if ((receipt.firstBrief !== undefined) !== briefComplete) {
@@ -334,14 +343,14 @@ export function parseActivationReceiptV1(value: unknown): ActivationReceiptV1 {
 
 export function parseActivationUndoPlanV1(value: unknown): ActivationUndoPlanV1 {
   const plan = Schema.decodeUnknownSync(ActivationUndoPlanV1Schema, STRICT_PARSE_OPTIONS)(value);
-  const operationIds = plan.operations.map(operation => operation.operationId);
+  const operationIds = EffectArray.map(plan.operations, operation => operation.operationId);
   if (new Set(operationIds).size !== operationIds.length) {
     throw new Error('Activation undo operation IDs must be unique.');
   }
   if (new Set(plan.retainedOperationIds).size !== plan.retainedOperationIds.length) {
     throw new Error('Activation retained operation IDs must be unique.');
   }
-  if (plan.retainedOperationIds.some(operationId => operationIds.includes(operationId))) {
+  if (EffectArray.some(plan.retainedOperationIds, operationId => operationIds.includes(operationId))) {
     throw new Error('Activation undo and retained operation IDs must be disjoint.');
   }
   if (activationUndoPlanHashV1(plan) !== plan.undoPlanHash) {
@@ -355,8 +364,11 @@ export function parseActivationUndoApprovalV1(value: unknown): ActivationUndoApp
 }
 
 export function activationPlanHashV1(plan: Omit<ActivationPlanV1, 'planHash'> | ActivationPlanV1): string {
-  const {planHash: _, ...body} = plan as ActivationPlanV1;
-  return sha256HexSync(canonicalJson(body));
+  if ('planHash' in plan) {
+    const {planHash: _, ...body} = plan;
+    return sha256HexSync(canonicalJson(body));
+  }
+  return sha256HexSync(canonicalJson(plan));
 }
 
 export function activationIdV1(
@@ -376,7 +388,7 @@ export function activationIdV1(
 export function canonicalActivationOperationsV1(input: ActivationPlanInputV1): readonly ActivationPlanOperationV1[] {
   const activationId = activationIdV1(input);
   const definitions = activationOperationDefinitionsV1(input.publicationMode);
-  return definitions.map((definition, index) => {
+  return EffectArray.map(definitions, (definition, index) => {
     const dependsOn = index === 0 ? [] : [definitions[index - 1].id];
     return {
       ...definition,
@@ -448,23 +460,29 @@ export function activationOperationDefinitionsV1(
 export function activationUndoPlanHashV1(
   plan: Omit<ActivationUndoPlanV1, 'undoPlanHash'> | ActivationUndoPlanV1,
 ): string {
-  const {undoPlanHash: _, ...body} = plan as ActivationUndoPlanV1;
-  return sha256HexSync(canonicalJson(body));
+  if ('undoPlanHash' in plan) {
+    const {undoPlanHash: _, ...body} = plan;
+    return sha256HexSync(canonicalJson(body));
+  }
+  return sha256HexSync(canonicalJson(plan));
 }
 
 export function activationReceiptRevisionV1(
   receipt: Omit<ActivationReceiptV1, 'revision'> | ActivationReceiptV1,
 ): string {
-  const {revision: _, ...body} = receipt as ActivationReceiptV1;
-  return sha256HexSync(canonicalJson(body));
+  if ('revision' in receipt) {
+    const {revision: _, ...body} = receipt;
+    return sha256HexSync(canonicalJson(body));
+  }
+  return sha256HexSync(canonicalJson(receipt));
 }
 
 export function activationReceiptStatusV1(
   operations: readonly ActivationReceiptOperationV1[],
 ): ActivationReceiptV1['status'] {
-  if (operations.every(operation => operationIsComplete(operation.status))) return 'completed';
-  if (operations.some(operation => operation.status === 'failed')) return 'failed';
-  if (operations.every(operation => operation.status === 'pending')) return 'pending';
+  if (EffectArray.every(operations, operation => operationIsComplete(operation.status))) return 'completed';
+  if (EffectArray.some(operations, operation => operation.status === 'failed')) return 'failed';
+  if (EffectArray.every(operations, operation => operation.status === 'pending')) return 'pending';
   return 'in-progress';
 }
 
@@ -502,18 +520,22 @@ function validateReceiptOperation(operation: ActivationReceiptOperationV1): void
 }
 
 function receiptOutcomeFields(operation: ActivationReceiptOperationV1): unknown[] {
-  return [
-    operation.approvalHash,
-    operation.failureCode,
-    operation.outcomeHash,
-    operation.ownership,
-    operation.subsystemReceiptHash,
-    operation.undoEligible,
-  ].filter(value => value !== undefined);
+  return EffectArray.filter(
+    [
+      operation.approvalHash,
+      operation.failureCode,
+      operation.outcomeHash,
+      operation.ownership,
+      operation.subsystemReceiptHash,
+      operation.undoEligible,
+    ],
+    value => value !== undefined,
+  );
 }
 
 function successFields(operation: ActivationReceiptOperationV1): unknown[] {
-  return [operation.ownership, operation.subsystemReceiptHash, operation.undoEligible].filter(
+  return EffectArray.filter(
+    [operation.ownership, operation.subsystemReceiptHash, operation.undoEligible],
     value => value !== undefined,
   );
 }

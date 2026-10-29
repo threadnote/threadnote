@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- Regression tests exercise owned OS process boundaries. */
 import {appendFile, link, mkdtemp, realpath, rename, rm, symlink, writeFile} from 'node:fs/promises';
 import {EventEmitter} from 'node:events';
@@ -29,13 +30,30 @@ import {
   runCollectionProcess,
 } from '../../../../scripts/threadnote-5-collection-process.js';
 import {CollectionMcpTransport} from '../../../../scripts/threadnote-5-collection-transport.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import * as EffectRecord from 'effect/Record';
+
+type MutableTranscript = {steps: {output: {stdout: string}}[]}[];
+function isMutableTranscript(value: unknown): value is MutableTranscript {
+  if (!EffectArray.isArray(value)) return false;
+  return EffectArray.every(
+    value,
+    transcript =>
+      Predicate.isObject(transcript) &&
+      EffectArray.isArray(transcript.steps) &&
+      EffectArray.every(
+        transcript.steps,
+        step => Predicate.isObject(step) && Predicate.isObject(step.output) && typeof step.output.stdout === 'string',
+      ),
+  );
+}
 
 function controlledMcpTransport(cleanupError?: Error) {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const stdin = new PassThrough();
-  const child = new EventEmitter() as unknown as ReturnType<typeof ownCollectionProcess>['child'];
-  Object.assign(child, {stdout, stderr, stdin});
+  const child = Object.assign(new EventEmitter(), {stdout, stderr, stdin});
   let finish!: (code: number | null) => void;
   const done = new Promise<number | null>(resolvePromise => {
     finish = resolvePromise;
@@ -122,8 +140,8 @@ describe('collection provenance and process integrity regressions', () => {
         }));
         const result = projectNativeRecord(plan, recipe, 'activation', trials);
         expect(result.provenance).toHaveLength(10);
-        expect(new Set(result.provenance.map(item => item.trialId)).size).toBe(10);
-        expect(new Set(result.provenance.map(item => item.observationDigest)).size).toBe(10);
+        expect(new Set(EffectArray.map(result.provenance, item => item.trialId)).size).toBe(10);
+        expect(new Set(EffectArray.map(result.provenance, item => item.observationDigest)).size).toBe(10);
       }),
       {numRuns: 25},
     );
@@ -134,13 +152,17 @@ describe('collection provenance and process integrity regressions', () => {
     expect(verifyThreadnote5PrivateCollection(source)).toEqual(source.collection);
     for (const field of ['planHash', 'transcriptDigest', 'collectionHash'] as const)
       expect(() =>
-        verifyThreadnote5PrivateCollection({...source, collection: {...source.collection, [field]: '0'.repeat(64)}}),
+        verifyThreadnote5PrivateCollection({
+          ...source,
+          collection: {...source.collection, [field]: Effect.pipe('0', EffectString.repeat(64))},
+        }),
       ).toThrow('recomputed');
     expect(() =>
       verifyThreadnote5PrivateCollection({...source, collection: {...source.collection, unexpected: 'private text'}}),
     ).toThrow('extra');
     expect(() => verifyThreadnote5PrivateCollection({...source, plan: {...source.plan, runId: 'different'}})).toThrow();
-    const transcript = structuredClone(source.transcripts) as {steps: {output: {stdout: string}}[]}[];
+    const transcript: unknown = structuredClone(source.transcripts);
+    if (!isMutableTranscript(transcript)) throw new Error('Collection fixture transcript is malformed.');
     transcript[0].steps[0].output.stdout = '{}';
     expect(() => verifyThreadnote5PrivateCollection({...source, transcripts: transcript})).toThrow('raw stdout');
     expect(() => verifyThreadnote5PrivateCollection({...source, transcripts: source.transcripts.slice(1)})).toThrow();
@@ -163,7 +185,7 @@ describe('collection provenance and process integrity regressions', () => {
     const binding = {
       version: 1,
       collectionHash: source.collection.collectionHash,
-      authorityManifestHash: 'a'.repeat(64),
+      authorityManifestHash: Effect.pipe('a', EffectString.repeat(64)),
     };
     const expectedBindingSha256 = threadnote5CollectionAuthorityBindingHash(binding);
     verifyThreadnote5CollectionAuthorityBinding({
@@ -198,9 +220,9 @@ describe('collection provenance and process integrity regressions', () => {
 
   it('does not share temporary storage between trials or surfaces', () => {
     const homes = ['/isolated/trial-a/primary', '/isolated/trial-a/secondary', '/isolated/trial-b/primary'];
-    const environments = homes.map(home => collectionEnvironment('/isolated', home));
-    expect(new Set(environments.map(env => env.TMPDIR)).size).toBe(homes.length);
-    expect(environments.every((env, index) => env.TMPDIR === `${homes[index]}/tmp`)).toBe(true);
+    const environments = EffectArray.map(homes, home => collectionEnvironment('/isolated', home));
+    expect(new Set(EffectArray.map(environments, env => env.TMPDIR)).size).toBe(homes.length);
+    expect(EffectArray.every(environments, (env, index) => env.TMPDIR === `${homes[index]}/tmp`)).toBe(true);
     expect(() => collectionEnvironment('/isolated', '/isolated/../personal')).toThrow();
   });
 
@@ -214,10 +236,11 @@ describe('collection provenance and process integrity regressions', () => {
         async events => {
           const owned = ownCollectionProcess('/bin/cat', [], process.cwd(), {PATH: '/usr/bin:/bin'});
           let callback!: (error?: Error | null) => void;
-          owned.child.stdin.end = ((_bytes: unknown, complete: typeof callback) => {
+          // @ts-expect-error Test harness replaces Writable.end to deterministically schedule its native callback races.
+          owned.child.stdin.end = (_bytes: unknown, complete: typeof callback) => {
             callback = complete;
             return owned.child.stdin;
-          }) as typeof owned.child.stdin.end;
+          };
           const result = owned.input.end('request').then(
             () => undefined,
             error => error,
@@ -258,12 +281,13 @@ describe('collection provenance and process integrity regressions', () => {
   it('rejects every pending input write with the first callback or emitted error', async () => {
     const owned = ownCollectionProcess('/bin/cat', [], process.cwd(), {PATH: '/usr/bin:/bin'});
     const callbacks: ((error?: Error | null) => void)[] = [];
-    owned.child.stdin.write = ((_bytes: unknown, callback: (error?: Error | null) => void) => {
+    // @ts-expect-error Test harness replaces Writable.write to deterministically schedule its native callback races.
+    owned.child.stdin.write = (_bytes: unknown, callback: (error?: Error | null) => void) => {
       callbacks.push(callback);
       return true;
-    }) as typeof owned.child.stdin.write;
+    };
     const writes = [owned.input.write('first'), owned.input.write('second')];
-    const observed = Promise.all(writes.map(write => write.catch(error => error)));
+    const observed = Promise.all(EffectArray.map(writes, write => write.catch(error => error)));
     const first = new Error('callback failure');
     callbacks[0](first);
     callbacks[1](new Error('later callback failure'));
@@ -321,16 +345,13 @@ describe('collection provenance and process integrity regressions', () => {
         if (!early && (failure || !Buffer.concat(output).equals(bytes))) throw new Error('normal bytes changed');
         process.stdout.write((early ? 'handled input failure' : 'exact bytes') + '\\n');
       `;
-      const result = await runCollectionProcess(
-        process.execPath,
-        ['-e', program],
-        process.cwd(),
-        {...process.env} as Record<string, string>,
-        10_000,
-      );
+      const environment: Record<string, string> = {};
+      for (const [key, value] of EffectRecord.toEntries(process.env))
+        if (typeof value === 'string') environment[key] = value;
+      const result = await runCollectionProcess(process.execPath, ['-e', program], process.cwd(), environment, 10_000);
       expect(result.stderr).toBe('');
       expect(result.exitCode).toBe(0);
-      expect(result.stdout.trim()).toBe(early ? 'handled input failure' : 'exact bytes');
+      expect(Effect.pipe(result.stdout, EffectString.trim)).toBe(early ? 'handled input failure' : 'exact bytes');
     }
   });
 
@@ -394,7 +415,10 @@ describe('collection provenance and process integrity regressions', () => {
       });
       const [, observed] = await Promise.all([attack(), Promise.all(attempts)]);
       expect(
-        observed.filter(value => value !== undefined).every(value => JSON.stringify(value) === '{"safe":true}'),
+        EffectArray.every(
+          EffectArray.filter(observed, value => value !== undefined),
+          value => JSON.stringify(value) === '{"safe":true}',
+        ),
       ).toBe(true);
       await expect(readPrivateCollectionJson(capture, 64)).resolves.toEqual({safe: true});
       const [original, alias] = await Promise.all([
@@ -573,7 +597,7 @@ describe('collection provenance and process integrity regressions', () => {
       expect(chunks).toEqual([Buffer.from([0xe2]), Buffer.from([0x82, 0xac, 0x0a])]);
       finish();
       await closed;
-      expect(split.stderr.join('')).toBe('€\n');
+      expect(EffectArray.join(split.stderr, '')).toBe('€\n');
       split.assertHealthy();
     } finally {
       await split.close().catch(() => {});

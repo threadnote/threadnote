@@ -7,6 +7,8 @@ import * as FC from 'fast-check';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect, vi} from 'vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = () => SqliteClient.layer({filename: ':memory:', disableWAL: true});
 
@@ -127,7 +129,9 @@ describe('Effect Bun SQLite statement lifetime without a package patch', () => {
             const actual = yield* effect.pipe(Effect.provideService(SqlClient.SafeIntegers, operation.safe));
             const value = operation.safe ? operation.value : Number(operation.value);
             const bytes = Uint8Array.from(operation.bytes);
-            const expected = operation.mode.startsWith('values') ? [[value, bytes]] : [{value, bytes}];
+            const expected = Effect2.pipe(operation.mode, EffectString.startsWith('values'))
+              ? [[value, bytes]]
+              : [{value, bytes}];
             expect(actual).toEqual(expected);
             retained.push({actual, expected});
           }

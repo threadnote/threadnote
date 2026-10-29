@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -14,6 +15,8 @@ import {
   selectCodeGraphLifecycleOpportunityTarget,
   selectCodeGraphLifecycleOpportunityUnit,
 } from '@threadnote/graph/lifecycle/opportunity';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const reclaimableState = fc.constantFrom<CodeGraphLifecycleState>(
   'missing-view',
@@ -63,7 +66,7 @@ describe('code graph lifecycle classification properties', () => {
           {maxLength: 64, selector: value => value.id},
         ),
         values => {
-          const candidates: readonly CodeGraphLifecycleCandidate[] = values.map(value => ({
+          const candidates: readonly CodeGraphLifecycleCandidate[] = EffectArray.map(values, value => ({
             id: value.id,
             lifecycle: {
               authority: value.authority,
@@ -71,13 +74,16 @@ describe('code graph lifecycle classification properties', () => {
               state: value.state,
             },
           }));
-          const expected = candidates
-            .filter(candidate => classifyCodeGraphLifecycle(candidate.lifecycle).disposition === 'reclaim')
-            .map(candidate => candidate.id)
-            .sort();
-          expect(planCodeGraphLifecycleReclamation([...candidates].reverse(), 64).map(value => value.id)).toEqual(
-            expected,
-          );
+          const expected = EffectArray.map(
+            EffectArray.filter(
+              candidates,
+              candidate => classifyCodeGraphLifecycle(candidate.lifecycle).disposition === 'reclaim',
+            ),
+            candidate => candidate.id,
+          ).sort();
+          expect(
+            EffectArray.map(planCodeGraphLifecycleReclamation([...candidates].reverse(), 64), value => value.id),
+          ).toEqual(expected);
 
           let remaining = [...candidates];
           const reclaimed: string[] = [];
@@ -85,7 +91,7 @@ describe('code graph lifecycle classification properties', () => {
             const page = planCodeGraphLifecycleReclamation(remaining, 1);
             if (page.length === 0) break;
             reclaimed.push(page[0].id);
-            remaining = remaining.filter(candidate => candidate.id !== page[0].id);
+            remaining = EffectArray.filter(remaining, candidate => candidate.id !== page[0].id);
           }
           expect(reclaimed).toEqual(expected);
           expect(planCodeGraphLifecycleReclamation(remaining, 1)).toEqual([]);
@@ -99,8 +105,8 @@ describe('code graph lifecycle classification properties', () => {
   it('rotates lifecycle opportunities fairly regardless of catalog order', () => {
     fc.assert(
       fc.property(fc.shuffledSubarray([0, 1, 2, 3], {maxLength: 4, minLength: 4}), order => {
-        const targets = order.map(index => ({
-          checkoutId: index.toString(16).repeat(64),
+        const targets = EffectArray.map(order, index => ({
+          checkoutId: Effect.pipe(index.toString(16), EffectString.repeat(64)),
           databasePath: `/database/${index}`,
         }));
         const visited: string[] = [];
@@ -111,8 +117,15 @@ describe('code graph lifecycle classification properties', () => {
           visited.push(selected.checkoutId);
           cursor = `${selected.checkoutId}\0${selected.databasePath}`;
         }
-        expect(visited).toEqual(['0'.repeat(64), '1'.repeat(64), '2'.repeat(64), '3'.repeat(64)]);
-        expect(selectCodeGraphLifecycleOpportunityTarget(targets, cursor)?.checkoutId).toBe('0'.repeat(64));
+        expect(visited).toEqual([
+          Effect.pipe('0', EffectString.repeat(64)),
+          Effect.pipe('1', EffectString.repeat(64)),
+          Effect.pipe('2', EffectString.repeat(64)),
+          Effect.pipe('3', EffectString.repeat(64)),
+        ]);
+        expect(selectCodeGraphLifecycleOpportunityTarget(targets, cursor)?.checkoutId).toBe(
+          Effect.pipe('0', EffectString.repeat(64)),
+        );
       }),
       {numRuns: 40},
     );
@@ -121,9 +134,9 @@ describe('code graph lifecycle classification properties', () => {
   it('prioritizes cold pending reconciliation without breaking fair rotation', () => {
     fc.assert(
       fc.property(fc.shuffledSubarray([0, 1, 2, 3], {maxLength: 4, minLength: 4}), order => {
-        const targets = order.map(index => ({
+        const targets = EffectArray.map(order, index => ({
           ...(index % 2 === 1 ? {anchorPath: `/repository/${index}`} : {}),
-          checkoutId: index.toString(16).repeat(64),
+          checkoutId: Effect.pipe(index.toString(16), EffectString.repeat(64)),
           databasePath: `/database/${index}`,
           reconciliationPending: index % 2 === 1,
         }));
@@ -135,14 +148,16 @@ describe('code graph lifecycle classification properties', () => {
           visited.push(selected.checkoutId);
           cursor = `${selected.checkoutId}\0${selected.databasePath}`;
         }
-        expect(visited[0]).toBe('1'.repeat(64));
-        expect(new Set(visited)).toEqual(new Set(targets.map(target => target.checkoutId)));
-        const unanchored = targets.map(target => ({
+        expect(visited[0]).toBe(Effect.pipe('1', EffectString.repeat(64)));
+        expect(new Set(visited)).toEqual(new Set(EffectArray.map(targets, target => target.checkoutId)));
+        const unanchored = EffectArray.map(targets, target => ({
           checkoutId: target.checkoutId,
           databasePath: target.databasePath,
           reconciliationPending: target.reconciliationPending,
         }));
-        expect(selectCodeGraphLifecycleOpportunityTarget(unanchored)?.checkoutId).toBe('0'.repeat(64));
+        expect(selectCodeGraphLifecycleOpportunityTarget(unanchored)?.checkoutId).toBe(
+          Effect.pipe('0', EffectString.repeat(64)),
+        );
       }),
       {numRuns: 40},
     );
@@ -151,17 +166,23 @@ describe('code graph lifecycle classification properties', () => {
   it('builds a bounded pending unit ring that visits every explicit lane exactly once', () => {
     fc.assert(
       fc.property(fc.shuffledSubarray([0, 1, 2, 3], {maxLength: 4, minLength: 4}), order => {
-        const targets = order.map(index => ({
+        const targets = EffectArray.map(order, index => ({
           ...(index === 1 || index === 3 ? {anchorPath: `/repository/${index}`} : {}),
-          checkoutId: index.toString(16).repeat(64),
+          checkoutId: Effect.pipe(index.toString(16), EffectString.repeat(64)),
           databasePath: `/database/${index}`,
           reconciliationPending: index === 1 || index === 2,
         }));
         const units = codeGraphLifecycleOpportunityUnits(targets, 'status');
         const expected = [
-          `reconciliation:${'1'.repeat(64)}`,
-          ...[0, 1, 2, 3].map(index => `ordinary:${index.toString(16).repeat(64)}`),
-          ...[0, 1, 2, 3].map(index => `residual:${index.toString(16).repeat(64)}`),
+          `reconciliation:${Effect.pipe('1', EffectString.repeat(64))}`,
+          ...EffectArray.map(
+            [0, 1, 2, 3],
+            index => `ordinary:${Effect.pipe(index.toString(16), EffectString.repeat(64))}`,
+          ),
+          ...EffectArray.map(
+            [0, 1, 2, 3],
+            index => `residual:${Effect.pipe(index.toString(16), EffectString.repeat(64))}`,
+          ),
         ];
         const visited: string[] = [];
         let cursor: string | undefined;

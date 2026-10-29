@@ -1,3 +1,6 @@
+import {isManagerProcessDiagnostics} from '../api/response_guards.js';
+import {Array as EffectArray} from 'effect';
+import {isReadonlyArray} from '@threadnote/platform/readonly-array';
 import React, {createContext, useContext, useEffect, useMemo, useRef, useState} from 'react';
 import type {ManagerProcessDiagnostics} from './contracts.js';
 import {api, errorMessage} from '../ui/support.js';
@@ -19,7 +22,14 @@ function useProcessInventory(enabled: boolean): ProcessInventory {
   const live = useManagerLiveQuery<ManagerProcessDiagnostics>(
     enabled ? {topic: 'processes', scope: 'account'} : undefined,
     'diagnostics',
-    signal => api<ManagerProcessDiagnostics>('/api/processes', undefined, {signal, timeoutMilliseconds: 8_000}),
+    signal =>
+      api<ManagerProcessDiagnostics>(
+        '/api/processes',
+        undefined,
+        {signal, timeoutMilliseconds: 8_000},
+        isManagerProcessDiagnostics,
+      ),
+    isManagerProcessDiagnostics,
   );
   const fallback = !live.active || live.snapshot.status === 'unsupported';
   useEffect(() => {
@@ -29,10 +39,15 @@ function useProcessInventory(enabled: boolean): ProcessInventory {
   }, [enabled]);
   const load = async (signal?: AbortSignal): Promise<void> => {
     try {
-      const next = await api<ManagerProcessDiagnostics>('/api/processes', undefined, {
-        signal,
-        timeoutMilliseconds: 8_000,
-      });
+      const next = await api<ManagerProcessDiagnostics>(
+        '/api/processes',
+        undefined,
+        {
+          signal,
+          timeoutMilliseconds: 8_000,
+        },
+        isManagerProcessDiagnostics,
+      );
       if (signal?.aborted) return;
       setDiagnostics(next);
       setLoadError('');
@@ -59,10 +74,10 @@ function useProcessInventory(enabled: boolean): ProcessInventory {
   if (current !== sample.current.data) sample.current = {data: current, at: Date.now()};
   const displayed = useMemo(
     () =>
-      current && Array.isArray(current.processes)
+      current && isReadonlyArray(current.processes)
         ? {
             ...current,
-            processes: current.processes.map(process => ({
+            processes: EffectArray.map(current.processes, process => ({
               ...process,
               ageMilliseconds: process.ageMilliseconds + Math.max(0, displayNow - sample.current.at),
             })),

@@ -1,16 +1,19 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join, resolve} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {afterEach, describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execute = promisify(execFile);
 const checkout = resolve(import.meta.dirname, '../../../..');
 const standalone = join(checkout, 'apps/threadnote/src/standalone.ts');
 const roots: string[] = [];
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, {recursive: true, force: true})));
+  await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {recursive: true, force: true})));
 });
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'threadnote-model-setup-cli-'));
@@ -107,7 +110,10 @@ async function prepareHarness(f: Awaited<ReturnType<typeof fixture>>) {
     '@threadnote/inference/models/catalog',
     '@threadnote/inference/models/store',
   ]) {
-    source = source.replaceAll(`from '${name}'`, `from ${JSON.stringify(import.meta.resolve(name))}`);
+    source = Effect.pipe(
+      source,
+      EffectString.replaceAll(`from '${name}'`, `from ${JSON.stringify(import.meta.resolve(name))}`),
+    );
   }
   await writeFile(entry, source);
   return {entry, gate, entered};
@@ -135,7 +141,10 @@ describe('public background model setup CLI boundary', () => {
     await writeFile(f.home, 'private fixture bytes');
     const error = await run(['models', 'setup', '--json'], f.env).then(
       () => undefined,
-      cause => cause as {stderr: string},
+      cause =>
+        typeof cause === 'object' && cause !== null && 'stderr' in cause && typeof cause.stderr === 'string'
+          ? {stderr: cause.stderr}
+          : undefined,
     );
     expect(error).toBeDefined();
     expect(error?.stderr).toContain('Check home permissions and retry');

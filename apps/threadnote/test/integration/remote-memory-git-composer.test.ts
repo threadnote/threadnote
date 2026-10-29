@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {richRemoteMemoryMetadata} from '@threadnote/memory/test/helpers/remote-memory-document';
 import {testGitWorktreeLock} from '../helpers/git-worktree-lock.js';
 import {mkdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -25,6 +26,8 @@ import {
   createRemoteMemoryPostgresFixture,
   type RemoteMemoryPostgresFixture,
 } from '../helpers/remote-memory-postgres.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const TEST_DATABASE_URL = process.env.THREADNOTE_TEST_POSTGRES_URL;
 const postgresDescribe = TEST_DATABASE_URL ? describe : describe.skip;
@@ -207,7 +210,7 @@ postgresDescribe('git-backed remote memory composer', () => {
       },
       'context-brief-stale-hydration-verify',
     );
-    expect(result.results.some(candidate => candidate.uri === uri)).toBe(false);
+    expect(EffectArray.some(result.results, candidate => candidate.uri === uri)).toBe(false);
     const backlinks = await withTenant(
       fixture.migratorSql,
       TENANT,
@@ -855,16 +858,20 @@ postgresDescribe('git-backed remote memory composer', () => {
         'request-git-contender-b',
       ),
     ]);
-    const winner = contenders.find(result => result.status === 'fulfilled');
-    const loser = contenders.find(result => result.status === 'rejected');
+    const winner = EffectOption.getOrUndefined(
+      EffectArray.findFirst(contenders, result => result.status === 'fulfilled'),
+    );
+    const loser = EffectOption.getOrUndefined(
+      EffectArray.findFirst(contenders, result => result.status === 'rejected'),
+    );
     expect(winner?.status).toBe('fulfilled');
     expect(loser?.status).toBe('rejected');
     if (loser?.status !== 'rejected') throw new Error('expected a rejected concurrent remember');
     expect(loser.reason).toMatchObject({code: 'conflict'});
     const read = await repository.read(principal, {uri: created.uri!, version: 1}, 'request-git-concurrent-read');
     expect(
-      read.content.includes('Alpha overlayneedle from composer.') ||
-        read.content.includes('Beta overlayneedle from composer.'),
+      Effect.pipe(read.content, EffectString.includes('Alpha overlayneedle from composer.')) ||
+        Effect.pipe(read.content, EffectString.includes('Beta overlayneedle from composer.')),
     ).toBe(true);
     expect(await indexer.runPass({batchSize: 8})).toMatchObject({failed: 0});
     const recalled = await repository.recall(
@@ -872,7 +879,7 @@ postgresDescribe('git-backed remote memory composer', () => {
       {project: PROJECT, query: 'overlayneedle', version: 1},
       'request-git-recall',
     );
-    expect(recalled.results.some(result => result.topic === 'git-concurrent')).toBe(true);
+    expect(EffectArray.some(recalled.results, result => result.topic === 'git-concurrent')).toBe(true);
   });
 
   it('indexes a laptop git publish without copying the body into postgres', async () => {
@@ -893,7 +900,7 @@ postgresDescribe('git-backed remote memory composer', () => {
       },
       'Laptop share publish reached the composer.',
     );
-    const target = join(laptop, ...path.split('/'));
+    const target = join(laptop, ...Effect.pipe(path, EffectString.split('/')));
     await mkdir(dirname(target), {recursive: true});
     await writeFile(target, content, 'utf8');
     await git(['add', '--', path], laptop);
@@ -901,7 +908,7 @@ postgresDescribe('git-backed remote memory composer', () => {
     await git(['push', 'origin', 'main'], laptop);
 
     const otherPath = gitCanonicalSharePath('durable', 'other-project', 'ignored');
-    const otherTarget = join(laptop, ...otherPath.split('/'));
+    const otherTarget = join(laptop, ...Effect.pipe(otherPath, EffectString.split('/')));
     await mkdir(dirname(otherTarget), {recursive: true});
     await writeFile(
       otherTarget,
@@ -987,7 +994,7 @@ postgresDescribe('git-backed remote memory composer', () => {
     const path = gitCanonicalSharePath('handoff', PROJECT, 'git-expired');
     const laptop = join(gitFixture.root, 'laptop-expired');
     await cloneGitShareWorktree(gitFixture.remote, laptop);
-    const target = join(laptop, ...path.split('/'));
+    const target = join(laptop, ...Effect.pipe(path, EffectString.split('/')));
     await mkdir(dirname(target), {recursive: true});
     await writeFile(
       target,
@@ -1132,7 +1139,7 @@ async function writeCanonicalMemory(
   text: string,
 ): Promise<string> {
   const path = gitCanonicalSharePath(kind, project, topic);
-  const target = join(worktree, ...path.split('/'));
+  const target = join(worktree, ...Effect.pipe(path, EffectString.split('/')));
   await mkdir(dirname(target), {recursive: true});
   await writeFile(
     target,
@@ -1166,8 +1173,10 @@ async function waitUntil(predicate: () => Promise<boolean>, timeoutMilliseconds 
 }
 
 async function withTenant<A>(sql: Sql, tenantId: string, use: (transaction: TransactionSql) => Promise<A>): Promise<A> {
-  return (await sql.begin(async transaction => {
-    await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
-    return use(transaction);
-  })) as A;
+  return sql
+    .begin(async transaction => {
+      await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
+      return {result: await use(transaction)};
+    })
+    .then(({result}) => result);
 }

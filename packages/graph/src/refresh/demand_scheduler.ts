@@ -357,39 +357,76 @@ export function failCodeGraphRefreshDemand(
   };
 }
 
-export function validCodeGraphRefreshDemand(state: CodeGraphRefreshDemandState): boolean {
-  const validRetry = (retry: unknown) =>
-    retry === undefined ||
-    (typeof retry === 'object' &&
-      retry !== null &&
-      Number.isSafeInteger((retry as {attempt?: unknown}).attempt) &&
-      (retry as {attempt: number}).attempt >= 1 &&
-      (retry as {attempt: number}).attempt <= 8 &&
-      ((retry as {blocked?: unknown}).blocked === undefined || (retry as {blocked?: unknown}).blocked === true) &&
-      Number.isSafeInteger((retry as {notBefore?: unknown}).notBefore) &&
-      (retry as {notBefore: number}).notBefore >= 0);
-  const validTarget = (target: CodeGraphRefreshDemandTarget | undefined) =>
-    target === undefined ||
-    (CODE_GRAPH_REFRESH_DEMAND_KEY.test(target.targetKey) &&
-      (target.recoveryKey === undefined || CODE_GRAPH_REFRESH_DEMAND_KEY.test(target.recoveryKey)) &&
+export function validCodeGraphRefreshDemand(state: unknown): state is CodeGraphRefreshDemandState {
+  const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
+  const validRetry = (retry: unknown): boolean => {
+    if (retry === undefined) return true;
+    if (!isRecord(retry)) return false;
+    const attempt = retry.attempt;
+    const blocked = retry.blocked;
+    const notBefore = retry.notBefore;
+    return (
+      typeof attempt === 'number' &&
+      Number.isSafeInteger(attempt) &&
+      attempt >= 1 &&
+      attempt <= 8 &&
+      (blocked === undefined || blocked === true) &&
+      typeof notBefore === 'number' &&
+      Number.isSafeInteger(notBefore) &&
+      notBefore >= 0
+    );
+  };
+  const validTarget = (target: unknown): target is CodeGraphRefreshDemandTarget | undefined => {
+    if (target === undefined) return true;
+    if (!isRecord(target)) return false;
+    return (
+      typeof target.targetKey === 'string' &&
+      CODE_GRAPH_REFRESH_DEMAND_KEY.test(target.targetKey) &&
+      (target.recoveryKey === undefined ||
+        (typeof target.recoveryKey === 'string' && CODE_GRAPH_REFRESH_DEMAND_KEY.test(target.recoveryKey))) &&
+      typeof target.targetToken === 'string' &&
       CODE_GRAPH_REFRESH_DEMAND_TOKEN.test(target.targetToken) &&
+      typeof target.requestedAt === 'number' &&
       Number.isSafeInteger(target.requestedAt) &&
+      typeof target.updatedAt === 'number' &&
       Number.isSafeInteger(target.updatedAt) &&
+      typeof target.attachmentCount === 'number' &&
       Number.isSafeInteger(target.attachmentCount) &&
       target.attachmentCount > 0 &&
       target.attachmentCount <= MAX_ATTACHMENTS &&
-      (!('retry' in target) || validRetry((target as {retry?: unknown}).retry)));
+      validRetry(target.retry)
+    );
+  };
+  if (!isRecord(state)) return false;
+  if (
+    state.version !== CODE_GRAPH_REFRESH_DEMAND_VERSION ||
+    typeof state.checkoutId !== 'string' ||
+    !CODE_GRAPH_REFRESH_DEMAND_KEY.test(state.checkoutId) ||
+    typeof state.worktreeId !== 'string' ||
+    !CODE_GRAPH_REFRESH_DEMAND_KEY.test(state.worktreeId) ||
+    typeof state.revision !== 'number' ||
+    !Number.isSafeInteger(state.revision) ||
+    state.revision < 0 ||
+    !validTarget(state.active) ||
+    !validTarget(state.desired)
+  ) {
+    return false;
+  }
+  const active = state.active;
+  if (active === undefined) return true;
+  if (!isRecord(active)) return false;
+  const claimOwner = active.claimOwner;
   return (
-    state.version === CODE_GRAPH_REFRESH_DEMAND_VERSION &&
-    CODE_GRAPH_REFRESH_DEMAND_KEY.test(state.checkoutId) &&
-    CODE_GRAPH_REFRESH_DEMAND_KEY.test(state.worktreeId) &&
-    Number.isSafeInteger(state.revision) &&
-    state.revision >= 0 &&
-    validTarget(state.active) &&
-    validTarget(state.desired) &&
-    (state.active === undefined ||
-      (Number.isSafeInteger(state.active.claimStartedAt) &&
-        state.active.claimStartedAt >= 0 &&
-        ['claimed', 'preparing', 'publishing'].includes(state.active.phase)))
+    typeof active.claimStartedAt === 'number' &&
+    Number.isSafeInteger(active.claimStartedAt) &&
+    active.claimStartedAt >= 0 &&
+    (active.phase === 'claimed' || active.phase === 'preparing' || active.phase === 'publishing') &&
+    (claimOwner === undefined ||
+      (isRecord(claimOwner) &&
+        typeof claimOwner.processId === 'number' &&
+        Number.isSafeInteger(claimOwner.processId) &&
+        claimOwner.processId > 0 &&
+        (claimOwner.processStartIdentity === undefined ||
+          (typeof claimOwner.processStartIdentity === 'string' && claimOwner.processStartIdentity.length <= 256))))
   );
 }

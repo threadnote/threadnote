@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtemp, mkdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -6,6 +7,8 @@ import {hasProjectNameMigrationCandidates, runMigrateProjectNames} from '@thread
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runCommand} from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const GIT_ENV_KEYS = ['GIT_COMMON_DIR', 'GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE'] as const;
 
@@ -17,7 +20,7 @@ describe('project-name memory migration', () => {
   beforeEach(async () => {
     workspace = await mkdtemp(join(tmpdir(), 'threadnote-project-migration-'));
     previousCallerCwd = process.env.THREADNOTE_CALLER_CWD;
-    previousGitEnv = new Map(GIT_ENV_KEYS.map(key => [key, process.env[key]]));
+    previousGitEnv = new Map(EffectArray.map(GIT_ENV_KEYS, key => [key, process.env[key]]));
     for (const key of GIT_ENV_KEYS) {
       delete process.env[key];
     }
@@ -50,56 +53,65 @@ describe('project-name memory migration', () => {
     await mkdir(config.agentContextHome, {recursive: true});
     await writeFile(
       config.manifestPath,
-      [
-        'version: 1',
-        'projects:',
-        '  - name: easy-to-type',
-        `    path: ${repoRoot}`,
-        '    uri: threadnote://resources/repos/easy-to-type',
-        '    seed: [README.md]',
-        '    graph:',
-        '      roots: [apps/easy]',
-        '      closure: dependencies',
-        '      include: [tools/generated]',
-        'worksets:',
-        '  - name: local',
-        '    projects: [easy-to-type]',
-        'future_monorepo:',
-        '  path_candidates: [/Users/denys/src/future]',
-        '  uri: threadnote://resources/repos/future',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'version: 1',
+          'projects:',
+          '  - name: easy-to-type',
+          `    path: ${repoRoot}`,
+          '    uri: threadnote://resources/repos/easy-to-type',
+          '    seed: [README.md]',
+          '    graph:',
+          '      roots: [apps/easy]',
+          '      closure: dependencies',
+          '      include: [tools/generated]',
+          'worksets:',
+          '  - name: local',
+          '    projects: [easy-to-type]',
+          'future_monorepo:',
+          '  path_candidates: [/Users/denys/src/future]',
+          '  uri: threadnote://resources/repos/future',
+          '',
+        ],
+        '\n',
+      ),
       'utf8',
     );
     await writeMemory(
       config,
       'durable/projects/easy-to-type/current.md',
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: easy-to-type',
-        'topic: current',
-        'source_agent_client: codex',
-        'timestamp: 2026-07-07T00:00:00.000Z',
-        '',
-        'Feature knowledge.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: easy-to-type',
+          'topic: current',
+          'source_agent_client: codex',
+          'timestamp: 2026-07-07T00:00:00.000Z',
+          '',
+          'Feature knowledge.',
+        ],
+        '\n',
+      ),
     );
     await writeMemory(
       config,
       'durable/projects/threadnote/current.md',
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: threadnote',
-        'topic: current',
-        'source_agent_client: codex',
-        'timestamp: 2026-07-07T00:00:00.000Z',
-        '',
-        'Existing remote-named memory.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          'topic: current',
+          'source_agent_client: codex',
+          'timestamp: 2026-07-07T00:00:00.000Z',
+          '',
+          'Existing remote-named memory.',
+        ],
+        '\n',
+      ),
     );
 
     await expect(runEffect(hasProjectNameMigrationCandidates(config))).resolves.toBe(true);
@@ -107,7 +119,10 @@ describe('project-name memory migration', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     await runEffect(runMigrateProjectNames(config, {dryRun: true}));
 
-    const output = log.mock.calls.map(call => call.join(' ')).join('\n');
+    const output = EffectArray.join(
+      EffectArray.map(log.mock.calls, call => EffectArray.join(call, ' ')),
+      '\n',
+    );
     expect(output).toContain('Would update seed manifest:');
     expect(output).toContain('name: threadnote');
     expect(output).toContain('uri: threadnote://resources/repos/threadnote');
@@ -138,19 +153,22 @@ describe('project-name memory migration', () => {
     await writeMemory(
       config,
       'handoffs/active/easy-to-type/current.md',
-      [
-        'MEMORY',
-        'kind: handoff',
-        'status: active',
-        'project: easy-to-type',
-        'topic: current',
-        'source_agent_client: codex',
-        'timestamp: 2026-07-07T00:00:00.000Z',
-        '',
-        'repo: easy-to-type',
-        `repo_path: ${repoRoot}`,
-        'branch: main',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: handoff',
+          'status: active',
+          'project: easy-to-type',
+          'topic: current',
+          'source_agent_client: codex',
+          'timestamp: 2026-07-07T00:00:00.000Z',
+          '',
+          'repo: easy-to-type',
+          `repo_path: ${repoRoot}`,
+          'branch: main',
+        ],
+        '\n',
+      ),
     );
 
     await expect(runEffect(hasProjectNameMigrationCandidates(config))).resolves.toBe(true);
@@ -158,7 +176,10 @@ describe('project-name memory migration', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     await runEffect(runMigrateProjectNames(config, {dryRun: true}));
 
-    const output = log.mock.calls.map(call => call.join(' ')).join('\n');
+    const output = EffectArray.join(
+      EffectArray.map(log.mock.calls, call => EffectArray.join(call, ' ')),
+      '\n',
+    );
     expect(output).not.toContain('Would update seed manifest:');
     expect(output).toContain(
       'threadnote://user/denys/memories/handoffs/active/easy-to-type/current.md -> threadnote://user/denys/memories/handoffs/active/threadnote/current.md',
@@ -180,38 +201,44 @@ describe('project-name memory migration', () => {
     await mkdir(config.agentContextHome, {recursive: true});
     await writeFile(
       config.manifestPath,
-      [
-        'version: 1',
-        'projects:',
-        '  - name: threadnote',
-        `    path: ${currentRepo}`,
-        '    uri: threadnote://resources/repos/threadnote',
-        '    seed: [README.md]',
-        '  - name: ta',
-        `    path: ${otherRepo}`,
-        '    uri: threadnote://resources/repos/ta',
-        '    seed: [README.md]',
-        'worksets:',
-        '  - name: all',
-        '    projects: [threadnote, ta]',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'version: 1',
+          'projects:',
+          '  - name: threadnote',
+          `    path: ${currentRepo}`,
+          '    uri: threadnote://resources/repos/threadnote',
+          '    seed: [README.md]',
+          '  - name: ta',
+          `    path: ${otherRepo}`,
+          '    uri: threadnote://resources/repos/ta',
+          '    seed: [README.md]',
+          'worksets:',
+          '  - name: all',
+          '    projects: [threadnote, ta]',
+          '',
+        ],
+        '\n',
+      ),
       'utf8',
     );
     await writeMemory(
       config,
       'durable/projects/ta/current.md',
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: ta',
-        'topic: current',
-        'source_agent_client: codex',
-        'timestamp: 2026-07-07T00:00:00.000Z',
-        '',
-        'Feature knowledge.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: ta',
+          'topic: current',
+          'source_agent_client: codex',
+          'timestamp: 2026-07-07T00:00:00.000Z',
+          '',
+          'Feature knowledge.',
+        ],
+        '\n',
+      ),
     );
 
     await expect(runEffect(hasProjectNameMigrationCandidates(config))).resolves.toBe(true);
@@ -219,7 +246,10 @@ describe('project-name memory migration', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     await runEffect(runMigrateProjectNames(config, {dryRun: true}));
 
-    const output = log.mock.calls.map(call => call.join(' ')).join('\n');
+    const output = EffectArray.join(
+      EffectArray.map(log.mock.calls, call => EffectArray.join(call, ' ')),
+      '\n',
+    );
     expect(output).toContain('Would update seed manifest:');
     expect(output).toContain('name: igor-bot');
     expect(output).toContain('uri: threadnote://resources/repos/igor-bot');
@@ -255,7 +285,7 @@ async function writeMemory(config: RuntimeConfig, relativePath: string, content:
     'user',
     config.user,
     'memories',
-    ...relativePath.split('/'),
+    ...Effect.pipe(relativePath, EffectString.split('/')),
   );
   await mkdir(join(path, '..'), {recursive: true});
   await writeFile(path, content, 'utf8');

@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {isJsonObject} from '@threadnote/platform/json';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -8,6 +10,9 @@ import {linearIntegration} from '../src/manager-ui/index.js';
 import {LinearConnectionForm, parseLinearIds} from '../src/manager-ui/connection-form.js';
 import fc from 'fast-check';
 import type {LinearSource} from '../src/manager-contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 let root: Root | undefined;
 afterEach(async () => {
@@ -17,15 +22,35 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
+function parseJsonObject(text: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(text);
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 async function render(node: React.ReactNode): Promise<void> {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
   await act(async () => root?.render(<ManagerDialogProvider>{node}</ManagerDialogProvider>));
 }
 function button(label: string): HTMLButtonElement {
-  const match = [...document.querySelectorAll('button')].find(item => item.textContent?.trim().startsWith(label));
+  const match = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(
+            item.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+          ))(__effectArrayValue),
+    ),
+  );
   if (!match) throw new Error('Button not found: ' + label);
   return match;
 }
@@ -66,9 +91,9 @@ describe('Linear connection', () => {
   it('normalizes explicit IDs without adding scope', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.uuid(), {minLength: 1, maxLength: 8}), ids => {
-        const normalized = ids.map(id => id.toLowerCase());
-        expect(parseLinearIds(ids.join(',\n') + '\n' + ids[0])).toEqual(normalized);
-        expect(parseLinearIds(parseLinearIds(ids.join(' ')).join('\n'))).toEqual(normalized);
+        const normalized = EffectArray.map(ids, id => Effect.pipe(id, EffectString.toLowerCase));
+        expect(parseLinearIds(EffectArray.join(ids, ',\n') + '\n' + ids[0])).toEqual(normalized);
+        expect(parseLinearIds(EffectArray.join(parseLinearIds(EffectArray.join(ids, ' ')), '\n'))).toEqual(normalized);
       }),
       {numRuns: 40},
     );
@@ -97,8 +122,17 @@ describe('Linear connection', () => {
     expect(row.textContent).toContain('Beta');
     expect(row.textContent).toContain('Inline comments and project update comments are unavailable');
     await act(async () => button('Add integration').click());
-    const catalog = [...document.querySelectorAll('.integration-product')].find(item =>
-      item.textContent?.includes('Linear'),
+    const catalog = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll('.integration-product')],
+        __effectArrayValue =>
+          !!(item =>
+            Effect.pipe(item.textContent, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes('Linear')),
+            ))(__effectArrayValue),
+      ),
     )!;
     expect(catalog.textContent).toContain('Beta');
     await act(async () => button('Connect Linear').click());
@@ -110,7 +144,7 @@ describe('Linear connection', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_path: string, init: RequestInit) => {
-        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const body = parseJsonObject(String(init.body));
         calls.push(body);
         return new Response(
           JSON.stringify(
@@ -175,7 +209,7 @@ describe('Linear connection', () => {
       apply: true,
       confirm: true,
     });
-    expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('');
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe('');
   });
 
   it('saves a new connection without starting sync and names the next action', async () => {
@@ -190,7 +224,8 @@ describe('Linear connection', () => {
               linear: {sources: connected ? [linearSource] : []},
             }),
           );
-        const body = JSON.parse(String(init?.body)) as {action: string};
+        const body = parseJsonObject(String(init?.body));
+        if (typeof body.action !== 'string') throw new Error('Expected a Linear action.');
         actions.push(body.action);
         if (body.action === 'resolve-selection')
           return new Response(
@@ -225,7 +260,11 @@ describe('Linear connection', () => {
     await fill(document.querySelector<HTMLInputElement>('input[placeholder="my-project"]')!, 'team');
     await act(async () => button('Verify selection').click());
     const submit = document.querySelector<HTMLButtonElement>('.integration-form button[type="submit"]')!;
-    expect(submit.textContent?.trim()).toBe('Connect');
+    expect(
+      Effect.pipe(submit.textContent, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      ),
+    ).toBe('Connect');
     await act(async () => submit.click());
     expect(actions).toEqual(['resolve-selection', 'save-source']);
     expect(document.body.textContent).toContain(
@@ -246,7 +285,7 @@ describe('Linear connection', () => {
               linear: {sources: [linearSource]},
             }),
           );
-        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const body = parseJsonObject(String(init.body));
         calls.push(body);
         return new Response(
           JSON.stringify(

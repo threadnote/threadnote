@@ -27,6 +27,9 @@ import {formatMemoryDocument, parseMemoryDocument, type MemoryMetadata} from '@t
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const WRAP_HEAL_URI = 'threadnote://user/tester/memories/durable/projects/threadnote/wrap-heal.md';
 
@@ -107,7 +110,7 @@ describe('in-process graph-index deferred-anchor recovery', () => {
           healed.push('healed');
         }),
       ).ensureCommit({
-        commit: 'b'.repeat(40),
+        commit: Effect2.pipe('b', EffectString.repeat(40)),
         cwd: '/repo',
         threadnoteHome: '/threadnote-home',
       });
@@ -122,8 +125,8 @@ describe('in-process graph-index deferred-anchor recovery', () => {
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-heal-absent-data-'});
         yield* healAfterPublishedGraphIndex(home, home, {
-          repositoryId: 'a'.repeat(64),
-          worktreeId: 'b'.repeat(64),
+          repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+          worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
         });
         expect(yield* fs.exists(path.join(home, 'data'))).toBe(false);
       }),
@@ -139,8 +142,8 @@ describe('in-process graph-index deferred-anchor recovery', () => {
         const dataPath = path.join(home, 'data');
         yield* fs.writeFileString(dataPath, 'not-a-tree\n');
         yield* healAfterPublishedGraphIndex(home, home, {
-          repositoryId: 'a'.repeat(64),
-          worktreeId: 'b'.repeat(64),
+          repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+          worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
         });
         expect(yield* fs.readFileString(dataPath)).toBe('not-a-tree\n');
       }),
@@ -238,8 +241,10 @@ describe('in-process graph-index deferred-anchor recovery', () => {
             'v1',
           );
           expect(
-            (yield* fs.readDirectory(pendingRoot, {recursive: true})).filter(name =>
-              isDeferredCodeAnchorIntentFilename(path.basename(name)),
+            EffectArray.filter(
+              yield* fs.readDirectory(pendingRoot, {recursive: true}),
+              __effectArrayValue =>
+                !!(name => isDeferredCodeAnchorIntentFilename(path.basename(name)))(__effectArrayValue),
             ),
           ).toHaveLength(1);
 
@@ -247,8 +252,10 @@ describe('in-process graph-index deferred-anchor recovery', () => {
           yield* indexer.index({cwd: repository, ensureVectors: false, threadnoteHome: home}).pipe(TestClock.withLive);
 
           expect(
-            (yield* fs.readDirectory(pendingRoot, {recursive: true})).filter(name =>
-              isDeferredCodeAnchorIntentFilename(path.basename(name)),
+            EffectArray.filter(
+              yield* fs.readDirectory(pendingRoot, {recursive: true}),
+              __effectArrayValue =>
+                !!(name => isDeferredCodeAnchorIntentFilename(path.basename(name)))(__effectArrayValue),
             ),
           ).toEqual([]);
           const finalized = parseMemoryDocument(WRAP_HEAL_URI, yield* store.read(location, WRAP_HEAL_URI));
@@ -410,29 +417,29 @@ function indexSummary(): CodeGraphIndexSummary {
     durationMs: 1,
     identity: {
       caseMode: 'sensitive',
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
       displayName: 'fixture',
       gitCommonDirectory: '/repo/.git',
-      headCommit: 'b'.repeat(40),
+      headCommit: Effect2.pipe('b', EffectString.repeat(40)),
       objectFormat: 'sha1',
       repoRoot: '/repo',
-      repositoryId: 'c'.repeat(64),
-      worktreeId: 'd'.repeat(64),
+      repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+      worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
     },
     reusedFiles: 0,
     skippedFiles: 0,
     snapshot: {
-      commit: 'b'.repeat(40),
+      commit: Effect2.pipe('b', EffectString.repeat(40)),
       completedAt: '2026-09-10T00:00:00.000Z',
       dirty: false,
       edgeCount: 0,
-      extractorSet: 'e'.repeat(64),
+      extractorSet: Effect2.pipe('e', EffectString.repeat(64)),
       fileCount: 1,
-      id: `cgsn_${'1'.repeat(40)}`,
-      repositoryId: 'c'.repeat(64),
+      id: `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`,
+      repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
       state: 'ready',
       symbolCount: 1,
-      worktreeId: 'd'.repeat(64),
+      worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
     },
   };
 }

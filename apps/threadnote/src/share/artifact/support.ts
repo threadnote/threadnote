@@ -15,6 +15,9 @@ import {
   readFile,
   readdir,
 } from '../core.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const collectBundleMemberFiles = Effect.fn('share.collectBundleMemberFiles')(function* (skillDir: string) {
   const out: BundleMemberFile[] = [];
@@ -38,7 +41,8 @@ const collectBundleMemberFiles = Effect.fn('share.collectBundleMemberFiles')(fun
       }
       out.push({
         absolutePath: full,
-        relativePath: (yield* pathRelative(skillDir, full)).split(yield* pathSeparator).join('/'),
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+        relativePath: EffectArray.join((yield* pathRelative(skillDir, full)).split(yield* pathSeparator), '/'),
       });
     }
   });
@@ -53,7 +57,10 @@ function isIgnoredBundleFile(name: string): boolean {
   if (OV_SUMMARY_FILES.includes(name)) {
     return true;
   }
-  return name.endsWith('.log') || name.endsWith('.threadnote-install.json');
+  return (
+    Effect2.pipe(name, EffectString.endsWith('.log')) ||
+    Effect2.pipe(name, EffectString.endsWith('.threadnote-install.json'))
+  );
 }
 
 function isProbablyBinary(buffer: Uint8Array): boolean {
@@ -78,7 +85,7 @@ function detectBinaryCredential(buffer: Uint8Array): string | undefined {
 function detectBinaryLocalPath(buffer: Uint8Array, rewriteRoots: readonly string[]): string | undefined {
   const latin1 = new TextDecoder('latin1').decode(buffer);
   for (const root of rewriteRoots) {
-    if (root.length > 0 && latin1.includes(root)) {
+    if (root.length > 0 && Effect2.pipe(latin1, EffectString.includes(root))) {
       return 'machine-local path';
     }
   }

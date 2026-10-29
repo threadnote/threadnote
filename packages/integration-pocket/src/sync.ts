@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {admittedSourceFetch} from '@threadnote/integration-core/source-coordinator';
 import {isPocketSource} from './config.js';
 import {Clock, Effect, Random, Result, Schema} from 'effect';
@@ -45,9 +46,12 @@ import {
   type PocketIdMarker,
 } from './state.js';
 import type {PocketSyncResult} from './source.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const loc = (config: RuntimeConfig) => ({account: config.account, home: config.agentContextHome, user: config.user});
-const documentId = (id: string) => `r-${sha256HexSync(id).slice(0, 40)}`;
+const documentId = (id: string) => `r-${Effect2.pipe(sha256HexSync(id), EffectString.slice(0, 40))}`;
 const receiptUri = (id: string) => externalSourceReceiptUri(id, 'pocket');
 const manifestUri = (id: string, doc: string) => externalDocumentManifestUri(id, doc, 'pocket');
 const manifest = (config: RuntimeConfig, id: string, doc: string) =>
@@ -58,11 +62,16 @@ const configFence = Effect.fn('pocket.syncConfigFence')(function* (
   id: string,
   fingerprint: string,
 ) {
-  const source = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+  const source = EffectOption.getOrUndefined(
+    EffectArray.findFirst((yield* readSourceConfiguration(config)).sources, item => item.id === id),
+  );
   if (!source || !isPocketSource(source) || !source.enabled || sourceConfigurationFingerprint(source) !== fingerprint)
     return yield* syncError('Pocket source configuration changed during refresh.');
 });
-class PocketSyncError extends Schema.TaggedError<PocketSyncError>()('PocketSyncError', {message: Schema.String}) {}
+class PocketSyncError extends Schema.TaggedError<PocketSyncError, {readonly brand: unique symbol}>()(
+  'PocketSyncError',
+  {message: Schema.String},
+) {}
 const syncError = (message: string) => PocketSyncError.make({message});
 const error = (message: string) => Effect.fail(syncError(message));
 const saveReceipt = Effect.fn('pocket.saveReceipt')(function* (
@@ -94,8 +103,8 @@ const writeDocument = Effect.fn('pocket.writeDocument')(function* (
   if (chunks.length > 2048) return yield* error('Pocket record exceeds the chunk inventory limit.');
   const fingerprint = sourceConfigurationFingerprint(source);
   const previous = yield* manifest(config, source.id, doc);
-  const files = Object.fromEntries(
-    chunks.map(chunk => {
+  const files = EffectRecord.fromEntries(
+    EffectArray.map(chunks, chunk => {
       const uri = externalResourceUri({
         provider: 'pocket',
         sourceId: source.id,
@@ -132,15 +141,15 @@ const writeDocument = Effect.fn('pocket.writeDocument')(function* (
     status: 'active',
     fetchedAt: yield* Clock.currentTimeMillis,
     maxStaleMilliseconds: source.maxStaleHours * 3_600_000,
-    chunks: Object.fromEntries(Object.entries(files).map(([uri, file]) => [uri, file.hash])),
+    chunks: EffectRecord.fromEntries(EffectArray.map(EffectRecord.toEntries(files), ([uri, file]) => [uri, file.hash])),
     accessEpoch: access.accessEpoch,
     inventoryGeneration: generation,
   };
   const store = yield* ResourceStore;
   const fence = configFence(config, source.id, fingerprint);
-  const obsolete = Object.keys(previous?.chunks ?? {}).filter(uri => !(uri in files));
+  const obsolete = EffectArray.filter(EffectRecord.keys(previous?.chunks ?? {}), uri => !(uri in files));
   const changed: ResourceStoreMutation[] = [];
-  for (const [uri, file] of Object.entries(files)) {
+  for (const [uri, file] of EffectRecord.toEntries(files)) {
     if (previous?.chunks[uri] === file.hash) {
       const check = yield* Effect.result(store.read(loc(config), uri));
       if (Result.isSuccess(check) && sha256HexSync(check.success) === file.hash) continue;
@@ -162,7 +171,7 @@ const writeDocument = Effect.fn('pocket.writeDocument')(function* (
   if (obsolete.length)
     yield* store.mutateChecked(
       loc(config),
-      obsolete.map(uri => ({type: 'remove' as const, uri, ignoreMissing: true})),
+      EffectArray.map(obsolete, uri => ({type: 'remove' as const, uri, ignoreMissing: true})),
       fence,
     );
   yield* store.mutateChecked(
@@ -333,7 +342,7 @@ export const syncPocketSource = Effect.fn('pocket.syncSource')(function* (
             const result = yield* fromPromiseInterruptible(
               () => client.catalog(kind),
               failure =>
-                failure instanceof PocketClientError ? failure : new PocketClientError({code: 'transport-rejected'}),
+                Schema.is(PocketClientError)(failure) ? failure : PocketClientError.make({code: 'transport-rejected'}),
             ).pipe(Effect.result);
             if (Result.isFailure(result)) {
               if (result.failure.code === 'authentication-rejected') return yield* denyGlobal();
@@ -379,7 +388,7 @@ export const syncPocketSource = Effect.fn('pocket.syncSource')(function* (
             const listed = yield* fromPromiseInterruptible(
               () => client.list(state.page),
               failure =>
-                failure instanceof PocketClientError ? failure : new PocketClientError({code: 'transport-rejected'}),
+                Schema.is(PocketClientError)(failure) ? failure : PocketClientError.make({code: 'transport-rejected'}),
             ).pipe(Effect.result);
             if (Result.isFailure(listed)) {
               if (listed.failure.code === 'authentication-rejected' || listed.failure.code === 'access-rejected')
@@ -407,7 +416,7 @@ export const syncPocketSource = Effect.fn('pocket.syncSource')(function* (
             if (state.total !== undefined && state.total !== listed.success.total) state = {...state, incomplete: true};
             state = {
               ...state,
-              pageIds: listed.success.recordings.map(item => item.id),
+              pageIds: EffectArray.map(listed.success.recordings, item => item.id),
               hasMore: listed.success.hasMore,
               total: state.total ?? listed.success.total,
               offset: 0,
@@ -448,7 +457,7 @@ export const syncPocketSource = Effect.fn('pocket.syncSource')(function* (
             const detailed = yield* fromPromiseInterruptible(
               () => client.detail(rawId),
               failure =>
-                failure instanceof PocketClientError ? failure : new PocketClientError({code: 'transport-rejected'}),
+                Schema.is(PocketClientError)(failure) ? failure : PocketClientError.make({code: 'transport-rejected'}),
             ).pipe(Effect.result);
             if (Result.isFailure(detailed)) {
               if (detailed.failure.code === 'authentication-rejected') return yield* denyGlobal();
@@ -514,7 +523,9 @@ export const syncPocketSource = Effect.fn('pocket.syncSource')(function* (
           if (markers === null) {
             state = {...state, incomplete: true};
             warnings.push('Pocket ID inventory is invalid.');
-          } else if (markers.filter(marker => marker.generation === state.generation).length !== state.total) {
+          } else if (
+            EffectArray.filter(markers, marker => marker.generation === state.generation).length !== state.total
+          ) {
             state = {...state, incomplete: true};
             warnings.push('Pocket listing coverage changed during refresh.');
           }
@@ -537,7 +548,9 @@ export const syncPocketSource = Effect.fn('pocket.syncSource')(function* (
               const detailed = yield* fromPromiseInterruptible(
                 () => client.detail(marker.id),
                 failure =>
-                  failure instanceof PocketClientError ? failure : new PocketClientError({code: 'transport-rejected'}),
+                  Schema.is(PocketClientError)(failure)
+                    ? failure
+                    : PocketClientError.make({code: 'transport-rejected'}),
               ).pipe(Effect.result);
               if (Result.isFailure(detailed)) {
                 if (detailed.failure.code === 'authentication-rejected') return yield* denyGlobal();
@@ -589,7 +602,8 @@ export const syncPocketSource = Effect.fn('pocket.syncSource')(function* (
           if (
             !state.incomplete &&
             markers &&
-            markers.some(
+            EffectArray.some(
+              markers,
               marker =>
                 marker.generation !== state.generation &&
                 (!state.confirmAfter || marker.documentId > state.confirmAfter),

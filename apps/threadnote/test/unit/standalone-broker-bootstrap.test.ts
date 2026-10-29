@@ -1,15 +1,25 @@
+import {Array as EffectArray} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {dirname, join, relative, resolve} from '@threadnote/testing/node-path';
 import {describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const repositoryRoot = process.cwd();
 
 describe('standalone broker bootstrap', () => {
   it('selects the broker runtime before importing the application runtime', () => {
     const standaloneSource = readSource('apps/threadnote/src/standalone.ts');
-    const applicationProgramStart = standaloneSource.indexOf('async function applicationProgram');
+    const applicationProgramStart = Effect.pipe(
+      standaloneSource,
+      EffectString.indexOf('async function applicationProgram'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const brokerBranch = standaloneSource.indexOf('if (isMcpBroker)', applicationProgramStart);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const brokerRuntimeImport = standaloneSource.indexOf("import('./effect/runtime-bootstrap.js')", brokerBranch);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const applicationRuntimeImport = standaloneSource.indexOf("import('./effect/runtime.js')", applicationProgramStart);
 
     expect(applicationProgramStart).toBeGreaterThanOrEqual(0);
@@ -20,7 +30,8 @@ describe('standalone broker bootstrap', () => {
 
   it('keeps the broker runtime bootstrap outside heavyweight application domains', () => {
     const bootstrapSource = readSource('apps/threadnote/src/effect/runtime-bootstrap.ts');
-    const importSpecifiers = [...bootstrapSource.matchAll(/(?:from\s+|import\()(['"])([^'"]+)\1/gu)].map(
+    const importSpecifiers = EffectArray.map(
+      [...Effect.pipe(bootstrapSource, EffectString.matchAll(/(?:from\s+|import\()(['"])([^'"]+)\1/gu))],
       match => match[2],
     );
     const heavyweightPrefixes = [
@@ -36,7 +47,9 @@ describe('standalone broker bootstrap', () => {
 
     expect(importSpecifiers).not.toEqual([]);
     expect(
-      importSpecifiers.filter(Boolean).filter(specifier => heavyweightPrefixes.some(p => specifier.startsWith(p))),
+      EffectArray.filter(EffectArray.filter(importSpecifiers, Boolean), specifier =>
+        EffectArray.some(heavyweightPrefixes, p => Effect.pipe(specifier, EffectString.startsWith(p))),
+      ),
     ).toEqual([]);
   });
 
@@ -57,14 +70,15 @@ describe('standalone broker bootstrap', () => {
       'apps/threadnote/src/process/diagnostics.ts',
       'apps/threadnote/src/process/standalone_lease.ts',
     ]);
-    const forbidden = [...closure].filter(
+    const forbidden = EffectArray.filter(
+      [...closure],
       path =>
         path === 'apps/threadnote/src/effect/runtime.ts' ||
         path === 'apps/threadnote/src/release/index.ts' ||
         path === 'apps/threadnote/src/release/update.ts' ||
         path === 'apps/threadnote/src/utils.ts' ||
-        path.startsWith('apps/threadnote/src/code_graph/') ||
-        path.startsWith('apps/threadnote/src/memory/'),
+        Effect.pipe(path, EffectString.startsWith('apps/threadnote/src/code_graph/')) ||
+        Effect.pipe(path, EffectString.startsWith('apps/threadnote/src/memory/')),
     );
     expect(forbidden).toEqual([]);
   });
@@ -76,7 +90,7 @@ function readSource(path: string): string {
 
 function staticRelativeImportClosure(entryPaths: readonly string[]): ReadonlySet<string> {
   const appSourceRoot = resolve(repositoryRoot, 'apps/threadnote/src');
-  const queued = entryPaths.map(path => resolve(repositoryRoot, path));
+  const queued = EffectArray.map(entryPaths, path => resolve(repositoryRoot, path));
   const visited = new Set<string>();
   while (queued.length > 0) {
     const current = queued.pop()!;
@@ -84,11 +98,15 @@ function staticRelativeImportClosure(entryPaths: readonly string[]): ReadonlySet
     visited.add(current);
     const imports = new Bun.Transpiler({loader: 'ts'}).scanImports(readFileSync(current, 'utf8'));
     for (const imported of imports) {
-      if (imported.kind !== 'import-statement' || !imported.path.startsWith('.')) continue;
-      const candidate = resolve(dirname(current), imported.path.replace(/\.js$/u, '.ts'));
-      if (relative(appSourceRoot, candidate).startsWith('..')) continue;
+      if (imported.kind !== 'import-statement' || !Effect.pipe(imported.path, EffectString.startsWith('.'))) continue;
+      const candidate = resolve(dirname(current), Effect.pipe(imported.path, EffectString.replace(/\.js$/u, '.ts')));
+      if (Effect.pipe(relative(appSourceRoot, candidate), EffectString.startsWith('..'))) continue;
       queued.push(candidate);
     }
   }
-  return new Set([...visited].map(path => relative(repositoryRoot, path).replaceAll('\\', '/')));
+  return new Set(
+    EffectArray.map([...visited], path =>
+      Effect.pipe(relative(repositoryRoot, path), EffectString.replaceAll('\\', '/')),
+    ),
+  );
 }

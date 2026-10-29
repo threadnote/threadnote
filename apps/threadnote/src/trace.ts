@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Predicate, Result, Stream} from 'effect';
 import {applyScrubber} from './share/index.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAX_TRANSCRIPT_BYTES = 4 * 1024 * 1024;
 const MAX_INTENTS = 5;
@@ -8,9 +11,9 @@ const MAX_TOOLS = 12;
 
 function extractText(content: unknown): string | undefined {
   if (typeof content === 'string') {
-    return content.trim() || undefined;
+    return Effect2.pipe(content, EffectString.trim) || undefined;
   }
-  if (!Array.isArray(content)) {
+  if (!EffectArray.isArray(content)) {
     return undefined;
   }
   const parts: string[] = [];
@@ -21,12 +24,12 @@ function extractText(content: unknown): string | undefined {
       parts.push(part.text);
     }
   }
-  const joined = parts.join(' ').trim();
+  const joined = Effect2.pipe(EffectArray.join(parts, ' '), EffectString.trim);
   return joined || undefined;
 }
 
 function extractToolNames(content: unknown): readonly string[] {
-  if (!Array.isArray(content)) {
+  if (!EffectArray.isArray(content)) {
     return [];
   }
   const names: string[] = [];
@@ -39,8 +42,8 @@ function extractToolNames(content: unknown): readonly string[] {
 }
 
 function truncate(value: string, max: number): string {
-  const oneLine = value.replace(/\s+/g, ' ').trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+  const oneLine = Effect2.pipe(value, EffectString.replace(/\s+/g, ' '), EffectString.trim);
+  return oneLine.length > max ? `${Effect2.pipe(oneLine, EffectString.slice(0, max - 1))}…` : oneLine;
 }
 
 /**
@@ -56,14 +59,14 @@ export const distillTrace = Effect.fn('trace.distill')(function* (transcriptPath
   if (raw === undefined) {
     return undefined;
   }
-  if (!raw.trim()) {
+  if (!Effect2.pipe(raw, EffectString.trim)) {
     return undefined;
   }
   let events = 0;
   const tools = new Set<string>();
   const intents: string[] = [];
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
+  for (const line of Effect2.pipe(raw, EffectString.split('\n'))) {
+    const trimmed = Effect2.pipe(line, EffectString.trim);
     if (!trimmed) {
       continue;
     }
@@ -99,7 +102,7 @@ export const distillTrace = Effect.fn('trace.distill')(function* (transcriptPath
   }
   const lines = [`- ${events} transcript events`];
   if (tools.size > 0) {
-    lines.push(`- tools used: ${[...tools].slice(0, MAX_TOOLS).join(', ')}`);
+    lines.push(`- tools used: ${EffectArray.join([...tools].slice(0, MAX_TOOLS), ', ')}`);
   }
   const recentIntents = intents.slice(-MAX_INTENTS);
   if (recentIntents.length > 0) {
@@ -108,7 +111,7 @@ export const distillTrace = Effect.fn('trace.distill')(function* (transcriptPath
       lines.push(`  - ${intent}`);
     }
   }
-  return lines.join('\n');
+  return EffectArray.join(lines, '\n');
 });
 
 const readTranscriptTail = Effect.fn('trace.readTail')((transcriptPath: string) =>
@@ -126,13 +129,13 @@ const readTranscriptTail = Effect.fn('trace.readTail')((transcriptPath: string) 
     const chunks = yield* fs
       .stream(transcriptPath, {bytesToRead: MAX_TRANSCRIPT_BYTES, offset: start})
       .pipe(Stream.runCollect);
-    const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+    const length = EffectArray.reduce(chunks, 0, (total, chunk) => total + chunk.byteLength);
     const bytes = new Uint8Array(length);
     let offset = 0;
     for (const chunk of chunks) {
       bytes.set(chunk, offset);
       offset += chunk.byteLength;
     }
-    return new TextDecoder().decode(bytes).replace(/^[^\n]*(?:\n|$)/, '');
+    return Effect2.pipe(new TextDecoder().decode(bytes), EffectString.replace(/^[^\n]*(?:\n|$)/, ''));
   }).pipe(Effect.orElseSucceed(() => undefined)),
 );

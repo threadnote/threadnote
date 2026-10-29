@@ -1,9 +1,13 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, Schema} from 'effect';
 import type {FileSystem, Path, Crypto} from 'effect';
 import type {PlatformError} from 'effect/PlatformError';
 import type {SystemInfo} from '@threadnote/platform/system';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface SourceConfig {
   readonly type: string;
@@ -57,19 +61,19 @@ export const mutateSourceConfiguration = Effect.fn('source.mutateConfiguration')
 ) {
   return yield* (yield* SourceConfigurationStore).mutate(config, update);
 });
-export class SourceConfigurationError extends Schema.TaggedError<SourceConfigurationError>()(
-  'SourceConfigurationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class SourceConfigurationError extends Schema.TaggedError<
+  SourceConfigurationError,
+  {readonly brand: unique symbol}
+>()('SourceConfigurationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 const IDENTIFIER_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const PROVIDER_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 export const CREDENTIAL_ENV_PATTERN = /^[A-Z_][A-Z0-9_]{0,127}$/;
 export {isJsonObject} from '@threadnote/platform/json';
 export function validateSourceIdentifier(value: string, label: string): string {
-  const normalized = value.trim().toLowerCase();
+  const normalized = Effect2.pipe(value, EffectString.trim, EffectString.toLowerCase);
   if (!IDENTIFIER_PATTERN.test(normalized)) {
     throw SourceConfigurationError.make({
       message: `${label} must contain only lowercase letters, digits, dots, underscores, and hyphens.`,
@@ -97,10 +101,10 @@ export function portableIdentifier(value: string, label: string): string {
   }
 }
 export function providerIds(value: unknown, label: string, maximum: number): readonly string[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > maximum) {
+  if (!EffectArray.isArray(value) || value.length === 0 || value.length > maximum) {
     throw SourceConfigurationError.make({message: `${label} must contain 1 to ${maximum} ids.`});
   }
-  const ids = value.map(item => requiredProviderId(item, label));
+  const ids = EffectArray.map(value, item => requiredProviderId(item, label));
   if (new Set(ids).size !== ids.length) {
     throw SourceConfigurationError.make({message: `${label} contains duplicate ids.`});
   }
@@ -108,22 +112,29 @@ export function providerIds(value: unknown, label: string, maximum: number): rea
 }
 export function positiveInteger(value: unknown, fallback: number, maximum: number, label: string): number {
   if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > maximum) {
+  if (!checkedIsSafeInteger(value) || value < 1 || value > maximum) {
     throw SourceConfigurationError.make({message: `${label} must be an integer from 1 to ${maximum}.`});
   }
-  return value as number;
+  return value;
 }
 export function requiredString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (typeof value !== 'string' || Effect2.pipe(value, EffectString.trim).length === 0) {
     throw SourceConfigurationError.make({message: `${label} must be a non-empty string.`});
   }
-  return value.trim();
+  return Effect2.pipe(value, EffectString.trim);
 }
+const isNonEmptyTrimmedStringArray = (value: unknown): value is readonly string[] =>
+  EffectArray.isArray(value) &&
+  EffectArray.every(
+    value,
+    (item): item is string => typeof item === 'string' && Effect2.pipe(item, EffectString.trim).length > 0,
+  );
+
 export function requiredStringArray(value: unknown, label: string): readonly string[] {
-  if (!Array.isArray(value) || !value.every(item => typeof item === 'string' && item.trim().length > 0)) {
+  if (!isNonEmptyTrimmedStringArray(value)) {
     throw SourceConfigurationError.make({message: `${label} must be an array of non-empty strings.`});
   }
-  return [...new Set(value.map(item => item.trim()))];
+  return [...new Set(EffectArray.map(value, item => Effect2.pipe(item, EffectString.trim)))];
 }
 export function optionalBoolean(value: unknown, fallback: boolean, label: string): boolean {
   if (value === undefined) {

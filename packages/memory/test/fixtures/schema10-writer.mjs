@@ -1,3 +1,4 @@
+/* oxlint-disable effecttsgo/prefer-effect-array, effecttsgo/prefer-effect-record, effecttsgo/prefer-effect-string -- Frozen generated compatibility oracle must retain its historical implementation. */
 // Frozen schema10 writer oracle, bundled from HEAD724cc6def34c1fd9630d309e8f9c9e9ff7096814 before Phase7 edits.
 // Do not rebuild from current source: this fixture tests the old writer contract.
 // @bun

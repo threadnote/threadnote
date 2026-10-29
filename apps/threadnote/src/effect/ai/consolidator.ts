@@ -1,3 +1,5 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import {OpenAiClient, OpenAiLanguageModel} from '@effect/ai-openai-compat';
 import {Context, Effect, Layer, Redacted, Schema} from 'effect';
@@ -22,6 +24,8 @@ import {
   topicDraftModelSchema,
   topicDraftNativeJsonSchema,
 } from '../../manager/topic_draft_schema.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface DraftGenerationSettings {
   readonly maxOutputTokens: 4000;
@@ -48,18 +52,21 @@ export function localDraftGenerationSettings(
 }
 
 export function serializeDraftGenerationSettings(settings: DraftGenerationSettings): string {
-  return [
-    ...(settings.seed === undefined ? [] : [`seed=${settings.seed}`]),
-    `maxTokens=${settings.maxOutputTokens}`,
-    ...(settings.sampling
-      ? [
-          `profile=${settings.sampling.profileId}`,
-          `temperature=${settings.sampling.temperature}`,
-          `topP=${settings.sampling.topP}`,
-          `topK=${settings.sampling.topK}`,
-        ]
-      : []),
-  ].join(';');
+  return EffectArray.join(
+    [
+      ...(settings.seed === undefined ? [] : [`seed=${settings.seed}`]),
+      `maxTokens=${settings.maxOutputTokens}`,
+      ...(settings.sampling
+        ? [
+            `profile=${settings.sampling.profileId}`,
+            `temperature=${settings.sampling.temperature}`,
+            `topP=${settings.sampling.topP}`,
+            `topK=${settings.sampling.topK}`,
+          ]
+        : []),
+    ],
+    ';',
+  );
 }
 
 export const EFFECT_AI_ENABLED_ENV = 'THREADNOTE_EFFECT_AI';
@@ -77,25 +84,32 @@ export interface ResolvedEffectAiConfiguration {
   readonly configuration: EffectAiConfiguration;
 }
 
-export class AiConsolidationFailed extends Schema.TaggedError<AiConsolidationFailed>()('AiConsolidationFailed', {
-  cause: Schema.Defect(),
+export class AiConsolidationFailed extends Schema.TaggedError<AiConsolidationFailed, {readonly brand: unique symbol}>()(
+  'AiConsolidationFailed',
+  {
+    cause: Schema.Defect(),
+    message: Schema.String,
+  },
+) {}
+
+/** Only final preflights that prove no provider/runtime call can return this outcome. */
+export class DraftProviderUnavailableBeforeDispatch extends Schema.TaggedError<
+  DraftProviderUnavailableBeforeDispatch,
+  {readonly brand: unique symbol}
+>()('DraftProviderUnavailableBeforeDispatch', {
+  backend: Schema.Literals(['local-ai', 'effect-ai']),
+  modelId: Schema.String,
   message: Schema.String,
 }) {}
 
-/** Only final preflights that prove no provider/runtime call can return this outcome. */
-export class DraftProviderUnavailableBeforeDispatch extends Schema.TaggedError<DraftProviderUnavailableBeforeDispatch>()(
-  'DraftProviderUnavailableBeforeDispatch',
-  {backend: Schema.Literals(['local-ai', 'effect-ai']), modelId: Schema.String, message: Schema.String},
-) {}
-
-export class TopicDraftProviderOutputError extends Schema.TaggedError<TopicDraftProviderOutputError>()(
-  'TopicDraftProviderOutputError',
-  {
-    message: Schema.String,
-    output: RetainedTopicGenerationOutput,
-    usage: Schema.optionalKey(TopicGenerationUsage),
-  },
-) {}
+export class TopicDraftProviderOutputError extends Schema.TaggedError<
+  TopicDraftProviderOutputError,
+  {readonly brand: unique symbol}
+>()('TopicDraftProviderOutputError', {
+  message: Schema.String,
+  output: RetainedTopicGenerationOutput,
+  usage: Schema.optionalKey(TopicGenerationUsage),
+}) {}
 
 function decodeTopicDraftProviderOutput(
   basis: TopicMaintenanceDraftBasis,
@@ -119,11 +133,11 @@ function decodeTopicDraftProviderOutput(
 }
 
 export function topicDraftProviderUsage(inputTokens: unknown, outputTokens: unknown): TopicGenerationUsageV1 {
-  return Number.isSafeInteger(inputTokens) &&
-    (inputTokens as number) >= 0 &&
-    Number.isSafeInteger(outputTokens) &&
-    (outputTokens as number) >= 0
-    ? {status: 'measured', inputTokens: inputTokens as number, outputTokens: outputTokens as number}
+  return checkedIsSafeInteger(inputTokens) &&
+    inputTokens >= 0 &&
+    checkedIsSafeInteger(outputTokens) &&
+    outputTokens >= 0
+    ? {status: 'measured', inputTokens: inputTokens, outputTokens: outputTokens}
     : {status: 'unavailable'};
 }
 
@@ -144,15 +158,31 @@ export const consolidateWithAiEffect = Effect.fn('AiConsolidator.consolidate')(f
 export function effectAiConfiguration(
   env: Readonly<Record<string, string | undefined>>,
 ): EffectAiConfiguration | undefined {
-  if (!['1', 'true', 'yes'].includes(env[EFFECT_AI_ENABLED_ENV]?.trim().toLowerCase() ?? '')) {
+  if (
+    !['1', 'true', 'yes'].includes(
+      Effect2.pipe(
+        env[EFFECT_AI_ENABLED_ENV],
+        effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+      ) ?? '',
+    )
+  ) {
     return undefined;
   }
-  const model = env[EFFECT_AI_MODEL_ENV]?.trim();
+  const model = Effect2.pipe(env[EFFECT_AI_MODEL_ENV], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (!model) {
     return undefined;
   }
-  const apiKey = env[EFFECT_AI_API_KEY_ENV]?.trim();
-  const apiUrl = env[EFFECT_AI_API_URL_ENV]?.trim();
+  const apiKey = Effect2.pipe(env[EFFECT_AI_API_KEY_ENV], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
+  const apiUrl = Effect2.pipe(env[EFFECT_AI_API_URL_ENV], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   return {
     apiKey: apiKey || undefined,
     apiUrl: apiUrl || undefined,
@@ -199,7 +229,7 @@ export function aiConsolidatorLayer(
               schema: ConsolidationDraft,
             })
             .pipe(
-              Effect.map(response => response.value.draft.trim()),
+              Effect.map(response => Effect2.pipe(response.value.draft, EffectString.trim)),
               Effect.filterOrFail(
                 draft => draft.length > 0,
                 () =>
@@ -279,7 +309,13 @@ export function runEffectAiTopicDraft(
                 basis.version === 3 ? JSON.parse(response.text) : response.value,
                 usage,
               ),
-            catch: error => error as TopicDraftProviderOutputError,
+            catch: error =>
+              Schema.is(TopicDraftProviderOutputError)(error)
+                ? error
+                : AiConsolidationFailed.make({
+                    cause: error,
+                    message: 'Could not decode topic maintenance provider output.',
+                  }),
           });
           return {
             text,
@@ -357,7 +393,7 @@ export const runNativeAiConsolidation = Effect.fn('AiConsolidator.consolidateNat
       }),
     ),
   );
-  const value = draft.draft.trim();
+  const value = Effect2.pipe(draft.draft, EffectString.trim);
   if (!value) {
     return yield* AiConsolidationFailed.make({
       cause: output,
@@ -389,7 +425,10 @@ export const runNativeAiTopicDraft = Effect.fn('AiConsolidator.generateNativeTop
     });
   const text = yield* Effect.try({
     try: () => decodeTopicDraftProviderOutput(basis, output),
-    catch: error => error as TopicDraftProviderOutputError,
+    catch: error =>
+      Schema.is(TopicDraftProviderOutputError)(error)
+        ? error
+        : AiConsolidationFailed.make({cause: error, message: 'Could not decode topic maintenance provider output.'}),
   });
   return {
     text,

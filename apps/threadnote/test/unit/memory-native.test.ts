@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it} from '@effect/vitest';
@@ -39,8 +40,12 @@ import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {readMemoryWithRelocations, recordMemoryRelocation} from '@threadnote/memory/relocation';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {fatalLocalModelWorkerHarness} from '../helpers/fatal-local-model-worker.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const generationManifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'generation')!;
+const generationManifest = Option.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'generation'),
+)!;
 
 describe('native memory workflow', () => {
   it.effect('stores canonical memory when optional enrichment repeatedly crashes its native child', () =>
@@ -164,7 +169,7 @@ describe('native memory workflow', () => {
           includeInactive: false,
           query: 'QX7 missed heartbeat lease recovery',
         });
-        expect(indexed.map(candidate => candidate.uri)).toContain(uri);
+        expect(EffectArray.map(indexed, candidate => candidate.uri)).toContain(uri);
         const canonicalContent = yield* fs.readFileString(
           path.join(
             home,
@@ -263,9 +268,15 @@ describe('native memory workflow', () => {
         const observed = yield* captureConsole(runRead(config, uri, {}).pipe(Effect.exit));
 
         expect(Exit.isFailure(observed.value)).toBe(true);
-        const recoveryLine = observed.output
-          .split('\n')
-          .find(line => line.startsWith('{"code":"memory-resource-not-found"'));
+        const recoveryLine = Option.getOrUndefined(
+          EffectArray.findFirst(
+            Effect2.pipe(observed.output, EffectString.split('\n')),
+            __effectArrayValue =>
+              !!(line => Effect2.pipe(line, EffectString.startsWith('{"code":"memory-resource-not-found"')))(
+                __effectArrayValue,
+              ),
+          ),
+        );
         expect(recoveryLine).toBeDefined();
         expect(JSON.parse(recoveryLine!)).toEqual({
           code: 'memory-resource-not-found',
@@ -318,7 +329,7 @@ describe('native memory workflow', () => {
           },
           'Receipt-witnessed replacement source.',
         );
-        const missingIdentity = original.replace(`memory_id: ${memoryId}\n`, '');
+        const missingIdentity = Effect2.pipe(original, EffectString.replace(`memory_id: ${memoryId}\n`, ''));
         yield* store.write(location, sourceUri, original, {mode: 'create'});
         yield* store.write(location, targetUri, original, {mode: 'create'});
         yield* recordMemoryRelocation(config, {
@@ -439,7 +450,7 @@ describe('native memory workflow', () => {
         const cases = [
           {
             expected: 'canonical positive safe integer',
-            schemaLines: [`schema_version: ${'9'.repeat(80)}`],
+            schemaLines: [`schema_version: ${Effect2.pipe('9', EffectString.repeat(80))}`],
             topic: 'unsafe-version',
           },
           {
@@ -451,16 +462,19 @@ describe('native memory workflow', () => {
 
         for (const testCase of cases) {
           const uri = `threadnote://user/tester/memories/durable/projects/threadnote/${testCase.topic}.md`;
-          const original = [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'project: threadnote',
-            `topic: ${testCase.topic}`,
-            ...testCase.schemaLines,
-            '',
-            'Future-owned content must remain byte-for-byte unchanged.',
-          ].join('\n');
+          const original = EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'project: threadnote',
+              `topic: ${testCase.topic}`,
+              ...testCase.schemaLines,
+              '',
+              'Future-owned content must remain byte-for-byte unchanged.',
+            ],
+            '\n',
+          );
           yield* store.write(location, uri, original, {mode: 'create'});
 
           const error = yield* Effect.flip(
@@ -499,17 +513,20 @@ describe('native memory workflow', () => {
         const location = {account: config.account, home: config.agentContextHome, user: config.user};
         const futureTopic = 'implicit-future-version';
         const futureUri = `threadnote://user/tester/memories/durable/projects/threadnote/${futureTopic}.md`;
-        const future = [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          'project: threadnote',
-          `topic: ${futureTopic}`,
-          `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
-          'future_writer_field: preserve-me',
-          '',
-          'Future-owned content must remain unchanged.',
-        ].join('\n');
+        const future = EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            'project: threadnote',
+            `topic: ${futureTopic}`,
+            `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
+            'future_writer_field: preserve-me',
+            '',
+            'Future-owned content must remain unchanged.',
+          ],
+          '\n',
+        );
         yield* store.write(location, futureUri, future, {mode: 'create'});
 
         const futureError = yield* Effect.flip(
@@ -527,13 +544,13 @@ describe('native memory workflow', () => {
         const citationUri = `threadnote://user/tester/memories/durable/projects/threadnote/${citationTopic}.md`;
         const citation = createMemoryCodeCitation({
           extractorSet: 'native-code-graph-13',
-          fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+          fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
           path: 'apps/threadnote/src/memory/index.ts',
-          repositoryId: 'b'.repeat(64),
+          repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
           repositoryIdentityKind: 'remote',
-          sourceCommit: 'c'.repeat(40),
+          sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
           sourceDirty: false,
-          sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+          sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
           target: {kind: 'file'},
           version: 1,
         });
@@ -632,17 +649,20 @@ describe('native memory workflow', () => {
         const store = yield* ResourceStore;
         const location = {account: config.account, home: config.agentContextHome, user: config.user};
         const sourceUri = 'threadnote://user/tester/memories/handoffs/active/threadnote/archive-race.md';
-        const original = [
-          'HANDOFF',
-          'kind: handoff',
-          'status: active',
-          'project: threadnote',
-          'topic: archive-race',
-          'source_agent_client: test',
-          'timestamp: 2026-07-01T00:00:00.000Z',
-          '',
-          'Original archive candidate.',
-        ].join('\n');
+        const original = EffectArray.join(
+          [
+            'HANDOFF',
+            'kind: handoff',
+            'status: active',
+            'project: threadnote',
+            'topic: archive-race',
+            'source_agent_client: test',
+            'timestamp: 2026-07-01T00:00:00.000Z',
+            '',
+            'Original archive candidate.',
+          ],
+          '\n',
+        );
         const changed = `${original}\n\nConcurrent source update.`;
         yield* store.write(location, sourceUri, original, {mode: 'create'});
 
@@ -652,7 +672,8 @@ describe('native memory workflow', () => {
           writeChecked: (writeLocation, writeUri, content, options, check) =>
             store.writeChecked(writeLocation, writeUri, content, options, check).pipe(
               Effect.tap(() => {
-                if (sourceChanged || !writeUri.includes('/handoffs/archived/')) return Effect.void;
+                if (sourceChanged || !Effect2.pipe(writeUri, EffectString.includes('/handoffs/archived/')))
+                  return Effect.void;
                 sourceChanged = true;
                 return store.write(location, sourceUri, changed, {mode: 'replace'}).pipe(Effect.asVoid);
               }),
@@ -690,7 +711,7 @@ describe('native memory workflow', () => {
           // The former scratch path was keyed only by agentContextHome, so
           // distinct account stores still collided here while avoiding an
           // unrelated account-wide mutation-lock bottleneck in this test.
-          const cases = projects.map(project => ({
+          const cases = EffectArray.map(projects, project => ({
             config: {
               account: `local-${project}`,
               agentContextHome: home,
@@ -708,17 +729,20 @@ describe('native memory workflow', () => {
               home: candidate.config.agentContextHome,
               user: candidate.config.user,
             };
-            const content = [
-              'MEMORY',
-              'kind: durable',
-              'status: active',
-              `project: ${candidate.project}`,
-              'topic: contract',
-              'source_agent_client: test',
-              'timestamp: 2026-08-20T00:00:00.000Z',
-              '',
-              `Contract for ${candidate.project}.`,
-            ].join('\n');
+            const content = EffectArray.join(
+              [
+                'MEMORY',
+                'kind: durable',
+                'status: active',
+                `project: ${candidate.project}`,
+                'topic: contract',
+                'source_agent_client: test',
+                'timestamp: 2026-08-20T00:00:00.000Z',
+                '',
+                `Contract for ${candidate.project}.`,
+              ],
+              '\n',
+            );
             yield* store.write(location, candidate.stable, content, {mode: 'create'});
             yield* store.write(location, candidate.copy, content, {mode: 'create'});
             const pendingRoot = path.join(
@@ -743,7 +767,7 @@ describe('native memory workflow', () => {
           const observedFileSystem = FileSystem.FileSystem.of({
             ...fs,
             writeFileString: (target, content, options) => {
-              if (target.endsWith('/compact-memory-update.txt')) sharedScratchWrites += 1;
+              if (Effect2.pipe(target, EffectString.endsWith('/compact-memory-update.txt'))) sharedScratchWrites += 1;
               return fs.writeFileString(target, content, options);
             },
           });
@@ -774,7 +798,13 @@ describe('native memory workflow', () => {
               'deferred-code-anchors',
               'v1',
             );
-            expect((yield* fs.readDirectory(pendingRoot)).filter(name => name.endsWith('.json'))).toEqual([]);
+            expect(
+              EffectArray.filter(
+                yield* fs.readDirectory(pendingRoot),
+                __effectArrayValue2 =>
+                  !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue2),
+              ),
+            ).toEqual([]);
           }
         }),
       ),
@@ -802,17 +832,20 @@ describe('native memory workflow', () => {
             const location = {account: config.account, home: config.agentContextHome, user: config.user};
             const survivorUri = `threadnote://user/tester/memories/durable/projects/${race}/contract.md`;
             const duplicateUri = `threadnote://user/tester/memories/durable/projects/${race}/threadnote-copy.md`;
-            const original = [
-              'MEMORY',
-              'kind: durable',
-              'status: active',
-              `project: ${race}`,
-              'topic: contract',
-              'source_agent_client: test',
-              'timestamp: 2026-08-20T00:00:00.000Z',
-              '',
-              `Stable ${race} contract.`,
-            ].join('\n');
+            const original = EffectArray.join(
+              [
+                'MEMORY',
+                'kind: durable',
+                'status: active',
+                `project: ${race}`,
+                'topic: contract',
+                'source_agent_client: test',
+                'timestamp: 2026-08-20T00:00:00.000Z',
+                '',
+                `Stable ${race} contract.`,
+              ],
+              '\n',
+            );
             const concurrentContent = `${original}\n\nConcurrent survivor mutation.`;
             yield* store.write(location, survivorUri, original, {mode: 'create'});
             yield* store.write(location, duplicateUri, original, {mode: 'create'});
@@ -979,37 +1012,43 @@ describe('native memory workflow', () => {
         yield* fs.makeDirectory(memoryRoot, {recursive: true});
         yield* fs.writeFileString(
           path.join(memoryRoot, 'reference-source.md'),
-          [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'project: threadnote',
-            'topic: reference-source',
-            'source_agent_client: test',
-            'timestamp: 2026-07-30T00:00:00.000Z',
-            `references: ${existingUri}`,
-            `references: ${missingUri}`,
-            '',
-            '# Reference source',
-            '',
-            'DANGLING-REFERENCE-908172635 belongs only to the surfaced source.',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'project: threadnote',
+              'topic: reference-source',
+              'source_agent_client: test',
+              'timestamp: 2026-07-30T00:00:00.000Z',
+              `references: ${existingUri}`,
+              `references: ${missingUri}`,
+              '',
+              '# Reference source',
+              '',
+              'DANGLING-REFERENCE-908172635 belongs only to the surfaced source.',
+            ],
+            '\n',
+          ),
         );
         yield* fs.writeFileString(
           path.join(memoryRoot, 'existing-target.md'),
-          [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'project: threadnote',
-            'topic: existing-target',
-            'source_agent_client: test',
-            'timestamp: 2026-07-30T00:00:00.000Z',
-            '',
-            '# Existing target',
-            '',
-            'Readable prior design context.',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'project: threadnote',
+              'topic: existing-target',
+              'source_agent_client: test',
+              'timestamp: 2026-07-30T00:00:00.000Z',
+              '',
+              '# Existing target',
+              '',
+              'Readable prior design context.',
+            ],
+            '\n',
+          ),
         );
         yield* loadRecallIndex(config, {
           forceRefresh: true,
@@ -1063,19 +1102,22 @@ describe('native memory workflow', () => {
         yield* fs.makeDirectory(memoryRoot, {recursive: true});
         yield* fs.writeFileString(
           path.join(memoryRoot, 'stale-lexical-ghost.md'),
-          [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'project: threadnote',
-            'topic: stale-lexical-ghost',
-            'source_agent_client: test',
-            'timestamp: 2026-07-30T00:00:00.000Z',
-            '',
-            '# Stale lexical ghost',
-            '',
-            sentinel,
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'project: threadnote',
+              'topic: stale-lexical-ghost',
+              'source_agent_client: test',
+              'timestamp: 2026-07-30T00:00:00.000Z',
+              '',
+              '# Stale lexical ghost',
+              '',
+              sentinel,
+            ],
+            '\n',
+          ),
         );
         yield* loadRecallIndex(config, {
           forceRefresh: true,
@@ -1166,7 +1208,12 @@ describe('native memory workflow', () => {
         expect((yield* captureConsole(runRead(targetConfig, importedUri, {}))).output).toContain(
           'Pack round-trip preserves',
         );
-        expect((yield* fs.readDirectory(pendingRoot)).filter(name => name.endsWith('.json'))).toEqual([]);
+        expect(
+          EffectArray.filter(
+            yield* fs.readDirectory(pendingRoot),
+            __effectArrayValue2 => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue2),
+          ),
+        ).toEqual([]);
         yield* store.remove(targetLocation, importedUri);
         const staleRevival = yield* readMemoryWithRelocations(targetConfig, importedUri).pipe(Effect.exit);
         expect(Exit.isFailure(staleRevival)).toBe(true);
@@ -1301,14 +1348,14 @@ describe('native memory workflow', () => {
             version: 1 as const,
             provider: 'github' as const,
             sourceId: 'issues',
-            sourceInstanceId: 'a'.repeat(64),
+            sourceInstanceId: Effect2.pipe('a', EffectString.repeat(64)),
             resourceUri: 'threadnote://resources/external/github/issues/docs/r-1-issue-1/pages/main/chunk-1.md',
-            accessHash: 'a'.repeat(64),
-            revisionHash: 'a'.repeat(64),
-            contentHash: 'a'.repeat(64),
+            accessHash: Effect2.pipe('a', EffectString.repeat(64)),
+            revisionHash: Effect2.pipe('a', EffectString.repeat(64)),
+            contentHash: Effect2.pipe('a', EffectString.repeat(64)),
             rendererVersion: 'github-v1',
             sanitizerVersion: 'scrubber-redact-v1',
-            fragmentHash: 'a'.repeat(64),
+            fragmentHash: Effect2.pipe('a', EffectString.repeat(64)),
             fragmentStart: 0,
             fragmentEnd: 4,
             pinId: '12345678-1234-4234-8234-123456789abc',
@@ -1352,7 +1399,7 @@ describe('native memory workflow', () => {
             {relativeUri: 'other.md', content: memory('Other memory.')},
             {
               relativeUri: 'cited.md',
-              content: `${memory('Changed.', citation).replace(/source_evidence: .*\n/u, 'source_evidence: {bad-json}\n')}`,
+              content: `${Effect2.pipe(memory('Changed.', citation), EffectString.replace(/source_evidence: .*\n/u, 'source_evidence: {bad-json}\n'))}`,
             },
           ]);
           yield* assertRejectedWithoutWrites('source evidence');
@@ -1361,9 +1408,9 @@ describe('native memory workflow', () => {
             {relativeUri: 'other.md', content: memory('Other memory.')},
             {
               relativeUri: 'cited.md',
-              content: memory('Future writer.').replace(
-                'schema_version: 7',
-                `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
+              content: Effect2.pipe(
+                memory('Future writer.'),
+                EffectString.replace('schema_version: 7', `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`),
               ),
             },
           ]);
@@ -1404,13 +1451,13 @@ describe('native memory workflow', () => {
             version: 1 as const,
             sourceId: 'notes',
             sourceInstanceId: '12345678-1234-1234-1234-123456789abc',
-            vaultHash: 'a'.repeat(64),
-            accessHash: 'a'.repeat(64),
+            vaultHash: Effect2.pipe('a', EffectString.repeat(64)),
+            accessHash: Effect2.pipe('a', EffectString.repeat(64)),
             noteId: '12345678-1234-1234-1234-123456789abc',
             relativePath: 'Decision.md',
-            revisionHash: 'a'.repeat(64),
+            revisionHash: Effect2.pipe('a', EffectString.repeat(64)),
             sanitizerVersion: 'scrubber-redact-v1',
-            fragmentHash: 'a'.repeat(64),
+            fragmentHash: Effect2.pipe('a', EffectString.repeat(64)),
             fragmentStart: 0,
             fragmentEnd: 4,
             pinId: '12345678-1234-1234-1234-123456789abc',
@@ -1458,7 +1505,7 @@ describe('native memory workflow', () => {
           Array.from({length: 140}, (_, index) => index),
           index =>
             fs.writeFileString(
-              path.join(globalRoot, `${String(index).padStart(3, '0')}.md`),
+              path.join(globalRoot, `${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`),
               `# Global ${index}\n\ncommon recall term`,
             ),
           {concurrency: 16},
@@ -1485,10 +1532,14 @@ describe('native memory workflow', () => {
           semanticResult: Option.none(),
         });
 
-        expect(result.expansionCandidates.map(candidate => candidate.uri)).toContain(
+        expect(EffectArray.map(result.expansionCandidates, candidate => candidate.uri)).toContain(
           'threadnote://resources/repos/zeta/target.md',
         );
-        expect(result.expansionCandidates.some(candidate => candidate.uri.includes('/repos/alpha/'))).toBe(true);
+        expect(
+          EffectArray.some(result.expansionCandidates, candidate =>
+            Effect2.pipe(candidate.uri, EffectString.includes('/repos/alpha/')),
+          ),
+        ).toBe(true);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

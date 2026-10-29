@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Effect, Exit, Layer, Option, Predicate, Schema, Semaphore, Stream} from 'effect';
 import type {LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {parseLocalModelManifest} from '@threadnote/inference/models/catalog';
@@ -27,6 +28,8 @@ import {LOCAL_MODEL_WORKER_ARGUMENT} from '../../worker_protocol.js';
 import {withAnonymousTelemetryPhase} from '../telemetry.js';
 import {attachAnonymousTelemetryDiagnostic} from '../../telemetry/diagnostic.js';
 import {withCurrentAgentSessionEnvironment} from '../../telemetry/session.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {LOCAL_MODEL_WORKER_ARGUMENT};
 
@@ -70,14 +73,14 @@ interface WorkerFailure {
 
 type WorkerResponse = WorkerFailure | WorkerSuccess;
 
-export class LocalModelWorkerTransportError extends Schema.TaggedError<LocalModelWorkerTransportError>()(
-  'LocalModelWorkerTransportError',
-  {
-    message: Schema.String,
-    operation: Schema.String,
-    reason: Schema.Literals(['crash', 'exit', 'protocol', 'spawn', 'timeout', 'write']),
-  },
-) {}
+export class LocalModelWorkerTransportError extends Schema.TaggedError<
+  LocalModelWorkerTransportError,
+  {readonly brand: unique symbol}
+>()('LocalModelWorkerTransportError', {
+  message: Schema.String,
+  operation: Schema.String,
+  reason: Schema.Literals(['crash', 'exit', 'protocol', 'spawn', 'timeout', 'write']),
+}) {}
 
 export interface LocalModelWorkerProcess {
   readonly closeInput: () => Promise<void> | void;
@@ -263,13 +266,13 @@ export interface LocalModelWorkerServerIo {
   readonly writeLine: (line: string) => Promise<void>;
 }
 
-class LocalModelWorkerServerError extends Schema.TaggedError<LocalModelWorkerServerError>()(
-  'LocalModelWorkerServerError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class LocalModelWorkerServerError extends Schema.TaggedError<
+  LocalModelWorkerServerError,
+  {readonly brand: unique symbol}
+>()('LocalModelWorkerServerError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export function serveWorker(
   runtime: LocalModelRuntimeShape,
@@ -291,10 +294,14 @@ export function serveWorker(
     Effect.gen(function* () {
       buffered += typeof chunk === 'string' ? chunk : decoder.decode(chunk, {stream: true});
       for (;;) {
-        const newline = buffered.indexOf('\n');
+        const newline = Effect2.pipe(
+          buffered,
+          EffectString.indexOf('\n'),
+          Effect2.Option.getOrElse(() => -1),
+        );
         if (newline < 0) break;
-        const line = buffered.slice(0, newline).replace(/\r$/, '');
-        buffered = buffered.slice(newline + 1);
+        const line = Effect2.pipe(buffered, EffectString.slice(0, newline), EffectString.replace(/\r$/, ''));
+        buffered = Effect2.pipe(buffered, EffectString.slice(newline + 1));
         if (!line) continue;
         yield* writeResponse(line);
       }
@@ -306,7 +313,7 @@ export function serveWorker(
     Effect.andThen(
       Effect.gen(function* () {
         buffered += decoder.decode();
-        const finalLine = buffered.trim();
+        const finalLine = Effect2.pipe(buffered, EffectString.trim);
         if (finalLine) yield* writeResponse(finalLine);
       }),
     ),
@@ -580,13 +587,13 @@ class LocalModelWorkerConnection {
           return;
         }
         this.consumeStdoutLines();
-        if (decoded.includes('\n')) {
+        if (Effect2.pipe(decoded, EffectString.includes('\n'))) {
           this.stdoutBufferBytes = this.encoder.encode(this.stdoutBuffer).byteLength;
         }
       }
       this.stdoutBuffer += this.decoder.decode();
       this.consumeStdoutLines();
-      if (this.stdoutBuffer.trim()) this.fail('protocol');
+      if (Effect2.pipe(this.stdoutBuffer, EffectString.trim)) this.fail('protocol');
       else this.fail('exit');
     } catch {
       this.fail('exit');
@@ -595,10 +602,14 @@ class LocalModelWorkerConnection {
 
   private consumeStdoutLines(): void {
     for (;;) {
-      const newline = this.stdoutBuffer.indexOf('\n');
+      const newline = Effect2.pipe(
+        this.stdoutBuffer,
+        EffectString.indexOf('\n'),
+        Effect2.Option.getOrElse(() => -1),
+      );
       if (newline < 0) return;
-      const line = this.stdoutBuffer.slice(0, newline).replace(/\r$/, '');
-      this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
+      const line = Effect2.pipe(this.stdoutBuffer, EffectString.slice(0, newline), EffectString.replace(/\r$/, ''));
+      this.stdoutBuffer = Effect2.pipe(this.stdoutBuffer, EffectString.slice(newline + 1));
       if (!line) continue;
       const pending = this.pending;
       if (Option.isNone(pending)) {
@@ -692,7 +703,11 @@ export function localModelWorkerSpawnOptions(system: SystemInfoShape): LocalMode
 }
 
 function developmentStandaloneScript(system: SystemInfoShape): Option.Option<string> {
-  const executableName = system.executablePath.replaceAll('\\', '/').split('/').at(-1);
+  const executableName = Effect2.pipe(
+    system.executablePath,
+    EffectString.replaceAll('\\', '/'),
+    EffectString.split('/'),
+  ).at(-1);
   if (executableName !== 'bun' && executableName !== 'bun.exe') return Option.none();
   const candidate = system.processArguments[1];
   if (
@@ -903,10 +918,10 @@ function decodeVectors(
   expectedCount: number,
   expectedDimensions: number | undefined,
 ): Option.Option<readonly (readonly number[])[]> {
-  if (!Array.isArray(value) || value.length !== expectedCount) return Option.none();
+  if (!EffectArray.isArray(value) || value.length !== expectedCount) return Option.none();
   const vectors: number[][] = [];
   for (const vector of value) {
-    if (!Array.isArray(vector) || (expectedDimensions !== undefined && vector.length !== expectedDimensions)) {
+    if (!EffectArray.isArray(vector) || (expectedDimensions !== undefined && vector.length !== expectedDimensions)) {
       return Option.none();
     }
     const coordinates: number[] = [];
@@ -920,7 +935,7 @@ function decodeVectors(
 }
 
 function decodeScores(value: unknown, expectedCount: number): Option.Option<readonly number[]> {
-  if (!Array.isArray(value) || value.length !== expectedCount) return Option.none();
+  if (!EffectArray.isArray(value) || value.length !== expectedCount) return Option.none();
   const scores: number[] = [];
   for (const score of value) {
     if (typeof score !== 'number' || !Number.isFinite(score)) return Option.none();
@@ -962,7 +977,7 @@ function decodeEmbeddingContextPlanDiagnostics(
       (typeof value.modelGpuLayers !== 'number' ||
         !Number.isSafeInteger(value.modelGpuLayers) ||
         value.modelGpuLayers < 0)) ||
-    !Array.isArray(value.threadCounts)
+    !EffectArray.isArray(value.threadCounts)
   ) {
     return Option.none();
   }
@@ -1260,7 +1275,7 @@ function parseJson(value: string): Option.Option<unknown> {
 }
 
 function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every(item => typeof item === 'string');
+  return EffectArray.isArray(value) && EffectArray.every(value, item => typeof item === 'string');
 }
 
 function isWorkerOperation(value: unknown): value is WorkerOperation {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import type {CodeGraphInventoryFile} from '../../types.js';
@@ -17,8 +18,11 @@ export const discardInvalidCachedFacts = Effect.fn('codeGraph.discardInvalidCach
     const batch = files.slice(offset, offset + 100);
     yield* sql.unsafe(
       `DELETE FROM file_blobs
-       WHERE ${batch.map(() => '(path_hint = ? AND content_hash = ?)').join(' OR ')}`,
-      batch.flatMap(file => [file.path, file.contentHash]),
+       WHERE ${EffectArray.join(
+         EffectArray.map(batch, () => '(path_hint = ? AND content_hash = ?)'),
+         ' OR ',
+       )}`,
+      EffectArray.flatMap(batch, file => [file.path, file.contentHash]),
     );
   }
 });

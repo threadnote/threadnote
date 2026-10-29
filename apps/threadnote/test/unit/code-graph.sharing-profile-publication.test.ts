@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -13,6 +14,8 @@ import {makeGraphShareRegistryWriter} from '@threadnote/graph/sharing/registry/w
 
 import {graphRegistryFixture} from '@threadnote/graph/test/helpers/graph-registry';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, FetchHttpClient.layer)),
@@ -24,7 +27,7 @@ const profile = {
     canonicalRemote: 'github.com/acme/example',
     organization: 'acme',
     publisherKeyFingerprint: sha256Digest('publisher'),
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
   }),
   registry: {canonical: registryReference, worker: 'oci://registry.example.test/acme/worker'},
 };
@@ -37,12 +40,12 @@ effectIt.effect('publishes and verifies the immutable profile artifact before re
     const publish = () => fixture.provide(publishGraphShareProfileArtifact(profile, writer, reader));
     const expected = graphShareProfileOciArtifact(profile);
     expect(yield* publish()).toEqual(expected);
-    const tag = `tn-profile-${expected.manifestDigest.slice('sha256:'.length)}`;
+    const tag = `tn-profile-${Effect2.pipe(expected.manifestDigest, EffectString.slice('sha256:'.length))}`;
     expect(fixture.manifests.get(tag)).toEqual(expected.manifestBytes);
     expect(fixture.manifests.get(expected.manifestDigest)).toEqual(expected.manifestBytes);
     expect(fixture.blobs.get(expected.profileDigest)).toEqual(expected.profileBytes);
-    const puts = fixture.requests.filter(request => request.method === 'PUT');
-    expect(puts.map(request => request.pathname)).toEqual([
+    const puts = EffectArray.filter(fixture.requests, request => request.method === 'PUT');
+    expect(EffectArray.map(puts, request => request.pathname)).toEqual([
       `/v2/acme/canonical/blobs/uploads/fixture`,
       `/v2/acme/canonical/blobs/uploads/fixture`,
       `/v2/acme/canonical/manifests/${expected.manifestDigest}`,
@@ -50,7 +53,10 @@ effectIt.effect('publishes and verifies the immutable profile artifact before re
     ]);
     expect(yield* publish()).toEqual(expected);
     expect(
-      fixture.requests.filter(request => request.method === 'PUT' && request.pathname.endsWith(`/${tag}`)),
+      EffectArray.filter(
+        fixture.requests,
+        request => request.method === 'PUT' && Effect2.pipe(request.pathname, EffectString.endsWith(`/${tag}`)),
+      ),
     ).toHaveLength(1);
   }).pipe(provideTestLayer(layer)),
 );
@@ -61,12 +67,12 @@ effectIt.effect('fails closed on a conflicting profile tag or unverifiable remot
     const writer = yield* fixture.provide(makeGraphShareRegistryWriter(registryReference));
     const reader = yield* fixture.provide(makeGraphShareRegistryReader(registryReference));
     const artifact = graphShareProfileOciArtifact(profile);
-    const tag = `tn-profile-${artifact.manifestDigest.slice('sha256:'.length)}`;
+    const tag = `tn-profile-${Effect2.pipe(artifact.manifestDigest, EffectString.slice('sha256:'.length))}`;
     fixture.manifests.set(tag, new TextEncoder().encode('{}'));
     expect(
       (yield* Effect.result(fixture.provide(publishGraphShareProfileArtifact(profile, writer, reader))))._tag,
     ).toBe('Failure');
-    expect(fixture.requests.some(request => request.method === 'PUT')).toBe(false);
+    expect(EffectArray.some(fixture.requests, request => request.method === 'PUT')).toBe(false);
     fixture.manifests.delete(tag);
     const tamperedReader = {...reader, readBlob: () => Effect.succeed(Buffer.from('{}'))};
     expect(

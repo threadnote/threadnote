@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseSeedManifest} from '@threadnote/workspace/manifest';
@@ -5,6 +6,8 @@ import type {ProjectManifest} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
 import {runBinaryCommandEffect} from '@threadnote/platform/command';
 import {resolveRepositoryIdentity} from '../repository.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_SCOPE_ROUTING_EXIT_CODE = 78;
 export const CODE_GRAPH_ISOLATED_BUILDER_ENV = 'THREADNOTE_CODE_GRAPH_ISOLATED_BUILDER';
@@ -19,15 +22,13 @@ const WORKTREE_LIST_OUTPUT_BYTES_MAXIMUM = 1_048_576;
 const WORKTREE_LIST_TIMEOUT_MS = 10_000;
 const WORKTREE_ROOT_OUTPUT_BYTES_MAXIMUM = 4_096;
 
-export class CodeGraphScopeRoutingError extends Schema.TaggedError<CodeGraphScopeRoutingError>()(
-  'CodeGraphScopeRoutingError',
-  {
-    message: Schema.String,
-    projects: Schema.optionalKey(
-      Schema.Array(Schema.Struct({name: Schema.String, roots: Schema.Array(Schema.String)})),
-    ),
-  },
-) {}
+export class CodeGraphScopeRoutingError extends Schema.TaggedError<
+  CodeGraphScopeRoutingError,
+  {readonly brand: unique symbol}
+>()('CodeGraphScopeRoutingError', {
+  message: Schema.String,
+  projects: Schema.optionalKey(Schema.Array(Schema.Struct({name: Schema.String, roots: Schema.Array(Schema.String)}))),
+}) {}
 
 export type CodeGraphScopeRoute =
   | {readonly project: Pick<ProjectManifest, 'graph' | 'name' | 'uri'>; readonly state: 'selected'}
@@ -67,17 +68,22 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
   const path = yield* Path.Path;
   const caller = path.resolve(cwd);
   if (explicitProject !== undefined) {
-    const requested = explicitProject.trim().toLowerCase();
-    const exactProject = manifest.projects.find(candidate => candidate.name.toLowerCase() === requested);
+    const requested = Effect2.pipe(explicitProject, EffectString.trim, EffectString.toLowerCase);
+    const exactProject = Option.getOrUndefined(
+      EffectArray.findFirst(
+        manifest.projects,
+        candidate => Effect2.pipe(candidate.name, EffectString.toLowerCase) === requested,
+      ),
+    );
     const aliasProjects = exactProject === undefined ? graphRootAliasProjects(manifest.projects, requested) : [];
     const localAliasProjects =
       aliasProjects.length === 0 ? [] : yield* projectsInCallerRepository(aliasProjects, caller);
     if (localAliasProjects.length > 1) {
       return yield* CodeGraphScopeRoutingError.make({
-        message: `Graph root alias "${explicitProject}" belongs to multiple configured projects. Select one of: ${localAliasProjects
-          .map(project => project.name)
-          .sort()
-          .join(', ')}.`,
+        message: `Graph root alias "${explicitProject}" belongs to multiple configured projects. Select one of: ${EffectArray.join(
+          EffectArray.map(localAliasProjects, project => project.name).sort(),
+          ', ',
+        )}.`,
       });
     }
     const project = exactProject ?? localAliasProjects[0];
@@ -108,15 +114,23 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
     }
     return selectedRoute(project);
   }
-  const configured = manifest.projects.filter(project => project.graph !== undefined);
+  const configured = EffectArray.filter(manifest.projects, project => project.graph !== undefined);
   const expanded = yield* Effect.forEach(configured, project =>
     expandPath(project.path).pipe(Effect.map(root => ({project, root}))),
   );
-  const localMatches = expanded.filter(candidate => pathContains(path, candidate.root, caller));
-  const localGraphRootMatches = localMatches.filter(candidate =>
-    candidate.project.graph?.roots.some(root => pathContains(path, path.resolve(candidate.root, root), caller)),
+  const localMatches = EffectArray.filter(
+    expanded,
+    (candidate, __effectArrayIndex2) => __effectArrayIndex2 in expanded && pathContains(path, candidate.root, caller),
   );
-  let matches = (localGraphRootMatches.length > 0 ? localGraphRootMatches : localMatches).map(
+  const localGraphRootMatches = EffectArray.filter(localMatches, candidate => {
+    const roots = candidate.project.graph?.roots;
+    return (
+      roots !== undefined &&
+      EffectArray.some(roots, root => pathContains(path, path.resolve(candidate.root, root), caller))
+    );
+  });
+  let matches = EffectArray.map(
+    localGraphRootMatches.length > 0 ? localGraphRootMatches : localMatches,
     candidate => candidate.project,
   );
   if (matches.length === 0) {
@@ -127,12 +141,23 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
     ]);
     if (Option.isSome(worktreeRoots)) {
       const matchedRoots = new Set(
-        expanded
-          .filter(candidate => worktreeRoots.value.some(root => pathContains(path, root, candidate.root)))
-          .map(candidate => candidate.root),
+        EffectArray.map(
+          EffectArray.filter(
+            expanded,
+            (candidate, __effectArrayIndex2) =>
+              __effectArrayIndex2 in expanded &&
+              EffectArray.some(worktreeRoots.value, root => pathContains(path, root, candidate.root)),
+          ),
+          candidate => candidate.root,
+        ),
       );
       const unresolvedRoots = [
-        ...new Set(expanded.map(candidate => candidate.root).filter(root => !matchedRoots.has(root))),
+        ...new Set(
+          EffectArray.filter(
+            EffectArray.map(expanded, candidate => candidate.root),
+            root => !matchedRoots.has(root),
+          ),
+        ),
       ];
       const resolvedRoots = yield* Effect.forEach(
         unresolvedRoots,
@@ -146,12 +171,15 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
       for (const resolved of resolvedRoots) {
         if (Option.isNone(resolved)) continue;
         const [root, worktreeRoot] = resolved.value;
-        if (worktreeRoots.value.some(candidate => pathContains(path, candidate, worktreeRoot))) {
+        if (EffectArray.some(worktreeRoots.value, candidate => pathContains(path, candidate, worktreeRoot))) {
           matchedRoots.add(root);
         }
       }
       const localProjects = yield* rootedProjectsInCallerRepository(
-        expanded.filter(candidate => matchedRoots.has(candidate.root)),
+        EffectArray.filter(
+          expanded,
+          (candidate, __effectArrayIndex) => __effectArrayIndex in expanded && matchedRoots.has(candidate.root),
+        ),
         caller,
       );
       matches = preferCallerGraphRootMatches(path, localProjects, canonicalCaller, callerWorktreeRoot);
@@ -167,15 +195,16 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
   if (matches.length === 0) return {state: 'full'} as const satisfies CodeGraphScopeRoute;
   const [project] = matches;
   if (matches.length === 1 && project !== undefined) return selectedRoute(project);
-  const projects = [...matches].sort((left, right) => left.name.localeCompare(right.name));
-  const scopeChoices = projects
-    .map(project => {
-      const roots = project.graph?.roots.length ? project.graph.roots.join(', ') : '.';
+  const projects = [...matches].sort((left, right) => Effect2.pipe(left.name, EffectString.localeCompare(right.name)));
+  const scopeChoices = EffectArray.join(
+    EffectArray.map(projects, project => {
+      const roots = project.graph?.roots.length ? EffectArray.join(project.graph.roots, ', ') : '.';
       return `- ${project.name}: ${roots}`;
-    })
-    .join('\n');
+    }),
+    '\n',
+  );
   return yield* CodeGraphScopeRoutingError.make({
-    projects: projects.map(project => ({name: project.name, roots: project.graph?.roots ?? []})),
+    projects: EffectArray.map(projects, project => ({name: project.name, roots: project.graph?.roots ?? []})),
     message: `Graph scope is ambiguous for this cwd: ${matches.length} configured scopes match. Set project (or CLI --project) to one of:\n${scopeChoices}`,
   });
 });
@@ -194,7 +223,12 @@ export const resolveCodeGraphRefreshRoute = Effect.fn('codeGraph.resolveRefreshR
   expectedManifestRevision?: string,
   projectFreshness: 'verify' | 'resolve' = 'verify',
 ) {
-  if (project !== undefined && !project.name?.trim()) {
+  if (
+    project !== undefined &&
+    !Effect2.pipe(project.name, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  ) {
     return yield* CodeGraphScopeRoutingError.make({
       message: 'Graph refresh requires a configured project name. Select a project before refreshing.',
     });
@@ -242,7 +276,7 @@ function rootedProjectsInCallerRepository(
 ) {
   return Effect.gen(function* () {
     const callerIdentity = yield* resolveRepositoryIdentity(caller);
-    const roots = [...new Set(candidates.map(candidate => candidate.root))];
+    const roots = [...new Set(EffectArray.map(candidates, candidate => candidate.root))];
     const identities = yield* Effect.forEach(
       roots,
       root =>
@@ -253,9 +287,15 @@ function rootedProjectsInCallerRepository(
       {concurrency: 4},
     );
     const byRoot = new Map(identities);
-    return candidates
-      .filter(candidate => sameCheckoutRepository(callerIdentity, byRoot.get(candidate.root) ?? Option.none()))
-      .map(candidate => candidate.project);
+    return EffectArray.map(
+      EffectArray.filter(
+        candidates,
+        (candidate, __effectArrayIndex2) =>
+          __effectArrayIndex2 in candidates &&
+          sameCheckoutRepository(callerIdentity, byRoot.get(candidate.root) ?? Option.none()),
+      ),
+      candidate => candidate.project,
+    );
   });
 }
 
@@ -277,7 +317,7 @@ const resolveCheckoutWorktreeRoots = Effect.fn('codeGraph.resolveCheckoutWorktre
     timeoutMs: WORKTREE_LIST_TIMEOUT_MS,
   });
   const roots = parseCheckoutWorktreeRoots(result.stdout);
-  if (roots === undefined || roots.some(root => !path.isAbsolute(root))) {
+  if (roots === undefined || EffectArray.some(roots, root => !path.isAbsolute(root))) {
     return yield* CodeGraphScopeRoutingError.make({message: 'Git worktree registry could not be read.'});
   }
   return roots;
@@ -303,7 +343,10 @@ const resolveGitWorktreeRoot = Effect.fn('codeGraph.resolveGitWorktreeRoot')(fun
 function parseCheckoutWorktreeRoots(output: Uint8Array): readonly string[] | undefined {
   if (output.byteLength === 0 || output.byteLength > WORKTREE_LIST_OUTPUT_BYTES_MAXIMUM) return undefined;
   try {
-    const records = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(output).split('\0');
+    const records = Effect2.pipe(
+      new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(output),
+      EffectString.split('\0'),
+    );
     if (records.pop() !== '') return undefined;
     const roots: string[] = [];
     let expectsWorktree = true;
@@ -311,8 +354,9 @@ function parseCheckoutWorktreeRoots(output: Uint8Array): readonly string[] | und
       if (record === '') {
         expectsWorktree = true;
       } else if (expectsWorktree) {
-        if (!record.startsWith('worktree ') || record.length === 'worktree '.length) return undefined;
-        roots.push(record.slice('worktree '.length));
+        if (!Effect2.pipe(record, EffectString.startsWith('worktree ')) || record.length === 'worktree '.length)
+          return undefined;
+        roots.push(Effect2.pipe(record, EffectString.slice('worktree '.length)));
         expectsWorktree = false;
       }
     }
@@ -326,7 +370,14 @@ function parseGitWorktreeRoot(output: Uint8Array): string | undefined {
   if (output.byteLength === 0 || output.byteLength > WORKTREE_ROOT_OUTPUT_BYTES_MAXIMUM) return undefined;
   try {
     const root = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(output);
-    return root.endsWith('\n') && !root.slice(0, -1).includes('\n') ? root.slice(0, -1) : undefined;
+    return Effect2.pipe(root, EffectString.endsWith('\n')) &&
+      !Effect2.pipe(root, __effectPipeInput => {
+        const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+        const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.includes('\n'));
+        return __effectPipeStage1;
+      })
+      ? Effect2.pipe(root, EffectString.slice(0, -1))
+      : undefined;
   } catch {
     return undefined;
   }
@@ -334,7 +385,12 @@ function parseGitWorktreeRoot(output: Uint8Array): string | undefined {
 
 function pathContains(path: Path.Path, root: string, target: string): boolean {
   const relative = path.relative(path.resolve(root), target);
-  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  return (
+    relative === '' ||
+    (relative !== '..' &&
+      !Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)) &&
+      !path.isAbsolute(relative))
+  );
 }
 
 function preferCallerGraphRootMatches(
@@ -344,24 +400,58 @@ function preferCallerGraphRootMatches(
   callerWorktreeRoot: Option.Option<string>,
 ): ProjectManifest[] {
   if (Option.isNone(callerWorktreeRoot)) return [...projects];
-  const graphRootMatches = projects.filter(project =>
-    project.graph?.roots.some(root => pathContains(path, path.resolve(callerWorktreeRoot.value, root), caller)),
+  const graphRootMatches = EffectArray.filter(
+    projects,
+    (project, __effectArrayIndex) =>
+      __effectArrayIndex in projects &&
+      Boolean(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(project.graph?.roots), __effectArrayReceiver =>
+            EffectArray.some(
+              __effectArrayReceiver,
+              __effectArrayValue =>
+                !!(root => pathContains(path, path.resolve(callerWorktreeRoot.value, root), caller))(
+                  __effectArrayValue,
+                ),
+            ),
+          ),
+        ),
+      ),
   );
   return graphRootMatches.length > 0 ? graphRootMatches : [...projects];
 }
 
 function graphRootAliasProjects(projects: readonly ProjectManifest[], requested: string): readonly ProjectManifest[] {
   const normalizedRequested = normalizeGraphRootAlias(requested);
-  return projects.filter(project =>
-    project.graph?.roots.some(root => {
-      const normalizedRoot = normalizeGraphRootAlias(root);
-      return normalizedRoot === normalizedRequested || normalizedRoot.split('/').at(-1) === normalizedRequested;
-    }),
+  return EffectArray.filter(
+    projects,
+    (project, __effectArrayIndex) =>
+      __effectArrayIndex in projects &&
+      Boolean(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(project.graph?.roots), __effectArrayReceiver =>
+            EffectArray.some(__effectArrayReceiver, root => {
+              const normalizedRoot = normalizeGraphRootAlias(root);
+              return (
+                normalizedRoot === normalizedRequested ||
+                Effect2.pipe(normalizedRoot, EffectString.split('/')).at(-1) === normalizedRequested
+              );
+            }),
+          ),
+        ),
+      ),
   );
 }
 
 function normalizeGraphRootAlias(value: string): string {
-  return value.trim().replaceAll('\\', '/').replace(/^\.\//u, '').replace(/\/+$/u, '').toLowerCase();
+  return Effect2.pipe(
+    value,
+    EffectString.trim,
+    EffectString.replaceAll('\\', '/'),
+    EffectString.replace(/^\.\//u, ''),
+    EffectString.replace(/\/+$/u, ''),
+    EffectString.toLowerCase,
+  );
 }
 
 function selectedRoute(

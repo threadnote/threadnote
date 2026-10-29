@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -13,13 +14,13 @@ export interface CursorCloudIdentityProfileV1 {
   readonly version: typeof CURSOR_CLOUD_PROFILE_VERSION;
 }
 
-export class CursorCloudIdentityProfileError extends Schema.TaggedError<CursorCloudIdentityProfileError>()(
-  'CursorCloudIdentityProfileError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CursorCloudIdentityProfileError extends Schema.TaggedError<
+  CursorCloudIdentityProfileError,
+  {readonly brand: unique symbol}
+>()('CursorCloudIdentityProfileError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export const cursorCloudIdentityProfilePath = Effect.fn('cursorCloud.identityProfilePath')(function* (
   agentContextHome: string,
@@ -106,7 +107,7 @@ function isCursorCloudIdentityProfile(value: unknown): value is CursorCloudIdent
   ) {
     return false;
   }
-  return [candidate.account, candidate.agentId, candidate.user].every(value => {
+  return EffectArray.every([candidate.account, candidate.agentId, candidate.user], value => {
     try {
       return validatePortableSegment(value) === value;
     } catch {

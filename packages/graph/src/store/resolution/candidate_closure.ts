@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '../../fact/budget.js';
 import type {ProjectResolutionLookupKey} from '../../incremental/closure.js';
 import {compareCodeUnits} from '../../ordering.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphReference} from '../../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** One complete scan must stay within the ordinary 5,000-file attribution-work ceiling. */
 export const PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES = 5_000;
@@ -127,7 +130,7 @@ export function planProjectResolutionCandidateScan(input: {
     !isNonNegativeSafeInteger(maximumFactBytes) ||
     !isPositiveSafeInteger(pageMaximumFiles) ||
     !isPositiveSafeInteger(pageMaximumFactBytes) ||
-    new Set(input.files.map(file => file.path)).size !== input.files.length
+    new Set(EffectArray.map(input.files, file => file.path)).size !== input.files.length
   ) {
     return {mode: 'fallback', reason: 'cache-incomplete'};
   }
@@ -211,7 +214,7 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
     const maximumProjectionObservedKeyBytes =
       input.maximumProjectionObservedKeyBytes ?? PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES;
     if (
-      input.initialLookupKeys.some(value => !validResolutionLookupKey(value)) ||
+      EffectArray.some(input.initialLookupKeys, value => !validResolutionLookupKey(value)) ||
       !isNonNegativeSafeInteger(input.maximumSelectedFiles) ||
       !isNonNegativeSafeInteger(maximumProjectionAssociations) ||
       !isNonNegativeSafeInteger(maximumProjectionAssociationsPerFile) ||
@@ -357,9 +360,9 @@ export function resolutionCandidateLookupKeyClosure(
   | Extract<ProjectResolutionCandidateClosure, {readonly mode: 'fallback'}> {
   if (
     !isNonNegativeSafeInteger(maximumLookupKeys) ||
-    initialLookupKeys.some(value => !validResolutionLookupKey(value)) ||
-    reexports.some(reexport =>
-      [...reexport.aliases, ...reexport.candidates].some(value => !validResolutionLookupKey(value)),
+    EffectArray.some(initialLookupKeys, value => !validResolutionLookupKey(value)) ||
+    EffectArray.some(reexports, reexport =>
+      EffectArray.some([...reexport.aliases, ...reexport.candidates], value => !validResolutionLookupKey(value)),
     )
   ) {
     return {mode: 'fallback', reason: 'cache-incomplete'};
@@ -375,8 +378,8 @@ export function resolutionCandidateLookupKeyClosure(
     if (
       resolutionDomain !== undefined &&
       reexport.aliases.length > 0 &&
-      (reexport.aliases.some(alias => alias.resolutionDomain !== resolutionDomain) ||
-        reexport.candidates.some(candidate => candidate.resolutionDomain !== resolutionDomain))
+      (EffectArray.some(reexport.aliases, alias => alias.resolutionDomain !== resolutionDomain) ||
+        EffectArray.some(reexport.candidates, candidate => candidate.resolutionDomain !== resolutionDomain))
     ) {
       return {mode: 'fallback', reason: 'cache-incomplete'};
     }
@@ -397,7 +400,9 @@ export function resolutionCandidateLookupKeyClosure(
     }
   }
   const initial = uniqueResolutionLookupKeys(initialLookupKeys);
-  const keys = new Map(initial.map(value => [resolutionLookupKeyIdentity(value.resolutionDomain, value.key), value]));
+  const keys = new Map(
+    EffectArray.map(initial, value => [resolutionLookupKeyIdentity(value.resolutionDomain, value.key), value]),
+  );
   if (keys.size > maximumLookupKeys) return unbounded('candidate-lookup-keys', keys.size, maximumLookupKeys);
   const queue = [...keys.values()];
   const aliasIdentities = new Set<string>();
@@ -443,19 +448,19 @@ function retainReexport(
   const resolutionDomain = reexport.aliases[0]?.resolutionDomain;
   if (
     retainedCount >= PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORTS ||
-    [...reexport.aliases, ...reexport.candidates].some(value => !validResolutionLookupKey(value)) ||
+    EffectArray.some([...reexport.aliases, ...reexport.candidates], value => !validResolutionLookupKey(value)) ||
     resolutionDomain === undefined ||
     reexport.candidates.length === 0 ||
     reexport.sourcePath.length === 0 ||
-    reexport.aliases.some(alias => alias.resolutionDomain !== resolutionDomain) ||
-    reexport.candidates.some(candidate => candidate.resolutionDomain !== resolutionDomain)
+    EffectArray.some(reexport.aliases, alias => alias.resolutionDomain !== resolutionDomain) ||
+    EffectArray.some(reexport.candidates, candidate => candidate.resolutionDomain !== resolutionDomain)
   ) {
     return retainedCount >= PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORTS
       ? unbounded('candidate-reexports', retainedCount + 1, PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORTS)
       : {mode: 'fallback', reason: 'cache-incomplete'};
   }
   const retainedBytes = utf8Bytes(
-    [...reexport.aliases, ...reexport.candidates].flatMap(value => [value.resolutionDomain, value.key]),
+    EffectArray.flatMap([...reexport.aliases, ...reexport.candidates], value => [value.resolutionDomain, value.key]),
   );
   const lookupKeys = reexport.aliases.length + reexport.candidates.length;
   if (retainedLookupKeys > PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORT_LOOKUP_KEYS - lookupKeys) {
@@ -632,8 +637,9 @@ function completePage(page: ProjectResolutionCandidateScanPage, loaded: ProjectR
   if (loaded.facts.size !== page.files.length || loaded.bytesByPath.size !== page.files.length) return false;
   if (
     loaded.previousFacts &&
-    [...loaded.previousFacts].some(
-      ([path, facts]) => facts.path !== path || !page.files.some(file => file.path === path),
+    EffectArray.some(
+      [...loaded.previousFacts],
+      ([path, facts]) => facts.path !== path || !EffectArray.some(page.files, file => file.path === path),
     )
   )
     return false;
@@ -654,7 +660,7 @@ function isReexport(reference: CodeGraphReference): boolean {
 }
 
 function resolutionLookupKeys(resolutionDomain: string, keys: readonly string[]): ProjectResolutionLookupKey[] {
-  return uniqueResolutionLookupKeys(keys.map(key => ({key, resolutionDomain})));
+  return uniqueResolutionLookupKeys(EffectArray.map(keys, key => ({key, resolutionDomain})));
 }
 
 function symbolResolutionLookupKeys(
@@ -662,13 +668,17 @@ function symbolResolutionLookupKeys(
   keys: readonly string[],
 ): ProjectResolutionLookupKey[] {
   return uniqueResolutionLookupKeys(
-    keys.map(key => ({key, resolutionDomain: lookupKeyDomain(key, fallbackResolutionDomain)})),
+    EffectArray.map(keys, key => ({key, resolutionDomain: lookupKeyDomain(key, fallbackResolutionDomain)})),
   );
 }
 
 function lookupKeyDomain(key: string, fallback: string | undefined): string {
-  const separator = key.indexOf(':');
-  return separator > 0 ? key.slice(0, separator) : (fallback ?? 'generic');
+  const separator = Effect2.pipe(
+    key,
+    EffectString.indexOf(':'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  return separator > 0 ? Effect2.pipe(key, EffectString.slice(0, separator)) : (fallback ?? 'generic');
 }
 
 function uniqueResolutionLookupKeys(values: readonly ProjectResolutionLookupKey[]): ProjectResolutionLookupKey[] {
@@ -688,8 +698,8 @@ function resolutionLookupKeyIdentity(resolutionDomain: string, key: string): str
 }
 
 function validFactLookupKeys(facts: CodeGraphFileFacts): boolean {
-  return (facts.references ?? []).every(reference =>
-    [...(reference.aliasLookupKeys ?? []), ...reference.lookupTiers.flat()].every(key =>
+  return EffectArray.every(facts.references ?? [], reference =>
+    EffectArray.every([...(reference.aliasLookupKeys ?? []), ...reference.lookupTiers.flat()], key =>
       validResolutionLookupKey({key, resolutionDomain: reference.resolutionDomain}),
     ),
   );
@@ -700,7 +710,9 @@ function validResolutionLookupKey(value: {readonly key: string; readonly resolut
 }
 
 function utf8Bytes(values: readonly string[]): number {
-  return values.reduce((total, value) => saturatingSafeIntegerAdd(total, Buffer.byteLength(value, 'utf8')), 0);
+  return EffectArray.reduce(values, 0, (total, value) =>
+    saturatingSafeIntegerAdd(total, Buffer.byteLength(value, 'utf8')),
+  );
 }
 
 function saturatingSafeIntegerAdd(left: number, right: number): number {

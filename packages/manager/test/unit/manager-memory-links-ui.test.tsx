@@ -1,10 +1,13 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import type {Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import type {MemoryResponse, TreeNode} from '../../src/ui/contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const {roots} = vi.hoisted(() => ({roots: [] as Root[]}));
+const roots: Root[] = [];
 vi.mock('react-dom/client', async importOriginal => {
   const original = await importOriginal<typeof import('react-dom/client')>();
   return {
@@ -29,7 +32,7 @@ vi.mock('../../src/memory_editor.js', () => ({
 
 const base = 'threadnote://user/test/memories';
 function node(name: string, shared = false): TreeNode {
-  const filename = name.replaceAll(' ', '-');
+  const filename = Effect.pipe(name, EffectString.replaceAll(' ', '-'));
   const relativePath = shared
     ? 'shared/team/durable/projects/elsewhere/' + filename + '.md'
     : 'durable/projects/demo/' + filename + '.md';
@@ -73,7 +76,14 @@ const markdown =
   slow.uri +
   ')';
 function record(item: TreeNode, body: string): MemoryResponse {
-  return {node: item, content: body, record: {metadata: item.metadata!}} as MemoryResponse;
+  const metadata = item.metadata;
+  if (!metadata) throw new Error('Memory response fixture is missing metadata.');
+  return {node: item, content: body, record: {body, content: body, metadata, uri: item.uri}};
+}
+function parseAction(body: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(body);
+  if (!Predicate.isObject(value)) throw new Error('Memory review action fixture must be an object.');
+  return value;
 }
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {status, headers: {'content-type': 'application/json'}});
@@ -103,21 +113,38 @@ beforeEach(() => {
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost');
     // Exercise the explicit REST compatibility path in this navigation fixture.
+    if (url.pathname === '/api/shares/conflicts') return json({conflicts: []});
     if (url.pathname === '/api/live-session')
       return new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404});
     if (url.pathname === '/api/state')
       return json({
         agents: [],
-        config: {user: 'test', account: 'local'},
+        config: {user: 'test', account: 'local', agentContextHome: '/tmp/threadnote-context'},
         autoUpdate: {effectivePolicy: 'notify'},
+        updateAvailable: false,
         version: 'fixture',
       });
-    if (url.pathname === '/api/tree')
+    if (url.pathname === '/api/tree') {
+      const tree = {...source, uri: base, relativePath: '', name: 'memories', isDir: true, children: treeChildren};
+      return json({resourcesTree: tree, tree});
+    }
+    if (url.pathname === '/api/graphs')
+      return json({repositories: [], builds: [], diagnostics: [], views: [], waiterCount: 0, waiters: []});
+    if (url.pathname === '/api/shares')
       return json({
-        tree: {...source, uri: base, relativePath: '', name: 'memories', isDir: true, children: treeChildren},
+        shares: [
+          {
+            name: 'team',
+            addedAt: '2026-01-01',
+            default: false,
+            gitdir: '/tmp/team',
+            remote: 'origin',
+            version: '1',
+            worktree: '/tmp/team-worktree',
+          },
+        ],
       });
-    if (url.pathname === '/api/graphs') return json({repositories: [], builds: [], diagnostics: [], views: []});
-    if (url.pathname === '/api/shares') return json({shares: [{name: 'team'}]});
+    if (url.pathname === '/api/processes') return json({processes: [], schemaVersion: 1, truncated: false});
     if (url.pathname === '/api/home')
       return json({version: 1, project: '', lanes: [], handoffs: [], stats: {memories: 2}});
     if (url.pathname === '/api/attention/automatic-memory')
@@ -132,8 +159,14 @@ beforeEach(() => {
                 title: 'Source',
                 state: 'ready',
                 reviewId: 'review-links',
-                targetHash: 'a'.repeat(64),
-                coverage: {outcome: 'unknown', scope: 'none', searchedScopes: [], omittedSources: 0},
+                targetHash: EffectString.repeat(64)('a'),
+                coverage: {
+                  outcome: 'unknown',
+                  scope: 'none',
+                  searchedScopes: [],
+                  omittedSources: 0,
+                  omittedParagraphs: 0,
+                },
                 paragraphs: [],
                 route: 'personal-review',
                 legacyUncited: false,
@@ -142,7 +175,7 @@ beforeEach(() => {
           : [],
       });
     if (url.pathname === '/api/attention/automatic-review') {
-      const action = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+      const action = init?.body ? parseAction(String(init.body)) : undefined;
       if (action) reviewActions.push(action);
       return json({
         version: 1,
@@ -153,22 +186,60 @@ beforeEach(() => {
         state: 'pending',
         purpose: action?.action === 'manual-preview' ? 'manual-edit' : 'automatic',
         targetUri: source.uri,
-        targetHash: action?.expectedContentHash ?? 'a'.repeat(64),
-        evidenceRevision: 'a'.repeat(64),
+        targetHash: action?.expectedContentHash ?? EffectString.repeat(64)('a'),
+        evidenceRevision: EffectString.repeat(64)('a'),
         acceptedBody: markdown,
-        proposal: {body: markdown, draft: {paragraphDecisions: []}},
+        proposal: {
+          version: 2,
+          kind: 'automatic',
+          body: markdown,
+          finalBodyHash: EffectString.repeat(64)('a'),
+          changedOrdinals: [],
+          draft: {
+            version: 2,
+            kind: 'automatic',
+            purpose: 'automatic',
+            targetHash: EffectString.repeat(64)('a'),
+            observationRevision: EffectString.repeat(64)('a'),
+            packetDigest: EffectString.repeat(64)('a'),
+            outcome: 'propose-revalidation',
+            operations: [],
+            reviewedHandles: [],
+            rationale: 'Fixture proposal.',
+            unresolvedQuestions: [],
+            removedClaims: [],
+            paragraphDecisions: [],
+          },
+        },
         sourceEvidence: [],
-        coverage: {outcome: 'unknown', scope: 'none', searchedScopes: [], omittedSources: 0},
+        coverage: {outcome: 'unknown', scope: 'none', searchedScopes: [], omittedSources: 0, omittedParagraphs: 0},
         canApply: true,
         canFinishVerification: false,
         verified: false,
         approval: {
           stage: 'preview',
           reviewRevision: 2,
-          approvalDigest: 'a'.repeat(64),
-          contentHash: 'a'.repeat(64),
+          approvalDigest: EffectString.repeat(64)('a'),
+          contentHash: EffectString.repeat(64)('a'),
           content: 'Exact document',
           metadataDiff: [],
+          reviewedSupport: {
+            type: 'reviewed-memory-support',
+            version: 1,
+            active: {
+              bodyHash: EffectString.repeat(64)('a'),
+              paragraphs: [],
+              sources: [],
+              acceptance: {
+                reviewId: 'review-links',
+                approvedAt: '2026-10-23T00:00:00Z',
+                targetBeforeHash: EffectString.repeat(64)('a'),
+                preparationDigest: EffectString.repeat(64)('a'),
+                sourceVectorDigest: EffectString.repeat(64)('a'),
+              },
+              digest: EffectString.repeat(64)('a'),
+            },
+          },
         },
       });
     }
@@ -178,6 +249,7 @@ beforeEach(() => {
         project: 'demo',
         findings: [],
         recordPreviews: [],
+        limit: 100,
         omittedFindings: 0,
         recordsScanned: 1,
         repositoryEvidence: {state: 'unavailable', reason: 'repository-unavailable'},
@@ -187,7 +259,15 @@ beforeEach(() => {
           state: 'partial',
           eligibleRecords: 1,
           analyzedRecords: 0,
-          unknownReasons: [],
+          unknownRecords: 1,
+          claimsAnalyzed: 0,
+          supportedClaims: 0,
+          unsupportedClaims: 0,
+          coverage: 'bounded-English-extraction',
+          contradictionCount: 0,
+          pairsCompared: 0,
+          omittedContradictions: 0,
+          unknownReasons: [{reason: 'record-limit', count: 1}],
         },
         maintenance: {
           version: 2,
@@ -195,6 +275,31 @@ beforeEach(() => {
           affectedMemories: 0,
           automaticallyManagedFindings: 0,
           historicalFindings: 0,
+          citationCoverage: {
+            eligible: 0,
+            checked: 0,
+            deferred: 0,
+            currentVerified: 0,
+            historicalVerified: 0,
+            unverified: 0,
+            state: 'complete',
+            reasons: [],
+          },
+          semanticCoverage: {
+            version: 2,
+            state: 'partial',
+            eligibleRecords: 1,
+            analyzedRecords: 0,
+            unknownRecords: 1,
+            claimsAnalyzed: 0,
+            supportedClaims: 0,
+            unsupportedClaims: 0,
+            coverage: 'bounded-English-extraction',
+            contradictionCount: 0,
+            pairsCompared: 0,
+            omittedContradictions: 0,
+            unknownReasons: [{reason: 'record-limit', count: 1}],
+          },
         },
       });
     if (url.pathname === '/api/attention/context-maintenance')
@@ -211,6 +316,7 @@ beforeEach(() => {
       return json({
         version: 1,
         project: '',
+        pendingCount: showReview ? 1 : 0,
         items: showReview
           ? [
               {
@@ -221,7 +327,18 @@ beforeEach(() => {
                 topic: 'Source',
                 task: 'Review Source update',
                 createdAt: '2026-10-23T00:00:00Z',
-                candidates: [{candidateId: 'candidate-links', state: 'pending', reason: 'Updated source'}],
+                candidates: [
+                  {
+                    candidateId: 'candidate-links',
+                    categories: ['decision'],
+                    comparison: 'new',
+                    confidence: 0.8,
+                    proposedText: 'Updated source.',
+                    reason: 'Updated source',
+                    recommendation: 'create',
+                    state: 'pending',
+                  },
+                ],
               },
             ]
           : [],
@@ -261,8 +378,14 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 function button(label: string): HTMLButtonElement {
-  const found = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-    item => item.textContent?.trim() === label || item.querySelector('.tree-label')?.textContent === label,
+  const found = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      item =>
+        Effect.pipe(item.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label || item.querySelector('.tree-label')?.textContent === label,
+    ),
   );
   expect(found, label).toBeDefined();
   return found!;
@@ -276,8 +399,11 @@ async function openSource() {
   expect(host.querySelector('.library-article')?.textContent).toContain('Source body');
 }
 async function link(label: string) {
-  const element = [...host.querySelectorAll<HTMLAnchorElement>('.markdown-viewer a')].find(
-    item => item.textContent === label,
+  const element = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...host.querySelectorAll<HTMLAnchorElement>('.markdown-viewer a')],
+      item => item.textContent === label,
+    ),
   )!;
   expect(element).toBeDefined();
   const event = new MouseEvent('click', {bubbles: true, cancelable: true, button: 0});
@@ -308,7 +434,7 @@ it('opens canonical and shared alias links using the accepted node even outside 
 it('keeps expanded navigator instances on the first memory open', async () => {
   const folder = (path: string, children: readonly TreeNode[]): TreeNode => ({
     ...source,
-    name: path.split('/').at(-1)!,
+    name: Effect.pipe(path, EffectString.split('/')).at(-1)!,
     uri: `${base}/${path}`,
     relativePath: path,
     isDir: true,
@@ -323,7 +449,7 @@ it('keeps expanded navigator instances on the first memory open', async () => {
   const explorer = host.querySelector('.library-explorer');
   const folders = [...host.querySelectorAll<HTMLDetailsElement>('.library-explorer details')];
   await act(async () =>
-    folders.forEach(element => {
+    EffectArray.forEach(folders, element => {
       element.open = true;
       element.dispatchEvent(new Event('toggle'));
     }),
@@ -331,7 +457,7 @@ it('keeps expanded navigator instances on the first memory open', async () => {
   await act(async () => button('Source').click());
   expect(host.querySelector('.library-explorer')).toBe(explorer);
   expect([...host.querySelectorAll('.library-explorer details')]).toEqual(folders);
-  expect(folders.every(element => element.open)).toBe(true);
+  expect(EffectArray.every(folders, element => element.open)).toBe(true);
 });
 
 function historyButton(direction: 'Back' | 'Forward'): HTMLButtonElement {
@@ -429,8 +555,11 @@ it.each(['accepted', 'proposed'] as const)(
     await openSource();
     await act(async () => button('Review update').click());
     const selector = part === 'accepted' ? '.memory-excerpt' : '.review-proposal-preview';
-    const anchor = [...host.querySelectorAll<HTMLAnchorElement>(`.automatic-review-comparison ${selector} a`)].find(
-      node => node.textContent === 'shared',
+    const anchor = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...host.querySelectorAll<HTMLAnchorElement>(`.automatic-review-comparison ${selector} a`)],
+        node => node.textContent === 'shared',
+      ),
     )!;
     expect(anchor.getAttribute('href')).toBe(alias);
     await act(async () => anchor.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
@@ -448,8 +577,11 @@ it('follows automatic Reviews preview links and clears unavailable destinations'
   const openReview = host.querySelector<HTMLButtonElement>('[data-review-id="review-links"]')!;
   await act(async () => openReview.click());
   expect(host.querySelector('.automatic-review-dialog')).not.toBeNull();
-  const anchor = [...host.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')].find(
-    node => node.textContent === 'missing',
+  const anchor = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...host.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')],
+      node => node.textContent === 'missing',
+    ),
   )!;
   await act(async () => anchor.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
   expect(requests).toEqual([source.uri, missing]);
@@ -470,11 +602,14 @@ it('keeps the manual support review and authored draft when link navigation is c
     input.dispatchEvent(new Event('input', {bubbles: true}));
   });
   await act(async () => button('Save').click());
-  expect(reviewActions.map(action => action.action)).toEqual(['manual-preview']);
+  expect(EffectArray.map(reviewActions, action => action.action)).toEqual(['manual-preview']);
   expect(host.querySelector('.automatic-review-dialog')?.textContent).toContain('Review your memory edit');
   const follow = async () => {
-    const anchor = [...host.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')].find(
-      node => node.textContent === 'current',
+    const anchor = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...host.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')],
+        node => node.textContent === 'current',
+      ),
     )!;
     expect(anchor.getAttribute('href')).toBe(target.uri);
     await act(async () => anchor.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
@@ -489,7 +624,7 @@ it('keeps the manual support review and authored draft when link navigation is c
   expect(requests).toEqual([source.uri, target.uri]);
   expect(host.querySelector('.automatic-review-dialog')).toBeNull();
   expect(host.querySelector('.library-article h2')?.textContent).toBe('Target');
-  expect(reviewActions.map(action => action.action)).toEqual(['manual-preview']);
+  expect(EffectArray.map(reviewActions, action => action.action)).toEqual(['manual-preview']);
 });
 
 it('opens automatic Context health preview links using the same authorized Library navigation', async () => {
@@ -502,8 +637,11 @@ it('opens automatic Context health preview links using the same authorized Libra
     project.dispatchEvent(new Event('change', {bubbles: true}));
   });
   await act(async () => button('Review update').click());
-  const anchor = [...host.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')].find(
-    node => node.textContent === 'current',
+  const anchor = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...host.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')],
+      node => node.textContent === 'current',
+    ),
   )!;
   expect(anchor.getAttribute('href')).toBe(target.uri);
   await act(async () => anchor.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));

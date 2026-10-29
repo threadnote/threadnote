@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useState} from 'react';
 import {LoaderCircle} from 'lucide-react';
 import {
@@ -6,10 +7,13 @@ import {
   type ManageableManagerProcess,
 } from './process/contracts.js';
 import {useManagerProcesses} from './process/live.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function ManagerOperationsFooter({onOpen}: {readonly onOpen: () => void}): React.ReactElement {
   const {diagnostics, loadError} = useManagerProcesses();
-  const active = orderManagerProcessesByAttention(diagnostics?.processes ?? []).filter(managerProcessIsActive);
+  const ordered = orderManagerProcessesByAttention(diagnostics?.processes ?? []);
+  const active = EffectArray.filter(ordered, (process, index) => index in ordered && managerProcessIsActive(process));
   const [displayed, setDisplayed] = useState<readonly ManageableManagerProcess[]>([]);
   useEffect(() => {
     if (active.length > 0) setDisplayed(active);
@@ -35,8 +39,11 @@ export function ManagerOperationsFooter({onOpen}: {readonly onOpen: () => void})
           </button>
           {!loadError ? (
             <ul aria-label="Active operations">
-              {processes.map(process => {
-                const label = (process.currentOperation ?? process.activityRole ?? process.role).replaceAll('-', ' ');
+              {EffectArray.map(processes, process => {
+                const label = Effect.pipe(
+                  process.currentOperation ?? process.activityRole ?? process.role,
+                  EffectString.replaceAll('-', ' '),
+                );
                 return (
                   <li key={`${process.processId}:${process.startedAt}`} title={`${label} · PID ${process.processId}`}>
                     {label}

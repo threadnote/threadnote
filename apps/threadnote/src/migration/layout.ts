@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256FileHex, sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -11,6 +12,8 @@ import {
 } from '@threadnote/store/layout';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import {hasBoundedMigrationTreeContent, isIgnorableOperatingSystemMetadata} from './evidence.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const STORAGE_LAYOUT_MIGRATION_ID = 'threadnote-storage-layout-v2' as const;
 const STORAGE_LAYOUT_MIGRATION_RECEIPT_VERSION = 1 as const;
@@ -45,13 +48,13 @@ export interface StorageLayoutMigrationResult {
     | 'would_repair_marker';
 }
 
-export class StorageLayoutMigrationConflict extends Schema.TaggedError<StorageLayoutMigrationConflict>()(
-  'StorageLayoutMigrationConflict',
-  {
-    message: Schema.String,
-    path: Schema.String,
-  },
-) {}
+export class StorageLayoutMigrationConflict extends Schema.TaggedError<
+  StorageLayoutMigrationConflict,
+  {readonly brand: unique symbol}
+>()('StorageLayoutMigrationConflict', {
+  message: Schema.String,
+  path: Schema.String,
+}) {}
 
 export interface StorageLayoutMigrationOptions {
   readonly apply?: boolean;
@@ -301,9 +304,14 @@ function mergePendingMigrationPlans(
   existing: StorageLayoutMigrationReceipt,
   current: StorageLayoutMigrationReceipt,
 ): StorageLayoutMigrationReceipt {
-  const accounts = new Map(existing.accounts.map(account => [account.name, account]));
+  const accounts = new Map(EffectArray.map(existing.accounts, account => [account.name, account]));
   for (const account of current.accounts) accounts.set(account.name, account);
-  return {...existing, accounts: [...accounts.values()].sort((left, right) => left.name.localeCompare(right.name))};
+  return {
+    ...existing,
+    accounts: [...accounts.values()].sort((left, right) =>
+      Effect2.pipe(left.name, EffectString.localeCompare(right.name)),
+    ),
+  };
 }
 
 function replaceAccountDigest(
@@ -313,7 +321,9 @@ function replaceAccountDigest(
 ): StorageLayoutMigrationReceipt {
   return {
     ...receipt,
-    accounts: receipt.accounts.map(current => (current.name === account ? {...current, treeSha256} : current)),
+    accounts: EffectArray.map(receipt.accounts, current =>
+      current.name === account ? {...current, treeSha256} : current,
+    ),
   };
 }
 
@@ -352,7 +362,7 @@ function shouldIncludeLegacyCanonicalStorePath(
   if (isIgnorableOperatingSystemMetadata(name)) return false;
   return (
     path.resolve(path.dirname(candidate)) !== path.resolve(legacyRoot) ||
-    !LEGACY_CANONICAL_RUNTIME_FILENAMES.has(name.toLowerCase())
+    !LEGACY_CANONICAL_RUNTIME_FILENAMES.has(Effect2.pipe(name, EffectString.toLowerCase))
   );
 }
 
@@ -454,7 +464,10 @@ function digestDirectory(
       Effect.gen(function* () {
         for (const name of (yield* fs.readDirectory(directory)).sort()) {
           const absolute = path.join(directory, name);
-          const relative = path.join(relativeDirectory, name).split(path.sep).join('/');
+          const relative = EffectArray.join(
+            Effect2.pipe(path.join(relativeDirectory, name), EffectString.split(path.sep)),
+            '/',
+          );
           if (Option.isSome(yield* fs.readLink(absolute).pipe(Effect.option))) {
             return yield* StorageLayoutMigrationConflict.make({
               message: 'Symbolic links are not allowed in the canonical Threadnote store.',
@@ -481,7 +494,7 @@ function digestDirectory(
         }
       });
     yield* visit(root, '');
-    return yield* sha256Hex(entries.join(''));
+    return yield* sha256Hex(EffectArray.join(entries, ''));
   });
 }
 
@@ -523,7 +536,10 @@ function digestMergedDirectories(
           const targetExists = target !== undefined && (yield* fs.exists(target));
           const sourcePath = sourceExists ? source : undefined;
           const targetPath = targetExists ? target : undefined;
-          const relative = path.join(relativeDirectory, name).split(path.sep).join('/');
+          const relative = EffectArray.join(
+            Effect2.pipe(path.join(relativeDirectory, name), EffectString.split(path.sep)),
+            '/',
+          );
           for (const absolute of [sourcePath, targetPath]) {
             if (absolute && Option.isSome(yield* fs.readLink(absolute).pipe(Effect.option))) {
               return yield* StorageLayoutMigrationConflict.make({
@@ -571,7 +587,7 @@ function digestMergedDirectories(
         }
       });
     yield* visit(sourceRoot, targetRoot, '');
-    return yield* sha256Hex(entries.join(''));
+    return yield* sha256Hex(EffectArray.join(entries, ''));
   });
 }
 
@@ -685,7 +701,7 @@ function readMigrationReceipt(
         parsed.sourceLayoutVersion !== LEGACY_THREADNOTE_STORAGE_LAYOUT_VERSION ||
         parsed.targetLayoutVersion !== THREADNOTE_STORAGE_LAYOUT_VERSION ||
         (parsed.status !== 'pending' && parsed.status !== 'completed') ||
-        !Array.isArray(parsed.accounts)
+        !EffectArray.isArray(parsed.accounts)
       ) {
         throw new Error('Invalid Threadnote storage layout migration receipt.');
       }

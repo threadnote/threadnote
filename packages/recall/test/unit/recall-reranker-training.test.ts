@@ -1,11 +1,15 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
+import {Schema} from 'effect';
 import * as FC from 'fast-check';
 import {
   compareRecallRerankerStringsV1,
   createRecallRerankerDatasetV1,
   normalizeRecallRerankerText,
   parseRecallRerankerDatasetV1,
+  parseRecallRerankerDatasetDraftV1,
+  parseRecallRerankerGroupJsonLinesV1,
   recallRerankerGroupsHashV1,
   serializeRecallRerankerGroupsV1,
   type RecallRerankerDatasetV1,
@@ -14,6 +18,8 @@ import {
 import {createRecallRerankerSmokeDatasetV1} from '../../../../scripts/training/recall-reranker-smoke.js';
 import {prepareReviewedRecallRerankerDatasetV1} from '../../../../scripts/training/recall-reranker-preparation.js';
 import {normalizeRecallRerankerScore} from '@threadnote/recall/reranker-score';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('recall reranker training dataset v1', () => {
   it('builds a deterministic, partitioned smoke corpus that is explicitly non-production', () => {
@@ -29,7 +35,7 @@ describe('recall reranker training dataset v1', () => {
       splits: {test: 4, train: 10, validation: 4},
     });
     expect(left.manifest.reservedEvaluations).toHaveLength(1);
-    expect(left.groups.every(group => group.candidates.length === 4)).toBe(true);
+    expect(EffectArray.every(left.groups, group => group.candidates.length === 4)).toBe(true);
   });
 
   it('round-trips the manifest and canonical JSONL with integrity checks', () => {
@@ -39,7 +45,10 @@ describe('recall reranker training dataset v1', () => {
 
     expect(parsed).toEqual(dataset);
     expect(() =>
-      parseRecallRerankerDatasetV1(dataset.manifest, groupContent.replace('Aurora scheduler', 'Modified scheduler')),
+      parseRecallRerankerDatasetV1(
+        dataset.manifest,
+        Effect.pipe(groupContent, EffectString.replace('Aurora scheduler', 'Modified scheduler')),
+      ),
     ).toThrow(/checksum does not match/);
   });
 
@@ -52,8 +61,11 @@ describe('recall reranker training dataset v1', () => {
 
   it('rejects split leakage by partition key or normalized candidate text', () => {
     const dataset = createRecallRerankerSmokeDatasetV1();
-    const train = dataset.groups.find(group => group.split === 'train')!;
-    const testIndex = dataset.groups.findIndex(group => group.split === 'test');
+    const train = EffectOption.getOrUndefined(EffectArray.findFirst(dataset.groups, group => group.split === 'train'))!;
+    const testIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(dataset.groups, group => group.split === 'test'),
+      () => -1,
+    );
     const test = dataset.groups[testIndex];
     const partitionLeak = replaceGroup(dataset.groups, testIndex, {...test, partitionKey: train.partitionKey});
     const documentLeak = replaceGroup(dataset.groups, testIndex, {
@@ -97,7 +109,10 @@ describe('recall reranker training dataset v1', () => {
   it('requires every labeled candidate, including negatives, to be reviewed', () => {
     const dataset = createRecallRerankerSmokeDatasetV1();
     const group = dataset.groups[0];
-    const negativeIndex = group.candidates.findIndex(candidate => candidate.relevance === 0);
+    const negativeIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(group.candidates, candidate => candidate.relevance === 0),
+      () => -1,
+    );
     const candidates = [...group.candidates];
     candidates[negativeIndex] = {...candidates[negativeIndex], reviewed: false};
     const groups = replaceGroup(dataset.groups, 0, {...group, candidates});
@@ -106,26 +121,27 @@ describe('recall reranker training dataset v1', () => {
   });
 
   it('matches the shared non-ASCII normalization, UTF-8 ordering, and canonical-hash vectors', async () => {
-    const fixture = (await Bun.file(
-      new URL('../../../../training/recall-reranker/fixtures/canonicalization-v1.json', import.meta.url),
-    ).json()) as CanonicalizationFixture;
+    const fixture = Schema.decodeUnknownSync(CanonicalizationFixtureSchema)(
+      await Bun.file(
+        new URL('../../../../training/recall-reranker/fixtures/canonicalization-v1.json', import.meta.url),
+      ).json(),
+    );
 
     for (const vector of fixture.normalization) {
       expect(normalizeRecallRerankerText(vector.input)).toBe(vector.output);
     }
     expect(
-      [...fixture.canonicalGroups]
-        .sort((left, right) => compareRecallRerankerStringsV1(left.id, right.id))
-        .map(group => group.id),
+      EffectArray.map(
+        [...fixture.canonicalGroups].sort((left, right) => compareRecallRerankerStringsV1(left.id, right.id)),
+        group => group.id,
+      ),
     ).toEqual(fixture.sortedIds);
-    expect(
-      recallRerankerGroupsHashV1(fixture.canonicalGroups as unknown as readonly RecallRerankerQueryGroupV1[]),
-    ).toBe(fixture.groupsSha256);
+    expect(recallRerankerGroupsHashV1(fixture.canonicalGroups)).toBe(fixture.groupsSha256);
   });
 
   it('prepares the reviewed template without inventing review or source approval', async () => {
     const tools = new URL('../../../../training/recall-reranker/dataset-tools/', import.meta.url);
-    const draft = (await Bun.file(new URL('draft.example.json', tools)).json()) as Record<string, unknown>;
+    const draft = parseRecallRerankerDatasetDraftV1(await Bun.file(new URL('draft.example.json', tools)).json());
     const groupContent = await Bun.file(new URL('groups.example.jsonl', tools)).text();
     const dataset = prepareReviewedRecallRerankerDatasetV1(draft, groupContent);
 
@@ -138,19 +154,19 @@ describe('recall reranker training dataset v1', () => {
     });
     expect(dataset.manifest.reservedEvaluations).toHaveLength(1);
 
-    const groups = groupContent
-      .trim()
-      .split('\n')
-      .map(line => JSON.parse(line) as RecallRerankerQueryGroupV1);
+    const groups = [...parseRecallRerankerGroupJsonLinesV1(groupContent)];
     const candidate = groups[0].candidates[1];
     groups[0] = {
       ...groups[0],
       candidates: [groups[0].candidates[0], {...candidate, reviewed: false}, ...groups[0].candidates.slice(2)],
     };
-    const unreviewed = `${groups.map(group => JSON.stringify(group)).join('\n')}\n`;
+    const unreviewed = `${EffectArray.join(
+      EffectArray.map(groups, group => JSON.stringify(group)),
+      '\n',
+    )}\n`;
     expect(() => prepareReviewedRecallRerankerDatasetV1(draft, unreviewed)).toThrow(/must be reviewed/);
 
-    const source = (draft.sources as readonly Record<string, unknown>[])[0];
+    const source = draft.sources[0];
     const unapproved = {...draft, sources: [{...source, trainingApproved: false}]};
     expect(() => prepareReviewedRecallRerankerDatasetV1(unapproved, groupContent)).toThrow(/not approved for training/);
   });
@@ -161,10 +177,12 @@ describe('recall reranker training dataset v1', () => {
     {weights: FC.array(FC.integer(), {maxLength: 18, minLength: 18})},
     ({weights}) => {
       const groups = createRecallRerankerSmokeDatasetV1().groups;
-      const shuffled = groups
-        .map((group, index) => ({group, index, weight: weights[index]}))
-        .sort((left, right) => left.weight - right.weight || right.index - left.index)
-        .map(entry => entry.group);
+      const shuffled = EffectArray.map(
+        EffectArray.map(groups, (group, index) => ({group, index, weight: weights[index]})).sort(
+          (left, right) => left.weight - right.weight || right.index - left.index,
+        ),
+        entry => entry.group,
+      );
 
       expect(recallRerankerGroupsHashV1(shuffled)).toBe(recallRerankerGroupsHashV1(groups));
     },
@@ -177,7 +195,10 @@ describe('recall reranker training dataset v1', () => {
     {candidateIndex: FC.integer({max: 3, min: 0})},
     ({candidateIndex}) => {
       const dataset = createRecallRerankerSmokeDatasetV1();
-      const groupIndex = dataset.groups.findIndex(group => group.answerability === 'no_answer');
+      const groupIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(dataset.groups, group => group.answerability === 'no_answer'),
+        () => -1,
+      );
       const group = dataset.groups[groupIndex];
       const candidate = group.candidates[candidateIndex];
       const candidates = [...group.candidates];
@@ -190,13 +211,21 @@ describe('recall reranker training dataset v1', () => {
   );
 });
 
-interface CanonicalizationFixture {
-  readonly canonicalGroups: readonly {readonly id: string; readonly payload: unknown}[];
-  readonly groupsSha256: string;
-  readonly normalization: readonly {readonly input: string; readonly output: string}[];
-  readonly sortedIds: readonly string[];
-  readonly version: 1;
-}
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const CanonicalizationFixtureSchema = Schema.StructWithRest(
+  Schema.Struct({
+    canonicalGroups: Schema.Array(
+      Schema.StructWithRest(Schema.Struct({id: Schema.String, payload: Schema.Unknown}), [JsonRecordSchema]),
+    ),
+    groupsSha256: Schema.String,
+    normalization: Schema.Array(
+      Schema.StructWithRest(Schema.Struct({input: Schema.String, output: Schema.String}), [JsonRecordSchema]),
+    ),
+    sortedIds: Schema.Array(Schema.String),
+    version: Schema.Literal(1),
+  }),
+  [JsonRecordSchema],
+);
 
 function rebuild(dataset: RecallRerankerDatasetV1, groups: readonly RecallRerankerQueryGroupV1[]) {
   return createRecallRerankerDatasetV1(draft(dataset), groups);

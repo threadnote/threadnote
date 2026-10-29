@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -18,6 +19,8 @@ import {
   type CodeGraphWorksetCatalogRoutingSymbolRecordV1,
   type CodeGraphWorksetRoutingTermV1,
 } from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const SOURCE_CURSOR_PREFIX = 'cgwsc_';
 const SOURCE_CURSOR_VERSION = 1;
@@ -350,7 +353,10 @@ function selectLexicalCandidates(
   request: CodeGraphWorksetCatalogCandidateRequestV1 & {readonly cursor?: LexicalCursor},
 ) {
   const cursor = request.cursor;
-  const termPlaceholders = request.query.terms.map(() => '?').join(', ');
+  const termPlaceholders = EffectArray.join(
+    EffectArray.map(request.query.terms, () => '?'),
+    ', ',
+  );
   const after =
     cursor === undefined
       ? ''
@@ -442,8 +448,11 @@ function loadCandidateSurfaces(sql: SqlClient.SqlClient, rows: readonly Candidat
       terms: new Map<string, CodeGraphWorksetRoutingTermV1[]>(),
     });
   }
-  const values = rows.map(() => '(?, ?, ?)').join(', ');
-  const parameters = rows.flatMap(row => [row.ordinal, row.projection_digest, row.node_id]);
+  const values = EffectArray.join(
+    EffectArray.map(rows, () => '(?, ?, ?)'),
+    ', ',
+  );
+  const parameters = EffectArray.flatMap(rows, row => [row.ordinal, row.projection_digest, row.node_id]);
   return Effect.gen(function* () {
     const lookupRows = yield* sql.unsafe<LookupRow>(
       `WITH selected(ordinal, projection_digest, node_id) AS (VALUES ${values})
@@ -501,7 +510,7 @@ function decodeHits(
   },
 ) {
   return validateStored(() =>
-    rows.map(row => {
+    EffectArray.map(rows, row => {
       const ordinal = requiredInteger(row.ordinal, 'candidate ordinal');
       const nodeId = requiredText(row.node_id, 'candidate node identity');
       if (!NODE_ID.test(nodeId)) throw corrupt('Candidate node identity is invalid.');
@@ -625,15 +634,18 @@ function decodeCursor(
   lane: CodeGraphWorksetCatalogCandidateLaneV1,
 ): CandidateCursor {
   assertText(cursor, 'candidate cursor', SOURCE_CURSOR_BYTES_MAXIMUM);
-  if (!cursor.startsWith(SOURCE_CURSOR_PREFIX)) throw invalid('Candidate cursor is invalid.');
+  if (!Effect2.pipe(cursor, EffectString.startsWith(SOURCE_CURSOR_PREFIX)))
+    throw invalid('Candidate cursor is invalid.');
   let value: unknown;
   try {
-    value = JSON.parse(Buffer.from(cursor.slice(SOURCE_CURSOR_PREFIX.length), 'base64url').toString('utf8'));
+    value = JSON.parse(
+      Buffer.from(Effect2.pipe(cursor, EffectString.slice(SOURCE_CURSOR_PREFIX.length)), 'base64url').toString('utf8'),
+    );
   } catch (cause) {
     throw invalid('Candidate cursor is invalid.', cause);
   }
   const expectedLength = lane === 'exact' ? 11 : 12;
-  if (!Array.isArray(value) || value.length !== expectedLength || value[0] !== SOURCE_CURSOR_VERSION) {
+  if (!EffectArray.isArray(value) || value.length !== expectedLength || value[0] !== SOURCE_CURSOR_VERSION) {
     throw invalid('Candidate cursor version is incompatible.');
   }
   if (
@@ -710,7 +722,11 @@ function assertText(value: unknown, label: string, maximumBytes: number): assert
 
 function containsControlCharacter(value: string): boolean {
   for (const character of value) {
-    const code = character.codePointAt(0)!;
+    const code = Effect2.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect2.Option.getOrElse(() => undefined),
+    )!;
     if (code <= 0x1f || code === 0x7f) return true;
   }
   return false;
@@ -782,8 +798,11 @@ function mapCandidateError(operation: string) {
     effect.pipe(
       Effect.mapError(cause => {
         if (Schema.is(CodeGraphWorksetCatalogError)(cause)) return cause;
-        const detail = String(cause).toLowerCase();
-        const reason = detail.includes('locked') || detail.includes('busy') ? 'busy' : 'storage';
+        const detail = Effect2.pipe(String(cause), EffectString.toLowerCase);
+        const reason =
+          Effect2.pipe(detail, EffectString.includes('locked')) || Effect2.pipe(detail, EffectString.includes('busy'))
+            ? 'busy'
+            : 'storage';
         return CodeGraphWorksetCatalogError.of(
           reason,
           reason === 'busy' ? `Timed out waiting to ${operation}.` : `Unable to ${operation}.`,

@@ -23,9 +23,12 @@ export const resolveAgentHostPaths = Effect.fn('agentIntegrations.resolveHostPat
   const profile = environment.OMP_PROFILE ?? environment.PI_PROFILE;
   const agentRoot =
     hostRoot ??
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves TypeScript narrowing across this conditional.
     (profile?.trim()
-      ? path.join(system.homeDirectory, '.omp', 'profiles', profile.trim(), 'agent')
-      : environment.PI_CODING_AGENT_DIR?.trim()
+      ? // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The branch uses the value narrowed by the optional-chain condition.
+        path.join(system.homeDirectory, '.omp', 'profiles', profile.trim(), 'agent')
+      : // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves TypeScript narrowing across this conditional.
+        environment.PI_CODING_AGENT_DIR?.trim()
         ? yield* expandPath(environment.PI_CODING_AGENT_DIR)
         : yield* expandPath('~/.omp/agent'));
   return {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import type {CodeGraphQueryResult} from '@threadnote/graph/types';
@@ -10,8 +11,10 @@ import {
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import type {MemoryRecord} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const repositoryId = 'a'.repeat(64);
+const repositoryId = Effect.pipe('a', EffectString.repeat(64));
 
 describe('Context Check graph impact selection', () => {
   it('selects indirectly impacted cited memories and suppresses covered capture advisories', () => {
@@ -65,7 +68,7 @@ describe('Context Check graph impact selection', () => {
   it('bounds and deterministically orders capture advisories (property)', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.stringMatching(/^[a-z]{1,12}$/u), {maxLength: 40}), names => {
-        const paths = names.map(name => `src/${name}.ts`);
+        const paths = EffectArray.map(names, name => `src/${name}.ts`);
         const forward = selectContextCheckGraphImpact(result(paths), [], repositoryId, [], []);
         const reverse = selectContextCheckGraphImpact(result([...paths].reverse()), [], repositoryId, [], []);
         expect(forward).toEqual(reverse);
@@ -83,14 +86,25 @@ function result(paths: readonly string[]): CodeGraphQueryResult {
   return {
     edges: [],
     freshness: 'current',
-    nodes: paths.map(path => ({id: `cgs_${sha256HexSync(path).slice(0, 32)}`, path, score: 1})) as never,
+    nodes: EffectArray.map(paths, path => ({
+      contentHash: sha256HexSync(path),
+      exported: false,
+      id: `cgs_${Effect.pipe(sha256HexSync(path), EffectString.slice(0, 32))}`,
+      kind: 'function',
+      language: 'typescript',
+      name: path,
+      path,
+      qualifiedName: `test.${path}`,
+      score: 1,
+      span: {column: 1, endColumn: 2, endLine: 1, line: 1},
+    })),
     operation: 'impact',
     repository: {displayName: 'example/repository', repositoryId},
     snapshot: {
-      commit: 'b'.repeat(40),
+      commit: Effect.pipe('b', EffectString.repeat(40)),
       dirty: true,
-      id: `cgsn_${'c'.repeat(40)}`,
-      worktreeId: 'd'.repeat(64),
+      id: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}`,
+      worktreeId: Effect.pipe('d', EffectString.repeat(64)),
     },
     trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
     version: 1,
@@ -107,13 +121,13 @@ function record(name: string, path: string): MemoryRecord {
       codeCitations: [
         createMemoryCodeCitation({
           extractorSet: 'test',
-          fileContentHash: {algorithm: 'sha256', value: 'e'.repeat(64)},
+          fileContentHash: {algorithm: 'sha256', value: Effect.pipe('e', EffectString.repeat(64))},
           path,
           repositoryId,
           repositoryIdentityKind: 'remote',
-          sourceCommit: 'b'.repeat(40),
+          sourceCommit: Effect.pipe('b', EffectString.repeat(40)),
           sourceDirty: false,
-          sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+          sourceSnapshotId: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}`,
           target: {kind: 'file'},
           version: 1,
         }),

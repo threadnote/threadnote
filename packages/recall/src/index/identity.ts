@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type * as SqlClient from 'effect/sql/SqlClient';
 import type {RecallEligibilityPolicy} from '../eligibility.js';
@@ -75,7 +76,10 @@ export function createRecallIdentityConflictLoader(sql: SqlClient.SqlClient) {
     const rows: RecallIdentityConflictRow[] = [];
     for (let start = 0; start < memoryIds.length; start += IDENTITY_QUERY_BATCH_SIZE) {
       const batch = memoryIds.slice(start, start + IDENTITY_QUERY_BATCH_SIZE);
-      const memoryIdParameters = batch.map(() => '?').join(', ');
+      const memoryIdParameters = EffectArray.join(
+        EffectArray.map(batch, () => '?'),
+        ', ',
+      );
       rows.push(
         ...(!scope.restricted
           ? yield* sql.unsafe<RecallIdentityConflictRow>(
@@ -98,7 +102,7 @@ export function createRecallIdentityConflictLoader(sql: SqlClient.SqlClient) {
             )),
       );
     }
-    const conflicts = new Set(rows.map(row => row.memory_id));
+    const conflicts = new Set(EffectArray.map(rows, row => row.memory_id));
     cache.set(key, conflicts);
     return conflicts;
   });
@@ -109,7 +113,7 @@ export function markRecallIdentityConflicts(
   conflictingMemoryIds: ReadonlySet<string>,
 ): readonly RecallCandidate[] {
   if (conflictingMemoryIds.size === 0) return candidates;
-  return candidates.map(candidate =>
+  return EffectArray.map(candidates, candidate =>
     candidate.memoryId && conflictingMemoryIds.has(candidate.memoryId)
       ? {...candidate, identityConflict: true}
       : candidate,

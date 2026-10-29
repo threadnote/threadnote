@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Clock, Console, Crypto, DateTime, Effect, Exit, FileSystem, Path, Result, Schema} from 'effect';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
 import {applicationError, fromPromise} from '@threadnote/platform/errors';
@@ -14,6 +15,8 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {UpdateOptions} from '../types.js';
 import {isStandaloneThreadnoteBuild} from '@threadnote/workspace/runtime-version';
 import {isDevelopmentBuildVersion} from './version/compare.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const AUTO_UPDATE_STATE_FILE = 'auto-update.json';
 const AUTO_UPDATE_LOCK_FILE = '.auto-update.lock';
@@ -436,7 +439,8 @@ function runOwnedAutoUpdate(config: RuntimeConfig) {
       const workflowOnly =
         Exit.isFailure(update) &&
         update.cause.reasons.length > 0 &&
-        update.cause.reasons.every(
+        EffectArray.every(
+          update.cause.reasons,
           reason =>
             Cause.isFailReason(reason) && isJsonObject(reason.error) && reason.error._tag === 'DevSkillsUpdatePending',
         );
@@ -589,7 +593,13 @@ const effectiveAutoUpdatePolicy = Effect.fn('autoUpdate.effectivePolicy')(functi
   ) {
     return {policy: 'notify' as const, source: 'environment' as const};
   }
-  const override = environment.THREADNOTE_AUTO_UPDATE?.trim().toLowerCase();
+  const override = Effect2.pipe(
+    environment.THREADNOTE_AUTO_UPDATE,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   if (override === '1' || override === 'true' || override === 'yes' || override === 'on') {
     return {policy: 'automatic' as const, source: 'environment' as const};
   }
@@ -608,7 +618,12 @@ function emptyAutoUpdateState(policy: AutoUpdatePolicy): AutoUpdateState {
 }
 
 function failureSummary(cause: Cause.Cause<unknown>): string {
-  return redactSensitiveText(Cause.pretty(cause)).replace(/\s+/g, ' ').trim().slice(0, 500);
+  return Effect2.pipe(
+    redactSensitiveText(Cause.pretty(cause)),
+    EffectString.replace(/\s+/g, ' '),
+    EffectString.trim,
+    EffectString.slice(0, 500),
+  );
 }
 
 function isAutoUpdatePolicy(value: unknown): value is AutoUpdatePolicy {

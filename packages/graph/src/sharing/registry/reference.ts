@@ -1,4 +1,6 @@
 import {graphSharingFailure} from '../errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const HOST_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
 const COMPONENT = '[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*';
@@ -33,7 +35,12 @@ export function parseGraphShareRegistryTarget(value: string): GraphShareRegistry
   if (url.hostname !== match[1]) throw graphSharingFailure('OCI registry host must be canonical.');
   const origin = url.origin;
   const repository = match[3];
-  return {origin, registry: origin.slice('https://'.length), repository, pullScope: `repository:${repository}:pull`};
+  return {
+    origin,
+    registry: Effect.pipe(origin, EffectString.slice('https://'.length)),
+    repository,
+    pullScope: `repository:${repository}:pull`,
+  };
 }
 
 export function isGraphShareRegistryReference(value: string): boolean {

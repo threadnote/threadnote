@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {selectAffectedMemories} from '@threadnote/threadnote/context_check/commands';
 import type {MemoryRecord} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('context check citation selection', () => {
   it('respects repository identity and repository case mode', () => {
@@ -14,9 +17,9 @@ describe('context check citation selection', () => {
   it('has set semantics for changed paths and cannot select another repository', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.stringMatching(/^[a-z]{1,8}$/u), {maxLength: 20}), names => {
-        const paths = names.map(name => `${name}.ts`);
-        const current = paths.map(path => record('current', path));
-        const other = paths.map(path => record('other', path));
+        const paths = EffectArray.map(names, name => `${name}.ts`);
+        const current = EffectArray.map(paths, path => record('current', path));
+        const other = EffectArray.map(paths, path => record('other', path));
         expect(selectAffectedMemories([...other, ...current], 'current', [...paths, ...paths].reverse())).toEqual(
           current,
         );
@@ -42,14 +45,14 @@ function record(repositoryId: string, path: string): MemoryRecord {
       codeCitations: [
         {
           extractorSet: 'test',
-          fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+          fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
           id: 'citation',
           path,
           repositoryId,
           repositoryIdentityKind: 'local',
-          sourceCommit: 'b'.repeat(40),
+          sourceCommit: Effect.pipe('b', EffectString.repeat(40)),
           sourceDirty: false,
-          sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+          sourceSnapshotId: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}`,
           target: {kind: 'file'},
           version: 1,
         },

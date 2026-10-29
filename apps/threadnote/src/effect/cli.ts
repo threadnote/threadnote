@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {makeCodexCloudCommand} from './codex_cloud_cli.js';
 import {makeWorkflowMemoryCommand} from './workflow_memory_cli.js';
 import {makeWorkflowAutomationCommand} from './workflow_automation_cli.js';
@@ -226,7 +227,7 @@ const withMutationRuntimeEffect = <E, R>(effect: (config: RuntimeConfig) => Effe
   withRuntimeEffect(config =>
     effect(config).pipe(Effect.tap(() => wakeContextMaintenance(config).pipe(Effect.ignore))),
   );
-export type CliRuntimeRunner = typeof withRuntimeEffect;
+export type {CliRuntimeRunner} from './cli_runtime_contract.js';
 export type CliMutationRuntimeRunner = typeof withMutationRuntimeEffect;
 const withManifestManagementRuntimeEffect = <E, R>(effect: (config: RuntimeConfig) => Effect.Effect<void, E, R>) =>
   withRuntimeEffect(config => ensureUserManifestRuntimeConfig(config).pipe(Effect.flatMap(effect)));
@@ -689,9 +690,7 @@ const graphIndex = Command.make(
   options => withMutationRuntimeEffect(config => runCodeGraphIndex(config, options)),
 ).pipe(Command.withDescription('Build and atomically activate a current native code graph snapshot'));
 
-const withScopedRuntime = withManifestManagementRuntimeEffect as <E, R>(
-  effect: (config: RuntimeConfig) => Effect.Effect<void, E, R>,
-) => Effect.Effect<void, E, R>;
+const withScopedRuntime = withManifestManagementRuntimeEffect;
 const graphScope = makeCodeGraphScopeCommand(withScopedRuntime, graphBounds.json);
 
 const graphQuery = Command.make(
@@ -1101,8 +1100,8 @@ const projectionAdd = Command.make(
     withRuntimeEffect(config =>
       runObsidianProjectionAdd(config, {
         ...options,
-        kinds: kind.map(parseMemoryKind),
-        statuses: status.map(parseMemoryStatus),
+        kinds: EffectArray.map(kind, parseMemoryKind),
+        statuses: EffectArray.map(status, parseMemoryStatus),
       }),
     ),
 ).pipe(Command.withDescription('Configure a deterministic read-only memory projection'));
@@ -1984,7 +1983,7 @@ const topLevelCommandRegistrations = [
 const inspectRegisteredCliInvocation = makeCliInvocationInspector(topLevelCommandRegistrations);
 export const threadnoteCommand = root.pipe(
   Command.withDescription('Threadnote shared context workflow for development agents'),
-  Command.withSubcommands(topLevelCommandRegistrations.map(registration => registration.command)),
+  Command.withSubcommands(EffectArray.map(topLevelCommandRegistrations, registration => registration.command)),
 );
 export function inspectCliInvocation(arguments_: readonly string[]): CliInvocationInspection {
   const invocation = inspectRegisteredCliInvocation(arguments_);

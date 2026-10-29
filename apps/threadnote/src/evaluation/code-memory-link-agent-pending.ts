@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   codeMemoryLinkAgentAbTrialReceiptDigest,
@@ -10,6 +11,9 @@ import {
   parseCodeMemoryLinkAgentEvidenceReceiptV1,
   type CodeMemoryLinkAgentEvidenceReceiptV1,
 } from './code-memory-link-agent-evidence.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_AGENT_PENDING_COMMIT_VERSION = 1 as const;
 
@@ -48,7 +52,11 @@ export function parseCodeMemoryLinkAgentPendingCommitJsonV1(source: string): Cod
   try {
     return parseCodeMemoryLinkAgentPendingCommitV1(JSON.parse(source) as unknown);
   } catch (cause) {
-    if (cause instanceof Error && cause.message.startsWith('Invalid Code Memory Link pending commit:')) throw cause;
+    if (
+      cause instanceof Error &&
+      Effect.pipe(cause.message, EffectString.startsWith('Invalid Code Memory Link pending commit:'))
+    )
+      throw cause;
     throw new Error('Invalid Code Memory Link pending commit: pending commit must be valid JSON.', {cause});
   }
 }
@@ -73,8 +81,8 @@ export function reconcileCodeMemoryLinkAgentPendingCommitV1(input: {
   readonly trials: readonly CodeMemoryLinkAgentAbTrialV1[];
 } {
   const pending = parseCodeMemoryLinkAgentPendingCommitV1(input.pending);
-  const evidence = input.evidence.map(parseCodeMemoryLinkAgentEvidenceReceiptV1);
-  const trials = input.trials.map(parseCodeMemoryLinkAgentAbTrialV1);
+  const evidence = EffectArray.map(input.evidence, parseCodeMemoryLinkAgentEvidenceReceiptV1);
+  const trials = EffectArray.map(input.trials, parseCodeMemoryLinkAgentAbTrialV1);
   if (
     evidence.length < pending.index ||
     evidence.length > pending.index + 1 ||
@@ -137,9 +145,9 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid('pending commit has unsupported or missing fields');
   }
 }

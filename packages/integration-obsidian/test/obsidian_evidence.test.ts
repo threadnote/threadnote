@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {isJsonObject} from '@threadnote/platform/json';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, DateTime, Effect, FileSystem, Layer, Path, PlatformError, Schema} from 'effect';
@@ -21,6 +23,9 @@ import {
   runObsidianSourceSync,
 } from '../src/source.js';
 import {obsidianSourceCodec} from '../src/config.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const base = Layer.mergeAll(
   BunServices.layer,
@@ -127,13 +132,19 @@ describe('cited Obsidian evidence', () => {
       const options = {mode: 'automatic', requestId: 'rename-access', credentialEnvironment: {}} as const;
       expect((yield* obsidianSourceWork.run(config, 'notes', options)).more).toBe(true);
       expect((yield* obsidianSourceWork.run(config, 'notes', options)).more).toBe(true);
-      const state = JSON.parse(
+      const stateValue: unknown = JSON.parse(
         yield* fs.readFileString(path.join(home, 'threadnote', 'sources', 'obsidian', 'notes', 'state-v1.json')),
-      ) as {files: Record<string, {noteId: string}>};
+      );
+      if (!isJsonObject(stateValue) || !isJsonObject(stateValue.files))
+        throw new Error('Expected Obsidian source state with files.');
       expect(
-        Object.entries(state.files)
-          .filter(([, file]) => file.noteId === citation.noteId)
-          .map(([name]) => name),
+        EffectArray.map(
+          EffectArray.filter(
+            EffectRecord.toEntries(stateValue.files),
+            ([, file]) => isJsonObject(file) && file.noteId === citation.noteId,
+          ),
+          ([name]) => name,
+        ),
       ).toEqual(['Decision.md', 'Folder/Renamed.md']);
       expect((yield* readObsidianEvidence(config, citation)).historical).toBe('available');
       const renamed = path.join(yield* fs.realPath(vault), 'Folder', 'Renamed.md');
@@ -326,7 +337,7 @@ describe('cited Obsidian evidence', () => {
           manifestPath: path.join(home, 'manifest.yaml'),
           user: 'tester',
         };
-        const fragment = `signal:${chars.join('')}`;
+        const fragment = `signal:${EffectArray.join(chars, '')}`;
         yield* fs.makeDirectory(vault, {recursive: true});
         yield* fs.writeFileString(note, `# Decision\n\n${fragment}\n`);
         yield* runObsidianSourceAdd(config, {apply: true, id: 'notes', include: ['**/*.md'], vault});
@@ -572,7 +583,7 @@ describe('cited Obsidian evidence', () => {
             expiresAt: DateTime.formatIso(DateTime.makeUnsafe(Date.parse(input.reservation.expiresAt) - 1000)),
           },
           {...input.reservation, pinId: '44444444-4444-4444-8444-444444444444'},
-          {...input.reservation, accessHash: 'a'.repeat(64)},
+          {...input.reservation, accessHash: Effect2.pipe('a', EffectString.repeat(64))},
         ]) {
           expect((yield* Effect.result(captureObsidianEvidence(config, {...input, reservation})))._tag).toBe('Failure');
           expect(yield* fs.readFileString(destination)).toBe(bytes);
@@ -634,7 +645,7 @@ describe('cited Obsidian evidence', () => {
       const {fs, path, config, input, dir, note, vault, reviewed} = yield* reservedFixture;
       for (const invalid of [
         {...input, fragment: ''},
-        {...input, fragment: 'β'.repeat(4097)},
+        {...input, fragment: Effect2.pipe('β', EffectString.repeat(4097))},
         {...input, fragment: 'absent'},
         {...input, expectedSanitizerVersion: 'unsupported'},
         {...input, expectedNoteId: 'unknown'},
@@ -677,7 +688,7 @@ describe('cited Obsidian evidence', () => {
       yield* fs.writeFileString(destination, bytes);
       const pin = JSON.parse(bytes);
       for (let index = 0; index < 255; index += 1) {
-        const pinId = `${index.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`;
+        const pinId = `${Effect2.pipe(index.toString(16), EffectString.padStart(8, '0'))}-0000-4000-8000-000000000000`;
         yield* fs.writeFileString(
           path.join(dir, `${pinId}.json`),
           JSON.stringify({citation: {...pin.citation, pinId}, sanitizedContent: pin.sanitizedContent}),

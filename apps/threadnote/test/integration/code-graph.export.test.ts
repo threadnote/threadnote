@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -5,7 +6,7 @@ import {mkdtempSync, rmSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Effect, Layer} from 'effect';
+import {Effect, Layer, Schema} from 'effect';
 import {afterEach, describe, expect} from 'vitest';
 import {exportCodeGraph} from '@threadnote/graph/export';
 import {CodeGraphStore} from '@threadnote/graph/store';
@@ -46,16 +47,20 @@ describe('SQLite code graph export integration', () => {
       }).pipe(provideTestLayer(codeGraphStoreLayer));
 
       expect(result.firstJson.output).toBe(result.secondJson.output);
-      const json = JSON.parse(result.firstJson.output) as {
-        edges: CodeGraphEdge[];
-        nodes: CodeGraphSymbol[];
-        summary: {edges: {written: number}; nodes: {written: number}};
-      };
-      expect(json.nodes.map(node => `${node.path}#${node.qualifiedName}`)).toEqual([
+      const graphExportSchema = Schema.Struct({
+        edges: Schema.Array(Schema.Struct({id: Schema.String})),
+        nodes: Schema.Array(Schema.Struct({path: Schema.String, qualifiedName: Schema.String})),
+        summary: Schema.Struct({
+          edges: Schema.Struct({written: Schema.Finite}),
+          nodes: Schema.Struct({written: Schema.Finite}),
+        }),
+      });
+      const json = yield* Schema.decodeUnknownEffect(graphExportSchema)(JSON.parse(result.firstJson.output));
+      expect(EffectArray.map(json.nodes, node => `${node.path}#${node.qualifiedName}`)).toEqual([
         'src/a.ts#Alpha',
         'src/z.ts#Zeta <&>',
       ]);
-      expect(json.edges.map(edge => edge.id)).toEqual(['edge-alpha', 'edge-zeta', 'edge-unresolved']);
+      expect(EffectArray.map(json.edges, edge => edge.id)).toEqual(['edge-alpha', 'edge-zeta', 'edge-unresolved']);
       expect(json.summary).toMatchObject({edges: {written: 3}, nodes: {written: 2}});
 
       expect(result.graphml.output).toContain('<node id="node-alpha">');
@@ -108,7 +113,7 @@ function capture(databasePath: string, snapshot: CodeGraphSnapshot, format: 'gra
     repository: {displayName: 'acme/<portable>', repositoryId: snapshot.repositoryId},
     snapshotId: snapshot.id,
     write: chunk => Effect.sync(() => void chunks.push(chunk)),
-  }).pipe(Effect.map(summary => ({output: chunks.join(''), summary})));
+  }).pipe(Effect.map(summary => ({output: EffectArray.join(chunks, ''), summary})));
 }
 
 function repositoryIdentity(root: string): RepositoryIdentity {

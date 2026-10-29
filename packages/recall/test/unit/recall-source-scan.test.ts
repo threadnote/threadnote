@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
@@ -7,6 +8,8 @@ import fc from 'fast-check';
 import {describe, expect} from 'vitest';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {RECALL_REFRESH_SOURCE_TABLE, scanRecallSources} from '@threadnote/recall/index/refresh';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const database = SqliteClient.layer({filename: ':memory:'});
 const locatorIndex = `${RECALL_REFRESH_SOURCE_TABLE}_locator_digest`;
@@ -44,7 +47,7 @@ const fixture = Effect.fn('test.recallSourceScanFixture')(function* (sources: re
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'recall-source-scan-'});
   const expected: SourceRow[] = [];
   for (const source of sources) {
-    const name = `source-${source.id.toString().padStart(3, '0')}.md`;
+    const name = `source-${Effect2.pipe(source.id.toString(), EffectString.padStart(3, '0'))}.md`;
     const relative = source.resource ? ['resources', name] : ['user', 'allowed', 'memories', name];
     const file = path.join(home, 'data', 'acct', ...relative);
     yield* fs.makeDirectory(path.dirname(file), {recursive: true});
@@ -73,11 +76,18 @@ const fixture = Effect.fn('test.recallSourceScanFixture')(function* (sources: re
       true,
       {
         entryKeyByUri: new Map(
-          expected.flatMap(row => (row.authority_policy_key === null ? [] : [[row.uri, row.authority_policy_key]])),
+          EffectArray.flatMap(expected, row =>
+            row.authority_policy_key === null ? [] : [[row.uri, row.authority_policy_key]],
+          ),
         ),
         sourcePathByUri: new Map(),
       },
-      new Set(expected.filter(row => row.invalidated === 1).map(row => row.uri)),
+      new Set(
+        EffectArray.map(
+          EffectArray.filter(expected, row => row.invalidated === 1),
+          row => row.uri,
+        ),
+      ),
     );
   return {expected, scan};
 });
@@ -93,14 +103,14 @@ const verifyInventory = Effect.fn('test.verifyRecallSourceInventory')(function* 
         `SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE} WHERE uri_locator_digest = ? AND uri = ?`,
         [row.uri_locator_digest, row.uri],
       );
-      expect(lookup.map(value => value.uri)).toEqual([row.uri]);
+      expect(EffectArray.map(lookup, value => value.uri)).toEqual([row.uri]);
     }
     const plan = yield* sql.unsafe<{readonly detail: string}>(
       `EXPLAIN QUERY PLAN SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE}
        WHERE uri_locator_digest = ? ORDER BY uri`,
-      [expected[0]?.uri_locator_digest ?? '0'.repeat(64)],
+      [expected[0]?.uri_locator_digest ?? Effect2.pipe('0', EffectString.repeat(64))],
     );
-    expect(plan.some(row => row.detail.includes(locatorIndex))).toBe(true);
+    expect(EffectArray.some(plan, row => Effect2.pipe(row.detail, EffectString.includes(locatorIndex)))).toBe(true);
   }).pipe(withDatabase);
 });
 
@@ -147,9 +157,13 @@ describe('Recall source staging', () => {
               get(target, property, receiver) {
                 if (property !== 'unsafe') return Reflect.get(target, property, receiver);
                 return <A extends object>(text: string, parameters: readonly unknown[] = []) => {
-                  const indexBuild = text.startsWith(`CREATE INDEX temp.${locatorIndex}`);
+                  const indexBuild = Effect2.pipe(text, EffectString.startsWith(`CREATE INDEX temp.${locatorIndex}`));
                   if (indexBuild) indexAttempts += 1;
-                  if (failIndex ? indexBuild : text.startsWith(`INSERT INTO ${RECALL_REFRESH_SOURCE_TABLE} `)) {
+                  if (
+                    failIndex
+                      ? indexBuild
+                      : Effect2.pipe(text, EffectString.startsWith(`INSERT INTO ${RECALL_REFRESH_SOURCE_TABLE} `))
+                  ) {
                     injectedFailures += 1;
                     return target.unsafe<A>('SELECT * FROM missing_recall_source_stage_failure');
                   }

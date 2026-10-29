@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 
 export const BENCHMARK_ARTIFACT_VERSION = 1 as const;
@@ -115,13 +116,13 @@ export function benchmarkMeasurement(
   unit: BenchmarkMeasurementV1['unit'],
   values: readonly number[],
 ): BenchmarkMeasurementV1 {
-  if (values.length === 0 || values.some(value => !Number.isFinite(value) || value < 0)) {
+  if (values.length === 0 || EffectArray.some(values, value => !Number.isFinite(value) || value < 0)) {
     throw new Error(`Benchmark ${name} requires non-negative finite samples`);
   }
   const sorted = [...values].sort((left, right) => left - right);
   return {
     maximum: sorted[sorted.length - 1],
-    mean: sorted.reduce((total, value) => total + value, 0) / sorted.length,
+    mean: EffectArray.reduce(sorted, 0, (total, value) => total + value) / sorted.length,
     minimum: sorted[0],
     name,
     p50: percentile(sorted, 0.5),

@@ -31,6 +31,7 @@ import {pruneRetiredSnapshotRowsPage} from '../view_cleanup.js';
 import {runRoutineMaintenancePage} from '../routine_cleanup.js';
 import {type CodeGraphStoreRuntime} from '../runtime.js';
 import {type CodeGraphStoreShape} from '../shape.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 type CodeGraphStoreMaintenanceMethods = Pick<
   CodeGraphStoreShape,
@@ -111,8 +112,14 @@ export function makeCodeGraphStoreMaintenanceMethods(runtime: CodeGraphStoreRunt
         );
         if (probe.kind === 'result') return probe.result;
 
-        const validCandidates = probe.candidates.filter(persistentBuildOwnerCandidateValid);
-        let candidate = validCandidates.find(owner => !system.isProcessRunning(owner.processId));
+        const validCandidates = EffectArray.filter(
+          probe.candidates,
+          (__effectFilterValue: (typeof probe.candidates)[number], __effectFilterIndex: number) =>
+            __effectFilterIndex in probe.candidates && persistentBuildOwnerCandidateValid(__effectFilterValue),
+        );
+        let candidate = EffectOption.getOrUndefined(
+          EffectArray.findFirst(validCandidates, owner => !system.isProcessRunning(owner.processId)),
+        );
         if (candidate === undefined) {
           const selected = validCandidates[0];
           if (selected !== undefined && (yield* observePersistentBuildOwner(selected)) === 'dead') {

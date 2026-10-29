@@ -1,6 +1,8 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, Fiber, FileSystem, Path, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
+import {TestError} from '@threadnote/testing/test-error';
 import {expect, vi} from 'vitest';
 import type {CodeGraphStatus} from '@threadnote/graph/types';
 import * as candidates from '@threadnote/memory/candidate';
@@ -22,6 +24,8 @@ import {
 } from '../../src/manager/review_actionability.js';
 import {requestAutomaticMemoryReview} from '../../src/memory/context/maintenance_draft.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* (
   outcome: 'propose-update' | 'propose-revalidation' | 'insufficient-evidence' | 'policy-conflict' = 'propose-update',
@@ -154,7 +158,11 @@ effectIt.effect(
         },
       };
       yield* candidates.saveCandidateReview(f.config.agentContextHome, generated);
-      expect(generated.maintenance.basis.reads.filter(read => read.uri.startsWith('code:'))).toHaveLength(4);
+      expect(
+        EffectArray.filter(generated.maintenance.basis.reads, read =>
+          Effect2.pipe(read.uri, EffectString.startsWith('code:')),
+        ),
+      ).toHaveLength(4);
       expect((yield* readManagerReviewEligibility(f.config, [generated])).pendingCount).toBe(1);
       const query = yield* CodeGraphQueryService;
       const stale: CodeGraphQueryService['Service'] = {
@@ -278,7 +286,7 @@ const status: CodeGraphStatus = {
     checkoutId: 'checkout',
     displayName: 'synthetic',
     gitCommonDirectory: '/synthetic/repository/.git',
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: '/synthetic/repository',
     repositoryId: 'repository',
@@ -286,7 +294,7 @@ const status: CodeGraphStatus = {
   },
   languagePacks: [],
   readySnapshot: {
-    commit: '1'.repeat(40),
+    commit: Effect2.pipe('1', EffectString.repeat(40)),
     dirty: false,
     edgeCount: 1,
     extractorSet: 'extractor',
@@ -305,7 +313,14 @@ const read = (project?: string) =>
     Effect.flatMap(query => query.status('/synthetic/home', '/synthetic/repository', {...options, project})),
   );
 const service = (observe: CodeGraphQueryService['Service']['status']) =>
-  CodeGraphQueryService.of({status: observe} as unknown as CodeGraphQueryService['Service']);
+  CodeGraphQueryService.of({
+    attachSharedReadySnapshot: () => Effect.fail(TestError.make({message: 'Unexpected shared snapshot attachment.'})),
+    inspect: () => Effect.fail(TestError.make({message: 'Unexpected graph inspection.'})),
+    purge: () => Effect.fail(TestError.make({message: 'Unexpected graph purge.'})),
+    status: observe,
+    statusForIdentity: () => Effect.fail(TestError.make({message: 'Unexpected identity status lookup.'})),
+    statusForPublishedIdentity: () => Effect.fail(TestError.make({message: 'Unexpected published identity lookup.'})),
+  });
 
 effectIt.effect('finishes sixteen repeated two-second observations within the thirty-second read deadline', () =>
   Effect.gen(function* () {
@@ -350,7 +365,7 @@ effectIt.effect.prop(
           ),
         ),
       );
-      expect(yield* program).toEqual(projects.map(() => status));
+      expect(yield* program).toEqual(EffectArray.map(projects, () => status));
       expect(calls).toHaveLength(new Set(projects).size * 2);
       yield* program;
       expect(calls).toHaveLength(new Set(projects).size * 4);
@@ -426,12 +441,15 @@ effectIt.effect('loads All project summaries within eight seconds without checki
     const f = yield* fixture().pipe(TestClock.withLive);
     const reviews = Array.from({length: 8}, (_, index) => ({
       ...f.review,
-      reviewId: `review-${String(index).padStart(24, '0')}`,
+      reviewId: `review-${Effect2.pipe(String(index), EffectString.padStart(24, '0'))}`,
       project: index % 2 ? 'other project' : 'fixture',
       topic: 'Synthetic private topic',
       task: 'Synthetic private task',
       createdAt: `2026-10-25T00:00:0${index}.000Z`,
-      candidates: f.review.candidates.map(candidate => ({...candidate, reason: 'Synthetic private reason'})),
+      candidates: EffectArray.map(f.review.candidates, candidate => ({
+        ...candidate,
+        reason: 'Synthetic private reason',
+      })),
     }));
     yield* Effect.acquireUseRelease(
       Effect.sync(() => ({
@@ -439,7 +457,9 @@ effectIt.effect('loads All project summaries within eight seconds without checki
         check: vi
           .spyOn(draftController, 'readTopicMaintenanceDraft')
           .mockImplementation((_config, id) =>
-            Effect.sleep('9 seconds').pipe(Effect.as(reviews.find(review => review.reviewId === id)!)),
+            Effect.sleep('9 seconds').pipe(
+              Effect.as(EffectOption.getOrUndefined(EffectArray.findFirst(reviews, review => review.reviewId === id))!),
+            ),
           ),
       })),
       spies =>
@@ -459,12 +479,14 @@ effectIt.effect('loads All project summaries within eight seconds without checki
           const response = loaded.success;
           if (response?.status !== 200 || !('items' in response.body) || !response.body.items)
             throw new Error('Expected an inbox.');
-          expect(response.body.items.map(review => review.reviewId)).toEqual(
-            reviews.map(review => review.reviewId).reverse(),
+          expect(EffectArray.map(response.body.items, review => review.reviewId)).toEqual(
+            EffectArray.map(reviews, review => review.reviewId).reverse(),
           );
           expect(JSON.stringify(response)).not.toMatch(/Synthetic private|The timeout|target\.md/u);
           expect(
-            response.body.items.every(review => review.candidates.every(candidate => candidate.proposedText === '')),
+            EffectArray.every(response.body.items, review =>
+              EffectArray.every(review.candidates, candidate => candidate.proposedText === ''),
+            ),
           ).toBe(true);
           for (const project of ['fixture', 'other project']) {
             const selected = yield* list(project);
@@ -472,7 +494,7 @@ effectIt.effect('loads All project summaries within eight seconds without checki
             if (selected?.status !== 200 || !('items' in selected.body) || !selected.body.items)
               throw new Error('Expected selected inbox.');
             expect(selected.body.items).toHaveLength(4);
-            expect(selected.body.items.every(review => review.project === project)).toBe(true);
+            expect(EffectArray.every(selected.body.items, review => review.project === project)).toBe(true);
           }
           for (const view of ['history', 'deferred'])
             expect(yield* list('', view)).toMatchObject({status: 200, body: {pendingCount: 8, items: []}});

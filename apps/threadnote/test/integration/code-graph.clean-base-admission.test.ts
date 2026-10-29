@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -49,8 +50,8 @@ describe('first dirty index clean-base admission', () => {
           refresh: false,
           requestMaintenance: false,
         });
-        expect(clean.nodes.some(node => node.name === 'cleanSymbol0')).toBe(true);
-        expect(clean.nodes.some(node => node.name === 'dirtyOnlyCanary')).toBe(false);
+        expect(EffectArray.some(clean.nodes, node => node.name === 'cleanSymbol0')).toBe(true);
+        expect(EffectArray.some(clean.nodes, node => node.name === 'dirtyOnlyCanary')).toBe(false);
         const current = yield* query.inspect({
           cwd: repo,
           threadnoteHome: home,
@@ -61,7 +62,7 @@ describe('first dirty index clean-base admission', () => {
         });
         expect(current.freshness).toBe('current');
         expect(current.snapshot.id).toBe(dirty.snapshot.id);
-        expect(current.nodes.some(node => node.name === 'dirtyOnlyCanary')).toBe(true);
+        expect(EffectArray.some(current.nodes, node => node.name === 'dirtyOnlyCanary')).toBe(true);
         const restricted = path.join(root, 'restricted');
         yield* git(['worktree', 'add', '-q', '-b', 'restricted', restricted]);
         yield* fs.writeFileString(path.join(repo, '.git/info/exclude'), 'file1.ts\n');

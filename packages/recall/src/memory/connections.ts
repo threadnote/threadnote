@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {DateTime, Effect} from 'effect';
 import {
   MEMORY_RELATION_TYPES,
@@ -24,6 +26,8 @@ import {
 import {classifyMemoryIdentityCandidates} from './identity.js';
 import type {RecallMemoryLinkMatch} from './links.js';
 import {recallMemoryContentHash, type RecallCandidate} from '../rank.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const MAX_RECALL_MEMORY_REFS = 8;
 export const MAX_RECALL_MEMORY_CONNECTIONS = 8;
@@ -152,7 +156,7 @@ export function parseRecallMemoryConnectionInput(
   input: RecallMemoryConnectionInput,
 ): ParsedRecallMemoryConnectionInput {
   const memoryRefs = uniqueStrings(
-    uniqueStrings(input.memoryRefs, 'memory reference').map(normalizeRecallMemoryReference),
+    EffectArray.map(uniqueStrings(input.memoryRefs, 'memory reference'), normalizeRecallMemoryReference),
     'memory reference',
   );
   if (memoryRefs.length === 0) throw new Error('Recall memory connections require at least one memory reference.');
@@ -161,10 +165,10 @@ export function parseRecallMemoryConnectionInput(
   }
 
   const relationTypes = input.relationTypes
-    ? uniqueStrings(input.relationTypes, 'memory relation type').map(value => {
+    ? EffectArray.map(uniqueStrings(input.relationTypes, 'memory relation type'), value => {
         if (!isMemoryRelationType(value)) {
           throw new Error(
-            `Unknown memory relation type "${value}". Expected one of: ${MEMORY_RELATION_TYPES.join(', ')}.`,
+            `Unknown memory relation type "${value}". Expected one of: ${EffectArray.join(MEMORY_RELATION_TYPES, ', ')}.`,
           );
         }
         return value;
@@ -223,19 +227,28 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   }
   const now = input.now ?? (yield* DateTime.nowAsDate);
   const limit = boundedConnectionResultLimit(input.limit);
-  const requestedCanonicalUris = parsed.memoryRefs
-    .map(ref => parseResourceId(ref).canonicalUri)
-    .filter(ref => memoryIdFromIdentityAlias(ref) === undefined && recallUriMatchesScopes(ref, input.allowedUriScopes));
+  const requestedCanonicalUris = EffectArray.filter(
+    EffectArray.map(parsed.memoryRefs, ref => parseResourceId(ref).canonicalUri),
+    ref => memoryIdFromIdentityAlias(ref) === undefined && recallUriMatchesScopes(ref, input.allowedUriScopes),
+  );
   const requestedRecords = yield* input.readRecords(requestedCanonicalUris);
-  const canonicalRecordByUri = new Map(requestedRecords.map(record => [record.uri, record] as const));
+  const canonicalRecordByUri = new Map(EffectArray.map(requestedRecords, record => [record.uri, record] as const));
   const requestedRecordByUri = new Map(
-    requestedRecords.filter(record => authorizedRecord(record, input)).map(record => [record.uri, record] as const),
+    EffectArray.map(
+      EffectArray.filter(
+        requestedRecords,
+        (record, __effectArrayIndex) => __effectArrayIndex in requestedRecords && authorizedRecord(record, input),
+      ),
+      record => [record.uri, record] as const,
+    ),
   );
   const requestedPremises = yield* resolveRequestedPremises(config, parsed.memoryRefs, requestedRecordByUri, input);
   for (const premise of requestedPremises) {
     if (premise.witnessedRecord) canonicalRecordByUri.set(premise.witnessedRecord.uri, premise.witnessedRecord);
   }
-  const requestedMemoryIds = requestedPremises.flatMap(premise => (premise.memoryId ? [premise.memoryId] : []));
+  const requestedMemoryIds = EffectArray.flatMap(requestedPremises, premise =>
+    premise.memoryId ? [premise.memoryId] : [],
+  );
   const premiseIndex =
     requestedMemoryIds.length === 0
       ? undefined
@@ -246,27 +259,33 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
           memoryIds: requestedMemoryIds,
           validateNow: true,
         });
-  const witnessedPremiseCandidates = requestedPremises.flatMap(premise =>
+  const witnessedPremiseCandidates = EffectArray.flatMap(requestedPremises, premise =>
     premise.witnessedCandidate ? [premise.witnessedCandidate] : [],
   );
   const premiseCandidates = mergeRecallCandidates(premiseIndex?.candidates ?? [], witnessedPremiseCandidates);
   const premiseCandidatesById = groupCandidatesByMemoryId(premiseCandidates);
-  const premiseCandidateUris = [...new Set(premiseCandidates.flatMap(candidateUrisForRead))];
-  const unreadPremiseCandidateUris = premiseCandidateUris.filter(uri => !canonicalRecordByUri.has(uri));
+  const premiseCandidateUris = [
+    ...new Set(
+      EffectArray.flatMap(premiseCandidates, (__effectFlatMapValue, __effectFlatMapIndex) =>
+        __effectFlatMapIndex in premiseCandidates ? candidateUrisForRead(__effectFlatMapValue) : [],
+      ),
+    ),
+  ];
+  const unreadPremiseCandidateUris = EffectArray.filter(premiseCandidateUris, uri => !canonicalRecordByUri.has(uri));
   const newlyReadPremiseRecords =
     unreadPremiseCandidateUris.length === 0 ? [] : yield* input.readRecords(unreadPremiseCandidateUris);
   for (const record of newlyReadPremiseRecords) canonicalRecordByUri.set(record.uri, record);
-  const premiseLiveRecords = premiseCandidateUris.flatMap(uri => {
+  const premiseLiveRecords = EffectArray.flatMap(premiseCandidateUris, uri => {
     const record = canonicalRecordByUri.get(uri);
     return record ? [record] : [];
   });
   const verifiedPremises = verifyLiveRecallCandidates(premiseCandidates, premiseLiveRecords, input);
-  const premiseSeeds = requestedPremises.flatMap(({memoryId}, requestedOrdinal) =>
+  const premiseSeeds = EffectArray.flatMap(requestedPremises, ({memoryId}, requestedOrdinal) =>
     memoryId && verifiedPremises.liveCandidateById.has(memoryId) && !verifiedPremises.conflictIds.has(memoryId)
       ? [{memoryId, requestedOrdinal}]
       : [],
   );
-  const witnessedPremiseSources = requestedPremises.flatMap((premise, requestedOrdinal) =>
+  const witnessedPremiseSources = EffectArray.flatMap(requestedPremises, (premise, requestedOrdinal) =>
     premise.memoryId !== undefined && premise.witnessedRecord !== undefined
       ? [{memoryId: premise.memoryId, requestedOrdinal, uri: premise.witnessedRecord.uri}]
       : [],
@@ -309,7 +328,9 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
           relationTypes: parsed.relationTypes,
           witnessedSources: witnessedPremiseSources,
         });
-  const linkedMemoryIds = rawLinks.flatMap(link => [link.sourceMemoryId, link.targetMemoryId].filter(isString));
+  const linkedMemoryIds = EffectArray.flatMap(rawLinks, link =>
+    EffectArray.filter([link.sourceMemoryId, link.targetMemoryId], isString),
+  );
   const allMemoryIds = [...new Set([...requestedMemoryIds, ...linkedMemoryIds])];
   const index =
     allMemoryIds.length === 0
@@ -322,37 +343,46 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
           validateNow: true,
         });
   const indexedCandidates = mergeRecallCandidates(index?.candidates ?? [], witnessedPremiseCandidates);
-  const candidateUris = [...new Set(indexedCandidates.flatMap(candidateUrisForRead))];
-  const unreadCandidateUris = candidateUris.filter(uri => !canonicalRecordByUri.has(uri));
+  const candidateUris = [
+    ...new Set(
+      EffectArray.flatMap(indexedCandidates, (__effectFlatMapValue, __effectFlatMapIndex) =>
+        __effectFlatMapIndex in indexedCandidates ? candidateUrisForRead(__effectFlatMapValue) : [],
+      ),
+    ),
+  ];
+  const unreadCandidateUris = EffectArray.filter(candidateUris, uri => !canonicalRecordByUri.has(uri));
   canonicalRereads += unreadCandidateUris.length;
   const newlyReadCandidateRecords =
     unreadCandidateUris.length === 0 ? [] : yield* input.readRecords(unreadCandidateUris);
   for (const record of newlyReadCandidateRecords) canonicalRecordByUri.set(record.uri, record);
-  const liveRecords = candidateUris.flatMap(uri => {
+  const liveRecords = EffectArray.flatMap(candidateUris, uri => {
     const record = canonicalRecordByUri.get(uri);
     return record ? [record] : [];
   });
   const verifiedCandidates = verifyLiveRecallCandidates(indexedCandidates, liveRecords, input);
   const liveCandidateById = verifiedCandidates.liveCandidateById;
   const conflictIds = verifiedCandidates.conflictIds;
-  const finalPremiseSeeds = premiseSeeds.filter(
+  const finalPremiseSeeds = EffectArray.filter(
+    premiseSeeds,
     seed => liveCandidateById.has(seed.memoryId) && !conflictIds.has(seed.memoryId),
   );
   const finalPremiseIdByOrdinal = new Map(
-    finalPremiseSeeds.map(seed => [seed.requestedOrdinal, seed.memoryId] as const),
+    EffectArray.map(finalPremiseSeeds, seed => [seed.requestedOrdinal, seed.memoryId] as const),
   );
-  const verifiedRawLinks = rawLinks.filter(link => {
+  const verifiedRawLinks = EffectArray.filter(rawLinks, link => {
     const premiseId = finalPremiseIdByOrdinal.get(link.requestedOrdinal);
     return (
       premiseId !== undefined &&
       (link.direction === 'outgoing' ? link.sourceMemoryId === premiseId : link.targetMemoryId === premiseId)
     );
   });
-  const verifiedLinkedMemoryIds = verifiedRawLinks.flatMap(link =>
-    [link.sourceMemoryId, link.targetMemoryId].filter(isString),
+  const verifiedLinkedMemoryIds = EffectArray.flatMap(verifiedRawLinks, link =>
+    EffectArray.filter([link.sourceMemoryId, link.targetMemoryId], isString),
   );
 
-  const currentnessIds = [...new Set([...finalPremiseSeeds.map(seed => seed.memoryId), ...verifiedLinkedMemoryIds])];
+  const currentnessIds = [
+    ...new Set([...EffectArray.map(finalPremiseSeeds, seed => seed.memoryId), ...verifiedLinkedMemoryIds]),
+  ];
   const currentnessIdSet = new Set(currentnessIds);
   let witnessedCurrentnessTruncated = false;
   const witnessedSupersederLinks =
@@ -399,7 +429,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
           includeInactive: true,
           limit: currentnessIds.length * ACTIVE_SUPERSEDER_PROOF_LIMIT_PER_MEMORY,
           limitPerSeed: ACTIVE_SUPERSEDER_PROOF_LIMIT_PER_MEMORY,
-          memorySeeds: currentnessIds.map((memoryId, requestedOrdinal) => ({memoryId, requestedOrdinal})),
+          memorySeeds: EffectArray.map(currentnessIds, (memoryId, requestedOrdinal) => ({memoryId, requestedOrdinal})),
           onCanonicalMismatch: count => {
             canonicalMismatches += count;
           },
@@ -425,24 +455,28 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
         });
   const supersederLinks = deduplicateSupersederLinks([
     ...indexedSupersederLinks,
-    ...verifiedRawLinks.filter(link => link.relationType === 'supersedes'),
-    ...witnessedSupersederLinks.filter(link =>
-      link.targetMemoryId === undefined ? false : currentnessIdSet.has(link.targetMemoryId),
+    ...EffectArray.filter(verifiedRawLinks, link => link.relationType === 'supersedes'),
+    ...EffectArray.filter(
+      witnessedSupersederLinks,
+      (link, __effectArrayIndex2) =>
+        __effectArrayIndex2 in witnessedSupersederLinks &&
+        (link.targetMemoryId === undefined ? false : currentnessIdSet.has(link.targetMemoryId)),
     ),
   ]);
   const currentnessTruncatedMemoryIds = new Set(
     witnessedCurrentnessTruncated
       ? currentnessIds
-      : currentnessTruncatedOrdinals.flatMap(ordinal => {
+      : EffectArray.flatMap(currentnessTruncatedOrdinals, ordinal => {
           const memoryId = currentnessIds[ordinal];
           return memoryId === undefined ? [] : [memoryId];
         }),
   );
   const missingSupersederIds = [
     ...new Set(
-      supersederLinks
-        .map(link => link.sourceMemoryId)
-        .filter(memoryId => !liveCandidateById.has(memoryId) && !conflictIds.has(memoryId)),
+      EffectArray.filter(
+        EffectArray.map(supersederLinks, link => link.sourceMemoryId),
+        memoryId => !liveCandidateById.has(memoryId) && !conflictIds.has(memoryId),
+      ),
     ),
   ];
   if (missingSupersederIds.length > 0) {
@@ -453,13 +487,21 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
       memoryIds: missingSupersederIds,
       validateNow: true,
     });
-    const supersederUris = [...new Set(supersederIndex.candidates.flatMap(candidateUrisForRead))];
-    const unreadSupersederUris = supersederUris.filter(uri => !canonicalRecordByUri.has(uri));
+    const supersederUris = [
+      ...new Set(
+        EffectArrayPipe(supersederIndex.candidates, __effectFlatMapValues =>
+          EffectArray.flatMap(__effectFlatMapValues, (value, __effectFlatMapIndex2) =>
+            __effectFlatMapIndex2 in __effectFlatMapValues ? candidateUrisForRead(value) : [],
+          ),
+        ),
+      ),
+    ];
+    const unreadSupersederUris = EffectArray.filter(supersederUris, uri => !canonicalRecordByUri.has(uri));
     canonicalRereads += unreadSupersederUris.length;
     const newlyReadSupersederRecords =
       unreadSupersederUris.length === 0 ? [] : yield* input.readRecords(unreadSupersederUris);
     for (const record of newlyReadSupersederRecords) canonicalRecordByUri.set(record.uri, record);
-    const supersederRecords = supersederUris.flatMap(uri => {
+    const supersederRecords = EffectArray.flatMap(supersederUris, uri => {
       const record = canonicalRecordByUri.get(uri);
       return record ? [record] : [];
     });
@@ -508,19 +550,22 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
     return state;
   };
 
-  const premises = requestedPremises.map(({memoryId, requestedRef}, requestedOrdinal): RecallMemoryPremiseReceiptV1 => {
-    const candidate = memoryId ? liveCandidateById.get(memoryId) : undefined;
-    const requestedCandidate = memoryId ? premiseCandidatesById.get(memoryId)?.[0] : undefined;
-    return {
-      ...(memoryId ? {memoryId} : {}),
-      requestedOrdinal,
-      requestedRef,
-      state: stateForId(memoryId),
-      ...((candidate?.uri ?? requestedCandidate?.uri) ? {uri: candidate?.uri ?? requestedCandidate?.uri} : {}),
-    };
-  });
+  const premises = EffectArray.map(
+    requestedPremises,
+    ({memoryId, requestedRef}, requestedOrdinal): RecallMemoryPremiseReceiptV1 => {
+      const candidate = memoryId ? liveCandidateById.get(memoryId) : undefined;
+      const requestedCandidate = memoryId ? premiseCandidatesById.get(memoryId)?.[0] : undefined;
+      return {
+        ...(memoryId ? {memoryId} : {}),
+        requestedOrdinal,
+        requestedRef,
+        state: stateForId(memoryId),
+        ...((candidate?.uri ?? requestedCandidate?.uri) ? {uri: candidate?.uri ?? requestedCandidate?.uri} : {}),
+      };
+    },
+  );
 
-  const resolvedConnections = verifiedRawLinks.flatMap(link =>
+  const resolvedConnections = EffectArray.flatMap(verifiedRawLinks, link =>
     resolveConnection(link, liveCandidateById, conflictIds, stateForId),
   );
   const fairConnections = fairConnectionOrder(deduplicateResolvedConnections(resolvedConnections));
@@ -535,21 +580,23 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
     selectedCandidates.push(connection.candidate);
     if (selectedCandidates.length >= limit) break;
   }
-  const selectedConnections = fairConnections
-    .filter(
-      connection =>
-        connection.receipt.resolution !== 'resolved' ||
-        (connection.memoryId !== undefined && selectedIds.has(connection.memoryId)),
-    )
-    .slice(0, CONNECTION_RECEIPT_LIMIT)
-    .map(connection => connection.receipt);
+  const selectedConnections = EffectArray.map(
+    EffectArray.filter(
+      fairConnections,
+      (connection, __effectArrayIndex) =>
+        __effectArrayIndex in fairConnections &&
+        (connection.receipt.resolution !== 'resolved' ||
+          (connection.memoryId !== undefined && selectedIds.has(connection.memoryId))),
+    ).slice(0, CONNECTION_RECEIPT_LIMIT),
+    connection => connection.receipt,
+  );
   const truncated =
     truncatedSeedOrdinals.length > 0 ||
     currentnessTruncatedMemoryIds.size > 0 ||
     fairConnections.length > selectedConnections.length ||
     selectedIds.size <
       new Set(
-        fairConnections.flatMap(connection =>
+        EffectArray.flatMap(fairConnections, connection =>
           connection.memoryId && connection.receipt.resolution === 'resolved' ? [connection.memoryId] : [],
         ),
       ).size;
@@ -621,17 +668,17 @@ const resolveRequestedPremises = Effect.fn('recall.resolveRequestedConnectionPre
   let witnesses: readonly MemoryRelocationIdentityWitnessCandidate[] = [];
   let indexedResolutions = new Map<string, ReturnType<typeof classifyMemoryIdentityCandidates>>();
   if (canonicalFallbacks.size > 0) {
-    const expectedMemoryIds = [...canonicalFallbacks.values()].flatMap(fallback =>
+    const expectedMemoryIds = EffectArray.flatMap([...canonicalFallbacks.values()], fallback =>
       fallback.expectedMemoryId ? [fallback.expectedMemoryId] : [],
     );
     witnesses = yield* loadMemoryRelocationIdentityWitnesses(
       config,
       [...aliasMemoryIds, ...expectedMemoryIds],
       input.allowedUriScopes,
-      {destinationUris: [...canonicalFallbacks.values()].map(fallback => fallback.record.uri)},
+      {destinationUris: EffectArray.map([...canonicalFallbacks.values()], fallback => fallback.record.uri)},
     );
     const identityIds = [
-      ...new Set([...aliasMemoryIds, ...expectedMemoryIds, ...witnesses.map(value => value.memoryId)]),
+      ...new Set([...aliasMemoryIds, ...expectedMemoryIds, ...EffectArray.map(witnesses, value => value.memoryId)]),
     ];
     const indexed =
       identityIds.length === 0
@@ -642,7 +689,7 @@ const resolveRequestedPremises = Effect.fn('recall.resolveRequestedConnectionPre
             validateNow: true,
           });
     indexedResolutions = new Map(
-      identityIds.map(memoryId => [
+      EffectArray.map(identityIds, memoryId => [
         memoryId,
         classifyMemoryIdentityCandidates(indexed, memoryId, input.allowedUriScopes),
       ]),
@@ -654,12 +701,13 @@ const resolveRequestedPremises = Effect.fn('recall.resolveRequestedConnectionPre
       validateNow: true,
     });
     indexedResolutions = new Map(
-      [...aliasMemoryIds].map(memoryId => [
+      EffectArray.map([...aliasMemoryIds], memoryId => [
         memoryId,
         classifyMemoryIdentityCandidates(indexed, memoryId, input.allowedUriScopes),
       ]),
     );
-    const fallbackMemoryIds = [...aliasMemoryIds].filter(
+    const fallbackMemoryIds = EffectArray.filter(
+      [...aliasMemoryIds],
       memoryId => indexedResolutions.get(memoryId)?.state === 'not-found',
     );
     if (fallbackMemoryIds.length > 0) {
@@ -676,12 +724,15 @@ const resolveRequestedPremises = Effect.fn('recall.resolveRequestedConnectionPre
       const resolution = classifyMemoryIdentityCandidates(witnesses, aliasMemoryId, input.allowedUriScopes);
       const witness =
         resolution.state === 'resolved'
-          ? witnesses.find(
-              candidate =>
-                candidate.memoryId === aliasMemoryId &&
-                candidate.uri === resolution.uri &&
-                candidate.missingMemoryId &&
-                candidate.identityConflict !== true,
+          ? EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                witnesses,
+                candidate =>
+                  candidate.memoryId === aliasMemoryId &&
+                  candidate.uri === resolution.uri &&
+                  candidate.missingMemoryId &&
+                  candidate.identityConflict !== true,
+              ),
             )
           : undefined;
       if (witness) witnessedByRequestedRef.set(requestedUri, witness);
@@ -691,23 +742,34 @@ const resolveRequestedPremises = Effect.fn('recall.resolveRequestedConnectionPre
     if (!fallback) continue;
     const candidateIds = [
       ...new Set(
-        witnesses
-          .filter(candidate => candidate.uri === fallback.record.uri && candidate.missingMemoryId)
-          .map(candidate => candidate.memoryId)
-          .filter(memoryId => fallback.expectedMemoryId === undefined || memoryId === fallback.expectedMemoryId)
-          .filter(memoryId => indexedResolutions.get(memoryId)?.state === 'not-found'),
+        EffectArray.filter(
+          EffectArray.filter(
+            EffectArray.map(
+              EffectArray.filter(
+                witnesses,
+                candidate => candidate.uri === fallback.record.uri && candidate.missingMemoryId,
+              ),
+              candidate => candidate.memoryId,
+            ),
+            memoryId => fallback.expectedMemoryId === undefined || memoryId === fallback.expectedMemoryId,
+          ),
+          memoryId => indexedResolutions.get(memoryId)?.state === 'not-found',
+        ),
       ),
     ];
     if (candidateIds.length !== 1) continue;
     const resolution = classifyMemoryIdentityCandidates(witnesses, candidateIds[0], input.allowedUriScopes);
     const witness =
       resolution.state === 'resolved' && resolution.uri === fallback.record.uri
-        ? witnesses.find(
-            candidate =>
-              candidate.memoryId === candidateIds[0] &&
-              candidate.uri === resolution.uri &&
-              candidate.missingMemoryId &&
-              candidate.identityConflict !== true,
+        ? EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              witnesses,
+              candidate =>
+                candidate.memoryId === candidateIds[0] &&
+                candidate.uri === resolution.uri &&
+                candidate.missingMemoryId &&
+                candidate.identityConflict !== true,
+            ),
           )
         : undefined;
     if (witness) witnessedByRequestedRef.set(requestedUri, witness);
@@ -829,15 +891,21 @@ function deduplicateResolvedConnections(connections: readonly ResolvedConnection
   const selected = new Map<string, ResolvedConnection>();
   for (const connection of connections) {
     const receipt = connection.receipt;
-    const key = [
-      receipt.requestedOrdinal,
-      receipt.direction,
-      receipt.sourceMemoryId,
-      receipt.neighborMemoryId ?? '',
-      receipt.relationType,
-      receipt.origin,
-      receipt.relationOrdinal,
-    ].join('\u0000');
+    const key = EffectArray.join(
+      EffectArray.map(
+        [
+          receipt.requestedOrdinal,
+          receipt.direction,
+          receipt.sourceMemoryId,
+          receipt.neighborMemoryId ?? '',
+          receipt.relationType,
+          receipt.origin,
+          receipt.relationOrdinal,
+        ],
+        item => (item === null || item === undefined ? '' : String(item)),
+      ),
+      '\u0000',
+    );
     const current = selected.get(key);
     if (!current || compareCodeUnits(receipt.sourceUri ?? '', current.receipt.sourceUri ?? '') < 0) {
       selected.set(key, connection);
@@ -913,21 +981,35 @@ function verifyLiveRecallCandidates<R>(
   readonly liveCandidateById: Map<string, RecallCandidate>;
 } {
   const candidatesById = groupCandidatesByMemoryId(candidates);
-  const liveById = groupLiveRecordsByMemoryId(records.filter(record => authorizedRecord(record, input)));
+  const liveById = groupLiveRecordsByMemoryId(
+    EffectArray.filter(
+      records,
+      (record, __effectArrayIndex) => __effectArrayIndex in records && authorizedRecord(record, input),
+    ),
+  );
   const liveCandidateById = new Map<string, RecallCandidate>();
   const conflictIds = new Set<string>();
   for (const [memoryId, indexedCandidates] of candidatesById) {
     const liveRecords = liveById.get(memoryId) ?? [];
-    const contentHashes = new Set(liveRecords.map(record => recallMemoryContentHash(record.body)));
-    if (indexedCandidates.some(candidate => candidate.identityConflict) || contentHashes.size > 1) {
+    const contentHashes = new Set(EffectArray.map(liveRecords, record => recallMemoryContentHash(record.body)));
+    if (
+      EffectArray.some(indexedCandidates, candidate => Boolean(candidate.identityConflict)) ||
+      contentHashes.size > 1
+    ) {
       conflictIds.add(memoryId);
       continue;
     }
-    const candidate = indexedCandidates.find(indexed =>
-      liveRecords.some(
-        record =>
-          candidateUrisForRead(indexed).includes(record.uri) &&
-          indexed.contentHash === recallMemoryContentHash(record.body),
+    const candidate = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        indexedCandidates,
+        __effectArrayValue =>
+          !!(indexed =>
+            EffectArray.some(
+              liveRecords,
+              record =>
+                candidateUrisForRead(indexed).includes(record.uri) &&
+                indexed.contentHash === recallMemoryContentHash(record.body),
+            ))(__effectArrayValue),
       ),
     );
     if (candidate) liveCandidateById.set(memoryId, candidate);
@@ -983,7 +1065,7 @@ function uniqueStrings(values: readonly string[], label: string): string[] {
   const unique: string[] = [];
   const seen = new Set<string>();
   for (const raw of values) {
-    const value = raw.trim();
+    const value = Effect2.pipe(raw, EffectString.trim);
     if (!value) throw new Error(`Recall ${label} must not be empty.`);
     if (seen.has(value)) continue;
     seen.add(value);

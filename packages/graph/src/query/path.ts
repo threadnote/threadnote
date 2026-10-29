@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect} from 'effect';
 import type {CodeGraphStoreShape} from '../store.js';
 import type {CodeGraphTraversalEdge} from '../store/internal_models.js';
@@ -6,12 +7,22 @@ import type {CodeGraphProvenance, CodeGraphQueryNode, CodeGraphQueryResult} from
 
 export const QUERY_TRAVERSAL_TIME_BUDGET_MILLISECONDS = 2_000;
 
+export type CodeGraphPathQueryStore = Pick<
+  CodeGraphStoreShape,
+  | 'directEdgeBetweenNodes'
+  | 'edgesByIds'
+  | 'findSymbolsByPathAndName'
+  | 'searchSymbols'
+  | 'symbolsByIds'
+  | 'traversalEdgesForNodes'
+>;
+
 const deadlineReached = Effect.fn('codeGraph.pathDeadlineReached')(function* (deadline: number) {
   return (yield* Clock.currentTimeMillis) >= deadline;
 });
 
 export const pathQuery = Effect.fn('codeGraph.pathQuery')(function* (
-  store: CodeGraphStoreShape,
+  store: CodeGraphPathQueryStore,
   databasePath: string,
   snapshotId: string,
   from: string,
@@ -163,7 +174,7 @@ export const pathQuery = Effect.fn('codeGraph.pathQuery')(function* (
         timedOut
           ? 'Path search reached its elapsed-time budget; results are partial.'
           : limitsReached.length > 0
-            ? `No authoritative path was found; search coverage was bounded by ${limitsReached.join(', ')}. Widen the traversal limits or inspect endpoint neighbors.`
+            ? `No authoritative path was found; search coverage was bounded by ${EffectArray.join(limitsReached, ', ')}. Widen the traversal limits or inspect endpoint neighbors.`
             : 'No authoritative path exists in the searched graph for the selected provenance filters.',
       ],
     };
@@ -190,7 +201,7 @@ export const pathQuery = Effect.fn('codeGraph.pathQuery')(function* (
   const hydratedEdges = yield* store.edgesByIds(
     databasePath,
     snapshotId,
-    pathEdges.map(edge => edge.id),
+    EffectArray.map(pathEdges, edge => edge.id),
   );
   if (yield* deadlineReached(deadline)) {
     return {
@@ -200,16 +211,23 @@ export const pathQuery = Effect.fn('codeGraph.pathQuery')(function* (
       warnings: ['Path search reached its elapsed-time budget; results are partial.'],
     };
   }
-  const byId = new Map(symbols.map(symbol => [symbol.id, symbol]));
-  const orderedIds = [start.id, ...pathEdges.map(edge => edge.targetId!).filter(Boolean)];
+  const byId = new Map(EffectArray.map(symbols, symbol => [symbol.id, symbol]));
+  const orderedIds = [
+    start.id,
+    ...EffectArray.filter(
+      EffectArray.map(pathEdges, edge => edge.targetId!),
+      Boolean,
+    ),
+  ];
   return {
     edges: hydratedEdges,
-    nodes: orderedIds
-      .map((id, index) => {
+    nodes: EffectArray.filter(
+      EffectArray.map(orderedIds, (id, index) => {
         const symbol = byId.get(id);
         return symbol ? {...symbol, score: 1 / (index + 1)} : undefined;
-      })
-      .filter((node): node is CodeGraphQueryNode => node !== undefined),
+      }),
+      (node): node is CodeGraphQueryNode => node !== undefined,
+    ),
     searchCoverage: coverage('found', [], visited.size, inspectedEdges, true),
     warnings: [],
   };

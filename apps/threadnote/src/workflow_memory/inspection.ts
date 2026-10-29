@@ -1,6 +1,7 @@
 import {Effect} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {stableJson, workflowError, type WorkflowJournal, type WorkflowOperationInspectionRequest} from './protocol.js';
+import * as EffectRecord from 'effect/Record';
 
 /** The caller must validate this journal under its workflow lock with manifest recovery disabled. */
 export const inspectWorkflowOperation = Effect.fn('workflowMemory.inspectOperation')(function* (
@@ -17,7 +18,7 @@ export const inspectWorkflowOperation = Effect.fn('workflowMemory.inspectOperati
       'binding-drift',
       'The expected workflow binding or generation differs from native state.',
     );
-  const operation = Object.hasOwn(state.operations, request.operationId)
+  const operation = EffectRecord.has(state.operations, request.operationId)
     ? state.operations[request.operationId]
     : undefined;
   if (operation && operation.intentDigest !== request.intentDigest)

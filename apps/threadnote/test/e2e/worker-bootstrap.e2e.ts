@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
@@ -6,6 +7,8 @@ import {join} from '@threadnote/testing/node-path';
 import {spawn} from '@threadnote/testing/node-child-process';
 import {afterAll, beforeAll, describe, expect, it} from 'vitest';
 import {CODE_GRAPH_PARSER_WORKER_ARGUMENT, LOCAL_MODEL_WORKER_ARGUMENT} from '@threadnote/threadnote/worker_protocol';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const root = process.cwd();
 const compiled = join(root, 'dist', process.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
@@ -21,12 +24,15 @@ afterAll(async () => {
 
 describe('standalone worker bootstrap', () => {
   it('preserves parser protocol facts and digest in source and one-file compiled executions', async () => {
-    const content = [
-      "import {Effect} from 'effect';",
-      'export function parseThroughWorker(value: number): number {',
-      '  return value > 0 ? parseThroughWorker(value - 1) : value;',
-      '}',
-    ].join('\n');
+    const content = EffectArray.join(
+      [
+        "import {Effect} from 'effect';",
+        'export function parseThroughWorker(value: number): number {',
+        '  return value > 0 ? parseThroughWorker(value - 1) : value;',
+        '}',
+      ],
+      '\n',
+    );
     const request = {
       file: {
         blobId: 'worker-bootstrap-e2e',
@@ -112,11 +118,29 @@ async function runWorker(
     child.once('error', reject);
     child.once('close', code => resolve(code ?? -1));
   });
-  if (exitCode !== 0) throw TestError.make({message: `Worker exited ${exitCode}: ${stderr.slice(0, 1_000)}`});
-  const lines = stdout.trim().split(/\r?\n/);
+  if (exitCode !== 0)
+    throw TestError.make({message: `Worker exited ${exitCode}: ${Effect.pipe(stderr, EffectString.slice(0, 1_000))}`});
+  const lines = Effect.pipe(stdout, EffectString.trim, EffectString.split(/\r?\n/));
   if (lines.length !== 1 || !lines[0])
     throw TestError.make({message: `Expected one worker response line, got: ${stdout}`});
-  return JSON.parse(lines[0]) as WorkerResponse;
+  const response: unknown = JSON.parse(lines[0]);
+  if (!isWorkerResponse(response)) throw TestError.make({message: 'Worker returned an invalid response.'});
+  return response;
+}
+
+function isWorkerResponse(value: unknown): value is WorkerResponse {
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
+  if ('error' in value && value.error !== undefined) {
+    if (typeof value.error !== 'object' || value.error === null || EffectArray.isArray(value.error)) return false;
+    if ('tag' in value.error && value.error.tag !== undefined && typeof value.error.tag !== 'string') return false;
+  }
+  return (
+    (!('id' in value) || value.id === undefined || typeof value.id === 'string') &&
+    (!('ok' in value) || value.ok === undefined || typeof value.ok === 'boolean') &&
+    (!('protocol' in value) ||
+      value.protocol === undefined ||
+      (typeof value.protocol === 'number' && Number.isFinite(value.protocol)))
+  );
 }
 
 function factsDigest(facts: unknown): string {

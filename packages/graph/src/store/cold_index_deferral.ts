@@ -9,6 +9,7 @@ import {
 import {CODE_GRAPH_QUERY_INDEX_DEFINITIONS, inspectCodeGraphQueryIndexes} from './query/indexes.js';
 import {recordCodeGraphSchemaInitializationReceipt} from './schema/receipt.js';
 import {CodeGraphStoreError, type CodeGraphInventoryFile} from '../types.js';
+import {Array as EffectArray} from 'effect';
 
 const DEFERRED_QUERY_INDEX_STATE_KEY = 'query_indexes_deferred';
 const DEFERRED_QUERY_INDEX_STATE_VALUE = '1';
@@ -163,8 +164,14 @@ export const restoreCodeGraphQueryIndexesAfterColdBuild = Effect.fn('codeGraph.r
       rowCount: saturatingCapacityAdd(
         1,
         missing.length,
-        saturatingCapacityMultiply(edgeCount, missing.filter(definition => definition.table === 'edges').length),
-        saturatingCapacityMultiply(symbolCount, missing.filter(definition => definition.table === 'symbols').length),
+        saturatingCapacityMultiply(
+          edgeCount,
+          EffectArray.filter(missing, definition => definition.table === 'edges').length,
+        ),
+        saturatingCapacityMultiply(
+          symbolCount,
+          EffectArray.filter(missing, definition => definition.table === 'symbols').length,
+        ),
       ),
     };
     const startedAt = yield* Clock.currentTimeMillis;

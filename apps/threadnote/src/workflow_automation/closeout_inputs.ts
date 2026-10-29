@@ -20,6 +20,9 @@ import {
   type NativeAuthoringCall,
 } from './authoring_artifacts.js';
 import {nativeWorkflowError} from './memory.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface NativeCloseoutOwnedArtifact {
   readonly runId: string;
@@ -205,11 +208,11 @@ export const loadNativeCloseoutInputs = Effect.fn('workflowAutomation.closeout.l
   const owned: NativeCloseoutOwnedArtifact[] = [];
   const seen = new Set<string>();
   for (const original of [loadedPlan, ...(loadedSpec ? [loadedSpec] : [])]) {
-    for (const artifact of Object.values(original.journal.artifacts)) {
+    for (const artifact of EffectRecord.values(original.journal.artifacts)) {
       if (
         artifact.state !== 'active' ||
         artifact.sourceRunId !== original.pin.binding.runId ||
-        !artifact.role.startsWith('authoring-')
+        !Effect2.pipe(artifact.role, EffectString.startsWith('authoring-'))
       )
         continue;
       const key = original.pin.binding.bindingId + '\n' + artifact.canonicalUri;

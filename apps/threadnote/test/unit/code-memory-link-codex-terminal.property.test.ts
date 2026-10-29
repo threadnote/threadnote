@@ -11,6 +11,8 @@ import {
   formatCodeMemoryLinkCodexTerminalReceipt,
   parseCodeMemoryLinkCodexTerminalReceipt,
 } from '../../../../scripts/code-memory-link-codex-terminal.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('Code Memory Link Codex terminal receipts', () => {
   it('round-trips every closed privacy-safe terminal class and rejects tampering', () => {
@@ -24,7 +26,9 @@ describe('Code Memory Link Codex terminal receipts', () => {
           createCodeMemoryLinkCodexTerminalReceipt(kind),
         );
         expect(
-          parseCodeMemoryLinkCodexTerminalReceipt(marker.replace(/"diagnosticHash":"[0-9a-f]/u, '"diagnosticHash":"z')),
+          parseCodeMemoryLinkCodexTerminalReceipt(
+            Effect.pipe(marker, EffectString.replace(/"diagnosticHash":"[0-9a-f]/u, '"diagnosticHash":"z')),
+          ),
         ).toBeNull();
       }),
       {numRuns: 32},

@@ -1,7 +1,10 @@
+import {parseThreadnotePack, canonicalPackRoot, packTargetForCurrentUser} from './pack.js';
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
 import {assertImportedMemoryAssociation, validateImportedMemory} from './pack_validation.js';
 import {normalizeReferenceUris} from '@threadnote/memory/references';
-import {Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Result, Schema} from 'effect';
+import {Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {
   expandWeakRecallQueryEffect,
   limitRecallRewritesForConfidence,
@@ -22,12 +25,7 @@ import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resou
 import {withAnonymousTelemetryPhase} from '../effect/telemetry.js';
 import {withCodeAnchorFinalizationAnonymousTelemetry} from '../telemetry/code_anchor_finalization.js';
 import {syncSourcesBeforeRecall} from '@threadnote/integration-core/source-sync';
-import {
-  canonicalResourceUri,
-  parseResourceId,
-  resourceIdIsManagedMemoryNamespace,
-  resourceIdWithoutAnchor,
-} from '@threadnote/store/resource-id';
+import {parseResourceId, resourceIdIsManagedMemoryNamespace} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {resolveRecallScope} from './recall_scope.js';
 import {
@@ -186,6 +184,8 @@ import {
   writeMemoryFileChecked,
   writeSharedWorktreeFile,
 } from '../share/index.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {
   hasLegacyLifecycleHandoffCandidates,
@@ -220,7 +220,7 @@ const requireValue = <A>(value: A | undefined, message: string): Effect.Effect<A
 
 export const runRemember = Effect.fn('runRemember')(function* (config: RuntimeConfig, options: RememberOptions) {
   const text = yield* getInputText(options.text, options.stdin === true);
-  if (!text.trim()) {
+  if (!Effect2.pipe(text, EffectString.trim)) {
     return yield* MemoryOperationError.make({message: 'Provide memory text with --text or --stdin.'});
   }
   const timestamp = DateTime.formatIso(yield* DateTime.now);
@@ -253,12 +253,13 @@ export const runRemember = Effect.fn('runRemember')(function* (config: RuntimeCo
   const citationSourceCommit = commonMemoryCodeCitationCommit(codeCitations);
   const workspaceComponent = yield* resolveWorkspaceComponentContext({includeProcessCwd: true});
   const crypto = yield* Crypto.Crypto;
-  const memoryId = replacement?.memoryId ?? `tn_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
+  const memoryId =
+    replacement?.memoryId ?? `tn_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
   const sharedTeam = replaceUri ? sharedTeamNameForUri(config, replaceUri) : undefined;
   const relationScope = sharedTeam
     ? `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(sharedTeam)}`
     : `threadnote://user/${uriSegment(config.user)}/memories`;
-  const relationInputs = yield* attemptSync(() => (options.relations ?? []).map(parseMemoryRelationOption));
+  const relationInputs = yield* attemptSync(() => EffectArray.map(options.relations ?? [], parseMemoryRelationOption));
   const authoredRelations = yield* resolveAuthoredMemoryRelations(config, relationInputs, {
     allowedUriScopes: [relationScope],
     sourceMemoryId: memoryId,
@@ -292,7 +293,11 @@ export const runRemember = Effect.fn('runRemember')(function* (config: RuntimeCo
   const metadata =
     options.dryRun === true || sharedTarget || !shouldEnrichForKeywordPlan(keywordPlan)
       ? baseMetadata
-      : yield* enrichMemoryMetadataWithConfiguredLocalAi(config, baseMetadata, text.trim()).pipe(
+      : yield* enrichMemoryMetadataWithConfiguredLocalAi(
+          config,
+          baseMetadata,
+          Effect2.pipe(text, EffectString.trim),
+        ).pipe(
           Effect.catch(error =>
             Console.log(
               `Local AI memory enrichment skipped: ${error instanceof Error ? error.message : String(error)}`,
@@ -300,7 +305,7 @@ export const runRemember = Effect.fn('runRemember')(function* (config: RuntimeCo
           ),
         );
   const memoryUri = yield* storeMemory(config, {
-    bodyText: text.trim(),
+    bodyText: Effect2.pipe(text, EffectString.trim),
     deferredCodeAnchor: citationCapture.deferred,
     dryRun: options.dryRun === true,
     expectedReplaceContent: replaced?.content,
@@ -331,7 +336,7 @@ export const runRemember = Effect.fn('runRemember')(function* (config: RuntimeCo
 });
 
 function commonMemoryCodeCitationCommit(citations: readonly {readonly sourceCommit: string}[]): string | undefined {
-  const commits = new Set(citations.map(citation => citation.sourceCommit));
+  const commits = new Set(EffectArray.map(citations, citation => citation.sourceCommit));
   return commits.size === 1 ? citations[0]?.sourceCommit : undefined;
 }
 
@@ -456,7 +461,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
         : `Would search native recall index for ${JSON.stringify(query)}${inferredUri ? ` under ${inferredUri}` : ''}.`,
     );
   }
-  const scopedRecallUris = new Set([inferredUri].filter((uri): uri is string => uri !== undefined));
+  const scopedRecallUris = new Set(EffectArray.filter([inferredUri], (uri): uri is string => uri !== undefined));
   if (options.project && project) {
     const projectMemoryUri = `threadnote://user/${uriSegment(config.user)}/memories/durable/projects/${uriSegment(project.name)}`;
     if (!scopedRecallUris.has(projectMemoryUri)) {
@@ -470,6 +475,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
   }
   const seededUri = project ? trimTrailingSlash(project.uri) : undefined;
   if (
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native optional-chain guard narrows `seededUri` for insertion.
     seededUri?.startsWith('threadnote://') &&
     seededUri !== inferredUri &&
     !options.uri &&
@@ -480,13 +486,21 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
 
   const workset = scope.workset;
   if (workset && workset.projects.length > 0) {
-    yield* Console.log(`Workset scope: ${workset.name} (${workset.projects.map(member => member.name).join(', ')})`);
-    const alreadyScoped = new Set(
-      [inferredUri, seededUri, ...scopedRecallUris].filter((uri): uri is string => uri !== undefined),
+    yield* Console.log(
+      `Workset scope: ${workset.name} (${EffectArray.join(
+        EffectArray.map(workset.projects, member => member.name),
+        ', ',
+      )})`,
     );
-    const worksetScopes = worksetScopeUris(config, workset)
-      .filter(uri => !alreadyScoped.has(uri))
-      .slice(0, MAX_WORKSET_PASSES);
+    const alreadyScoped = new Set(
+      EffectArray.filter([inferredUri, seededUri, ...scopedRecallUris], (uri): uri is string => uri !== undefined),
+    );
+    const worksetScopes = EffectArrayPipe(worksetScopeUris(config, workset), __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (uri, __effectArrayIndex3) => __effectArrayIndex3 in __effectArrayValues && !alreadyScoped.has(uri),
+      ),
+    ).slice(0, MAX_WORKSET_PASSES);
     for (const scope of worksetScopes) {
       scopedRecallUris.add(scope);
     }
@@ -537,7 +551,11 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
   const surfacedOperationalWarningCodes = new Set<RecallOperationalWarning['code']>();
   const surfaceOperationalWarnings = (warnings: readonly RecallOperationalWarning[]) =>
     Effect.forEach(
-      warnings.filter(warning => !surfacedOperationalWarningCodes.has(warning.code)),
+      EffectArray.filter(
+        warnings,
+        (warning, __effectArrayIndex2) =>
+          __effectArrayIndex2 in warnings && !surfacedOperationalWarningCodes.has(warning.code),
+      ),
       warning =>
         Effect.sync(() => surfacedOperationalWarningCodes.add(warning.code)).pipe(
           Effect.andThen(Console.warn(renderRecallOperationalWarning(warning))),
@@ -579,7 +597,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
           readRecords: uris => readMemoryRecordsByUri(config, uris),
           relationTypes: memoryConnections?.relationTypes,
           rerankerCache,
-          seedUris: [inferredUri, seededUri].filter((uri): uri is string => uri !== undefined),
+          seedUris: EffectArray.filter([inferredUri, seededUri], (uri): uri is string => uri !== undefined),
           semanticResult,
           workspaceBranch,
           workspaceScope: workspaceComponent?.scope,
@@ -780,7 +798,7 @@ const syncSharedReposAndLog = Effect.fn('memory.syncSharedReposAndLog')(function
     ),
   );
   if (syncResult.syncedTeams.length > 0) {
-    yield* Console.error(`Auto-synced shared memories: ${syncResult.syncedTeams.join(', ')}`);
+    yield* Console.error(`Auto-synced shared memories: ${EffectArray.join(syncResult.syncedTeams, ', ')}`);
   }
   for (const warning of syncResult.warnings) {
     yield* Console.error(`Auto-sync warning: ${warning}`);
@@ -792,13 +810,18 @@ function formatSharedCompactAudit(audit: {
   readonly syncedTeams: readonly string[];
   readonly warnings: readonly string[];
 }): string {
-  return [
-    'Shared audit source:',
-    '- bounded auto-sync attempted before scanning local canonical mirrors',
-    audit.syncedTeams.length > 0 ? `- refreshed teams: ${audit.syncedTeams.join(', ')}` : '- refreshed teams: none',
-    '- freshness note: repository contention may defer refresh; hygiene actions never mutate shared memories',
-    ...audit.warnings.map(warning => `- warning: ${warning}`),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Shared audit source:',
+      '- bounded auto-sync attempted before scanning local canonical mirrors',
+      audit.syncedTeams.length > 0
+        ? `- refreshed teams: ${EffectArray.join(audit.syncedTeams, ', ')}`
+        : '- refreshed teams: none',
+      '- freshness note: repository contention may defer refresh; hygiene actions never mutate shared memories',
+      ...EffectArray.map(audit.warnings, warning => `- warning: ${warning}`),
+    ],
+    '\n',
+  );
 }
 
 const syncSourcesAndLog = Effect.fn('memory.syncSourcesAndLog')(function* (config: RuntimeConfig) {
@@ -812,7 +835,7 @@ const syncSourcesAndLog = Effect.fn('memory.syncSourcesAndLog')(function* (confi
     return;
   }
   if (syncResult.syncedSources.length > 0) {
-    yield* Console.error(`Auto-synced sources: ${syncResult.syncedSources.join(', ')}`);
+    yield* Console.error(`Auto-synced sources: ${EffectArray.join(syncResult.syncedSources, ', ')}`);
   }
   for (const warning of syncResult.warnings) {
     yield* Console.error(`Auto-sync warning: ${warning}`);
@@ -857,17 +880,22 @@ export const runCompact = Effect.fn('runCompact')(function* (config: RuntimeConf
     project,
     topic: normalizeOptionalMetadata(options.topic),
   });
-  yield* Console.log([formatCompactPlan(plan, {apply}), '', formatSharedCompactAudit(sharedAudit)].join('\n'));
+  yield* Console.log(
+    EffectArray.join([formatCompactPlan(plan, {apply}), '', formatSharedCompactAudit(sharedAudit)], '\n'),
+  );
   if (!apply) {
     return;
   }
 
   const plannedActions = [...plan.keepUpdates, ...plan.archives, ...plan.forgets];
   const currentByUri = new Map(
-    (yield* readMemoryRecordsByUri(
-      config,
-      plannedActions.map(action => action.uri),
-    )).map(record => [record.uri, record.content]),
+    EffectArray.map(
+      yield* readMemoryRecordsByUri(
+        config,
+        EffectArray.map(plannedActions, action => action.uri),
+      ),
+      record => [record.uri, record.content],
+    ),
   );
   for (const action of plannedActions) {
     if (currentByUri.get(action.uri) !== action.expectedContent) {
@@ -877,7 +905,7 @@ export const runCompact = Effect.fn('runCompact')(function* (config: RuntimeConf
     }
   }
 
-  const invalidatedUris = plannedActions.map(action => action.uri);
+  const invalidatedUris = EffectArray.map(plannedActions, action => action.uri);
   yield* Effect.gen(function* () {
     yield* applyCliCompactKeepUpdates(config, plan, records);
     for (const action of plan.archives) {
@@ -910,8 +938,14 @@ export const runCompactDiagnostics = Effect.fn('memory.runCompactDiagnostics')(f
     kind: options.kind,
     project,
   });
-  const activeRecords = records.filter(record => record.metadata.status === 'active');
-  const matchingRecords = activeRecords.filter(record => topic === undefined || topicForRecord(record) === topic);
+  const activeRecords = EffectArray.filter(
+    records,
+    (record, __effectArrayIndex) => __effectArrayIndex in records && record.metadata.status === 'active',
+  );
+  const matchingRecords = EffectArray.filter(
+    activeRecords,
+    record => topic === undefined || topicForRecord(record) === topic,
+  );
   const counts = new Map<CompactableMemoryKind, number>();
   for (const record of matchingRecords) {
     const kind = record.metadata.kind;
@@ -920,19 +954,22 @@ export const runCompactDiagnostics = Effect.fn('memory.runCompactDiagnostics')(f
     }
   }
   yield* Console.log(
-    [
-      'Scope summary:',
-      `- project: ${project}`,
-      `- topic: ${topic ?? '(all)'}`,
-      `- kind: ${options.kind ?? '(handoff, durable, incident)'}`,
-      `- stable records read: ${records.length}`,
-      `- active records in project: ${activeRecords.length}`,
-      `- active records matching topic: ${matchingRecords.length}`,
-      `- matching by kind: ${formatKindCounts(counts)}`,
-      '- shared memories: audited read-only for conflicts/merge review; never mutated by compact',
-      '- skipped by design: archived memories, preferences, smoke records, seeded resources, and non-stable timestamped/global paths',
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'Scope summary:',
+        `- project: ${project}`,
+        `- topic: ${topic ?? '(all)'}`,
+        `- kind: ${options.kind ?? '(handoff, durable, incident)'}`,
+        `- stable records read: ${records.length}`,
+        `- active records in project: ${activeRecords.length}`,
+        `- active records matching topic: ${matchingRecords.length}`,
+        `- matching by kind: ${formatKindCounts(counts)}`,
+        '- shared memories: audited read-only for conflicts/merge review; never mutated by compact',
+        '- skipped by design: archived memories, preferences, smoke records, seeded resources, and non-stable timestamped/global paths',
+        '',
+      ],
+      '\n',
+    ),
   );
 });
 
@@ -958,7 +995,7 @@ const scopedCompactRecords = Effect.fn('memory.scopedCompactRecords')(function* 
         continue;
       }
       for (const entry of entries.value) {
-        if (entry.startsWith('.') || !entry.endsWith('.md')) {
+        if (Effect2.pipe(entry, EffectString.startsWith('.')) || !Effect2.pipe(entry, EffectString.endsWith('.md'))) {
           continue;
         }
         const entryPath = path.join(directory, entry);
@@ -995,20 +1032,23 @@ const sharedMemoryDirectoriesForCompact = Effect.fn('memory.sharedMemoryDirector
   const baseUri = `threadnote://user/${uriSegment(config.user)}/memories/shared`;
   const directories: Array<{readonly directory: string; readonly uriDirectory: string}> = [];
   for (const team of [...teamEntries.value].sort()) {
-    if (team.startsWith('.')) continue;
+    if (Effect2.pipe(team, EffectString.startsWith('.'))) continue;
     const teamRoot = path.join(sharedRoot, team);
     const teamInfo = yield* fs.stat(teamRoot).pipe(Effect.option);
     if (teamInfo._tag === 'None' || teamInfo.value.type !== 'Directory') continue;
     directories.push({
       directory: path.join(teamRoot, ...relativeParts),
-      uriDirectory: `${baseUri}/${team}/${relativeParts.join('/')}`,
+      uriDirectory: `${baseUri}/${team}/${EffectArray.join(relativeParts, '/')}`,
     });
   }
   return directories;
 });
 
 function formatKindCounts(counts: ReadonlyMap<CompactableMemoryKind, number>): string {
-  return (['handoff', 'durable', 'incident'] as const).map(kind => `${kind} ${counts.get(kind) ?? 0}`).join(', ');
+  return EffectArray.join(
+    EffectArray.map(['handoff', 'durable', 'incident'] as const, kind => `${kind} ${counts.get(kind) ?? 0}`),
+    ', ',
+  );
 }
 
 export const readMemoryRecordsByUri = Effect.fn('memory.readMemoryRecordsByUri')(function* (
@@ -1027,7 +1067,10 @@ export const readMemoryRecordsByUri = Effect.fn('memory.readMemoryRecordsByUri')
       }),
     {concurrency: 16},
   );
-  return records.filter((record): record is MemoryRecord => record !== undefined);
+  return EffectArray.filter(
+    records,
+    (record, __effectArrayIndex4): record is MemoryRecord => __effectArrayIndex4 in records && record !== undefined,
+  );
 });
 
 const localMemoryDirectoryForCompact = Effect.fn('memory.localMemoryDirectoryForCompact')(function* (
@@ -1044,7 +1087,7 @@ const localMemoryDirectoryForCompact = Effect.fn('memory.localMemoryDirectoryFor
 function memoryUriDirectoryForCompact(config: RuntimeConfig, kind: CompactableMemoryKind, project: string): string {
   const base = `threadnote://user/${uriSegment(config.user)}/memories`;
   const projectSegment = uriSegment(project);
-  return `${base}/${compactMemoryDirectoryParts(kind, projectSegment).join('/')}`;
+  return `${base}/${EffectArray.join(compactMemoryDirectoryParts(kind, projectSegment), '/')}`;
 }
 
 function compactMemoryDirectoryParts(kind: CompactableMemoryKind, projectSegment: string): readonly string[] {
@@ -1073,7 +1116,12 @@ export const runList = Effect.fn('runList')(function* (config: RuntimeConfig, ur
   });
   const entries = nodeLimit === undefined ? allEntries : allEntries.slice(0, nodeLimit);
   if (options.simple === true) {
-    yield* writeFinalCliOutput(entries.map(entry => entry.uri).join('\n'));
+    yield* writeFinalCliOutput(
+      EffectArray.join(
+        EffectArray.map(entries, entry => entry.uri),
+        '\n',
+      ),
+    );
     return;
   }
   yield* writeFinalCliOutput(JSON.stringify(entries, null, 2));
@@ -1228,7 +1276,7 @@ export const runExportPack = Effect.fn('runExportPack')(function* (config: Runti
   const store = yield* ResourceStore;
   const entries = yield* store.list(resourceStoreLocation(config), sourceUri, {recursive: true});
   const resources = yield* Effect.forEach(
-    entries.filter(entry => entry.type === 'file'),
+    EffectArray.filter(entries, (entry, __effectArrayIndex) => __effectArrayIndex in entries && entry.type === 'file'),
     entry =>
       store.read(resourceStoreLocation(config), entry.uri).pipe(
         Effect.flatMap(content => {
@@ -1243,7 +1291,14 @@ export const runExportPack = Effect.fn('runExportPack')(function* (config: Runti
             );
           return Effect.succeed({
             content,
-            relativeUri: entry.uri.slice(sourceUri.replace(/\/+$/, '').length).replace(/^\/+/, ''),
+            relativeUri: Effect2.pipe(entry.uri, __effectPipeInput => {
+              const __effectPipeStage0 = Effect2.pipe(
+                __effectPipeInput,
+                EffectString.slice(Effect2.pipe(sourceUri, EffectString.replace(/\/+$/, '')).length),
+              );
+              const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/^\/+/, ''));
+              return __effectPipeStage1;
+            }),
           });
         }),
       ),
@@ -1274,13 +1329,13 @@ export const runImportPack = Effect.fn('runImportPack')(function* (config: Runti
   const targetUri = options.targetUri
     ? canonicalPackRoot(options.targetUri)
     : packTargetForCurrentUser(pack.sourceUri, config.user);
-  const planned = pack.resources.map(resource => ({
+  const planned = EffectArray.map(pack.resources, resource => ({
     content: resource.content,
-    uri: canonicalPackRoot(`${targetUri.replace(/\/+$/, '')}/${resource.relativeUri}`),
+    uri: canonicalPackRoot(`${Effect2.pipe(targetUri, EffectString.replace(/\/+$/, ''))}/${resource.relativeUri}`),
   }));
   const destinations = new Set<string>();
   for (const resource of planned) {
-    const collisionKey = resource.uri.normalize('NFC').toLocaleLowerCase();
+    const collisionKey = Effect2.pipe(resource.uri, EffectString.normalize('NFC'), EffectString.toLocaleLowerCase());
     if (destinations.has(collisionKey)) {
       return yield* MemoryOperationError.make({
         message: `Threadnote pack contains colliding destination URIs: ${resource.uri}.`,
@@ -1288,7 +1343,10 @@ export const runImportPack = Effect.fn('runImportPack')(function* (config: Runti
     }
     destinations.add(collisionKey);
   }
-  const managed = planned.filter(resource => resourceIdIsManagedMemoryNamespace(resource.uri));
+  const managed = EffectArray.filter(
+    planned,
+    (resource, __effectArrayIndex) => __effectArrayIndex in planned && resourceIdIsManagedMemoryNamespace(resource.uri),
+  );
   const incoming = new Map(
     yield* Effect.forEach(managed, resource =>
       attemptSync(() => [resource.uri, validateImportedMemory(resource.uri, resource.content)] as const),
@@ -1310,7 +1368,7 @@ export const runImportPack = Effect.fn('runImportPack')(function* (config: Runti
   }
   if (options.dryRun !== true) {
     const mutation = store.mutate(resourceStoreLocation(config), mutations);
-    const managedMemoryUris = managed.map(resource => resource.uri);
+    const managedMemoryUris = EffectArray.map(managed, resource => resource.uri);
     if (managedMemoryUris.length === 0) {
       yield* mutation;
     } else {
@@ -1348,55 +1406,6 @@ export const runImportPack = Effect.fn('runImportPack')(function* (config: Runti
   );
 });
 
-function parseThreadnotePack(raw: string): {
-  readonly resources: readonly {readonly content: string; readonly relativeUri: string}[];
-  readonly sourceUri: string;
-  readonly version: 1;
-} {
-  const value = JSON.parse(raw) as unknown;
-  if (!Predicate.isObject(value)) throw MemoryOperationError.make({message: 'Pack root must be an object.'});
-  const pack = value;
-  if (pack.version !== 1 || typeof pack.sourceUri !== 'string' || !Array.isArray(pack.resources)) {
-    throw MemoryOperationError.make({message: 'Unsupported Threadnote pack version or shape.'});
-  }
-  const resources = pack.resources.map(resource => {
-    if (
-      !Predicate.isObject(resource) ||
-      typeof resource.content !== 'string' ||
-      typeof resource.relativeUri !== 'string'
-    ) {
-      throw MemoryOperationError.make({message: 'Pack resource entry is invalid.'});
-    }
-    const entry = {content: resource.content, relativeUri: resource.relativeUri};
-    if (
-      !entry.relativeUri ||
-      entry.relativeUri.startsWith('/') ||
-      entry.relativeUri.split('/').some(segment => !segment || segment === '.' || segment === '..')
-    ) {
-      throw MemoryOperationError.make({message: `Unsafe pack relative URI: ${entry.relativeUri}.`});
-    }
-    return entry;
-  });
-  return {resources, sourceUri: pack.sourceUri, version: 1};
-}
-
-function canonicalPackRoot(input: string): string {
-  const id = parseResourceId(input);
-  if (id.anchor) throw MemoryOperationError.make({message: `Pack resource roots cannot contain anchors: ${input}.`});
-  return resourceIdWithoutAnchor(id).canonicalUri;
-}
-
-function packTargetForCurrentUser(sourceUri: string, user: string): string {
-  const source = resourceIdWithoutAnchor(parseResourceId(sourceUri));
-  if (source.namespace === 'resources') {
-    return source.canonicalUri;
-  }
-  if (source.namespace === 'user' && source.segments.length > 0) {
-    return canonicalResourceUri('user', [uriSegment(user), ...source.segments.slice(1)]);
-  }
-  throw MemoryOperationError.make({message: `Unsupported Threadnote pack source URI: ${sourceUri}.`});
-}
-
 function inferredRecallSkillUri(query: string, projectName: string | undefined): string | undefined {
   if (!hasAgentSkillCatalogIntent(query)) return undefined;
   return projectName
@@ -1405,7 +1414,7 @@ function inferredRecallSkillUri(query: string, projectName: string | undefined):
 }
 
 export function hasAgentSkillCatalogIntent(query: string): boolean {
-  const normalized = query.toLowerCase();
+  const normalized = Effect2.pipe(query, EffectString.toLowerCase);
   if (!/\bskills?\b/.test(normalized)) {
     return false;
   }
@@ -1453,7 +1462,7 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
   if (replaceUri) {
     const current = yield* resolveLocalMemoryReplacementTarget(config, replaceUri);
     const maintenanceError = topicMaintenanceReplacementError(current.record, {
-      body: options.bodyText.trim(),
+      body: Effect2.pipe(options.bodyText, EffectString.trim),
       metadata: options.metadata,
     });
     if (maintenanceError) return yield* MemoryOperationError.make({message: maintenanceError});
@@ -1498,7 +1507,7 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
         config.agentContextHome,
         [
           replaceUri,
-          ...(options.expectedSourceContent ?? []).map(source => source.uri),
+          ...EffectArray.map(options.expectedSourceContent ?? [], source => source.uri),
           ...(options.skipMemoryIdentityLock === true
             ? []
             : memoryIdentityWriteLockKeys(options.metadata.memoryId, options.expectedSourceContent ?? [])),
@@ -1560,7 +1569,7 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
         .read(resourceStoreLocation(config), memoryUri)
         .pipe(Effect.catchTag('ResourceNotFound', () => Effect.void));
       if (existing !== undefined) {
-        if (existing.trim() !== memory.trim())
+        if (Effect2.pipe(existing, EffectString.trim) !== Effect2.pipe(memory, EffectString.trim))
           return yield* MemoryOperationError.make({
             message: `Consolidation archive ${memoryUri} changed. Source cleanup was refused.`,
           });
@@ -1581,7 +1590,7 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
         replaceUri === memoryUri ? destination : undefined,
       );
       const maintenanceError = topicMaintenanceReplacementError(currentReplacement, {
-        body: options.bodyText.trim(),
+        body: Effect2.pipe(options.bodyText, EffectString.trim),
         metadata: finalMetadata,
       });
       if (maintenanceError) return yield* MemoryOperationError.make({message: maintenanceError});
@@ -1645,7 +1654,7 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
         [
           replaceUri,
           memoryUri,
-          ...(options.expectedSourceContent ?? []).map(source => source.uri),
+          ...EffectArray.map(options.expectedSourceContent ?? [], source => source.uri),
           ...(options.skipMemoryIdentityLock === true
             ? []
             : memoryIdentityWriteLockKeys(finalMetadata.memoryId, options.expectedSourceContent ?? [])),
@@ -1658,7 +1667,7 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
         [
           replaceUri,
           memoryUri,
-          ...(options.expectedSourceContent ?? []).map(source => source.uri),
+          ...EffectArray.map(options.expectedSourceContent ?? [], source => source.uri),
           ...(options.skipMemoryIdentityLock === true
             ? []
             : memoryIdentityWriteLockKeys(finalMetadata.memoryId, options.expectedSourceContent ?? [])),
@@ -1797,7 +1806,7 @@ function worksetScopeUris(config: RuntimeConfig, workset: ResolvedWorkset): read
   for (const member of workset.projects) {
     scopes.push(`threadnote://user/${uriSegment(config.user)}/memories/durable/projects/${uriSegment(member.name)}`);
     const seeded = trimTrailingSlash(member.uri);
-    if (seeded.startsWith('threadnote://')) {
+    if (Effect2.pipe(seeded, EffectString.startsWith('threadnote://'))) {
       scopes.push(seeded);
     }
   }
@@ -1845,7 +1854,7 @@ const memoryUriFor = Effect.fn('memory.memoryUriFor')(function* (
 ) {
   const filename = shouldUseStableMemoryUri(metadata)
     ? `${uriSegment(metadata.topic ?? 'current')}.md`
-    : `threadnote-${safeTimestamp()}-${(yield* sha256(memory)).slice(0, 12)}.md`;
+    : `threadnote-${safeTimestamp()}-${Effect2.pipe(yield* sha256(memory), EffectString.slice(0, 12))}.md`;
   return `${memoryDirectoryUri(config, metadata)}/${filename}`;
 });
 
@@ -1879,7 +1888,7 @@ const buildHandoff = Effect.fn('memory.buildHandoff')(function* (options: Handof
   const workspaceComponent = yield* resolveWorkspaceComponentContext({includeProcessCwd: true});
   const metadata: MemoryMetadata = {
     kind: 'handoff',
-    memoryId: existingMemoryId ?? `tn_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`,
+    memoryId: existingMemoryId ?? `tn_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`,
     project: normalizeOptionalMetadata(options.project) ?? repoName,
     references: normalizeReferenceUris(options.references),
     sourceAgentClient: options.sourceAgentClient ?? 'codex',
@@ -1894,39 +1903,45 @@ const buildHandoff = Effect.fn('memory.buildHandoff')(function* (options: Handof
   // Caller-supplied review-state snapshot (pr/issue/ci). Threadnote has no
   // GitHub client, so these are captured strings paired with the exact commit,
   // never a live status board.
-  const reviewState = [
-    options.pr ? `pr: ${options.pr}` : undefined,
-    options.issue ? `issue: ${options.issue}` : undefined,
-    options.ci ? `ci: ${options.ci}` : undefined,
-  ].filter((line): line is string => line !== undefined);
-  const bodyText = [
-    `repo: ${repoName}`,
-    `repo_path: ${repoRoot}`,
-    `branch: ${branch || 'unknown'}`,
-    `commit: ${commit}`,
-    `task: ${options.task ?? 'unspecified'}`,
-    ...reviewState,
-    '',
-    'files_touched:',
-    formatBlock(touchedFiles, '- none'),
-    '',
-    'git_status:',
-    formatBlock(status, '- clean'),
-    '',
-    'diff_stat:',
-    formatBlock(diffStat, '- none'),
-    '',
-    'tests:',
-    options.tests ?? '- not recorded',
-    '',
-    'blockers:',
-    options.blockers ?? '- none recorded',
-    '',
-    'next_step:',
-    options.nextStep ?? `- ${DEFAULT_HANDOFF_NEXT_STEP}`,
-    ...(options.sessionId ? ['', `session_id: ${options.sessionId}`] : []),
-    ...(options.trace ? ['', 'trace (auto-captured, heuristic):', options.trace] : []),
-  ].join('\n');
+  const reviewState = EffectArray.filter(
+    [
+      options.pr ? `pr: ${options.pr}` : undefined,
+      options.issue ? `issue: ${options.issue}` : undefined,
+      options.ci ? `ci: ${options.ci}` : undefined,
+    ],
+    (line): line is string => line !== undefined,
+  );
+  const bodyText = EffectArray.join(
+    [
+      `repo: ${repoName}`,
+      `repo_path: ${repoRoot}`,
+      `branch: ${branch || 'unknown'}`,
+      `commit: ${commit}`,
+      `task: ${options.task ?? 'unspecified'}`,
+      ...reviewState,
+      '',
+      'files_touched:',
+      formatBlock(touchedFiles, '- none'),
+      '',
+      'git_status:',
+      formatBlock(status, '- clean'),
+      '',
+      'diff_stat:',
+      formatBlock(diffStat, '- none'),
+      '',
+      'tests:',
+      options.tests ?? '- not recorded',
+      '',
+      'blockers:',
+      options.blockers ?? '- none recorded',
+      '',
+      'next_step:',
+      options.nextStep ?? `- ${DEFAULT_HANDOFF_NEXT_STEP}`,
+      ...(options.sessionId ? ['', `session_id: ${options.sessionId}`] : []),
+      ...(options.trace ? ['', 'trace (auto-captured, heuristic):', options.trace] : []),
+    ],
+    '\n',
+  );
   return {bodyText, metadata};
 });
 
@@ -1935,23 +1950,23 @@ const gitTouchedFiles = Effect.fn('memory.gitTouchedFiles')(function* (cwd: stri
   const untrackedFiles = yield* gitValue(['ls-files', '--others', '--exclude-standard'], cwd);
   const files = new Set<string>();
   for (const value of [changedFiles, untrackedFiles]) {
-    for (const line of (value ?? '').split('\n')) {
-      const trimmed = line.trim();
+    for (const line of Effect2.pipe(value ?? '', EffectString.split('\n'))) {
+      const trimmed = Effect2.pipe(line, EffectString.trim);
       if (trimmed) {
         files.add(trimmed);
       }
     }
   }
-  return [...files].sort().join('\n');
+  return EffectArray.join([...files].sort(), '\n');
 });
 
 function formatBlock(value: string, emptyValue: string): string {
-  const trimmed = value.trim();
+  const trimmed = Effect2.pipe(value, EffectString.trim);
   if (!trimmed) {
     return emptyValue;
   }
-  return trimmed
-    .split('\n')
-    .map(line => `- ${line}`)
-    .join('\n');
+  return EffectArray.join(
+    EffectArray.map(Effect2.pipe(trimmed, EffectString.split('\n')), line => `- ${line}`),
+    '\n',
+  );
 }

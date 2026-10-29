@@ -1,6 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {DateTime, Effect, FileSystem, Path, Scope} from 'effect';
+import {Array as EffectArray, DateTime, Effect, FileSystem, Path, Predicate, Scope} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {loadCandidateReview, saveCandidateReview} from '@threadnote/memory/candidate';
@@ -19,8 +19,13 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {makeTopicExpansionFixture} from '../helpers/topic-expansion.js';
 import {managerAttentionProjectRoot} from '../../src/manager/attention.js';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
-import {registerTopicDependencyExpansionTools} from '../../src/mcp/server/context/topic_expansion.js';
-import type {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {
+  handleTopicDependencyExpansionTool,
+  registerTopicDependencyExpansionTools,
+} from '../../src/mcp/server/context/topic_expansion.js';
+import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type Fixture = Effect.Success<ReturnType<typeof makeTopicExpansionFixture>>;
 const selection = (f: Fixture) => {
@@ -40,7 +45,50 @@ const request = (f: Fixture, action: string, extra: Record<string, unknown> = {}
       ...extra,
     }),
   });
-const args = (p: ManagerTopicExpansionPreview) => ({
+type PreviewApproval = Pick<ManagerTopicExpansionPreview, 'revision' | 'approvalDigest'>;
+type PreviewOperation = Pick<
+  NonNullable<ManagerTopicExpansionPreview['operation']>,
+  'id' | 'generation' | 'predecessorRevision' | 'predecessorApprovalDigest'
+>;
+type PreviewProjection = {
+  readonly operation?: PreviewOperation;
+  readonly revision: string;
+  readonly approvalDigest: string;
+  readonly content: string;
+  readonly additions: readonly Pick<ManagerTopicExpansionPreview['additions'][number], 'kind' | 'path'>[];
+};
+function isPreviewOperation(value: unknown): value is PreviewOperation {
+  return (
+    Predicate.isObject(value) &&
+    typeof value.id === 'string' &&
+    typeof value.generation === 'number' &&
+    Number.isInteger(value.generation) &&
+    typeof value.predecessorRevision === 'string' &&
+    typeof value.predecessorApprovalDigest === 'string'
+  );
+}
+function isPreviewProjection(value: unknown): value is PreviewProjection {
+  return (
+    Predicate.isObject(value) &&
+    typeof value.revision === 'string' &&
+    typeof value.approvalDigest === 'string' &&
+    typeof value.content === 'string' &&
+    EffectArray.isArray(value.additions) &&
+    EffectArray.every(
+      value.additions,
+      (addition): addition is PreviewProjection['additions'][number] =>
+        Predicate.isObject(addition) &&
+        (addition.kind === 'configuration' || addition.kind === 'dependency') &&
+        typeof addition.path === 'string',
+    ) &&
+    (value.operation === undefined || isPreviewOperation(value.operation))
+  );
+}
+const previewProjection = (value: unknown): PreviewProjection => {
+  if (!isPreviewProjection(value)) throw new Error('Topic expansion preview response is invalid.');
+  return value;
+};
+const args = (p: PreviewApproval) => ({
   revision: p.revision,
   approvalDigest: p.approvalDigest,
   approved: true,
@@ -126,7 +174,7 @@ effectIt.effect(
       const response = yield* request(f, 'preview');
       expect(response?.status).toBe(200);
       safe(response?.body, f);
-      const preview = response?.body as ManagerTopicExpansionPreview;
+      const preview = previewProjection(response?.body);
       expect(preview.additions).toEqual([expect.objectContaining({kind: 'dependency', path: 'src/dependency.ts'})]);
       expect(parseMemoryDocument(f.uri, preview.content)?.body).toBe(f.body);
       expect((yield* request(f, 'apply', {...args(preview), approved: false}))?.status).toBe(400);
@@ -163,7 +211,7 @@ effectIt.effect(
         409,
       );
       const response = yield* request(f, 'preview');
-      const preview = response?.body as ManagerTopicExpansionPreview;
+      const preview = previewProjection(response?.body);
       expect(response?.status).toBe(200);
       expect((yield* request(f, 'apply', {...args(preview), project: 'other'}))?.status).toBe(409);
       expect((yield* request(f, 'preview', {selection: {...selection(f), root: f.repository}}))?.status).toBe(409);
@@ -193,13 +241,13 @@ effectIt.effect('Manager rejects imported source authority without returning pri
       version: 1 as const,
       sourceId: 'notes',
       sourceInstanceId: '11111111-1111-4111-8111-111111111111',
-      vaultHash: 'a'.repeat(64),
-      accessHash: 'b'.repeat(64),
+      vaultHash: Effect2.pipe('a', EffectString.repeat(64)),
+      accessHash: Effect2.pipe('b', EffectString.repeat(64)),
       noteId: '22222222-2222-4222-8222-222222222222',
       relativePath: 'PRIVATE_NOTE.md',
-      revisionHash: 'c'.repeat(64),
+      revisionHash: Effect2.pipe('c', EffectString.repeat(64)),
       sanitizerVersion: 'scrubber-redact-v1',
-      fragmentHash: 'd'.repeat(64),
+      fragmentHash: Effect2.pipe('d', EffectString.repeat(64)),
       fragmentStart: 0,
       fragmentEnd: 12,
       pinId: '33333333-3333-4333-8333-333333333333',
@@ -233,25 +281,21 @@ effectIt.effect('MCP registers explicit expansion actions with safe projections 
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const f = yield* makeTopicExpansionFixture();
-    type ToolResult = {readonly isError?: boolean; readonly structuredContent?: unknown};
-    const handlers = new Map<string, (input: Record<string, unknown>) => Effect.Effect<ToolResult>>();
-    registerTopicDependencyExpansionTools(
-      {
-        registerTool: (name: string, _definition: unknown, handler: unknown) => {
-          handlers.set(name, handler as (input: Record<string, unknown>) => Effect.Effect<ToolResult>);
-        },
-      } as unknown as EffectMcpServerAdapter,
-      f.config,
-    );
-    const call = (action: string, extra: Record<string, unknown> = {}) =>
-      handlers.get('context_topic_dependency_expansion')!({
+    const adapter = new EffectMcpServerAdapter('test', '1', '');
+    registerTopicDependencyExpansionTools(adapter, f.config);
+    const call = (action: string, extra: Record<string, unknown> = {}) => {
+      const input = {
         action,
         uri: f.uri,
         project: 'fixture',
         callerCwd: f.repository,
         ...(action === 'inspect' ? {} : {inputJson: JSON.stringify(selection(f))}),
         ...extra,
-      });
+      };
+      return action === 'unexpected'
+        ? handleTopicDependencyExpansionTool(f.config, input)
+        : adapter.invokeTool('context_topic_dependency_expansion', input);
+    };
     expect((yield* call('unexpected')).isError).toBe(true);
     const inspected = yield* call('inspect');
     expect(inspected.isError).not.toBe(true);
@@ -259,7 +303,7 @@ effectIt.effect('MCP registers explicit expansion actions with safe projections 
     const previewed = yield* call('preview');
     expect(previewed.isError).not.toBe(true);
     safe(previewed.structuredContent, f);
-    const preview = previewed.structuredContent as ManagerTopicExpansionPreview;
+    const preview = previewProjection(previewed.structuredContent);
     const before = yield* fs.readFileString(f.memoryPath);
     expect((yield* call('apply', {...args(preview), approved: false})).isError).toBe(true);
     expect(yield* fs.readFileString(f.memoryPath)).toBe(before);
@@ -278,7 +322,7 @@ effectIt.effect(
       const path = yield* Path.Path;
       const f = yield* makeTopicExpansionFixture();
       const response = yield* request(f, 'preview');
-      const prior = response?.body as ManagerTopicExpansionPreview;
+      const prior = previewProjection(response?.body);
       const before = yield* fs.readFileString(f.memoryPath);
       const retainedEvidence = () =>
         fs
@@ -286,7 +330,13 @@ effectIt.effect(
           .pipe(
             Effect.flatMap(files =>
               Effect.forEach(
-                files.filter(file => file.includes('citation-evidence') && file.endsWith('.json')).sort(),
+                EffectArray.filter(
+                  files,
+                  (file, index) =>
+                    index in files &&
+                    Effect2.pipe(file, EffectString.includes('citation-evidence')) &&
+                    Effect2.pipe(file, EffectString.endsWith('.json')),
+                ).sort(),
                 file => fs.readFileString(path.join(f.home, file)).pipe(Effect.map(content => [file, content])),
               ),
             ),
@@ -307,23 +357,18 @@ effectIt.effect(
         {afterIntentSaved: () => Effect.fail('fixture interruption before capture')},
       ).pipe(Effect.result);
       expect(interrupted).toMatchObject({failure: 'fixture interruption before capture'});
-      const journal = yield* loadCandidateReview(f.home, `review-${prior.revision.slice(0, 24)}`);
+      const journal = yield* loadCandidateReview(
+        f.home,
+        `review-${Effect2.pipe(prior.revision, EffectString.slice(0, 24))}`,
+      );
       expect(journal.dependencyExpansion?.stage).toBe('prepared');
       expect((yield* request(f, 'restart', args(prior)))?.status).toBe(409);
       const expiredAt = DateTime.formatIso(DateTime.subtract(yield* DateTime.now, {days: 91}));
       yield* saveCandidateReview(f.home, {...journal, createdAt: expiredAt});
-      type ToolResult = {readonly isError?: boolean; readonly structuredContent?: unknown};
-      const handlers = new Map<string, (input: Record<string, unknown>) => Effect.Effect<ToolResult>>();
-      registerTopicDependencyExpansionTools(
-        {
-          registerTool: (name: string, _definition: unknown, handler: unknown) => {
-            handlers.set(name, handler as (input: Record<string, unknown>) => Effect.Effect<ToolResult>);
-          },
-        } as unknown as EffectMcpServerAdapter,
-        f.config,
-      );
+      const adapter = new EffectMcpServerAdapter('test', '1', '');
+      registerTopicDependencyExpansionTools(adapter, f.config);
       const call = (action: string, extra: Record<string, unknown> = {}) =>
-        handlers.get('context_topic_dependency_expansion')!({
+        handleTopicDependencyExpansionTool(f.config, {
           action,
           uri: f.uri,
           project: 'fixture',
@@ -349,18 +394,24 @@ effectIt.effect(
       safe(mcpBlocked.structuredContent, f);
       expect(yield* fs.readFileString(f.memoryPath)).toBe(before);
       expect((yield* request(f, 'restart', {...args(prior), approved: false}))?.status).toBe(400);
-      expect((yield* request(f, 'restart', {...args(prior), approvalDigest: '0'.repeat(64)}))?.status).toBe(409);
+      expect(
+        (yield* request(f, 'restart', {...args(prior), approvalDigest: Effect2.pipe('0', EffectString.repeat(64))}))
+          ?.status,
+      ).toBe(409);
       expect((yield* request(f, 'restart', {...args(prior), project: 'other'}))?.status).toBe(409);
-      expect((yield* request(f, 'restart', {...args(prior), uri: f.uri.replace('limit.md', 'other.md')}))?.status).toBe(
-        409,
-      );
+      expect(
+        (yield* request(f, 'restart', {
+          ...args(prior),
+          uri: Effect2.pipe(f.uri, EffectString.replace('limit.md', 'other.md')),
+        }))?.status,
+      ).toBe(409);
       expect(
         (yield* request(f, 'restart', {...args(prior), selection: {...selection(f), edgeLimit: 63}}))?.status,
       ).toBe(409);
       const restarted = yield* request(f, 'restart', args(prior));
       expect(restarted?.status).toBe(200);
       safe(restarted?.body, f);
-      const fresh = restarted?.body as ManagerTopicExpansionPreview;
+      const fresh = previewProjection(restarted?.body);
       expect(fresh.operation).toMatchObject({
         generation: 1,
         predecessorRevision: prior.revision,

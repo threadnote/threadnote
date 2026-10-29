@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 
 import {readFile} from '@threadnote/testing/node-fs-promises';
@@ -16,12 +17,14 @@ import {
   useManagerDialogs,
   validateManagerDialogValues,
 } from '@threadnote/manager/dialog';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const root = process.cwd();
 let reactRoot: Root | undefined;
 
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
     configurable: true,
     value(this: HTMLDialogElement) {
@@ -59,7 +62,7 @@ describe('manager dialogs', () => {
 
         expect(result).toEqual({
           ok: true,
-          values: {project: project.trim(), team: team.trim()},
+          values: {project: Effect.pipe(project, EffectString.trim), team: Effect.pipe(team, EffectString.trim)},
         });
       }),
     );
@@ -81,21 +84,28 @@ describe('manager dialogs', () => {
     fc.assert(
       fc.property(fc.array(fc.string(), {maxLength: 40}), fc.string(), (options, query) => {
         const entries = managerAutocompleteEntries(options, query, true);
-        const normalizedQuery = query.trim().toLocaleLowerCase();
+        const normalizedQuery = Effect.pipe(query, EffectString.trim, EffectString.toLocaleLowerCase());
         const normalizedOptions = new Set(
-          options
-            .map(option => option.trim())
-            .filter(Boolean)
-            .map(option => option.toLocaleLowerCase()),
+          EffectArray.map(
+            EffectArray.filter(
+              EffectArray.map(options, option => Effect.pipe(option, EffectString.trim)),
+              Boolean,
+            ),
+            option => Effect.pipe(option, EffectString.toLocaleLowerCase()),
+          ),
         );
-        const existing = entries.filter(entry => entry.kind === 'existing');
-        const normalizedExisting = existing.map(entry => entry.value.toLocaleLowerCase());
+        const existing = EffectArray.filter(entries, entry => entry.kind === 'existing');
+        const normalizedExisting = EffectArray.map(existing, entry =>
+          Effect.pipe(entry.value, EffectString.toLocaleLowerCase()),
+        );
         const shouldCreate = normalizedQuery.length > 0 && !normalizedOptions.has(normalizedQuery);
 
         expect(new Set(normalizedExisting).size).toBe(normalizedExisting.length);
-        expect(normalizedExisting.every(option => option.includes(normalizedQuery))).toBe(true);
+        expect(
+          EffectArray.every(normalizedExisting, option => Effect.pipe(option, EffectString.includes(normalizedQuery))),
+        ).toBe(true);
         expect(entries[0]?.kind === 'create').toBe(shouldCreate);
-        if (shouldCreate) expect(entries[0]?.value).toBe(query.trim());
+        if (shouldCreate) expect(entries[0]?.value).toBe(Effect.pipe(query, EffectString.trim));
       }),
     );
   });
@@ -199,7 +209,9 @@ describe('manager dialogs', () => {
 
   it('keeps native browser prompts out of every Manager surface', async () => {
     const sources = await Promise.all(
-      ['packages/manager/src/ui.tsx', 'packages/manager/src/graph.tsx'].map(file => readFile(join(root, file), 'utf8')),
+      EffectArray.map(['packages/manager/src/ui.tsx', 'packages/manager/src/graph.tsx'], file =>
+        readFile(join(root, file), 'utf8'),
+      ),
     );
 
     for (const source of sources) {
@@ -230,7 +242,9 @@ async function render(element: React.ReactElement): Promise<void> {
 }
 
 async function clickButton(label: string): Promise<void> {
-  const button = [...document.querySelectorAll('button')].find(candidate => candidate.textContent === label);
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst([...document.querySelectorAll('button')], candidate => candidate.textContent === label),
+  );
   expect(button).toBeDefined();
   await act(async () => button?.click());
 }

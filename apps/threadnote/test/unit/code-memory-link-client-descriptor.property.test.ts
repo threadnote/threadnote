@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -7,8 +8,10 @@ import {
   codeMemoryLinkClientPathDigest,
   parseCodeMemoryLinkClientImplementationDescriptorV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-client-descriptor';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const hash = (character: string) => character.repeat(64);
+const hash = (character: string) => Effect.pipe(character, EffectString.repeat(64));
 
 describe('Code Memory Link client implementation descriptors', () => {
   it('hashes a canonical exact descriptor and rejects ambiguous artifact order', () => {
@@ -49,8 +52,8 @@ describe('Code Memory Link client implementation descriptors', () => {
 
     const descriptorHash = codeMemoryLinkClientImplementationDescriptorHash(descriptor);
     const roster = [
-      {clientId: `cli_${'1'.repeat(16)}`, implementationDescriptorHash: descriptorHash},
-      {clientId: `cli_${'2'.repeat(16)}`, implementationDescriptorHash: hash('4')},
+      {clientId: `cli_${Effect.pipe('1', EffectString.repeat(16))}`, implementationDescriptorHash: descriptorHash},
+      {clientId: `cli_${Effect.pipe('2', EffectString.repeat(16))}`, implementationDescriptorHash: hash('4')},
     ];
     expect(assertCodeMemoryLinkClientImplementationBinding({clientId: roster[0].clientId, descriptor, roster})).toBe(
       descriptorHash,
@@ -62,7 +65,7 @@ describe('Code Memory Link client implementation descriptors', () => {
     expect(() =>
       parseCodeMemoryLinkClientImplementationDescriptorV1({
         ...descriptor,
-        artifactBindings: descriptor.artifactBindings.map(binding =>
+        artifactBindings: EffectArray.map(descriptor.artifactBindings, binding =>
           binding.role === 'client-bundle' ? {...binding, sha256: hash('c')} : binding,
         ),
       }),

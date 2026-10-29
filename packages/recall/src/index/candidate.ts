@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {isExternalResourceUri, parseExternalResource} from '@threadnote/store/external-resource';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -11,6 +13,8 @@ import {identifiers, stripRecallAnchor} from './lexical.js';
 import {recallMemoryContentHash, type RecallCandidate} from '../rank.js';
 import {normalizeRecallSearchText} from '../tokenize.js';
 import {recallCandidateIsEligible, type RecallEligibilityPolicy} from '../eligibility.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function indexCandidate(
   uri: string,
@@ -70,16 +74,20 @@ export function recallExactSearchText(candidate: RecallCandidate): string {
   const fields = candidate.fields;
   return normalizeRecallSearchText(
     redactSensitiveText(
-      [
-        candidate.text,
-        fields?.title,
-        fields?.topic,
-        fields?.project,
-        fields?.workspaceScope,
-        ...(fields?.keywords ?? []),
-      ]
-        .filter((value): value is string => value !== undefined && value.length > 0)
-        .join('\n'),
+      EffectArray.join(
+        EffectArray.filter(
+          [
+            candidate.text,
+            fields?.title,
+            fields?.topic,
+            fields?.project,
+            fields?.workspaceScope,
+            ...(fields?.keywords ?? []),
+          ],
+          (value): value is string => value !== undefined && value.length > 0,
+        ),
+        '\n',
+      ),
     ),
   );
 }
@@ -111,17 +119,27 @@ function memoryRelations(memory: ReturnType<typeof parseMemoryDocument>): readon
   if (!memory) return undefined;
   const relations: MemoryRelation[] = [
     ...(memory.metadata.relations ?? []),
-    ...(memory.metadata.references ?? []).map(uri => ({type: 'references' as const, uri})),
-    ...(memory.metadata.evidence ?? [])
-      .filter(evidence => evidence.startsWith('threadnote://'))
-      .map(uri => ({type: 'evidence_for' as const, uri})),
+    ...EffectArray.map(memory.metadata.references ?? [], uri => ({type: 'references' as const, uri})),
+    ...EffectArray.map(
+      EffectArrayPipe(memory.metadata.evidence ?? [], __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (evidence, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues &&
+            Effect.pipe(evidence, EffectString.startsWith('threadnote://')),
+        ),
+      ),
+      uri => ({type: 'evidence_for' as const, uri}),
+    ),
     ...(memory.metadata.supersedes ? [{type: 'supersedes' as const, uri: memory.metadata.supersedes}] : []),
   ];
   return relations.length > 0 ? relations : undefined;
 }
 
 function firstHeading(value: string): string | undefined {
-  return /^#{1,3}[ \t]+(\S.*)$/m.exec(value)?.[1]?.trim();
+  return Effect.pipe(/^#{1,3}[ \t]+(\S.*)$/m.exec(value)?.[1], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
 }
 
 function resourceProject(uri: string): string | undefined {
@@ -129,9 +147,18 @@ function resourceProject(uri: string): string | undefined {
 }
 
 function uriTopic(uri: string): string {
-  return uriBasename(uri).replace(/\.[a-z0-9]+$/i, '');
+  return Effect.pipe(uriBasename(uri), EffectString.replace(/\.[a-z0-9]+$/i, ''));
 }
 
 function uriBasename(uri: string): string {
-  return uri.slice(uri.lastIndexOf('/') + 1);
+  return Effect.pipe(
+    uri,
+    EffectString.slice(
+      Effect.pipe(
+        uri,
+        EffectString.lastIndexOf('/'),
+        Effect.Option.getOrElse(() => -1),
+      ) + 1,
+    ),
+  );
 }

@@ -1,5 +1,5 @@
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Clock, Effect, Fiber, FileSystem, Path} from 'effect';
+import {Clock, Effect, Fiber, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {graphRegistryFixture} from '@threadnote/graph/test/helpers/graph-registry';
@@ -26,6 +26,8 @@ import {writePrivateJsonFile} from '@threadnote/graph/sharing/atomic';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('passive signed graph delivery monitor', () => {
   effectIt.effect('keeps signed candidates queued when the organization disables uploads', () =>
@@ -34,7 +36,7 @@ describe('passive signed graph delivery monitor', () => {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-signed-zero-upload-'});
         const cas = `${home}/cas`;
-        const repositoryId = 'a'.repeat(64);
+        const repositoryId = Effect2.pipe('a', EffectString.repeat(64));
         const publisherKeyFingerprint = sha256Digest('publisher');
         const base = defaultGraphShareProfile({
           branch: 'main',
@@ -69,11 +71,11 @@ describe('passive signed graph delivery monitor', () => {
         });
         yield* persistGraphShareSignedCandidates(home, repositoryId, [
           {
-            actionKey: 'a'.repeat(64),
-            batchId: '1'.repeat(40),
+            actionKey: Effect2.pipe('a', EffectString.repeat(64)),
+            batchId: Effect2.pipe('1', EffectString.repeat(40)),
             casRoot: cas,
-            extractorSet: 'b'.repeat(64),
-            graphAbi: 'e'.repeat(64),
+            extractorSet: Effect2.pipe('b', EffectString.repeat(64)),
+            graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
             organization: 'acme',
             partialCoverage: false,
             platform: {architecture: 'x64', os: 'linux'},
@@ -84,8 +86,8 @@ describe('passive signed graph delivery monitor', () => {
             resultDigest: sha256Digest('result'),
             resultSize: 6,
             semanticDigest: sha256Digest('semantic'),
-            snapshotId: `cgsn_${'f'.repeat(40)}`,
-            sourceCommit: '1'.repeat(40),
+            snapshotId: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`,
+            sourceCommit: Effect2.pipe('1', EffectString.repeat(40)),
           },
         ]);
         const pages = yield* listGraphShareSignedCandidatePageIds(home, repositoryId);
@@ -110,7 +112,7 @@ describe('passive signed graph delivery monitor', () => {
           const registry = yield* graphRegistryFixture();
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-signed-passive-monitor-'});
           const cas = path.join(home, 'cas');
-          const repositoryId = 'a'.repeat(64);
+          const repositoryId = Effect2.pipe('a', EffectString.repeat(64));
           const publisherKeyFingerprint = sha256Digest('publisher key');
           const coordinatorUrl = 'https://control.example.test';
           const issuer = 'https://identity.example.test/';
@@ -146,10 +148,10 @@ describe('passive signed graph delivery monitor', () => {
             bindings: [{audience, coordinatorUrl, helper: 'fixture', issuer, organization: 'acme'}],
             schemaVersion: 1,
           });
-          const sourceCommit = '1'.repeat(40);
+          const sourceCommit = Effect2.pipe('1', EffectString.repeat(40));
           const action = {
-            contentHash: 'b'.repeat(64),
-            extractorSet: 'c'.repeat(64),
+            contentHash: Effect2.pipe('b', EffectString.repeat(64)),
+            extractorSet: Effect2.pipe('c', EffectString.repeat(64)),
             languageAndRole: 'typescript:source',
             normalizedPath: 'src/index.ts',
             repositoryId,
@@ -158,7 +160,7 @@ describe('passive signed graph delivery monitor', () => {
             ...action,
             actionKey: graphShareParseActionKey(action),
             facts: {path: action.normalizedPath, diagnostics: [], edges: [], symbols: []},
-            gitBlobId: 'd'.repeat(40),
+            gitBlobId: Effect2.pipe('d', EffectString.repeat(40)),
           });
           const resultBytes = new TextEncoder().encode(canonicalJson(parsed));
           const resultDigest = yield* putCasBytes(cas, resultBytes);
@@ -168,7 +170,7 @@ describe('passive signed graph delivery monitor', () => {
               batchId: sourceCommit,
               casRoot: cas,
               extractorSet: action.extractorSet,
-              graphAbi: 'e'.repeat(64),
+              graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
               organization: 'acme',
               partialCoverage: false,
               platform: {architecture: 'x64', os: 'linux'},
@@ -179,7 +181,7 @@ describe('passive signed graph delivery monitor', () => {
               resultDigest,
               resultSize: resultBytes.byteLength,
               semanticDigest: parsed.semanticDigest,
-              snapshotId: `cgsn_${'f'.repeat(40)}`,
+              snapshotId: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`,
               sourceCommit,
             },
           ]);
@@ -203,11 +205,20 @@ describe('passive signed graph delivery monitor', () => {
               if (url.origin === 'https://registry.example.test') return registry.fetch(input, init);
               expect(url.origin).toBe('https://control.example.test');
               expect(init?.method).toBe('POST');
-              const body = (await new Response(init?.body).json()) as {
-                body?: {idempotencyKey?: string};
-                idempotencyKey?: string;
-                signingPublicKey?: string;
-              };
+              const body = Schema.decodeUnknownSync(
+                Schema.StructWithRest(
+                  Schema.Struct({
+                    body: Schema.optional(
+                      Schema.StructWithRest(Schema.Struct({idempotencyKey: Schema.optional(Schema.String)}), [
+                        Schema.Record(Schema.String, Schema.Unknown),
+                      ]),
+                    ),
+                    idempotencyKey: Schema.optional(Schema.String),
+                    signingPublicKey: Schema.optional(Schema.String),
+                  }),
+                  [Schema.Record(Schema.String, Schema.Unknown)],
+                ),
+              )(await new Response(init?.body).json());
               if (url.pathname === '/v1/enroll') {
                 enrolledWorker = {
                   expiresAt: Math.floor(Date.now() / 1000) + 3600,
@@ -216,7 +227,7 @@ describe('passive signed graph delivery monitor', () => {
                   repositoryId,
                   schemaVersion: 1,
                   signingPublicKey: body.signingPublicKey!,
-                  workerId: `gw_${'1'.repeat(32)}`,
+                  workerId: `gw_${Effect2.pipe('1', EffectString.repeat(32))}`,
                 };
                 return Response.json(enrolledWorker, {status: 201});
               }
@@ -266,7 +277,10 @@ describe('passive signed graph delivery monitor', () => {
           yield* Fiber.interrupt(firstMonitor);
           expect((yield* listGraphShareSignedCandidatePageIds(home, repositoryId)).length).toBeGreaterThan(0);
           expect(enrolledWorker).toBeDefined();
-          const scope = graphWorkerDeliveryScope({...enrolledWorker!, graphAbi: '0'.repeat(64)}, 'acme');
+          const scope = graphWorkerDeliveryScope(
+            {...enrolledWorker!, graphAbi: Effect2.pipe('0', EffectString.repeat(64))},
+            'acme',
+          );
           const beforeRestart = yield* listGraphWorkerDeliveryOutboxOperations(home, scope);
           expect(beforeRestart).toHaveLength(1);
           expect(beforeRestart[0].state).toBe('prepared');

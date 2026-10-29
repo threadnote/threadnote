@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {
   RecallEvaluationCategory,
   RecallEvaluationComparisonV1,
@@ -5,6 +6,9 @@ import type {
   RecallEvaluationResultV1,
 } from './recall.js';
 import {compareRecallEvaluationResults, RECALL_EVALUATION_CATEGORIES} from './recall.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const RECALL_NON_INFERIORITY_POLICY_VERSION = 1 as const;
 
@@ -73,15 +77,18 @@ export function evaluateRecallNonInferiority(
       `contract failures increased by ${contractFailureIncrease}; maximum ${policy.maximumContractFailureIncrease}`,
     );
   }
-  const baselineHasReviewedFailureIdentities = baseline.failures.some(
-    failure => !failure.startsWith('known-baseline-defect-'),
+  const baselineHasReviewedFailureIdentities = EffectArray.some(
+    baseline.failures,
+    failure => !Effect.pipe(failure, EffectString.startsWith('known-baseline-defect-')),
   );
   if (baselineHasReviewedFailureIdentities) {
     const reviewedFailures = new Set(baseline.failures);
-    const introducedFailures = [...new Set(candidate.failures.filter(failure => !reviewedFailures.has(failure)))];
+    const introducedFailures = [
+      ...new Set(EffectArray.filter(candidate.failures, failure => !reviewedFailures.has(failure))),
+    ];
     if (introducedFailures.length > policy.maximumContractFailureIncrease) {
       failures.push(
-        `new contract failure identities: ${introducedFailures.slice(0, 5).join('; ')}${introducedFailures.length > 5 ? `; … ${introducedFailures.length - 5} more` : ''}`,
+        `new contract failure identities: ${EffectArray.join(introducedFailures.slice(0, 5), '; ')}${introducedFailures.length > 5 ? `; … ${introducedFailures.length - 5} more` : ''}`,
       );
     }
   }
@@ -117,7 +124,7 @@ function checkMetricDeltas(
 }
 
 function validatePolicy(policy: RecallNonInferiorityPolicyV1): void {
-  for (const [name, value] of Object.entries(policy)) {
+  for (const [name, value] of EffectRecord.toEntries(policy)) {
     if (name === 'version') continue;
     if (!Number.isFinite(value) || value < 0) {
       throw new Error(`Recall non-inferiority policy ${name} must be a non-negative finite number`);

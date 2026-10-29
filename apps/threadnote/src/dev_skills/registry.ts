@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -5,6 +6,13 @@ import {installationRoot} from '../process/standalone_lease.js';
 import type {DevSkillsConsumer, DevSkillsManifest, DevSkillsTarget} from './contract.js';
 import {decode, fail, hash, isRecord, readOptional, requireValue, statOptional} from './files.js';
 import {parseHistoricalDevSkillsManifest} from './manifest.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function reject(code: string, message: string): never {
+  throw fail(code, message);
+}
 
 export interface Enrollment extends DevSkillsConsumer {
   readonly state: 'enrolled' | 'removed';
@@ -32,7 +40,9 @@ export interface PhysicalReceipt {
   readonly consumers: Readonly<Record<string, DevSkillsConsumer>>;
 }
 const absolute = (value: unknown): value is string =>
-  typeof value === 'string' && /^(?:\/|[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/u.test(value) && !value.includes('\0');
+  typeof value === 'string' &&
+  /^(?:\/|[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/u.test(value) &&
+  !Effect2.pipe(value, EffectString.includes('\0'));
 export const consumerId = (consumer: DevSkillsConsumer) =>
   hash(
     JSON.stringify({
@@ -52,13 +62,42 @@ export function parseTarget(value: unknown): DevSkillsTarget {
       ['user', 'project', 'local'].includes(String(value.scope)) &&
       absolute(value.skillRoot) &&
       ['directory', 'flat'].includes(String(value.layout)) &&
-      Array.isArray(value.discoveryRoots) &&
+      EffectArray.isArray(value.discoveryRoots) &&
       value.discoveryRoots.length <= 8 &&
-      value.discoveryRoots.every(absolute) &&
+      EffectArray.every(value.discoveryRoots, absolute) &&
       (value.cwd === undefined || absolute(value.cwd)),
     'Invalid pinned development skills target.',
   );
-  return value as unknown as DevSkillsTarget;
+  const profile =
+    value.profile === 'desktop' || value.profile === 'codex-cloud-personal' || value.profile === 'cursor-cloud-personal'
+      ? value.profile
+      : reject('invalid-index', 'Invalid pinned development skills target.');
+  const scope =
+    value.scope === 'user' || value.scope === 'project' || value.scope === 'local'
+      ? value.scope
+      : reject('invalid-index', 'Invalid pinned development skills target.');
+  const layout =
+    value.layout === 'directory' || value.layout === 'flat'
+      ? value.layout
+      : reject('invalid-index', 'Invalid pinned development skills target.');
+  const skillRoot = absolute(value.skillRoot)
+    ? value.skillRoot
+    : reject('invalid-index', 'Invalid pinned development skills target.');
+  const discoveryRoots = EffectArray.map(value.discoveryRoots, root =>
+    absolute(root) ? root : reject('invalid-index', 'Invalid pinned development skills target.'),
+  );
+  const cwd = value.cwd;
+  if (cwd !== undefined && !absolute(cwd)) reject('invalid-index', 'Invalid pinned development skills target.');
+  return {
+    surfaceId: value.surfaceId,
+    agentId: value.agentId,
+    profile,
+    scope,
+    skillRoot,
+    layout,
+    discoveryRoots,
+    ...(cwd === undefined ? {} : {cwd}),
+  };
 }
 function parseConsumer(value: unknown): DevSkillsConsumer {
   requireValue(
@@ -68,9 +107,9 @@ function parseConsumer(value: unknown): DevSkillsConsumer {
   return {home: value.home, installationRoot: value.installationRoot, target: parseTarget(value.target)};
 }
 function parseEnrollments(value: unknown, version: 1 | 2): Record<string, Enrollment> {
-  requireValue(isRecord(value) && Object.keys(value).length <= 1024, 'Invalid enrollment index.');
+  requireValue(isRecord(value) && EffectRecord.keys(value).length <= 1024, 'Invalid enrollment index.');
   const result: Record<string, Enrollment> = {};
-  for (const [key, entry] of Object.entries(value)) {
+  for (const [key, entry] of EffectRecord.toEntries(value)) {
     const consumer = parseConsumer(entry);
     requireValue(
       isRecord(entry) && ['enrolled', 'removed'].includes(String(entry.state)) && key === consumerId(consumer),
@@ -89,10 +128,14 @@ function parseEnrollments(value: unknown, version: 1 | 2): Record<string, Enroll
           entry.state === 'enrolled'),
       'Invalid setup ownership checkpoint.',
     );
+    const state =
+      entry.state === 'enrolled' || entry.state === 'removed'
+        ? entry.state
+        : reject('invalid-index', 'Invalid enrollment identity.');
     result[key] = {
       ...consumer,
-      state: entry.state as Enrollment['state'],
-      enabled: version === 1 ? entry.state === 'enrolled' : (entry.enabled as boolean),
+      state,
+      enabled: version === 1 ? state === 'enrolled' : entry.enabled === true,
       ...(entry.createdBy ? {createdBy: entry.createdBy} : {}),
     };
   }
@@ -108,7 +151,8 @@ export function parseHomeIndex(value: unknown): HomeIndex {
   );
   const targets = parseEnrollments(value.targets, value.schemaVersion);
   requireValue(
-    Object.values(targets).every(
+    EffectArray.every(
+      EffectRecord.values(targets),
       entry => entry.home === value.home && entry.installationRoot === value.installationRoot,
     ),
     'Enrollment home/runtime identity differs.',
@@ -122,7 +166,7 @@ export function parseRuntimeIndex(value: unknown): RuntimeIndex {
   );
   const enrollments = parseEnrollments(value.enrollments, value.schemaVersion);
   requireValue(
-    Object.values(enrollments).every(entry => entry.installationRoot === value.installationRoot),
+    EffectArray.every(EffectRecord.values(enrollments), entry => entry.installationRoot === value.installationRoot),
     'Enrollment runtime identity differs.',
   );
   return {schemaVersion: 2, installationRoot: value.installationRoot, enrollments};
@@ -138,23 +182,26 @@ export function parseReceipt(value: unknown): PhysicalReceipt {
       ['directory', 'flat'].includes(String(value.layout)) &&
       isRecord(value.entrypoints) &&
       isRecord(value.generations) &&
-      Object.keys(value.generations).length <= 1024 &&
+      EffectRecord.keys(value.generations).length <= 1024 &&
       isRecord(value.consumers) &&
-      Object.keys(value.consumers).length <= 1024,
+      EffectRecord.keys(value.consumers).length <= 1024,
     'Invalid physical skills receipt.',
   );
   const manifest = parseHistoricalDevSkillsManifest(value.manifest);
   const generations: Record<string, DevSkillsManifest> = {};
-  for (const [key, generation] of Object.entries(value.generations)) {
+  for (const [key, generation] of EffectRecord.toEntries(value.generations)) {
     const decoded = parseHistoricalDevSkillsManifest(generation);
     requireValue(key === decoded.digest, 'Invalid retained generation identity.');
     generations[key] = decoded;
   }
   requireValue(manifest.digest in generations, 'Current generation is not owned.');
-  const layout = value.layout as DevSkillsTarget['layout'];
-  const allowed = new Set(manifest.skills.map(member => entrypointPath(layout, member.id)));
+  const layout =
+    value.layout === 'directory' || value.layout === 'flat'
+      ? value.layout
+      : reject('invalid-index', 'Invalid physical skills receipt.');
+  const allowed = new Set(EffectArray.map(manifest.skills, member => entrypointPath(layout, member.id)));
   const entrypoints: Record<string, string> = {};
-  for (const [key, content] of Object.entries(value.entrypoints)) {
+  for (const [key, content] of EffectRecord.toEntries(value.entrypoints)) {
     requireValue(
       allowed.has(key) && typeof content === 'string' && content.length <= 300_000,
       'Invalid discovery entrypoint receipt.',
@@ -162,7 +209,7 @@ export function parseReceipt(value: unknown): PhysicalReceipt {
     entrypoints[key] = content;
   }
   const consumers: Record<string, DevSkillsConsumer> = {};
-  for (const [key, entry] of Object.entries(value.consumers)) {
+  for (const [key, entry] of EffectRecord.toEntries(value.consumers)) {
     const consumer = parseConsumer(entry);
     requireValue(
       key === consumerId(consumer) &&
@@ -173,9 +220,9 @@ export function parseReceipt(value: unknown): PhysicalReceipt {
     consumers[key] = consumer;
   }
   requireValue(
-    Object.keys(consumers).length === 0
-      ? Object.keys(entrypoints).length === 0
-      : Object.keys(entrypoints).length === allowed.size,
+    EffectRecord.keys(consumers).length === 0
+      ? EffectRecord.keys(entrypoints).length === 0
+      : EffectRecord.keys(entrypoints).length === allowed.size,
     'Incomplete discovery entrypoint ownership.',
   );
   return {schemaVersion: 1, skillRoot: value.skillRoot, layout, manifest, generations, entrypoints, consumers};

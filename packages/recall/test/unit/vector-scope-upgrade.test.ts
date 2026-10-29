@@ -1,10 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 import type {RecallCandidate} from '@threadnote/recall/rank';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
-import {Effect, FileSystem, Layer, Option, Path, Schedule} from 'effect';
+import {Effect, FileSystem, Layer, Option, Path, Schedule, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -25,8 +26,12 @@ import {
   vectorIndexStatus,
 } from '@threadnote/recall/vector-index';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+const manifest = Option.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
 const systemLayer = SystemInfo.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -70,11 +75,11 @@ function database<A>(home: string, use: (database: Database) => A) {
 function legacyScopeMapping(home: string) {
   return database(home, handle => {
     const columns = handle.query<{name: string}, []>('PRAGMA table_info(vector_generations)').all();
-    if (columns.some(column => column.name === 'scope_mapping_version')) {
+    if (EffectArray.some(columns, column => column.name === 'scope_mapping_version')) {
       handle.exec('ALTER TABLE vector_generations DROP COLUMN scope_mapping_version');
     }
     handle.query('UPDATE vector_chunks SET project = ?').run('communication-style');
-    handle.query('UPDATE vector_generations SET job_id = ?').run('b'.repeat(64));
+    handle.query('UPDATE vector_generations SET job_id = ?').run(Effect2.pipe('b', EffectString.repeat(64)));
   });
 }
 function withRuntime<A, E, R>(use: (embedded: string[]) => Effect.Effect<A, E, R>) {
@@ -89,7 +94,7 @@ function withRuntime<A, E, R>(use: (embedded: string[]) => Effect.Effect<A, E, R
             embedMany: ({inputs}) =>
               Effect.sync(() => {
                 embedded.push(...inputs);
-                return inputs.map(() => [1, ...new Array<number>(manifest.dimensions - 1).fill(0)]);
+                return EffectArray.map(inputs, () => [1, ...new Array<number>(manifest.dimensions - 1).fill(0)]);
               }),
             generate: () => Effect.die('Unexpected generation'),
             rerank: () => Effect.die('Unexpected reranking'),
@@ -213,7 +218,7 @@ describe('vector scope mapping upgrades', () => {
             const fs = yield* FileSystem.FileSystem;
             const home = yield* fs.makeTempDirectoryScoped({prefix: 'vector-scope-upgrade-property-'});
             const cleanHome = yield* fs.makeTempDirectoryScoped({prefix: 'vector-scope-clean-property-'});
-            const candidates: RecallCandidate[] = entries.map((entry, index) => ({
+            const candidates: RecallCandidate[] = EffectArray.map(entries, (entry, index) => ({
               kind: entry.preference ? 'preference' : 'durable',
               fields: {project: entry.project},
               text: `# Entry ${index}\n\nStable source ${index}.`,
@@ -253,8 +258,12 @@ describe('vector scope mapping upgrades', () => {
                   .all(),
               );
             const actual = yield* rows(home);
-            expect(actual.map(row => (row as {project: unknown}).project)).toEqual(
-              entries.map(entry => (entry.preference ? null : entry.project)),
+            const actualRows = yield* Schema.decodeUnknownEffect(
+              Schema.Array(Schema.Struct({project: Schema.NullOr(Schema.String)})),
+            )(actual);
+            const actualProjects = EffectArray.map(actualRows, row => row.project);
+            expect(actualProjects).toEqual(
+              EffectArray.map(entries, entry => (entry.preference ? null : entry.project)),
             );
             yield* ensureVectorIndex({agentContextHome: cleanHome}, manifest, candidates, {
               corpusGeneration: 'unchanged-corpus',

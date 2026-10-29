@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem} from 'effect';
 import {requireWorkset} from '@threadnote/workspace/manifest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
 import {CodeGraphQueryService, observationFromCodeGraphStatus, renderCodeGraphResult} from '../query.js';
 import type {CodeGraphQueryOptions, CodeGraphQueryResult} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_WORKSET_MAX_REPOSITORIES = 8;
 export const CODE_GRAPH_WORKSET_MAX_NODES = 24;
@@ -114,7 +117,7 @@ export const inspectCodeGraphWorkset = Effect.fn('codeGraph.inspectWorkset')(fun
       ),
     {concurrency: 2},
   );
-  const readyRepositories = repositories.filter(member => member.state === 'ready').length;
+  const readyRepositories = EffectArray.filter(repositories, member => member.state === 'ready').length;
   const warnings: string[] = [];
   if (workset.projects.length > projects.length) {
     warnings.push(
@@ -164,11 +167,11 @@ export function renderCodeGraphWorksetResult(result: CodeGraphWorksetQueryResult
   ];
   for (const member of result.repositories) {
     lines.push('', `Repository member: ${member.project}`);
-    if (member.state === 'ready') lines.push(renderCodeGraphResult(member.graph).trimEnd());
+    if (member.state === 'ready') lines.push(Effect2.pipe(renderCodeGraphResult(member.graph), EffectString.trimEnd));
     else lines.push(`Unavailable: ${member.reason}`);
   }
-  if (result.warnings.length > 0) lines.push('', ...result.warnings.map(warning => `Warning: ${warning}`));
-  return `${lines.join('\n')}\n`;
+  if (result.warnings.length > 0) lines.push('', ...EffectArray.map(result.warnings, warning => `Warning: ${warning}`));
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 function unavailable(project: string, reason: Extract<CodeGraphWorksetMember, {state: 'unavailable'}>['reason']) {
@@ -182,8 +185,19 @@ function boundedTotal(value: number | undefined, fallback: number, maximum: numb
 }
 
 function safeLabel(value: string): string {
-  return [...value]
-    .filter(character => (character.codePointAt(0) ?? 0) > 0x1f)
-    .join('')
-    .slice(0, 256);
+  return Effect2.pipe(
+    EffectArray.join(
+      EffectArray.filter(
+        [...value],
+        character =>
+          (Effect2.pipe(
+            character,
+            EffectString.codePointAt(0),
+            Effect2.Option.getOrElse(() => undefined),
+          ) ?? 0) > 0x1f,
+      ),
+      '',
+    ),
+    EffectString.slice(0, 256),
+  );
 }

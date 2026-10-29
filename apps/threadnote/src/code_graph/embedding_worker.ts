@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
 import {CodeGraphEmbeddingWorkerProcess} from '@threadnote/graph/runtime_ports';
@@ -15,11 +16,13 @@ import {
   CODE_GRAPH_EMBEDDING_WORKER_ARGUMENT,
   CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION,
 } from '../worker_protocol.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class CodeGraphEmbeddingWorkerProcessError extends Schema.TaggedError<CodeGraphEmbeddingWorkerProcessError>()(
-  'CodeGraphEmbeddingWorkerProcessError',
-  {message: Schema.String},
-) {}
+class CodeGraphEmbeddingWorkerProcessError extends Schema.TaggedError<
+  CodeGraphEmbeddingWorkerProcessError,
+  {readonly brand: unique symbol}
+>()('CodeGraphEmbeddingWorkerProcessError', {message: Schema.String}) {}
 
 export function codeGraphEmbeddingWorkerInvocation(
   executablePath: string,
@@ -27,7 +30,11 @@ export function codeGraphEmbeddingWorkerInvocation(
   home: string,
   version: string,
 ) {
-  const executableName = executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  const executableName = Effect2.pipe(
+    Effect2.pipe(executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   return {
     executable: executablePath,
     arguments: [
@@ -70,7 +77,11 @@ export const codeGraphEmbeddingWorkerProgram = Effect.fn('codeGraph.embeddingWor
         }
         if (!directory) return {checkoutIds: []};
         const page = await directory.readPage(64);
-        const checkoutIds = page.names.filter(name => /^[a-f0-9]{64}$/.test(name));
+        const names = page.names;
+        const checkoutIds = EffectArray.filter(
+          names,
+          (name, __effectArrayIndex) => __effectArrayIndex in names && /^[a-f0-9]{64}$/.test(name),
+        );
         if (page.done) {
           directory = undefined;
           return {checkoutIds};
@@ -97,12 +108,21 @@ export const wakeCodeGraphEmbeddingWorker = Effect.fn('codeGraph.wakeEmbeddingWo
     if (Option.isSome(yield* fs.readLink(receipt).pipe(Effect.option))) return false;
     if ((yield* fs.stat(receipt)).size > 4096) return false;
     const content = yield* fs.readFileString(receipt);
-    const parsed = yield* Effect.try({
-      try: () =>
-        JSON.parse(content) as {protocol?: number; version?: string; processId?: number; processStartIdentity?: string},
+    const ReceiptSchema = Schema.Struct({
+      processId: Schema.optionalKey(Schema.Int),
+      processStartIdentity: Schema.optionalKey(Schema.String),
+      protocol: Schema.optionalKey(Schema.Int),
+      version: Schema.optionalKey(Schema.String),
+    });
+    const parsed: unknown = yield* Effect.try({
+      try: () => JSON.parse(content),
       catch: () => CodeGraphEmbeddingWorkerProcessError.make({message: 'Embedding worker process operation failed.'}),
     });
-    if (!parsed || typeof parsed.processId !== 'number' || typeof parsed.processStartIdentity !== 'string')
+    if (
+      !Schema.is(ReceiptSchema)(parsed) ||
+      typeof parsed.processId !== 'number' ||
+      typeof parsed.processStartIdentity !== 'string'
+    )
       return false;
     return (
       parsed.protocol === CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION &&

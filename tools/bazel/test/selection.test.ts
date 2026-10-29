@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {selectTargets} from '../../ci/selection.mjs';
@@ -66,7 +67,7 @@ it('is deterministic and monotone as additional impacted targets are discovered'
       const result = select([...first, ...second], []).targets;
       expect(result).toEqual([...new Set([...first, ...second])].sort());
       expect(result).toEqual(select([...second, ...first, ...first], []).targets);
-      expect(select(first, []).targets.every(target => result.includes(target))).toBe(true);
+      expect(EffectArray.every(select(first, []).targets, target => result.includes(target))).toBe(true);
     }),
     {numRuns: 50},
   );
@@ -115,7 +116,7 @@ it('keeps global lock coverage complete and deterministic across mixed changes a
         const before = selectTargets(input);
         const withLock = selectTargets({...input, changedFiles: [...changedFiles, 'MODULE.bazel.lock']});
         expect(withLock.targets).toEqual([...labels].sort());
-        expect(before.targets.every(label => withLock.targets.includes(label))).toBe(true);
+        expect(EffectArray.every(before.targets, label => withLock.targets.includes(label))).toBe(true);
         expect(withLock).toEqual(
           selectTargets({
             ...input,

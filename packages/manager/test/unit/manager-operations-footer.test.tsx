@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot} from 'react-dom/client';
@@ -49,10 +50,9 @@ it('polls operations across page changes, shares the inventory, handles failures
     await tick();
     expect(container.querySelector('.footer-operations.is-visible')).not.toBeNull();
     expect(container.querySelector('.footer-operations [role="status"]')?.textContent).toBe('2 active operations');
-    expect([...container.querySelectorAll('.footer-operations li')].map(item => item.textContent)).toEqual([
-      'graph',
-      'context',
-    ]);
+    expect(EffectArray.map([...container.querySelectorAll('.footer-operations li')], item => item.textContent)).toEqual(
+      ['graph', 'context'],
+    );
     await act(async () => container.querySelector<HTMLButtonElement>('.footer-operations-summary')!.click());
     expect(open).toHaveBeenCalledOnce();
     await act(async () => root.render(render(true)));

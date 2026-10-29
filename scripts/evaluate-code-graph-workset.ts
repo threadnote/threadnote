@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Effect} from 'effect';
@@ -32,6 +34,8 @@ import {
   type CodeGraphWorksetFixtureSize,
   type PreparedCodeGraphWorksetFixture,
 } from './support/code-graph-workset-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const WORKSET_EVALUATION_SMOKE_SIZES = [1, 8] as const;
 
@@ -70,11 +74,17 @@ export function parseCodeGraphWorksetEvaluationArguments(
 export const evaluateCodeGraphWorkset = Effect.scoped(
   Effect.gen(function* () {
     const options = parseCodeGraphWorksetEvaluationArguments(yield* scriptArguments());
-    const maximumSize = Math.max(...options.sizes) as CodeGraphWorksetFixtureSize;
+    const initialSize = options.sizes[0];
+    if (initialSize === undefined)
+      return yield* ScriptError.make({message: 'At least one evaluation size is required.'});
+    let maximumSize: CodeGraphWorksetFixtureSize = initialSize;
+    for (const size of options.sizes) if (size > maximumSize) maximumSize = size;
     const prepared = yield* acquirePreparedFixture(maximumSize, 'mixed');
     yield* indexPreparedCodeGraphWorksetFixture(prepared);
-    const selectedWorksets = options.sizes.map(size => {
-      const workset = prepared.plan.worksets.find(candidate => candidate.size === size);
+    const selectedWorksets = EffectArray.map(options.sizes, size => {
+      const workset = EffectOption.getOrUndefined(
+        EffectArray.findFirst(prepared.plan.worksets, candidate => candidate.size === size),
+      );
       if (!workset) throw ScriptError.make({message: `Fixture did not emit a size-${size} workset.`});
       return workset.name;
     });
@@ -84,17 +94,30 @@ export const evaluateCodeGraphWorkset = Effect.scoped(
     const config = codeGraphWorksetRuntimeConfig(prepared);
     const observations: CodeGraphWorksetEvaluationObservationV1[] = [];
     for (const worksetSize of options.sizes) {
-      const workset = prepared.plan.worksets.find(candidate => candidate.size === worksetSize);
+      const workset = EffectOption.getOrUndefined(
+        EffectArray.findFirst(prepared.plan.worksets, candidate => candidate.size === worksetSize),
+      );
       if (!workset) return yield* ScriptError.make({message: `Fixture did not emit a size-${worksetSize} workset.`});
-      const queries = fixture.queries.filter(query => query.sizes.includes(worksetSize));
+      const queries = EffectArrayPipe(fixture.queries, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (query, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && query.sizes.includes(worksetSize),
+        ),
+      );
       const worktree = yield* measureWorktreeIsolation(prepared, config, workset.name, worksetSize);
       let coverage: readonly CodeGraphWorksetCoverageObservationV1[] | undefined;
       let worktreeReceiptAvailable = true;
       for (const query of queries) {
         if (query.operation !== 'query') {
           if (!coverage) {
-            const probe = fixture.queries.find(
-              candidate => candidate.operation === 'query' && candidate.sizes.includes(worksetSize),
+            const probe = EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                fixture.queries,
+                __effectArrayValue =>
+                  !!(candidate => candidate.operation === 'query' && candidate.sizes.includes(worksetSize))(
+                    __effectArrayValue,
+                  ),
+              ),
             );
             if (!probe?.query) {
               return yield* ScriptError.make({
@@ -159,7 +182,7 @@ export const evaluateCodeGraphWorkset = Effect.scoped(
     if (options.outputPath) yield* atomicWrite(options.outputPath, `${JSON.stringify(baseline, undefined, 2)}\n`);
     yield* printJson(baseline);
     const safetyFailures = codeGraphWorksetEvaluationSafetyFailures(metrics);
-    if (safetyFailures.length > 0) return yield* ScriptError.make({message: safetyFailures.join('\n')});
+    if (safetyFailures.length > 0) return yield* ScriptError.make({message: EffectArray.join(safetyFailures, '\n')});
   }),
 );
 
@@ -169,12 +192,15 @@ export function codeGraphWorksetEvaluationSafetyFailures(metrics: {
     'authoritativeFalseEdgeRate' | 'noAnswerPrecision' | 'noAnswerRecall' | 'worktreeLeakageRate'
   >;
 }): readonly string[] {
-  return [
-    metrics.aggregate.authoritativeFalseEdgeRate !== 0 ? 'authoritative false-edge rate must be zero' : '',
-    metrics.aggregate.worktreeLeakageRate !== 0 ? 'worktree leakage rate must be zero' : '',
-    metrics.aggregate.noAnswerPrecision !== 1 ? 'no-answer precision must be one' : '',
-    metrics.aggregate.noAnswerRecall !== 1 ? 'no-answer recall must be one' : '',
-  ].filter(Boolean);
+  return EffectArray.filter(
+    [
+      metrics.aggregate.authoritativeFalseEdgeRate !== 0 ? 'authoritative false-edge rate must be zero' : '',
+      metrics.aggregate.worktreeLeakageRate !== 0 ? 'worktree leakage rate must be zero' : '',
+      metrics.aggregate.noAnswerPrecision !== 1 ? 'no-answer precision must be one' : '',
+      metrics.aggregate.noAnswerRecall !== 1 ? 'no-answer recall must be one' : '',
+    ],
+    Boolean,
+  );
 }
 
 function acquirePreparedFixture(size: CodeGraphWorksetFixtureSize, stateProfile: 'all-clean' | 'mixed') {
@@ -197,37 +223,56 @@ const measureWorktreeIsolation = Effect.fn('evaluateCodeGraphWorkset.worktreeIso
   worksetName: string,
   worksetSize: number,
 ) {
-  const admitted = prepared.repositories.slice(0, worksetSize).filter(repository => repository.state === 'worktree');
+  const admitted = EffectArray.filter(
+    prepared.repositories.slice(0, worksetSize),
+    repository => repository.state === 'worktree',
+  );
   if (admitted.length === 0) return {leakageCount: 0, observationCount: 0};
   const measured = yield* measureCodeGraphWorksetQuery(config, worksetName, 'siblingOnlySymbol');
   const leakedRepositories = new Set(
-    measured.result.cards.filter(card => card.symbol.name === 'siblingOnlySymbol').map(card => card.repositoryKey),
+    EffectArray.map(
+      EffectArray.filter(measured.result.cards, card => card.symbol.name === 'siblingOnlySymbol'),
+      card => card.repositoryKey,
+    ),
   );
   return {
-    leakageCount: admitted.filter(repository => leakedRepositories.has(repository.projectName)).length,
+    leakageCount: EffectArray.filter(admitted, repository => leakedRepositories.has(repository.projectName)).length,
     observationCount: admitted.length,
   };
 });
 
 function parseEvaluationSizes(value: string): readonly CodeGraphWorksetFixtureSize[] {
-  const allowed = new Set<number>(CODE_GRAPH_WORKSET_FIXTURE_SIZES);
   const sizes = parseSizeList(value, '--sizes');
   for (const size of sizes) {
-    if (!allowed.has(size)) {
+    if (!isCodeGraphWorksetFixtureSize(size)) {
       throw ScriptError.make({
-        message: `--sizes only accepts evaluation sizes: ${CODE_GRAPH_WORKSET_FIXTURE_SIZES.join(', ')}. Received ${size}.`,
+        message: `--sizes only accepts evaluation sizes: ${EffectArray.join(
+          EffectArray.map(CODE_GRAPH_WORKSET_FIXTURE_SIZES, item =>
+            item === null || item === undefined ? '' : String(item),
+          ),
+          ', ',
+        )}. Received ${size}.`,
       });
     }
   }
-  return [...sizes].sort((left, right) => left - right) as readonly CodeGraphWorksetFixtureSize[];
+  return EffectArray.filter(
+    [...sizes].sort((left, right) => left - right),
+    isCodeGraphWorksetFixtureSize,
+  );
+}
+
+function isCodeGraphWorksetFixtureSize(value: number): value is CodeGraphWorksetFixtureSize {
+  return EffectArray.some(CODE_GRAPH_WORKSET_FIXTURE_SIZES, size => size === value);
 }
 
 function parseSizeList(value: string, option: string): readonly number[] {
-  const parts = value.split(',');
-  if (parts.length === 0 || parts.some(part => !part.trim()))
+  const parts = Effect2.pipe(value, EffectString.split(','));
+  if (parts.length === 0 || EffectArray.some(parts, part => !Effect2.pipe(part, EffectString.trim)))
     throw ScriptError.make({message: `${option} requires comma-separated sizes.`});
-  const sizes = parts.map(part => Number(part.trim()));
-  if (sizes.some(size => !Number.isSafeInteger(size) || size < 1)) {
+  const sizes: number[] = EffectArray.map(parts, (part: string): number =>
+    Number(Effect2.pipe(part, EffectString.trim)),
+  );
+  if (EffectArray.some(sizes, size => !Number.isSafeInteger(size) || size < 1)) {
     throw ScriptError.make({message: `${option} requires positive integer sizes.`});
   }
   if (new Set(sizes).size !== sizes.length) throw ScriptError.make({message: `${option} sizes must be unique.`});
@@ -252,6 +297,7 @@ function parseCreatedAt(value: string, option: string): string {
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
@@ -260,7 +306,7 @@ const sourceGit = Effect.fn('evaluateCodeGraphWorkset.sourceGit')((args: readonl
   runCommandEffect('git', ['-C', process.cwd(), ...args], {
     maxOutputBytes: 1_048_576,
     timeoutMs: 30_000,
-  }).pipe(Effect.map(result => result.stdout.trim())),
+  }).pipe(Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim))),
 );
 
 if (import.meta.main) BunRuntime.runMain(provideScriptLayer(evaluateCodeGraphWorkset, ApplicationLayer));

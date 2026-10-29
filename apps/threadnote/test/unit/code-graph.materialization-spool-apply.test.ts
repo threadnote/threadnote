@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {expect, it as effectIt} from '@effect/vitest';
@@ -9,6 +10,8 @@ import {
   assertCodeGraphMaterializationSpoolApplyComplete,
   registerCodeGraphMaterializationSpoolApply,
 } from '@threadnote/graph/store/materialization/spool_apply';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 effectIt.effect('commits a main-database page and its exact apply cursor atomically', () =>
   Effect.gen(function* () {
@@ -34,8 +37,8 @@ effectIt.effect('commits a main-database page and its exact apply cursor atomica
     yield* sql.unsafe('CREATE TABLE applied_symbols (id INTEGER PRIMARY KEY NOT NULL)');
     yield* sql.unsafe("INSERT INTO snapshots (id, state) VALUES ('snapshot', 'building')");
     yield* sql.unsafe("INSERT INTO snapshot_build_owners (snapshot_id, owner_token) VALUES ('snapshot', 'owner')");
-    const identity = 'a'.repeat(64);
-    const plan = CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES.map((surface, index) => ({
+    const identity = Effect2.pipe('a', EffectString.repeat(64));
+    const plan = EffectArray.map(CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES, (surface, index) => ({
       name: surface.name,
       rowCount: index === 0 ? 3 : 0,
     }));

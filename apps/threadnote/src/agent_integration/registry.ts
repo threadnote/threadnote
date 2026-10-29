@@ -1,3 +1,5 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Predicate, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -6,6 +8,7 @@ import type {AgentClient, ClaudeMcpScope} from '../types.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ensureDirectory, readFileIfExists} from '../utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
+import * as EffectRecord from 'effect/Record';
 
 export const AGENT_INTEGRATION_REGISTRY_VERSION = 2;
 export const AGENT_INTEGRATION_ARTIFACT_VERSION = 1;
@@ -107,12 +110,18 @@ export function setupCompletionForSuccessfulInstall(
   const targetStatus =
     'host' in target ? registry.hosts[target.host]?.status : registry.surfaces?.[target.surface]?.status;
   const otherStatuses = [
-    ...Object.entries(registry.hosts)
-      .filter(([id]) => !('host' in target) || id !== target.host)
-      .map(([, receipt]) => receipt?.status),
-    ...Object.entries(registry.surfaces ?? {})
-      .filter(([id]) => !('surface' in target) || id !== target.surface)
-      .map(([, receipt]) => receipt.status),
+    ...EffectArray.map(
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+      EffectArray.filter(Object.entries(registry.hosts), ([id]) => !('host' in target) || id !== target.host),
+      ([, receipt]) => receipt?.status,
+    ),
+    ...EffectArray.map(
+      EffectArray.filter(
+        EffectRecord.toEntries(registry.surfaces ?? {}),
+        ([id]) => !('surface' in target) || id !== target.surface,
+      ),
+      ([, receipt]) => receipt.status,
+    ),
   ];
   return setupCompletionForRegistrationStates(targetStatus, otherStatuses);
 }
@@ -126,12 +135,14 @@ export function migrateAgentIntegrationRegistry(
 ): AgentIntegrationRegistry {
   const physicalArtifacts: Record<string, string[]> = {};
   for (const [consumer, receipt] of [
-    ...Object.entries(registry.hosts).map(([id, receipt]) => [`legacy:${id}`, receipt] as const),
-    ...Object.entries(registry.surfaces ?? {}).map(([id, receipt]) => [id, receipt] as const),
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    ...EffectArray.map(Object.entries(registry.hosts), ([id, receipt]) => [`legacy:${id}`, receipt] as const),
+    ...EffectArray.map(EffectRecord.toEntries(registry.surfaces ?? {}), ([id, receipt]) => [id, receipt] as const),
   ]) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     for (const target of Object.keys(receipt.artifacts)) (physicalArtifacts[target] ??= []).push(consumer);
   }
-  for (const consumers of Object.values(physicalArtifacts)) consumers.sort();
+  for (const consumers of EffectRecord.values(physicalArtifacts)) consumers.sort();
   return {
     ...registry,
     version: AGENT_INTEGRATION_REGISTRY_VERSION,
@@ -146,18 +157,19 @@ export function artifactHasOtherConsumers(
   consumer: string,
   excludedConsumers: ReadonlySet<string> = new Set(),
 ): boolean {
-  return (migrateAgentIntegrationRegistry(registry).physicalArtifacts?.[target] ?? []).some(
+  return EffectArray.some(
+    migrateAgentIntegrationRegistry(registry).physicalArtifacts?.[target] ?? [],
     owner => owner !== consumer && !excludedConsumers.has(owner),
   );
 }
 
-class AgentIntegrationRegistryError extends Schema.TaggedError<AgentIntegrationRegistryError>()(
-  'AgentIntegrationRegistryError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class AgentIntegrationRegistryError extends Schema.TaggedError<
+  AgentIntegrationRegistryError,
+  {readonly brand: unique symbol}
+>()('AgentIntegrationRegistryError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export const readAgentIntegrationRegistry = Effect.fn('agentIntegrations.readRegistry')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
@@ -176,11 +188,11 @@ export const readAgentIntegrationRegistry = Effect.fn('agentIntegrations.readReg
 });
 
 export function registeredAgentClients(registry: AgentIntegrationRegistry | undefined): readonly AgentClient[] {
-  return AGENT_CLIENTS.filter(agent => registry?.hosts[agent] !== undefined);
+  return EffectArray.filter(AGENT_CLIENTS, agent => registry?.hosts[agent] !== undefined);
 }
 
 export function repairableAgentClients(registry: AgentIntegrationRegistry | undefined): readonly AgentClient[] {
-  return registeredAgentClients(registry).filter(agent => registry?.hosts[agent]?.mcp.repair === true);
+  return EffectArray.filter(registeredAgentClients(registry), agent => registry?.hosts[agent]?.mcp.repair === true);
 }
 
 export function emptyAgentIntegrationRegistry(legacyInstructionsMigrated: boolean): AgentIntegrationRegistry {
@@ -242,12 +254,12 @@ function isAgentIntegrationRegistry(value: unknown): value is AgentIntegrationRe
   )
     return false;
   if (typeof value.legacyInstructionsMigrated !== 'boolean') return false;
-  for (const [agent, receipt] of Object.entries(value.hosts)) {
+  for (const [agent, receipt] of EffectRecord.toEntries(value.hosts)) {
     if (!isAgentClient(agent) || !isHostReceipt(receipt)) return false;
   }
   if (value.surfaces !== undefined) {
     if (!Predicate.isObject(value.surfaces)) return false;
-    for (const [id, receipt] of Object.entries(value.surfaces)) {
+    for (const [id, receipt] of EffectRecord.toEntries(value.surfaces)) {
       if (!isSurfaceReceipt(id, receipt)) return false;
     }
   }
@@ -267,7 +279,7 @@ function isSurfaceReceipt(id: string, value: unknown): value is AgentSurfaceRece
     typeof value.installedVersion !== 'string' ||
     (value.status !== 'pending' && value.status !== 'current') ||
     !Predicate.isObject(value.artifacts) ||
-    !Array.isArray(value.artifactDescriptors) ||
+    !EffectArray.isArray(value.artifactDescriptors) ||
     !Predicate.isObject(value.strategy) ||
     !Predicate.isObject(value.mcp)
   )
@@ -281,9 +293,9 @@ function isSurfaceReceipt(id: string, value: unknown): value is AgentSurfaceRece
     ((value.scope !== 'project' && value.scope !== 'local') || typeof value.cwd === 'string') &&
     (typeof value.strategy.container === 'string'
       ? value.strategy.container.length > 0
-      : Array.isArray(value.strategy.container) &&
+      : EffectArray.isArray(value.strategy.container) &&
         value.strategy.container.length > 0 &&
-        value.strategy.container.every(key => typeof key === 'string' && key.length > 0)) &&
+        EffectArray.every(value.strategy.container, key => typeof key === 'string' && key.length > 0)) &&
     typeof value.mcp.path === 'string' &&
     value.mcp.path.length > 0 &&
     (value.mcp.root === undefined || (typeof value.mcp.root === 'string' && value.mcp.root.length > 0)) &&
@@ -293,11 +305,14 @@ function isSurfaceReceipt(id: string, value: unknown): value is AgentSurfaceRece
     (value.mcp.toolset === 'core' || value.mcp.toolset === 'full') &&
     typeof value.mcp.createdContainer === 'boolean' &&
     (value.mcp.createdContainerParents === undefined ||
-      (Number.isSafeInteger(value.mcp.createdContainerParents) &&
-        (value.mcp.createdContainerParents as number) >= 0)) &&
+      (checkedIsSafeInteger(value.mcp.createdContainerParents) && value.mcp.createdContainerParents >= 0)) &&
     typeof value.mcp.createdFile === 'boolean' &&
-    Object.values(artifacts).every(hash => typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash)) &&
-    value.artifactDescriptors.every(
+    EffectArray.every(
+      EffectRecord.values(artifacts),
+      hash => typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash),
+    ) &&
+    EffectArray.every(
+      value.artifactDescriptors,
       artifact =>
         Predicate.isObject(artifact) &&
         typeof artifact.path === 'string' &&
@@ -366,9 +381,12 @@ function isHostReceipt(value: unknown): value is AgentIntegrationHostReceipt {
   ) {
     return false;
   }
-  return Object.values(value.artifacts).every(hash => typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash));
+  return EffectArray.every(
+    EffectRecord.values(value.artifacts),
+    hash => typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash),
+  );
 }
 
 function isAgentClient(value: string): value is AgentClient {
-  return AGENT_CLIENTS.some(client => client === value);
+  return EffectArray.some(AGENT_CLIENTS, client => client === value);
 }

@@ -1,26 +1,31 @@
-import {Data, Redacted} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
+import {Redacted} from 'effect';
 import {validLinearApiToken} from './credentials.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const LINEAR_ENDPOINT = 'https://api.linear.app/graphql';
-export type LinearErrorCode =
-  | 'authentication-rejected'
-  | 'access-rejected'
-  | 'not-found'
-  | 'quota-rejected'
-  | 'transport-rejected'
-  | 'response-too-large'
-  | 'contract-invalid'
-  | 'contract-incomplete'
-  | 'credential-reflected'
-  | 'deadline-exceeded'
-  | 'scope-rejected'
-  | 'revision-changed';
-export class LinearClientError extends Data.TaggedError('LinearClientError')<{
-  readonly code: LinearErrorCode;
-  readonly retryAfterMilliseconds?: number;
-}> {}
+export const LinearErrorCodeSchema = Schema.Literals([
+  'authentication-rejected',
+  'access-rejected',
+  'not-found',
+  'quota-rejected',
+  'transport-rejected',
+  'response-too-large',
+  'contract-invalid',
+  'contract-incomplete',
+  'credential-reflected',
+  'deadline-exceeded',
+  'scope-rejected',
+  'revision-changed',
+]);
+export type LinearErrorCode = typeof LinearErrorCodeSchema.Type;
+export class LinearClientError extends Schema.TaggedError<LinearClientError, {readonly brand: unique symbol}>()(
+  'LinearClientError',
+  {code: LinearErrorCodeSchema, retryAfterMilliseconds: Schema.optional(Schema.Finite)},
+) {}
 export function fail(code: LinearErrorCode): never {
-  throw new LinearClientError({code});
+  throw LinearClientError.make({code});
 }
 export interface LinearClientBudget {
   requests: number;
@@ -45,22 +50,31 @@ export const makeLinearClientBudget = (milliseconds: number, requests: number): 
   deadlineAt: Date.now() + milliseconds,
 });
 export function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 function errorCode(errors: unknown): LinearErrorCode {
-  if (!Array.isArray(errors)) return 'contract-invalid';
-  const codes = errors
-    .filter(record)
-    .flatMap(error =>
+  if (!EffectArray.isArray(errors)) return 'contract-invalid';
+  const codes = EffectArray.flatMap(
+    EffectArray.filter(
+      errors,
+      (
+        __effectFilterValue: (typeof errors)[number],
+        __effectFilterIndex: number,
+      ): __effectFilterValue is Record<string, unknown> => __effectFilterIndex in errors && record(__effectFilterValue),
+    ),
+    (error: Record<string, unknown>) =>
       record(error.extensions)
-        ? [String(error.extensions.code ?? '').toUpperCase(), String(error.extensions.type ?? '').toUpperCase()]
+        ? [
+            Effect.pipe(String(error.extensions.code ?? ''), EffectString.toUpperCase),
+            Effect.pipe(String(error.extensions.type ?? ''), EffectString.toUpperCase),
+          ]
         : [],
-    );
-  if (codes.some(code => /RATE.?LIMIT|RATELIMITED/.test(code))) return 'quota-rejected';
-  if (codes.some(code => /AUTHENTICATION|UNAUTHENTICATED/.test(code))) return 'authentication-rejected';
-  if (codes.some(code => /FORBIDDEN|PERMISSION|ACCESS_DENIED/.test(code))) return 'access-rejected';
-  if (codes.some(code => /NOT_FOUND|ENTITY_NOT_FOUND/.test(code))) return 'not-found';
-  if (codes.some(code => /GRAPHQL_VALIDATION|GRAPHQL_PARSE/.test(code))) return 'contract-invalid';
+  );
+  if (EffectArray.some(codes, code => /RATE.?LIMIT|RATELIMITED/.test(code))) return 'quota-rejected';
+  if (EffectArray.some(codes, code => /AUTHENTICATION|UNAUTHENTICATED/.test(code))) return 'authentication-rejected';
+  if (EffectArray.some(codes, code => /FORBIDDEN|PERMISSION|ACCESS_DENIED/.test(code))) return 'access-rejected';
+  if (EffectArray.some(codes, code => /NOT_FOUND|ENTITY_NOT_FOUND/.test(code))) return 'not-found';
+  if (EffectArray.some(codes, code => /GRAPHQL_VALIDATION|GRAPHQL_PARSE/.test(code))) return 'contract-invalid';
   return 'contract-incomplete';
 }
 function quotaRetryDelay(value: string | null): number {
@@ -92,7 +106,7 @@ export function createLinearTransport(token: Redacted.Redacted<string>, options:
     );
     const signal = AbortSignal.any([controller.signal, timeout, ...(options.signal ? [options.signal] : [])]);
     const aborted = Promise.withResolvers<never>();
-    const abort = () => aborted.reject(new LinearClientError({code: 'deadline-exceeded'}));
+    const abort = () => aborted.reject(LinearClientError.make({code: 'deadline-exceeded'}));
     signal.addEventListener('abort', abort, {once: true});
     if (signal.aborted) abort();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -116,13 +130,17 @@ export function createLinearTransport(token: Redacted.Redacted<string>, options:
       if (response.status === 403) fail('access-rejected');
       if (response.status === 404) fail('not-found');
       if (response.status === 429)
-        throw new LinearClientError({
+        throw LinearClientError.make({
           code: 'quota-rejected',
           retryAfterMilliseconds,
         });
       if (
         ![200, 400].includes(response.status) ||
-        !response.headers.get('content-type')?.startsWith('application/json') ||
+        !Effect.pipe(response.headers.get('content-type'), effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect.pipe(effectOptionalString, EffectString.startsWith('application/json')),
+        ) ||
         !response.body
       )
         fail('transport-rejected');
@@ -145,18 +163,18 @@ export function createLinearTransport(token: Redacted.Redacted<string>, options:
         offset += piece.length;
       }
       const raw = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
-      if (raw.includes(secret)) fail('credential-reflected');
+      if (Effect.pipe(raw, EffectString.includes(secret))) fail('credential-reflected');
       const value: unknown = JSON.parse(raw);
-      if (JSON.stringify(value).includes(secret)) fail('credential-reflected');
+      if (Effect.pipe(JSON.stringify(value), EffectString.includes(secret))) fail('credential-reflected');
       if (!record(value)) fail('contract-invalid');
-      if (value.errors !== undefined && (!Array.isArray(value.errors) || value.errors.length > 0)) {
+      if (value.errors !== undefined && (!EffectArray.isArray(value.errors) || value.errors.length > 0)) {
         const code = errorCode(value.errors);
-        throw new LinearClientError({code, ...(code === 'quota-rejected' ? {retryAfterMilliseconds} : {})});
+        throw LinearClientError.make({code, ...(code === 'quota-rejected' ? {retryAfterMilliseconds} : {})});
       }
       if (response.status !== 200 || !record(value.data)) fail('contract-invalid');
       return value.data;
     } catch (error) {
-      if (error instanceof LinearClientError) throw error;
+      if (Schema.is(LinearClientError)(error)) throw error;
       return fail(signal.aborted ? 'deadline-exceeded' : 'transport-rejected');
     } finally {
       signal.removeEventListener('abort', abort);

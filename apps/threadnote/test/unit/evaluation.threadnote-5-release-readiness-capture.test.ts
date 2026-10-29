@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import * as fc from 'fast-check';
@@ -30,24 +31,37 @@ import {
   PRODUCTION_CAPTURE_CANDIDATE,
   productionCaptureFixture,
 } from '../helpers/threadnote-5-production-capture-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CANDIDATE: Threadnote5SourceV1 = {
-  commit: '1'.repeat(40),
-  executableSha256: '2'.repeat(64),
+  commit: Effect2.pipe('1', EffectString.repeat(40)),
+  executableSha256: Effect2.pipe('2', EffectString.repeat(64)),
   id: 'threadnote-5.0.0',
-  version: `5.0.0-local.g${'1'.repeat(40)}`,
+  version: `5.0.0-local.g${Effect2.pipe('1', EffectString.repeat(40))}`,
 };
 
 describe('Threadnote 5 production capture', () => {
   effectIt.effect('freezes the corrected 15-observation and 24-source-record shape', () =>
     Effect.sync(() => {
       expect(APPROVED_THREADNOTE_5_SCENARIOS).toHaveLength(15);
-      expect(APPROVED_THREADNOTE_5_SCENARIOS.reduce((sum, scenario) => sum + scenario.subsystems.length, 0)).toBe(24);
-      expect(APPROVED_THREADNOTE_5_SCENARIOS.find(item => item.id === 'solo')?.subsystems).toContain('value-report');
-      expect(APPROVED_THREADNOTE_5_SCENARIOS.find(item => item.id === 'git-shared')?.subsystems).toContain(
-        'value-report',
-      );
-      expect(APPROVED_THREADNOTE_5_SCENARIOS.find(item => item.id === 'offline')?.subsystems).toContain('value-report');
+      expect(
+        EffectArray.reduce(APPROVED_THREADNOTE_5_SCENARIOS, 0, (sum, scenario) => sum + scenario.subsystems.length),
+      ).toBe(24);
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(APPROVED_THREADNOTE_5_SCENARIOS, item => item.id === 'solo'))
+          ?.subsystems,
+      ).toContain('value-report');
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(APPROVED_THREADNOTE_5_SCENARIOS, item => item.id === 'git-shared'),
+        )?.subsystems,
+      ).toContain('value-report');
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(APPROVED_THREADNOTE_5_SCENARIOS, item => item.id === 'offline'),
+        )?.subsystems,
+      ).toContain('value-report');
     }),
   );
 
@@ -131,16 +145,19 @@ describe('Threadnote 5 production capture', () => {
       expect(() => captureThreadnote5ReleaseCandidateV1({...common, runtimeBoundaries: runtimeBoundaries()})).toThrow(
         /exactly 15 observations and 24 source records/u,
       );
-      const drifting = runtimeBoundaries().map((boundary, index) =>
+      const drifting = EffectArray.map(runtimeBoundaries(), (boundary, index) =>
         index === 0
-          ? {...boundary, postRuntime: {...boundary.postRuntime, executableSha256: '9'.repeat(64)}}
+          ? {
+              ...boundary,
+              postRuntime: {...boundary.postRuntime, executableSha256: Effect2.pipe('9', EffectString.repeat(64))},
+            }
           : boundary,
       );
       expect(() => captureThreadnote5ReleaseCandidateV1({...common, runtimeBoundaries: drifting})).toThrow(
         /runtime boundaries are missing, duplicated, mislabeled, or drifting/u,
       );
-      const oversized = runtimeBoundaries().map((boundary, index) =>
-        index === 0 ? {...boundary, padding: 'x'.repeat(256 * 1024)} : boundary,
+      const oversized = EffectArray.map(runtimeBoundaries(), (boundary, index) =>
+        index === 0 ? {...boundary, padding: Effect2.pipe('x', EffectString.repeat(256 * 1024))} : boundary,
       );
       expect(() => captureThreadnote5ReleaseCandidateV1({...common, runtimeBoundaries: oversized})).toThrow(
         /within size limits/u,
@@ -190,7 +207,11 @@ describe('Threadnote 5 production capture', () => {
 
 function runtimeBoundaries(candidate: Threadnote5SourceV1 = CANDIDATE) {
   const runtime = {executableSha256: candidate.executableSha256, sourceCommit: candidate.commit};
-  return THREADNOTE_5_RELEASE_SCENARIOS.map(scenario => ({postRuntime: runtime, preRuntime: runtime, scenario}));
+  return EffectArray.map(THREADNOTE_5_RELEASE_SCENARIOS, scenario => ({
+    postRuntime: runtime,
+    preRuntime: runtime,
+    scenario,
+  }));
 }
 
 function procedureRecord(): Threadnote5LocalSubsystemReceiptRecordV1 {
@@ -260,16 +281,23 @@ function outputBudgetRecord(): Threadnote5LocalSubsystemReceiptRecordV1 {
 }
 
 function authorityForProcedure(record: Threadnote5LocalSubsystemReceiptRecordV1) {
-  const attempt = (record.artifact as {readonly attempts: readonly Record<string, unknown>[]}).attempts[0];
+  const attempt = Schema.decodeUnknownSync(
+    Schema.Struct({
+      attempts: Schema.Array(
+        Schema.Struct({manifest: Schema.Unknown, statusInput: Schema.Struct({receipt: Schema.Unknown})}),
+      ),
+    }),
+  )(record.artifact).attempts[0];
+  if (!attempt) throw new Error('Procedure fixture must contain one attempt.');
   const manifest = parseProcedureManifest(attempt.manifest);
-  const receipt = (attempt.statusInput as {readonly receipt: unknown}).receipt;
+  const receipt = attempt.statusInput.receipt;
   return {
     candidate: CANDIDATE,
     entries: [
       {
         artifactId: manifest.artifact.id,
         automaticExecutionCount: 0,
-        commandResults: manifest.verification.commands.map(command => ({
+        commandResults: EffectArray.map(manifest.verification.commands, command => ({
           commandId: command.id,
           exitCode: 0,
           outputDigest: sha256HexSync(`verified-output:${command.id}`),

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
@@ -40,6 +41,13 @@ import {
   type ManagerLiveResource,
 } from '@threadnote/manager/live/contracts';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const TicketResponseSchema = Schema.StructWithRest(Schema.Struct({ticket: Schema.String}), [
+  Schema.Record(Schema.String, Schema.Unknown),
+]);
+const decodeTicketResponse = Schema.decodeUnknownSync(TicketResponseSchema);
 
 const systemLayer = SystemInfo.layer.pipe(
   Layer.provide(
@@ -159,7 +167,7 @@ describe('Manager canonical live observation', () => {
           Effect.gen(function* () {
             expect(topics).toContain('context-health');
             if (revision === '') return;
-            if (revision.startsWith('v1:')) {
+            if (Effect2.pipe(revision, EffectString.startsWith('v1:'))) {
               expect(topics).toContain('context-maintenance');
               yield* Deferred.succeed(canonicalSeen, revision);
             } else {
@@ -353,7 +361,7 @@ describe('Manager canonical live observation', () => {
         // There is deliberately no completion hint. The unchanged marker is
         // enough for the next cheap reconciliation to complete after the lock.
         yield* observer.reconcile;
-        expect(notifications.filter(item => item === marker)).toHaveLength(1);
+        expect(EffectArray.filter(notifications, item => item === marker)).toHaveLength(1);
         expect((yield* observer.state).observed).toBe(marker);
       }
     }).pipe(TestClock.withLive, provideLayer),
@@ -662,15 +670,18 @@ const serveLive = Effect.fn('test.managerLive.serve')(function* (
       headers: {authorization: 'Bearer synthetic-live-token', origin},
     });
     expect(response.status).toBe(200);
-    return (yield* response.json) as {ticket: string};
+    return decodeTicketResponse(yield* response.json);
   });
   const connect = (value: string, from = origin) =>
     Effect.gen(function* () {
-      const socket = yield* Socket.makeWebSocket(`${origin.replace('http:', 'ws:')}/api/live?ticket=${value}`, {
-        headers: {origin: from},
-        openTimeout: 1_000,
-        highWaterMark: 262_144,
-      });
+      const socket = yield* Socket.makeWebSocket(
+        `${Effect2.pipe(origin, EffectString.replace('http:', 'ws:'))}/api/live?ticket=${value}`,
+        {
+          headers: {origin: from},
+          openTimeout: 1_000,
+          highWaterMark: 262_144,
+        },
+      );
       const reader = yield* socket.reader;
       const writer = yield* socket.writer;
       const pending: ManagerLiveServerFrame[] = [];
@@ -919,13 +930,13 @@ describe('Manager live protocol', () => {
       yield* legacy.close;
       const emptyBody = yield* server.ticketWithBody({});
       expect(emptyBody.status).toBe(200);
-      const emptyBodyTicket = (yield* emptyBody.json) as {ticket: string};
+      const emptyBodyTicket = decodeTicketResponse(yield* emptyBody.json);
       const emptyBodyClient = yield* server.connect(emptyBodyTicket.ticket);
       expect(yield* emptyBodyClient.next).toMatchObject({type: 'welcome', topics: ['context-maintenance']});
       yield* emptyBodyClient.close;
       const requested = yield* server.ticketWithBody({topics: ['worksets', 'context-maintenance', 'graph-status']});
       expect(requested.status).toBe(200);
-      const body = (yield* requested.json) as {ticket: string};
+      const body = decodeTicketResponse(yield* requested.json);
       const modern = yield* server.connect(body.ticket);
       expect(yield* modern.next).toMatchObject({type: 'welcome', topics: ['context-maintenance', 'worksets']});
       yield* modern.send({
@@ -965,7 +976,7 @@ describe('Manager live protocol', () => {
       const issue = Effect.gen(function* () {
         const response = yield* server.ticketWithBody({topics: ['home', 'worksets', 'context-maintenance']});
         expect(response.status).toBe(200);
-        return (yield* response.json) as {ticket: string};
+        return decodeTicketResponse(yield* response.json);
       });
       const good = yield* server.connect((yield* issue).ticket);
       expect(yield* good.next).toMatchObject({type: 'welcome', topics: ['context-maintenance', 'home', 'worksets']});
@@ -1259,16 +1270,19 @@ describe('Manager live protocol', () => {
       generation: 1,
       resources: Array.from({length: 33}, () => ({topic: 'context-maintenance', project: 'one'})),
     },
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     'x'.repeat(MANAGER_LIVE_LIMITS.messageBytes + 1),
   ])
-    effectIt.effect(`closes a real invalid client: ${JSON.stringify(invalid).slice(0, 95)}`, () =>
-      Effect.gen(function* () {
-        const server = yield* serveLive();
-        const client = yield* server.connect((yield* server.ticket).ticket);
-        expect((yield* client.next).type).toBe('welcome');
-        yield* client.send(invalid);
-        expect((yield* Effect.result(client.next))._tag).toBe('Failure');
-      }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
+    effectIt.effect(
+      `closes a real invalid client: ${Effect2.pipe(JSON.stringify(invalid), EffectString.slice(0, 95))}`,
+      () =>
+        Effect.gen(function* () {
+          const server = yield* serveLive();
+          const client = yield* server.connect((yield* server.ticket).ticket);
+          expect((yield* client.next).type).toBe('welcome');
+          yield* client.send(invalid);
+          expect((yield* Effect.result(client.next))._tag).toBe('Failure');
+        }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
     );
 
   effectIt.effect('refuses malformed JSON and an obsolete subscription generation', () =>
@@ -1324,7 +1338,7 @@ describe('Manager live protocol', () => {
         );
       const first = (yield* live.handle(request()))!;
       const body = yield* Effect.promise(() => HttpServerResponse.toWeb(first).json());
-      const ticket = (body as {ticket: string}).ticket;
+      const ticket = decodeTicketResponse(body).ticket;
       expect(JSON.stringify(body)).not.toContain('synthetic-token');
       for (let i = 1; i < MANAGER_LIVE_LIMITS.tickets; i++) expect((yield* live.handle(request()))?.status).toBe(200);
       expect((yield* live.handle(request()))?.status).toBe(429);
@@ -1365,7 +1379,7 @@ describe('Manager live protocol', () => {
         expect(actual.invalidations).toEqual(
           overflow || revisions.length === 0
             ? []
-            : resources.map(resource => ({resource, revision: String(revisions.at(-1))})),
+            : EffectArray.map(resources, resource => ({resource, revision: String(revisions.at(-1))})),
         );
         expect(mailbox.drain()).toEqual({reset: false, invalidations: []});
       }),

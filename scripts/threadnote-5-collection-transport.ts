@@ -1,5 +1,7 @@
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Private release engineering validates a protected system executable. */
 import type {Transport} from '@modelcontextprotocol/sdk/shared/transport.js';
+import type {EventEmitter} from 'node:events';
+import {Predicate} from 'effect';
 import {deserializeMessage, serializeMessage} from '@modelcontextprotocol/sdk/shared/stdio.js';
 import type {JSONRPCMessage} from '@modelcontextprotocol/sdk/types.js';
 import {lstat, realpath} from 'node:fs/promises';
@@ -12,12 +14,18 @@ import {
   readCollectionPayloadIdentity,
   type CollectionPayloadIdentity,
 } from './threadnote-5-collection-process.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const MACOS_PROTECTED_PYTHON = '/usr/bin/python3';
 const collectionUtf8Decoder = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true});
 
 type CollectionTransportUtf8Error = Error & {readonly collectionUtf8: true};
-type CollectionProcessFactory = () => ReturnType<typeof ownCollectionProcess>;
+type CollectionTransportProcess = Pick<ReturnType<typeof ownCollectionProcess>, 'done' | 'terminate'> & {
+  readonly child: EventEmitter & Pick<ReturnType<typeof ownCollectionProcess>['child'], 'stdin' | 'stdout' | 'stderr'>;
+  readonly input: Pick<ReturnType<typeof ownCollectionProcess>['input'], 'failed' | 'write'>;
+};
+type CollectionProcessFactory = () => CollectionTransportProcess;
 type CollectionMcpTransportOptions =
   | ({launch: CollectionVerifiedLaunch; cwd: string; env: Record<string, string>; argv?: readonly string[]} & {
       readonly processFactory?: CollectionProcessFactory;
@@ -27,13 +35,14 @@ type CollectionMcpTransportOptions =
     });
 
 function collectionTransportUtf8Error(message: string): CollectionTransportUtf8Error {
-  const error = new Error(message) as CollectionTransportUtf8Error;
+  const error = new Error(message);
   Object.defineProperty(error, 'collectionUtf8', {value: true});
+  if (!isCollectionTransportUtf8Error(error)) throw new Error('Could not brand the private UTF-8 boundary error.');
   return error;
 }
 
 function isCollectionTransportUtf8Error(error: unknown): error is CollectionTransportUtf8Error {
-  return error instanceof Error && (error as Partial<CollectionTransportUtf8Error>).collectionUtf8 === true;
+  return error instanceof Error && Predicate.hasProperty(error, 'collectionUtf8') && error.collectionUtf8 === true;
 }
 const MACOS_VERIFIED_SPAWN_OBSERVER = String.raw`
 import ctypes
@@ -308,9 +317,9 @@ export async function observeVerifiedCollectionRuntime(
   const version = await runVerifiedCollectionProcess(launch, ['--version'], cwd, env, {timeoutMs: 10_000});
   if (
     version.exitCode !== 0 ||
-    version.stderr.trim() ||
-    version.stdout.trim() !== `threadnote v${candidate.version}` ||
-    !candidate.version.endsWith(`local.g${candidate.commit}`)
+    Effect.pipe(version.stderr, EffectString.trim) ||
+    Effect.pipe(version.stdout, EffectString.trim) !== `threadnote v${candidate.version}` ||
+    !Effect.pipe(candidate.version, EffectString.endsWith(`local.g${candidate.commit}`))
   )
     throw new Error('Candidate version/commit drift.');
   if (canonicalJson(await readCollectionPayloadIdentity(launch.candidate)) !== canonicalJson(launch.candidatePayload))
@@ -330,7 +339,7 @@ export class CollectionMcpTransport implements Transport {
   onclose?: Transport['onclose'];
   onerror?: Transport['onerror'];
   onmessage?: Transport['onmessage'];
-  private process?: ReturnType<typeof ownCollectionProcess>;
+  private process?: CollectionTransportProcess;
   private failure?: Error;
   private bytes = 0;
   private captureBytes = 0;
@@ -482,7 +491,9 @@ export class CollectionMcpTransport implements Transport {
       const frame = this.stdoutBuffer.subarray(0, newline);
       this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
       const decoded = decodeCollectionUtf8(frame, 'MCP stdout');
-      const line = decoded.endsWith('\r') ? decoded.slice(0, -1) : decoded;
+      const line = Effect.pipe(decoded, EffectString.endsWith('\r'))
+        ? Effect.pipe(decoded, EffectString.slice(0, -1))
+        : decoded;
       this.onmessage?.(deserializeMessage(line));
     }
   }

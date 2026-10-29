@@ -1,7 +1,11 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Redacted} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {createLinearClient} from '../src/client.js';
 import {comment, connection, issue, request, response, safeFetch, source, time, uuid} from './fixtures.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 const token = Redacted.make('synthetic-linear-private-key');
 const errorResponse = (code: string, status = 200) =>
   new Response(
@@ -93,7 +97,7 @@ describe('Linear GraphQL read contract', () => {
   it('rejects credential reflection including JSON escaped material', async () => {
     const raw =
       '{"data":{"organization":{"id":"synthetic-linear-private-key"},"viewer":{"id":"00000000-0000-0000-0000-000000000002"}}}';
-    for (const payload of [raw, raw.replace('synthetic', '\\u0073ynthetic')]) {
+    for (const payload of [raw, Effect.pipe(raw, EffectString.replace('synthetic', '\\u0073ynthetic'))]) {
       const client = createLinearClient(token, {
         fetch: async () => new Response(payload, {headers: {'content-type': 'application/json'}}),
       });
@@ -112,7 +116,7 @@ describe('Linear GraphQL read contract', () => {
     const client = createLinearClient(token, {
       fetch: async (url, init) => {
         const req = request(init);
-        if (req.query.includes('LinearComments')) {
+        if (Effect.pipe(req.query, EffectString.includes('LinearComments'))) {
           rootCalls++;
           return response({
             issue: {
@@ -123,7 +127,7 @@ describe('Linear GraphQL read contract', () => {
             },
           });
         }
-        if (req.query.includes('LinearReplies')) {
+        if (Effect.pipe(req.query, EffectString.includes('LinearReplies'))) {
           replyCalls++;
           return response({
             comment: {
@@ -139,7 +143,10 @@ describe('Linear GraphQL read contract', () => {
     });
     const result = await client.issueSnapshot(source, issue.id);
     expect(result.comments).toHaveLength(102);
-    expect(result.comments.find(c => c.id === roots[0].id)?.resolvingCommentId).toBe(children[50].id);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(result.comments, c => c.id === roots[0].id))
+        ?.resolvingCommentId,
+    ).toBe(children[50].id);
     expect(rootCalls).toBe(4);
     expect(replyCalls).toBe(4);
     client.close();
@@ -148,7 +155,7 @@ describe('Linear GraphQL read contract', () => {
     const client = createLinearClient(token, {
       fetch: async (url, init) => {
         const req = request(init);
-        if (req.query.includes('LinearComments')) {
+        if (Effect.pipe(req.query, EffectString.includes('LinearComments'))) {
           let rows: unknown[] = [comment(10)];
           if (kind === 'duplicate') rows = [comment(10), comment(10)];
           if (kind === 'missing-parent') rows = [comment(10, uuid(999))];
@@ -177,7 +184,7 @@ describe('Linear GraphQL read contract', () => {
       const client = createLinearClient(token, {
         fetch: async (url, init) => {
           const req = request(init);
-          if (req.query.includes('LinearIssue(')) {
+          if (Effect.pipe(req.query, EffectString.includes('LinearIssue('))) {
             reads++;
             return response({
               issue: {
@@ -202,7 +209,7 @@ describe('Linear GraphQL read contract', () => {
   it('excludes inline discussions explicitly and never mixes orphaned inline replies into issue discussion', async () => {
     const client = createLinearClient(token, {
       fetch: async (url, init) =>
-        request(init).query.includes('LinearComments')
+        Effect.pipe(request(init).query, EffectString.includes('LinearComments'))
           ? response({issue: {id: issue.id, comments: connection([{...comment(10), documentContentId: uuid(900)}])}})
           : safeFetch(url, init),
     });
@@ -214,7 +221,10 @@ describe('Linear GraphQL read contract', () => {
     await expect(client.issueSnapshot(source, issue.id)).rejects.toMatchObject({code: 'deadline-exceeded'});
     client.close();
     const large = createLinearClient(token, {
-      fetch: async () => new Response('x'.repeat(1024 * 1024 + 1), {headers: {'content-type': 'application/json'}}),
+      fetch: async () =>
+        new Response(Effect.pipe('x', EffectString.repeat(1024 * 1024 + 1)), {
+          headers: {'content-type': 'application/json'},
+        }),
     });
     await expect(large.identity()).rejects.toMatchObject({code: 'response-too-large'});
     large.close();

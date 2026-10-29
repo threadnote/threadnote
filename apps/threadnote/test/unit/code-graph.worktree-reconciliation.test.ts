@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -17,8 +18,8 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Database} from 'bun:sqlite';
-import {Clock, Deferred, Effect, Fiber, Layer, Path, Ref} from 'effect';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
+import {Clock, Deferred, Effect, Fiber, Layer, Path, Ref, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {afterEach, describe, expect} from 'vitest';
@@ -56,17 +57,64 @@ import {
   type CodeGraphWorktreeReconciliationDependencies,
   type CodeGraphWorktreeReconciliationResult,
 } from '@threadnote/graph/worktree_reconciliation';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
-const checkoutId = 'a'.repeat(64);
-const repositoryId = 'b'.repeat(64);
-const anchorWorktreeId = 'c'.repeat(64);
-const targetWorktreeId = 'd'.repeat(64);
-const expectedSnapshotId = `cgsn_${'e'.repeat(40)}`;
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
+
+const provenanceRecordSchema = Schema.Struct({
+  registration: Schema.optional(Schema.Struct({kind: Schema.String})),
+  schemaVersion: Schema.optional(Schema.Finite),
+});
+const worktreeReconciliationResultSchema = Schema.Union([
+  Schema.Struct({
+    expectedSnapshotId: Schema.String,
+    nextCursor: Schema.String,
+    retiredSnapshots: Schema.Finite,
+    state: Schema.Literal('removed'),
+    worktreeId: Schema.String,
+  }),
+  Schema.Struct({
+    nextCursor: Schema.optional(Schema.String),
+    reason: Schema.Literals([
+      'already-removed',
+      'anchor-unavailable',
+      'evidence-changed',
+      'external-maintenance',
+      'no-anchor',
+      'no-candidates',
+      'no-missing-candidates',
+      'registered',
+      'registry-changed',
+      'stale-target',
+    ]),
+    state: Schema.Literal('preserved'),
+  }),
+  Schema.Struct({
+    nextCursor: Schema.optional(Schema.String),
+    reason: Schema.Literals(['catalog-unavailable', 'registry-unavailable', 'target-busy', 'writer-busy']),
+    state: Schema.Literal('deferred'),
+  }),
+]);
+
+function isCodeGraphWorktreeReconciliationResult(value: unknown): value is CodeGraphWorktreeReconciliationResult {
+  return Schema.is(worktreeReconciliationResultSchema)(value);
+}
+
+const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
+const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
+const anchorWorktreeId = Effect2.pipe('c', EffectString.repeat(64));
+const targetWorktreeId = Effect2.pipe('d', EffectString.repeat(64));
+const expectedSnapshotId = `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`;
 const privateRoot = '/private/threadnote/repository';
-const registryRootIdentity = 'f'.repeat(64);
+const registryRootIdentity = Effect2.pipe('f', EffectString.repeat(64));
 const boundedMalformedReconciliationCursor = fc
-  .array(fc.constantFrom(...'0123456789abcdefxyz_-'.split('')), {maxLength: 64})
-  .map(characters => characters.join(''))
+  .array(fc.constantFrom(...Effect2.pipe('0123456789abcdefxyz_-', EffectString.split(''))), {maxLength: 64})
+  .map(characters => EffectArray.join(characters, ''))
   .filter(value => !/^[0-9a-f]{64}$/u.test(value));
 const temporaryRoots: string[] = [];
 const storeLayer = CodeGraphStore.layer.pipe(
@@ -87,7 +135,7 @@ const anchor: RepositoryIdentity = {
   checkoutId,
   displayName: 'threadnote/reconciliation-test',
   gitCommonDirectory: `${privateRoot}/.git`,
-  headCommit: '1'.repeat(40),
+  headCommit: Effect2.pipe('1', EffectString.repeat(40)),
   objectFormat: 'sha1',
   repositoryId,
   repoRoot: privateRoot,
@@ -103,17 +151,17 @@ const candidate: CodeGraphWorktreeReconciliationCandidate = {
 const linkedEvidence: Extract<CodeGraphWorktreeReconciliationEvidenceCandidate, {readonly state: 'candidate'}> = {
   canonicalWorktreePath: `${privateRoot}/removed-linked-worktree`,
   checkoutId,
-  evidenceToken: '1'.repeat(64),
-  recordDigest: '2'.repeat(64),
-  recordIdentity: '3'.repeat(64),
-  registration: {adminNameKeys: ['4'.repeat(64)], kind: 'linked'},
+  evidenceToken: Effect2.pipe('1', EffectString.repeat(64)),
+  recordDigest: Effect2.pipe('2', EffectString.repeat(64)),
+  recordIdentity: Effect2.pipe('3', EffectString.repeat(64)),
+  registration: {adminNameKeys: [Effect2.pipe('4', EffectString.repeat(64))], kind: 'linked'},
   repositoryId,
   state: 'candidate',
   worktreeId: targetWorktreeId,
 };
 
 const absentBatch: CodeGraphWorktreeReconciliationAuthorityObservation = {
-  contentDigest: '5'.repeat(64),
+  contentDigest: Effect2.pipe('5', EffectString.repeat(64)),
   entryCount: 0,
   pathStates: ['missing'],
   registryRootIdentity,
@@ -256,7 +304,7 @@ describe('automatic missing-worktree reconciliation', () => {
           overrides: {
             observeAuthority: authoritySequence(absentBatch, {
               ...absentFinal,
-              registryRootIdentity: '6'.repeat(64),
+              registryRootIdentity: Effect2.pipe('6', EffectString.repeat(64)),
             }),
           },
         },
@@ -266,7 +314,9 @@ describe('automatic missing-worktree reconciliation', () => {
         },
         {
           name: 'identity-mismatched anchor',
-          overrides: {resolveAnchor: () => Effect.succeed({...anchor, repositoryId: '7'.repeat(64)})},
+          overrides: {
+            resolveAnchor: () => Effect.succeed({...anchor, repositoryId: Effect2.pipe('7', EffectString.repeat(64))}),
+          },
         },
       ] as const;
 
@@ -293,8 +343,8 @@ describe('automatic missing-worktree reconciliation', () => {
           Effect.succeed(
             Array.from({length: CODE_GRAPH_WORKTREE_RECONCILIATION_CANDIDATE_LIMIT}, (_, index) => ({
               repositoryId,
-              snapshotId: `cgsn_${index.toString(16).padStart(40, '0')}`,
-              worktreeId: index.toString(16).padStart(64, '0'),
+              snapshotId: `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`,
+              worktreeId: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
             })),
           ),
         observeAuthority: () => Ref.update(registryCalls, count => count + 1).pipe(Effect.as(absentBatch)),
@@ -350,8 +400,11 @@ describe('automatic missing-worktree reconciliation', () => {
   effectIt.effect('requires the final missing record to be byte-for-byte the initially admitted evidence', () =>
     Effect.gen(function* () {
       const changedEvidence = [
-        {...linkedEvidence, recordIdentity: '8'.repeat(64)},
-        {...linkedEvidence, registration: {adminNameKeys: ['9'.repeat(64)], kind: 'linked' as const}},
+        {...linkedEvidence, recordIdentity: Effect2.pipe('8', EffectString.repeat(64))},
+        {
+          ...linkedEvidence,
+          registration: {adminNameKeys: [Effect2.pipe('9', EffectString.repeat(64))], kind: 'linked' as const},
+        },
       ] as const;
       for (const changed of changedEvidence) {
         const reads = yield* Ref.make(0);
@@ -380,7 +433,11 @@ describe('automatic missing-worktree reconciliation', () => {
       const dependencies = successfulDependencies({
         readEvidenceCandidate: () =>
           Ref.updateAndGet(reads, count => count + 1).pipe(
-            Effect.map(count => (count === 3 ? {...linkedEvidence, recordDigest: '8'.repeat(64)} : linkedEvidence)),
+            Effect.map(count =>
+              count === 3
+                ? {...linkedEvidence, recordDigest: Effect2.pipe('8', EffectString.repeat(64))}
+                : linkedEvidence,
+            ),
           ),
         removeView: () => Ref.update(removals, count => count + 1).pipe(Effect.as(removedResult())),
       });
@@ -442,7 +499,7 @@ describe('automatic missing-worktree reconciliation', () => {
       const candidates = Array.from({length: 10_000}, (_, index) => ({
         repositoryId,
         snapshotId: `snapshot-${index}`,
-        worktreeId: index.toString(16).padStart(64, '0'),
+        worktreeId: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
       }));
       const listedLimits = yield* Ref.make<number[]>([]);
       const authorityScans = yield* Ref.make(0);
@@ -453,8 +510,8 @@ describe('automatic missing-worktree reconciliation', () => {
           Ref.updateAndGet(authorityScans, count => count + 1).pipe(
             Effect.map(count => ({
               ...absentBatch,
-              pathStates: targets.map(() => 'missing' as const),
-              registryStates: targets.map(() => 'absent' as const),
+              pathStates: EffectArray.map(targets, () => 'missing' as const),
+              registryStates: EffectArray.map(targets, () => 'absent' as const),
               ...(count === 1 ? {} : {entryCount: 0}),
             })),
           ),
@@ -481,7 +538,9 @@ describe('automatic missing-worktree reconciliation', () => {
         const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
         const store = yield* CodeGraphStore;
         yield* store.initialize(databasePath);
-        const worktreeIds = Array.from({length: 70}, (_, index) => index.toString(16).padStart(64, '0'));
+        const worktreeIds = Array.from({length: 70}, (_, index) =>
+          Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+        );
         yield* Effect.sync(() => seedCandidateViews(databasePath, worktreeIds));
 
         const pages = yield* Effect.all(
@@ -490,12 +549,12 @@ describe('automatic missing-worktree reconciliation', () => {
           ),
           {concurrency: 'unbounded'},
         );
-        const claimed = new Set(pages.flatMap(page => page.map(entry => entry.worktreeId)));
-        expect(pages.map(page => page.length).sort((left, right) => left - right)).toEqual([31, 32, 32]);
+        const claimed = new Set(EffectArray.flatMap(pages, page => EffectArray.map(page, entry => entry.worktreeId)));
+        expect(EffectArray.map(pages, page => page.length).sort((left, right) => left - right)).toEqual([31, 32, 32]);
         expect(claimed.size).toBe(69);
         expect(claimed.has(worktreeIds.at(-1)!)).toBe(false);
 
-        const cleanupCursor = 'e'.repeat(64);
+        const cleanupCursor = Effect2.pipe('e', EffectString.repeat(64));
         const repaired = yield* Effect.sync(() => {
           const database = new Database(databasePath, {strict: true});
           try {
@@ -598,7 +657,7 @@ describe('automatic missing-worktree reconciliation', () => {
     TestClock.withLive(
       Effect.gen(function* () {
         const store = yield* CodeGraphStore;
-        const oversized = 'private-cursor-content-'.repeat(4_096);
+        const oversized = Effect2.pipe('private-cursor-content-', EffectString.repeat(4_096));
         const cases = [
           {
             entries: [['worktree_reconciliation_cursor', oversized]] as const,
@@ -612,7 +671,7 @@ describe('automatic missing-worktree reconciliation', () => {
           },
           {
             entries: [
-              ['worktree_reconciliation_cursor', 'a'.repeat(64)],
+              ['worktree_reconciliation_cursor', Effect2.pipe('a', EffectString.repeat(64))],
               ['WORKTREE_RECONCILIATION_CURSOR', 'private-ambiguous-cursor'],
             ] as const,
             name: 'ambiguous key family',
@@ -640,7 +699,9 @@ describe('automatic missing-worktree reconciliation', () => {
           expect(invalid.code, testCase.name).toBe('confirmed-corruption');
           expect(invalid.operation, testCase.name).toBe('claim code graph reconciliation candidates');
           expect(invalid.recovery, testCase.name).toBe('manual-rebuild');
-          expect(JSON.stringify(invalid), testCase.name).not.toContain(testCase.privateValue.slice(0, 32));
+          expect(JSON.stringify(invalid), testCase.name).not.toContain(
+            Effect2.pipe(testCase.privateValue, EffectString.slice(0, 32)),
+          );
           expect(JSON.stringify(invalid), testCase.name).not.toContain(root);
           expect(readSchemaMetadataFamily(databasePath, 'worktree_reconciliation_cursor'), testCase.name).toEqual(
             before,
@@ -662,7 +723,11 @@ describe('automatic missing-worktree reconciliation', () => {
           yield* Effect.sync(() => {
             seedCandidateViews(databasePath, [targetWorktreeId], false);
             if (cleanupCursorRecorded) {
-              insertSchemaMetadata(databasePath, 'removed_view_cleanup_admission_cursor', 'e'.repeat(64));
+              insertSchemaMetadata(
+                databasePath,
+                'removed_view_cleanup_admission_cursor',
+                Effect2.pipe('e', EffectString.repeat(64)),
+              );
             }
           });
           const maximumRows = REMOVED_VIEW_CLEANUP_CURRENT_MAXIMUM_METADATA_ROWS - (cleanupCursorRecorded ? 0 : 1);
@@ -670,17 +735,17 @@ describe('automatic missing-worktree reconciliation', () => {
 
           for (let call = 0; call < 2; call += 1) {
             const claimed = yield* store.claimWorktreeReconciliationCandidates(databasePath, 1);
-            expect(claimed.map(entry => entry.worktreeId)).toEqual([targetWorktreeId]);
+            expect(EffectArray.map(claimed, entry => entry.worktreeId)).toEqual([targetWorktreeId]);
             expect(readSchemaMetadataCount(databasePath)).toBe(maximumRows);
             expect(readReconciliationCursor(databasePath)).toBeUndefined();
           }
           expect(readSchemaMetadataValue(databasePath, 'removed_view_cleanup_admission_cursor')).toBe(
-            cleanupCursorRecorded ? 'e'.repeat(64) : undefined,
+            cleanupCursorRecorded ? Effect2.pipe('e', EffectString.repeat(64)) : undefined,
           );
 
           yield* Effect.sync(() => deleteSchemaMetadata(databasePath, fillerKeys.at(-1)!));
           const claimed = yield* store.claimWorktreeReconciliationCandidates(databasePath, 1);
-          expect(claimed.map(entry => entry.worktreeId)).toEqual([targetWorktreeId]);
+          expect(EffectArray.map(claimed, entry => entry.worktreeId)).toEqual([targetWorktreeId]);
           expect(readSchemaMetadataCount(databasePath)).toBe(maximumRows);
           expect(readReconciliationCursor(databasePath)).toBe(targetWorktreeId);
         }
@@ -693,7 +758,7 @@ describe('automatic missing-worktree reconciliation', () => {
       Effect.gen(function* () {
         const store = yield* CodeGraphStore;
         for (const cleanupCursorRecorded of [false, true]) {
-          for (const legacyCursor of ['a'.repeat(64), 'bounded-malformed-cursor']) {
+          for (const legacyCursor of [Effect2.pipe('a', EffectString.repeat(64)), 'bounded-malformed-cursor']) {
             const root = mkdtempSync(join(tmpdir(), 'threadnote-reconciliation-cursor-legacy-overflow-'));
             temporaryRoots.push(root);
             const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
@@ -701,7 +766,11 @@ describe('automatic missing-worktree reconciliation', () => {
             yield* Effect.sync(() => {
               seedCandidateViews(databasePath, [targetWorktreeId], false);
               if (cleanupCursorRecorded) {
-                insertSchemaMetadata(databasePath, 'removed_view_cleanup_admission_cursor', 'e'.repeat(64));
+                insertSchemaMetadata(
+                  databasePath,
+                  'removed_view_cleanup_admission_cursor',
+                  Effect2.pipe('e', EffectString.repeat(64)),
+                );
               }
             });
             const maximumRows = REMOVED_VIEW_CLEANUP_CURRENT_MAXIMUM_METADATA_ROWS - (cleanupCursorRecorded ? 0 : 1);
@@ -713,12 +782,12 @@ describe('automatic missing-worktree reconciliation', () => {
 
             for (let call = 0; call < 2; call += 1) {
               const claimed = yield* store.claimWorktreeReconciliationCandidates(databasePath, 1);
-              expect(claimed.map(entry => entry.worktreeId)).toEqual([targetWorktreeId]);
+              expect(EffectArray.map(claimed, entry => entry.worktreeId)).toEqual([targetWorktreeId]);
               expect(readSchemaMetadataCount(databasePath)).toBe(maximumRows);
               expect(readReconciliationCursor(databasePath)).toBeUndefined();
             }
             expect(readSchemaMetadataValue(databasePath, 'removed_view_cleanup_admission_cursor')).toBe(
-              cleanupCursorRecorded ? 'e'.repeat(64) : undefined,
+              cleanupCursorRecorded ? Effect2.pipe('e', EffectString.repeat(64)) : undefined,
             );
 
             yield* Effect.sync(() => deleteSchemaMetadata(databasePath, fillerKeys.at(-1)!));
@@ -737,7 +806,9 @@ describe('automatic missing-worktree reconciliation', () => {
         const store = yield* CodeGraphStore;
         const structuralCases = [
           {
-            entries: [['worktree_reconciliation_cursor', 'private-oversized-cursor'.repeat(64)]] as const,
+            entries: [
+              ['worktree_reconciliation_cursor', Effect2.pipe('private-oversized-cursor', EffectString.repeat(64))],
+            ] as const,
             fillerRows: 66,
             name: 'oversized exact key',
           },
@@ -748,7 +819,7 @@ describe('automatic missing-worktree reconciliation', () => {
           },
           {
             entries: [
-              ['worktree_reconciliation_cursor', 'a'.repeat(64)],
+              ['worktree_reconciliation_cursor', Effect2.pipe('a', EffectString.repeat(64))],
               ['WORKTREE_RECONCILIATION_CURSOR', 'private-ambiguous-cursor'],
             ] as const,
             fillerRows: 65,
@@ -763,7 +834,11 @@ describe('automatic missing-worktree reconciliation', () => {
           yield* store.initialize(databasePath);
           yield* Effect.sync(() => {
             seedCandidateViews(databasePath, [targetWorktreeId], false);
-            insertSchemaMetadata(databasePath, 'removed_view_cleanup_admission_cursor', 'e'.repeat(64));
+            insertSchemaMetadata(
+              databasePath,
+              'removed_view_cleanup_admission_cursor',
+              Effect2.pipe('e', EffectString.repeat(64)),
+            );
             fillSchemaMetadataToCount(databasePath, testCase.fillerRows);
             for (const [key, value] of testCase.entries) insertSchemaMetadata(databasePath, key, value);
           });
@@ -781,7 +856,9 @@ describe('automatic missing-worktree reconciliation', () => {
           expect(readSchemaMetadataFamily(databasePath, 'worktree_reconciliation_cursor'), testCase.name).toEqual(
             before,
           );
-          expect(readSchemaMetadataValue(databasePath, 'removed_view_cleanup_admission_cursor')).toBe('e'.repeat(64));
+          expect(readSchemaMetadataValue(databasePath, 'removed_view_cleanup_admission_cursor')).toBe(
+            Effect2.pipe('e', EffectString.repeat(64)),
+          );
         }
       }).pipe(provideTestLayer(storeLayer)),
     ),
@@ -799,7 +876,11 @@ describe('automatic missing-worktree reconciliation', () => {
           const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
           const store = yield* CodeGraphStore;
           yield* store.initialize(databasePath);
-          const worktreeIds = ['0'.repeat(64), '1'.repeat(64), '2'.repeat(64)];
+          const worktreeIds = [
+            Effect2.pipe('0', EffectString.repeat(64)),
+            Effect2.pipe('1', EffectString.repeat(64)),
+            Effect2.pipe('2', EffectString.repeat(64)),
+          ];
           yield* Effect.sync(() => {
             seedCandidateViews(databasePath, worktreeIds, false);
             writeReconciliationCursor(databasePath, malformedCursor);
@@ -808,7 +889,7 @@ describe('automatic missing-worktree reconciliation', () => {
 
           const claimed = yield* store.claimWorktreeReconciliationCandidates(databasePath, 2);
 
-          expect(claimed.map(entry => entry.worktreeId)).toEqual(worktreeIds.slice(0, 2));
+          expect(EffectArray.map(claimed, entry => entry.worktreeId)).toEqual(worktreeIds.slice(0, 2));
           expect(readReconciliationCursor(databasePath)).toBe(worktreeIds[1]);
           expect(readSchemaMetadataCount(databasePath)).toBe(beforeRows);
         }).pipe(provideTestLayer(storeLayer)),
@@ -821,7 +902,10 @@ describe('automatic missing-worktree reconciliation', () => {
     'recovers bounded semantic legacy overflow without consuming either metadata reservation',
     {
       cleanupCursorRecorded: fc.boolean(),
-      legacyCursor: fc.oneof(fc.constant('a'.repeat(64)), boundedMalformedReconciliationCursor),
+      legacyCursor: fc.oneof(
+        fc.constant(Effect2.pipe('a', EffectString.repeat(64))),
+        boundedMalformedReconciliationCursor,
+      ),
     },
     ({cleanupCursorRecorded, legacyCursor}) =>
       TestClock.withLive(
@@ -834,7 +918,11 @@ describe('automatic missing-worktree reconciliation', () => {
           yield* Effect.sync(() => {
             seedCandidateViews(databasePath, [targetWorktreeId], false);
             if (cleanupCursorRecorded) {
-              insertSchemaMetadata(databasePath, 'removed_view_cleanup_admission_cursor', 'e'.repeat(64));
+              insertSchemaMetadata(
+                databasePath,
+                'removed_view_cleanup_admission_cursor',
+                Effect2.pipe('e', EffectString.repeat(64)),
+              );
             }
           });
           const maximumRows = REMOVED_VIEW_CLEANUP_CURRENT_MAXIMUM_METADATA_ROWS - (cleanupCursorRecorded ? 0 : 1);
@@ -849,7 +937,7 @@ describe('automatic missing-worktree reconciliation', () => {
             expect(readReconciliationCursor(databasePath)).toBeUndefined();
           }
           expect(readSchemaMetadataValue(databasePath, 'removed_view_cleanup_admission_cursor')).toBe(
-            cleanupCursorRecorded ? 'e'.repeat(64) : undefined,
+            cleanupCursorRecorded ? Effect2.pipe('e', EffectString.repeat(64)) : undefined,
           );
         }).pipe(provideTestLayer(storeLayer)),
       ),
@@ -864,24 +952,35 @@ describe('automatic missing-worktree reconciliation', () => {
         const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
         const store = yield* CodeGraphStore;
         yield* store.initialize(databasePath);
-        const worktreeIds = Array.from({length: 10_000}, (_, index) => index.toString(16).padStart(64, '0'));
+        const worktreeIds = Array.from({length: 10_000}, (_, index) =>
+          Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+        );
         yield* Effect.sync(() => seedCandidateViews(databasePath, worktreeIds));
 
         const plans = yield* Effect.sync(() => {
           const database = new Database(databasePath, {readonly: true, strict: true});
           try {
-            return (['after', 'through'] as const).flatMap(boundary => {
-              const statement = codeGraphWorktreeReconciliationCandidatePageStatement('7'.repeat(64), boundary, 32);
-              return database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-                readonly detail: string;
-              }[];
+            return EffectArray.flatMap(['after', 'through'] as const, boundary => {
+              const statement = codeGraphWorktreeReconciliationCandidatePageStatement(
+                Effect2.pipe('7', EffectString.repeat(64)),
+                boundary,
+                32,
+              );
+              return database
+                .query<
+                  {
+                    readonly detail: string;
+                  },
+                  SQLQueryBindings[]
+                >(`EXPLAIN QUERY PLAN ${statement.text}`)
+                .all(...statement.parameters);
             });
           } finally {
             database.close(false);
           }
         });
-        expect(plans.some(plan => /active.*(?:INDEX|PRIMARY KEY)/iu.test(plan.detail))).toBe(true);
-        expect(plans.some(plan => /USE TEMP B-TREE/iu.test(plan.detail))).toBe(false);
+        expect(EffectArray.some(plans, plan => /active.*(?:INDEX|PRIMARY KEY)/iu.test(plan.detail))).toBe(true);
+        expect(EffectArray.some(plans, plan => /USE TEMP B-TREE/iu.test(plan.detail))).toBe(false);
 
         yield* Effect.sync(() => tombstoneEveryActiveView(databasePath));
         const firstEmptyPage = yield* store.claimWorktreeReconciliationCandidates(databasePath, 32, {
@@ -899,7 +998,7 @@ describe('automatic missing-worktree reconciliation', () => {
         const sparsePage = yield* store.claimWorktreeReconciliationCandidates(databasePath, 32, {
           waitTimeoutMilliseconds: 0,
         });
-        expect(sparsePage.map(entry => entry.worktreeId)).toEqual([worktreeIds[64]]);
+        expect(EffectArray.map(sparsePage, entry => entry.worktreeId)).toEqual([worktreeIds[64]]);
         expect(readReconciliationCursor(databasePath)).toBe(worktreeIds[95]);
       }).pipe(provideTestLayer(storeLayer)),
     ),
@@ -913,7 +1012,7 @@ describe('automatic missing-worktree reconciliation', () => {
         const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
         const store = yield* CodeGraphStore;
         yield* store.initialize(databasePath);
-        const selectedSnapshotId = `cgsn_${'0'.repeat(40)}`;
+        const selectedSnapshotId = `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`;
         yield* Effect.sync(() => {
           seedCandidateViews(databasePath, [targetWorktreeId], false);
           seedReadyOrphanSnapshots(databasePath, 4_096, 1);
@@ -923,19 +1022,34 @@ describe('automatic missing-worktree reconciliation', () => {
           const database = new Database(databasePath, {readonly: true, strict: true});
           try {
             const statement = codeGraphExactSnapshotRetirementStatement([selectedSnapshotId], now);
-            return database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-              readonly detail: string;
-            }[];
+            return database
+              .query<
+                {
+                  readonly detail: string;
+                },
+                SQLQueryBindings[]
+              >(`EXPLAIN QUERY PLAN ${statement.text}`)
+              .all(...statement.parameters);
           } finally {
             database.close(false);
           }
         });
-        expect(plan.some(row => row.detail.includes('snapshots_base_state_id'))).toBe(true);
-        expect(plan.some(row => row.detail.includes('active_snapshots_snapshot_worktree'))).toBe(true);
-        expect(plan.some(row => row.detail.includes('snapshot_leases_snapshot_expiry'))).toBe(true);
-        expect(plan.some(row => /SCAN (?:active_snapshots|snapshot_leases|snapshots)\b/iu.test(row.detail))).toBe(
-          false,
-        );
+        expect(
+          EffectArray.some(plan, row => Effect2.pipe(row.detail, EffectString.includes('snapshots_base_state_id'))),
+        ).toBe(true);
+        expect(
+          EffectArray.some(plan, row =>
+            Effect2.pipe(row.detail, EffectString.includes('active_snapshots_snapshot_worktree')),
+          ),
+        ).toBe(true);
+        expect(
+          EffectArray.some(plan, row =>
+            Effect2.pipe(row.detail, EffectString.includes('snapshot_leases_snapshot_expiry')),
+          ),
+        ).toBe(true);
+        expect(
+          EffectArray.some(plan, row => /SCAN (?:active_snapshots|snapshot_leases|snapshots)\b/iu.test(row.detail)),
+        ).toBe(false);
 
         const result = yield* store.removeView(databasePath, targetWorktreeId, selectedSnapshotId, {
           requireReconciliationSchema: true,
@@ -962,8 +1076,13 @@ describe('automatic missing-worktree reconciliation', () => {
         const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
         const store = yield* CodeGraphStore;
         yield* store.initialize(databasePath);
-        const worktreeIds = Array.from({length: 5}, (_, index) => String(index + 1).repeat(64));
-        const snapshotIds = Array.from({length: 5}, (_, index) => `cgsn_${index.toString(16).padStart(40, '0')}`);
+        const worktreeIds = Array.from({length: 5}, (_, index) =>
+          Effect2.pipe(String(index + 1), EffectString.repeat(64)),
+        );
+        const snapshotIds = Array.from(
+          {length: 5},
+          (_, index) => `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`,
+        );
         yield* Effect.sync(() => seedCandidateViews(databasePath, worktreeIds, false));
         const leaseToken = yield* store.acquireSnapshotLease(databasePath, snapshotIds[0], 60_000);
         // Lease acquisition legitimately prunes one existing retired page and
@@ -985,10 +1104,10 @@ describe('automatic missing-worktree reconciliation', () => {
         );
         const states = yield* Effect.sync(() => readSnapshotStates(databasePath, snapshotIds));
 
-        expect(results.map(result => ('retiredSnapshots' in result ? result.retiredSnapshots : undefined))).toEqual([
-          0, 0, 0, 0, 1,
-        ]);
-        expect(results.every(result => result.state === 'removed')).toBe(true);
+        expect(
+          EffectArray.map(results, result => ('retiredSnapshots' in result ? result.retiredSnapshots : undefined)),
+        ).toEqual([0, 0, 0, 0, 1]);
+        expect(EffectArray.every(results, result => result.state === 'removed')).toBe(true);
         expect(states).toEqual([
           {id: snapshotIds[0], state: 'ready'},
           {id: snapshotIds[1], state: 'ready'},
@@ -996,7 +1115,7 @@ describe('automatic missing-worktree reconciliation', () => {
           {id: snapshotIds[3], state: 'ready'},
           {id: snapshotIds[4], state: 'retired'},
         ]);
-        const childAfterRemoval = `cgsn_${'d'.repeat(40)}`;
+        const childAfterRemoval = `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`;
         yield* Effect.sync(() => seedReadySnapshotChild(databasePath, snapshotIds[0], childAfterRemoval));
         yield* store.releaseSnapshotLease(databasePath, leaseToken);
         expect(yield* Effect.sync(() => readSnapshotStates(databasePath, [snapshotIds[0], childAfterRemoval]))).toEqual(
@@ -1017,9 +1136,9 @@ describe('automatic missing-worktree reconciliation', () => {
         const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
         const store = yield* CodeGraphStore;
         yield* store.initialize(databasePath);
-        const targetSnapshotId = `cgsn_${'0'.repeat(40)}`;
-        const baseSnapshotId = `cgsn_${'1'.repeat(40)}`;
-        const blockingChildId = `cgsn_${'2'.repeat(40)}`;
+        const targetSnapshotId = `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`;
+        const baseSnapshotId = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+        const blockingChildId = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
         yield* Effect.sync(() => {
           seedCandidateViews(databasePath, [targetWorktreeId], false);
           seedLeaseReleaseCounterexample(databasePath, baseSnapshotId, targetSnapshotId, blockingChildId);
@@ -1054,7 +1173,7 @@ describe('automatic missing-worktree reconciliation', () => {
           const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
           const store = yield* CodeGraphStore;
           yield* store.initialize(databasePath);
-          const snapshotId = `cgsn_${'0'.repeat(40)}`;
+          const snapshotId = `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`;
           yield* Effect.sync(() => seedCandidateViews(databasePath, [targetWorktreeId], false));
           const lease = yield* store.acquireSnapshotLease(databasePath, snapshotId, 60_000);
           const removed = yield* store.removeView(databasePath, targetWorktreeId, snapshotId, {
@@ -1077,7 +1196,7 @@ describe('automatic missing-worktree reconciliation', () => {
           } else {
             expect(state).toEqual({
               activeSnapshotId: snapshotId,
-              removedSnapshotId: `cgsn_${'f'.repeat(40)}`,
+              removedSnapshotId: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`,
               snapshotState: 'ready',
             });
           }
@@ -1094,17 +1213,19 @@ describe('automatic missing-worktree reconciliation', () => {
         const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
         const store = yield* CodeGraphStore;
         yield* store.initialize(databasePath);
-        const rootSnapshotId = `cgsn_${'0'.repeat(40)}`;
-        const immediateBlockerId = `cgsn_${'1'.padStart(40, '0')}`;
-        const tailId = `cgsn_${(10_001).toString(16).padStart(40, '0')}`;
+        const rootSnapshotId = `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`;
+        const immediateBlockerId = `cgsn_${Effect2.pipe('1', EffectString.padStart(40, '0'))}`;
+        const tailId = `cgsn_${Effect2.pipe((10_001).toString(16), EffectString.padStart(40, '0'))}`;
         yield* Effect.sync(() => {
           seedCandidateViews(databasePath, [targetWorktreeId], false);
           seedBlockedDescendantChain(databasePath, rootSnapshotId, 10_001);
         });
         const statement = codeGraphExactSnapshotRetirementStatement([rootSnapshotId], yield* Clock.currentTimeMillis);
         const plan = yield* Effect.sync(() => queryPlan(databasePath, statement));
-        expect(plan.some(row => row.detail.includes('snapshots_base_state_id'))).toBe(true);
-        expect(plan.some(row => /USE TEMP B-TREE|SCAN child/u.test(row.detail))).toBe(false);
+        expect(
+          EffectArray.some(plan, row => Effect2.pipe(row.detail, EffectString.includes('snapshots_base_state_id'))),
+        ).toBe(true);
+        expect(EffectArray.some(plan, row => /USE TEMP B-TREE|SCAN child/u.test(row.detail))).toBe(false);
         expect(statement.text).not.toMatch(/WITH RECURSIVE|descendant/iu);
         expect(statement.text).toMatch(/child\.base_snapshot_id = candidate\.id/u);
 
@@ -1180,9 +1301,12 @@ describe('automatic missing-worktree reconciliation', () => {
               name: 'snapshot self foreign key',
               setup: (databasePath: string) =>
                 rebuildCanonicalTableDefinition(databasePath, 'snapshots', definition =>
-                  definition.replace(
-                    /\s*\)$/u,
-                    ',\n      FOREIGN KEY (base_snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE\n    )',
+                  Effect2.pipe(
+                    definition,
+                    EffectString.replace(
+                      /\s*\)$/u,
+                      ',\n      FOREIGN KEY (base_snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE\n    )',
+                    ),
                   ),
                 ),
             },
@@ -1190,9 +1314,12 @@ describe('automatic missing-worktree reconciliation', () => {
               name: 'altered lifecycle state check',
               setup: (databasePath: string) =>
                 rebuildCanonicalTableDefinition(databasePath, 'snapshots', definition =>
-                  definition.replace(
-                    "state IN ('building', 'ready', 'failed', 'retired')",
-                    "state IN ('building', 'ready', 'failed')",
+                  Effect2.pipe(
+                    definition,
+                    EffectString.replace(
+                      "state IN ('building', 'ready', 'failed', 'retired')",
+                      "state IN ('building', 'ready', 'failed')",
+                    ),
                   ),
                 ),
             },
@@ -1200,9 +1327,12 @@ describe('automatic missing-worktree reconciliation', () => {
               name: 'uppercase lifecycle state literals',
               setup: (databasePath: string) =>
                 rebuildCanonicalTableDefinition(databasePath, 'snapshots', definition =>
-                  definition.replace(
-                    "state IN ('building', 'ready', 'failed', 'retired')",
-                    "state IN ('BUILDING', 'READY', 'FAILED', 'RETIRED')",
+                  Effect2.pipe(
+                    definition,
+                    EffectString.replace(
+                      "state IN ('building', 'ready', 'failed', 'retired')",
+                      "state IN ('BUILDING', 'READY', 'FAILED', 'RETIRED')",
+                    ),
                   ),
                 ),
             },
@@ -1210,16 +1340,25 @@ describe('automatic missing-worktree reconciliation', () => {
               name: 'case-folded schema metadata key',
               setup: (databasePath: string) =>
                 rebuildCanonicalTableDefinition(databasePath, 'schema_metadata', definition =>
-                  definition.replace('key TEXT PRIMARY KEY NOT NULL', 'key TEXT PRIMARY KEY NOT NULL COLLATE NOCASE'),
+                  Effect2.pipe(
+                    definition,
+                    EffectString.replace(
+                      'key TEXT PRIMARY KEY NOT NULL',
+                      'key TEXT PRIMARY KEY NOT NULL COLLATE NOCASE',
+                    ),
+                  ),
                 ),
             },
             {
               name: 'case-folded tombstone equality',
               setup: (databasePath: string) =>
                 rebuildCanonicalTableDefinition(databasePath, 'removed_views', definition =>
-                  definition.replace(
-                    'expected_snapshot_id TEXT NOT NULL',
-                    'expected_snapshot_id TEXT NOT NULL COLLATE NOCASE',
+                  Effect2.pipe(
+                    definition,
+                    EffectString.replace(
+                      'expected_snapshot_id TEXT NOT NULL',
+                      'expected_snapshot_id TEXT NOT NULL COLLATE NOCASE',
+                    ),
                   ),
                 ),
             },
@@ -1237,9 +1376,12 @@ describe('automatic missing-worktree reconciliation', () => {
               name: 'case-folded lease capability key',
               setup: (databasePath: string) =>
                 rebuildCanonicalTableDefinition(databasePath, 'snapshot_leases', definition =>
-                  definition.replace(
-                    'token TEXT PRIMARY KEY NOT NULL',
-                    'token TEXT COLLATE NOCASE PRIMARY KEY NOT NULL',
+                  Effect2.pipe(
+                    definition,
+                    EffectString.replace(
+                      'token TEXT PRIMARY KEY NOT NULL',
+                      'token TEXT COLLATE NOCASE PRIMARY KEY NOT NULL',
+                    ),
                   ),
                 ),
             },
@@ -1261,7 +1403,7 @@ describe('automatic missing-worktree reconciliation', () => {
             temporaryRoots.push(root);
             const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
             const store = yield* CodeGraphStore;
-            const snapshotId = `cgsn_${'0'.repeat(40)}`;
+            const snapshotId = `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`;
             yield* store.initialize(databasePath);
             yield* Effect.sync(() => seedCandidateViews(databasePath, [targetWorktreeId], false));
             expect(yield* store.prepareWorktreeReconciliationIndexes(databasePath), `${mutation.name} control`).toEqual(
@@ -1325,7 +1467,7 @@ describe('automatic missing-worktree reconciliation', () => {
         const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
         const store = yield* CodeGraphStore;
         yield* store.initialize(databasePath);
-        const snapshotId = `cgsn_${'0'.repeat(40)}`;
+        const snapshotId = `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`;
         yield* Effect.sync(() => {
           seedCandidateViews(databasePath, [targetWorktreeId], false);
           executeDatabaseSql(databasePath, 'DROP TABLE snapshot_analysis_summary_receipts');
@@ -1360,7 +1502,7 @@ describe('automatic missing-worktree reconciliation', () => {
         const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
         const store = yield* CodeGraphStore;
         yield* store.initialize(databasePath);
-        const selectedSnapshotId = `cgsn_${'0'.repeat(40)}`;
+        const selectedSnapshotId = `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`;
         yield* Effect.sync(() => seedCandidateViews(databasePath, [targetWorktreeId], false));
         expect(yield* store.claimWorktreeReconciliationCandidates(databasePath, 1)).toHaveLength(1);
 
@@ -1436,7 +1578,7 @@ describe('automatic missing-worktree reconciliation', () => {
         const databasePath = join(root, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
         const store = yield* CodeGraphStore;
         yield* store.initialize(databasePath);
-        const snapshotId = `cgsn_${'0'.repeat(40)}`;
+        const snapshotId = `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`;
         yield* Effect.sync(() => seedCandidateViews(databasePath, [targetWorktreeId], false));
         const refuse = () => Effect.fail(CodeGraphMaintenanceActiveError.of());
 
@@ -1475,10 +1617,10 @@ describe('automatic missing-worktree reconciliation', () => {
         const fixture = yield* createLiveReconciliationFixture('threadnote-reconciliation-live-remove-');
         const observed = yield* observedLiveReconciler;
         const provenanceBefore = readFileSync(fixture.provenancePath, 'utf8');
-        const record = JSON.parse(provenanceBefore) as {
-          readonly registration?: {readonly kind?: string};
-          readonly schemaVersion?: number;
-        };
+        const record: unknown = JSON.parse(provenanceBefore);
+        expect(Schema.is(provenanceRecordSchema)(record)).toBe(true);
+        if (!Schema.is(provenanceRecordSchema)(record))
+          throw TestError.make({message: 'Expected worktree provenance record.'});
         expect(record).toMatchObject({registration: {kind: 'linked'}, schemaVersion: 2});
 
         yield* Effect.sync(() => removeLiveLinkedWorktree(fixture));
@@ -1510,8 +1652,8 @@ describe('automatic missing-worktree reconciliation', () => {
       TestClock.withLive(
         Effect.gen(function* () {
           const fixture = yield* createLiveReconciliationFixture('threadnote-reconciliation-scopes-');
-          const scopeId = `code-graph-scope:${'a'.repeat(64)}`;
-          const scopedSnapshotId = `cgsn_${'8'.repeat(40)}`;
+          const scopeId = `code-graph-scope:${Effect2.pipe('a', EffectString.repeat(64))}`;
+          const scopedSnapshotId = `cgsn_${Effect2.pipe('8', EffectString.repeat(40))}`;
           yield* Effect.sync(() => {
             const database = new Database(fixture.layout.databasePath, {strict: true});
             try {
@@ -1660,11 +1802,11 @@ describe('automatic missing-worktree reconciliation', () => {
         const fixture = yield* createLiveReconciliationFixture('threadnote-reconciliation-process-load-');
         yield* Effect.sync(() => removeLiveLinkedWorktree(fixture));
         const outcomes = yield* Effect.promise(() => runLiveReconciliationContenders(fixture, 8));
-        const removed = outcomes.filter(outcome => outcome.state === 'removed');
+        const removed = EffectArray.filter(outcomes, outcome => outcome.state === 'removed');
 
         expect(removed).toHaveLength(1);
         expect(
-          outcomes.every(outcome => {
+          EffectArray.every(outcomes, outcome => {
             if (outcome.state === 'removed') return true;
             if (outcome.state === 'preserved') {
               return ['already-removed', 'no-candidates', 'stale-target'].includes(outcome.reason);
@@ -1672,7 +1814,12 @@ describe('automatic missing-worktree reconciliation', () => {
             return outcome.reason === 'target-busy' || outcome.reason === 'writer-busy';
           }),
         ).toBe(true);
-        expect(outcomes.every(outcome => !JSON.stringify(outcome).includes(fixture.root))).toBe(true);
+        expect(
+          EffectArray.every(
+            outcomes,
+            outcome => !Effect2.pipe(JSON.stringify(outcome), EffectString.includes(fixture.root)),
+          ),
+        ).toBe(true);
         const view = readViewState(fixture);
         expect(view.activeSnapshotId).toBeUndefined();
         expect(view.removedSnapshotId).toBe(fixture.snapshotId);
@@ -1715,7 +1862,9 @@ describe('automatic missing-worktree reconciliation', () => {
               }
               return {
                 ...absentFinal,
-                registryRootIdentity: predicates.registryRootStable ? absentFinal.registryRootIdentity : '6'.repeat(64),
+                registryRootIdentity: predicates.registryRootStable
+                  ? absentFinal.registryRootIdentity
+                  : Effect2.pipe('6', EffectString.repeat(64)),
                 registryStates: [predicates.finalAbsent ? ('absent' as const) : ('present' as const)],
               };
             }),
@@ -1724,12 +1873,14 @@ describe('automatic missing-worktree reconciliation', () => {
               evidenceReads += 1;
               if (!predicates.linkedRegistration) return {state: 'main'} as const;
               return !predicates.evidenceStable && evidenceReads > 1
-                ? {...linkedEvidence, recordIdentity: '8'.repeat(64)}
+                ? {...linkedEvidence, recordIdentity: Effect2.pipe('8', EffectString.repeat(64))}
                 : linkedEvidence;
             }),
           removeView: () => Ref.update(removals, count => count + 1).pipe(Effect.as(removedResult())),
           resolveAnchor: () =>
-            Effect.succeed(predicates.anchorMatches ? anchor : {...anchor, repositoryId: '7'.repeat(64)}),
+            Effect.succeed(
+              predicates.anchorMatches ? anchor : {...anchor, repositoryId: Effect2.pipe('7', EffectString.repeat(64))},
+            ),
         });
 
         const result = yield* (yield* makeCodeGraphWorktreeReconciler(dependencies)).tick(tick());
@@ -1802,9 +1953,12 @@ function createLiveReconciliationFixture(prefix: string) {
     const mainIdentity = yield* resolveRepositoryIdentity(main);
     const linkedIdentity = yield* resolveRepositoryIdentity(linked);
     const adminPath = yield* Effect.sync(() =>
-      execFileSync('git', ['-C', linked, 'rev-parse', '--path-format=absolute', '--git-dir'], {
-        encoding: 'utf8',
-      }).trim(),
+      Effect2.pipe(
+        execFileSync('git', ['-C', linked, 'rev-parse', '--path-format=absolute', '--git-dir'], {
+          encoding: 'utf8',
+        }),
+        EffectString.trim,
+      ),
     );
     const association = yield* recordVerifiedCodeGraphLocalAssociation(home, linkedIdentity);
     if (association.state !== 'verified') {
@@ -1812,7 +1966,7 @@ function createLiveReconciliationFixture(prefix: string) {
     }
     const path = yield* Path.Path;
     const layout = codeGraphLayout(path, home, linkedIdentity.checkoutId, linkedIdentity.worktreeId);
-    const snapshotId = `cgsn_${'9'.repeat(40)}`;
+    const snapshotId = `cgsn_${Effect2.pipe('9', EffectString.repeat(40))}`;
     const snapshot = {
       commit: linkedIdentity.headCommit,
       completedAt: '2026-08-08T00:00:00.000Z',
@@ -1876,14 +2030,23 @@ function readViewState(fixture: LiveReconciliationFixture): {
   const database = new Database(fixture.layout.databasePath, {readonly: true, strict: true});
   try {
     const active = database
-      .query('SELECT snapshot_id FROM active_snapshots WHERE worktree_id = ?')
-      .get(fixture.linkedIdentity.worktreeId) as {readonly snapshot_id: string} | null;
+      .query<{readonly snapshot_id: string} | null, SQLQueryBindings[]>(
+        'SELECT snapshot_id FROM active_snapshots WHERE worktree_id = ?',
+      )
+      .get(fixture.linkedIdentity.worktreeId);
     const removed = database
-      .query('SELECT expected_snapshot_id FROM removed_views WHERE worktree_id = ?')
-      .get(fixture.linkedIdentity.worktreeId) as {readonly expected_snapshot_id: string} | null;
-    const snapshot = database.query('SELECT state FROM snapshots WHERE id = ?').get(fixture.snapshotId) as {
-      readonly state: string;
-    } | null;
+      .query<{readonly expected_snapshot_id: string} | null, SQLQueryBindings[]>(
+        'SELECT expected_snapshot_id FROM removed_views WHERE worktree_id = ?',
+      )
+      .get(fixture.linkedIdentity.worktreeId);
+    const snapshot = database
+      .query<
+        {
+          readonly state: string;
+        } | null,
+        SQLQueryBindings[]
+      >('SELECT state FROM snapshots WHERE id = ?')
+      .get(fixture.snapshotId);
     return {
       activeSnapshotId: active?.snapshot_id,
       removedSnapshotId: removed?.expected_snapshot_id,
@@ -1939,10 +2102,10 @@ async function runLiveReconciliationContender(
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', chunk => {
-      stdout = `${stdout}${String(chunk)}`.slice(-maximumOutputCharacters);
+      stdout = Effect2.pipe(`${stdout}${String(chunk)}`, EffectString.slice(-maximumOutputCharacters));
     });
     child.stderr.on('data', chunk => {
-      stderr = `${stderr}${String(chunk)}`.slice(-maximumOutputCharacters);
+      stderr = Effect2.pipe(`${stderr}${String(chunk)}`, EffectString.slice(-maximumOutputCharacters));
     });
     const timeout = setTimeout(() => child.kill('SIGKILL'), 20_000);
     child.once('error', error => {
@@ -1951,13 +2114,25 @@ async function runLiveReconciliationContender(
     });
     child.once('close', code => {
       clearTimeout(timeout);
-      const resultLine = stdout.split(/\r?\n/u).find(line => line.startsWith('THREADNOTE_E4_RESULT='));
+      const resultLine = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          Effect2.pipe(stdout, EffectString.split(/\r?\n/u)),
+          __effectArrayValue =>
+            !!(line => Effect2.pipe(line, EffectString.startsWith('THREADNOTE_E4_RESULT=')))(__effectArrayValue),
+        ),
+      );
       if (code !== 0 || resultLine === undefined) {
         reject(TestError.make({message: `E4 contender exited ${String(code)}: ${stderr || stdout}`}));
         return;
       }
       try {
-        resolve(JSON.parse(resultLine.slice('THREADNOTE_E4_RESULT='.length)) as CodeGraphWorktreeReconciliationResult);
+        const result: unknown = JSON.parse(
+          Effect2.pipe(resultLine, EffectString.slice('THREADNOTE_E4_RESULT='.length)),
+        );
+        if (!isCodeGraphWorktreeReconciliationResult(result)) {
+          throw TestError.make({message: 'E4 contender returned an invalid reconciliation result.'});
+        }
+        resolve(result);
       } catch (error) {
         reject(error);
       }
@@ -1968,7 +2143,13 @@ async function runLiveReconciliationContender(
 async function waitForContenderBarrier(barrier: string, count: number, timeoutMilliseconds: number): Promise<void> {
   const deadline = Date.now() + timeoutMilliseconds;
   for (;;) {
-    if (Array.from({length: count}, (_, index) => existsSync(join(barrier, `${index}.ready`))).every(Boolean)) return;
+    if (
+      EffectArray.every(
+        Array.from({length: count}, (_, index) => existsSync(join(barrier, `${index}.ready`))),
+        Boolean,
+      )
+    )
+      return;
     if (Date.now() >= deadline)
       throw TestError.make({message: 'E4 contenders did not reach the shared barrier in time.'});
     await new Promise(resolve => setTimeout(resolve, 5));
@@ -2087,12 +2268,12 @@ function seedCandidateViews(databasePath: string, worktreeIds: readonly string[]
     );
     database.transaction(() => {
       for (const [index, worktreeId] of worktreeIds.entries()) {
-        const snapshotId = `cgsn_${index.toString(16).padStart(40, '0')}`;
+        const snapshotId = `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`;
         insertSnapshot.run(
           snapshotId,
           repositoryId,
           worktreeId,
-          index.toString(16).padStart(40, '0'),
+          Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
           `content-${index}`,
           new Date(index).toISOString(),
           new Date(index + 1).toISOString(),
@@ -2105,7 +2286,7 @@ function seedCandidateViews(databasePath: string, worktreeIds: readonly string[]
           .query('INSERT INTO removed_views (worktree_id, expected_snapshot_id, removed_at) VALUES (?, ?, ?)')
           .run(
             worktreeIds.at(-1)!,
-            `cgsn_${(worktreeIds.length - 1).toString(16).padStart(40, '0')}`,
+            `cgsn_${Effect2.pipe((worktreeIds.length - 1).toString(16), EffectString.padStart(40, '0'))}`,
             new Date().toISOString(),
           );
       }
@@ -2144,9 +2325,14 @@ function readReconciliationCursor(databasePath: string): string | undefined {
 function readSchemaMetadataValue(databasePath: string, key: string): string | undefined {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database.query('SELECT value FROM schema_metadata WHERE key = ? COLLATE BINARY').get(key) as {
-      readonly value: string;
-    } | null;
+    const row = database
+      .query<
+        {
+          readonly value: string;
+        } | null,
+        SQLQueryBindings[]
+      >('SELECT value FROM schema_metadata WHERE key = ? COLLATE BINARY')
+      .get(key);
     return row?.value;
   } finally {
     database.close(false);
@@ -2160,8 +2346,10 @@ function readSchemaMetadataFamily(
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     return database
-      .query('SELECT key, value FROM schema_metadata WHERE key = ? COLLATE NOCASE ORDER BY key')
-      .all(key) as readonly {readonly key: string; readonly value: string}[];
+      .query<{readonly key: string; readonly value: string}, SQLQueryBindings[]>(
+        'SELECT key, value FROM schema_metadata WHERE key = ? COLLATE NOCASE ORDER BY key',
+      )
+      .all(key);
   } finally {
     database.close(false);
   }
@@ -2170,7 +2358,11 @@ function readSchemaMetadataFamily(
 function readSchemaMetadataCount(databasePath: string): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database.query('SELECT COUNT(*) AS count FROM schema_metadata').get() as {readonly count: number};
+    const row = requiredRow(
+      database
+        .query<{readonly count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM schema_metadata')
+        .get(),
+    );
     return Number(row.count);
   } finally {
     database.close(false);
@@ -2204,11 +2396,14 @@ function fillSchemaMetadataToCount(databasePath: string, targetCount: number): r
   const database = new Database(databasePath, {strict: true});
   try {
     const current = Number(
-      (database.query('SELECT COUNT(*) AS count FROM schema_metadata').get() as {count: number}).count,
+      requiredRow(
+        database.query<{count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM schema_metadata').get(),
+      ).count,
     );
     const keys = Array.from(
       {length: Math.max(0, targetCount - current)},
-      (_, index) => `reconciliation_cursor_capacity_${(current + index).toString().padStart(2, '0')}`,
+      (_, index) =>
+        `reconciliation_cursor_capacity_${Effect2.pipe((current + index).toString(), EffectString.padStart(2, '0'))}`,
     );
     const insert = database.prepare('INSERT INTO schema_metadata (key, value) VALUES (?, ?)');
     database.transaction(() => {
@@ -2240,7 +2435,7 @@ function republishLegacyActivePointer(
     if (!exactTombstone) {
       database
         .query('UPDATE removed_views SET expected_snapshot_id = ? WHERE worktree_id = ?')
-        .run(`cgsn_${'f'.repeat(40)}`, worktreeId);
+        .run(`cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`, worktreeId);
     }
     database
       .query('INSERT INTO active_snapshots (worktree_id, snapshot_id, activated_at) VALUES (?, ?, ?)')
@@ -2257,15 +2452,27 @@ function readLegacyRepublishState(
 ): {readonly activeSnapshotId?: string; readonly removedSnapshotId?: string; readonly snapshotState?: string} {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const active = database.query('SELECT snapshot_id FROM active_snapshots WHERE worktree_id = ?').get(worktreeId) as {
-      readonly snapshot_id: string;
-    } | null;
+    const active = database
+      .query<
+        {
+          readonly snapshot_id: string;
+        } | null,
+        SQLQueryBindings[]
+      >('SELECT snapshot_id FROM active_snapshots WHERE worktree_id = ?')
+      .get(worktreeId);
     const removed = database
-      .query('SELECT expected_snapshot_id FROM removed_views WHERE worktree_id = ?')
-      .get(worktreeId) as {readonly expected_snapshot_id: string} | null;
-    const snapshot = database.query('SELECT state FROM snapshots WHERE id = ?').get(snapshotId) as {
-      readonly state: string;
-    } | null;
+      .query<{readonly expected_snapshot_id: string} | null, SQLQueryBindings[]>(
+        'SELECT expected_snapshot_id FROM removed_views WHERE worktree_id = ?',
+      )
+      .get(worktreeId);
+    const snapshot = database
+      .query<
+        {
+          readonly state: string;
+        } | null,
+        SQLQueryBindings[]
+      >('SELECT state FROM snapshots WHERE id = ?')
+      .get(snapshotId);
     return {
       activeSnapshotId: active?.snapshot_id,
       removedSnapshotId: removed?.expected_snapshot_id,
@@ -2289,12 +2496,12 @@ function seedBlockedDescendantChain(databasePath: string, baseSnapshotId: string
     database.transaction(() => {
       let parent = baseSnapshotId;
       for (let index = 1; index <= count; index += 1) {
-        const snapshotId = `cgsn_${index.toString(16).padStart(40, '0')}`;
+        const snapshotId = `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`;
         insert.run(
           snapshotId,
           repositoryId,
-          (index + 20_000).toString(16).padStart(64, '0'),
-          index.toString(16).padStart(40, '0'),
+          Effect2.pipe((index + 20_000).toString(16), EffectString.padStart(64, '0')),
+          Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
           `descendant-content-${index}`,
           parent,
           new Date(index).toISOString(),
@@ -2314,9 +2521,14 @@ function queryPlan(
 ): readonly {readonly detail: string}[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-      readonly detail: string;
-    }[];
+    return database
+      .query<
+        {
+          readonly detail: string;
+        },
+        SQLQueryBindings[]
+      >(`EXPLAIN QUERY PLAN ${statement.text}`)
+      .all(...statement.parameters);
   } finally {
     database.close(false);
   }
@@ -2336,7 +2548,9 @@ function seedIncompatibleDeleteJournalDatabase(databasePath: string): void {
 function readJournalMode(databasePath: string): string {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database.query('PRAGMA journal_mode').get() as {readonly journal_mode: string};
+    const row = requiredRow(
+      database.query<{readonly journal_mode: string}, SQLQueryBindings[]>('PRAGMA journal_mode').get(),
+    );
     return row.journal_mode;
   } finally {
     database.close(false);
@@ -2359,36 +2573,55 @@ function rebuildCanonicalTableDefinition(
 ): void {
   const database = new Database(databasePath, {strict: true});
   try {
-    const row = database.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName) as {
-      readonly sql: string;
-    } | null;
+    const row = database
+      .query<
+        {
+          readonly sql: string;
+        } | null,
+        SQLQueryBindings[]
+      >("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(tableName);
     if (row === null) throw TestError.make({message: `missing canonical table ${tableName}`});
     const changed = mutate(row.sql);
     if (changed === row.sql) throw TestError.make({message: `canonical table mutation did not change ${tableName}`});
     const temporaryTable = `${tableName}_drift_fixture`;
-    const temporaryDefinition = changed.replace(
-      new RegExp(`^CREATE TABLE(?: IF NOT EXISTS)? "?${tableName}"?`, 'u'),
-      `CREATE TABLE ${temporaryTable}`,
+    const temporaryDefinition = Effect2.pipe(
+      changed,
+      EffectString.replace(
+        new RegExp(`^CREATE TABLE(?: IF NOT EXISTS)? "?${tableName}"?`, 'u'),
+        `CREATE TABLE ${temporaryTable}`,
+      ),
     );
     if (temporaryDefinition === changed)
       throw TestError.make({message: `cannot derive temporary table for ${tableName}`});
-    const columns = (
-      database.query(`PRAGMA table_xinfo('${tableName}')`).all() as readonly {
-        readonly hidden: number;
-        readonly name: string;
-      }[]
-    )
-      .filter(column => column.hidden === 0)
-      .map(column => `"${column.name.replaceAll('"', '""')}"`)
-      .join(', ');
-    const dependentDefinitions = database
-      .query<{readonly sql: string}, [string]>(
-        `SELECT sql FROM sqlite_master
+    const columns = EffectArray.join(
+      EffectArray.map(
+        EffectArray.filter(
+          database
+            .query<
+              {
+                readonly hidden: number;
+                readonly name: string;
+              },
+              SQLQueryBindings[]
+            >(`PRAGMA table_xinfo('${tableName}')`)
+            .all(),
+          column => column.hidden === 0,
+        ),
+        column => `"${Effect2.pipe(column.name, EffectString.replaceAll('"', '""'))}"`,
+      ),
+      ', ',
+    );
+    const dependentDefinitions = EffectArray.map(
+      database
+        .query<{readonly sql: string}, [string]>(
+          `SELECT sql FROM sqlite_master
          WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL
          ORDER BY type, name`,
-      )
-      .all(tableName)
-      .map(dependent => dependent.sql);
+        )
+        .all(tableName),
+      dependent => dependent.sql,
+    );
     database.run('PRAGMA foreign_keys = OFF');
     database.run('PRAGMA ignore_check_constraints = ON');
     database.run('BEGIN IMMEDIATE');
@@ -2416,9 +2649,14 @@ function rebuildCanonicalTableDefinition(
 function indexDefinition(databasePath: string, index: string): string | undefined {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?").get(index) as {
-      readonly sql: string;
-    } | null;
+    const row = database
+      .query<
+        {
+          readonly sql: string;
+        } | null,
+        SQLQueryBindings[]
+      >("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
+      .get(index);
     return row?.sql;
   } finally {
     database.close(false);
@@ -2432,11 +2670,15 @@ function extensionDefinitionAndRows(databasePath: string): {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     const definition = database
-      .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'snapshot_analysis_summary_receipts'")
-      .get() as {readonly sql: string} | null;
+      .query<{readonly sql: string} | null, SQLQueryBindings[]>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'snapshot_analysis_summary_receipts'",
+      )
+      .get();
     const rows = database
-      .query('SELECT sentinel, payload FROM snapshot_analysis_summary_receipts ORDER BY sentinel')
-      .all() as readonly {readonly payload: string; readonly sentinel: string}[];
+      .query<{readonly payload: string; readonly sentinel: string}, SQLQueryBindings[]>(
+        'SELECT sentinel, payload FROM snapshot_analysis_summary_receipts ORDER BY sentinel',
+      )
+      .all();
     return {definition: definition?.sql, rows};
   } finally {
     database.close(false);
@@ -2459,12 +2701,12 @@ function seedReadyOrphanSnapshots(databasePath: string, count: number, startInde
     database.transaction(() => {
       for (let offset = 0; offset < count; offset += 1) {
         const index = startIndex + offset;
-        const snapshotId = `cgsn_${index.toString(16).padStart(40, '0')}`;
+        const snapshotId = `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`;
         insertSnapshot.run(
           snapshotId,
           repositoryId,
-          (index + 10_000).toString(16).padStart(64, '0'),
-          index.toString(16).padStart(40, '0'),
+          Effect2.pipe((index + 10_000).toString(16), EffectString.padStart(64, '0')),
+          Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
           `orphan-content-${index}`,
           new Date(index).toISOString(),
           new Date(index + 1).toISOString(),
@@ -2498,7 +2740,7 @@ function seedRetirementProtectionGraph(databasePath: string, snapshotIds: readon
         id,
         repositoryId,
         worktreeId,
-        'f'.repeat(40),
+        Effect2.pipe('f', EffectString.repeat(40)),
         `derived-${id}`,
         baseSnapshotId,
         state,
@@ -2508,16 +2750,16 @@ function seedRetirementProtectionGraph(databasePath: string, snapshotIds: readon
       insertGeneration.run(id, CODE_GRAPH_EXTRACTOR_GENERATION);
     };
     database.transaction(() => {
-      const warmChild = `cgsn_${'a'.repeat(40)}`;
-      insertDerived(warmChild, '6'.repeat(64), snapshotIds[1], 'ready');
+      const warmChild = `cgsn_${Effect2.pipe('a', EffectString.repeat(40))}`;
+      insertDerived(warmChild, Effect2.pipe('6', EffectString.repeat(64)), snapshotIds[1], 'ready');
 
-      insertActive.run('9'.repeat(64), snapshotIds[2], new Date(30_000).toISOString());
+      insertActive.run(Effect2.pipe('9', EffectString.repeat(64)), snapshotIds[2], new Date(30_000).toISOString());
 
-      const retiredIntermediate = `cgsn_${'b'.repeat(40)}`;
-      const activeGrandchild = `cgsn_${'c'.repeat(40)}`;
-      insertDerived(retiredIntermediate, '7'.repeat(64), snapshotIds[3], 'retired');
-      insertDerived(activeGrandchild, '8'.repeat(64), retiredIntermediate, 'ready');
-      insertActive.run('8'.repeat(64), activeGrandchild, new Date(30_001).toISOString());
+      const retiredIntermediate = `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}`;
+      const activeGrandchild = `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`;
+      insertDerived(retiredIntermediate, Effect2.pipe('7', EffectString.repeat(64)), snapshotIds[3], 'retired');
+      insertDerived(activeGrandchild, Effect2.pipe('8', EffectString.repeat(64)), retiredIntermediate, 'ready');
+      insertActive.run(Effect2.pipe('8', EffectString.repeat(64)), activeGrandchild, new Date(30_001).toISOString());
 
       database
         .query(
@@ -2544,7 +2786,13 @@ function seedReadySnapshotChild(databasePath: string, baseSnapshotId: string, ch
              dirty, overlay_fingerprint, 'ready', 0, 0, 0, started_at, completed_at, NULL
            FROM snapshots WHERE id = ?`,
       )
-      .run(childSnapshotId, 'e'.repeat(64), `child-${childSnapshotId}`, baseSnapshotId, baseSnapshotId);
+      .run(
+        childSnapshotId,
+        Effect2.pipe('e', EffectString.repeat(64)),
+        `child-${childSnapshotId}`,
+        baseSnapshotId,
+        baseSnapshotId,
+      );
     database
       .query('INSERT INTO snapshot_extractor_generations (snapshot_id, generation) VALUES (?, ?)')
       .run(childSnapshotId, CODE_GRAPH_EXTRACTOR_GENERATION);
@@ -2574,10 +2822,22 @@ function seedLeaseReleaseCounterexample(
       'INSERT INTO snapshot_extractor_generations (snapshot_id, generation) VALUES (?, ?)',
     );
     database.transaction(() => {
-      clone.run(baseSnapshotId, '3'.repeat(64), `base-${baseSnapshotId}`, null, targetSnapshotId);
+      clone.run(
+        baseSnapshotId,
+        Effect2.pipe('3', EffectString.repeat(64)),
+        `base-${baseSnapshotId}`,
+        null,
+        targetSnapshotId,
+      );
       generation.run(baseSnapshotId, CODE_GRAPH_EXTRACTOR_GENERATION);
       database.query('UPDATE snapshots SET base_snapshot_id = ? WHERE id = ?').run(baseSnapshotId, targetSnapshotId);
-      clone.run(blockingChildId, '4'.repeat(64), `child-${blockingChildId}`, targetSnapshotId, targetSnapshotId);
+      clone.run(
+        blockingChildId,
+        Effect2.pipe('4', EffectString.repeat(64)),
+        `child-${blockingChildId}`,
+        targetSnapshotId,
+        targetSnapshotId,
+      );
       generation.run(blockingChildId, CODE_GRAPH_EXTRACTOR_GENERATION);
     })();
   } finally {
@@ -2589,17 +2849,30 @@ function readExactRetirementState(databasePath: string, selectedSnapshotId: stri
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     const active = database
-      .query('SELECT snapshot_id FROM active_snapshots WHERE worktree_id = ?')
-      .get(targetWorktreeId) as {readonly snapshot_id: string} | null;
+      .query<{readonly snapshot_id: string} | null, SQLQueryBindings[]>(
+        'SELECT snapshot_id FROM active_snapshots WHERE worktree_id = ?',
+      )
+      .get(targetWorktreeId);
     const removed = database
-      .query('SELECT expected_snapshot_id FROM removed_views WHERE worktree_id = ?')
-      .get(targetWorktreeId) as {readonly expected_snapshot_id: string} | null;
-    const selected = database.query('SELECT state FROM snapshots WHERE id = ?').get(selectedSnapshotId) as {
-      readonly state: string;
-    } | null;
-    const ready = database
-      .query("SELECT COUNT(*) AS count FROM snapshots WHERE id <> ? AND state = 'ready'")
-      .get(selectedSnapshotId) as {readonly count: number};
+      .query<{readonly expected_snapshot_id: string} | null, SQLQueryBindings[]>(
+        'SELECT expected_snapshot_id FROM removed_views WHERE worktree_id = ?',
+      )
+      .get(targetWorktreeId);
+    const selected = database
+      .query<
+        {
+          readonly state: string;
+        } | null,
+        SQLQueryBindings[]
+      >('SELECT state FROM snapshots WHERE id = ?')
+      .get(selectedSnapshotId);
+    const ready = requiredRow(
+      database
+        .query<{readonly count: number}, SQLQueryBindings[]>(
+          "SELECT COUNT(*) AS count FROM snapshots WHERE id <> ? AND state = 'ready'",
+        )
+        .get(selectedSnapshotId),
+    );
     return {
       activeSnapshotId: active?.snapshot_id,
       readyOrphans: Number(ready.count),
@@ -2614,12 +2887,17 @@ function readExactRetirementState(databasePath: string, selectedSnapshotId: stri
 function readSnapshotStates(databasePath: string, snapshotIds: readonly string[]) {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const rows = database.query('SELECT id, state FROM snapshots').all() as readonly {
-      readonly id: string;
-      readonly state: string;
-    }[];
-    const stateById = new Map(rows.map(row => [row.id, row.state]));
-    return snapshotIds.map(id => ({id, state: stateById.get(id)}));
+    const rows = database
+      .query<
+        {
+          readonly id: string;
+          readonly state: string;
+        },
+        SQLQueryBindings[]
+      >('SELECT id, state FROM snapshots')
+      .all();
+    const stateById = new Map(EffectArray.map(rows, row => [row.id, row.state]));
+    return EffectArray.map(snapshotIds, id => ({id, state: stateById.get(id)}));
   } finally {
     database.close(false);
   }

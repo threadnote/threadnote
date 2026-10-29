@@ -1,11 +1,14 @@
+import {Array as EffectArray} from 'effect';
 import type {FileLockOwner} from '@threadnote/platform/file/lock';
 import type {ObservedCodeGraphBuildStatus} from '../build_status.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function annotateBuildCoordination(
   statuses: readonly ObservedCodeGraphBuildStatus[],
   lockOwner: FileLockOwner | undefined,
 ): readonly ObservedCodeGraphBuildStatus[] {
-  return statuses.map(status => {
+  return EffectArray.map(statuses, status => {
     const terminal = status.state === 'completed' || status.state === 'failed';
     const progressSilent = status.observation.liveness === 'stalled';
     const legacyQueuedPastLock =
@@ -51,12 +54,14 @@ export function groupBuildStatusesByView(
     group.push(status);
     groups.set(key, group);
   }
-  return [...groups]
-    .map(([, group]) => [group[0].identity.worktreeId, group[0].identity.scopeId, group] as const)
-    .sort(
-      ([leftWorktree, leftScope], [rightWorktree, rightScope]) =>
-        leftWorktree.localeCompare(rightWorktree) || (leftScope ?? '').localeCompare(rightScope ?? ''),
-    );
+  return EffectArray.map(
+    [...groups],
+    ([, group]) => [group[0].identity.worktreeId, group[0].identity.scopeId, group] as const,
+  ).sort(
+    ([leftWorktree, leftScope], [rightWorktree, rightScope]) =>
+      Effect.pipe(leftWorktree, EffectString.localeCompare(rightWorktree)) ||
+      Effect.pipe(leftScope ?? '', EffectString.localeCompare(rightScope ?? '')),
+  );
 }
 
 export function sameProcessOwner(status: ObservedCodeGraphBuildStatus, lockOwner: FileLockOwner): boolean {

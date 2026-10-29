@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
 export {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
 import {Clock, DateTime, Effect, Exit, Schema} from 'effect';
@@ -158,7 +159,7 @@ export function instrumentContextBriefCompilerDependencies<
 
 function contextBriefGraphPhaseOutcome(evidence: ContextBriefGraphEvidenceV1): 'success' | 'unavailable' {
   return !evidence.coverage.complete ||
-    evidence.gaps.some(gap =>
+    EffectArray.some(evidence.gaps, gap =>
       [
         'graph-coverage-incomplete',
         'graph-query-unavailable',
@@ -175,7 +176,7 @@ function contextBriefCodeLinkedMemoryPhaseOutcome(evidence: ContextBriefMemoryRe
   const anchors = evidence.codeAnchorCoverage;
   return anchors === undefined ||
     anchors.resolved === 0 ||
-    evidence.gaps.some(gap =>
+    EffectArray.some(evidence.gaps, gap =>
       [
         'code-anchor-recall-unavailable',
         'code-anchor-ref-unsupported',
@@ -356,12 +357,12 @@ function failedContextBriefCitationValidations(
   candidates: ContextBriefMemoryRetrievalV1['candidates'],
   observedAt: string,
 ): NonNullable<ContextBriefMemoryRetrievalV1['citationValidations']> {
-  return candidates.flatMap(candidate =>
+  return EffectArray.flatMap(candidates, candidate =>
     candidate.codeCitations.length === 0
       ? []
       : [
           {
-            receipts: candidate.codeCitations.map(citation => ({
+            receipts: EffectArray.map(candidate.codeCitations, citation => ({
               candidateCount: 0,
               citationId: citation.id,
               coverage: 'incomplete' as const,
@@ -385,7 +386,7 @@ export function summarizeContextBriefCitationTelemetry(
   candidates: ContextBriefMemoryRetrievalV1['candidates'],
   validations: NonNullable<ContextBriefMemoryRetrievalV1['citationValidations']>,
 ): ContextBriefCitationTelemetrySummary {
-  const validationsByUri = new Map(validations.map(validation => [validation.uri, validation]));
+  const validationsByUri = new Map(EffectArray.map(validations, validation => [validation.uri, validation]));
   let cacheHits = 0;
   let citations = 0;
   let citedMemories = 0;
@@ -403,7 +404,7 @@ export function summarizeContextBriefCitationTelemetry(
     citedMemories += 1;
     const validation = validationsByUri.get(candidate.uri);
     cacheHits += Math.min(validation?.cacheHits ?? 0, candidate.codeCitations.length);
-    const receiptsById = new Map((validation?.receipts ?? []).map(receipt => [receipt.citationId, receipt]));
+    const receiptsById = new Map(EffectArray.map(validation?.receipts ?? [], receipt => [receipt.citationId, receipt]));
     for (const citation of candidate.codeCitations) {
       const receipt = receiptsById.get(citation.id);
       if (receipt?.snapshotId !== undefined && receipt.repositoryId !== undefined) {

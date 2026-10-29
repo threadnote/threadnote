@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_CHECKPOINT_IMPORT_FORMAT_VERSION} from './revision.js';
 
 export const CODE_GRAPH_EMBEDDING_DEMAND_TABLE_SQL = `CREATE TABLE IF NOT EXISTS embedding_demand (
@@ -875,4 +876,7 @@ export const LEGACY_BUILDING_REFERENCES_V3_CONTRACT = {
 } as const satisfies PersistentExtensionTableContract;
 
 export const REMOVED_BETA30_INDEXES = ['snapshot_symbol_lookup_key', 'terms_lookup', 'terms_symbol'] as const;
-export const CODE_GRAPH_PERSISTENT_EXTENSION_TABLE_NAMES = PERSISTENT_EXTENSION_TABLES.map(table => table.name);
+export const CODE_GRAPH_PERSISTENT_EXTENSION_TABLE_NAMES = EffectArray.map(
+  PERSISTENT_EXTENSION_TABLES,
+  table => table.name,
+);

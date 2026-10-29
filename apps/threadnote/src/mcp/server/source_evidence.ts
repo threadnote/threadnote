@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect} from 'effect';
 import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {
@@ -10,6 +11,7 @@ import {resourceStoreLocation} from '../../memory/migrations.js';
 import {EffectMcpServerAdapter, McpInput} from '../../effect/ai/mcp.js';
 import {writeDurableMemory} from './memory.js';
 import {argumentError, mcpErrorResult, requiredText, type RuntimeConfig, withStaleVersionNotice} from './common.js';
+import * as EffectRecord from 'effect/Record';
 
 export function registerSourceEvidenceTools(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   const location = resourceStoreLocation(config);
@@ -31,15 +33,19 @@ export function registerSourceEvidenceTools(server: EffectMcpServerAdapter, conf
           content: [
             {
               type: 'text' as const,
-              text: [
-                'SYNCED SANITIZED SOURCE REVISION',
-                ...Object.entries(inspection)
-                  .filter(([key]) => key !== 'sanitizedContent')
-                  .map(([key, value]) => `${key}: ${value}`),
-                '',
-                'SANITIZED CONTENT',
-                inspection.sanitizedContent,
-              ].join('\n'),
+              text: EffectArray.join(
+                [
+                  'SYNCED SANITIZED SOURCE REVISION',
+                  ...EffectArray.map(
+                    EffectArray.filter(EffectRecord.toEntries(inspection), ([key]) => key !== 'sanitizedContent'),
+                    ([key, value]) => `${key}: ${value}`,
+                  ),
+                  '',
+                  'SANITIZED CONTENT',
+                  inspection.sanitizedContent,
+                ],
+                '\n',
+              ),
             },
           ],
           structuredContent: {type: 'threadnote-source-revision', version: 1, ...inspection},
@@ -74,23 +80,64 @@ export function registerSourceEvidenceTools(server: EffectMcpServerAdapter, conf
       },
     },
     ({fragment, retentionDays, ...input}) => {
-      const checked: Record<keyof typeof input, string> = {...input} as Record<keyof typeof input, string>;
-      for (const key of [
-        'resourceUri',
+      const resourceUri = requiredText(input.resourceUri, 'derive_from_source', 'resourceUri', {
+        resourceUri: '<reviewed value>',
+      });
+      if (!resourceUri.ok) return resourceUri.error;
+      const expectedSourceInstanceId = requiredText(
+        input.expectedSourceInstanceId,
+        'derive_from_source',
         'expectedSourceInstanceId',
-        'expectedAccessHash',
+        {expectedSourceInstanceId: '<reviewed value>'},
+      );
+      if (!expectedSourceInstanceId.ok) return expectedSourceInstanceId.error;
+      const expectedAccessHash = requiredText(input.expectedAccessHash, 'derive_from_source', 'expectedAccessHash', {
+        expectedAccessHash: '<reviewed value>',
+      });
+      if (!expectedAccessHash.ok) return expectedAccessHash.error;
+      const expectedRevisionHash = requiredText(
+        input.expectedRevisionHash,
+        'derive_from_source',
         'expectedRevisionHash',
-        'expectedContentHash',
+        {expectedRevisionHash: '<reviewed value>'},
+      );
+      if (!expectedRevisionHash.ok) return expectedRevisionHash.error;
+      const expectedContentHash = requiredText(input.expectedContentHash, 'derive_from_source', 'expectedContentHash', {
+        expectedContentHash: '<reviewed value>',
+      });
+      if (!expectedContentHash.ok) return expectedContentHash.error;
+      const expectedRendererVersion = requiredText(
+        input.expectedRendererVersion,
+        'derive_from_source',
         'expectedRendererVersion',
+        {expectedRendererVersion: '<reviewed value>'},
+      );
+      if (!expectedRendererVersion.ok) return expectedRendererVersion.error;
+      const expectedSanitizerVersion = requiredText(
+        input.expectedSanitizerVersion,
+        'derive_from_source',
         'expectedSanitizerVersion',
-        'text',
-        'project',
-        'topic',
-      ] as const) {
-        const field = requiredText(input[key], 'derive_from_source', key, {[key]: '<reviewed value>'});
-        if (!field.ok) return field.error;
-        checked[key] = field.value;
-      }
+        {expectedSanitizerVersion: '<reviewed value>'},
+      );
+      if (!expectedSanitizerVersion.ok) return expectedSanitizerVersion.error;
+      const text = requiredText(input.text, 'derive_from_source', 'text', {text: '<reviewed value>'});
+      if (!text.ok) return text.error;
+      const project = requiredText(input.project, 'derive_from_source', 'project', {project: '<reviewed value>'});
+      if (!project.ok) return project.error;
+      const topic = requiredText(input.topic, 'derive_from_source', 'topic', {topic: '<reviewed value>'});
+      if (!topic.ok) return topic.error;
+      const checked = {
+        resourceUri: resourceUri.value,
+        expectedSourceInstanceId: expectedSourceInstanceId.value,
+        expectedAccessHash: expectedAccessHash.value,
+        expectedRevisionHash: expectedRevisionHash.value,
+        expectedContentHash: expectedContentHash.value,
+        expectedRendererVersion: expectedRendererVersion.value,
+        expectedSanitizerVersion: expectedSanitizerVersion.value,
+        text: text.value,
+        project: project.value,
+        topic: topic.value,
+      };
       if (typeof fragment !== 'string' || fragment.length === 0)
         return argumentError('derive_from_source needs an exact non-empty fragment.');
       return Effect.gen(function* () {

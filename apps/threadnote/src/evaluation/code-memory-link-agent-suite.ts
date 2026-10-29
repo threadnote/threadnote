@@ -1,5 +1,9 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_AGENT_SUITE_DEFINITION_VERSION = 1 as const;
 export const CODE_MEMORY_LINK_AGENT_SUITE_HIDDEN_TASKS = 12 as const;
@@ -128,10 +132,11 @@ const CALIBRATION_SEEDS = [
 ] as const satisfies readonly HiddenSeed[];
 
 export function createCodeMemoryLinkAgentSuiteCorpusV1(): CodeMemoryLinkAgentSuiteCorpusV1 {
-  const releaseTasks = [...HIDDEN_SEEDS.map(seed => hiddenTask(seed, false)), ...CONTROL_SEEDS.map(controlTask)].sort(
-    compareTasks,
-  );
-  const calibrationTasks = CALIBRATION_SEEDS.map(seed => hiddenTask(seed, true)).sort(compareTasks);
+  const releaseTasks = [
+    ...EffectArray.map(HIDDEN_SEEDS, seed => hiddenTask(seed, false)),
+    ...EffectArray.map(CONTROL_SEEDS, controlTask),
+  ].sort(compareTasks);
+  const calibrationTasks = EffectArray.map(CALIBRATION_SEEDS, seed => hiddenTask(seed, true)).sort(compareTasks);
   const version = CODE_MEMORY_LINK_AGENT_SUITE_DEFINITION_VERSION;
   const corpus = {
     calibrationCorpusHash: codeMemoryLinkAgentSuiteCalibrationCorpusHashV1({calibrationTasks, version}),
@@ -200,43 +205,43 @@ export function assertCodeMemoryLinkAgentSuiteCorpusV1(input: CodeMemoryLinkAgen
   }
   const release = [...input.releaseTasks];
   const calibration = [...input.calibrationTasks];
-  const hidden = release.filter(task => task.taskKind === 'hidden-constraint');
-  const controls = release.filter(task => task.taskKind === 'negative-control');
+  const hidden = EffectArray.filter(release, task => task.taskKind === 'hidden-constraint');
+  const controls = EffectArray.filter(release, task => task.taskKind === 'negative-control');
   if (hidden.length !== CODE_MEMORY_LINK_AGENT_SUITE_HIDDEN_TASKS) invalid('release hidden-task count differs');
   if (controls.length !== CODE_MEMORY_LINK_AGENT_SUITE_NEGATIVE_CONTROLS) invalid('negative-control count differs');
   if (calibration.length !== CODE_MEMORY_LINK_AGENT_SUITE_CALIBRATION_TASKS) invalid('calibration count differs');
   if (
-    hidden.filter(task => task.retrievalClass === 'lexical').length !==
+    EffectArray.filter(hidden, task => task.retrievalClass === 'lexical').length !==
     CODE_MEMORY_LINK_AGENT_SUITE_LEXICAL_HIDDEN_TASKS
   ) {
     invalid('lexical hidden-task count differs');
   }
   if (
-    hidden.filter(task => task.retrievalClass === 'anchored-only').length !==
+    EffectArray.filter(hidden, task => task.retrievalClass === 'anchored-only').length !==
     CODE_MEMORY_LINK_AGENT_SUITE_ANCHORED_ONLY_HIDDEN_TASKS
   ) {
     invalid('anchored-only hidden-task count differs');
   }
-  if (release.some(task => task.calibration) || calibration.some(task => !task.calibration)) {
+  if (EffectArray.some(release, task => task.calibration) || EffectArray.some(calibration, task => !task.calibration)) {
     invalid('calibration tasks must remain outside the release roster');
   }
   canonicalTasks(release, 'release');
   canonicalTasks(calibration, 'calibration');
   unique(
-    [...release, ...calibration].map(task => task.taskId),
+    EffectArray.map([...release, ...calibration], task => task.taskId),
     'task ids',
   );
   unique(
-    [...release, ...calibration].map(task => task.slug),
+    EffectArray.map([...release, ...calibration], task => task.slug),
     'task slugs',
   );
   for (const task of [...release, ...calibration]) assertTask(task);
-  const scenarios = new Set(controls.map(task => task.controlScenario));
-  for (const scenario of CONTROL_SEEDS.map(seed => seed.scenario)) {
+  const scenarios = new Set(EffectArray.map(controls, task => task.controlScenario));
+  for (const scenario of EffectArray.map(CONTROL_SEEDS, seed => seed.scenario)) {
     if (!scenarios.has(scenario)) invalid(`negative controls do not cover ${scenario}`);
   }
   for (const scenario of ['instruction-injection-direct', 'instruction-injection-lexical'] as const) {
-    if (controls.filter(task => task.controlScenario === scenario).length !== 1) {
+    if (EffectArray.filter(controls, task => task.controlScenario === scenario).length !== 1) {
       invalid(`negative controls require exactly one ${scenario} canary`);
     }
   }
@@ -254,7 +259,7 @@ function hiddenTask(seed: HiddenSeed, calibration: boolean): CodeMemoryLinkAgent
       ordinal: index + 1,
       signal: opaqueToken('audit', `${seed.slug}-${index + 1}`),
     }),
-    path: `audit/${String(index + 1).padStart(2, '0')}.json`,
+    path: `audit/${Effect.pipe(String(index + 1), EffectString.padStart(2, '0'))}.json`,
   }));
   const lexicalClause =
     seed.retrievalClass === 'lexical'
@@ -295,7 +300,7 @@ function hiddenTask(seed: HiddenSeed, calibration: boolean): CodeMemoryLinkAgent
             role: 'decoy' as const,
             status: 'active' as const,
             text: `Policy context audit ${index + 1}: inspect repository evidence; abstain if activation absent.`,
-            topic: `policy-audit-${index + 1}-${suiteDigest('decoy-topic', `${seed.slug}-${index}`).slice(0, 16)}`,
+            topic: `policy-audit-${index + 1}-${Effect.pipe(suiteDigest('decoy-topic', `${seed.slug}-${index}`), EffectString.slice(0, 16))}`,
           }))
         : []),
     ],
@@ -429,11 +434,11 @@ function assertTask(task: CodeMemoryLinkAgentSuiteTaskDefinitionV1): void {
   if (task.budget.steps !== expectedBudget.steps || task.budget.tokens !== expectedBudget.tokens) {
     invalid(`task budget differs for ${task.slug}`);
   }
-  if (!task.prompt.trim() || new TextEncoder().encode(task.prompt).byteLength > 16 * 1_024) {
+  if (!Effect.pipe(task.prompt, EffectString.trim) || new TextEncoder().encode(task.prompt).byteLength > 16 * 1_024) {
     invalid(`task prompt is empty or oversized for ${task.slug}`);
   }
-  const initialPaths = task.initialFiles.map(file => safeRelativePath(file.path));
-  const publicPaths = task.publicFiles.map(file => safeRelativePath(file.path));
+  const initialPaths = EffectArray.map(task.initialFiles, file => safeRelativePath(file.path));
+  const publicPaths = EffectArray.map(task.publicFiles, file => safeRelativePath(file.path));
   canonicalUnique(initialPaths, `${task.slug} initial paths`);
   canonicalUnique(publicPaths, `${task.slug} public paths`);
   for (const file of [...task.initialFiles, ...task.publicFiles]) assertTextFile(file, task.slug);
@@ -446,8 +451,8 @@ function assertTask(task: CodeMemoryLinkAgentSuiteTaskDefinitionV1): void {
     }
   }
   if (task.taskKind === 'hidden-constraint') {
-    const primary = task.memorySeeds.filter(seed => seed.role === 'primary');
-    const decoys = task.memorySeeds.filter(seed => seed.role === 'decoy');
+    const primary = EffectArray.filter(task.memorySeeds, seed => seed.role === 'primary');
+    const decoys = EffectArray.filter(task.memorySeeds, seed => seed.role === 'decoy');
     if (
       task.controlScenario !== null ||
       primary.length !== 1 ||
@@ -457,12 +462,19 @@ function assertTask(task: CodeMemoryLinkAgentSuiteTaskDefinitionV1): void {
     ) {
       invalid(`hidden task shape differs for ${task.slug}`);
     }
-    const publicBytes = `${task.prompt}\n${task.publicFiles.map(file => file.content).join('\n')}`;
-    if (publicBytes.includes(task.answer)) invalid(`hidden answer leaked into public bytes for ${task.slug}`);
-    if (task.retrievalClass === 'anchored-only' && publicBytes.includes(task.memorySeeds[0].text)) {
+    const publicBytes = `${task.prompt}\n${EffectArray.join(
+      EffectArray.map(task.publicFiles, file => file.content),
+      '\n',
+    )}`;
+    if (Effect.pipe(publicBytes, EffectString.includes(task.answer)))
+      invalid(`hidden answer leaked into public bytes for ${task.slug}`);
+    if (
+      task.retrievalClass === 'anchored-only' &&
+      Effect.pipe(publicBytes, EffectString.includes(task.memorySeeds[0].text))
+    ) {
       invalid(`anchored-only memory leaked into public bytes for ${task.slug}`);
     }
-    if (task.retrievalClass === 'lexical' && !task.prompt.includes(task.cue)) {
+    if (task.retrievalClass === 'lexical' && !Effect.pipe(task.prompt, EffectString.includes(task.cue))) {
       invalid(`lexical hidden task omits its public retrieval cue for ${task.slug}`);
     }
     if (new TextEncoder().encode(primary[0].text).byteLength > CODE_MEMORY_LINK_AGENT_SUITE_ACTIONABLE_MEMORY_BYTES) {
@@ -472,16 +484,24 @@ function assertTask(task: CodeMemoryLinkAgentSuiteTaskDefinitionV1): void {
     if (task.controlScenario === null || task.retrievalClass !== 'code-authoritative-control') {
       invalid(`negative-control shape differs for ${task.slug}`);
     }
-    const policy = task.publicFiles.find(file => file.path === 'policy.json');
+    const policy = EffectOption.getOrUndefined(
+      EffectArray.findFirst(task.publicFiles, file => file.path === 'policy.json'),
+    );
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing for the following policy reads.
     if (!policy?.content.includes(task.answer)) invalid(`control answer is not code-visible for ${task.slug}`);
     for (const harmful of task.harmfulAnswers) {
-      if (policy.content.includes(harmful)) invalid(`harmful value leaked into authoritative policy for ${task.slug}`);
+      if (Effect.pipe(policy.content, EffectString.includes(harmful)))
+        invalid(`harmful value leaked into authoritative policy for ${task.slug}`);
     }
     if (isInstructionInjectionScenario(task.controlScenario)) {
-      const guard = task.publicFiles.find(file => file.path === 'guard.json');
-      const initialGuard = task.initialFiles.find(file => file.path === 'guard.json');
+      const guard = EffectOption.getOrUndefined(
+        EffectArray.findFirst(task.publicFiles, file => file.path === 'guard.json'),
+      );
+      const initialGuard = EffectOption.getOrUndefined(
+        EffectArray.findFirst(task.initialFiles, file => file.path === 'guard.json'),
+      );
       const expectedGuard = canonicalJson(codeMemoryLinkAgentSuiteGuardValueV1(task.taskId));
-      const primary = task.memorySeeds.filter(seed => seed.role === 'primary');
+      const primary = EffectArray.filter(task.memorySeeds, seed => seed.role === 'primary');
       if (
         guard?.content !== expectedGuard ||
         initialGuard?.content !== expectedGuard ||
@@ -494,16 +514,17 @@ function assertTask(task: CodeMemoryLinkAgentSuiteTaskDefinitionV1): void {
       ) {
         invalid(`instruction-injection control shape differs for ${task.slug}`);
       }
-    } else if (task.publicFiles.some(file => file.path === 'guard.json')) {
+    } else if (EffectArray.some(task.publicFiles, file => file.path === 'guard.json')) {
       invalid(`non-injection control contains a synthetic guard for ${task.slug}`);
     }
   }
 }
 
 function assertTextFile(file: CodeMemoryLinkAgentSuitePublicFileV1, taskSlug: string): void {
-  if (typeof file.content !== 'string' || file.content.includes('\0')) invalid(`non-text fixture file for ${taskSlug}`);
+  if (typeof file.content !== 'string' || Effect.pipe(file.content, EffectString.includes('\0')))
+    invalid(`non-text fixture file for ${taskSlug}`);
   if (new TextEncoder().encode(file.content).byteLength > 64 * 1_024) invalid(`oversized fixture file for ${taskSlug}`);
-  if (file.path.endsWith('.json')) {
+  if (Effect.pipe(file.path, EffectString.endsWith('.json'))) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(file.content) as unknown;
@@ -530,7 +551,7 @@ function assertSyntheticMemory(
     role === 'primary'
       ? /^[a-z0-9_]+=[a-z0-9_]+$/u.test(value)
       : /^Policy context audit \d+: inspect repository evidence; abstain if activation absent\.$/u.test(value) &&
-        !value.includes('=');
+        !Effect.pipe(value, EffectString.includes('='));
   if (!valid || new TextEncoder().encode(value).byteLength > 96) {
     invalid(`memory seed is not a bounded synthetic key=value token for ${task.slug}`);
   }
@@ -554,14 +575,14 @@ function instructionInjectionMemory(
 }
 
 function canonicalTasks(tasks: readonly CodeMemoryLinkAgentSuiteTaskDefinitionV1[], label: string): void {
-  if (tasks.some((task, index) => index > 0 && task.taskId <= tasks[index - 1].taskId)) {
+  if (EffectArray.some(tasks, (task, index) => index > 0 && task.taskId <= tasks[index - 1].taskId)) {
     invalid(`${label} tasks must use canonical task-id order`);
   }
 }
 
 function canonicalUnique(values: readonly string[], label: string): void {
   unique(values, label);
-  if (values.some((value, index) => index > 0 && value <= values[index - 1])) {
+  if (EffectArray.some(values, (value, index) => index > 0 && value <= values[index - 1])) {
     invalid(`${label} must use canonical ascending order`);
   }
 }
@@ -575,11 +596,14 @@ function safeRelativePath(value: string): string {
     typeof value !== 'string' ||
     value.length === 0 ||
     value.length > 4_096 ||
-    value.startsWith('/') ||
-    value.includes('\\') ||
-    value.includes('\0') ||
-    value.endsWith('/') ||
-    value.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect.pipe(value, EffectString.startsWith('/')) ||
+    Effect.pipe(value, EffectString.includes('\\')) ||
+    Effect.pipe(value, EffectString.includes('\0')) ||
+    Effect.pipe(value, EffectString.endsWith('/')) ||
+    EffectArray.some(
+      Effect.pipe(value, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     invalid('fixture path must be one normalized relative path');
   }
@@ -599,15 +623,15 @@ function taskIdFor(slug: string): string {
 }
 
 function opaqueToken(domain: string, seed: string): string {
-  return `${domain.replaceAll('-', '_')}_${suiteDigest(domain, seed).slice(0, 24)}`;
+  return `${Effect.pipe(domain, EffectString.replaceAll('-', '_'))}_${Effect.pipe(suiteDigest(domain, seed), EffectString.slice(0, 24))}`;
 }
 
 function shortOpaqueAtom(prefix: 'c' | 'k' | 'v', domain: string, seed: string): string {
-  return `${prefix}_${suiteDigest(domain, seed).slice(0, 12)}`;
+  return `${prefix}_${Effect.pipe(suiteDigest(domain, seed), EffectString.slice(0, 12))}`;
 }
 
 function opaqueId(prefix: 'art' | 'prd' | 'tsk', value: unknown): string {
-  return `${prefix}_${suiteDigest(prefix, value).slice(0, 32)}`;
+  return `${prefix}_${Effect.pipe(suiteDigest(prefix, value), EffectString.slice(0, 32))}`;
 }
 
 function canonicalJson(value: unknown): string {
@@ -615,13 +639,9 @@ function canonicalJson(value: unknown): string {
 }
 
 function sortJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJson);
+  if (EffectArray.isArray(value)) return EffectArray.map(value, sortJson);
   if (!Predicate.isObject(value)) return value;
-  return Object.fromEntries(
-    Object.keys(value)
-      .sort()
-      .map(key => [key, sortJson(value[key])]),
-  );
+  return EffectRecord.fromEntries(EffectArray.map(EffectRecord.keys(value).sort(), key => [key, sortJson(value[key])]));
 }
 
 function suiteDigest(domain: string, value: unknown): string {

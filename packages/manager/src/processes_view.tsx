@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {PageActions} from './workspace.js';
 import {Check, Circle, Cpu, GitBranch, Monitor, Plug, RefreshCw, ShieldCheck} from 'lucide-react';
 import {DetailModal} from './detail_modal.js';
@@ -10,6 +11,9 @@ import {
   managerProcessIsActive,
   type ManageableManagerProcess,
 } from '@threadnote/manager/process/contracts';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {pipe as effectPipe} from 'effect';
 
 export function ProcessesPanel(): React.ReactElement {
   const dialogs = useManagerDialogs();
@@ -135,8 +139,16 @@ export function ProcessesPanel(): React.ReactElement {
               <header>
                 <h3>Active operations</h3>
               </header>
-              {displayedProcesses?.some(managerProcessIsActive) ? (
-                displayedProcesses.filter(managerProcessIsActive).map(row)
+              {displayedProcesses !== undefined &&
+              EffectArray.some(displayedProcesses, (process): boolean => managerProcessIsActive(process)) ? (
+                EffectArray.map(
+                  EffectArray.filter(
+                    displayedProcesses,
+                    (__effectFilterValue: (typeof displayedProcesses)[number], __effectFilterIndex: number) =>
+                      __effectFilterIndex in displayedProcesses && managerProcessIsActive(__effectFilterValue),
+                  ),
+                  row,
+                )
               ) : (
                 <p className="workspace-empty">No active background operations.</p>
               )}
@@ -145,8 +157,12 @@ export function ProcessesPanel(): React.ReactElement {
               <header>
                 <h3>Other runtimes</h3>
               </header>
-              {displayedProcesses?.some(process => !managerProcessIsActive(process)) ? (
-                displayedProcesses.filter(process => !managerProcessIsActive(process)).map(row)
+              {displayedProcesses !== undefined &&
+              EffectArray.some(displayedProcesses, process => !managerProcessIsActive(process)) ? (
+                EffectArray.map(
+                  EffectArray.filter(displayedProcesses, process => !managerProcessIsActive(process)),
+                  row,
+                )
               ) : (
                 <p className="workspace-empty">No other runtimes are registered.</p>
               )}
@@ -235,11 +251,18 @@ function processRoleLabel(role: ManageableManagerProcess['role']): string {
 }
 
 function operationLabel(operation: string): string {
-  return operation
-    .split('-')
-    .filter(Boolean)
-    .map((part, index) => (index === 0 ? `${part.slice(0, 1).toUpperCase()}${part.slice(1)}` : part))
-    .join(' ');
+  return EffectArray.join(
+    EffectArray.map(
+      effectPipe(operation, EffectString.split('-'), values =>
+        EffectArray.filter(values, (value, index) => index in values && Boolean(value)),
+      ),
+      (part, index) =>
+        index === 0
+          ? `${Effect.pipe(part, EffectString.slice(0, 1), EffectString.toUpperCase)}${Effect.pipe(part, EffectString.slice(1))}`
+          : part,
+    ),
+    ' ',
+  );
 }
 
 function parentLabel(process: ManageableManagerProcess): string {

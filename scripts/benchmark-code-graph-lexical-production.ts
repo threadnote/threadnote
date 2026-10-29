@@ -1,6 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {DateTime, Effect, FileSystem, Option, Path} from 'effect';
 import {
   codeGraphCompactLexicalDeepAuditStatement,
@@ -20,6 +21,9 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {parseLexicalProductionBenchmarkArguments} from './benchmark-code-graph-lexical-production-arguments.js';
 import {atomicWrite, printJson, scriptArguments} from './effect/script.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ARTIFACT_VERSION = 1 as const;
 const LEGACY_INSERT_BATCH_ROWS = 5_000;
@@ -110,7 +114,7 @@ const benchmark = Effect.scoped(
       queryParity: compactQuery.digest === legacyQuery.digest && compactQuery.responseRows === legacyQuery.responseRows,
       storageReduced: compactStorage.allocatedBytes < legacyStorage.allocatedBytes,
     };
-    if (Object.values(assertions).some(value => !value)) {
+    if (EffectArray.some(EffectRecord.values(assertions), value => !value)) {
       return yield* ScriptError.make({
         message: `Code graph lexical production microbenchmark failed: ${JSON.stringify(assertions)}`,
       });
@@ -307,9 +311,12 @@ function materializeLegacyTerms(
       legacy
         .query(
           `INSERT INTO symbol_terms (snapshot_id, term, symbol_id, weight)
-           VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')}`,
+           VALUES ${EffectArray.join(
+             EffectArray.map(batch, () => '(?, ?, ?, ?)'),
+             ', ',
+           )}`,
         )
-        .run(...batch.flatMap(row => [snapshotId, row.term, row.symbol_id, Number(row.weight)]));
+        .run(...EffectArray.flatMap(batch, row => [snapshotId, row.term, row.symbol_id, Number(row.weight)]));
       postingRows += batch.length;
       transactionRows += batch.length;
       batch = [];
@@ -318,7 +325,9 @@ function materializeLegacyTerms(
     const startedAt = performance.now();
     let next = rows.next();
     while (!next.done) {
-      const row = next.value as {readonly symbol_id: string; readonly term: string; readonly weight: number};
+      const row = next.value;
+      if (!isLegacySymbolTermRow(row))
+        throw ScriptError.make({message: 'Legacy symbol-term scan returned an invalid row.'});
       batch.push(row);
       if (batch.length >= LEGACY_INSERT_BATCH_ROWS) flush();
       next = rows.next();
@@ -340,6 +349,47 @@ function materializeLegacyTerms(
   }
 }
 
+function isLegacySymbolTermRow(
+  value: unknown,
+): value is {readonly symbol_id: string; readonly term: string; readonly weight: number} {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'symbol_id' in value &&
+    typeof value.symbol_id === 'string' &&
+    'term' in value &&
+    typeof value.term === 'string' &&
+    'weight' in value &&
+    typeof value.weight === 'number'
+  );
+}
+
+function isExactValidationMeasurementsRow(value: unknown): value is {
+  readonly expected_posting_count: number;
+  readonly expected_symbol_count: number;
+  readonly expected_term_count: number;
+  readonly posting_count: number;
+  readonly symbol_count: number;
+  readonly term_count: number;
+} {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'expected_posting_count' in value &&
+    typeof value.expected_posting_count === 'number' &&
+    'expected_symbol_count' in value &&
+    typeof value.expected_symbol_count === 'number' &&
+    'expected_term_count' in value &&
+    typeof value.expected_term_count === 'number' &&
+    'posting_count' in value &&
+    typeof value.posting_count === 'number' &&
+    'symbol_count' in value &&
+    typeof value.symbol_count === 'number' &&
+    'term_count' in value &&
+    typeof value.term_count === 'number'
+  );
+}
+
 function compactValidationMeasurements(databasePath: string, snapshotId: string): ExactValidationMeasurements {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
@@ -358,7 +408,14 @@ function compactValidationMeasurements(databasePath: string, snapshotId: string)
       | undefined;
     for (let index = 0; index < 5; index += 1) {
       const startedAt = performance.now();
-      result = query.get(...statement.parameters) as typeof result;
+      const observed: unknown = query.get(...statement.parameters);
+      if (observed === undefined) {
+        result = undefined;
+      } else if (isExactValidationMeasurementsRow(observed)) {
+        result = observed;
+      } else {
+        throw ScriptError.make({message: 'Compact lexical deep audit returned an invalid storage receipt.'});
+      }
       durations.push(performance.now() - startedAt);
     }
     if (result === undefined)
@@ -461,7 +518,7 @@ function storageMeasurements(databasePath: string): StorageMeasurements {
 }
 
 function pragmaInteger(database: Database, name: 'freelist_count' | 'page_count' | 'page_size'): number {
-  const row = database.query(`PRAGMA ${name}`).get() as Record<string, bigint | number> | null;
+  const row = database.query<Record<string, bigint | number> | null, SQLQueryBindings[]>(`PRAGMA ${name}`).get();
   const value = Number(row?.[name] ?? -1);
   if (!Number.isSafeInteger(value) || value < 0)
     throw ScriptError.make({message: `SQLite returned an invalid ${name}.`});
@@ -471,7 +528,9 @@ function pragmaInteger(database: Database, name: 'freelist_count' | 'page_count'
 function sqliteVersion(databasePath: string): string {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database.query('SELECT sqlite_version() AS version').get() as {readonly version?: string} | null;
+    const row = database
+      .query<{readonly version?: string} | null, SQLQueryBindings[]>('SELECT sqlite_version() AS version')
+      .get();
     return row?.version ?? 'unknown';
   } finally {
     database.close(false);
@@ -488,21 +547,21 @@ function lexicalFixture(
 } {
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'lexical-production-micro',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'r'.repeat(64),
-    worktreeId: 'w'.repeat(64),
+    repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
   };
   const fileCount = Math.max(1, Math.ceil(symbolCount / 10));
   const files = Array.from({length: fileCount}, (_, index): CodeGraphInventoryFile => {
-    const fileIndex = String(index).padStart(6, '0');
+    const fileIndex = Effect2.pipe(String(index), EffectString.padStart(6, '0'));
     return {
-      blobId: index.toString(16).padStart(40, '0'),
-      contentHash: index.toString(16).padStart(64, '0'),
+      blobId: Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
+      contentHash: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
       language: 'typescript',
       mode: '100644',
       path: `packages/module-${index % 64}/src/service-${fileIndex}.ts`,
@@ -511,7 +570,7 @@ function lexicalFixture(
     };
   });
   const symbols = Array.from({length: symbolCount}, (_, index): CodeGraphSymbol => {
-    const padded = String(index).padStart(7, '0');
+    const padded = Effect2.pipe(String(index), EffectString.padStart(7, '0'));
     const module = index % 64;
     const file = files[Math.floor(index / 10)];
     const name = `renderPipelineService${padded}`;
@@ -548,7 +607,7 @@ function chunk<A>(values: readonly A[], size: number): readonly (readonly A[])[]
 
 function gitValue(arguments_: readonly string[]): string {
   const result = Bun.spawnSync({cmd: ['git', ...arguments_], stderr: 'ignore', stdout: 'pipe'});
-  return result.exitCode === 0 ? new TextDecoder().decode(result.stdout).trim() : 'unknown';
+  return result.exitCode === 0 ? Effect2.pipe(new TextDecoder().decode(result.stdout), EffectString.trim) : 'unknown';
 }
 
 if (import.meta.main) BunRuntime.runMain(provideScriptLayer(benchmark, ApplicationLayer));

@@ -1,3 +1,6 @@
+import {Schema} from 'effect';
+import {isIntegrationResult} from '@threadnote/manager/api/response-guards';
+import {Array as EffectArray} from 'effect';
 import React, {useState} from 'react';
 import {AlertTriangle, Pause, Pencil, Play, RefreshCw, Unplug} from 'lucide-react';
 import {ActionMenu} from '@threadnote/manager/action-menu';
@@ -10,11 +13,15 @@ import type {IntegrationResult} from '@threadnote/integration-core/manager-contr
 import type {LinearSource} from '../manager-contracts.js';
 import {LinearConnectionForm} from './connection-form.js';
 import {product} from './catalog.js';
+import {Option as EffectOption} from 'effect';
 
 type Connections = {readonly sources: readonly LinearSource[]};
 function matchingSources(data: Connections | undefined, query: string): readonly LinearSource[] {
-  return (data?.sources ?? []).filter(source =>
-    matchesIntegrationQuery(product, query, source.id, source.project ?? ''),
+  const sources = data?.sources ?? [];
+  return EffectArray.filter(
+    sources,
+    (source, __effectArrayIndex) =>
+      __effectArrayIndex in sources && matchesIntegrationQuery(product, query, source.id, source.project ?? ''),
   );
 }
 
@@ -59,13 +66,18 @@ export function LinearIntegrationView({
     setError('');
     setNotice('');
     try {
-      const result = await api<IntegrationResult>('/api/integrations/linear', {
-        action,
-        id: source.id,
-        ...(action === 'set-enabled' ? {enabled: !source.enabled} : {}),
-        apply: true,
-        confirm: true,
-      });
+      const result = await api<IntegrationResult>(
+        '/api/integrations/linear',
+        {
+          action,
+          id: source.id,
+          ...(action === 'set-enabled' ? {enabled: !source.enabled} : {}),
+          apply: true,
+          confirm: true,
+        },
+        undefined,
+        isIntegrationResult,
+      );
       if (action === 'sync-source') setLinearResult(result);
       if (!result.applied) throw new Error('Connection change was not applied.');
       await onChanged(
@@ -91,7 +103,7 @@ export function LinearIntegrationView({
     <>
       {visible ? (
         <>
-          {linearSources.map(source => (
+          {EffectArray.map(linearSources, source => (
             <div className="integration-row" key={'linear-' + source.id}>
               <IntegrationLogo product={product} decorative />
               <div className="integration-row-main">
@@ -162,7 +174,18 @@ export function LinearIntegrationView({
       {connection ? (
         <LinearConnectionForm
           source={connection.value}
-          reusableCredential={!connection.value && (data?.sources.some(source => source.credentialConfigured) ?? false)}
+          reusableCredential={
+            !connection.value &&
+            (EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(data?.sources), __effectArrayReceiver =>
+                EffectArray.some(
+                  __effectArrayReceiver,
+                  __effectArrayValue => !!(source => source.credentialConfigured)(__effectArrayValue),
+                ),
+              ),
+            ) ??
+              false)
+          }
           onClose={closeConnection}
           onSaved={async () => {
             closeConnection();
@@ -181,7 +204,7 @@ export function LinearIntegrationView({
           </p>
           {linearResult.warnings?.length ? (
             <ul className="integration-warnings">
-              {linearResult.warnings.map((warning, index) => (
+              {EffectArray.map(linearResult.warnings, (warning, index) => (
                 <li key={index}>
                   <AlertTriangle /> {warning}
                 </li>
@@ -207,6 +230,42 @@ function integrationStatus(source: Pick<LinearSource, 'enabled' | 'credentialCon
 
 export const linearIntegration = defineIntegration<Connections>({
   product,
+  isData: Schema.is(
+    Schema.Struct({
+      sources: Schema.Array(
+        Schema.Struct({
+          id: Schema.String,
+          enabled: Schema.Boolean,
+          organizationId: Schema.String,
+          principalId: Schema.String,
+          teamIds: Schema.Array(Schema.String),
+          projectIds: Schema.Array(Schema.String),
+          issueIds: Schema.Array(Schema.String),
+          project: Schema.Union([Schema.Null, Schema.String]),
+          credentialEnv: Schema.String,
+          credentialStorage: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Literal('local')])),
+          credentialConfigured: Schema.Boolean,
+          refreshIntervalMinutes: Schema.Finite,
+          maxStaleHours: Schema.Finite,
+          status: Schema.Union([
+            Schema.Literal('active'),
+            Schema.Literal('needs-sync'),
+            Schema.Literal('needs-attention'),
+          ]),
+          issues: Schema.Finite,
+          documents: Schema.Finite,
+          updates: Schema.Finite,
+          chunks: Schema.Finite,
+          lastSyncedAt: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Finite])),
+          nextAttemptAt: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.Finite])),
+          progress: Schema.optionalKey(
+            Schema.Union([Schema.Undefined, Schema.Struct({completed: Schema.Finite, total: Schema.Finite})]),
+          ),
+          coverage: Schema.optionalKey(Schema.Union([Schema.Undefined, Schema.String])),
+        }),
+      ),
+    }),
+  ),
   count: (data, query) => matchingSources(data, query).length,
   View: LinearIntegrationView,
 });

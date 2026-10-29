@@ -1,4 +1,3 @@
-import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
 import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
@@ -9,19 +8,25 @@ import {expect} from 'vitest';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
-import {SystemInfo} from '@threadnote/platform/system';
 import {captureCodeGraphVectorPublication} from '../../src/vector/publication.js';
+import {citationPlatformLayer} from '../helpers/citation-platform.js';
 import {codeGraphLayout} from '../../src/layout.js';
-import type {CodeGraphStoreShape} from '../../src/store.js';
 import type {CodeGraphSnapshot} from '../../src/types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const firstId = `cgsn_${'1'.repeat(40)}`;
-const secondId = `cgsn_${'2'.repeat(40)}`;
+const firstId = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+const secondId = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-publication-fence-'});
-  const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+  const layout = codeGraphLayout(
+    path,
+    home,
+    Effect2.pipe('a', EffectString.repeat(64)),
+    Effect2.pipe('b', EffectString.repeat(64)),
+  );
   const context = yield* Layer.build(SqliteClient.layer({filename: ':memory:'}));
   const sql = Context.get(context, SqlClient.SqlClient);
   yield* sql.unsafe(
@@ -35,11 +40,11 @@ const fixture = Effect.gen(function* () {
   let ready = true;
   const snapshot: CodeGraphSnapshot = {
     id: firstId,
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
     worktreeId: layout.worktreeId,
     state: 'ready',
     dirty: false,
-    commit: 'c'.repeat(40),
+    commit: Effect2.pipe('c', EffectString.repeat(40)),
     extractorSet: 'test',
     fileCount: 0,
     symbolCount: 0,
@@ -49,7 +54,7 @@ const fixture = Effect.gen(function* () {
     withSession: <A, E, R>(_path: string, program: Effect.Effect<A, E, R | SqlClient.SqlClient>) =>
       Effect.provide(program, context),
     readySnapshot: () => Effect.succeed(ready ? snapshot : undefined),
-  } as unknown as CodeGraphStoreShape;
+  };
   const capture = captureCodeGraphVectorPublication({store, layout, threadnoteHome: home, snapshot});
   return {
     sql,
@@ -62,13 +67,7 @@ const fixture = Effect.gen(function* () {
   };
 });
 
-const system = Layer.succeed(SystemInfo, {
-  processId: process.pid,
-  platform: process.platform,
-  processStartIdentity: () => Effect.void,
-  isProcessRunning: () => true,
-} as never);
-effectIt.layer(Layer.merge(BunServices.layer, system))(it => {
+effectIt.layer(citationPlatformLayer)(it => {
   it.effect('holds the actual graph writer gate through attachment commit', () =>
     Effect.gen(function* () {
       const {capture, home, layout} = yield* fixture;

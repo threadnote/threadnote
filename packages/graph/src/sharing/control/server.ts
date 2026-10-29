@@ -34,6 +34,8 @@ import {
 import {adoptPublishedFrontier} from '../frontier.js';
 import {graphShareFrontierDiscoveryTag} from '../namespace.js';
 import {makeGraphControlReader, type GraphControlReaderOptions} from './reader.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const GRAPH_SHARE_PUBLISHER_WATCH_INTERVAL = '5 seconds' as const;
 
@@ -80,15 +82,15 @@ export interface GraphShareControlServerOptions<E = never, R = never> {
 }
 
 export function parseGraphShareListenAddress(value: string): GraphShareListenAddress {
-  const match = /^(127\.0\.0\.1|localhost):(\d{1,5})$/u.exec(value.trim());
-  if (match?.[1] === undefined || match[2] === undefined) {
+  const match = /^(127\.0\.0\.1|localhost):(\d{1,5})$/u.exec(Effect2.pipe(value, EffectString.trim));
+  if (match === null || (match[1] !== '127.0.0.1' && match[1] !== 'localhost') || match[2] === undefined) {
     throw graphSharingFailure('Listen address must be 127.0.0.1:port or localhost:port.');
   }
   const port = Number(match[2]);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
     throw graphSharingFailure('Listen port is invalid.');
   }
-  return {hostname: match[1] as GraphShareListenAddress['hostname'], port};
+  return {hostname: match[1], port};
 }
 
 export const runGraphShareControlServer = Effect.fn('codeGraph.sharing.controlServer')(function* <E, R>(
@@ -236,7 +238,7 @@ const handleGraphShareHttp = (
         HttpServerResponse.jsonUnsafe(
           {
             error:
-              Schema.is(GraphSharingError)(error) && error.message.includes('exceeds')
+              Schema.is(GraphSharingError)(error) && Effect2.pipe(error.message, EffectString.includes('exceeds'))
                 ? 'payload-too-large'
                 : Schema.isSchemaError(error)
                   ? 'invalid-request'
@@ -244,7 +246,7 @@ const handleGraphShareHttp = (
           },
           {
             status:
-              Schema.is(GraphSharingError)(error) && error.message.includes('exceeds')
+              Schema.is(GraphSharingError)(error) && Effect2.pipe(error.message, EffectString.includes('exceeds'))
                 ? 413
                 : Schema.isSchemaError(error)
                   ? 400
@@ -277,7 +279,7 @@ function requestUrlPath(url: string): string {
   try {
     return new URL(url, 'http://127.0.0.1').pathname;
   } catch {
-    return url.split('?')[0] ?? url;
+    return Effect2.pipe(url, EffectString.split('?'))[0] ?? url;
   }
 }
 
@@ -339,7 +341,7 @@ const receiveTag = Effect.fn('codeGraph.sharing.receiveTag')(function* (
   request: HttpServerRequest.HttpServerRequest,
 ) {
   assertGraphShareDiscoveryTag(name);
-  if (!name.startsWith('tn-action-')) {
+  if (!Effect2.pipe(name, EffectString.startsWith('tn-action-'))) {
     return HttpServerResponse.jsonUnsafe({error: 'publisher-operation-forbidden'}, {status: 403});
   }
   yield* readBoundedBody(request, GRAPH_SHARE_CONTROL_MAX_BODY_BYTES);
@@ -412,14 +414,9 @@ const commitCoordinatorDispatch = (
   );
 
 function frontierBranchHash(repositoryId: string, branch: string): string {
-  return graphShareFrontierDiscoveryTag(repositoryId, branch).slice('tn-frontier-'.length);
+  return Effect2.pipe(graphShareFrontierDiscoveryTag(repositoryId, branch), EffectString.slice('tn-frontier-'.length));
 }
 
 function isCoordinatorState(value: unknown, repositoryId: string): value is GraphShareCoordinatorStateV1 {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'repositoryId' in value &&
-    (value as GraphShareCoordinatorStateV1).repositoryId === repositoryId
-  );
+  return typeof value === 'object' && value !== null && 'repositoryId' in value && value.repositoryId === repositoryId;
 }

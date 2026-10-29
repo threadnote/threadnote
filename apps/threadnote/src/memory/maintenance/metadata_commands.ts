@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, FileSystem} from 'effect';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
@@ -13,6 +14,8 @@ import {
 } from '@threadnote/memory/maintenance/metadata';
 import {isMemoryId, memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {MemoryOperationError} from '../migrations.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface MetadataMutationOptionsV1 extends MaintenanceMetadataPatchV1 {
   readonly memoryId?: string;
@@ -114,14 +117,17 @@ export function renderMaintenanceMetadata(
   if (result.status === 'already-applied')
     return `Metadata proposal ${result.proposal.proposalId} was already applied.`;
   if (result.status === 'applied') return `Metadata proposal ${result.proposal.proposalId} applied.`;
-  return [
-    `Metadata preview for ${result.proposal.targetUri}`,
-    `proposal: ${result.proposal.proposalId}`,
-    `revision: ${result.proposal.revision}`,
-    `content_hash: ${result.proposal.expectedContentHash}`,
-    `current: ${JSON.stringify(result.proposal.current)}`,
-    `patch: ${JSON.stringify(result.proposal.patch)}`,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `Metadata preview for ${result.proposal.targetUri}`,
+      `proposal: ${result.proposal.proposalId}`,
+      `revision: ${result.proposal.revision}`,
+      `content_hash: ${result.proposal.expectedContentHash}`,
+      `current: ${JSON.stringify(result.proposal.current)}`,
+      `patch: ${JSON.stringify(result.proposal.patch)}`,
+    ],
+    '\n',
+  );
 }
 
 export function metadataProposalFromPreview(
@@ -131,7 +137,17 @@ export function metadataProposalFromPreview(
 }
 
 function selectorFor(options: MetadataMutationOptionsV1): string {
-  const values = [options.uri?.trim(), options.memoryId?.trim()].filter((value): value is string => Boolean(value));
+  const values = EffectArray.filter(
+    [
+      Effect2.pipe(options.uri, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ),
+      Effect2.pipe(options.memoryId, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ),
+    ],
+    (value): value is string => Boolean(value),
+  );
   if (values.length !== 1)
     throw MemoryOperationError.make({message: 'Provide exactly one target URI or stable memory ID.'});
   const value = values[0];

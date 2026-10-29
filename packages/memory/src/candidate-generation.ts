@@ -9,13 +9,15 @@ import {
   validateTopicGenerationReceipt,
   type TopicGenerationReceiptV1,
 } from './topic-maintenance-generation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class TopicGenerationStorageError extends Schema.TaggedError<TopicGenerationStorageError>()(
-  'TopicGenerationStorageError',
-  {
-    message: Schema.String,
-  },
-) {}
+export class TopicGenerationStorageError extends Schema.TaggedError<
+  TopicGenerationStorageError,
+  {readonly brand: unique symbol}
+>()('TopicGenerationStorageError', {
+  message: Schema.String,
+}) {}
 const unavailable = () =>
   TopicGenerationStorageError.make({message: 'The private generation receipt is unavailable or expired.'});
 const directory = (path: Path.Path, home: string) =>
@@ -50,7 +52,7 @@ export const saveTopicGenerationReceiptUnderLock = Effect.fn('candidate.saveTopi
         const modifiedAt = info.mtime._tag === 'Some' ? info.mtime.value.getTime() : 0;
         entries.push({file, name, modifiedAt});
       }
-      entries.sort((a, b) => a.modifiedAt - b.modifiedAt || a.name.localeCompare(b.name));
+      entries.sort((a, b) => a.modifiedAt - b.modifiedAt || Effect2.pipe(a.name, EffectString.localeCompare(b.name)));
       let remaining = entries.length;
       for (const entry of entries) {
         if (entry.name === receipt.receiptId + '.json') continue;

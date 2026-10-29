@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
 import {Schema} from 'effect';
 
@@ -33,6 +34,9 @@ import {
   loadCodeMemoryLinkCodexSuiteTask,
   type CodeMemoryLinkVerifiedArtifactV1,
 } from './code-memory-link-codex-suite.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const HASH = /^[0-9a-f]{64}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
@@ -99,12 +103,18 @@ async function main(): Promise<void> {
   ) {
     throw new Error('Calibration environment differs from the canonical schedule.');
   }
-  const task = plan.tasks.find(candidate => candidate.packet.taskId === environment.taskId);
+  const task = EffectOption.getOrUndefined(
+    EffectArray.findFirst(plan.tasks, candidate => candidate.packet.taskId === environment.taskId),
+  );
   if (!task) throw new Error('Calibration task is outside the plan roster.');
   const manifest = parseCodeMemoryLinkAgentAbManifestV1(await readJson(join(preparedRoot, 'manifest.json')));
   const registry = parseClientRegistry(await readJson(join(preparedRoot, 'clients.json')));
-  const client = registry.clients.find(candidate => candidate.clientId === environment.clientId);
-  const rostered = manifest.clients.find(candidate => candidate.clientId === environment.clientId);
+  const client = EffectOption.getOrUndefined(
+    EffectArray.findFirst(registry.clients, candidate => candidate.clientId === environment.clientId),
+  );
+  const rostered = EffectOption.getOrUndefined(
+    EffectArray.findFirst(manifest.clients, candidate => candidate.clientId === environment.clientId),
+  );
   if (!client || !rostered || !plan.clients.includes(environment.clientId)) {
     throw new Error('Calibration client is outside the prepared roster.');
   }
@@ -240,7 +250,7 @@ function completedDiagnostic(
   const finalStates = classifyFinalStates(plan, environment.taskId, output.rawEvidence.finalPublicArtifacts);
   return sealDiagnostic({
     environment,
-    contextBriefGoldCitationMatched: projection.contextBriefCalls.some(call => call.goldCitationMatched),
+    contextBriefGoldCitationMatched: EffectArray.some(projection.contextBriefCalls, call => call.goldCitationMatched),
     contextBriefProtocolAdhered: projection.contextBriefProtocolAdhered,
     contextBriefResponseClass: onlyCall?.responseClass ?? null,
     evidenceHash: output.rawEvidence.evidenceHash,
@@ -284,26 +294,44 @@ function classifyFinalStates(
   readonly mutation: Exclude<CalibrationDiagnosticV1['finalMutationState'], null>;
   readonly result: Exclude<CalibrationDiagnosticV1['finalResultState'], null>;
 } {
-  const initialFiles = plan.fixtureFiles
-    .filter(entry => entry.taskId === taskId && entry.scope === 'repository')
-    .map(mapping => {
-      const artifact = plan.fixture.artifacts.find(candidate => candidate.artifactId === mapping.artifactId);
+  const initialFiles = EffectArray.map(
+    EffectArray.filter(plan.fixtureFiles, entry => entry.taskId === taskId && entry.scope === 'repository'),
+    mapping => {
+      const artifact = EffectOption.getOrUndefined(
+        EffectArray.findFirst(plan.fixture.artifacts, candidate => candidate.artifactId === mapping.artifactId),
+      );
       if (!artifact) throw new Error('Calibration repository fixture artifact is missing.');
       return {path: mapping.destination, sha256: artifact.sha256};
-    });
+    },
+  );
   const mutation = classifyCodeMemoryLinkCalibrationMutationV1({finalArtifacts, initialFiles});
-  const mapping = plan.fixtureFiles.find(
-    entry => entry.taskId === taskId && entry.scope === 'repository' && entry.destination === 'result.json',
+  const mapping = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      plan.fixtureFiles,
+      entry => entry.taskId === taskId && entry.scope === 'repository' && entry.destination === 'result.json',
+    ),
   );
   if (!mapping) throw new Error('Calibration task has no result.json fixture mapping.');
-  const initial = plan.fixture.artifacts.find(artifact => artifact.artifactId === mapping.artifactId);
-  if (!initial) throw new Error('Calibration result.json fixture artifact is missing.');
-  const final = finalArtifacts.find(artifact => artifact.pathDigest === publicPathDigest('result.json'));
-  if (!final) return {mutation, result: 'missing'};
-  const task = plan.tasks.find(candidate => candidate.packet.taskId === taskId);
-  const resultPredicate = task?.rubric.predicates.find(
-    predicate => predicate.roles.includes('task-pass') && predicate.assertion.kind === 'json-equals',
+  const initial = EffectOption.getOrUndefined(
+    EffectArray.findFirst(plan.fixture.artifacts, artifact => artifact.artifactId === mapping.artifactId),
   );
+  if (!initial) throw new Error('Calibration result.json fixture artifact is missing.');
+  const final = EffectOption.getOrUndefined(
+    EffectArray.findFirst(finalArtifacts, artifact => artifact.pathDigest === publicPathDigest('result.json')),
+  );
+  if (!final) return {mutation, result: 'missing'};
+  const task = EffectOption.getOrUndefined(
+    EffectArray.findFirst(plan.tasks, candidate => candidate.packet.taskId === taskId),
+  );
+  const resultPredicate =
+    task === undefined
+      ? undefined
+      : EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            task.rubric.predicates,
+            predicate => predicate.roles.includes('task-pass') && predicate.assertion.kind === 'json-equals',
+          ),
+        );
   if (!resultPredicate || resultPredicate.assertion.kind !== 'json-equals') {
     throw new Error('Calibration task has no JSON result predicate.');
   }
@@ -316,17 +344,21 @@ export function classifyCodeMemoryLinkCalibrationMutationV1(input: {
   readonly finalArtifacts: readonly {readonly contentSha256: string; readonly pathDigest: string}[];
   readonly initialFiles: readonly {readonly path: string; readonly sha256: string}[];
 }): Exclude<CalibrationDiagnosticV1['finalMutationState'], null> {
-  const initialByDigest = new Map(input.initialFiles.map(file => [publicPathDigest(file.path), file.sha256]));
-  const finalByDigest = new Map(input.finalArtifacts.map(file => [file.pathDigest, file.contentSha256]));
+  const initialByDigest = new Map(
+    EffectArray.map(input.initialFiles, file => [publicPathDigest(file.path), file.sha256]),
+  );
+  const finalByDigest = new Map(EffectArray.map(input.finalArtifacts, file => [file.pathDigest, file.contentSha256]));
   const resultDigest = publicPathDigest('result.json');
   const auditDigest = publicPathDigest('audit.json');
   const resultChanged = finalByDigest.get(resultDigest) !== initialByDigest.get(resultDigest);
   const auditChanged = finalByDigest.has(auditDigest);
   const otherChanged =
-    [...initialByDigest].some(
+    EffectArray.some(
+      [...initialByDigest],
       ([pathDigest, contentSha256]) => pathDigest !== resultDigest && finalByDigest.get(pathDigest) !== contentSha256,
     ) ||
-    [...finalByDigest].some(
+    EffectArray.some(
+      [...finalByDigest],
       ([pathDigest, contentSha256]) =>
         pathDigest !== resultDigest && pathDigest !== auditDigest && initialByDigest.get(pathDigest) !== contentSha256,
     );
@@ -349,11 +381,11 @@ async function calibrationFixture(
   readonly repository: readonly CodeMemoryLinkVerifiedArtifactV1[];
   readonly threadnoteHome: readonly CodeMemoryLinkVerifiedArtifactV1[];
 }> {
-  const artifacts = new Map(plan.fixture.artifacts.map(artifact => [artifact.artifactId, artifact]));
+  const artifacts = new Map(EffectArray.map(plan.fixture.artifacts, artifact => [artifact.artifactId, artifact]));
   const loaded = await Promise.all(
-    plan.fixtureFiles
-      .filter(mapping => mapping.taskId === taskId)
-      .map(async mapping => {
+    EffectArray.map(
+      EffectArray.filter(plan.fixtureFiles, mapping => mapping.taskId === taskId),
+      async mapping => {
         const descriptor = artifacts.get(mapping.artifactId);
         if (!descriptor) throw new Error('Calibration fixture mapping is outside the artifact roster.');
         const bytes = new Uint8Array(await readFile(joinRoot(root, mapping.source)));
@@ -369,13 +401,20 @@ async function calibrationFixture(
           } satisfies CodeMemoryLinkVerifiedArtifactV1,
           scope: mapping.scope,
         };
-      }),
+      },
+    ),
   );
-  const repository = loaded.filter(item => item.scope === 'repository').map(item => item.artifact);
+  const repository = EffectArray.map(
+    EffectArray.filter(loaded, item => item.scope === 'repository'),
+    item => item.artifact,
+  );
   if (repository.length === 0) throw new Error('Calibration task has no repository fixture.');
   return {
     repository,
-    threadnoteHome: loaded.filter(item => item.scope === 'threadnote-home').map(item => item.artifact),
+    threadnoteHome: EffectArray.map(
+      EffectArray.filter(loaded, item => item.scope === 'threadnote-home'),
+      item => item.artifact,
+    ),
   };
 }
 
@@ -473,9 +512,9 @@ async function readDiagnostics(path: string): Promise<readonly CalibrationDiagno
     if (isMissing(cause)) return [];
     throw cause;
   }
-  return text
-    .split(/\r?\n/u)
-    .flatMap(line => (line.length === 0 ? [] : [parseDiagnostic(JSON.parse(line) as unknown)]));
+  return EffectArray.flatMap(Effect.pipe(text, EffectString.split(/\r?\n/u)), line =>
+    line.length === 0 ? [] : [parseDiagnostic(JSON.parse(line) as unknown)],
+  );
 }
 
 function parseDiagnostic(value: unknown): CalibrationDiagnosticV1 {
@@ -503,7 +542,7 @@ function parseDiagnostic(value: unknown): CalibrationDiagnosticV1 {
     'totalTaskUsage',
     'version',
   ].sort();
-  if (JSON.stringify(Object.keys(diagnostic).sort()) !== JSON.stringify(expected)) {
+  if (JSON.stringify(EffectRecord.keys(diagnostic).sort()) !== JSON.stringify(expected)) {
     throw new Error('Calibration diagnostic has unsupported fields.');
   }
   if (
@@ -566,7 +605,7 @@ function parseDiagnostic(value: unknown): CalibrationDiagnosticV1 {
 function parseUsage(value: unknown): {readonly steps: number; readonly tokens: number} | null {
   if (value === null) return null;
   const usage = record(value, 'calibration usage');
-  if (JSON.stringify(Object.keys(usage).sort()) !== JSON.stringify(['steps', 'tokens'])) {
+  if (JSON.stringify(EffectRecord.keys(usage).sort()) !== JSON.stringify(['steps', 'tokens'])) {
     throw new Error('Calibration usage has unsupported fields.');
   }
   return {steps: integer(usage.steps, 'calibration steps'), tokens: integer(usage.tokens, 'calibration tokens')};
@@ -576,7 +615,7 @@ function parseEventSummary(value: unknown): CodeMemoryLinkCodexTerminalDiagnosti
   if (value === null) return null;
   const summary = record(value, 'calibration event summary');
   if (
-    JSON.stringify(Object.keys(summary).sort()) !==
+    JSON.stringify(EffectRecord.keys(summary).sort()) !==
       JSON.stringify(['completedItems', 'contextBriefCallStarts', 'startedItems', 'totalTaskUsage', 'version']) ||
     summary.version !== 1
   ) {
@@ -605,7 +644,7 @@ function parseItemCounts(value: unknown, label: string): CodeMemoryLinkCodexTerm
     'reasoning',
     'userMessage',
   ];
-  if (JSON.stringify(Object.keys(counts).sort()) !== JSON.stringify(fields)) {
+  if (JSON.stringify(EffectRecord.keys(counts).sort()) !== JSON.stringify(fields)) {
     throw new Error(`${label} item counts have unsupported fields.`);
   }
   return {
@@ -623,7 +662,8 @@ function parseItemCounts(value: unknown, label: string): CodeMemoryLinkCodexTerm
 function parseEnvironment(environment: NodeJS.ProcessEnv): CalibrationEnvironment {
   const value = (name: string): string => {
     const observed = environment[name];
-    if (!observed || observed.trim() !== observed) throw new Error(`Missing calibration environment ${name}.`);
+    if (!observed || Effect.pipe(observed, EffectString.trim) !== observed)
+      throw new Error(`Missing calibration environment ${name}.`);
     return observed;
   };
   const arm = value('THREADNOTE_CODE_MEMORY_LINK_CALIBRATION_ARM');
@@ -676,7 +716,7 @@ function blindArm(arm: CalibrationEnvironment['arm']): {readonly label: 'X' | 'Y
 }
 
 function opaqueId(prefix: 'inv' | 'run', input: string): string {
-  return `${prefix}_${sha256HexSync(input).slice(0, 32)}`;
+  return `${prefix}_${Effect.pipe(sha256HexSync(input), EffectString.slice(0, 32))}`;
 }
 
 function diagnosticHash(value: unknown): string {
@@ -695,14 +735,14 @@ async function canonicalDirectory(path: string, label: string): Promise<string> 
 
 function joinRoot(root: string, relative: string): string {
   const path = resolve(root, relative);
-  if (path !== root && !path.startsWith(`${root}/`)) throw new Error('Calibration path escapes its root.');
+  if (path !== root && !Effect.pipe(path, EffectString.startsWith(`${root}/`)))
+    throw new Error('Calibration path escapes its root.');
   return path;
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object.`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error(`${label} must be an object.`);
+  return value;
 }
 
 function matching(value: unknown, pattern: RegExp, label: string): string {
@@ -717,7 +757,11 @@ function integer(value: unknown, label: string): number {
 }
 
 function absolute(value: string, label: string): string {
-  if (!value.startsWith('/') || resolve(value) !== value || value.includes('\0')) {
+  if (
+    !Effect.pipe(value, EffectString.startsWith('/')) ||
+    resolve(value) !== value ||
+    Effect.pipe(value, EffectString.includes('\0'))
+  ) {
     throw new Error(`${label} must be normalized and absolute.`);
   }
   return value;

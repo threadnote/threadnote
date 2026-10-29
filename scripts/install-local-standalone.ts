@@ -1,3 +1,5 @@
+import {isJsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray} from 'effect';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
@@ -44,6 +46,8 @@ import {
   type DevelopmentInstallReceiptV1,
   type DevelopmentRuntimeEvidence,
 } from './development-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ROOT_URL = new URL('..', import.meta.url);
 const GIT_COMMIT_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
@@ -177,7 +181,7 @@ export const installLocalStandalone = Effect.fn('developmentInstall.run')(functi
     ],
     {concurrency: 2},
   );
-  const commit = sourceCommit.stdout.trim();
+  const commit = Effect2.pipe(sourceCommit.stdout, EffectString.trim);
   if (!GIT_COMMIT_PATTERN.test(commit)) {
     return yield* ScriptError.make({message: 'The Threadnote checkout did not resolve to an exact Git commit.'});
   }
@@ -251,7 +255,8 @@ export const installLocalStandalone = Effect.fn('developmentInstall.run')(functi
         `${result.preservedMcpSessionProcesses} live MCP session process(es) remain safely pinned and will promote behind their stable transport.`,
       );
     }
-    const processStateUnknown = result.cleanupIssues.some(
+    const processStateUnknown = EffectArray.some(
+      result.cleanupIssues,
       (issue: LocalStandaloneCleanupIssue) => issue === 'process-inspection' || issue === 'process-termination',
     );
     yield* Console.log(
@@ -263,7 +268,7 @@ export const installLocalStandalone = Effect.fn('developmentInstall.run')(functi
     );
     if (!result.cleanupComplete) {
       yield* Console.log(
-        `Managed cleanup is incomplete (${result.cleanupIssues.join(', ') || 'superseded processes remain'}); ` +
+        `Managed cleanup is incomplete (${EffectArray.join(result.cleanupIssues, ', ') || 'superseded processes remain'}); ` +
           'rerun the exact-HEAD installer after active work finishes.',
       );
     }
@@ -284,7 +289,7 @@ const verifyCleanSourceState = Effect.fn('developmentInstall.verifyCleanSourceSt
     ],
     {concurrency: 2},
   );
-  if (commit.stdout.trim() !== expectedCommit || status.stdout.length > 0) {
+  if (Effect2.pipe(commit.stdout, EffectString.trim) !== expectedCommit || status.stdout.length > 0) {
     return yield* ScriptError.make({message: 'The Threadnote checkout changed before development activation.'});
   }
 });
@@ -296,7 +301,9 @@ export const developmentSourceCheckoutId = Effect.fn('developmentInstall.sourceC
   const system = yield* SystemInfo;
   const canonicalSourceRoot = yield* fs.realPath(sourceRoot);
   const normalizedSourceRoot =
-    system.platform === 'win32' ? canonicalSourceRoot.toLocaleLowerCase('en-US') : canonicalSourceRoot;
+    system.platform === 'win32'
+      ? Effect2.pipe(canonicalSourceRoot, EffectString.toLocaleLowerCase('en-US'))
+      : canonicalSourceRoot;
   return yield* sha256Hex(`threadnote-development-source-checkout-v1\0${normalizedSourceRoot}`);
 });
 
@@ -452,28 +459,39 @@ export const readDevelopmentRuntimeOwner = Effect.fn('developmentInstall.readRun
   return value === undefined ? 'invalid' : parseDevelopmentRuntimeOwner(value);
 });
 
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && SHA256_PATTERN.test(value);
+}
+
 function parseDevelopmentRuntimeOwner(value: unknown): DevelopmentRuntimeOwnershipState {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 'invalid';
-  const candidate = value as {
-    readonly ownershipRevision?: unknown;
-    readonly schemaVersion?: unknown;
-    readonly sourceCheckoutId?: unknown;
-    readonly version?: unknown;
-  };
-  const commonValid =
-    typeof candidate.sourceCheckoutId === 'string' &&
-    SHA256_PATTERN.test(candidate.sourceCheckoutId) &&
-    typeof candidate.version === 'string' &&
-    isDevelopmentBuildVersion(candidate.version);
-  if (!commonValid) return 'invalid';
+  if (!isJsonObject(value)) return 'invalid';
+  const candidate = value;
+  const sourceCheckoutId = candidate.sourceCheckoutId;
+  const version = candidate.version;
+  if (!isSha256(sourceCheckoutId) || typeof version !== 'string' || !isDevelopmentBuildVersion(version))
+    return 'invalid';
   if (candidate.schemaVersion === DEVELOPMENT_RUNTIME_OWNER_SCHEMA_VERSION_V1) {
-    return candidate as DevelopmentRuntimeOwnerV1;
+    return {
+      ...candidate,
+      schemaVersion: DEVELOPMENT_RUNTIME_OWNER_SCHEMA_VERSION_V1,
+      sourceCheckoutId,
+      version,
+    };
   }
-  return candidate.schemaVersion === DEVELOPMENT_RUNTIME_OWNER_SCHEMA_VERSION &&
+  if (
+    candidate.schemaVersion === DEVELOPMENT_RUNTIME_OWNER_SCHEMA_VERSION &&
     typeof candidate.ownershipRevision === 'string' &&
     DEVELOPMENT_RUNTIME_OWNERSHIP_REVISION_PATTERN.test(candidate.ownershipRevision)
-    ? (candidate as DevelopmentRuntimeOwnerV2)
-    : 'invalid';
+  ) {
+    return {
+      ...candidate,
+      ownershipRevision: candidate.ownershipRevision,
+      schemaVersion: DEVELOPMENT_RUNTIME_OWNER_SCHEMA_VERSION,
+      sourceCheckoutId,
+      version,
+    };
+  }
+  return 'invalid';
 }
 
 const writeDevelopmentRuntimeOwner = Effect.fn('developmentInstall.writeRuntimeOwner')(function* (
@@ -560,7 +578,10 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
         maxOutputBytes: 2 * 1024 * 1024,
         timeoutMs: 5 * 60_000,
       });
-      if (!doctor.stdout.includes('Running Threadnote doctor checks.') || !doctor.stdout.includes('Summary:')) {
+      if (
+        !Effect2.pipe(doctor.stdout, EffectString.includes('Running Threadnote doctor checks.')) ||
+        !Effect2.pipe(doctor.stdout, EffectString.includes('Summary:'))
+      ) {
         return yield* ScriptError.make({
           message: 'The installed development executable did not complete doctor verification.',
         });
@@ -673,7 +694,8 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
           if (system.isProcessRunning(processId) === false) unresolvedProcessIds.delete(processId);
         }
       }
-      const superseded = [...live.value.verified, ...live.value.unverified].filter(
+      const superseded = EffectArray.filter(
+        [...live.value.verified, ...live.value.unverified],
         lease => lease.version !== input.version,
       );
       // The benchmark/runtime preflight permits only the stable transport that
@@ -792,15 +814,19 @@ export function developmentDoctorHasOnlyConcurrentRecallProjectionFailures(
   stdout: string,
   failureCount: number,
 ): boolean {
-  const failures = stdout
-    .split(/\r?\n/u)
-    .map(line => /^FAIL\s+([^:]+):\s*(.*)$/u.exec(line.trim()))
-    .filter((match): match is RegExpExecArray => match !== null)
-    .map(match => ({detail: match[2] ?? '', name: match[1] ?? ''}));
+  const failures = EffectArray.map(
+    EffectArray.filter(
+      EffectArray.map(Effect2.pipe(stdout, EffectString.split(/\r?\n/u)), line =>
+        /^FAIL\s+([^:]+):\s*(.*)$/u.exec(Effect2.pipe(line, EffectString.trim)),
+      ),
+      (match): match is RegExpExecArray => match !== null,
+    ),
+    match => ({detail: match[2] ?? '', name: match[1] ?? ''}),
+  );
   return (
     failures.length === failureCount &&
     failures.length > 0 &&
-    failures.every(({detail, name}) => {
+    EffectArray.every(failures, ({detail, name}) => {
       if (name === 'lexical recall index') {
         return detail === 'canonical documents changed; run `threadnote repair`';
       }
@@ -918,7 +944,8 @@ const buildAndStageDevelopmentRelease = Effect.fn('developmentInstall.buildAndSt
     input.releaseRoot,
     Option.none(),
   );
-  if (!input.json) yield* Console.log(`Building standalone Threadnote from ${input.commit.slice(0, 12)}.`);
+  if (!input.json)
+    yield* Console.log(`Building standalone Threadnote from ${Effect2.pipe(input.commit, EffectString.slice(0, 12))}.`);
   yield* runCommandEffect(system.executablePath, ['install', '--frozen-lockfile'], {
     cwd: input.sourceRoot,
     maxOutputBytes: 2 * 1024 * 1024,
@@ -939,7 +966,7 @@ const buildAndStageDevelopmentRelease = Effect.fn('developmentInstall.buildAndSt
     ],
     {concurrency: 2},
   );
-  if (afterCommit.stdout.trim() !== input.commit || afterStatus.stdout.length > 0) {
+  if (Effect2.pipe(afterCommit.stdout, EffectString.trim) !== input.commit || afterStatus.stdout.length > 0) {
     return yield* ScriptError.make({
       message: 'The Threadnote checkout changed while building the development executable.',
     });
@@ -970,7 +997,7 @@ const buildAndStageDevelopmentRelease = Effect.fn('developmentInstall.buildAndSt
     ],
     {concurrency: 6},
   );
-  if (versionResult.stdout.trim() !== `threadnote v${input.version}`) {
+  if (Effect2.pipe(versionResult.stdout, EffectString.trim) !== `threadnote v${input.version}`) {
     return yield* ScriptError.make({message: 'The compiled development executable reported the wrong version.'});
   }
   const receipt: DevelopmentInstallReceiptV1 = {
@@ -1052,7 +1079,7 @@ const verifyLaunchers = Effect.fn('developmentInstall.verifyLaunchers')(function
     maxOutputBytes: 16 * 1024,
     timeoutMs: 30_000,
   });
-  if (version.stdout.trim() !== `threadnote v${expectedVersion}`) {
+  if (Effect2.pipe(version.stdout, EffectString.trim) !== `threadnote v${expectedVersion}`) {
     return yield* ScriptError.make({
       message: 'The managed CLI launcher did not execute the activated development release.',
     });
@@ -1089,7 +1116,9 @@ const requireCanonicalDevelopmentInstallRoots = Effect.fn('developmentInstall.re
   }
   if (Option.isSome(stagedRoot)) {
     const name = path.basename(stagedRoot.value);
-    const validName = name.startsWith(`.${version}.`) && name.endsWith('.staging');
+    const validName =
+      Effect2.pipe(name, EffectString.startsWith(`.${version}.`)) &&
+      Effect2.pipe(name, EffectString.endsWith('.staging'));
     const stagedParent = yield* fs.realPath(path.dirname(stagedRoot.value));
     const parentMatches = platformPathEquals(path, system, stagedParent, current.versionsRoot);
     const link = yield* fs.readLink(stagedRoot.value).pipe(Effect.option);
@@ -1120,7 +1149,7 @@ function platformPathEquals(
 ): boolean {
   const normalize = (value: string) => {
     const resolved = path.resolve(value);
-    return system.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
+    return system.platform === 'win32' ? Effect2.pipe(resolved, EffectString.toLocaleLowerCase('en-US')) : resolved;
   };
   return normalize(left) === normalize(right);
 }
@@ -1129,11 +1158,12 @@ function readPackageManifest(fs: FileSystem.FileSystem, file: string) {
   return fs.readFileString(file).pipe(
     Effect.flatMap(source =>
       Effect.try({
-        try: () => JSON.parse(source) as {readonly packageManager?: unknown; readonly version?: unknown},
+        try: () => JSON.parse(source) as unknown,
         catch: cause => ScriptError.make({message: 'Could not parse package.json.', cause}),
       }),
     ),
     Effect.flatMap(manifest =>
+      isJsonObject(manifest) &&
       typeof manifest.version === 'string' &&
       manifest.version.length > 0 &&
       typeof manifest.packageManager === 'string' &&
@@ -1153,20 +1183,19 @@ function readReleaseMetadata(fs: FileSystem.FileSystem, file: string) {
       }),
     ),
     Effect.flatMap(value => {
-      if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      if (!isJsonObject(value)) {
         return Effect.fail(ScriptError.make({message: 'The development release metadata is invalid.'}));
       }
-      const candidate = value as Partial<{
-        readonly executable: string;
-        readonly runtime: string;
-        readonly target: string;
-        readonly version: string;
-      }>;
-      return typeof candidate.executable === 'string' &&
-        typeof candidate.runtime === 'string' &&
-        typeof candidate.target === 'string' &&
-        typeof candidate.version === 'string'
-        ? Effect.succeed(candidate as {executable: string; runtime: string; target: string; version: string})
+      return typeof value.executable === 'string' &&
+        typeof value.runtime === 'string' &&
+        typeof value.target === 'string' &&
+        typeof value.version === 'string'
+        ? Effect.succeed({
+            executable: value.executable,
+            runtime: value.runtime,
+            target: value.target,
+            version: value.version,
+          })
         : Effect.fail(ScriptError.make({message: 'The development release metadata is incomplete.'}));
     }),
   );

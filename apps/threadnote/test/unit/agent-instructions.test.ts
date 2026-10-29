@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {readFile} from '@threadnote/testing/node-fs-promises';
 import {join} from '@threadnote/testing/node-path';
 import {describe, expect, it} from 'vitest';
 
 import {continueAdapter} from '@threadnote/threadnote/agent_integration/adapters/continue';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const skillNames = ['threadnote-context', 'threadnote-code-graph', 'threadnote-memory'] as const;
 const personalCursorCloudSkillNames = ['threadnote-context', 'threadnote-memory'] as const;
@@ -13,7 +16,9 @@ async function agentInstructions(): Promise<string> {
 
 async function agentSkills(): Promise<readonly string[]> {
   return Promise.all(
-    skillNames.map(skill => readFile(join(process.cwd(), 'config', 'agent-skills', skill, 'SKILL.md'), 'utf8')),
+    EffectArray.map(skillNames, skill =>
+      readFile(join(process.cwd(), 'config', 'agent-skills', skill, 'SKILL.md'), 'utf8'),
+    ),
   );
 }
 
@@ -21,7 +26,9 @@ async function personalCursorCloudArtifacts(): Promise<readonly string[]> {
   const root = join(process.cwd(), 'config', 'agent-profiles', 'cursor-cloud-personal');
   return Promise.all([
     readFile(join(root, 'agent-instructions.md'), 'utf8'),
-    ...personalCursorCloudSkillNames.map(skill => readFile(join(root, 'agent-skills', skill, 'SKILL.md'), 'utf8')),
+    ...EffectArray.map(personalCursorCloudSkillNames, skill =>
+      readFile(join(root, 'agent-skills', skill, 'SKILL.md'), 'utf8'),
+    ),
   ]);
 }
 
@@ -35,7 +42,10 @@ describe('agent instructions', () => {
   });
 
   it('ships Personal Cursor Cloud skills that match its one-MCP multi-share capabilities', async () => {
-    const artifacts = (await personalCursorCloudArtifacts()).join('\n').replace(/\s+/g, ' ');
+    const artifacts = Effect.pipe(
+      EffectArray.join(await personalCursorCloudArtifacts(), '\n'),
+      EffectString.replace(/\s+/g, ' '),
+    );
     for (const requiredText of [
       'one Threadnote MCP',
       'several configured Git memory shares',
@@ -59,7 +69,7 @@ describe('agent instructions', () => {
 
   it('keeps the always-loaded bootstrap compact and routes detailed work to skills', async () => {
     const instructions = await agentInstructions();
-    const normalized = instructions.replace(/\s+/g, ' ');
+    const normalized = Effect.pipe(instructions, EffectString.replace(/\s+/g, ' '));
     expect(Buffer.byteLength(instructions)).toBeLessThanOrEqual(800);
     for (const requiredText of [
       ...skillNames,
@@ -89,18 +99,21 @@ describe('agent instructions', () => {
   it('preserves detailed context, graph, memory, and code-brief contracts in progressive skills', async () => {
     const instructions = await agentInstructions();
     const skillFiles = await agentSkills();
-    const skills = skillFiles.join('\n').replace(/\s+/g, ' ');
+    const skills = Effect.pipe(EffectArray.join(skillFiles, '\n'), EffectString.replace(/\s+/g, ' '));
     const [context, graph, memory] = skillFiles;
-    const normalizedContext = context.replace(/\s+/g, ' ');
-    const normalizedGraph = graph.replace(/\s+/g, ' ');
-    const shippedGuidanceBytes = [instructions, ...skillFiles].reduce(
-      (total, artifact) => total + Buffer.byteLength(artifact),
+    const normalizedContext = Effect.pipe(context, EffectString.replace(/\s+/g, ' '));
+    const normalizedGraph = Effect.pipe(graph, EffectString.replace(/\s+/g, ' '));
+    const shippedGuidanceBytes = EffectArray.reduce(
+      [instructions, ...skillFiles],
       0,
+      (total, artifact) => total + Buffer.byteLength(artifact),
     );
     expect(shippedGuidanceBytes).toBeLessThanOrEqual(9_507);
-    expect(context.split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(400);
-    expect(graph.split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(425);
-    expect(memory.split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(500);
+    expect(EffectArray.filter(Effect.pipe(context, EffectString.split(/\s+/)), Boolean).length).toBeLessThanOrEqual(
+      400,
+    );
+    expect(EffectArray.filter(Effect.pipe(graph, EffectString.split(/\s+/)), Boolean).length).toBeLessThanOrEqual(425);
+    expect(EffectArray.filter(Effect.pipe(memory, EffectString.split(/\s+/)), Boolean).length).toBeLessThanOrEqual(500);
     for (const requiredText of [
       '`context_brief`',
       '`codeRefs`',
@@ -180,8 +193,8 @@ describe('agent instructions', () => {
     expect(normalizedContext).toContain('mode (`brief`, `locate`, `trace`, `impact`, `explain`, or `resume`)');
     expect(normalizedContext).toContain('MCP `context_brief`');
     expect(normalizedContext).toContain('`threadnote context brief --cwd <cwd> --task <task>`');
-    expect(normalizedContext.toLowerCase()).toContain('same active session/native context');
-    expect(normalizedContext.toLowerCase()).toContain(
+    expect(Effect.pipe(normalizedContext, EffectString.toLowerCase)).toContain('same active session/native context');
+    expect(Effect.pipe(normalizedContext, EffectString.toLowerCase)).toContain(
       'same active session/native context can continue without repeating brief/recall unless the work state is stale/missing, after compaction/handoff/new agent, or the user explicitly asks',
     );
     expect(normalizedContext).toContain('`mode=resume`');

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
@@ -44,9 +45,11 @@ import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {CODE_GRAPH_GIT_WORKTREE_REGISTRATION_WORKER_ARGUMENT} from '@threadnote/threadnote/worker_protocol';
 import {codeGraphGitdirBacklinkMatchesCanonicalWorktree} from '@threadnote/graph/git/worktree/backlink';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const roots: string[] = [];
-const CHECKOUT_ID = 'a'.repeat(64);
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const authorityWorkerLayer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
   Layer.provideMerge(BunServices.layer),
@@ -141,7 +144,7 @@ describe('code graph common-gitdir worktree authority', () => {
         {
           adminNameKeys: registration.kind === 'linked' ? registration.adminNameKeys : [],
           canonicalWorktreePath: linkedIdentity.repoRoot,
-          evidenceToken: '1'.repeat(64),
+          evidenceToken: Effect2.pipe('1', EffectString.repeat(64)),
         },
       ],
     });
@@ -207,7 +210,7 @@ describe('code graph common-gitdir worktree authority', () => {
 
       const page = yield* Effect.promise(() => runtimeDirectoryNamePage(join(common, 'worktrees'), 1));
       expect(page).toMatchObject({overflow: false});
-      expect(page.names.map(name => [...name])).toEqual([[0xff, 0xfe]]);
+      expect(EffectArray.map(page.names, name => [...name])).toEqual([[0xff, 0xfe]]);
 
       const observation = yield* Effect.promise(() =>
         scanCodeGraphGitWorktreeRegistry(request(common, 'absent-target')),
@@ -247,7 +250,10 @@ describe('code graph common-gitdir worktree authority', () => {
     Effect.gen(function* () {
       const common = commonDirectoryFixture();
       for (let index = 0; index < 16; index += 1) {
-        writeFileSync(join(common, 'worktrees', `bounded-${String(index).padStart(2, '0')}`), '');
+        writeFileSync(
+          join(common, 'worktrees', `bounded-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`),
+          '',
+        );
       }
 
       const page = yield* Effect.promise(() => runtimeDirectoryNamePage(join(common, 'worktrees'), 4));
@@ -276,8 +282,8 @@ describe('code graph common-gitdir worktree authority', () => {
 
     expect(exact).toEqual(repeated);
     expect(exact).toHaveLength(2);
-    expect(exact.some(key => folded.includes(key))).toBe(true);
-    expect(codeGraphGitWorktreeAdminNameKeys('b'.repeat(64), 'Solaris')).not.toEqual(exact);
+    expect(EffectArray.some(exact, key => folded.includes(key))).toBe(true);
+    expect(codeGraphGitWorktreeAdminNameKeys(Effect2.pipe('b', EffectString.repeat(64)), 'Solaris')).not.toEqual(exact);
     expect(JSON.stringify(exact)).not.toContain('Solaris');
     expect(codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, Uint8Array.of(0xff, 0xfe))).toHaveLength(1);
   });
@@ -288,7 +294,7 @@ describe('code graph common-gitdir worktree authority', () => {
       mkdirSync(join(common, 'worktrees', 'present-directory'));
       writeFileSync(join(common, 'worktrees', 'present-file'), 'partial registration');
       const observation = await scanCodeGraphGitWorktreeRegistryBatch({
-        adminNameKeySets: ['absent', 'present-directory', 'present-file'].map(name =>
+        adminNameKeySets: EffectArray.map(['absent', 'present-directory', 'present-file'], name =>
           codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, name),
         ),
         checkoutId: CHECKOUT_ID,
@@ -316,7 +322,7 @@ describe('code graph common-gitdir worktree authority', () => {
         return {
           adminNameKeys: codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, `absent-${index}`),
           canonicalWorktreePath,
-          evidenceToken: index.toString(16).padStart(64, '0'),
+          evidenceToken: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
         };
       });
 
@@ -327,12 +333,19 @@ describe('code graph common-gitdir worktree authority', () => {
 
       expect(observation).toMatchObject({entryCount: 0, registryRootKind: 'directory', state: 'complete'});
       if (observation.state === 'complete') {
-        expect(observation.pathStates).toEqual(targets.map((_, index) => (index % 2 === 0 ? 'present' : 'missing')));
-        expect(observation.registryStates).toEqual(targets.map(() => 'absent'));
+        expect(observation.pathStates).toEqual(
+          EffectArray.map(targets, (_, index) => (index % 2 === 0 ? 'present' : 'missing')),
+        );
+        expect(observation.registryStates).toEqual(EffectArray.map(targets, () => 'absent'));
       }
       const serialized = JSON.stringify(observation);
       expect(serialized).not.toContain(common);
-      expect(targets.every(target => !serialized.includes(target.canonicalWorktreePath))).toBe(true);
+      expect(
+        EffectArray.every(
+          targets,
+          target => !Effect2.pipe(serialized, EffectString.includes(target.canonicalWorktreePath)),
+        ),
+      ).toBe(true);
     }).pipe(provideTestLayer(authorityWorkerLayer)),
   );
 
@@ -351,7 +364,7 @@ describe('code graph common-gitdir worktree authority', () => {
           {
             adminNameKeys: codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, adminName),
             canonicalWorktreePath: removedWorktree,
-            evidenceToken: '3'.repeat(64),
+            evidenceToken: Effect2.pipe('3', EffectString.repeat(64)),
           },
         ];
 
@@ -385,7 +398,7 @@ describe('code graph common-gitdir worktree authority', () => {
         {
           adminNameKeys: codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, adminName),
           canonicalWorktreePath: join(temporaryRoot('threadnote-partial-admin-target-'), 'missing'),
-          evidenceToken: '4'.repeat(64),
+          evidenceToken: Effect2.pipe('4', EffectString.repeat(64)),
         },
       ],
     } satisfies CodeGraphWorktreeReconciliationAuthorityRequest;
@@ -421,7 +434,7 @@ describe('code graph common-gitdir worktree authority', () => {
             {
               adminNameKeys: codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, adminName),
               canonicalWorktreePath,
-              evidenceToken: '5'.repeat(64),
+              evidenceToken: Effect2.pipe('5', EffectString.repeat(64)),
             },
           ],
         });
@@ -495,9 +508,9 @@ describe('code graph common-gitdir worktree authority', () => {
       const targets = Array.from(
         {length: CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.maxBatchTargets + 1},
         (_, index) => ({
-          adminNameKeys: ['b'.repeat(64)],
+          adminNameKeys: [Effect2.pipe('b', EffectString.repeat(64))],
           canonicalWorktreePath: `/private/authority-${String(index)}`,
-          evidenceToken: 'c'.repeat(64),
+          evidenceToken: Effect2.pipe('c', EffectString.repeat(64)),
         }),
       );
       const observation = yield* observeCodeGraphWorktreeReconciliationAuthority(
@@ -508,33 +521,36 @@ describe('code graph common-gitdir worktree authority', () => {
       expect(workerCalls).toBe(0);
 
       const validAuthority = `${JSON.stringify({
-        contentDigest: '1'.repeat(64),
+        contentDigest: Effect2.pipe('1', EffectString.repeat(64)),
         entryCount: 0,
         pathStates: ['missing'],
-        registryRootIdentity: '2'.repeat(64),
+        registryRootIdentity: Effect2.pipe('2', EffectString.repeat(64)),
         registryRootKind: 'missing',
         registryStates: ['absent'],
         state: 'complete',
       })}\n`;
       const malformed = [
-        validAuthority.slice(0, -1),
+        Effect2.pipe(validAuthority, EffectString.slice(0, -1)),
         `${validAuthority}{}\n`,
         `${JSON.stringify({pathStates: [], state: 'complete'})}\n`,
         `${JSON.stringify({pathStates: ['missing', 'present'], state: 'complete'})}\n`,
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         'x'.repeat(CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.workerOutputBytes + 1),
         `${JSON.stringify({
-          contentDigest: '1'.repeat(64),
+          contentDigest: Effect2.pipe('1', EffectString.repeat(64)),
           entryCount: 0,
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           padding: 'x'.repeat(CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.workerOutputBytes),
           pathStates: ['missing'],
-          registryRootIdentity: '2'.repeat(64),
+          registryRootIdentity: Effect2.pipe('2', EffectString.repeat(64)),
           registryRootKind: 'missing',
           registryStates: ['absent'],
           state: 'complete',
         })}\n`,
       ];
       expect(
-        malformed.every(
+        EffectArray.every(
+          malformed,
           output =>
             parseCodeGraphWorktreeReconciliationAuthorityResponse(Buffer.from(output), 1).state === 'unknown' &&
             parseCodeGraphRecordedWorktreePathBatchResponse(Buffer.from(output), 1).state === 'unknown',
@@ -549,6 +565,7 @@ describe('code graph common-gitdir worktree authority', () => {
   effectIt.effect('accepts the maximally escaped valid page and rejects stdin beyond the hard cap', () =>
     Effect.gen(function* () {
       const prefix = process.platform === 'win32' ? 'C:\\' : '/';
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       const escapedPath = `${prefix}${'\u0001'.repeat(4_096 - Buffer.byteLength(prefix))}`;
       const request = {
         checkoutId: CHECKOUT_ID,
@@ -556,9 +573,9 @@ describe('code graph common-gitdir worktree authority', () => {
         kind: 'reconciliation-authority',
         protocol: 3,
         targets: Array.from({length: 32}, () => ({
-          adminNameKeys: ['b'.repeat(64)],
+          adminNameKeys: [Effect2.pipe('b', EffectString.repeat(64))],
           canonicalWorktreePath: escapedPath,
-          evidenceToken: 'c'.repeat(64),
+          evidenceToken: Effect2.pipe('c', EffectString.repeat(64)),
         })),
       } satisfies CodeGraphWorktreeReconciliationAuthorityRequest;
       const bytes = Buffer.byteLength(`${JSON.stringify(request)}\n`);
@@ -644,7 +661,7 @@ describe('code graph common-gitdir worktree authority', () => {
         yield* Effect.promise(() => waitForFile(timeoutPid, 1_500));
         const timeoutObservation = yield* Fiber.join(timeoutFiber);
         expect(timeoutObservation).toEqual({reason: 'timeout', state: 'unknown'});
-        const timeoutProcess = Number(readFileSync(timeoutPid, 'utf8').trim());
+        const timeoutProcess = Number(Effect2.pipe(readFileSync(timeoutPid, 'utf8'), EffectString.trim));
         yield* Effect.promise(() => waitForProcessExit(timeoutProcess, 2_000));
 
         const interruptPid = join(root, 'interrupt.pid');
@@ -654,7 +671,7 @@ describe('code graph common-gitdir worktree authority', () => {
               timeoutMilliseconds: 10_000,
             }).pipe(Effect.forkChild);
             yield* Effect.promise(() => waitForFile(interruptPid, 2_000));
-            const childProcess = Number(readFileSync(interruptPid, 'utf8').trim());
+            const childProcess = Number(Effect2.pipe(readFileSync(interruptPid, 'utf8'), EffectString.trim));
             yield* Fiber.interrupt(fiber);
             yield* Effect.promise(() => waitForProcessExit(childProcess, 2_000));
           }),

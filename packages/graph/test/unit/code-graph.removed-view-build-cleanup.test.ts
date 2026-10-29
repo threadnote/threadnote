@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {mkdtempSync, rmSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -16,15 +17,17 @@ import {
   type CodeGraphRemovedViewBuildCleanupOptions,
 } from '@threadnote/graph/removed_view/build_cleanup';
 import {codeGraphScopeViewKey} from '@threadnote/graph/scope/identity';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
-const REPOSITORY_ID = 'b'.repeat(64);
-const WORKTREE_ID = 'c'.repeat(64);
-const SNAPSHOT_A = `cgsn_${'1'.repeat(40)}`;
-const SNAPSHOT_B = `cgsn_${'2'.repeat(40)}`;
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
+const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
+const WORKTREE_ID = Effect2.pipe('c', EffectString.repeat(64));
+const SNAPSHOT_A = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+const SNAPSHOT_B = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
 const BUILD_A = '11111111-1111-1111';
 const BUILD_B = '22222222-2222-2222';
-const SCOPE_ID = `code-graph-scope:${'d'.repeat(64)}`;
+const SCOPE_ID = `code-graph-scope:${Effect2.pipe('d', EffectString.repeat(64))}`;
 const TestLayer = BunServices.layer;
 
 describe('removed view build-status cleanup', () => {
@@ -233,7 +236,7 @@ describe('removed view build-status cleanup', () => {
           const contextFile = join(statusDirectory, `${BUILD_A}.manager-context`);
           yield* fs.writeFileString(
             contextFile,
-            `${JSON.stringify({buildId: BUILD_A, schemaVersion: 1, worktreePath: 'é'.repeat(2_049)})}\n`,
+            `${JSON.stringify({buildId: BUILD_A, schemaVersion: 1, worktreePath: Effect2.pipe('é', EffectString.repeat(2_049))})}\n`,
             {flag: 'wx', mode: 0o600},
           );
           expect(yield* cleanupCodeGraphRemovedViewBuildStatusUnit(home, CHECKOUT_ID, WORKTREE_ID, SNAPSHOT_A)).toEqual(
@@ -249,7 +252,11 @@ describe('removed view build-status cleanup', () => {
       withFixture(({fs, home, statusDirectory}) =>
         Effect.gen(function* () {
           const statuses = Array.from({length: CODE_GRAPH_REMOVED_VIEW_BUILD_STATUS_PAGE_LIMIT + 1}, (_, index) =>
-            buildStatus((index + 1).toString(16).padStart(16, '0'), 'completed', SNAPSHOT_B),
+            buildStatus(
+              Effect2.pipe((index + 1).toString(16), EffectString.padStart(16, '0')),
+              'completed',
+              SNAPSHOT_B,
+            ),
           );
           for (const status of statuses) yield* writeStatus(fs, statusDirectory, status);
 
@@ -257,7 +264,7 @@ describe('removed view build-status cleanup', () => {
           expect(first).toEqual({cursorToken: expect.stringMatching(/^bs1:s:/u), state: 'progress'});
           if (first.state !== 'progress') return;
 
-          const tamperedCursor = `${first.cursorToken.slice(0, -1)}${first.cursorToken.endsWith('0') ? '1' : '0'}`;
+          const tamperedCursor = `${Effect2.pipe(first.cursorToken, EffectString.slice(0, -1))}${Effect2.pipe(first.cursorToken, EffectString.endsWith('0')) ? '1' : '0'}`;
           expect(
             yield* cleanupCodeGraphRemovedViewBuildStatusUnit(
               home,
@@ -298,9 +305,12 @@ describe('removed view build-status cleanup', () => {
       Effect.sync(() => {
         const statusNames = Array.from(
           {length: CODE_GRAPH_REMOVED_VIEW_BUILD_STATUS_LIMIT},
-          (_, index) => `${index.toString(16).padStart(16, '0')}.json`,
+          (_, index) => `${Effect2.pipe(index.toString(16), EffectString.padStart(16, '0'))}.json`,
         );
-        const pairedContexts = statusNames.map(name => `${name.slice(0, -5)}.manager-context`);
+        const pairedContexts = EffectArray.map(
+          statusNames,
+          name => `${Effect2.pipe(name, EffectString.slice(0, -5))}.manager-context`,
+        );
         const maximalLegitimatePage = {
           names: [...statusNames, ...pairedContexts, '.history-prune-cursor', '.history-prune-cursor.tmp'],
           overflow: false,
@@ -313,7 +323,7 @@ describe('removed view build-status cleanup', () => {
           codeGraphRemovedViewBuildStatusInventory({
             names: [
               ...statusNames,
-              `${CODE_GRAPH_REMOVED_VIEW_BUILD_STATUS_LIMIT.toString(16).padStart(16, '0')}.json`,
+              `${Effect2.pipe(CODE_GRAPH_REMOVED_VIEW_BUILD_STATUS_LIMIT.toString(16), EffectString.padStart(16, '0'))}.json`,
             ],
             overflow: false,
           }),
@@ -368,7 +378,7 @@ function buildStatus(buildId: string, state: CodeGraphBuildStatus['state'], snap
     counters: {},
     identity: {
       checkoutId: CHECKOUT_ID,
-      commit: '3'.repeat(40),
+      commit: Effect2.pipe('3', EffectString.repeat(40)),
       repositoryId: REPOSITORY_ID,
       worktreeId: WORKTREE_ID,
     },

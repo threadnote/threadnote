@@ -1,8 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {it} from '@effect/vitest';
 import {Effect, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect, vi} from 'vitest';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import * as EffectRecord from 'effect/Record';
 
 interface WitnessSample {
   readonly bindingId: string;
@@ -51,17 +53,25 @@ vi.mock('../../src/workflow_memory/journal_validation.js', async importOriginal 
         state.manifestCommitted ||
         current === state.manifestContent ||
         current !== state.previousManifestContent ||
-        Object.values(state.operations).some(operation => operation.deferredCodeAnchor !== undefined)
+        EffectArray.some(EffectRecord.values(state.operations), operation => operation.deferredCodeAnchor !== undefined)
       )
         return original.assertWorkflowJournalIntegrity(...args);
       // Real live manifest input, observed only. No replacement state or proof outcome is supplied.
       const memory = parseMemoryDocument(state.manifestUri, current);
       if (!memory) throw new Error('Expected an actual previous manifest');
-      const previous = JSON.parse(memory.body) as {artifacts: Record<string, unknown>};
+      const previousValue: unknown = JSON.parse(memory.body);
+      const previousSchema = Schema.Struct({
+        artifacts: Schema.Record(Schema.String, Schema.Unknown),
+      });
+      if (!Schema.is(previousSchema)(previousValue)) throw new Error('Expected a manifest with artifacts');
+      const previous = previousValue;
       const sample: WitnessSample = {
         bindingId: state.binding.bindingId,
-        verifiedReceipts: Object.values(state.operations).filter(operation => operation.status === 'verified').length,
-        mapComparisonInputs: Object.keys(previous.artifacts).length + Object.keys(state.artifacts).length,
+        verifiedReceipts: EffectArray.filter(
+          EffectRecord.values(state.operations),
+          operation => operation.status === 'verified',
+        ).length,
+        mapComparisonInputs: EffectRecord.keys(previous.artifacts).length + EffectRecord.keys(state.artifacts).length,
         artifactInputs: 0,
         invalidJournalErrors: 0,
       };
@@ -78,7 +88,9 @@ vi.mock('../../src/workflow_memory/journal_validation.js', async importOriginal 
   };
 });
 
-const written = Schema.Struct({artifact: Schema.Struct({uri: Schema.String, memoryId: Schema.String})});
+const written = Schema.Struct({
+  artifact: Schema.Struct({uri: Schema.String, memoryId: Schema.String}),
+});
 it.effect('bounds witness comparisons after real named history without crossing same-store homes', () =>
   Effect.gen(function* () {
     observed.enabled = false;

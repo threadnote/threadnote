@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -7,6 +8,8 @@ import {
 } from '@threadnote/recall/identifier';
 import {identifiers} from '@threadnote/recall/index/lexical';
 import {rankRecallCandidates, type RecallRankContext} from '@threadnote/recall/rank';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const TARGET_IDENTIFIER = 'rankRecallCandidates';
 const TARGET_URI = 'threadnote://resources/repos/threadnote/recall-ranker.md';
@@ -62,14 +65,23 @@ describe('cased recall identifiers', () => {
 
   it('matches exact original-query identifiers across generated casing shapes', () => {
     const lowerLetter = fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz');
-    const segment = fc.array(lowerLetter, {maxLength: 8, minLength: 2}).map(characters => characters.join(''));
-    const camelIdentifier = fc
-      .array(segment, {maxLength: 4, minLength: 2})
-      .map(([first, ...rest]) => `${first}${rest.map(part => `${part[0].toUpperCase()}${part.slice(1)}`).join('')}`);
+    const segment = fc
+      .array(lowerLetter, {maxLength: 8, minLength: 2})
+      .map(characters => EffectArray.join(characters, ''));
+    const camelIdentifier = fc.array(segment, {maxLength: 4, minLength: 2}).map(
+      ([first, ...rest]) =>
+        `${first}${EffectArray.join(
+          EffectArray.map(
+            rest,
+            part => `${Effect.pipe(part[0], EffectString.toUpperCase)}${Effect.pipe(part, EffectString.slice(1))}`,
+          ),
+          '',
+        )}`,
+    );
 
     fc.assert(
       fc.property(camelIdentifier, identifier => {
-        const caseMutation = `${identifier[0].toUpperCase()}${identifier.slice(1)}`;
+        const caseMutation = `${Effect.pipe(identifier[0], EffectString.toUpperCase)}${Effect.pipe(identifier, EffectString.slice(1))}`;
         expect(hasExactCasedCodeIdentifierMatch(`Where is ${identifier}?`, [identifier])).toBe(true);
         expect(hasExactCasedCodeIdentifierMatch(`Where is ${caseMutation}?`, [identifier])).toBe(false);
         expect(hasExactCasedCodeIdentifierMatch(`Where is ${identifier}Extra?`, [identifier])).toBe(false);

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {isMemoryId} from '@threadnote/memory/identity-alias';
 import type {
   ContextBriefEvidenceState,
@@ -9,6 +10,8 @@ import type {
   ContextBriefV1,
 } from './types.js';
 import {CONTEXT_BRIEF_SOURCE_EXCERPT_BUDGET_GAP} from './source_projection.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const STABLE_MEMORY_IDENTITY_UNAVAILABLE_GAP = 'stable-memory-identity-unavailable';
 
@@ -37,7 +40,7 @@ export function contextBriefResumeFocusUri(logical: ContextBriefLogicalResultV1)
 }
 
 export function isContextBriefGraphOnlyGap(gap: string): boolean {
-  return gap === 'no-graph-evidence' || gap.startsWith('graph-');
+  return gap === 'no-graph-evidence' || Effect.pipe(gap, EffectString.startsWith('graph-'));
 }
 
 export function deriveContextBriefEvidenceState(input: {
@@ -60,20 +63,20 @@ export function deriveContextBriefEvidenceState(input: {
     input.logical.scope.freshness === 'fresh' &&
     input.logical.coverage.graph.complete &&
     input.cards.length > 0 &&
-    input.activeHandoffs.some(isContextBriefExactCurrentContinuation)
+    EffectArray.some(input.activeHandoffs, isContextBriefExactCurrentContinuation)
   ) {
     return 'sufficient';
   }
   const unreliable =
     input.logical.scope.freshness !== 'fresh' ||
     !input.logical.coverage.graph.complete ||
-    retainedMemories.some(memory => memory.freshness !== 'fresh');
+    EffectArray.some(retainedMemories, memory => memory.freshness !== 'fresh');
   if (unreliable) return 'degraded';
   const requiresContract = input.logical.mode === 'trace' || input.logical.mode === 'impact';
   const requiresSource = input.sources !== undefined || input.gaps.includes(CONTEXT_BRIEF_SOURCE_EXCERPT_BUDGET_GAP);
   const requiresContinuation = input.logical.mode === 'resume';
-  const hasContinuation = retainedMemories.some(memory => memory.continuationCard !== undefined);
-  const mandatoryGap = input.gaps.some(gap => gap !== 'no-relevant-active-memory');
+  const hasContinuation = EffectArray.some(retainedMemories, memory => memory.continuationCard !== undefined);
+  const mandatoryGap = EffectArray.some(input.gaps, gap => gap !== 'no-relevant-active-memory');
   if (
     input.cards.length === 0 ||
     input.cards.length < input.logical.graph.cards.length ||
@@ -92,7 +95,9 @@ export function contextBriefRelationshipMemoryByUri(
   logical: ContextBriefLogicalResultV1,
   uri: string,
 ): ContextBriefMemoryEvidenceV1 | undefined {
-  return [...logical.activeHandoffs, ...logical.durableDecisions].find(memory => memory.uri === uri);
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst([...logical.activeHandoffs, ...logical.durableDecisions], memory => memory.uri === uri),
+  );
 }
 
 export function requiredContextBriefAgentMemoryItem<T extends {readonly id: string; readonly lane: string}>(
@@ -101,16 +106,21 @@ export function requiredContextBriefAgentMemoryItem<T extends {readonly id: stri
   responseFormat: ContextBriefResponseFormat,
 ): T | undefined {
   if (logical.mode === 'resume') {
-    return items.find(
-      item =>
-        (item.lane === 'handoff' || item.lane === 'durable-decision') &&
-        contextBriefRelationshipMemoryByUri(logical, item.id)?.continuationCard !== undefined,
+    return EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        items,
+        item =>
+          (item.lane === 'handoff' || item.lane === 'durable-decision') &&
+          contextBriefRelationshipMemoryByUri(logical, item.id)?.continuationCard !== undefined,
+      ),
     );
   }
   if (responseFormat !== 'agent' || logical.mode !== 'explain' || logical.coverage.memory.codeAnchors !== undefined) {
     return undefined;
   }
-  return items.find(item => item.lane === 'handoff' || item.lane === 'durable-decision');
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(items, item => item.lane === 'handoff' || item.lane === 'durable-decision'),
+  );
 }
 
 export function withStableContextBriefMemoryIdentityGap(
@@ -118,8 +128,11 @@ export function withStableContextBriefMemoryIdentityGap(
 ): ContextBriefLogicalResultV1 {
   if (logical.coverage.memory.codeAnchors === undefined) return logical;
   if (logical.mode !== 'trace' && logical.mode !== 'impact') return logical;
-  const primary = [...logical.activeHandoffs, ...logical.durableDecisions].find(
-    memory => memory.selectionBasis === 'code-citation',
+  const primary = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...logical.activeHandoffs, ...logical.durableDecisions],
+      memory => memory.selectionBasis === 'code-citation',
+    ),
   );
   if (primary === undefined || (primary.memoryId !== undefined && isMemoryId(primary.memoryId))) return logical;
   return {
@@ -128,7 +141,7 @@ export function withStableContextBriefMemoryIdentityGap(
       ...logical.coverage,
       gaps: [
         STABLE_MEMORY_IDENTITY_UNAVAILABLE_GAP,
-        ...logical.coverage.gaps.filter(gap => gap !== STABLE_MEMORY_IDENTITY_UNAVAILABLE_GAP),
+        ...EffectArray.filter(logical.coverage.gaps, gap => gap !== STABLE_MEMORY_IDENTITY_UNAVAILABLE_GAP),
       ],
     },
   };

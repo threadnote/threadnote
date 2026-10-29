@@ -17,6 +17,8 @@ import {
 } from '@threadnote/graph/citation/recovery';
 
 import {citationPlatformLayer as platform} from '../helpers/citation-platform.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', ['-C', cwd, ...args]);
 const fixture = Effect.gen(function* () {
@@ -71,7 +73,7 @@ describe('citation recovery checkout authority', () => {
             data.home,
             data.prior,
             data.current,
-            'f'.repeat(40),
+            Effect2.pipe('f', EffectString.repeat(40)),
             () =>
               Effect.sync(() => {
                 closingChecks++;
@@ -90,7 +92,7 @@ describe('citation recovery checkout authority', () => {
           const data = yield* fixture;
           const selectors = Array.from({length: 4}, (_, index) => ({
             repositoryId: data.previous.repositoryId,
-            sourceCommit: String(index + 1).repeat(40),
+            sourceCommit: Effect2.pipe(String(index + 1), EffectString.repeat(40)),
           }));
           const executor = yield* CommandExecutor;
           const executeBytes = executor.executeBytes;
@@ -224,8 +226,8 @@ describe('citation recovery checkout authority', () => {
             const selectors = [
               {repositoryId: data.previous.repositoryId, sourceCommit: data.previous.headCommit},
               ...Array.from({length: unavailable}, (_, index) => ({
-                repositoryId: 'f'.repeat(64),
-                sourceCommit: String(index + 1).repeat(40),
+                repositoryId: Effect2.pipe('f', EffectString.repeat(64)),
+                sourceCommit: Effect2.pipe(String(index + 1), EffectString.repeat(40)),
               })),
             ];
             const observe = yield* makeCodeGraphCitationRepositoryRouteObservation({
@@ -307,7 +309,12 @@ describe('citation recovery checkout authority', () => {
             yield* verifyCodeGraphCitationRepositoryAlias(data.home, data.prior, unrelated, data.previous.headCommit),
           ).toBeUndefined();
           expect(
-            yield* verifyCodeGraphCitationRepositoryAlias(data.home, data.prior, data.current, 'f'.repeat(40)),
+            yield* verifyCodeGraphCitationRepositoryAlias(
+              data.home,
+              data.prior,
+              data.current,
+              Effect2.pipe('f', EffectString.repeat(40)),
+            ),
           ).toBeUndefined();
         }),
       ),

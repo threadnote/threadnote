@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 
 import {evaluateContextBriefCitationFixture} from '@threadnote/threadnote/evaluation/context-brief-citations';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface Arguments {
   readonly fixturePath: string;
@@ -8,12 +11,15 @@ interface Arguments {
 }
 
 function usage(): string {
-  return [
-    'Usage: bun scripts/evaluate-context-brief-citations.ts --fixture <observations.json> [--output <result.json>]',
-    '',
-    'Evaluates bounded, offline memory-to-code citation observations.',
-    'Exits non-zero when parsing fails or a release gate fails.',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Usage: bun scripts/evaluate-context-brief-citations.ts --fixture <observations.json> [--output <result.json>]',
+      '',
+      'Evaluates bounded, offline memory-to-code citation observations.',
+      'Exits non-zero when parsing fails or a release gate fails.',
+    ],
+    '\n',
+  );
 }
 
 function parseArguments(argv: readonly string[]): Arguments | 'help' {
@@ -40,7 +46,8 @@ function parseArguments(argv: readonly string[]): Arguments | 'help' {
 
 function argumentValue(argv: readonly string[], index: number, name: string): string {
   const value = argv[index + 1];
-  if (value === undefined || value.startsWith('-')) throw new Error(`${name} requires a value.`);
+  if (value === undefined || Effect.pipe(value, EffectString.startsWith('-')))
+    throw new Error(`${name} requires a value.`);
   return value;
 }
 

@@ -5,10 +5,14 @@ import {expect} from 'vitest';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const object = (value: unknown): Record<string, unknown> => {
-  if (!value || typeof value !== 'object') throw new Error('Expected an object response');
-  return value as Record<string, unknown>;
+  if (!isJsonObject(value)) throw new Error('Expected an object response');
+  return value;
 };
 const plan = (objective = 'Preserve a small native draft across exact reads.') => {
   const document = decodeNativeAuthoringDocument({
@@ -96,7 +100,7 @@ it.effect('dispatches source-free authoring views, pins and exact recovery witho
     expect(pinned.reference).toEqual(root);
     const persistedRoot = parseMemoryDocument(rootUri, initialRootBytes);
     if (!persistedRoot) throw new Error('Expected a persisted native memory document');
-    expect(pinned.body).toBe(persistedRoot.body.trim() + '\n');
+    expect(pinned.body).toBe(Effect2.pipe(persistedRoot.body, EffectString.trim) + '\n');
     const validation = yield* call('validate', {document});
     expect(validation).toMatchObject({documentHash: first.documentHash, ready: false, issues: []});
     const rendered = yield* call('render', {document, detail: 'document'});
@@ -153,7 +157,7 @@ it.effect.prop(
       const f = yield* nativeFixture();
       const initialized = yield* f.init();
       const before = plan();
-      const after = plan('Changed objective: ' + suffix.join(''));
+      const after = plan('Changed objective: ' + EffectArray.join(suffix, ''));
       const image = yield* f.fs.readFileString(f.statePath());
       const journal = yield* f.fs.readFileString(f.journalPath(initialized.bindingId));
       const diff = (left: typeof before, right: typeof after) =>
